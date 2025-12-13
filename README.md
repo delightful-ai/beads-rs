@@ -8,33 +8,13 @@ beads-rs is a rust redesign of [beads](https://github.com/steveyegge/beads). it'
 curl -fsSL https://raw.githubusercontent.com/delightful-ai/beads-rs/main/scripts/install.sh | bash
 ```
 
-or with cargo:
+prebuilt binaries for x86_64 linux and apple silicon. other platforms auto-fallback to cargo.
+
 ```bash
-cargo install beads-rs
+cargo install beads-rs                              # cargo
+mise use -g ubi:delightful-ai/beads-rs[exe=bd]      # mise
+nix run github:delightful-ai/beads-rs               # nix
 ```
-
-or with nix (run directly):
-```bash
-nix run github:delightful-ai/beads-rs -- --help
-```
-
-or in your flake:
-```nix
-{
-  inputs.beads-rs.url = "github:delightful-ai/beads-rs";
-
-  outputs = { self, nixpkgs, beads-rs, ... }: {
-    # use the overlay
-    nixpkgs.overlays = [ beads-rs.overlays.default ];
-    # then pkgs.beads-rs or pkgs.bd is available
-
-    # or reference directly
-    environment.systemPackages = [ beads-rs.packages.${system}.default ];
-  };
-}
-```
-
-to update: `nix flake update beads-rs`
 
 ## why
 
@@ -134,6 +114,27 @@ bd setup aider
 
 - `CLI_SPEC.md` (cli surface / compatibility goals)
 - `SPEC.md` (storage model + invariants)
+
+## nix flake
+
+use beads-rs as a dependency in your flake:
+
+```nix
+{
+  inputs.beads-rs.url = "github:delightful-ai/beads-rs";
+
+  outputs = { self, nixpkgs, beads-rs, ... }: {
+    # use the overlay
+    nixpkgs.overlays = [ beads-rs.overlays.default ];
+    # then pkgs.beads-rs or pkgs.bd is available
+
+    # or reference directly
+    environment.systemPackages = [ beads-rs.packages.${system}.default ];
+  };
+}
+```
+
+to update: `nix flake update beads-rs`
 
 ## license
 
