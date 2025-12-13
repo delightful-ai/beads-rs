@@ -24,10 +24,10 @@ jobs:
             os: ubuntu-latest
             cross: true
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13  # Intel runner for x86_64
             cross: false
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-latest  # ARM runner for aarch64
             cross: false
 
     steps:
