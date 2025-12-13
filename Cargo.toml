@@ -1,6 +1,6 @@
 [package]
 name = "beads-rs"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -25,7 +25,7 @@ tracing-tree = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.9"
 sha2 = "0.10"
-git2 = { version = "0.20", features = ["vendored-openssl"] }
+git2 = "0.20"
 crossbeam = "0.8"
 signal-hook = "0.3"
 whoami = "1.4"
