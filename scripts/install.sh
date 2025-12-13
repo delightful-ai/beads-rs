@@ -19,43 +19,26 @@ log_warning() { echo -e "${YELLOW}==>${NC} $1"; }
 log_error() { echo -e "${RED}Error:${NC} $1" >&2; }
 
 detect_platform() {
-    local os arch
+    local os arch actual_arch
+    actual_arch="$(uname -m)"
 
     case "$(uname -s)" in
         Darwin)
-            os="apple-darwin"
-            arch="aarch64"  # Only Apple Silicon supported
+            if [[ "$actual_arch" == "arm64" || "$actual_arch" == "aarch64" ]]; then
+                echo "aarch64-apple-darwin"
+                return 0
+            fi
             ;;
         Linux)
-            os="unknown-linux-gnu"
-            arch="x86_64"  # Only x86_64 supported
-            ;;
-        *)
-            log_error "Unsupported OS: $(uname -s)"
-            exit 1
-            ;;
-    esac
-
-    # Verify architecture matches what we support
-    local actual_arch="$(uname -m)"
-    case "$os" in
-        apple-darwin)
-            if [[ "$actual_arch" != "arm64" && "$actual_arch" != "aarch64" ]]; then
-                log_error "Only Apple Silicon Macs are supported (got: $actual_arch)"
-                log_info "Intel Mac users: cargo install beads-rs"
-                exit 1
-            fi
-            ;;
-        unknown-linux-gnu)
-            if [[ "$actual_arch" != "x86_64" && "$actual_arch" != "amd64" ]]; then
-                log_error "Only x86_64 Linux is supported (got: $actual_arch)"
-                log_info "ARM Linux users: cargo install beads-rs"
-                exit 1
+            if [[ "$actual_arch" == "x86_64" || "$actual_arch" == "amd64" ]]; then
+                echo "x86_64-unknown-linux-gnu"
+                return 0
             fi
             ;;
     esac
 
-    echo "${arch}-${os}"
+    # No prebuilt binary for this platform
+    return 1
 }
 
 install_from_release() {
@@ -175,17 +158,20 @@ main() {
 
     log_info "Detecting platform..."
     local platform
-    platform=$(detect_platform)
-    log_info "Platform: $platform"
+    if platform=$(detect_platform); then
+        log_info "Platform: $platform (prebuilt binary available)"
 
-    # Try GitHub release first
-    if install_from_release "$platform"; then
-        verify_installation
-        exit 0
+        # Try GitHub release first
+        if install_from_release "$platform"; then
+            verify_installation
+            exit 0
+        fi
+        log_warning "Release download failed, trying cargo..."
+    else
+        log_info "Platform: $(uname -s) $(uname -m) (no prebuilt binary, using cargo)"
     fi
 
     # Fallback to cargo
-    log_warning "Release download failed, trying cargo..."
     if install_with_cargo; then
         verify_installation
         exit 0
@@ -195,8 +181,8 @@ main() {
     log_error "Installation failed"
     echo ""
     echo "Manual options:"
-    echo "  1. cargo install beads-rs"
-    echo "  2. Download from https://github.com/delightful-ai/beads-rs/releases"
+    echo "  1. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    echo "  2. Then: cargo install beads-rs"
     echo ""
     exit 1
 }
