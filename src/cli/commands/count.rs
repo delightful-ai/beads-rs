@@ -1,22 +1,22 @@
-use crate::{Error, Result};
-
-use crate::core::{ActorId, BeadId};
-use crate::daemon::ipc::Request;
-use crate::daemon::query::Filters;
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
 
-use super::super::{print_ok, send, Ctx, CountArgs};
+use super::super::{CountArgs, Ctx, print_ok, send};
+use crate::core::{ActorId, BeadId};
+use crate::daemon::ipc::Request;
+use crate::daemon::query::Filters;
+use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, args: CountArgs) -> Result<()> {
-    let mut filters = Filters::default();
-
-    filters.status = args.status.clone();
-    filters.priority = args.priority;
-    filters.priority_min = args.priority_min;
-    filters.priority_max = args.priority_max;
-    filters.bead_type = args.bead_type;
-    filters.assignee = args.assignee.as_deref().map(ActorId::new).transpose()?;
+    let mut filters = Filters {
+        status: args.status.clone(),
+        priority: args.priority,
+        priority_min: args.priority_min,
+        priority_max: args.priority_max,
+        bead_type: args.bead_type,
+        assignee: args.assignee.as_deref().map(ActorId::new).transpose()?,
+        ..Default::default()
+    };
 
     if !args.labels.is_empty() {
         filters.labels = Some(args.labels.clone());
@@ -120,8 +120,8 @@ fn parse_time_ms(s: &str) -> std::result::Result<u64, String> {
     }
 
     // YYYY-MM-DD (midnight UTC)
-    let fmt_date = time::format_description::parse("[year]-[month]-[day]")
-        .map_err(|e| e.to_string())?;
+    let fmt_date =
+        time::format_description::parse("[year]-[month]-[day]").map_err(|e| e.to_string())?;
     if let Ok(date) = Date::parse(s, &fmt_date) {
         let dt = date.with_time(Time::MIDNIGHT).assume_utc();
         return Ok(dt.unix_timestamp_nanos() as u64 / 1_000_000);

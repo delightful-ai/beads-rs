@@ -48,7 +48,10 @@ pub fn normalize_url(url: &str) -> String {
 
     // Scheme URLs: https://host/path or ssh://git@host/path
     if let Some((_, after_scheme)) = u.split_once("://") {
-        let after_at = after_scheme.rsplit_once('@').map(|(_, r)| r).unwrap_or(after_scheme);
+        let after_at = after_scheme
+            .rsplit_once('@')
+            .map(|(_, r)| r)
+            .unwrap_or(after_scheme);
         let mut parts = after_at.splitn(2, '/');
         let host = parts.next().unwrap_or("");
         let path = parts.next().unwrap_or("");
@@ -60,4 +63,3 @@ pub fn normalize_url(url: &str) -> String {
     // Fallback: use as-is (covers file:// and local path remotes).
     u.to_string()
 }
-

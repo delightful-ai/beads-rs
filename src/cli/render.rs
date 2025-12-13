@@ -3,13 +3,13 @@
 //! Parity target: beads-go default (non-`--json`) formatting.
 //! This module is pure formatting; handlers gather any extra data needed.
 
-use crate::daemon::ipc::ResponsePayload;
-use crate::daemon::ops::OpResult;
-use crate::daemon::query::QueryResult;
 use crate::api::{
     BlockedIssue, CountResult, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary, Note,
     StatusOutput, Tombstone,
 };
+use crate::daemon::ipc::ResponsePayload;
+use crate::daemon::ops::OpResult;
+use crate::daemon::query::QueryResult;
 
 /// Render a daemon response for human output.
 pub fn render_human(payload: &ResponsePayload) -> String {
@@ -168,7 +168,10 @@ pub fn render_deleted_list(tombs: &[Tombstone], since: &str, all: bool) -> Strin
     let mut out = if all {
         format!("\n🗑️ All tracked deletions ({} total):\n\n", tombs.len())
     } else {
-        format!("\n🗑️ Deletions in the last {since} ({} total):\n\n", tombs.len())
+        format!(
+            "\n🗑️ Deletions in the last {since} ({} total):\n\n",
+            tombs.len()
+        )
     };
 
     for t in tombs {
@@ -254,8 +257,14 @@ pub fn render_show(
             out.push_str(&format!("Assignee: {}\n", a));
         }
     }
-    out.push_str(&format!("Created: {}\n", fmt_wall_ms(bead.created_at.wall_ms)));
-    out.push_str(&format!("Updated: {}\n", fmt_wall_ms(bead.updated_at.wall_ms)));
+    out.push_str(&format!(
+        "Created: {}\n",
+        fmt_wall_ms(bead.created_at.wall_ms)
+    ));
+    out.push_str(&format!(
+        "Updated: {}\n",
+        fmt_wall_ms(bead.updated_at.wall_ms)
+    ));
 
     if !bead.description.is_empty() {
         out.push_str(&format!("\nDescription:\n{}\n", bead.description));
@@ -350,7 +359,11 @@ fn render_op(op: &OpResult) -> String {
         OpResult::Reopened { id } => format!("↻ Reopened {}", id.as_str()),
         OpResult::Deleted { id } => format!("✓ Deleted {}", id.as_str()),
         OpResult::DepAdded { from, to } => {
-            format!("✓ Added dependency: {} depends on {}", from.as_str(), to.as_str())
+            format!(
+                "✓ Added dependency: {} depends on {}",
+                from.as_str(),
+                to.as_str()
+            )
         }
         OpResult::DepRemoved { from, to } => {
             format!(
@@ -547,10 +560,7 @@ fn render_issue_list(views: &[IssueSummary]) -> String {
 }
 
 fn render_issue_summary(v: &IssueSummary) -> String {
-    let mut s = format!(
-        "{} [P{}] [{}] {}",
-        v.id, v.priority, v.issue_type, v.status
-    );
+    let mut s = format!("{} [P{}] [{}] {}", v.id, v.priority, v.issue_type, v.status);
     if let Some(a) = &v.assignee {
         if !a.is_empty() {
             s.push_str(&format!(" @{}", a));
@@ -655,11 +665,11 @@ fn fmt_labels(labels: &[String]) -> String {
 }
 
 fn fmt_wall_ms(ms: u64) -> String {
-    use time::format_description::parse;
     use time::OffsetDateTime;
+    use time::format_description::parse;
 
     let fmt = parse("[year]-[month]-[day] [hour]:[minute]").unwrap();
     let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
-        .unwrap_or_else(|_| OffsetDateTime::UNIX_EPOCH);
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
     dt.format(&fmt).unwrap_or_else(|_| ms.to_string())
 }

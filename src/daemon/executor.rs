@@ -22,6 +22,7 @@ use crate::core::{
 
 impl Daemon {
     /// Create a new bead.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_create(
         &mut self,
         repo: &Path,
@@ -99,10 +100,12 @@ impl Daemon {
                         return Response::err(OpError::ValidationFailed {
                             field: "id".into(),
                             reason: e.to_string(),
-                        })
+                        });
                     }
                 };
-                if repo_state.state.get_live(&id).is_some() || repo_state.state.get_tombstone(&id).is_some() {
+                if repo_state.state.get_live(&id).is_some()
+                    || repo_state.state.get_tombstone(&id).is_some()
+                {
                     return Response::err(OpError::AlreadyExists(id));
                 }
                 (id, None)
@@ -114,7 +117,7 @@ impl Daemon {
                         return Response::err(OpError::ValidationFailed {
                             field: "parent".into(),
                             reason: e.to_string(),
-                        })
+                        });
                     }
                 };
                 let child = match next_child_id(&repo_state.state, &parent_id) {
@@ -168,7 +171,7 @@ impl Daemon {
                     return Response::err(OpError::ValidationFailed {
                         field: "labels".into(),
                         reason: e.to_string(),
-                    })
+                    });
                 }
             };
             label_set.insert(label);
@@ -233,13 +236,17 @@ impl Daemon {
                 return Response::err(OpError::NotFound(parent_id));
             }
             let key = DepKey::new(id.clone(), parent_id, DepKind::Parent);
-            repo_state.state.insert_dep(DepEdge::new(key, stamp.clone()));
+            repo_state
+                .state
+                .insert_dep(DepEdge::new(key, stamp.clone()));
         }
 
         // Dependency edges.
         for (kind, to) in parsed_deps {
             let key = DepKey::new(id.clone(), to, kind);
-            repo_state.state.insert_dep(DepEdge::new(key, stamp.clone()));
+            repo_state
+                .state
+                .insert_dep(DepEdge::new(key, stamp.clone()));
         }
 
         // Mark dirty and schedule sync
@@ -327,11 +334,10 @@ impl Daemon {
         if let Patch::Set(v) = patch.labels {
             let mut labels = Labels::new();
             for raw in v {
-                let label =
-                    crate::core::Label::parse(raw).map_err(|e| OpError::ValidationFailed {
-                        field: "labels".into(),
-                        reason: e.to_string(),
-                    });
+                let label = crate::core::Label::parse(raw).map_err(|e| OpError::ValidationFailed {
+                    field: "labels".into(),
+                    reason: e.to_string(),
+                });
                 let label = match label {
                     Ok(l) => l,
                     Err(e) => return Response::err(e),
@@ -370,7 +376,7 @@ impl Daemon {
                     return Response::err(OpError::ValidationFailed {
                         field: "status".into(),
                         reason: format!("unknown status {other:?}"),
-                    })
+                    });
                 }
             }
         }
@@ -887,7 +893,10 @@ fn next_child_id(state: &crate::core::CanonicalState, parent: &BeadId) -> Result
     if depth >= 3 {
         return Err(OpError::ValidationFailed {
             field: "parent".into(),
-            reason: format!("maximum hierarchy depth (3) exceeded for parent {}", parent.as_str()),
+            reason: format!(
+                "maximum hierarchy depth (3) exceeded for parent {}",
+                parent.as_str()
+            ),
         });
     }
 
@@ -1040,11 +1049,7 @@ fn encode_base36(bytes: &[u8], len: usize) -> String {
 
 /// Check if adding a dependency from `from` to `to` would create a cycle.
 /// Returns true if there's already a path from `to` back to `from` (via deps_from).
-fn would_create_cycle(
-    state: &crate::core::CanonicalState,
-    from: &BeadId,
-    to: &BeadId,
-) -> bool {
+fn would_create_cycle(state: &crate::core::CanonicalState, from: &BeadId, to: &BeadId) -> bool {
     use std::collections::HashSet;
 
     // BFS from `to` following deps_from edges to see if we can reach `from`

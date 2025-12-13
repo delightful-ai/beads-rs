@@ -79,8 +79,6 @@ impl PartialOrd for Stamp {
 
 impl Ord for Stamp {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.at
-            .cmp(&other.at)
-            .then_with(|| self.by.cmp(&other.by)) // deterministic tiebreak
+        self.at.cmp(&other.at).then_with(|| self.by.cmp(&other.by)) // deterministic tiebreak
     }
 }

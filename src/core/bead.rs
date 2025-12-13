@@ -7,12 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::error::{CollisionError, CoreError};
-
 use super::collections::{Labels, NoteLog};
 use super::composite::{Claim, Workflow};
 use super::crdt::Lww;
 use super::domain::{BeadType, Priority};
+use super::error::{CollisionError, CoreError};
 use super::identity::{BeadId, ContentHash};
 use super::time::Stamp;
 
@@ -242,58 +241,58 @@ impl Bead {
 
         // id
         h.update(self.core.id.as_str().as_bytes());
-        h.update(&[0]);
+        h.update([0]);
 
         // title
         h.update(self.fields.title.value.as_bytes());
-        h.update(&[0]);
+        h.update([0]);
 
         // description
         h.update(self.fields.description.value.as_bytes());
-        h.update(&[0]);
+        h.update([0]);
 
         // status
         h.update(self.fields.workflow.value.status().as_bytes());
-        h.update(&[0]);
+        h.update([0]);
 
         // priority (as decimal)
         h.update(self.fields.priority.value.value().to_string().as_bytes());
-        h.update(&[0]);
+        h.update([0]);
 
         // bead_type
         h.update(self.fields.bead_type.value.as_str().as_bytes());
-        h.update(&[0]);
+        h.update([0]);
 
         // labels (sorted for determinism)
         for label in self.fields.labels.value.iter() {
             h.update(label.as_str().as_bytes());
             h.update(b",");
         }
-        h.update(&[0]);
+        h.update([0]);
 
         // assignee (from claim if present)
         if let Some(assignee) = self.fields.claim.value.assignee() {
             h.update(assignee.as_str().as_bytes());
         }
-        h.update(&[0]);
+        h.update([0]);
 
         // assignee_expires (wall clock ms if present)
         if let Some(expires) = self.fields.claim.value.expires() {
             h.update(expires.0.to_string().as_bytes());
         }
-        h.update(&[0]);
+        h.update([0]);
 
         // design
         if let Some(ref design) = self.fields.design.value {
             h.update(design.as_bytes());
         }
-        h.update(&[0]);
+        h.update([0]);
 
         // acceptance_criteria
         if let Some(ref ac) = self.fields.acceptance_criteria.value {
             h.update(ac.as_bytes());
         }
-        h.update(&[0]);
+        h.update([0]);
 
         // notes (sorted by id for determinism)
         for note in self.notes.sorted() {
@@ -308,23 +307,23 @@ impl Bead {
             h.update(note.at.counter.to_string().as_bytes());
             h.update(b"\n");
         }
-        h.update(&[0]);
+        h.update([0]);
 
         // created_at (wall_ms,counter)
         h.update(self.core.created().at.wall_ms.to_string().as_bytes());
         h.update(b",");
         h.update(self.core.created().at.counter.to_string().as_bytes());
-        h.update(&[0]);
+        h.update([0]);
 
         // created_by
         h.update(self.core.created().by.as_str().as_bytes());
-        h.update(&[0]);
+        h.update([0]);
 
         // created_on_branch
         if let Some(branch) = self.core.created_on_branch() {
             h.update(branch.as_bytes());
         }
-        h.update(&[0]);
+        h.update([0]);
 
         // closed_at, closed_by, closed_reason, closed_on_branch (from Closure if closed)
         if let Some(closure) = self.fields.workflow.value.closure() {
@@ -332,36 +331,36 @@ impl Bead {
             h.update(self.fields.workflow.stamp.at.wall_ms.to_string().as_bytes());
             h.update(b",");
             h.update(self.fields.workflow.stamp.at.counter.to_string().as_bytes());
-            h.update(&[0]);
+            h.update([0]);
 
             // closed_by (from workflow stamp)
             h.update(self.fields.workflow.stamp.by.as_str().as_bytes());
-            h.update(&[0]);
+            h.update([0]);
 
             // closed_reason
             if let Some(ref reason) = closure.reason {
                 h.update(reason.as_bytes());
             }
-            h.update(&[0]);
+            h.update([0]);
 
             // closed_on_branch
             if let Some(ref branch) = closure.on_branch {
                 h.update(branch.as_bytes());
             }
-            h.update(&[0]);
+            h.update([0]);
         } else {
             // Not closed - empty fields
-            h.update(&[0]); // closed_at
-            h.update(&[0]); // closed_by
-            h.update(&[0]); // closed_reason
-            h.update(&[0]); // closed_on_branch
+            h.update([0]); // closed_at
+            h.update([0]); // closed_by
+            h.update([0]); // closed_reason
+            h.update([0]); // closed_on_branch
         }
 
         // external_ref
         if let Some(ref ext) = self.fields.external_ref.value {
             h.update(ext.as_bytes());
         }
-        h.update(&[0]);
+        h.update([0]);
 
         // source_repo
         if let Some(ref sr) = self.fields.source_repo.value {

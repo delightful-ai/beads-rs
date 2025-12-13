@@ -167,7 +167,11 @@ mod tests {
         let id = BeadId::parse("bd-abc").unwrap();
 
         // Insert tombstone
-        let t1 = Tombstone::new(id.clone(), make_stamp(1000, "alice"), Some("old".to_string()));
+        let t1 = Tombstone::new(
+            id.clone(),
+            make_stamp(1000, "alice"),
+            Some("old".to_string()),
+        );
         store.upsert(t1);
 
         // Upsert with newer stamp

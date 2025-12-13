@@ -5,21 +5,21 @@
 //! Request format: `{"op": "create", ...}\n`
 //! Response format: `{"ok": ...}\n` or `{"err": {"code": "...", "message": "..."}}\n`
 
-use std::io::{BufRead, BufReader, Write};
 use std::fs;
-use std::os::unix::net::UnixStream;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
 use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::ops::{BeadOp, BeadPatch, OpError, OpResult};
 use super::query::{Filters, Query, QueryResult};
-use crate::core::{BeadId, BeadType, DepKind, Priority, CoreError, InvalidId};
+use crate::core::{BeadId, BeadType, CoreError, DepKind, InvalidId, Priority};
 use crate::error::{Effect, Transience};
 
 // =============================================================================
@@ -458,11 +458,7 @@ impl Request {
                 group_by: group_by.clone(),
             })),
 
-            Request::Deleted {
-                repo,
-                since_ms,
-                id,
-            } => Ok(Some(Query::Deleted {
+            Request::Deleted { repo, since_ms, id } => Ok(Some(Query::Deleted {
                 repo: repo.clone(),
                 since_ms: *since_ms,
                 id: id
@@ -494,6 +490,7 @@ impl Request {
 /// IPC response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     Ok { ok: ResponsePayload },
     Err { err: ErrorPayload },
@@ -514,6 +511,7 @@ impl Response {
 /// Successful response payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum ResponsePayload {
     /// Mutation result.
     Op(OpResult),
@@ -747,7 +745,7 @@ fn daemon_command() -> Command {
 
 fn connect_with_autostart(socket: &PathBuf) -> Result<UnixStream, IpcError> {
     match UnixStream::connect(socket) {
-        Ok(stream) => return Ok(stream),
+        Ok(stream) => Ok(stream),
         Err(e) if should_autostart(&e) => {
             // Try to autostart daemon with a simple lock to avoid herds.
             let dir = ensure_socket_dir()?;

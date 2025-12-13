@@ -19,12 +19,7 @@ use crate::core::{BeadId, DepKind, DepLife};
 
 impl Daemon {
     /// Get a single bead.
-    pub fn query_show(
-        &mut self,
-        repo: &Path,
-        id: &BeadId,
-        git_tx: &Sender<GitOp>,
-    ) -> Response {
+    pub fn query_show(&mut self, repo: &Path, id: &BeadId, git_tx: &Sender<GitOp>) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
@@ -141,8 +136,7 @@ impl Daemon {
         let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
         for (_, edge) in repo_state.state.iter_deps() {
             // Only count active `blocks` edges where the target is not closed.
-            if edge.life.value == DepLife::Active && edge.key.kind == crate::core::DepKind::Blocks
-            {
+            if edge.life.value == DepLife::Active && edge.key.kind == crate::core::DepKind::Blocks {
                 if let Some(to_bead) = repo_state.state.get_live(&edge.key.to) {
                     if !to_bead.fields.workflow.value.is_closed() {
                         blocked.insert(&edge.key.from);
@@ -179,12 +173,7 @@ impl Daemon {
     }
 
     /// Get dependency tree for a bead.
-    pub fn query_dep_tree(
-        &mut self,
-        repo: &Path,
-        id: &BeadId,
-        git_tx: &Sender<GitOp>,
-    ) -> Response {
+    pub fn query_dep_tree(&mut self, repo: &Path, id: &BeadId, git_tx: &Sender<GitOp>) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
@@ -217,16 +206,14 @@ impl Daemon {
             }
         }
 
-        Response::ok(ResponsePayload::Query(QueryResult::DepTree { root: id.clone(), edges }))
+        Response::ok(ResponsePayload::Query(QueryResult::DepTree {
+            root: id.clone(),
+            edges,
+        }))
     }
 
     /// Get direct dependencies for a bead.
-    pub fn query_deps(
-        &mut self,
-        repo: &Path,
-        id: &BeadId,
-        git_tx: &Sender<GitOp>,
-    ) -> Response {
+    pub fn query_deps(&mut self, repo: &Path, id: &BeadId, git_tx: &Sender<GitOp>) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
@@ -254,16 +241,14 @@ impl Daemon {
             }
         }
 
-        Response::ok(ResponsePayload::Query(QueryResult::Deps { incoming, outgoing }))
+        Response::ok(ResponsePayload::Query(QueryResult::Deps {
+            incoming,
+            outgoing,
+        }))
     }
 
     /// Get notes for a bead.
-    pub fn query_notes(
-        &mut self,
-        repo: &Path,
-        id: &BeadId,
-        git_tx: &Sender<GitOp>,
-    ) -> Response {
+    pub fn query_notes(&mut self, repo: &Path, id: &BeadId, git_tx: &Sender<GitOp>) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
@@ -281,11 +266,7 @@ impl Daemon {
     }
 
     /// Get sync status for a repo.
-    pub fn query_status(
-        &mut self,
-        repo: &Path,
-        git_tx: &Sender<GitOp>,
-    ) -> Response {
+    pub fn query_status(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
@@ -293,8 +274,7 @@ impl Daemon {
         let repo_state = self.repo_state(&remote).unwrap();
 
         let blocked_by = compute_blocked_by(repo_state);
-        let blocked_set: std::collections::HashSet<&BeadId> =
-            blocked_by.keys().map(|k| k).collect();
+        let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
 
         let mut open_issues = 0usize;
         let mut in_progress_issues = 0usize;
@@ -321,8 +301,7 @@ impl Daemon {
             }
         }
 
-        let epics_eligible_for_closure =
-            compute_epic_statuses(repo_state, true).len();
+        let epics_eligible_for_closure = compute_epic_statuses(repo_state, true).len();
 
         let summary = StatusSummary {
             total_issues: repo_state.state.live_count(),
@@ -485,7 +464,11 @@ impl Daemon {
 
         let blocked_by = compute_blocked_by(repo_state);
 
-        let status_filter = filters.status.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+        let status_filter = filters
+            .status
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
         let mut base_filters = filters.clone();
         base_filters.status = None;
 
@@ -498,7 +481,7 @@ impl Daemon {
                     return Response::err(OpError::ValidationFailed {
                         field: "group_by".into(),
                         reason: "valid values: status, priority, type, assignee, label".into(),
-                    })
+                    });
                 }
             }
         }
@@ -528,7 +511,7 @@ impl Daemon {
                         return Response::err(OpError::ValidationFailed {
                             field: "status".into(),
                             reason: "valid values: open, in_progress, blocked, closed".into(),
-                        })
+                        });
                     }
                 }
             }
@@ -538,11 +521,14 @@ impl Daemon {
 
         if group_by.is_none() {
             return Response::ok(ResponsePayload::Query(QueryResult::Count(
-                CountResult::Simple { count: matched.len() },
+                CountResult::Simple {
+                    count: matched.len(),
+                },
             )));
         }
 
-        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for (id, bead) in &matched {
             match group_by.unwrap() {
                 "status" => {
@@ -565,7 +551,9 @@ impl Daemon {
                 }
                 "assignee" => {
                     let group = match &bead.fields.claim.value {
-                        crate::core::Claim::Claimed { assignee, .. } => assignee.as_str().to_string(),
+                        crate::core::Claim::Claimed { assignee, .. } => {
+                            assignee.as_str().to_string()
+                        }
                         crate::core::Claim::Unclaimed => "(unassigned)".to_string(),
                     };
                     *counts.entry(group).or_insert(0) += 1;
@@ -588,10 +576,12 @@ impl Daemon {
             .map(|(group, count)| CountGroup { group, count })
             .collect();
 
-        Response::ok(ResponsePayload::Query(QueryResult::Count(CountResult::Grouped {
-            total: matched.len(),
-            groups,
-        })))
+        Response::ok(ResponsePayload::Query(QueryResult::Count(
+            CountResult::Grouped {
+                total: matched.len(),
+                groups,
+            },
+        )))
     }
 
     /// Show deleted (tombstoned) issues.
@@ -650,11 +640,7 @@ impl Daemon {
     }
 
     /// Validate state.
-    pub fn query_validate(
-        &mut self,
-        repo: &Path,
-        git_tx: &Sender<GitOp>,
-    ) -> Response {
+    pub fn query_validate(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
@@ -695,7 +681,7 @@ impl Daemon {
             queue.push_back(id.clone());
 
             while let Some(current) = queue.pop_front() {
-                if current == *id && visited.len() > 0 {
+                if current == *id && !visited.is_empty() {
                     errors.push(format!("dependency cycle involving {}", id.as_str()));
                     break;
                 }
@@ -719,7 +705,8 @@ impl Daemon {
 fn compute_blocked_by(
     repo_state: &super::repo::RepoState,
 ) -> std::collections::BTreeMap<BeadId, Vec<BeadId>> {
-    let mut blocked: std::collections::BTreeMap<BeadId, Vec<BeadId>> = std::collections::BTreeMap::new();
+    let mut blocked: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
+        std::collections::BTreeMap::new();
 
     for (_, edge) in repo_state.state.iter_deps() {
         if edge.life.value != DepLife::Active {
@@ -752,7 +739,8 @@ fn compute_epic_statuses(
     eligible_only: bool,
 ) -> Vec<EpicStatus> {
     // Build epic -> children mapping from parent edges.
-    let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> = std::collections::BTreeMap::new();
+    let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
+        std::collections::BTreeMap::new();
     for (_, edge) in repo_state.state.iter_deps() {
         if edge.life.value != DepLife::Active {
             continue;

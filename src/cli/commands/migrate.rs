@@ -1,8 +1,6 @@
-use crate::{Error, Result};
-
+use super::super::{Ctx, MigrateCmd, current_actor_string};
 use crate::core::{ActorId, FormatVersion};
-
-use super::super::{current_actor_string, Ctx, MigrateCmd};
+use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
     match cmd {
@@ -16,7 +14,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 "latest_format_version": latest,
                 "needs_migration": current != latest,
             });
-            let s = serde_json::to_string_pretty(&payload).map_err(crate::daemon::IpcError::from)?;
+            let s =
+                serde_json::to_string_pretty(&payload).map_err(crate::daemon::IpcError::from)?;
             println!("{s}");
             Ok(())
         }
@@ -28,8 +27,9 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
             ),
         })),
         MigrateCmd::FromGo(args) => {
-            use crate::git::SyncProcess;
             use std::time::{SystemTime, UNIX_EPOCH};
+
+            use crate::git::SyncProcess;
 
             let actor = ActorId::new(current_actor_string())?;
             let (imported, report) = crate::migrate::import_go_export(&args.input, &actor)?;
@@ -43,8 +43,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                     "notes": report.notes,
                     "warnings": report.warnings,
                 });
-                let s =
-                    serde_json::to_string_pretty(&payload).map_err(crate::daemon::IpcError::from)?;
+                let s = serde_json::to_string_pretty(&payload)
+                    .map_err(crate::daemon::IpcError::from)?;
                 println!("{s}");
                 return Ok(());
             }
@@ -63,10 +63,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            let resolution_stamp = crate::core::Stamp::new(
-                crate::core::WriteStamp::new(now_ms, 0),
-                actor.clone(),
-            );
+            let resolution_stamp =
+                crate::core::Stamp::new(crate::core::WriteStamp::new(now_ms, 0), actor.clone());
 
             let committed = SyncProcess::new(ctx.repo.clone())
                 .fetch(&repo)?
@@ -97,7 +95,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 "commit": commit_oid,
                 "pushed": pushed,
             });
-            let s = serde_json::to_string_pretty(&payload).map_err(crate::daemon::IpcError::from)?;
+            let s =
+                serde_json::to_string_pretty(&payload).map_err(crate::daemon::IpcError::from)?;
             println!("{s}");
             Ok(())
         }
@@ -110,9 +109,7 @@ fn read_current_format_version(repo: &git2::Repository) -> Result<u32> {
     let oid = repo
         .refname_to_id("refs/heads/beads/store")
         .map_err(|_| crate::git::SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
-    let commit = repo
-        .find_commit(oid)
-        .map_err(crate::git::SyncError::from)?;
+    let commit = repo.find_commit(oid).map_err(crate::git::SyncError::from)?;
     let tree = commit.tree().map_err(crate::git::SyncError::from)?;
     let meta_entry = tree
         .get_name("meta.json")
@@ -123,6 +120,7 @@ fn read_current_format_version(repo: &git2::Repository) -> Result<u32> {
     let meta_blob = meta_obj
         .peel_to_blob()
         .map_err(|_| crate::git::SyncError::NotABlob("meta.json"))?;
-    let v = crate::git::wire::parse_meta(meta_blob.content()).map_err(crate::git::SyncError::from)?;
+    let v =
+        crate::git::wire::parse_meta(meta_blob.content()).map_err(crate::git::SyncError::from)?;
     Ok(v)
 }

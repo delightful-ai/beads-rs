@@ -26,20 +26,15 @@ use crate::git::SyncError;
 /// - `Keep` - Don't change the field
 /// - `Clear` - Set the field to None
 /// - `Set(T)` - Set the field to Some(T)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Patch<T> {
     /// Don't change the field.
+    #[default]
     Keep,
     /// Clear the field (set to None).
     Clear,
     /// Set the field to a new value.
     Set(T),
-}
-
-impl<T> Default for Patch<T> {
-    fn default() -> Self {
-        Patch::Keep
-    }
 }
 
 impl<T> Patch<T> {
@@ -486,10 +481,7 @@ mod tests {
     fn patch_apply() {
         let current = Some("old".to_string());
 
-        assert_eq!(
-            Patch::Keep.apply(current.clone()),
-            Some("old".to_string())
-        );
+        assert_eq!(Patch::Keep.apply(current.clone()), Some("old".to_string()));
         assert_eq!(Patch::<String>::Clear.apply(current.clone()), None);
         assert_eq!(
             Patch::Set("new".to_string()).apply(current),

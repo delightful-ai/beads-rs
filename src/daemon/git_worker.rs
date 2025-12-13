@@ -9,11 +9,10 @@ use std::path::{Path, PathBuf};
 use crossbeam::channel::{Receiver, Sender};
 use git2::Repository;
 
+use super::remote::RemoteUrl;
 use crate::core::{ActorId, CanonicalState, Stamp};
 use crate::git::error::SyncError;
-use crate::git::sync::{init_beads_ref, sync_with_retry, SyncProcess};
-
-use super::remote::RemoteUrl;
+use crate::git::sync::{SyncProcess, init_beads_ref, sync_with_retry};
 
 /// Result of a sync operation.
 pub type SyncResult = Result<CanonicalState, SyncError>;
@@ -65,8 +64,8 @@ impl GitWorker {
     /// Open or get cached repository.
     fn open(&mut self, path: &Path) -> Result<&Repository, SyncError> {
         if !self.repos.contains_key(path) {
-            let repo = Repository::open(path)
-                .map_err(|e| SyncError::OpenRepo(path.to_owned(), e))?;
+            let repo =
+                Repository::open(path).map_err(|e| SyncError::OpenRepo(path.to_owned(), e))?;
             self.repos.insert(path.to_owned(), repo);
         }
         Ok(self.repos.get(path).unwrap())

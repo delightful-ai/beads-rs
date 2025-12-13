@@ -1,10 +1,8 @@
+use super::super::render;
+use super::super::{Ctx, ReadyArgs, print_ok, send};
 use crate::Result;
-
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::QueryResult;
-
-use super::super::{print_ok, send, Ctx, ReadyArgs};
-use super::super::render;
 
 pub(crate) fn handle(ctx: &Ctx, args: ReadyArgs) -> Result<()> {
     let req = Request::Ready {

@@ -1,8 +1,7 @@
+use beads_rs::cli;
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry};
-
-use beads_rs::cli;
 
 fn main() {
     let cli = cli::parse_from(std::env::args_os());

@@ -10,13 +10,13 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::Sender;
 use git2::Repository;
 
+use super::Clock;
 use super::git_worker::GitOp;
 use super::ipc::{ErrorPayload, Request, Response, ResponsePayload};
 use super::ops::OpError;
+use super::remote::{RemoteUrl, normalize_url};
 use super::repo::RepoState;
-use super::remote::{normalize_url, RemoteUrl};
 use super::scheduler::SyncScheduler;
-use super::Clock;
 use crate::core::{ActorId, BeadId, CanonicalState};
 use crate::git::SyncError;
 
@@ -94,8 +94,8 @@ impl Daemon {
         }
 
         // 3. Git config.
-        let repo = Repository::open(repo_path)
-            .map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
+        let repo =
+            Repository::open(repo_path).map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
         let remote = repo
             .find_remote("origin")
             .map_err(|_| OpError::NoRemote(repo_path.to_owned()))?;
@@ -173,7 +173,9 @@ impl Daemon {
             .map(|s| {
                 !s.dirty
                     && !s.sync_in_progress
-                    && s.last_refresh.map(|t| t.elapsed() >= REFRESH_TTL).unwrap_or(true)
+                    && s.last_refresh
+                        .map(|t| t.elapsed() >= REFRESH_TTL)
+                        .unwrap_or(true)
             })
             .unwrap_or(false);
 
@@ -262,20 +264,14 @@ impl Daemon {
                     // Merge local mutations with synced state
                     match CanonicalState::join(&synced_state, &repo_state.state) {
                         Ok(merged) => {
-                            repo_state.complete_sync(
-                                merged,
-                                self.clock.wall_ms(),
-                            );
+                            repo_state.complete_sync(merged, self.clock.wall_ms());
                             // Still dirty from mutations during sync - reschedule
                             repo_state.dirty = true;
                             self.scheduler.schedule(remote.clone());
                         }
                         Err(_) => {
                             // Merge failed - just take synced state, we'll catch up next sync
-                            repo_state.complete_sync(
-                                synced_state,
-                                self.clock.wall_ms(),
-                            );
+                            repo_state.complete_sync(synced_state, self.clock.wall_ms());
                         }
                     }
                 } else {
@@ -526,16 +522,12 @@ impl Daemon {
                 group_by,
             } => self.query_count(&repo, &filters, group_by.as_deref(), git_tx),
 
-            Request::Deleted {
-                repo,
-                since_ms,
-                id,
-            } => {
+            Request::Deleted { repo, since_ms, id } => {
                 let id = match id {
                     Some(s) => Some(match BeadId::parse(&s) {
                         Ok(id) => id,
                         Err(e) => {
-                            return Response::err(error_payload("invalid_id", &e.to_string()))
+                            return Response::err(error_payload("invalid_id", &e.to_string()));
                         }
                     }),
                     None => None,
@@ -543,9 +535,10 @@ impl Daemon {
                 self.query_deleted(&repo, since_ms, id.as_ref(), git_tx)
             }
 
-            Request::EpicStatus { repo, eligible_only } => {
-                self.query_epic_status(&repo, eligible_only, git_tx)
-            }
+            Request::EpicStatus {
+                repo,
+                eligible_only,
+            } => self.query_epic_status(&repo, eligible_only, git_tx),
 
             Request::Status { repo } => self.query_status(&repo, git_tx),
 
@@ -589,12 +582,9 @@ impl Daemon {
 
                 match respond_rx.recv() {
                     Ok(Ok(())) => {
-                        // Load the newly initialized state
-                        if self.ensure_repo_loaded(&repo, git_tx).is_ok() {
-                            Response::ok(ResponsePayload::Initialized)
-                        } else {
-                            Response::ok(ResponsePayload::Initialized)
-                        }
+                        // TODO: properly handle ensure_repo_loaded errors instead of ignoring
+                        let _ = self.ensure_repo_loaded(&repo, git_tx);
+                        Response::ok(ResponsePayload::Initialized)
                     }
                     Ok(Err(e)) => Response::err(error_payload("init_failed", &e.to_string())),
                     Err(_) => Response::err(error_payload("internal", "git thread died")),

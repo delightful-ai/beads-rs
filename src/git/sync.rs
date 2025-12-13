@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use git2::{ObjectType, Oid, Repository, Signature};
 
-use super::collision::{detect_collisions, resolve_collisions, Collision};
+use super::collision::{Collision, detect_collisions, resolve_collisions};
 use super::error::SyncError;
 use super::wire;
 use crate::core::{CanonicalState, Stamp};
@@ -128,8 +128,7 @@ impl SyncProcess<Idle> {
                 }
                 if allowed.is_user_pass_plaintext() {
                     if let Some(ref cfg) = cfg {
-                        if let Ok(cred) =
-                            git2::Cred::credential_helper(cfg, url, username_from_url)
+                        if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
                         {
                             return Ok(cred);
                         }
@@ -143,26 +142,25 @@ impl SyncProcess<Idle> {
         }
 
         // Get base state - prefer remote, fall back to local
-        let (base_oid, base_state) =
-            match repo.refname_to_id("refs/remotes/origin/beads/store") {
-                Ok(oid) => {
-                    let state = read_state_at_oid(repo, oid)?;
-                    (oid, state)
-                }
-                Err(_) => {
-                    // No remote - check local ref (handles local-only repos)
-                    match repo.refname_to_id("refs/heads/beads/store") {
-                        Ok(local_oid) => {
-                            let state = read_state_at_oid(repo, local_oid)?;
-                            (local_oid, state)
-                        }
-                        Err(_) => {
-                            // Neither remote nor local - truly first sync
-                            (Oid::zero(), CanonicalState::new())
-                        }
+        let (base_oid, base_state) = match repo.refname_to_id("refs/remotes/origin/beads/store") {
+            Ok(oid) => {
+                let state = read_state_at_oid(repo, oid)?;
+                (oid, state)
+            }
+            Err(_) => {
+                // No remote - check local ref (handles local-only repos)
+                match repo.refname_to_id("refs/heads/beads/store") {
+                    Ok(local_oid) => {
+                        let state = read_state_at_oid(repo, local_oid)?;
+                        (local_oid, state)
+                    }
+                    Err(_) => {
+                        // Neither remote nor local - truly first sync
+                        (Oid::zero(), CanonicalState::new())
                     }
                 }
-            };
+            }
+        };
 
         Ok(SyncProcess {
             repo_path: self.repo_path,
@@ -346,8 +344,7 @@ impl SyncProcess<Committed> {
                 }
                 if allowed.is_user_pass_plaintext() {
                     if let Some(ref cfg) = cfg {
-                        if let Ok(cred) =
-                            git2::Cred::credential_helper(cfg, url, username_from_url)
+                        if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
                         {
                             return Ok(cred);
                         }
@@ -535,8 +532,7 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
                 }
                 if allowed.is_user_pass_plaintext() {
                     if let Some(ref cfg) = cfg {
-                        if let Ok(cred) =
-                            git2::Cred::credential_helper(cfg, url, username_from_url)
+                        if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
                         {
                             return Ok(cred);
                         }
@@ -654,7 +650,9 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
                         return Err(SyncError::TooManyRetries(retries));
                     }
                     // Delete our orphan commit's ref so we can try again
-                    let _ = repo.find_reference("refs/heads/beads/store").map(|mut r| r.delete());
+                    let _ = repo
+                        .find_reference("refs/heads/beads/store")
+                        .map(|mut r| r.delete());
                     continue;
                 }
                 return Err(crate::git::error::PushRejected { message: err }.into());

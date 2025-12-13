@@ -10,10 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::error::CoreError;
-
 use super::bead::Bead;
 use super::dep::{DepEdge, DepKey};
+use super::error::CoreError;
 use super::identity::BeadId;
 use super::time::WallClock;
 use super::tombstone::Tombstone;
@@ -318,8 +317,8 @@ impl CanonicalState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::time::{Stamp, WriteStamp};
     use crate::core::identity::ActorId;
+    use crate::core::time::{Stamp, WriteStamp};
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -492,10 +491,7 @@ mod tests {
 
         // Merge: tombstone should win
         let merged = CanonicalState::join(&state_a, &state_b).unwrap();
-        assert!(
-            !merged.live.contains_key(&id),
-            "bead should be deleted"
-        );
+        assert!(!merged.live.contains_key(&id), "bead should be deleted");
         assert!(
             merged.tombstones.contains_key(&id),
             "tombstone should exist"

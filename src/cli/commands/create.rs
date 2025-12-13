@@ -1,13 +1,12 @@
-use crate::{Error, Result};
-
-use crate::core::BeadType;
-use crate::daemon::ipc::{send_request, Request, Response, ResponsePayload};
-use crate::daemon::ops::OpResult;
-use crate::daemon::query::QueryResult;
 use std::io::BufRead;
 
-use super::super::{fetch_issue, print_ok, send, Ctx, CreateArgs};
 use super::super::render;
+use super::super::{CreateArgs, Ctx, fetch_issue, print_ok, send};
+use crate::core::BeadType;
+use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
+use crate::daemon::ops::OpResult;
+use crate::daemon::query::QueryResult;
+use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     if let Some(path) = args.file.take() {
@@ -90,7 +89,10 @@ fn resolve_title(positional: Option<String>, flag: Option<String>) -> Result<Str
     }
 }
 
-fn resolve_description(description: Option<String>, body: Option<String>) -> Result<Option<String>> {
+fn resolve_description(
+    description: Option<String>,
+    body: Option<String>,
+) -> Result<Option<String>> {
     match (description, body) {
         (Some(d), Some(b)) => {
             if d != b {
@@ -148,12 +150,18 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
             Response::Ok { ok } => {
                 // Unexpected ok payload; treat as failure for bulk mode.
                 failed.push(t.title.clone());
-                eprintln!("warning: unexpected response creating {:?}: {ok:?}", t.title);
+                eprintln!(
+                    "warning: unexpected response creating {:?}: {ok:?}",
+                    t.title
+                );
                 continue;
             }
             Response::Err { err } => {
                 failed.push(t.title.clone());
-                eprintln!("error creating issue {:?}: {} - {}", t.title, err.code, err.message);
+                eprintln!(
+                    "error creating issue {:?}: {} - {}",
+                    t.title, err.code, err.message
+                );
                 continue;
             }
         };
@@ -248,7 +256,9 @@ fn parse_markdown_file(path: &std::path::Path) -> Result<Vec<MarkdownIssue>> {
             continue;
         }
 
-        let Some(issue) = current.as_mut() else { continue };
+        let Some(issue) = current.as_mut() else {
+            continue;
+        };
         if current_section.is_some() {
             section_buf.push(line);
             continue;
@@ -278,7 +288,9 @@ fn flush_md_section(
     current_section: &mut Option<String>,
     section_buf: &mut Vec<String>,
 ) -> Result<()> {
-    let Some(section) = current_section.take() else { return Ok(()) };
+    let Some(section) = current_section.take() else {
+        return Ok(());
+    };
     let content = section_buf.join("\n").trim().to_string();
     section_buf.clear();
     if content.is_empty() {
@@ -303,7 +315,11 @@ fn flush_md_section(
         }
         "assignee" => {
             let v = content.trim();
-            issue.assignee = if v.is_empty() { None } else { Some(v.to_string()) };
+            issue.assignee = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
         }
         "labels" => {
             issue.labels = parse_md_list(&content);
@@ -319,7 +335,10 @@ fn flush_md_section(
 
 fn validate_markdown_path(path: &std::path::Path) -> Result<()> {
     let clean = std::path::PathBuf::from(path);
-    if clean.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if clean
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
             field: "file".into(),
             reason: "invalid file path: directory traversal not allowed".into(),
@@ -372,7 +391,11 @@ fn parse_md_list(content: &str) -> Vec<String> {
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter_map(|s| {
             let t = s.trim();
-            if t.is_empty() { None } else { Some(t.to_string()) }
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
         })
         .collect()
 }

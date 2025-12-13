@@ -4,18 +4,22 @@ use std::path::PathBuf;
 
 use git2::Repository;
 
-use crate::core::CanonicalState;
-use crate::git::sync::read_state_at_oid;
-use crate::git::SyncError;
 use crate::Error;
+use crate::core::CanonicalState;
+use crate::git::SyncError;
+use crate::git::sync::read_state_at_oid;
 
 /// Open the git repository containing the current directory.
 pub fn discover() -> Result<(Repository, PathBuf), Error> {
-    let repo = Repository::discover(".")
-        .map_err(|e| SyncError::OpenRepo(PathBuf::from("."), e))?;
+    let repo = Repository::discover(".").map_err(|e| SyncError::OpenRepo(PathBuf::from("."), e))?;
     let path = repo
         .workdir()
-        .ok_or_else(|| SyncError::OpenRepo(PathBuf::from("."), git2::Error::from_str("bare repository not supported")))? 
+        .ok_or_else(|| {
+            SyncError::OpenRepo(
+                PathBuf::from("."),
+                git2::Error::from_str("bare repository not supported"),
+            )
+        })?
         .to_owned();
     Ok((repo, path))
 }

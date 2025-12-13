@@ -1,10 +1,8 @@
-use crate::{Error, Result};
-
+use super::super::render;
+use super::super::{CommentAddArgs, CommentsArgs, CommentsCmd, Ctx, print_ok, send};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::QueryResult;
-
-use super::super::{print_ok, send, Ctx, CommentAddArgs, CommentsArgs, CommentsCmd};
-use super::super::render;
+use crate::{Error, Result};
 
 pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
     match args.cmd {

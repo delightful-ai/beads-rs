@@ -5,8 +5,8 @@
 
 use std::io::Write;
 
-use crate::repo;
 use crate::Result;
+use crate::repo;
 
 /// Output workflow context. Returns Ok(()) even if not in a beads repo
 /// (silent success for cross-platform hook compatibility).

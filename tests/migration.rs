@@ -2,9 +2,10 @@
 //!
 //! Tests importing issues.jsonl from Go beads export format.
 
+use std::fs;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::fs;
 use tempfile::TempDir;
 
 /// Test fixture: working repo + bare remote.

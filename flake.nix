@@ -13,8 +13,8 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
-        rustToolchain = pkgs.rust-bin.stable."1.91.0".default.override {
-          extensions = [ "rust-src" "rust-analyzer" ];
+        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+          extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
         };
       in
       {
@@ -25,6 +25,10 @@
             pkgs.openssl
             pkgs.zlib
             pkgs.libgit2
+
+            # Dev tools
+            pkgs.just
+            pkgs.cargo-watch
           ];
 
           OPENSSL_DIR = "${pkgs.openssl.dev}";
@@ -34,6 +38,18 @@
           shellHook = ''
             echo "beads-rs dev shell"
             echo "Rust: $(rustc --version)"
+            echo ""
+            echo "Available commands:"
+            echo "  just         - Run common tasks (just --list for all)"
+            echo "  just check   - Run fmt, lint, test"
+            echo "  just watch   - Watch for changes and run tests"
+            echo ""
+
+            # Set up git hooks
+            if [ -d .git ]; then
+              git config core.hooksPath .githooks
+              echo "Git hooks configured (.githooks/pre-commit)"
+            fi
           '';
         };
       }

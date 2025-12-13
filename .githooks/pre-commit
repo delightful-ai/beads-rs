@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running pre-commit checks..."
+
+# Use nix-shell if available, otherwise assume environment is set up
+if command -v nix-shell &> /dev/null && [ -f shell.nix ]; then
+    echo "Using nix-shell..."
+    nix-shell --quiet --run "cargo fmt --all -- --check && cargo clippy --all-features -- -D warnings"
+else
+    echo "Checking formatting..."
+    cargo fmt --all -- --check
+    echo "Running clippy..."
+    cargo clippy --all-features -- -D warnings
+fi
+
+echo "Pre-commit checks passed!"

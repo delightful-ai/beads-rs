@@ -8,10 +8,10 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{builder::BoolishValueParser, ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, builder::BoolishValueParser};
 
 use crate::core::{BeadType, DepKind, Priority};
-use crate::daemon::ipc::{send_request, Request, Response, ResponsePayload};
+use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
 use crate::daemon::query::{QueryResult, SortField};
 use crate::{Error, Result};
 
@@ -870,9 +870,9 @@ fn fetch_issue(ctx: &Ctx, id: &str) -> Result<crate::api::Issue> {
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
-        other => Err(Error::Ipc(crate::daemon::IpcError::DaemonUnavailable(format!(
-            "unexpected response for show: {other:?}"
-        )))),
+        other => Err(Error::Ipc(crate::daemon::IpcError::DaemonUnavailable(
+            format!("unexpected response for show: {other:?}"),
+        ))),
     }
 }
 
@@ -956,7 +956,7 @@ fn parse_priority(raw: &str) -> std::result::Result<Priority, String> {
 }
 
 fn parse_status(raw: &str) -> std::result::Result<String, String> {
-    let s = raw.trim().to_lowercase().replace('-', "_").replace(' ', "_");
+    let s = raw.trim().to_lowercase().replace(['-', ' '], "_");
     let canon = match s.as_str() {
         "open" | "todo" => "open",
         "inprogress" | "in_progress" | "doing" | "wip" => "in_progress",

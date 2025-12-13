@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::core::BeadId;
-use crate::error::{Effect, Transience};
 use crate::core::CoreError;
+use crate::error::{Effect, Transience};
 
 /// Errors that can occur during git sync operations.
 #[derive(Error, Debug)]

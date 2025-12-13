@@ -1,14 +1,9 @@
+use super::super::{CloseArgs, Ctx, print_ok, send};
 use crate::Result;
-
 use crate::daemon::ipc::Request;
 
-use super::super::{print_ok, send, Ctx, CloseArgs};
-
 pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
-    let reason_str = args
-        .reason
-        .clone()
-        .unwrap_or_else(|| "Closed".to_string());
+    let reason_str = args.reason.clone().unwrap_or_else(|| "Closed".to_string());
     let req = Request::Close {
         repo: ctx.repo.clone(),
         id: args.id.clone(),

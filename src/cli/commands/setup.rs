@@ -9,7 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::daemon::OpError;
 use crate::{Error, Result};
@@ -557,7 +557,10 @@ fn install_aider() -> Result<()> {
     println!();
     println!("✓ Aider integration installed");
     println!("  Config: {}", config_path.display());
-    println!("  Instructions: {} (loaded by AI)", instructions_path.display());
+    println!(
+        "  Instructions: {} (loaded by AI)",
+        instructions_path.display()
+    );
     println!("  README: {} (for humans)", readme_path.display());
     println!();
     println!("Usage:");

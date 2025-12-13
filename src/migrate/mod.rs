@@ -4,5 +4,4 @@
 
 pub mod go_export;
 
-pub use go_export::{import_go_export, GoImportReport};
-
+pub use go_export::{GoImportReport, import_go_export};

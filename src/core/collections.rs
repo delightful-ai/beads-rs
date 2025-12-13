@@ -11,8 +11,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::composite::Note;
-use super::identity::NoteId;
 use super::error::{CoreError, InvalidLabel};
+use super::identity::NoteId;
 
 /// Validated label - non-empty, no newlines.
 ///

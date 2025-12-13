@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::identity::{ActorId, NoteId};
-use super::time::{WallClock, WriteStamp};  // WriteStamp still used in Note
+use super::time::{WallClock, WriteStamp}; // WriteStamp still used in Note
 
 /// Immutable note/comment on a bead.
 ///
@@ -41,7 +41,9 @@ impl Note {
 /// and prevents accidentally having empty/invalid claim states.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Claim {
+    #[default]
     Unclaimed,
     Claimed {
         assignee: ActorId,
@@ -78,7 +80,9 @@ impl Claim {
     /// Check if claimed and expired.
     pub fn is_expired(&self, now: WallClock) -> bool {
         match self {
-            Self::Claimed { expires: Some(exp), .. } => *exp < now,
+            Self::Claimed {
+                expires: Some(exp), ..
+            } => *exp < now,
             _ => false,
         }
     }
@@ -86,12 +90,6 @@ impl Claim {
     /// Check if currently claimed (not expired).
     pub fn is_claimed(&self) -> bool {
         matches!(self, Self::Claimed { .. })
-    }
-}
-
-impl Default for Claim {
-    fn default() -> Self {
-        Self::Unclaimed
     }
 }
 
@@ -119,7 +117,9 @@ impl Closure {
 /// This is the key invariant that prevents Go's status/closed_at desync.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Workflow {
+    #[default]
     Open,
     InProgress,
     Closed(Closure),
@@ -146,11 +146,5 @@ impl Workflow {
     /// Check if workflow is in terminal state.
     pub fn is_closed(&self) -> bool {
         matches!(self, Self::Closed(_))
-    }
-}
-
-impl Default for Workflow {
-    fn default() -> Self {
-        Self::Open
     }
 }

@@ -30,16 +30,11 @@ impl DepKey {
 }
 
 /// Dependency lifecycle state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DepLife {
+    #[default]
     Active,
     Deleted,
-}
-
-impl Default for DepLife {
-    fn default() -> Self {
-        DepLife::Active
-    }
 }
 
 /// Dependency edge with LWW lifecycle.

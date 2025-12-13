@@ -86,19 +86,9 @@ fn determine_winner(local: &Bead, remote: &Bead) -> (CollisionSide, CollisionSid
 /// Generate a new ID for the remapped bead.
 ///
 /// Uses 6 characters and checks both states to ensure uniqueness.
-fn generate_remap_id(
-    original: &BeadId,
-    local: &CanonicalState,
-    remote: &CanonicalState,
-) -> BeadId {
+fn generate_remap_id(original: &BeadId, local: &CanonicalState, remote: &CanonicalState) -> BeadId {
     // Generate a new ID longer than the original root suffix, capped to 8.
-    let mut target_len = original.root_len() + 1;
-    if target_len < 3 {
-        target_len = 3;
-    }
-    if target_len > 8 {
-        target_len = 8;
-    }
+    let target_len = (original.root_len() + 1).clamp(3, 8);
     loop {
         let new_id = BeadId::generate(target_len);
         if new_id != *original
@@ -219,13 +209,12 @@ fn verify_determinism(local: &Bead, remote: &Bead) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{ActorId, BeadCore, BeadFields, BeadType, Claim, Lww, Priority, Workflow, WriteStamp};
+    use crate::core::{
+        ActorId, BeadCore, BeadFields, BeadType, Claim, Lww, Priority, Workflow, WriteStamp,
+    };
 
     fn make_bead(id: &str, wall_ms: u64, actor: &str) -> Bead {
-        let stamp = Stamp::new(
-            WriteStamp::new(wall_ms, 0),
-            ActorId::new(actor).unwrap(),
-        );
+        let stamp = Stamp::new(WriteStamp::new(wall_ms, 0), ActorId::new(actor).unwrap());
         let core = BeadCore::new(BeadId::parse(id).unwrap(), stamp.clone(), None);
         let fields = BeadFields {
             title: Lww::new("test".to_string(), stamp.clone()),

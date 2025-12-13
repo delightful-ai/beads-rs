@@ -1,11 +1,9 @@
-use crate::{Error, Result};
-
+use super::super::render;
+use super::super::{Ctx, UpdateArgs, current_actor_string, fetch_issue, print_ok, send};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
 use crate::daemon::query::QueryResult;
-
-use super::super::{current_actor_string, fetch_issue, print_ok, send, Ctx, UpdateArgs};
-use super::super::render;
+use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
     let mut patch = BeadPatch::default();
@@ -112,7 +110,10 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-fn resolve_description(description: Option<String>, body: Option<String>) -> Result<Option<String>> {
+fn resolve_description(
+    description: Option<String>,
+    body: Option<String>,
+) -> Result<Option<String>> {
     match (description, body) {
         (Some(d), Some(b)) => {
             if d != b {

@@ -1,8 +1,6 @@
+use super::super::{Ctx, print_ok, send};
 use crate::Result;
-
 use crate::daemon::ipc::Request;
-
-use super::super::{print_ok, send, Ctx};
 
 pub(crate) fn handle(ctx: &Ctx, id: String) -> Result<()> {
     let req = Request::Unclaim {

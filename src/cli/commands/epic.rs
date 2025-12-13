@@ -1,11 +1,10 @@
-use crate::Result;
-
-use crate::daemon::ipc::{Request, ResponsePayload};
-use crate::daemon::query::QueryResult;
 use serde::Serialize;
 
-use super::super::{print_ok, send, Ctx, EpicCmd};
 use super::super::render;
+use super::super::{Ctx, EpicCmd, print_ok, send};
+use crate::Result;
+use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::query::QueryResult;
 
 #[derive(Debug, Serialize)]
 struct EpicCloseResult {

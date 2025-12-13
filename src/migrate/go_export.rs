@@ -8,16 +8,15 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use serde::Deserialize;
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, Closure, CanonicalState,
-    DepEdge, DepKey, DepKind, Labels, Lww, Note, NoteId, Priority, Stamp, Tombstone, Workflow,
-    WriteStamp,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepEdge,
+    DepKey, DepKind, Labels, Lww, Note, NoteId, Priority, Stamp, Tombstone, Workflow, WriteStamp,
 };
-use crate::daemon::OpError;
 use crate::daemon::IpcError;
+use crate::daemon::OpError;
 use crate::{Error, Result};
 
 /// Summary of an import run.
@@ -137,10 +136,7 @@ pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState,
                 .unwrap_or_else(|| actor.as_str().to_string());
             let deleted_by = ActorId::new(deleted_by_raw)?;
             let deleted_stamp = Stamp::new(WriteStamp::new(deleted_ms, 0), deleted_by);
-            let reason = issue
-                .delete_reason
-                .clone()
-                .filter(|s| !s.trim().is_empty());
+            let reason = issue.delete_reason.clone().filter(|s| !s.trim().is_empty());
             let tomb = Tombstone::new(id.clone(), deleted_stamp, reason);
             state.insert_tombstone(tomb);
             report.tombstones += 1;
@@ -199,7 +195,8 @@ pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState,
         // If claimed but status open, follow rust spec and treat as in_progress.
         let mut workflow_value = workflow_value;
         let mut workflow_stamp = workflow_stamp;
-        if matches!(claim_value, Claim::Claimed { .. }) && matches!(workflow_value, Workflow::Open) {
+        if matches!(claim_value, Claim::Claimed { .. }) && matches!(workflow_value, Workflow::Open)
+        {
             workflow_value = Workflow::InProgress;
             workflow_stamp = updated_stamp.clone();
         }
@@ -216,9 +213,7 @@ pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState,
             external_ref: Lww::new(issue.external_ref.clone(), updated_stamp.clone()),
             source_repo: Lww::new(None, updated_stamp.clone()),
             estimated_minutes: Lww::new(
-                issue
-                    .estimated_minutes
-                    .and_then(|m| u32::try_from(m).ok()),
+                issue.estimated_minutes.and_then(|m| u32::try_from(m).ok()),
                 updated_stamp.clone(),
             ),
             workflow: Lww::new(workflow_value, workflow_stamp),
@@ -365,13 +360,9 @@ fn workflow_from_status(
             } else {
                 updated_stamp.at.wall_ms
             };
-            let closed_stamp =
-                Stamp::new(WriteStamp::new(closed_ms, 0), actor.clone());
+            let closed_stamp = Stamp::new(WriteStamp::new(closed_ms, 0), actor.clone());
             let reason = close_reason.filter(|s| !s.trim().is_empty());
-            Ok((
-                Workflow::Closed(Closure::new(reason, None)),
-                closed_stamp,
-            ))
+            Ok((Workflow::Closed(Closure::new(reason, None)), closed_stamp))
         }
         "in_progress" | "inprogress" => Ok((Workflow::InProgress, updated_stamp.clone())),
         "open" | "blocked" => Ok((Workflow::Open, updated_stamp.clone())),

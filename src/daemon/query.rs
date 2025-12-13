@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult,
-    DeletedLookup as ApiDeletedLookup, DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus,
-    Issue, IssueSummary, Note as ApiNote, StatusOutput as ApiStatusOutput, Tombstone as ApiTombstone,
+    DeletedLookup as ApiDeletedLookup, DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue,
+    IssueSummary, Note as ApiNote, StatusOutput as ApiStatusOutput, Tombstone as ApiTombstone,
 };
 use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
 
@@ -138,7 +138,10 @@ impl Filters {
         // Status filter
         if let Some(ref status) = self.status {
             // NOTE: "blocked" is derived and handled by higher-level queries when needed.
-            if status != "all" && status != "blocked" && bead.fields.workflow.value.status() != status {
+            if status != "all"
+                && status != "blocked"
+                && bead.fields.workflow.value.status() != status
+            {
                 return false;
             }
         }
@@ -230,7 +233,12 @@ impl Filters {
         // Text search
         if let Some(ref search) = self.search {
             let search_lower = search.to_lowercase();
-            let title_match = bead.fields.title.value.to_lowercase().contains(&search_lower);
+            let title_match = bead
+                .fields
+                .title
+                .value
+                .to_lowercase()
+                .contains(&search_lower);
             let desc_match = bead
                 .fields
                 .description
@@ -296,7 +304,7 @@ impl Filters {
             .workflow
             .value
             .is_closed()
-            .then(|| bead.fields.workflow.stamp.at.wall_ms);
+            .then_some(bead.fields.workflow.stamp.at.wall_ms);
         if let Some(after) = self.closed_after {
             if closed_ms.map(|t| t < after).unwrap_or(true) {
                 return false;
@@ -421,6 +429,7 @@ impl Query {
 /// Result of a query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum QueryResult {
     /// Single issue result.
     Issue(Issue),

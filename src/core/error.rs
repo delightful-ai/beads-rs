@@ -72,4 +72,3 @@ impl CoreError {
         Effect::None
     }
 }
-

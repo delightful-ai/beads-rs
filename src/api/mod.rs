@@ -85,8 +85,13 @@ pub struct CountGroup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CountResult {
-    Simple { count: usize },
-    Grouped { total: usize, groups: Vec<CountGroup> },
+    Simple {
+        count: usize,
+    },
+    Grouped {
+        total: usize,
+        groups: Vec<CountGroup>,
+    },
 }
 
 // =============================================================================
@@ -279,12 +284,7 @@ impl Issue {
                 _ => (None, None, None, None),
             };
 
-        let notes = bead
-            .notes
-            .sorted()
-            .into_iter()
-            .map(Note::from)
-            .collect();
+        let notes = bead.notes.sorted().into_iter().map(Note::from).collect();
 
         Self {
             id: bead.core.id.as_str().to_string(),

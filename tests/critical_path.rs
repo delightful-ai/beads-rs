@@ -2,9 +2,10 @@
 //!
 //! These tests run the actual `bd` binary against temp git repos.
 
+use std::fs;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::fs;
 use tempfile::TempDir;
 
 /// Test fixture: working repo + bare remote.
@@ -674,17 +675,35 @@ fn test_filter_by_priority() {
     repo.bd().arg("init").assert().success();
 
     repo.bd()
-        .args(["create", "Critical bug", "--type=bug", "--priority=0", "--json"])
+        .args([
+            "create",
+            "Critical bug",
+            "--type=bug",
+            "--priority=0",
+            "--json",
+        ])
         .assert()
         .success();
 
     repo.bd()
-        .args(["create", "Low priority task", "--type=task", "--priority=4", "--json"])
+        .args([
+            "create",
+            "Low priority task",
+            "--type=task",
+            "--priority=4",
+            "--json",
+        ])
         .assert()
         .success();
 
     repo.bd()
-        .args(["create", "Medium task", "--type=task", "--priority=2", "--json"])
+        .args([
+            "create",
+            "Medium task",
+            "--type=task",
+            "--priority=2",
+            "--json",
+        ])
         .assert()
         .success();
 
@@ -1189,15 +1208,33 @@ fn test_list_sorting() {
 
     // Create issues with different priorities
     repo.bd()
-        .args(["create", "Low priority", "--type=task", "--priority=4", "--json"])
+        .args([
+            "create",
+            "Low priority",
+            "--type=task",
+            "--priority=4",
+            "--json",
+        ])
         .assert()
         .success();
     repo.bd()
-        .args(["create", "High priority", "--type=task", "--priority=0", "--json"])
+        .args([
+            "create",
+            "High priority",
+            "--type=task",
+            "--priority=0",
+            "--json",
+        ])
         .assert()
         .success();
     repo.bd()
-        .args(["create", "Medium priority", "--type=task", "--priority=2", "--json"])
+        .args([
+            "create",
+            "Medium priority",
+            "--type=task",
+            "--priority=2",
+            "--json",
+        ])
         .assert()
         .success();
 
@@ -1531,7 +1568,10 @@ fn test_setup_cursor() {
 
     // Rules file should exist in .cursor/rules/
     let rules_path = repo.path().join(".cursor/rules/beads.mdc");
-    assert!(rules_path.exists(), ".cursor/rules/beads.mdc file should exist");
+    assert!(
+        rules_path.exists(),
+        ".cursor/rules/beads.mdc file should exist"
+    );
 
     // File should contain beads workflow content
     let content = fs::read_to_string(&rules_path).unwrap();
@@ -1595,11 +1635,16 @@ fn test_setup_claude_project() {
         .args(["setup", "claude", "--project"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Claude Code integration installed"));
+        .stdout(predicate::str::contains(
+            "Claude Code integration installed",
+        ));
 
     // .claude directory should exist with settings
     let settings_path = repo.path().join(".claude/settings.local.json");
-    assert!(settings_path.exists(), ".claude/settings.local.json should exist");
+    assert!(
+        settings_path.exists(),
+        ".claude/settings.local.json should exist"
+    );
 
     // Check should report installed
     repo.bd()
@@ -1691,7 +1736,10 @@ fn test_self_dependency_prevention() {
         .args(["dep", "add", &id, &id])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("self").or(predicate::str::contains("itself").or(predicate::str::contains("circular"))));
+        .stderr(
+            predicate::str::contains("self")
+                .or(predicate::str::contains("itself").or(predicate::str::contains("circular"))),
+        );
 }
 
 #[test]
@@ -1723,16 +1771,10 @@ fn test_operations_on_deleted_issue() {
         .stderr(predicate::str::contains("deleted").or(predicate::str::contains("tombstone").or(predicate::str::contains("not found"))));
 
     // Try to claim - should fail
-    repo.bd()
-        .args(["claim", &id])
-        .assert()
-        .failure();
+    repo.bd().args(["claim", &id]).assert().failure();
 
     // Try to close - should fail
-    repo.bd()
-        .args(["close", &id])
-        .assert()
-        .failure();
+    repo.bd().args(["close", &id]).assert().failure();
 }
 
 #[test]
@@ -1762,10 +1804,7 @@ fn test_claim_already_claimed_issue() {
     // Second claim with actor bob - behavior depends on design:
     // Either it should fail (issue already claimed) or succeed (last-writer-wins)
     // Let's just verify it doesn't crash and produces a clear outcome
-    let result = repo
-        .bd()
-        .args(["claim", &id, "--actor=bob"])
-        .assert();
+    let result = repo.bd().args(["claim", &id, "--actor=bob"]).assert();
 
     // Should either succeed (LWW) or fail with clear message - not panic
     // We check it's deterministic either way
@@ -1894,7 +1933,13 @@ fn test_epic_close_with_open_children() {
 
     // Create open subtask
     repo.bd()
-        .args(["create", "Open subtask", "--type=task", "--parent", &epic_id])
+        .args([
+            "create",
+            "Open subtask",
+            "--type=task",
+            "--parent",
+            &epic_id,
+        ])
         .assert()
         .success();
 
@@ -1916,7 +1961,8 @@ fn test_epic_close_with_open_children() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("open") || stderr.contains("children") || stderr.contains("subtask"),
-            "Error should mention open children: {}", stderr
+            "Error should mention open children: {}",
+            stderr
         );
     }
 }
@@ -1928,20 +1974,36 @@ fn test_unicode_and_special_characters() {
 
     // Create issue with unicode title
     repo.bd()
-        .args(["create", "修复bug 🐛 émojis работает", "--type=bug", "--json"])
+        .args([
+            "create",
+            "修复bug 🐛 émojis работает",
+            "--type=bug",
+            "--json",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("修复bug"));
 
     // Create issue with special characters
     repo.bd()
-        .args(["create", "Issue with \"quotes\" and 'apostrophes'", "--type=task", "--json"])
+        .args([
+            "create",
+            "Issue with \"quotes\" and 'apostrophes'",
+            "--type=task",
+            "--json",
+        ])
         .assert()
         .success();
 
     // Create issue with newlines in description
     repo.bd()
-        .args(["create", "Multiline", "--description=Line 1\nLine 2\nLine 3", "--type=task", "--json"])
+        .args([
+            "create",
+            "Multiline",
+            "--description=Line 1\nLine 2\nLine 3",
+            "--type=task",
+            "--json",
+        ])
         .assert()
         .success();
 
@@ -1997,7 +2059,6 @@ fn test_empty_and_whitespace_inputs() {
         .failure();
 }
 
-
 #[test]
 fn test_duplicate_dependency() {
     let repo = TestRepo::new();
@@ -2036,10 +2097,7 @@ fn test_duplicate_dependency() {
         .success();
 
     // Add same dependency again - should be idempotent (succeed) or fail gracefully
-    let result = repo
-        .bd()
-        .args(["dep", "add", &id_b, &id_a])
-        .assert();
+    let result = repo.bd().args(["dep", "add", &id_b, &id_a]).assert();
 
     // Should not crash - either succeeds (idempotent) or fails with clear message
     let output = result.get_output();
@@ -2116,10 +2174,7 @@ fn test_remove_nonexistent_dependency() {
         .to_string();
 
     // Remove dependency that doesn't exist - should be idempotent or fail gracefully
-    let result = repo
-        .bd()
-        .args(["dep", "rm", &id_b, &id_a])
-        .assert();
+    let result = repo.bd().args(["dep", "rm", &id_b, &id_a]).assert();
 
     let output = result.get_output();
     // Either succeeds (no-op) or fails with clear "not found" message
@@ -2222,8 +2277,11 @@ fn test_partial_id_matching() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Should mention ambiguous or not found
         assert!(
-            stderr.contains("ambiguous") || stderr.contains("not found") || stderr.contains("invalid"),
-            "Error should be clear: {}", stderr
+            stderr.contains("ambiguous")
+                || stderr.contains("not found")
+                || stderr.contains("invalid"),
+            "Error should be clear: {}",
+            stderr
         );
     }
 }
@@ -2257,7 +2315,8 @@ fn test_double_close() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("already") || stderr.contains("closed"),
-            "Error should mention already closed: {}", stderr
+            "Error should mention already closed: {}",
+            stderr
         );
     }
 }
@@ -2288,7 +2347,8 @@ fn test_double_reopen() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("already") || stderr.contains("open") || stderr.contains("not closed"),
-            "Error should mention already open: {}", stderr
+            "Error should mention already open: {}",
+            stderr
         );
     }
 }
@@ -2300,13 +2360,23 @@ fn test_invalid_priority_values() {
 
     // Negative priority - should fail
     repo.bd()
-        .args(["create", "Negative priority", "--type=task", "--priority=-1"])
+        .args([
+            "create",
+            "Negative priority",
+            "--type=task",
+            "--priority=-1",
+        ])
         .assert()
         .failure();
 
     // Way too high priority - should fail
     repo.bd()
-        .args(["create", "Sky high priority", "--type=task", "--priority=999"])
+        .args([
+            "create",
+            "Sky high priority",
+            "--type=task",
+            "--priority=999",
+        ])
         .assert()
         .failure();
 }
@@ -2321,10 +2391,19 @@ fn test_string_priority_accepted() {
 
     // "high" is converted to P1 - maybe intentional UX?
     repo.bd()
-        .args(["create", "String priority", "--type=task", "--priority=high", "--json"])
+        .args([
+            "create",
+            "String priority",
+            "--type=task",
+            "--priority=high",
+            "--json",
+        ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("priority").and(predicate::str::contains("1").or(predicate::str::contains("high"))));
+        .stdout(
+            predicate::str::contains("priority")
+                .and(predicate::str::contains("1").or(predicate::str::contains("high"))),
+        );
 }
 
 #[test]
@@ -2376,7 +2455,13 @@ fn test_create_with_deleted_parent() {
     // Try to create child with deleted parent
     let result = repo
         .bd()
-        .args(["create", "Child of deleted", "--type=task", "--parent", &parent_id])
+        .args([
+            "create",
+            "Child of deleted",
+            "--type=task",
+            "--parent",
+            &parent_id,
+        ])
         .assert();
 
     let output = result.get_output();
@@ -2449,10 +2534,7 @@ fn test_dep_add_deleted_blocker() {
     repo.bd().args(["delete", &deleted_id]).assert().success();
 
     // Try to add dependency on deleted issue
-    let result = repo
-        .bd()
-        .args(["dep", "add", &id, &deleted_id])
-        .assert();
+    let result = repo.bd().args(["dep", "add", &id, &deleted_id]).assert();
 
     let output = result.get_output();
     // Should probably fail - depending on deleted issue is weird
@@ -2471,7 +2553,12 @@ fn test_long_dependency_chain() {
     for i in 0..4 {
         let output = repo
             .bd()
-            .args(["create", &format!("Chain issue {}", i), "--type=task", "--json"])
+            .args([
+                "create",
+                &format!("Chain issue {}", i),
+                "--type=task",
+                "--json",
+            ])
             .assert()
             .success()
             .get_output()
@@ -2551,11 +2638,7 @@ fn test_delete_middle_of_dependency_chain() {
 
     // C should now only be blocked by... nothing? Or still transitively by A?
     // Document the actual behavior
-    let result = repo
-        .bd()
-        .args(["ready", "--json"])
-        .assert()
-        .success();
+    let result = repo.bd().args(["ready", "--json"]).assert().success();
 
     let output = result.get_output();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2588,10 +2671,7 @@ fn test_empty_comment() {
         .to_string();
 
     // Try to add empty comment
-    let result = repo
-        .bd()
-        .args(["comments", "add", &id, ""])
-        .assert();
+    let result = repo.bd().args(["comments", "add", &id, ""]).assert();
 
     let output = result.get_output();
     // Should probably fail - empty comment is pointless
@@ -2605,7 +2685,10 @@ fn test_empty_comment() {
             .get_output()
             .stdout
             .clone();
-        println!("Empty comment behavior: {:?}", String::from_utf8_lossy(&list_out));
+        println!(
+            "Empty comment behavior: {:?}",
+            String::from_utf8_lossy(&list_out)
+        );
     }
 }
 
@@ -2633,7 +2716,8 @@ fn test_very_long_title() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("long") || stderr.contains("length") || stderr.contains("limit"),
-            "Should mention length: {}", stderr
+            "Should mention length: {}",
+            stderr
         );
     }
 }
@@ -2648,7 +2732,13 @@ fn test_very_long_description() {
 
     let result = repo
         .bd()
-        .args(["create", "Long desc test", "--type=task", &format!("--description={}", long_desc), "--json"])
+        .args([
+            "create",
+            "Long desc test",
+            "--type=task",
+            &format!("--description={}", long_desc),
+            "--json",
+        ])
         .assert();
 
     let output = result.get_output();
@@ -2763,7 +2853,8 @@ fn test_claim_closed_issue() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("closed") || stderr.contains("workflow"),
-            "Should mention issue is closed: {}", stderr
+            "Should mention issue is closed: {}",
+            stderr
         );
     }
 }
@@ -2789,7 +2880,8 @@ fn test_update_multiple_fields_at_once() {
     // Update multiple fields at once (skip assignee - can only assign self)
     repo.bd()
         .args([
-            "update", &id,
+            "update",
+            &id,
             "--title=New title",
             "--description=New desc",
             "--priority=0",
@@ -2859,7 +2951,8 @@ fn test_show_with_all_optional_fields() {
     let output = repo
         .bd()
         .args([
-            "create", "Full issue",
+            "create",
+            "Full issue",
             "--type=feature",
             "--priority=0",
             "--description=A description",

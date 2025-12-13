@@ -1,12 +1,11 @@
-use crate::{Error, Result};
+use serde::Serialize;
 
+use super::super::render;
+use super::super::{Ctx, LabelBatchArgs, LabelCmd, fetch_issue, send};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
 use crate::daemon::query::{Filters, QueryResult};
-use serde::Serialize;
-
-use super::super::{fetch_issue, send, Ctx, LabelBatchArgs, LabelCmd};
-use super::super::render;
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, Serialize)]
 struct LabelChange {
@@ -32,8 +31,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 if !labels.iter().any(|l| l == &label) {
                     labels.push(label.clone());
                 }
-                let mut patch = BeadPatch::default();
-                patch.labels = Patch::Set(labels);
+                let patch = BeadPatch {
+                    labels: Patch::Set(labels),
+                    ..Default::default()
+                };
                 let req = Request::Update {
                     repo: ctx.repo.clone(),
                     id: id.clone(),
@@ -52,7 +53,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             if ctx.json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&results).map_err(crate::daemon::IpcError::from)?
+                    serde_json::to_string_pretty(&results)
+                        .map_err(crate::daemon::IpcError::from)?
                 );
                 return Ok(());
             }
@@ -69,8 +71,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 let issue = fetch_issue(ctx, &id)?;
                 let mut labels = issue.labels;
                 labels.retain(|l| l != &label);
-                let mut patch = BeadPatch::default();
-                patch.labels = Patch::Set(labels);
+                let patch = BeadPatch {
+                    labels: Patch::Set(labels),
+                    ..Default::default()
+                };
                 let req = Request::Update {
                     repo: ctx.repo.clone(),
                     id: id.clone(),
@@ -89,7 +93,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             if ctx.json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&results).map_err(crate::daemon::IpcError::from)?
+                    serde_json::to_string_pretty(&results)
+                        .map_err(crate::daemon::IpcError::from)?
                 );
                 return Ok(());
             }
@@ -104,7 +109,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             if ctx.json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&issue.labels).map_err(crate::daemon::IpcError::from)?
+                    serde_json::to_string_pretty(&issue.labels)
+                        .map_err(crate::daemon::IpcError::from)?
                 );
                 return Ok(());
             }

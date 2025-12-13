@@ -3,17 +3,17 @@
 //! `bd daemon run` starts the background service.
 
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::core::ActorId;
-use crate::daemon::ipc::{ensure_socket_dir, encode_response};
-use crate::daemon::server::RequestMessage;
-use crate::daemon::{run_git_loop, run_state_loop, socket_path, Daemon, GitWorker, RemoteUrl};
-use crate::daemon::{decode_request, Response, Request};
-use crate::daemon::ipc::ErrorPayload;
-use crate::daemon::IpcError;
 use crate::Result;
+use crate::core::ActorId;
+use crate::daemon::IpcError;
+use crate::daemon::ipc::ErrorPayload;
+use crate::daemon::ipc::{encode_response, ensure_socket_dir};
+use crate::daemon::server::RequestMessage;
+use crate::daemon::{Daemon, GitWorker, RemoteUrl, run_git_loop, run_state_loop, socket_path};
+use crate::daemon::{Request, Response, decode_request};
 
 /// Run the daemon in the current process.
 ///
@@ -37,8 +37,7 @@ pub fn run_daemon() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ =
-            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
     }
     eprintln!("daemon listening on {:?}", socket);
 
@@ -164,8 +163,7 @@ fn handle_client(
                 });
                 let bytes = encode_response(&resp).unwrap_or_else(|e| {
                     let msg = e.to_string().replace('"', "\\\"");
-                    format!(r#"{{"err":{{"code":"internal","message":"{}"}}}}\n"#, msg)
-                        .into_bytes()
+                    format!(r#"{{"err":{{"code":"internal","message":"{}"}}}}\n"#, msg).into_bytes()
                 });
                 let _ = write!(writer, "{}", String::from_utf8_lossy(&bytes));
                 let _ = writer.flush();
@@ -205,4 +203,3 @@ fn handle_client(
         }
     }
 }
-

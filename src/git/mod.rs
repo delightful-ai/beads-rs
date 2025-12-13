@@ -11,6 +11,6 @@ pub mod error;
 pub mod sync;
 pub mod wire;
 
-pub use collision::{detect_collisions, resolve_collisions, Collision, CollisionSide};
+pub use collision::{Collision, CollisionSide, detect_collisions, resolve_collisions};
 pub use error::{SyncError, WireError};
-pub use sync::{init_beads_ref, read_state_at_oid, sync_with_retry, SyncDiff, SyncProcess};
+pub use sync::{SyncDiff, SyncProcess, init_beads_ref, read_state_at_oid, sync_with_retry};

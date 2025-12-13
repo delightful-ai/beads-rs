@@ -9,13 +9,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::error::WireError;
 use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure,
-    DepEdge, DepKey, DepKind, Label, Labels, Lww, Priority, Stamp, Tombstone, WallClock, Workflow,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepEdge,
+    DepKey, DepKind, Label, Labels, Lww, Priority, Stamp, Tombstone, WallClock, Workflow,
     WriteStamp,
 };
-
-use super::error::WireError;
 
 // =============================================================================
 // Wire format types (intermediate representation for JSON)
@@ -241,7 +240,8 @@ pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
             BeadId::parse(&wire.id).map_err(|e| WireError::InvalidValue(e.to_string()))?,
             Stamp::new(
                 wire_to_stamp(wire.deleted_at),
-                ActorId::new(wire.deleted_by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
+                ActorId::new(wire.deleted_by)
+                    .map_err(|e| WireError::InvalidValue(e.to_string()))?,
             ),
             wire.reason,
         );
@@ -345,7 +345,10 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
             if $field.stamp != bead_stamp {
                 v_map.insert(
                     $name.to_string(),
-                    (stamp_to_wire(&$field.stamp.at), $field.stamp.by.as_str().to_string()),
+                    (
+                        stamp_to_wire(&$field.stamp.at),
+                        $field.stamp.by.as_str().to_string(),
+                    ),
                 );
             }
         };
@@ -414,7 +417,13 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
         acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
         priority: bead.fields.priority.value.value(),
         bead_type: bead.fields.bead_type.value.as_str().to_string(),
-        labels: bead.fields.labels.value.iter().map(|l| l.as_str().to_string()).collect(),
+        labels: bead
+            .fields
+            .labels
+            .value
+            .iter()
+            .map(|l| l.as_str().to_string())
+            .collect(),
         external_ref: bead.fields.external_ref.value.clone(),
         source_repo: bead.fields.source_repo.value.clone(),
         estimated_minutes: bead.fields.estimated_minutes.value,
@@ -478,7 +487,12 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
         "open" => Workflow::Open,
         "in_progress" => Workflow::InProgress,
         "closed" => Workflow::Closed(Closure::new(wire.closed_reason, wire.closed_on_branch)),
-        _ => return Err(WireError::InvalidValue(format!("unknown status: {}", wire.status))),
+        _ => {
+            return Err(WireError::InvalidValue(format!(
+                "unknown status: {}",
+                wire.status
+            )));
+        }
     };
 
     // Build fields
@@ -495,7 +509,7 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
         labels: Lww::new(
             wire.labels
                 .into_iter()
-                .map(|s| Label::parse(s))
+                .map(Label::parse)
                 .collect::<std::result::Result<Labels, _>>()
                 .map_err(|e| WireError::InvalidValue(e.to_string()))?,
             get_stamp("labels")?,

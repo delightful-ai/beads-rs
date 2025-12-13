@@ -150,11 +150,7 @@ impl BeadId {
 
     /// Root suffix length (excluding prefix and any hierarchical children).
     pub fn root_len(&self) -> usize {
-        self.0[3..]
-            .split('.')
-            .next()
-            .map(|s| s.len())
-            .unwrap_or(0)
+        self.0[3..].split('.').next().map(|s| s.len()).unwrap_or(0)
     }
 }
 
@@ -251,17 +247,13 @@ impl ContentHash {
         }
         let mut bytes = [0u8; 32];
         for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
-            let hex = std::str::from_utf8(chunk).map_err(|_| {
-                InvalidId::ContentHash {
-                    raw: s.to_string(),
-                    reason: "contains invalid UTF-8".into(),
-                }
+            let hex = std::str::from_utf8(chunk).map_err(|_| InvalidId::ContentHash {
+                raw: s.to_string(),
+                reason: "contains invalid UTF-8".into(),
             })?;
-            bytes[i] = u8::from_str_radix(hex, 16).map_err(|_| {
-                InvalidId::ContentHash {
-                    raw: s.to_string(),
-                    reason: format!("contains invalid hex: {}", hex),
-                }
+            bytes[i] = u8::from_str_radix(hex, 16).map_err(|_| InvalidId::ContentHash {
+                raw: s.to_string(),
+                reason: format!("contains invalid hex: {}", hex),
             })?;
         }
         Ok(Self(bytes))

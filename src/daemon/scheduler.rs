@@ -105,8 +105,9 @@ impl SyncScheduler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crossbeam::channel;
+
+    use super::*;
 
     #[test]
     fn schedule_and_fire() {

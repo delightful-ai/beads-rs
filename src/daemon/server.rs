@@ -5,15 +5,16 @@
 //! - State thread - owns Daemon, processes requests sequentially
 //! - Git thread - owns GitWorker, handles all git IO
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::collections::HashMap;
+
 use crossbeam::channel::{Receiver, Sender};
 
 use super::core::Daemon;
 use super::git_worker::{GitOp, SyncResult};
+use super::ipc::{Request, Response, decode_request, encode_response};
 use super::remote::RemoteUrl;
-use super::ipc::{decode_request, encode_response, Request, Response};
 
 /// Message sent from socket handlers to state thread.
 pub struct RequestMessage {
@@ -242,8 +243,7 @@ fn handle_client(stream: UnixStream, req_tx: Sender<RequestMessage>) {
             Ok(b) => b,
             Err(e) => {
                 let msg = e.to_string().replace('"', "\\\"");
-                format!(r#"{{"err":{{"code":"internal","message":"{}"}}}}\n"#, msg)
-                    .into_bytes()
+                format!(r#"{{"err":{{"code":"internal","message":"{}"}}}}\n"#, msg).into_bytes()
             }
         };
         // encode_response already includes newline, but let's be safe
