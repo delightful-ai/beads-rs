@@ -1,0 +1,103 @@
+use crate::Result;
+
+use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::query::QueryResult;
+use serde::Serialize;
+
+use super::super::{print_ok, send, Ctx, EpicCmd};
+use super::super::render;
+
+#[derive(Debug, Serialize)]
+struct EpicCloseResult {
+    closed: Vec<String>,
+    count: usize,
+}
+
+pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
+    match cmd {
+        EpicCmd::Status(args) => {
+            let req = Request::EpicStatus {
+                repo: ctx.repo.clone(),
+                eligible_only: args.eligible_only,
+            };
+            let ok = send(&req)?;
+            if ctx.json {
+                return print_ok(&ok, true);
+            }
+            match ok {
+                ResponsePayload::Query(QueryResult::EpicStatus(statuses)) => {
+                    println!("{}", render::render_epic_statuses(&statuses));
+                    Ok(())
+                }
+                other => print_ok(&other, false),
+            }
+        }
+        EpicCmd::CloseEligible(args) => {
+            let req = Request::EpicStatus {
+                repo: ctx.repo.clone(),
+                eligible_only: true,
+            };
+            let ok = send(&req)?;
+            let statuses = match ok {
+                ResponsePayload::Query(QueryResult::EpicStatus(statuses)) => statuses,
+                other => {
+                    if ctx.json {
+                        print_ok(&other, true)?;
+                    } else {
+                        print_ok(&other, false)?;
+                    }
+                    return Ok(());
+                }
+            };
+
+            if statuses.is_empty() {
+                if ctx.json {
+                    println!("[]");
+                } else {
+                    println!("No epics eligible for closure");
+                }
+                return Ok(());
+            }
+
+            if args.dry_run {
+                if ctx.json {
+                    // Match go UX: dry-run prints the eligible list.
+                    print_ok(
+                        &ResponsePayload::Query(QueryResult::EpicStatus(statuses)),
+                        true,
+                    )?;
+                } else {
+                    println!("{}", render::render_epic_close_dry_run(&statuses));
+                }
+                return Ok(());
+            }
+
+            let mut closed = Vec::new();
+            for s in &statuses {
+                let epic_id = s.epic.id.clone();
+                let req = Request::Close {
+                    repo: ctx.repo.clone(),
+                    id: epic_id.clone(),
+                    reason: Some("All children completed".into()),
+                    on_branch: None,
+                };
+                let _ = send(&req)?;
+                closed.push(epic_id);
+            }
+
+            if ctx.json {
+                let out = EpicCloseResult {
+                    count: closed.len(),
+                    closed,
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out).map_err(crate::daemon::IpcError::from)?
+                );
+            } else {
+                println!("{}", render::render_epic_close_result(&closed));
+            }
+            Ok(())
+        }
+    }
+}
