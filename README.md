@@ -2,6 +2,17 @@
 
 beads-rs is a rust redesign of [beads](https://github.com/steveyegge/beads). it's a task coordination system for agent swarms. it's a distributed issue tracker backed by git. conflicts are impossible.
 
+## install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/delightful-ai/beads-rs/main/scripts/install.sh | bash
+```
+
+or with cargo:
+```bash
+cargo install beads-rs
+```
+
 ## why
 
 beads is for agents to coordinate arbitrary work. it lets agents defer fixing problems to the next session, where you can start with a fresh context window. beads is a substrate for long-horizon planning for any form of work that can live in git.
@@ -21,7 +32,35 @@ this also means that there is no reason for agents to push to main when updating
 
 ## status
 
-alpha. expect sharp edges and CLI churn.
+alpha. 
+
+but designed for reliability first, and really hard to fuck up using if you're an agent.
+
+stress tested and works on my workflows. the type design means it should... in theory, just work^tm and i have made every effort to make that the case.
+
+## differences from beads-go
+
+beads-rs is a **drop-in replacement for core workflows** but doesn't have everything yet:
+
+| feature | beads-rs | beads-go |
+|---------|----------|----------|
+| core CRUD (create/show/list/update/close) | yes | yes |
+| dependencies (blocks/parent) | yes | yes |
+| claims/leases | yes | yes |
+| labels | yes | yes |
+| epics | yes | yes |
+| JSON output (`--json`) | yes | yes |
+| multi-clone instant sync | yes | yes |
+| git-backed CRDT storage | yes | sqlite + jsonl |
+| **agent mail** (real-time multi-agent) | no | yes |
+| **multi-repo** state sharing | no | yes |
+| **jira integration** | no | yes |
+| **doctor/repair** commands | no | yes |
+| **config system** | no | yes |
+| **templates** | no | yes |
+| **compaction/decay** | no | yes |
+
+if you need agent mail or multi-repo, use the original. if you want simpler architecture and don't mind missing features, try beads-rs.
 
 ## requirements
 
@@ -65,6 +104,7 @@ beads-rs can install lightweight integrations so your agent gets context automat
 ```bash
 bd setup claude
 bd setup cursor
+bd setup aider
 ```
 
 ## docs
@@ -72,9 +112,6 @@ bd setup cursor
 - `CLI_SPEC.md` (cli surface / compatibility goals)
 - `SPEC.md` (storage model + invariants)
 
-## setup
+## license
 
-```
-bd init
-```
-
+MIT
