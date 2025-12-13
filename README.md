@@ -13,6 +13,29 @@ or with cargo:
 cargo install beads-rs
 ```
 
+or with nix (run directly):
+```bash
+nix run github:delightful-ai/beads-rs -- --help
+```
+
+or in your flake:
+```nix
+{
+  inputs.beads-rs.url = "github:delightful-ai/beads-rs";
+
+  outputs = { self, nixpkgs, beads-rs, ... }: {
+    # use the overlay
+    nixpkgs.overlays = [ beads-rs.overlays.default ];
+    # then pkgs.beads-rs or pkgs.bd is available
+
+    # or reference directly
+    environment.systemPackages = [ beads-rs.packages.${system}.default ];
+  };
+}
+```
+
+to update: `nix flake update beads-rs`
+
 ## why
 
 beads is for agents to coordinate arbitrary work. it lets agents defer fixing problems to the next session, where you can start with a fresh context window. beads is a substrate for long-horizon planning for any form of work that can live in git.
