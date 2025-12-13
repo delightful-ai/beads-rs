@@ -20,7 +20,7 @@
         # The beads-rs package
         beads-rs = pkgs.rustPlatform.buildRustPackage {
           pname = "beads-rs";
-          version = "0.1.3";
+          version = "0.1.4";
 
           src = ./.;
 
