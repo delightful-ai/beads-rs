@@ -23,11 +23,10 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true
-          - target: x86_64-apple-darwin
-            os: macos-13  # Intel runner for x86_64
-            cross: false
+          # Skip x86_64-apple-darwin for now (macos-13 retired, cross-compile is complex)
+          # Most Mac users are on ARM anyway
           - target: aarch64-apple-darwin
-            os: macos-latest  # ARM runner for aarch64
+            os: macos-latest
             cross: false
 
     steps:
