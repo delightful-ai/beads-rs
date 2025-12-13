@@ -22,20 +22,36 @@ detect_platform() {
     local os arch
 
     case "$(uname -s)" in
-        Darwin) os="apple-darwin" ;;
-        Linux) os="unknown-linux-gnu" ;;
+        Darwin)
+            os="apple-darwin"
+            arch="aarch64"  # Only Apple Silicon supported
+            ;;
+        Linux)
+            os="unknown-linux-gnu"
+            arch="x86_64"  # Only x86_64 supported
+            ;;
         *)
             log_error "Unsupported OS: $(uname -s)"
             exit 1
             ;;
     esac
 
-    case "$(uname -m)" in
-        x86_64|amd64) arch="x86_64" ;;
-        aarch64|arm64) arch="aarch64" ;;
-        *)
-            log_error "Unsupported architecture: $(uname -m)"
-            exit 1
+    # Verify architecture matches what we support
+    local actual_arch="$(uname -m)"
+    case "$os" in
+        apple-darwin)
+            if [[ "$actual_arch" != "arm64" && "$actual_arch" != "aarch64" ]]; then
+                log_error "Only Apple Silicon Macs are supported (got: $actual_arch)"
+                log_info "Intel Mac users: cargo install beads-rs"
+                exit 1
+            fi
+            ;;
+        unknown-linux-gnu)
+            if [[ "$actual_arch" != "x86_64" && "$actual_arch" != "amd64" ]]; then
+                log_error "Only x86_64 Linux is supported (got: $actual_arch)"
+                log_info "ARM Linux users: cargo install beads-rs"
+                exit 1
+            fi
             ;;
     esac
 

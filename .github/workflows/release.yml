@@ -5,9 +5,81 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: bd
+
 jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-26
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip binary (linux)
+        if: contains(matrix.target, 'linux')
+        run: strip target/${{ matrix.target }}/release/${{ env.BIN_NAME }}
+
+      - name: Strip binary (macos)
+        if: contains(matrix.target, 'apple')
+        run: strip target/${{ matrix.target }}/release/${{ env.BIN_NAME }}
+
+      - name: Create archive
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ env.BIN_NAME }} dist/
+          cd dist
+          tar czvf ../beads-rs-${{ matrix.target }}.tar.gz *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beads-rs-${{ matrix.target }}
+          path: beads-rs-${{ matrix.target }}.tar.gz
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true
+
   publish:
     name: Publish to crates.io
+    needs: release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
