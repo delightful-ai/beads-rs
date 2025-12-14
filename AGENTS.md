@@ -1,5 +1,20 @@
 # Repository Guidelines
 
+## Issue Tracking
+
+**bd** is infrastructure for you, the agent. It's your external memory.
+
+A bead is a **promise**: you WILL get to this, just not now. When you're in the middle of something and notice tech debt, bugs, slop, or follow-on work that's out of scope—file a bead. Capture enough context that anyone (including future-you) can pick it up cold. Then keep going.
+
+```bash
+bd ready              # What can I work on?
+bd create "..."       # Promise to handle this later
+bd claim <id>         # I'm on it
+bd close <id>         # Done
+```
+
+Run `bd prime` for full workflow.
+
 ## beads-rs
 
 `beads-rs` is a distributed work-item database for agent swarms, using git as the sync layer. It’s a Rust rewrite of the original Go beads.
