@@ -15,6 +15,56 @@ bd close <id>         # Done
 
 Run `bd prime` for full workflow.
 
+### Writing Good Beads
+
+Each bead should be **one self-contained, independently doable thing**. If you're writing a bead that says "and also..." — stop and make two beads.
+
+**Structure for non-trivial beads:**
+
+```
+**Problem**
+What's wrong or missing. Be specific — file paths, error messages, code snippets.
+
+**Design**
+How to fix it. Include implementation approach and code examples.
+This is the "what would I tell another engineer" section.
+
+**Design Notes** (optional)
+Tradeoffs, alternatives considered, dependencies on other work, open questions.
+
+**Acceptance**
+- [ ] Concrete, verifiable checklist items
+- [ ] Tests pass
+- [ ] Specific behavior works
+
+**Files:** list of affected files (helps with scoping)
+```
+
+**Quick beads are fine too.** A one-liner like `bd create "Timeout hardcoded in auth.rs:45" --type=bug` is perfectly valid when the fix is obvious.
+
+**Priority guide:**
+- P0 (critical): Blocking all work, data loss, security issue
+- P1 (high): Blocking important work, significant bug
+- P2 (medium): Should do soon, meaningful improvement
+- P3 (low): Nice to have, cleanup
+- P4 (backlog): Someday/maybe
+
+**Epics** group related work. Create subtasks with `--parent`:
+```bash
+bd create "Auth overhaul" --type=epic
+bd create "Add OAuth support" --parent=bd-xxx
+bd create "Add session management" --parent=bd-xxx
+```
+
+**Dependencies** express "A can't start until B is done":
+```bash
+bd dep add A B              # A depends on B (A waits for B)
+bd dep tree bd-xxx          # Visualize what blocks what
+bd blocked                  # See what's stuck
+```
+
+Be proactive about dependencies. When creating related beads, think: "Can these run in parallel, or does one need the other's output?" Add deps immediately — don't leave implicit ordering in your head.
+
 ## beads-rs
 
 `beads-rs` is a distributed work-item database for agent swarms, using git as the sync layer. It’s a Rust rewrite of the original Go beads.
