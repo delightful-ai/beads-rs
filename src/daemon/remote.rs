@@ -40,10 +40,10 @@ pub fn normalize_url(url: &str) -> String {
     }
 
     // SSH scp-style: git@host:path
-    if let Some(rest) = u.strip_prefix("git@") {
-        if let Some((host, path)) = rest.split_once(':') {
-            return format!("{}/{}", host, path.trim_start_matches('/'));
-        }
+    if let Some(rest) = u.strip_prefix("git@")
+        && let Some((host, path)) = rest.split_once(':')
+    {
+        return format!("{}/{}", host, path.trim_start_matches('/'));
     }
 
     // Scheme URLs: https://host/path or ssh://git@host/path

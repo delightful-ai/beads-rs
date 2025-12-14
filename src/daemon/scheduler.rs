@@ -55,11 +55,11 @@ impl SyncScheduler {
         let fire_at = Instant::now() + delay;
 
         // Only schedule if not already pending with an earlier time
-        if let Some(&existing) = self.pending.get(&remote) {
-            if existing <= fire_at {
-                // Already have an earlier or equal pending sync
-                return;
-            }
+        if let Some(&existing) = self.pending.get(&remote)
+            && existing <= fire_at
+        {
+            // Already have an earlier or equal pending sync
+            return;
         }
 
         self.pending.insert(remote.clone(), fire_at);
@@ -78,11 +78,11 @@ impl SyncScheduler {
     /// Returns true if the repo has a pending sync that's ready.
     /// Removes the pending entry if it fires.
     pub fn should_fire(&mut self, remote: &RemoteUrl) -> bool {
-        if let Some(&fire_at) = self.pending.get(remote) {
-            if Instant::now() >= fire_at {
-                self.pending.remove(remote);
-                return true;
-            }
+        if let Some(&fire_at) = self.pending.get(remote)
+            && Instant::now() >= fire_at
+        {
+            self.pending.remove(remote);
+            return true;
         }
         false
     }

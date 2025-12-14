@@ -82,10 +82,10 @@ impl Daemon {
     /// Resolve a repo path to a normalized remote URL.
     fn resolve_remote(&mut self, repo_path: &Path) -> Result<RemoteUrl, OpError> {
         // 1. Env override (highest priority).
-        if let Ok(url) = std::env::var("BD_REMOTE_URL") {
-            if !url.trim().is_empty() {
-                return Ok(RemoteUrl(normalize_url(&url)));
-            }
+        if let Ok(url) = std::env::var("BD_REMOTE_URL")
+            && !url.trim().is_empty()
+        {
+            return Ok(RemoteUrl(normalize_url(&url)));
         }
 
         // 2. Cache.

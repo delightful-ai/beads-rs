@@ -60,10 +60,10 @@ pub fn render_ready(views: &[IssueSummary]) -> String {
         if let Some(m) = v.estimated_minutes {
             out.push_str(&format!("   Estimate: {} min\n", m));
         }
-        if let Some(a) = &v.assignee {
-            if !a.is_empty() {
-                out.push_str(&format!("   Assignee: {}\n", a));
-            }
+        if let Some(a) = &v.assignee
+            && !a.is_empty()
+        {
+            out.push_str(&format!("   Assignee: {}\n", a));
         }
     }
     out.push('\n');
@@ -102,10 +102,10 @@ pub fn render_stale(issues: &[IssueSummary], threshold_days: u32) -> String {
             "   Status: {}, Last updated: {} days ago\n",
             issue.status, days_stale
         ));
-        if let Some(a) = &issue.assignee {
-            if !a.is_empty() {
-                out.push_str(&format!("   Assignee: {}\n", a));
-            }
+        if let Some(a) = &issue.assignee
+            && !a.is_empty()
+        {
+            out.push_str(&format!("   Assignee: {}\n", a));
         }
         out.push('\n');
     }
@@ -252,10 +252,10 @@ pub fn render_show(
     out.push_str(&format!("Status: {}\n", bead.status));
     out.push_str(&format!("Priority: P{}\n", bead.priority));
     out.push_str(&format!("Type: {}\n", bead.issue_type));
-    if let Some(a) = &bead.assignee {
-        if !a.is_empty() {
-            out.push_str(&format!("Assignee: {}\n", a));
-        }
+    if let Some(a) = &bead.assignee
+        && !a.is_empty()
+    {
+        out.push_str(&format!("Assignee: {}\n", a));
     }
     out.push_str(&format!(
         "Created: {}\n",
@@ -269,15 +269,15 @@ pub fn render_show(
     if !bead.description.is_empty() {
         out.push_str(&format!("\nDescription:\n{}\n", bead.description));
     }
-    if let Some(d) = &bead.design {
-        if !d.is_empty() {
-            out.push_str(&format!("\nDesign:\n{}\n", d));
-        }
+    if let Some(d) = &bead.design
+        && !d.is_empty()
+    {
+        out.push_str(&format!("\nDesign:\n{}\n", d));
     }
-    if let Some(a) = &bead.acceptance_criteria {
-        if !a.is_empty() {
-            out.push_str(&format!("\nAcceptance Criteria:\n{}\n", a));
-        }
+    if let Some(a) = &bead.acceptance_criteria
+        && !a.is_empty()
+    {
+        out.push_str(&format!("\nAcceptance Criteria:\n{}\n", a));
     }
 
     if !bead.labels.is_empty() {
@@ -419,15 +419,15 @@ fn render_status(out: &StatusOutput) -> String {
     buf.push_str(&format!("  Blocked:           {}\n", s.blocked_issues));
     buf.push_str(&format!("  Closed:            {}\n", s.closed_issues));
     buf.push_str(&format!("  Ready to Work:     {}\n", s.ready_issues));
-    if let Some(t) = s.tombstone_issues {
-        if t > 0 {
-            buf.push_str(&format!("  Deleted:           {} (tombstones)\n", t));
-        }
+    if let Some(t) = s.tombstone_issues
+        && t > 0
+    {
+        buf.push_str(&format!("  Deleted:           {} (tombstones)\n", t));
     }
-    if let Some(e) = s.epics_eligible_for_closure {
-        if e > 0 {
-            buf.push_str(&format!("  Epics Ready to Close: {}\n", e));
-        }
+    if let Some(e) = s.epics_eligible_for_closure
+        && e > 0
+    {
+        buf.push_str(&format!("  Epics Ready to Close: {}\n", e));
     }
     if let Some(sync) = &out.sync {
         let last = sync
@@ -524,10 +524,10 @@ fn render_deleted_lookup(out: &DeletedLookup) -> String {
         fmt_wall_ms(record.deleted_at.wall_ms)
     ));
     buf.push_str(&format!("  By:        {}\n", record.deleted_by));
-    if let Some(reason) = &record.reason {
-        if !reason.is_empty() {
-            buf.push_str(&format!("  Reason:    {}\n", reason));
-        }
+    if let Some(reason) = &record.reason
+        && !reason.is_empty()
+    {
+        buf.push_str(&format!("  Reason:    {}\n", reason));
     }
     buf.push('\n');
     buf
@@ -561,10 +561,10 @@ fn render_issue_list(views: &[IssueSummary]) -> String {
 
 fn render_issue_summary(v: &IssueSummary) -> String {
     let mut s = format!("{} [P{}] [{}] {}", v.id, v.priority, v.issue_type, v.status);
-    if let Some(a) = &v.assignee {
-        if !a.is_empty() {
-            s.push_str(&format!(" @{}", a));
-        }
+    if let Some(a) = &v.assignee
+        && !a.is_empty()
+    {
+        s.push_str(&format!(" @{}", a));
     }
     if !v.labels.is_empty() {
         s.push_str(&format!(" {}", fmt_labels(&v.labels)));
@@ -580,10 +580,10 @@ fn render_issue_detail(v: &Issue) -> String {
     out.push_str(&format!("Status: {}\n", v.status));
     out.push_str(&format!("Priority: P{}\n", v.priority));
     out.push_str(&format!("Type: {}\n", v.issue_type));
-    if let Some(a) = &v.assignee {
-        if !a.is_empty() {
-            out.push_str(&format!("Assignee: {}\n", a));
-        }
+    if let Some(a) = &v.assignee
+        && !a.is_empty()
+    {
+        out.push_str(&format!("Assignee: {}\n", a));
     }
     out.push_str(&format!("Created: {}\n", fmt_wall_ms(v.created_at.wall_ms)));
     out.push_str(&format!("Updated: {}\n", fmt_wall_ms(v.updated_at.wall_ms)));
@@ -591,15 +591,15 @@ fn render_issue_detail(v: &Issue) -> String {
     if !v.description.is_empty() {
         out.push_str(&format!("\nDescription:\n{}\n", v.description));
     }
-    if let Some(d) = &v.design {
-        if !d.is_empty() {
-            out.push_str(&format!("\nDesign:\n{}\n", d));
-        }
+    if let Some(d) = &v.design
+        && !d.is_empty()
+    {
+        out.push_str(&format!("\nDesign:\n{}\n", d));
     }
-    if let Some(a) = &v.acceptance_criteria {
-        if !a.is_empty() {
-            out.push_str(&format!("\nAcceptance Criteria:\n{}\n", a));
-        }
+    if let Some(a) = &v.acceptance_criteria
+        && !a.is_empty()
+    {
+        out.push_str(&format!("\nAcceptance Criteria:\n{}\n", a));
     }
     if !v.labels.is_empty() {
         out.push_str(&format!("\nLabels: {}\n", fmt_labels(&v.labels)));

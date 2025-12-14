@@ -28,10 +28,10 @@ pub(crate) fn handle() -> Result<()> {
     let context = get_context();
 
     let mut stdout = std::io::stdout().lock();
-    if let Err(e) = write!(stdout, "{}", context) {
-        if e.kind() != std::io::ErrorKind::BrokenPipe {
-            return Err(crate::daemon::IpcError::from(e).into());
-        }
+    if let Err(e) = write!(stdout, "{}", context)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(crate::daemon::IpcError::from(e).into());
     }
 
     Ok(())

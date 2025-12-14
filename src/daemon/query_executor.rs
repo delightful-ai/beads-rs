@@ -136,12 +136,12 @@ impl Daemon {
         let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
         for (_, edge) in repo_state.state.iter_deps() {
             // Only count active `blocks` edges where the target is not closed.
-            if edge.life.value == DepLife::Active && edge.key.kind == crate::core::DepKind::Blocks {
-                if let Some(to_bead) = repo_state.state.get_live(&edge.key.to) {
-                    if !to_bead.fields.workflow.value.is_closed() {
-                        blocked.insert(&edge.key.from);
-                    }
-                }
+            if edge.life.value == DepLife::Active
+                && edge.key.kind == crate::core::DepKind::Blocks
+                && let Some(to_bead) = repo_state.state.get_live(&edge.key.to)
+                && !to_bead.fields.workflow.value.is_closed()
+            {
+                blocked.insert(&edge.key.from);
             }
         }
 
@@ -388,13 +388,15 @@ impl Daemon {
         let repo_state = self.repo_state(&remote).unwrap();
 
         let status = status.map(|s| s.trim()).filter(|s| !s.is_empty());
-        if let Some(s) = status {
-            if s != "open" && s != "in_progress" && s != "blocked" {
-                return Response::err(OpError::ValidationFailed {
-                    field: "status".into(),
-                    reason: "valid values: open, in_progress, blocked".into(),
-                });
-            }
+        if let Some(s) = status
+            && s != "open"
+            && s != "in_progress"
+            && s != "blocked"
+        {
+            return Response::err(OpError::ValidationFailed {
+                field: "status".into(),
+                reason: "valid values: open, in_progress, blocked".into(),
+            });
         }
 
         let blocked_by = compute_blocked_by(repo_state);

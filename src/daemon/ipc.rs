@@ -720,14 +720,12 @@ fn should_autostart(err: &std::io::Error) -> bool {
 }
 
 fn maybe_remove_stale_lock(lock_path: &PathBuf) {
-    if let Ok(meta) = fs::metadata(lock_path) {
-        if let Ok(modified) = meta.modified() {
-            if let Ok(age) = modified.elapsed() {
-                if age > Duration::from_secs(10) {
-                    let _ = fs::remove_file(lock_path);
-                }
-            }
-        }
+    if let Ok(meta) = fs::metadata(lock_path)
+        && let Ok(modified) = meta.modified()
+        && let Ok(age) = modified.elapsed()
+        && age > Duration::from_secs(10)
+    {
+        let _ = fs::remove_file(lock_path);
     }
 }
 

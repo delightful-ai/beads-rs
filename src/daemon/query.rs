@@ -147,28 +147,28 @@ impl Filters {
         }
 
         // Priority filter
-        if let Some(priority) = self.priority {
-            if bead.fields.priority.value != priority {
-                return false;
-            }
+        if let Some(priority) = self.priority
+            && bead.fields.priority.value != priority
+        {
+            return false;
         }
 
-        if let Some(min) = self.priority_min {
-            if bead.fields.priority.value < min {
-                return false;
-            }
+        if let Some(min) = self.priority_min
+            && bead.fields.priority.value < min
+        {
+            return false;
         }
-        if let Some(max) = self.priority_max {
-            if bead.fields.priority.value > max {
-                return false;
-            }
+        if let Some(max) = self.priority_max
+            && bead.fields.priority.value > max
+        {
+            return false;
         }
 
         // Type filter
-        if let Some(bead_type) = self.bead_type {
-            if bead.fields.bead_type.value != bead_type {
-                return false;
-            }
+        if let Some(bead_type) = self.bead_type
+            && bead.fields.bead_type.value != bead_type
+        {
+            return false;
         }
 
         // Assignee filter
@@ -206,10 +206,10 @@ impl Filters {
         }
 
         // IDs filter
-        if let Some(ref ids) = self.ids {
-            if !ids.iter().any(|id| id == bead.id()) {
-                return false;
-            }
+        if let Some(ref ids) = self.ids
+            && !ids.iter().any(|id| id == bead.id())
+        {
+            return false;
         }
 
         // Unclaimed filter
@@ -276,27 +276,27 @@ impl Filters {
 
         // Date ranges
         let created_ms = bead.core.created().at.wall_ms;
-        if let Some(after) = self.created_after {
-            if created_ms < after {
-                return false;
-            }
+        if let Some(after) = self.created_after
+            && created_ms < after
+        {
+            return false;
         }
-        if let Some(before) = self.created_before {
-            if created_ms > before {
-                return false;
-            }
+        if let Some(before) = self.created_before
+            && created_ms > before
+        {
+            return false;
         }
 
         let updated_ms = bead.updated_stamp().at.wall_ms;
-        if let Some(after) = self.updated_after {
-            if updated_ms < after {
-                return false;
-            }
+        if let Some(after) = self.updated_after
+            && updated_ms < after
+        {
+            return false;
         }
-        if let Some(before) = self.updated_before {
-            if updated_ms > before {
-                return false;
-            }
+        if let Some(before) = self.updated_before
+            && updated_ms > before
+        {
+            return false;
         }
 
         let closed_ms = bead
@@ -305,15 +305,15 @@ impl Filters {
             .value
             .is_closed()
             .then_some(bead.fields.workflow.stamp.at.wall_ms);
-        if let Some(after) = self.closed_after {
-            if closed_ms.map(|t| t < after).unwrap_or(true) {
-                return false;
-            }
+        if let Some(after) = self.closed_after
+            && closed_ms.map(|t| t < after).unwrap_or(true)
+        {
+            return false;
         }
-        if let Some(before) = self.closed_before {
-            if closed_ms.map(|t| t > before).unwrap_or(true) {
-                return false;
-            }
+        if let Some(before) = self.closed_before
+            && closed_ms.map(|t| t > before).unwrap_or(true)
+        {
+            return false;
         }
 
         true

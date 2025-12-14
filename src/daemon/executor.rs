@@ -152,14 +152,11 @@ impl Daemon {
         if let Some((_, from_id)) = parsed_deps
             .iter()
             .find(|(k, _)| matches!(k, DepKind::DiscoveredFrom))
+            && let Some(parent_bead) = repo_state.state.get_live(from_id)
+            && let Some(sr) = &parent_bead.fields.source_repo.value
+            && !sr.trim().is_empty()
         {
-            if let Some(parent_bead) = repo_state.state.get_live(from_id) {
-                if let Some(sr) = &parent_bead.fields.source_repo.value {
-                    if !sr.trim().is_empty() {
-                        source_repo_value = Some(sr.clone());
-                    }
-                }
-            }
+            source_repo_value = Some(sr.clone());
         }
 
         // Validate + canonicalize labels.
@@ -763,10 +760,10 @@ impl Daemon {
             };
 
             // Check if claimed by this actor
-            if let Claim::Claimed { ref assignee, .. } = bead.fields.claim.value {
-                if assignee != &actor {
-                    return Response::err(OpError::NotClaimedByYou);
-                }
+            if let Claim::Claimed { ref assignee, .. } = bead.fields.claim.value
+                && assignee != &actor
+            {
+                return Response::err(OpError::NotClaimedByYou);
             }
         }
 

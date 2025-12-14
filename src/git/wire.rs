@@ -452,13 +452,13 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
 
     // Helper to get field stamp from _v or default
     let get_stamp = |field: &str| -> Result<Stamp, WireError> {
-        if let Some(ref v_map) = wire.v {
-            if let Some((at, by)) = v_map.get(field) {
-                return Ok(Stamp::new(
-                    wire_to_stamp(*at),
-                    ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-                ));
-            }
+        if let Some(ref v_map) = wire.v
+            && let Some((at, by)) = v_map.get(field)
+        {
+            return Ok(Stamp::new(
+                wire_to_stamp(*at),
+                ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
+            ));
         }
         Ok(default_stamp.clone())
     };

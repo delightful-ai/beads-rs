@@ -25,10 +25,10 @@ pub(crate) fn handle(ctx: &Ctx, args: CountArgs) -> Result<()> {
         filters.labels_any = Some(args.labels_any.clone());
     }
 
-    if let Some(title) = args.title.clone() {
-        if !title.trim().is_empty() {
-            filters.title = Some(title);
-        }
+    if let Some(title) = args.title.clone()
+        && !title.trim().is_empty()
+    {
+        filters.title = Some(title);
     }
 
     if let Some(ids_raw) = args.id.clone() {

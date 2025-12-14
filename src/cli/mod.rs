@@ -856,10 +856,10 @@ fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
 
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
-    if let Err(e) = writeln!(stdout, "{s}") {
-        if e.kind() != std::io::ErrorKind::BrokenPipe {
-            return Err(crate::daemon::IpcError::from(e).into());
-        }
+    if let Err(e) = writeln!(stdout, "{s}")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(crate::daemon::IpcError::from(e).into());
     }
     Ok(())
 }
@@ -1042,10 +1042,10 @@ fn split_kind_id(raw: &str) -> std::result::Result<(Option<DepKind>, String), St
 }
 
 fn current_actor_string() -> String {
-    if let Ok(a) = std::env::var("BD_ACTOR") {
-        if !a.is_empty() {
-            return a;
-        }
+    if let Ok(a) = std::env::var("BD_ACTOR")
+        && !a.is_empty()
+    {
+        return a;
     }
     let username = whoami::username();
     let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());

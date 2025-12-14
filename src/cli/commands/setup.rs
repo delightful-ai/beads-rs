@@ -178,15 +178,15 @@ fn add_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) 
 
     // Check if bd hook already registered
     for hook in event_hooks.iter() {
-        if let Some(hook_map) = hook.as_object() {
-            if let Some(commands) = hook_map.get("hooks").and_then(|c| c.as_array()) {
-                for cmd in commands {
-                    if let Some(cmd_map) = cmd.as_object() {
-                        if cmd_map.get("command").and_then(|c| c.as_str()) == Some(command) {
-                            println!("✓ Hook already registered: {event}");
-                            return false;
-                        }
-                    }
+        if let Some(hook_map) = hook.as_object()
+            && let Some(commands) = hook_map.get("hooks").and_then(|c| c.as_array())
+        {
+            for cmd in commands {
+                if let Some(cmd_map) = cmd.as_object()
+                    && cmd_map.get("command").and_then(|c| c.as_str()) == Some(command)
+                {
+                    println!("✓ Hook already registered: {event}");
+                    return false;
                 }
             }
         }
@@ -221,10 +221,10 @@ fn remove_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &st
         };
 
         for cmd in commands {
-            if let Some(cmd_map) = cmd.as_object() {
-                if cmd_map.get("command").and_then(|c| c.as_str()) == Some(command) {
-                    return false;
-                }
+            if let Some(cmd_map) = cmd.as_object()
+                && cmd_map.get("command").and_then(|c| c.as_str()) == Some(command)
+            {
+                return false;
             }
         }
         true
@@ -261,10 +261,10 @@ fn has_beads_hooks(settings_path: &Path) -> bool {
                 continue;
             };
             for cmd in commands {
-                if let Some(cmd_map) = cmd.as_object() {
-                    if cmd_map.get("command").and_then(|c| c.as_str()) == Some("bd prime") {
-                        return true;
-                    }
+                if let Some(cmd_map) = cmd.as_object()
+                    && cmd_map.get("command").and_then(|c| c.as_str()) == Some("bd prime")
+                {
+                    return true;
                 }
             }
         }

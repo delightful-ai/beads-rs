@@ -121,18 +121,16 @@ impl SyncProcess<Idle> {
             let cfg = repo.config().ok();
             let mut callbacks = git2::RemoteCallbacks::new();
             callbacks.credentials(move |url, username_from_url, allowed| {
-                if allowed.is_ssh_key() {
-                    if let Some(user) = username_from_url {
-                        return git2::Cred::ssh_key_from_agent(user);
-                    }
+                if allowed.is_ssh_key()
+                    && let Some(user) = username_from_url
+                {
+                    return git2::Cred::ssh_key_from_agent(user);
                 }
-                if allowed.is_user_pass_plaintext() {
-                    if let Some(ref cfg) = cfg {
-                        if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
-                        {
-                            return Ok(cred);
-                        }
-                    }
+                if allowed.is_user_pass_plaintext()
+                    && let Some(ref cfg) = cfg
+                    && let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
+                {
+                    return Ok(cred);
                 }
                 git2::Cred::default()
             });
@@ -337,18 +335,16 @@ impl SyncProcess<Committed> {
             let cfg = repo.config().ok();
             let mut callbacks = git2::RemoteCallbacks::new();
             callbacks.credentials(move |url, username_from_url, allowed| {
-                if allowed.is_ssh_key() {
-                    if let Some(user) = username_from_url {
-                        return git2::Cred::ssh_key_from_agent(user);
-                    }
+                if allowed.is_ssh_key()
+                    && let Some(user) = username_from_url
+                {
+                    return git2::Cred::ssh_key_from_agent(user);
                 }
-                if allowed.is_user_pass_plaintext() {
-                    if let Some(ref cfg) = cfg {
-                        if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
-                        {
-                            return Ok(cred);
-                        }
-                    }
+                if allowed.is_user_pass_plaintext()
+                    && let Some(ref cfg) = cfg
+                    && let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
+                {
+                    return Ok(cred);
                 }
                 git2::Cred::default()
             });
@@ -525,18 +521,16 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
             let cfg = repo.config().ok();
             let mut callbacks = git2::RemoteCallbacks::new();
             callbacks.credentials(move |url, username_from_url, allowed| {
-                if allowed.is_ssh_key() {
-                    if let Some(user) = username_from_url {
-                        return git2::Cred::ssh_key_from_agent(user);
-                    }
+                if allowed.is_ssh_key()
+                    && let Some(user) = username_from_url
+                {
+                    return git2::Cred::ssh_key_from_agent(user);
                 }
-                if allowed.is_user_pass_plaintext() {
-                    if let Some(ref cfg) = cfg {
-                        if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
-                        {
-                            return Ok(cred);
-                        }
-                    }
+                if allowed.is_user_pass_plaintext()
+                    && let Some(ref cfg) = cfg
+                    && let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
+                {
+                    return Ok(cred);
                 }
                 git2::Cred::default()
             });
@@ -604,19 +598,16 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
                 let cfg = repo.config().ok();
                 let mut callbacks = git2::RemoteCallbacks::new();
                 callbacks.credentials(move |url, username_from_url, allowed| {
-                    if allowed.is_ssh_key() {
-                        if let Some(user) = username_from_url {
-                            return git2::Cred::ssh_key_from_agent(user);
-                        }
+                    if allowed.is_ssh_key()
+                        && let Some(user) = username_from_url
+                    {
+                        return git2::Cred::ssh_key_from_agent(user);
                     }
-                    if allowed.is_user_pass_plaintext() {
-                        if let Some(ref cfg) = cfg {
-                            if let Ok(cred) =
-                                git2::Cred::credential_helper(cfg, url, username_from_url)
-                            {
-                                return Ok(cred);
-                            }
-                        }
+                    if allowed.is_user_pass_plaintext()
+                        && let Some(ref cfg) = cfg
+                        && let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
+                    {
+                        return Ok(cred);
                     }
                     git2::Cred::default()
                 });

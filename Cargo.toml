@@ -2,7 +2,7 @@
 name = "beads-rs"
 version = "0.1.7"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 license = "MIT"
 description = "A distributed work-item database for agent swarms, using git as the sync layer"
 repository = "https://github.com/delightful-ai/beads-rs"
