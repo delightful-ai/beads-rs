@@ -66,7 +66,7 @@ impl TestRepo {
     }
 
     fn bd(&self) -> Command {
-        let mut cmd = Command::cargo_bin("bd").expect("failed to find bd binary");
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.path());
         cmd
     }

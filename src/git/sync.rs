@@ -9,7 +9,7 @@
 //! - Linear history: always parent remote HEAD, no merge commits
 //! - Memory-only local state: no local commits, sync pushes directly
 //! - Retry on non-fast-forward: fetch again, re-merge
-//! - Meaningful commit messages: "sync: +2 created, ~1 updated"
+//! - Meaningful commit messages: "beads(store): +2 created, ~1 updated"
 
 use std::path::{Path, PathBuf};
 
@@ -55,16 +55,57 @@ pub struct Committed {
     pub state: CanonicalState,
 }
 
+/// A single change tracked for commit message.
+#[derive(Clone, Debug)]
+pub struct ChangeDetail {
+    pub id: String,
+    pub title: String,
+    pub change_type: ChangeType,
+    /// Which fields changed (for updates).
+    pub changed_fields: Vec<&'static str>,
+}
+
+/// Type of change for a bead.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChangeType {
+    Created,
+    Updated,
+    Deleted,
+}
+
 /// Summary of changes for commit message.
 #[derive(Default, Clone)]
 pub struct SyncDiff {
     pub created: usize,
     pub updated: usize,
     pub deleted: usize,
+    /// Detailed changes for smart commit messages.
+    pub details: Vec<ChangeDetail>,
 }
 
 impl SyncDiff {
+    const MAX_DETAILED_CHANGES: usize = 5;
+    const COMMIT_PREFIX: &'static str = "beads(store):";
+
+    /// Generate a smart commit message with bead details.
+    ///
+    /// Format:
+    /// - Short: "beads(store): +1 created, ~2 updated" (more than 5 changes, or no details)
+    /// - Detailed:
+    ///   - subject: "beads(store): +1 created, ~1 updated"
+    ///   - body: "created bd-xxx \"Title\""
     pub fn to_commit_message(&self) -> String {
+        // Use detailed format if we have details and <=MAX_DETAILED_CHANGES.
+        let total = self.created + self.updated + self.deleted;
+        if !self.details.is_empty() && total <= Self::MAX_DETAILED_CHANGES {
+            return self.to_detailed_message();
+        }
+
+        // Fallback to count-based format
+        self.to_count_message()
+    }
+
+    fn summary_parts(&self) -> Vec<String> {
         let mut parts = Vec::new();
         if self.created > 0 {
             parts.push(format!("+{} created", self.created));
@@ -75,10 +116,54 @@ impl SyncDiff {
         if self.deleted > 0 {
             parts.push(format!("-{} deleted", self.deleted));
         }
+        parts
+    }
+
+    fn to_count_message(&self) -> String {
+        let parts = self.summary_parts();
         if parts.is_empty() {
-            "sync: no changes".to_string()
+            format!("{} no changes", Self::COMMIT_PREFIX)
         } else {
-            format!("sync: {}", parts.join(", "))
+            format!("{} {}", Self::COMMIT_PREFIX, parts.join(", "))
+        }
+    }
+
+    fn to_detailed_message(&self) -> String {
+        let subject = self.to_count_message();
+        let parts: Vec<String> = self
+            .details
+            .iter()
+            .map(|d| {
+                // Truncate title to keep message reasonable
+                let title = if d.title.len() > 40 {
+                    format!("{}...", &d.title[..37])
+                } else {
+                    d.title.clone()
+                };
+
+                match d.change_type {
+                    ChangeType::Created => format!("created {}: \"{}\"", d.id, title),
+                    ChangeType::Deleted => format!("deleted {}: \"{}\"", d.id, title),
+                    ChangeType::Updated => {
+                        if d.changed_fields.is_empty() {
+                            format!("updated {}: \"{}\"", d.id, title)
+                        } else {
+                            format!(
+                                "updated {} [{}]: \"{}\"",
+                                d.id,
+                                d.changed_fields.join(", "),
+                                title
+                            )
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        if parts.is_empty() {
+            subject
+        } else {
+            format!("{subject}\n\n{}", parts.join("\n"))
         }
     }
 }
@@ -452,23 +537,92 @@ fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
     // Count created and updated
     for (id, bead) in after.iter_live() {
         match before.get_live(id) {
-            None => diff.created += 1,
+            None => {
+                diff.created += 1;
+                diff.details.push(ChangeDetail {
+                    id: id.to_string(),
+                    title: bead.title().to_string(),
+                    change_type: ChangeType::Created,
+                    changed_fields: Vec::new(),
+                });
+            }
             Some(old_bead) => {
                 if bead.updated_stamp() != old_bead.updated_stamp() {
                     diff.updated += 1;
+                    let changed_fields = detect_changed_fields(old_bead, bead);
+                    diff.details.push(ChangeDetail {
+                        id: id.to_string(),
+                        title: bead.title().to_string(),
+                        change_type: ChangeType::Updated,
+                        changed_fields,
+                    });
                 }
             }
         }
     }
 
     // Count deleted (in before.live but not in after.live)
-    for (id, _) in before.iter_live() {
+    for (id, bead) in before.iter_live() {
         if after.get_live(id).is_none() {
             diff.deleted += 1;
+            diff.details.push(ChangeDetail {
+                id: id.to_string(),
+                title: bead.title().to_string(),
+                change_type: ChangeType::Deleted,
+                changed_fields: Vec::new(),
+            });
         }
     }
 
     diff
+}
+
+/// Detect which fields changed between two beads by comparing LWW stamps.
+fn detect_changed_fields(old: &crate::core::Bead, new: &crate::core::Bead) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+
+    if old.fields.title.stamp != new.fields.title.stamp {
+        changed.push("title");
+    }
+    if old.fields.description.stamp != new.fields.description.stamp {
+        changed.push("desc");
+    }
+    if old.fields.design.stamp != new.fields.design.stamp {
+        changed.push("design");
+    }
+    if old.fields.acceptance_criteria.stamp != new.fields.acceptance_criteria.stamp {
+        changed.push("acceptance");
+    }
+    if old.fields.priority.stamp != new.fields.priority.stamp {
+        changed.push("priority");
+    }
+    if old.fields.bead_type.stamp != new.fields.bead_type.stamp {
+        changed.push("type");
+    }
+    if old.fields.labels.stamp != new.fields.labels.stamp {
+        changed.push("labels");
+    }
+    if old.fields.external_ref.stamp != new.fields.external_ref.stamp {
+        changed.push("external_ref");
+    }
+    if old.fields.source_repo.stamp != new.fields.source_repo.stamp {
+        changed.push("source_repo");
+    }
+    if old.fields.estimated_minutes.stamp != new.fields.estimated_minutes.stamp {
+        changed.push("estimate");
+    }
+    if old.fields.workflow.stamp != new.fields.workflow.stamp {
+        changed.push("status");
+    }
+    if old.fields.claim.stamp != new.fields.claim.stamp {
+        changed.push("claim");
+    }
+    // Check notes (compare note counts as a simple heuristic)
+    if old.notes.len() != new.notes.len() {
+        changed.push("notes");
+    }
+
+    changed
 }
 
 /// Run a full sync cycle with retry on non-fast-forward.
@@ -660,22 +814,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sync_diff_message() {
+    fn sync_diff_count_message() {
+        // When >5 changes, falls back to count format
         let diff = SyncDiff {
-            created: 2,
+            created: 6,
             updated: 1,
             deleted: 0,
+            details: vec![],
         };
-        assert_eq!(diff.to_commit_message(), "sync: +2 created, ~1 updated");
+        assert_eq!(
+            diff.to_commit_message(),
+            "beads(store): +6 created, ~1 updated"
+        );
 
         let diff = SyncDiff {
             created: 0,
             updated: 0,
             deleted: 3,
+            details: vec![],
         };
-        assert_eq!(diff.to_commit_message(), "sync: -3 deleted");
+        assert_eq!(diff.to_commit_message(), "beads(store): -3 deleted");
 
         let diff = SyncDiff::default();
-        assert_eq!(diff.to_commit_message(), "sync: no changes");
+        assert_eq!(diff.to_commit_message(), "beads(store): no changes");
+    }
+
+    #[test]
+    fn sync_diff_detailed_message() {
+        // When <=5 changes and has details, uses detailed format
+        let diff = SyncDiff {
+            created: 1,
+            updated: 1,
+            deleted: 0,
+            details: vec![
+                ChangeDetail {
+                    id: "bd-abc".to_string(),
+                    title: "Fix bug".to_string(),
+                    change_type: ChangeType::Created,
+                    changed_fields: vec![],
+                },
+                ChangeDetail {
+                    id: "bd-xyz".to_string(),
+                    title: "Update feature".to_string(),
+                    change_type: ChangeType::Updated,
+                    changed_fields: vec!["status", "desc"],
+                },
+            ],
+        };
+        let msg = diff.to_commit_message();
+        assert!(msg.contains("created bd-abc: \"Fix bug\""));
+        assert!(msg.contains("updated bd-xyz [status, desc]: \"Update feature\""));
+    }
+
+    #[test]
+    fn sync_diff_truncates_long_titles() {
+        let diff = SyncDiff {
+            created: 1,
+            updated: 0,
+            deleted: 0,
+            details: vec![ChangeDetail {
+                id: "bd-abc".to_string(),
+                title: "This is a very long title that should be truncated to fit".to_string(),
+                change_type: ChangeType::Created,
+                changed_fields: vec![],
+            }],
+        };
+        let msg = diff.to_commit_message();
+        assert!(msg.contains("..."));
+        assert!(!msg.contains("truncated to fit"));
     }
 }

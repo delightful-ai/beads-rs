@@ -68,7 +68,7 @@ impl TestRepo {
     }
 
     fn bd(&self) -> Command {
-        let mut cmd = Command::cargo_bin("bd").expect("failed to find bd binary");
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.path());
         cmd
     }
@@ -2786,7 +2786,7 @@ fn test_many_labels() {
         .stdout
         .clone();
 
-    let json: serde_json::Value = serde_json::from_slice(&show_out).unwrap();
+    let _json: serde_json::Value = serde_json::from_slice(&show_out).unwrap();
     // Labels might be in data.labels or elsewhere - check the output contains them
     let output_str = String::from_utf8_lossy(&show_out);
 
