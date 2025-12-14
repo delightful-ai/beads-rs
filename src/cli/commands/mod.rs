@@ -12,6 +12,7 @@ pub(super) mod init;
 pub(super) mod label;
 pub(super) mod list;
 pub(super) mod migrate;
+pub(super) mod onboard;
 pub(super) mod prime;
 pub(super) mod ready;
 pub(super) mod reopen;

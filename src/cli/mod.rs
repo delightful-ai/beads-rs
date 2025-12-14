@@ -155,6 +155,9 @@ pub enum Commands {
     /// Output AI-optimized workflow context.
     Prime,
 
+    /// Display instructions for configuring AGENTS.md.
+    Onboard(OnboardArgs),
+
     /// Setup integration with AI editors.
     Setup {
         #[command(subcommand)]
@@ -673,6 +676,13 @@ pub struct EpicCloseEligibleArgs {
     pub dry_run: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct OnboardArgs {
+    /// Generate BD_GUIDE.md at the specified path instead of printing instructions.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+}
+
 // =============================================================================
 // Migrate (hidden/internal)
 // =============================================================================
@@ -761,6 +771,8 @@ pub fn run(cli: Cli) -> Result<()> {
             SetupCmd::Cursor(args) => commands::setup::handle_cursor(args.check, args.remove),
             SetupCmd::Aider(args) => commands::setup::handle_aider(args.check, args.remove),
         },
+        // Onboard doesn't require an initialized beads repo
+        Commands::Onboard(args) => commands::onboard::handle(args.output.as_deref()),
         cmd => {
             let repo = resolve_repo(cli.repo)?;
             let ctx = Ctx {
@@ -793,8 +805,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 Commands::Epic { cmd } => commands::epic::handle(&ctx, cmd),
                 Commands::Status => commands::status::handle(&ctx),
                 Commands::Migrate { cmd } => commands::migrate::handle(&ctx, cmd),
-                // Daemon, Prime, and Setup handled above.
-                Commands::Daemon { .. } | Commands::Prime | Commands::Setup { .. } => Ok(()),
+                // Daemon, Prime, Setup, and Onboard handled above.
+                Commands::Daemon { .. }
+                | Commands::Prime
+                | Commands::Setup { .. }
+                | Commands::Onboard(_) => Ok(()),
             }
         }
     }
