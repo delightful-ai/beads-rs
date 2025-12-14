@@ -57,6 +57,17 @@ beads-rs is a **drop-in replacement** for core workflows. the main difference is
 
 if you need agent mail or multi-repo, use [the original](https://github.com/steveyegge/beads).
 
+## migration path
+
+```bash
+bd migrate from-go --input .beads/issues.jsonl --dry-run
+# if that looks good, run
+bd migrate from-go --input .beads/issues.jsonl
+# and you're good!
+```
+more details in `MIGRATION.md`.
+
+
 ## technical details
 
 **requirements:**
@@ -85,6 +96,7 @@ bd setup aider
 
 - `CLI_SPEC.md` - cli surface / compatibility goals
 - `SPEC.md` - storage model + invariants
+- `MIGRATION.md` - migrate from beads-go
 
 ## nix flake
 
