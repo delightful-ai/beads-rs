@@ -65,8 +65,9 @@ release-minor: check
     NEW_VERSION="$MAJOR.$NEW_MINOR.0"
     echo "Bumping version: $VERSION -> $NEW_VERSION"
     sed -i "s/^version = \"$VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+    sed -i "s/version = \"$VERSION\";/version = \"$NEW_VERSION\";/" flake.nix
     cargo check
-    git add Cargo.toml Cargo.lock
+    git add Cargo.toml Cargo.lock flake.nix
     git commit -m "chore: bump version to $NEW_VERSION"
     git tag "v$NEW_VERSION"
     git push && git push --tags
@@ -84,8 +85,9 @@ release-patch: check
     NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
     echo "Bumping version: $VERSION -> $NEW_VERSION"
     sed -i "s/^version = \"$VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+    sed -i "s/version = \"$VERSION\";/version = \"$NEW_VERSION\";/" flake.nix
     cargo check
-    git add Cargo.toml Cargo.lock
+    git add Cargo.toml Cargo.lock flake.nix
     git commit -m "chore: bump version to $NEW_VERSION"
     git tag "v$NEW_VERSION"
     git push && git push --tags
