@@ -29,6 +29,7 @@
           };
 
           nativeBuildInputs = [ pkgs.pkg-config ];
+          nativeCheckInputs = [ pkgs.git ];
 
           buildInputs = [
             pkgs.openssl
@@ -38,6 +39,8 @@
             pkgs.darwin.apple_sdk.frameworks.Security
             pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
           ];
+
+          doCheck = true;
 
           # The binary is named 'bd'
           meta = with pkgs.lib; {
@@ -74,6 +77,9 @@
             # Dev tools
             pkgs.just
             pkgs.cargo-watch
+
+            # bd binary for hooks
+            beads-rs
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.darwin.apple_sdk.frameworks.Security
             pkgs.darwin.apple_sdk.frameworks.SystemConfiguration

@@ -670,39 +670,62 @@ pub fn read_requests(stream: UnixStream) -> impl Iterator<Item = Result<Request,
 
 /// Get the directory that will contain the daemon socket.
 pub fn socket_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir).join("beads")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".beads")
-    } else {
-        per_user_tmp_dir()
-    }
+    socket_dir_candidates()
+        .into_iter()
+        .next()
+        .unwrap_or_else(per_user_tmp_dir)
 }
 
 /// Ensure the socket directory exists and is user-private.
 pub fn ensure_socket_dir() -> Result<PathBuf, IpcError> {
-    let dir = socket_dir();
-    fs::create_dir_all(&dir)?;
-
-    #[cfg(unix)]
-    {
-        let mode = fs::metadata(&dir)?.permissions().mode() & 0o777;
-        if mode != 0o700 {
-            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    let mut last_err: Option<std::io::Error> = None;
+    for dir in socket_dir_candidates() {
+        match fs::create_dir_all(&dir) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    let mode = fs::metadata(&dir)?.permissions().mode() & 0o777;
+                    if mode != 0o700 {
+                        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+                    }
+                }
+                return Ok(dir);
+            }
+            Err(e) => last_err = Some(e),
         }
     }
 
-    Ok(dir)
+    Err(IpcError::Io(last_err.unwrap_or_else(|| {
+        std::io::Error::other("unable to create a writable socket directory")
+    })))
 }
 
 /// Get the daemon socket path.
 pub fn socket_path() -> PathBuf {
-    socket_dir().join("daemon.sock")
+    ensure_socket_dir()
+        .map(|dir| dir.join("daemon.sock"))
+        .unwrap_or_else(|_| per_user_tmp_dir().join("daemon.sock"))
 }
 
 fn per_user_tmp_dir() -> PathBuf {
     let uid = unsafe { libc::geteuid() };
     PathBuf::from("/tmp").join(format!("beads-{}", uid))
+}
+
+fn socket_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR")
+        && !dir.trim().is_empty()
+    {
+        dirs.push(PathBuf::from(dir).join("beads"));
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        dirs.push(PathBuf::from(home).join(".beads"));
+    }
+    dirs.push(per_user_tmp_dir());
+    dirs
 }
 
 // =============================================================================
@@ -825,17 +848,39 @@ fn connect_with_autostart(socket: &PathBuf) -> Result<UnixStream, IpcError> {
     }
 }
 
-/// Send a request to the daemon and receive a response.
-pub fn send_request(req: &Request) -> Result<Response, IpcError> {
-    let socket = socket_path();
-    let mut stream = connect_with_autostart(&socket)?;
+fn send_request_over_stream(mut stream: UnixStream, req: &Request) -> Result<Response, IpcError> {
     let mut json = serde_json::to_string(req)?;
     json.push('\n');
     stream.write_all(json.as_bytes())?;
+
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    let bytes_read = reader.read_line(&mut line)?;
+    // EOF means daemon closed connection (likely just shut down)
+    if bytes_read == 0 || line.trim().is_empty() {
+        return Err(IpcError::DaemonUnavailable(
+            "daemon not running (stale socket)".into(),
+        ));
+    }
+
     Ok(serde_json::from_str(&line)?)
+}
+
+/// Send a request to the daemon and receive a response.
+pub fn send_request(req: &Request) -> Result<Response, IpcError> {
+    let socket = socket_path();
+    let stream = connect_with_autostart(&socket)?;
+    send_request_over_stream(stream, req)
+}
+
+/// Send a request without auto-starting the daemon.
+///
+/// Returns `DaemonUnavailable` if daemon is not running.
+pub fn send_request_no_autostart(req: &Request) -> Result<Response, IpcError> {
+    let socket = socket_path();
+    let stream = UnixStream::connect(&socket)
+        .map_err(|e| IpcError::DaemonUnavailable(format!("daemon not running: {}", e)))?;
+    send_request_over_stream(stream, req)
 }
 
 #[cfg(test)]
