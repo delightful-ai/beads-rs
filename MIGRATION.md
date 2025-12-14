@@ -23,6 +23,12 @@ This guide covers migrating an existing beads-go dataset into beads-rs.
    bd migrate from-go --input /path/to/issues.jsonl
    ```
 
+   If you want to rewrite the ID prefix during import (e.g. to `bd-…` or to a different repo slug):
+
+   ```bash
+   bd migrate from-go --input /path/to/issues.jsonl --root-slug myrepo
+   ```
+
 4. Verify:
 
    ```bash
@@ -74,4 +80,3 @@ The canonical store lives on its own git ref. If you want a “checkpoint” bef
 git show-ref refs/heads/beads/store >/dev/null 2>&1 && \
   git branch beads/store-backup refs/heads/beads/store
 ```
-

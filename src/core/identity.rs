@@ -57,8 +57,9 @@ const BEAD_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 /// Base58 alphabet (Bitcoin-style, no 0OIl) for internal note IDs.
 const NOTE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-/// Bead identifier - "bd-{suffix}" format.
+/// Bead identifier - "{slug}-{suffix}" format.
 ///
+/// Slug is a per-repo prefix (beads-go used the repo name; beads-rs historically used `bd`).
 /// Suffix is lowercase alphanumeric. Hierarchical children append `.N`.
 /// Only daemon generates new IDs (pub(crate)).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -66,22 +67,35 @@ const NOTE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopq
 pub struct BeadId(String);
 
 impl BeadId {
+    const SLUG_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz-._";
+
     /// Parse and validate a bead ID string.
     ///
     /// Accepted forms:
-    /// - `bd-<root>` where root is 1+ lowercase alphanumeric (legacy or hash)
-    /// - hierarchical children: `bd-<root>.<n>[.<n>...]`
+    /// - `<slug>-<root>` where:
+    ///   - slug is 1+ lowercase `[a-z0-9]` with optional `-._` separators
+    ///   - root is 1+ lowercase alphanumeric (legacy or hash)
+    /// - hierarchical children: `<slug>-<root>.<n>[.<n>...]`
     pub fn parse(s: &str) -> Result<Self, CoreError> {
-        if !s.starts_with("bd-") {
+        let s = s.trim();
+        if s.is_empty() {
             return Err(InvalidId::Bead {
                 raw: s.to_string(),
-                reason: "must start with 'bd-'".into(),
+                reason: "empty".into(),
             }
             .into());
         }
 
-        let rest = &s[3..];
-        if rest.is_empty() {
+        let Some((slug_raw, rest_raw)) = s.rsplit_once('-') else {
+            return Err(InvalidId::Bead {
+                raw: s.to_string(),
+                reason: "must contain '-' separator".into(),
+            }
+            .into());
+        };
+
+        let slug = normalize_bead_slug(slug_raw)?;
+        if rest_raw.is_empty() {
             return Err(InvalidId::Bead {
                 raw: s.to_string(),
                 reason: "missing suffix".into(),
@@ -89,7 +103,7 @@ impl BeadId {
             .into());
         }
 
-        let mut parts = rest.split('.');
+        let mut parts = rest_raw.split('.');
         let root_raw = parts.next().unwrap_or("");
         if root_raw.is_empty() {
             return Err(InvalidId::Bead {
@@ -110,7 +124,7 @@ impl BeadId {
             }
         }
 
-        let mut canonical = format!("bd-{}", root);
+        let mut canonical = format!("{}-{}", slug, root);
         for seg in parts {
             if seg.is_empty() || !seg.chars().all(|c| c.is_ascii_digit()) {
                 return Err(InvalidId::Bead {
@@ -129,10 +143,11 @@ impl BeadId {
     /// Generate a new bead ID with given suffix length.
     ///
     /// Only daemon should call this.
-    pub(crate) fn generate(len: usize) -> Self {
+    pub(crate) fn generate_with_slug(slug: &str, len: usize) -> Self {
         use rand::Rng;
         assert!(len >= 3, "bead id suffix must be >=3 chars");
 
+        let slug = normalize_bead_slug(slug).expect("internal slug must be valid");
         let mut rng = rand::rng();
         let suffix: String = (0..len)
             .map(|_| {
@@ -141,17 +156,73 @@ impl BeadId {
             })
             .collect();
 
-        Self(format!("bd-{}", suffix))
+        Self(format!("{}-{}", slug, suffix))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    pub fn slug(&self) -> &str {
+        self.0.rfind('-').map(|i| &self.0[..i]).unwrap_or("bd")
+    }
+
+    pub fn is_top_level(&self) -> bool {
+        self.rest().map(|r| !r.contains('.')).unwrap_or(true)
+    }
+
+    pub fn with_slug(&self, slug: &str) -> Result<Self, CoreError> {
+        let slug = normalize_bead_slug(slug)?;
+        let Some(rest) = self.rest() else {
+            return Err(InvalidId::Bead {
+                raw: self.0.clone(),
+                reason: "missing suffix".into(),
+            }
+            .into());
+        };
+        BeadId::parse(&format!("{}-{}", slug, rest))
+    }
+
+    fn rest(&self) -> Option<&str> {
+        self.0.rsplit_once('-').map(|(_, rest)| rest)
+    }
+
     /// Root suffix length (excluding prefix and any hierarchical children).
     pub fn root_len(&self) -> usize {
-        self.0[3..].split('.').next().map(|s| s.len()).unwrap_or(0)
+        self.rest()
+            .and_then(|r| r.split('.').next())
+            .map(|s| s.len())
+            .unwrap_or(0)
     }
+}
+
+fn normalize_bead_slug(raw: &str) -> Result<String, CoreError> {
+    let slug = raw.trim().to_lowercase();
+    if slug.is_empty() {
+        return Err(InvalidId::Bead {
+            raw: raw.to_string(),
+            reason: "missing slug".into(),
+        }
+        .into());
+    }
+    let bytes = slug.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+        return Err(InvalidId::Bead {
+            raw: raw.to_string(),
+            reason: "slug must start and end with alphanumeric".into(),
+        }
+        .into());
+    }
+    for &b in bytes {
+        if !BeadId::SLUG_ALPHABET.contains(&b) {
+            return Err(InvalidId::Bead {
+                raw: raw.to_string(),
+                reason: "slug contains invalid character".into(),
+            }
+            .into());
+        }
+    }
+    Ok(slug)
 }
 
 impl fmt::Debug for BeadId {
@@ -373,5 +444,30 @@ mod tests {
     fn branch_name_rejects_invalid() {
         assert!(BranchName::parse("main branch").is_err());
         assert!(BranchName::parse("main\nbranch").is_err());
+    }
+
+    #[test]
+    fn bead_id_parse_with_custom_slug() {
+        let id = BeadId::parse("beads-rs-abc1").unwrap();
+        assert_eq!(id.as_str(), "beads-rs-abc1");
+        assert_eq!(id.slug(), "beads-rs");
+        assert!(id.is_top_level());
+
+        let child = BeadId::parse("beads-rs-epic.12.3").unwrap();
+        assert_eq!(child.slug(), "beads-rs");
+        assert!(!child.is_top_level());
+    }
+
+    #[test]
+    fn bead_id_slug_is_canonicalized() {
+        let id = BeadId::parse("BeAds-Rs-abc1").unwrap();
+        assert_eq!(id.as_str(), "beads-rs-abc1");
+    }
+
+    #[test]
+    fn bead_id_with_slug_rewrites_prefix() {
+        let id = BeadId::parse("beads-rs-abc1.2").unwrap();
+        let rewritten = id.with_slug("other-repo").unwrap();
+        assert_eq!(rewritten.as_str(), "other-repo-abc1.2");
     }
 }

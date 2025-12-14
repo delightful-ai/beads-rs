@@ -22,6 +22,7 @@ use crate::{Error, Result};
 /// Summary of an import run.
 #[derive(Debug, Default, Clone)]
 pub struct GoImportReport {
+    pub root_slug: String,
     pub live_beads: usize,
     pub tombstones: usize,
     pub deps: usize,
@@ -96,13 +97,34 @@ struct GoComment {
 /// Import a beads-go JSONL export into a CanonicalState.
 ///
 /// This is a pure conversion step; writing to git happens at CLI.
-pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState, GoImportReport)> {
+pub fn import_go_export(
+    path: &Path,
+    actor: &ActorId,
+    root_slug: Option<String>,
+) -> Result<(CanonicalState, GoImportReport)> {
     let file = File::open(path).map_err(IpcError::from)?;
     let reader = BufReader::new(file);
 
     let mut state = CanonicalState::new();
     let mut deps_to_insert: Vec<DepEdge> = Vec::new();
     let mut report = GoImportReport::default();
+
+    let mut chosen_slug: Option<String> = root_slug
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            BeadId::parse(&format!("{s}-abc"))
+                .map(|id| id.slug().to_string())
+                .map_err(|e| {
+                    Error::Op(OpError::ValidationFailed {
+                        field: "root_slug".into(),
+                        reason: e.to_string(),
+                    })
+                })
+        })
+        .transpose()?;
+    let mut slug_mismatch_count: usize = 0;
 
     for (line_no, line_res) in reader.lines().enumerate() {
         let line = line_res.map_err(IpcError::from)?;
@@ -114,7 +136,15 @@ pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState,
         let issue: GoIssue = serde_json::from_str(trimmed).map_err(IpcError::from)?;
 
         // Parse ids and times
-        let id = BeadId::parse(&issue.id)?;
+        let id_in = BeadId::parse(&issue.id)?;
+        if chosen_slug.is_none() {
+            chosen_slug = Some(id_in.slug().to_string());
+        }
+        let slug = chosen_slug.as_deref().unwrap_or("bd");
+        if id_in.slug() != slug {
+            slug_mismatch_count += 1;
+        }
+        let id = id_in.with_slug(slug)?;
         let created_ms = parse_rfc3339_ms(&issue.created_at)?;
         let updated_ms = parse_rfc3339_ms(&issue.updated_at)?;
         let created_stamp = Stamp::new(WriteStamp::new(created_ms, 0), actor.clone());
@@ -144,7 +174,7 @@ pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState,
             // Dependencies from tombstones are still imported.
             if let Some(deps) = issue.dependencies {
                 for dep in deps {
-                    if let Ok(edge) = dep_to_edge(&dep, actor) {
+                    if let Ok(edge) = dep_to_edge(&dep, actor, slug) {
                         deps_to_insert.push(edge);
                     } else {
                         report.warnings.push(format!(
@@ -234,7 +264,11 @@ pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState,
         // Comments -> notes.
         if let Some(comments) = issue.comments {
             for c in comments {
-                if !c.issue_id.trim().is_empty() && c.issue_id.trim() != id.as_str() {
+                let c_issue_id = c.issue_id.trim();
+                if !c_issue_id.is_empty()
+                    && let Ok(cid) = BeadId::parse(c_issue_id).and_then(|cid| cid.with_slug(slug))
+                    && cid.as_str() != id.as_str()
+                {
                     report.warnings.push(format!(
                         "line {}: comment {} has mismatched issue_id {} (expected {})",
                         line_no + 1,
@@ -264,7 +298,7 @@ pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState,
         // Dependencies collected for later insert.
         if let Some(deps) = issue.dependencies {
             for dep in deps {
-                match dep_to_edge(&dep, actor) {
+                match dep_to_edge(&dep, actor, slug) {
                     Ok(edge) => deps_to_insert.push(edge),
                     Err(e) => report.warnings.push(format!(
                         "line {}: invalid dep {} -> {} ({}) : {}",
@@ -284,12 +318,19 @@ pub fn import_go_export(path: &Path, actor: &ActorId) -> Result<(CanonicalState,
         report.deps += 1;
     }
 
+    report.root_slug = chosen_slug.unwrap_or_else(|| "bd".to_string());
+    if slug_mismatch_count > 0 {
+        report.warnings.push(format!(
+            "some imported IDs had a different slug and were rewritten (count={slug_mismatch_count})"
+        ));
+    }
+
     Ok((state, report))
 }
 
-fn dep_to_edge(dep: &GoDependency, actor: &ActorId) -> Result<DepEdge> {
-    let from = BeadId::parse(&dep.issue_id)?;
-    let to = BeadId::parse(&dep.depends_on_id)?;
+fn dep_to_edge(dep: &GoDependency, actor: &ActorId, root_slug: &str) -> Result<DepEdge> {
+    let from = BeadId::parse(&dep.issue_id)?.with_slug(root_slug)?;
+    let to = BeadId::parse(&dep.depends_on_id)?.with_slug(root_slug)?;
     let kind = parse_dep_kind(&dep.dep_type)?;
     let created_ms = parse_rfc3339_ms(&dep.created_at)?;
     let created_by_raw = dep

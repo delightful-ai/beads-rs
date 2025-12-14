@@ -80,6 +80,13 @@ fn sample_go_export() -> &'static str {
 "#
 }
 
+/// Sample Go beads JSONL export using a repo-name slug (beads-go default).
+fn sample_go_export_repo_slug() -> &'static str {
+    r#"{"id":"beads-rs-abc1","title":"Open task","description":"A task that is open","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T10:00:00Z","updated_at":"2025-01-01T10:00:00Z"}
+{"id":"beads-rs-abc2","title":"Bug to fix","description":"Something is broken","status":"in_progress","priority":0,"issue_type":"bug","assignee":"alice","created_at":"2025-01-02T10:00:00Z","updated_at":"2025-01-02T12:00:00Z"}
+"#
+}
+
 /// Sample with dependencies.
 fn sample_with_deps() -> &'static str {
     r#"{"id":"bd-dep1","title":"Foundation","description":"Build the base","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T10:00:00Z","updated_at":"2025-01-01T10:00:00Z"}
@@ -430,6 +437,82 @@ fn test_migrate_then_create_new() {
         .success()
         .stdout(predicate::str::contains("Open task")) // from import
         .stdout(predicate::str::contains("Brand new issue")); // newly created
+}
+
+#[test]
+fn test_migrate_preserves_repo_slug_and_new_ids_use_it() {
+    let repo = TestRepo::new();
+
+    let export_path = repo.path().join("issues.jsonl");
+    fs::write(&export_path, sample_go_export_repo_slug()).expect("failed to write export");
+
+    repo.bd()
+        .args([
+            "migrate",
+            "from-go",
+            "--input",
+            export_path.to_str().unwrap(),
+            "--no-push",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"root_slug\": \"beads-rs\""));
+
+    repo.bd()
+        .args(["show", "beads-rs-abc2", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Something is broken"))
+        .stdout(predicate::str::contains("in_progress"));
+
+    let output = repo
+        .bd()
+        .args([
+            "create",
+            "Brand new issue",
+            "--type=task",
+            "--priority=1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_string();
+    assert!(
+        id.starts_with("beads-rs-"),
+        "expected new id to use repo slug, got {id}"
+    );
+}
+
+#[test]
+fn test_migrate_can_rewrite_root_slug() {
+    let repo = TestRepo::new();
+
+    let export_path = repo.path().join("issues.jsonl");
+    fs::write(&export_path, sample_go_export_repo_slug()).expect("failed to write export");
+
+    repo.bd()
+        .args([
+            "migrate",
+            "from-go",
+            "--input",
+            export_path.to_str().unwrap(),
+            "--root-slug",
+            "custom",
+            "--no-push",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"root_slug\": \"custom\""));
+
+    repo.bd()
+        .args(["show", "custom-abc2", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Something is broken"));
 }
 
 #[test]

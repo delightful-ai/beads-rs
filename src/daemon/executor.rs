@@ -947,16 +947,19 @@ fn generate_unique_id(
     stamp: &crate::core::WriteStamp,
     remote: &crate::daemon::RemoteUrl,
 ) -> BeadId {
+    let slug = preferred_bead_slug(state);
     let num_top_level = state
         .iter_live()
-        .filter(|(id, _)| !id.as_str()[3..].contains('.'))
+        .filter(|(id, _)| id.is_top_level())
         .count();
 
     let base_len = compute_adaptive_length(num_top_level);
 
     for len in base_len..=8 {
         for nonce in 0..10 {
-            let candidate = generate_hash_id(title, description, actor, stamp, remote, len, nonce);
+            let short = generate_hash_suffix(title, description, actor, stamp, remote, len, nonce);
+            let candidate =
+                BeadId::parse(&format!("{}-{}", slug, short)).expect("generated id must be valid");
             if state.get_live(&candidate).is_none() && state.get_tombstone(&candidate).is_none() {
                 return candidate;
             }
@@ -964,7 +967,7 @@ fn generate_unique_id(
     }
 
     // Extremely unlikely fallback.
-    BeadId::generate(8)
+    BeadId::generate_with_slug(&slug, 8)
 }
 
 fn compute_adaptive_length(num_issues: usize) -> usize {
@@ -983,7 +986,7 @@ fn collision_probability(num_issues: usize, id_len: usize) -> f64 {
     1.0 - (-n * n / (2.0 * total)).exp()
 }
 
-fn generate_hash_id(
+fn generate_hash_suffix(
     title: &str,
     description: &str,
     actor: &crate::core::ActorId,
@@ -991,7 +994,7 @@ fn generate_hash_id(
     remote: &crate::daemon::RemoteUrl,
     len: usize,
     nonce: usize,
-) -> BeadId {
+) -> String {
     use sha2::{Digest, Sha256};
 
     let content = format!(
@@ -1014,8 +1017,31 @@ fn generate_hash_id(
         _ => 3,
     };
 
-    let short = encode_base36(&hash[..num_bytes], len);
-    BeadId::parse(&format!("bd-{}", short)).expect("generated id must be valid")
+    encode_base36(&hash[..num_bytes], len)
+}
+
+fn preferred_bead_slug(state: &crate::core::CanonicalState) -> String {
+    use std::collections::BTreeMap;
+
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for id in state
+        .iter_live()
+        .map(|(id, _)| id)
+        .chain(state.iter_tombstones().map(|(id, _)| id))
+    {
+        *counts.entry(id.slug()).or_default() += 1;
+    }
+    let mut best_slug: Option<&str> = None;
+    let mut best_count: usize = 0;
+    for (slug, count) in counts {
+        if count > best_count {
+            best_slug = Some(slug);
+            best_count = count;
+        }
+    }
+    best_slug
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "bd".to_string())
 }
 
 fn encode_base36(bytes: &[u8], len: usize) -> String {

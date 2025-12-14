@@ -723,6 +723,12 @@ pub struct MigrateFromGoArgs {
     #[arg(long, value_name = "PATH")]
     pub input: PathBuf,
 
+    /// Override the bead ID root slug during import (e.g. `myrepo` for `myrepo-abc123`).
+    ///
+    /// When omitted, the importer preserves whatever slug is present in the export IDs.
+    #[arg(long, value_name = "SLUG")]
+    pub root_slug: Option<String>,
+
     /// Preview without writing.
     #[arg(long)]
     pub dry_run: bool,

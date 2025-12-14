@@ -90,7 +90,7 @@ fn generate_remap_id(original: &BeadId, local: &CanonicalState, remote: &Canonic
     // Generate a new ID longer than the original root suffix, capped to 8.
     let target_len = (original.root_len() + 1).clamp(3, 8);
     loop {
-        let new_id = BeadId::generate(target_len);
+        let new_id = BeadId::generate_with_slug(original.slug(), target_len);
         if new_id != *original
             && local.get_live(&new_id).is_none()
             && local.get_tombstone(&new_id).is_none()

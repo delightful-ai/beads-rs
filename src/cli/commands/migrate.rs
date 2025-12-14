@@ -32,11 +32,13 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
             use crate::git::SyncProcess;
 
             let actor = ActorId::new(current_actor_string())?;
-            let (imported, report) = crate::migrate::import_go_export(&args.input, &actor)?;
+            let (imported, report) =
+                crate::migrate::import_go_export(&args.input, &actor, args.root_slug.clone())?;
 
             if args.dry_run {
                 let payload = serde_json::json!({
                     "dry_run": true,
+                    "root_slug": report.root_slug,
                     "live_beads": report.live_beads,
                     "tombstones": report.tombstones,
                     "deps": report.deps,
@@ -87,6 +89,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
 
             let payload = serde_json::json!({
                 "dry_run": false,
+                "root_slug": report.root_slug,
                 "live_beads": report.live_beads,
                 "tombstones": report.tombstones,
                 "deps": report.deps,
