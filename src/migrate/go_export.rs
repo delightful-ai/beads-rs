@@ -285,7 +285,8 @@ pub fn import_go_export(
                 } else {
                     ActorId::new(c.author.clone())?
                 };
-                let note_id = NoteId::new(c.id.to_string())?;
+                // Include issue ID to ensure global uniqueness across all imported comments
+                let note_id = NoteId::new(format!("go-comment-{}-{}", id.as_str(), c.id))?;
                 let note = Note::new(note_id, c.text.clone(), author, at);
                 bead.notes.insert(note);
                 report.notes += 1;
@@ -411,5 +412,93 @@ fn workflow_from_status(
             // Unknown/custom statuses are treated as open; preserve via warning at caller.
             Ok((Workflow::Open, updated_stamp.clone()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn make_go_issue(id: &str, comments: Vec<(i64, &str)>) -> String {
+        let comments_json: Vec<String> = comments
+            .into_iter()
+            .map(|(cid, text)| {
+                format!(
+                    r#"{{"id": {}, "issue_id": "{}", "author": "test", "text": "{}", "created_at": "2024-01-01T00:00:00Z"}}"#,
+                    cid, id, text
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"id": "{}", "title": "Test", "description": "desc", "status": "open", "priority": 2, "issue_type": "task", "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z", "comments": [{}]}}"#,
+            id,
+            comments_json.join(", ")
+        )
+    }
+
+    #[test]
+    fn test_comment_ids_globally_unique_across_issues() {
+        // Two issues, each with a comment id=1
+        let issue1 = make_go_issue("bd-aaa", vec![(1, "Comment on issue aaa")]);
+        let issue2 = make_go_issue("bd-bbb", vec![(1, "Comment on issue bbb")]);
+        let jsonl = format!("{}\n{}\n", issue1, issue2);
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(jsonl.as_bytes()).unwrap();
+
+        let actor = ActorId::new("test-actor".to_string()).unwrap();
+        let (state, report) = import_go_export(file.path(), &actor, None).unwrap();
+
+        // Both issues should be imported
+        assert_eq!(report.live_beads, 2);
+        // Both comments should be imported (not merged)
+        assert_eq!(report.notes, 2);
+
+        // Verify distinct note IDs
+        let bead_aaa = state.get_live(&BeadId::parse("bd-aaa").unwrap()).unwrap();
+        let bead_bbb = state.get_live(&BeadId::parse("bd-bbb").unwrap()).unwrap();
+
+        assert_eq!(bead_aaa.notes.len(), 1);
+        assert_eq!(bead_bbb.notes.len(), 1);
+
+        let (note_id_aaa, _) = bead_aaa.notes.iter().next().unwrap();
+        let (note_id_bbb, _) = bead_bbb.notes.iter().next().unwrap();
+
+        // Note IDs should be different despite same comment id=1
+        assert_ne!(note_id_aaa.as_str(), note_id_bbb.as_str());
+        // Verify the format includes issue ID
+        assert!(note_id_aaa.as_str().contains("bd-aaa"));
+        assert!(note_id_bbb.as_str().contains("bd-bbb"));
+    }
+
+    #[test]
+    fn test_multiple_comments_same_issue_unique() {
+        // Single issue with multiple comments
+        let issue = make_go_issue(
+            "bd-xyz",
+            vec![
+                (1, "First comment"),
+                (2, "Second comment"),
+                (3, "Third comment"),
+            ],
+        );
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(issue.as_bytes()).unwrap();
+
+        let actor = ActorId::new("test-actor".to_string()).unwrap();
+        let (state, report) = import_go_export(file.path(), &actor, None).unwrap();
+
+        assert_eq!(report.notes, 3);
+
+        let bead = state.get_live(&BeadId::parse("bd-xyz").unwrap()).unwrap();
+        assert_eq!(bead.notes.len(), 3);
+
+        // All note IDs should be unique
+        let note_ids: std::collections::HashSet<_> =
+            bead.notes.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(note_ids.len(), 3);
     }
 }
