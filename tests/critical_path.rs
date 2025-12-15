@@ -2245,6 +2245,53 @@ fn test_double_init() {
 }
 
 #[test]
+fn test_init_fails_without_origin_remote() {
+    let work_dir = TempDir::new().expect("failed to create work dir");
+    let runtime_dir = TempDir::new().expect("failed to create runtime dir");
+
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(work_dir.path())
+        .output()
+        .expect("failed to git init");
+
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(work_dir.path())
+        .output()
+        .expect("failed to configure git email");
+
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(work_dir.path())
+        .output()
+        .expect("failed to configure git name");
+
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
+    cmd.current_dir(work_dir.path());
+    cmd.env("XDG_RUNTIME_DIR", runtime_dir.path());
+    cmd.arg("init").assert().failure();
+
+    // Best-effort: shut down the daemon started for this test.
+    let socket = runtime_dir.path().join("beads/daemon.sock");
+    for _ in 0..20 {
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket) {
+            use std::io::{BufRead, BufReader, Write};
+            let req = beads_rs::daemon::ipc::Request::Shutdown;
+            let mut json = serde_json::to_string(&req).expect("serialize shutdown request");
+            json.push('\n');
+            let _ = stream.write_all(json.as_bytes());
+            let _ = stream.flush();
+            let mut reader = BufReader::new(stream);
+            let mut _line = String::new();
+            let _ = reader.read_line(&mut _line);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[test]
 fn test_partial_id_matching() {
     let repo = TestRepo::new();
     repo.bd().arg("init").assert().success();

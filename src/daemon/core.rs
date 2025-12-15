@@ -243,6 +243,16 @@ impl Daemon {
         });
     }
 
+    pub(crate) fn ensure_loaded_and_maybe_start_sync(
+        &mut self,
+        repo: &Path,
+        git_tx: &Sender<GitOp>,
+    ) -> Result<RemoteUrl, OpError> {
+        let remote = self.ensure_repo_loaded(repo, git_tx)?;
+        self.maybe_start_sync(&remote, git_tx);
+        Ok(remote)
+    }
+
     /// Complete a sync operation.
     ///
     /// Called when git thread reports sync result.
@@ -551,26 +561,16 @@ impl Daemon {
             // Control
             Request::Sync { repo } => {
                 // Force immediate sync (used for graceful shutdown)
-                match self.ensure_repo_loaded(&repo, git_tx) {
-                    Ok(remote) => {
-                        self.maybe_start_sync(&remote, git_tx);
-                        Response::ok(ResponsePayload::Synced)
-                    }
+                match self.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
+                    Ok(_) => Response::ok(ResponsePayload::Synced),
                     Err(e) => Response::err(e),
                 }
             }
 
-            Request::SyncWait { repo } => {
-                // Best-effort: trigger an immediate sync if dirty. The state loop can
-                // optionally implement a true barrier by delaying the response.
-                match self.ensure_repo_loaded(&repo, git_tx) {
-                    Ok(remote) => {
-                        self.maybe_start_sync(&remote, git_tx);
-                        Response::ok(ResponsePayload::Synced)
-                    }
-                    Err(e) => Response::err(e),
-                }
-            }
+            Request::SyncWait { repo: _ } => Response::err(error_payload(
+                "internal",
+                "SyncWait must be handled by the daemon state loop",
+            )),
 
             Request::Init { repo } => {
                 let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
@@ -585,11 +585,10 @@ impl Daemon {
                 }
 
                 match respond_rx.recv() {
-                    Ok(Ok(())) => {
-                        // TODO: properly handle ensure_repo_loaded errors instead of ignoring
-                        let _ = self.ensure_repo_loaded(&repo, git_tx);
-                        Response::ok(ResponsePayload::Initialized)
-                    }
+                    Ok(Ok(())) => match self.ensure_repo_loaded(&repo, git_tx) {
+                        Ok(_) => Response::ok(ResponsePayload::Initialized),
+                        Err(e) => Response::err(e),
+                    },
                     Ok(Err(e)) => Response::err(error_payload("init_failed", &e.to_string())),
                     Err(_) => Response::err(error_payload("internal", "git thread died")),
                 }
