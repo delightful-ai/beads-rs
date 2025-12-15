@@ -59,7 +59,7 @@ pub fn run_state_loop(
                                         .unwrap_or(true);
 
                                     if clean {
-                                        let _ = respond.send(Response::ok(super::ipc::ResponsePayload::Synced));
+                                        let _ = respond.send(Response::ok(super::ipc::ResponsePayload::synced()));
                                     } else {
                                         sync_waiters.entry(remote).or_default().push(respond);
                                     }
@@ -150,7 +150,7 @@ fn flush_sync_waiters(daemon: &Daemon, waiters: &mut HashMap<RemoteUrl, Vec<Send
     for remote in ready {
         if let Some(list) = waiters.remove(&remote) {
             for respond in list {
-                let _ = respond.send(Response::ok(super::ipc::ResponsePayload::Synced));
+                let _ = respond.send(Response::ok(super::ipc::ResponsePayload::synced()));
             }
         }
     }

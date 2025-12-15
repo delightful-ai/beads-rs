@@ -564,7 +564,7 @@ impl Daemon {
             Request::Sync { repo } => {
                 // Force immediate sync (used for graceful shutdown)
                 match self.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
-                    Ok(_) => Response::ok(ResponsePayload::Synced),
+                    Ok(_) => Response::ok(ResponsePayload::synced()),
                     Err(e) => Response::err(e),
                 }
             }
@@ -588,7 +588,7 @@ impl Daemon {
 
                 match respond_rx.recv() {
                     Ok(Ok(())) => match self.ensure_repo_loaded(&repo, git_tx) {
-                        Ok(_) => Response::ok(ResponsePayload::Initialized),
+                        Ok(_) => Response::ok(ResponsePayload::initialized()),
                         Err(e) => Response::err(e),
                     },
                     Ok(Err(e)) => Response::err(error_payload("init_failed", &e.to_string())),
@@ -604,7 +604,7 @@ impl Daemon {
                 },
             ))),
 
-            Request::Shutdown => Response::ok(ResponsePayload::ShuttingDown),
+            Request::Shutdown => Response::ok(ResponsePayload::shutting_down()),
         }
     }
 }
