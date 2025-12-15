@@ -10,8 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::dep::{DepEdge, DepKey};
-use super::identity::BeadId;
-use super::tombstone::Tombstone;
+use super::tombstone::{Tombstone, TombstoneKey};
 
 /// Canonical dependency store.
 ///
@@ -73,12 +72,11 @@ impl DepStore {
 
 /// Canonical tombstone store.
 ///
-/// Keys (BeadId) are unique by construction. `upsert()` automatically joins
-/// if the key already exists.
+/// Keys are unique by construction. `upsert()` automatically joins if the key already exists.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TombstoneStore {
-    by_id: BTreeMap<BeadId, Tombstone>,
+    by_key: BTreeMap<TombstoneKey, Tombstone>,
 }
 
 impl TombstoneStore {
@@ -88,41 +86,41 @@ impl TombstoneStore {
 
     /// Insert or merge - auto-joins if id exists.
     pub fn upsert(&mut self, tombstone: Tombstone) {
-        let id = tombstone.id.clone();
-        self.by_id
-            .entry(id)
+        let key = tombstone.key();
+        self.by_key
+            .entry(key)
             .and_modify(|existing| *existing = Tombstone::join(existing, &tombstone))
             .or_insert(tombstone);
     }
 
-    pub fn get(&self, id: &BeadId) -> Option<&Tombstone> {
-        self.by_id.get(id)
+    pub fn get(&self, key: &TombstoneKey) -> Option<&Tombstone> {
+        self.by_key.get(key)
     }
 
-    pub fn remove(&mut self, id: &BeadId) -> Option<Tombstone> {
-        self.by_id.remove(id)
+    pub fn remove(&mut self, key: &TombstoneKey) -> Option<Tombstone> {
+        self.by_key.remove(key)
     }
 
-    pub fn contains(&self, id: &BeadId) -> bool {
-        self.by_id.contains_key(id)
+    pub fn contains(&self, key: &TombstoneKey) -> bool {
+        self.by_key.contains_key(key)
     }
 
     pub fn len(&self) -> usize {
-        self.by_id.len()
+        self.by_key.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+        self.by_key.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&BeadId, &Tombstone)> {
-        self.by_id.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&TombstoneKey, &Tombstone)> {
+        self.by_key.iter()
     }
 
     /// Merge two tombstone stores.
     pub fn join(a: &Self, b: &Self) -> Self {
         let mut result = a.clone();
-        for t in b.by_id.values() {
+        for t in b.by_key.values() {
             result.upsert(t.clone());
         }
         result
@@ -132,6 +130,7 @@ impl TombstoneStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::BeadId;
     use crate::core::{ActorId, DepKind, Stamp, WriteStamp};
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
@@ -179,7 +178,7 @@ mod tests {
         store.upsert(t2);
 
         // Should have merged (newer reason)
-        let result = store.get(&id).unwrap();
+        let result = store.get(&TombstoneKey::global(id)).unwrap();
         assert_eq!(result.reason, Some("new".to_string()));
     }
 }

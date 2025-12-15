@@ -98,6 +98,10 @@ struct WireTombstone {
     deleted_by: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lineage_created_at: Option<WireStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lineage_created_by: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -153,11 +157,18 @@ pub fn serialize_tombstones(state: &CanonicalState) -> Vec<u8> {
     tombs.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     for (_, tomb) in tombs {
+        let (lineage_created_at, lineage_created_by) = tomb
+            .lineage
+            .as_ref()
+            .map(|s| (Some(stamp_to_wire(&s.at)), Some(s.by.as_str().to_string())))
+            .unwrap_or((None, None));
         let wire = WireTombstone {
             id: tomb.id.as_str().to_string(),
             deleted_at: stamp_to_wire(&tomb.deleted.at),
             deleted_by: tomb.deleted.by.as_str().to_string(),
             reason: tomb.reason.clone(),
+            lineage_created_at,
+            lineage_created_by,
         };
         let json = serde_json::to_string(&wire).expect("tombstone serialization failed");
         lines.push(json);
@@ -236,15 +247,36 @@ pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
             continue;
         }
         let wire: WireTombstone = serde_json::from_str(line)?;
-        let tomb = Tombstone::new(
-            BeadId::parse(&wire.id).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            Stamp::new(
-                wire_to_stamp(wire.deleted_at),
-                ActorId::new(wire.deleted_by)
-                    .map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            ),
-            wire.reason,
+        let deleted = Stamp::new(
+            wire_to_stamp(wire.deleted_at),
+            ActorId::new(wire.deleted_by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
         );
+        let lineage = match (wire.lineage_created_at, wire.lineage_created_by) {
+            (Some(at), Some(by)) => Some(Stamp::new(
+                wire_to_stamp(at),
+                ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
+            )),
+            (None, None) => None,
+            _ => {
+                return Err(WireError::InvalidValue(
+                    "tombstone lineage requires both created_at and created_by".to_string(),
+                ));
+            }
+        };
+        let tomb = if let Some(lineage) = lineage {
+            Tombstone::new_collision(
+                BeadId::parse(&wire.id).map_err(|e| WireError::InvalidValue(e.to_string()))?,
+                deleted,
+                lineage,
+                wire.reason,
+            )
+        } else {
+            Tombstone::new(
+                BeadId::parse(&wire.id).map_err(|e| WireError::InvalidValue(e.to_string()))?,
+                deleted,
+                wire.reason,
+            )
+        };
         tombs.push(tomb);
     }
 

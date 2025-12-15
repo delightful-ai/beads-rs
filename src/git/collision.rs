@@ -91,12 +91,7 @@ fn generate_remap_id(original: &BeadId, local: &CanonicalState, remote: &Canonic
     let target_len = (original.root_len() + 1).clamp(3, 8);
     loop {
         let new_id = BeadId::generate_with_slug(original.slug(), target_len);
-        if new_id != *original
-            && local.get_live(&new_id).is_none()
-            && local.get_tombstone(&new_id).is_none()
-            && remote.get_live(&new_id).is_none()
-            && remote.get_tombstone(&new_id).is_none()
-        {
+        if new_id != *original && !local.contains(&new_id) && !remote.contains(&new_id) {
             return new_id;
         }
     }
@@ -151,8 +146,14 @@ fn resolve_single(
 ) {
     // 1. Remove bead from old ID, update its core.id, reinsert at new ID
     if let Some(mut bead) = state.remove_live(old_id) {
+        let lineage = bead.core.created().clone();
         bead.core.id = new_id.clone();
         state.insert_live(bead);
+
+        // 3. Add a lineage-scoped tombstone for old ID to prevent resurrection of the loser.
+        let tombstone =
+            Tombstone::new_collision(old_id.clone(), resolution_stamp.clone(), lineage, None);
+        state.insert_tombstone(tombstone);
     }
 
     // 2. Update deps referencing old ID
@@ -184,10 +185,6 @@ fn resolve_single(
         let new_edge = DepEdge::new(new_key, edge.created.clone());
         state.insert_dep(new_edge);
     }
-
-    // 3. Add tombstone for old ID to prevent resurrection
-    let tombstone = Tombstone::new(old_id.clone(), resolution_stamp.clone(), None);
-    state.insert_tombstone(tombstone);
 }
 
 /// Check if a collision resolution is deterministic.
@@ -263,5 +260,56 @@ mod tests {
         let local = make_bead("bd-abc", 1000, "bob");
         let remote = make_bead("bd-abc", 1000, "alice");
         assert!(verify_determinism(&local, &remote));
+    }
+
+    #[test]
+    fn collision_resolution_tombstone_does_not_delete_winner() {
+        let id = BeadId::parse("bd-abc").unwrap();
+
+        // Winner is older.
+        let winner = make_bead(id.as_str(), 1000, "alice");
+        let loser = make_bead(id.as_str(), 2000, "bob");
+
+        let mut local = CanonicalState::new();
+        local.insert(winner.clone()).unwrap();
+
+        let mut remote = CanonicalState::new();
+        remote.insert(loser.clone()).unwrap();
+
+        let collisions = detect_collisions(&local, &remote);
+        assert_eq!(collisions.len(), 1);
+
+        // Resolution happens later than either bead.
+        let resolver = ActorId::new("resolver").unwrap();
+        let resolution_stamp = Stamp::new(WriteStamp::new(5000, 0), resolver);
+
+        let (local_resolved, remote_resolved) =
+            resolve_collisions(&local, &remote, &collisions, resolution_stamp);
+        let merged = CanonicalState::join(&local_resolved, &remote_resolved).unwrap();
+
+        // Winner retains the original ID.
+        let merged_winner = merged.get_live(&id).expect("winner should remain live");
+        assert_eq!(merged_winner.core.created(), winner.core.created());
+        assert!(!merged.is_deleted(&id));
+
+        // Loser is remapped.
+        let new_id = &collisions[0].loser_new_id;
+        let merged_loser = merged
+            .get_live(new_id)
+            .expect("loser should be present under remapped id");
+        assert_eq!(merged_loser.core.created(), loser.core.created());
+
+        // Collision tombstone is preserved and scoped to the losing lineage.
+        let tomb = merged
+            .iter_tombstones()
+            .find_map(|(_, t)| {
+                if t.id == id && t.lineage.as_ref() == Some(loser.core.created()) {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .expect("collision tombstone should exist");
+        assert!(tomb.lineage.is_some());
     }
 }

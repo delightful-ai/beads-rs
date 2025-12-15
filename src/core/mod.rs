@@ -38,4 +38,4 @@ pub use meta::{FormatVersion, Meta};
 pub use state::CanonicalState;
 pub use stores::{DepStore, TombstoneStore};
 pub use time::{Stamp, WallClock, WriteStamp};
-pub use tombstone::Tombstone;
+pub use tombstone::{Tombstone, TombstoneKey};

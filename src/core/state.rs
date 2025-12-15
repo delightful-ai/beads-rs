@@ -2,7 +2,10 @@
 //!
 //! The single source of truth for beads, tombstones, and deps.
 //!
-//! INVARIANT: live ∩ tombstones = ∅ (enforced by construction)
+//! INVARIANT: live ∩ deletion-tombstones = ∅ (enforced by construction)
+//!
+//! Collision tombstones are lineage-scoped and may coexist with a live bead of
+//! the same ID when the live bead is a different lineage (SPEC §4.1.1).
 //!
 //! Resurrection rule: modification strictly newer than deletion can resurrect.
 
@@ -15,16 +18,17 @@ use super::dep::{DepEdge, DepKey};
 use super::error::CoreError;
 use super::identity::BeadId;
 use super::time::WallClock;
-use super::tombstone::Tombstone;
+use super::tombstone::{Tombstone, TombstoneKey};
 
 /// Canonical state - the CRDT for the entire bead store.
 ///
-/// Invariant: A bead ID exists in exactly one of `live` or `tombstones`, never both.
-/// This is enforced by the insert/delete methods, not runtime checks.
+/// Invariant: An ID cannot be both live and globally deleted (tombstone lineage=None).
+/// Collision tombstones (tombstone lineage=Some(created)) may coexist with a live bead
+/// of the same ID, as long as the live bead has a different creation stamp.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CanonicalState {
     live: BTreeMap<BeadId, Bead>,
-    tombstones: BTreeMap<BeadId, Tombstone>,
+    tombstones: BTreeMap<TombstoneKey, Tombstone>,
     deps: BTreeMap<DepKey, DepEdge>,
 }
 
@@ -46,15 +50,16 @@ impl CanonicalState {
     }
 
     pub fn is_deleted(&self, id: &BeadId) -> bool {
-        self.tombstones.contains_key(id)
+        self.tombstones
+            .contains_key(&TombstoneKey::global(id.clone()))
     }
 
     pub fn get_tombstone(&self, id: &BeadId) -> Option<&Tombstone> {
-        self.tombstones.get(id)
+        self.tombstones.get(&TombstoneKey::global(id.clone()))
     }
 
     pub fn contains(&self, id: &BeadId) -> bool {
-        self.live.contains_key(id) || self.tombstones.contains_key(id)
+        self.live.contains_key(id) || self.has_any_tombstone(id)
     }
 
     pub fn live_count(&self) -> usize {
@@ -73,7 +78,7 @@ impl CanonicalState {
         self.live.iter()
     }
 
-    pub fn iter_tombstones(&self) -> impl Iterator<Item = (&BeadId, &Tombstone)> {
+    pub fn iter_tombstones(&self) -> impl Iterator<Item = (&TombstoneKey, &Tombstone)> {
         self.tombstones.iter()
     }
 
@@ -117,7 +122,7 @@ impl CanonicalState {
         let id = bead.core.id.clone();
 
         // Remove tombstone if present (resurrection)
-        self.tombstones.remove(&id);
+        self.tombstones.remove(&TombstoneKey::global(id.clone()));
 
         // Merge with existing or insert
         if let Some(existing) = self.live.get(&id) {
@@ -134,17 +139,18 @@ impl CanonicalState {
     ///
     /// If tombstone already exists, merges (keeps later deletion).
     pub fn delete(&mut self, tombstone: Tombstone) {
-        let id = tombstone.id.clone();
+        let key = tombstone.key();
+        let id = key.id.clone();
 
         // Remove from live
         self.live.remove(&id);
 
         // Merge with existing tombstone or insert
-        if let Some(existing) = self.tombstones.get(&id) {
+        if let Some(existing) = self.tombstones.get(&key) {
             let merged = Tombstone::join(existing, &tombstone);
-            self.tombstones.insert(id, merged);
+            self.tombstones.insert(key, merged);
         } else {
-            self.tombstones.insert(id, tombstone);
+            self.tombstones.insert(key, tombstone);
         }
     }
 
@@ -169,7 +175,8 @@ impl CanonicalState {
     /// Used for collision resolution when we've already handled the logic.
     /// Removes any tombstone for this ID.
     pub fn insert_live(&mut self, bead: Bead) {
-        self.tombstones.remove(&bead.core.id);
+        self.tombstones
+            .remove(&TombstoneKey::global(bead.core.id.clone()));
         self.live.insert(bead.core.id.clone(), bead);
     }
 
@@ -182,7 +189,11 @@ impl CanonicalState {
     ///
     /// Used for collision resolution. Does not remove live beads.
     pub fn insert_tombstone(&mut self, tombstone: Tombstone) {
-        self.tombstones.insert(tombstone.id.clone(), tombstone);
+        let key = tombstone.key();
+        self.tombstones
+            .entry(key)
+            .and_modify(|t| *t = Tombstone::join(t, &tombstone))
+            .or_insert(tombstone);
     }
 
     // =========================================================================
@@ -199,28 +210,28 @@ impl CanonicalState {
         let mut result = Self::default();
         let mut errors = Vec::new();
 
+        // Merge tombstones by key; we may later drop global deletions on resurrection.
+        for (key, tomb) in a.tombstones.iter().chain(b.tombstones.iter()) {
+            result
+                .tombstones
+                .entry(key.clone())
+                .and_modify(|t| *t = Tombstone::join(t, tomb))
+                .or_insert_with(|| tomb.clone());
+        }
+
         // Collect all bead IDs from both sides
         let all_ids: BTreeSet<_> = a
             .live
             .keys()
             .chain(b.live.keys())
-            .chain(a.tombstones.keys())
-            .chain(b.tombstones.keys())
+            .chain(a.tombstones.keys().map(|k| &k.id))
+            .chain(b.tombstones.keys().map(|k| &k.id))
             .cloned()
             .collect();
 
         for id in all_ids {
             let a_bead = a.live.get(&id);
             let b_bead = b.live.get(&id);
-            let a_tomb = a.tombstones.get(&id);
-            let b_tomb = b.tombstones.get(&id);
-
-            // Merge tombstones if both exist
-            let merged_tomb = match (a_tomb, b_tomb) {
-                (Some(at), Some(bt)) => Some(Tombstone::join(at, bt)),
-                (Some(t), None) | (None, Some(t)) => Some(t.clone()),
-                (None, None) => None,
-            };
 
             // Merge beads if both exist (may error on collision)
             let merged_bead = match (a_bead, b_bead) {
@@ -236,24 +247,27 @@ impl CanonicalState {
                 (None, None) => None,
             };
 
-            // Decide: bead vs tombstone
-            match (merged_bead, merged_tomb) {
-                (Some(bead), Some(tomb)) => {
+            if let Some(bead) = merged_bead {
+                // Collision tombstone: if a lineage-scoped tombstone exists for this
+                // bead's creation stamp, it always wins and permanently suppresses
+                // that lineage at this ID.
+                let collision_key = TombstoneKey::lineage(id.clone(), bead.core.created().clone());
+                if result.tombstones.contains_key(&collision_key) {
+                    continue;
+                }
+
+                // Deletion tombstone: applies globally to the ID.
+                let delete_key = TombstoneKey::global(id.clone());
+                if let Some(tomb) = result.tombstones.get(&delete_key) {
                     // RESURRECTION RULE: bead wins if strictly newer than deletion
                     if bead.updated_stamp() > tomb.deleted {
+                        result.tombstones.remove(&delete_key);
                         result.live.insert(id, bead);
                     } else {
-                        result.tombstones.insert(id, tomb);
+                        // Keep tombstone, drop bead.
                     }
-                }
-                (Some(bead), None) => {
+                } else {
                     result.live.insert(id, bead);
-                }
-                (None, Some(tomb)) => {
-                    result.tombstones.insert(id, tomb);
-                }
-                (None, None) => {
-                    // Shouldn't happen - ID came from somewhere
                 }
             }
         }
@@ -312,6 +326,10 @@ impl CanonicalState {
             .filter(|e| e.is_active() && &e.key.to == id)
             .collect()
     }
+
+    fn has_any_tombstone(&self, id: &BeadId) -> bool {
+        self.tombstones.keys().any(|k| &k.id == id)
+    }
 }
 
 #[cfg(test)]
@@ -366,7 +384,11 @@ mod tests {
 
         assert!(!state.is_deleted(&id));
         assert!(state.live.contains_key(&id));
-        assert!(!state.tombstones.contains_key(&id));
+        assert!(
+            !state
+                .tombstones
+                .contains_key(&TombstoneKey::global(id.clone()))
+        );
     }
 
     #[test]
@@ -406,7 +428,11 @@ mod tests {
         state.delete(tomb);
 
         assert!(!state.live.contains_key(&id));
-        assert!(state.tombstones.contains_key(&id));
+        assert!(
+            state
+                .tombstones
+                .contains_key(&TombstoneKey::global(id.clone()))
+        );
         assert!(state.is_deleted(&id));
     }
 
@@ -449,7 +475,9 @@ mod tests {
         let merged = CanonicalState::join(&state_a, &state_b).unwrap();
         assert!(merged.live.contains_key(&id), "bead should be resurrected");
         assert!(
-            !merged.tombstones.contains_key(&id),
+            !merged
+                .tombstones
+                .contains_key(&TombstoneKey::global(id.clone())),
             "tombstone should be gone"
         );
     }
@@ -493,7 +521,9 @@ mod tests {
         let merged = CanonicalState::join(&state_a, &state_b).unwrap();
         assert!(!merged.live.contains_key(&id), "bead should be deleted");
         assert!(
-            merged.tombstones.contains_key(&id),
+            merged
+                .tombstones
+                .contains_key(&TombstoneKey::global(id.clone())),
             "tombstone should exist"
         );
     }
