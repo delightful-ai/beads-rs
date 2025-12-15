@@ -560,6 +560,10 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         state.insert_dep(dep);
     }
 
+    // Ensure dep indexes are built (insert_dep does this incrementally,
+    // but we rebuild to guarantee consistency after bulk loading)
+    state.rebuild_dep_indexes();
+
     Ok(LoadedStore { state, root_slug })
 }
 

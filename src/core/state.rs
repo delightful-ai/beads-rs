@@ -15,10 +15,62 @@ use serde::{Deserialize, Serialize};
 
 use super::bead::Bead;
 use super::dep::{DepEdge, DepKey};
+use super::domain::DepKind;
 use super::error::CoreError;
 use super::identity::BeadId;
 use super::time::WallClock;
 use super::tombstone::{Tombstone, TombstoneKey};
+
+/// Derived indexes for efficient dependency lookups.
+///
+/// These are rebuilt from `deps` on load and updated incrementally.
+/// Not serialized - derived state only.
+#[derive(Default, Debug, Clone)]
+pub struct DepIndexes {
+    /// from -> [(to, kind)] for active deps
+    out_edges: BTreeMap<BeadId, Vec<(BeadId, DepKind)>>,
+    /// to -> [(from, kind)] for active deps
+    in_edges: BTreeMap<BeadId, Vec<(BeadId, DepKind)>>,
+}
+
+impl DepIndexes {
+    /// Create empty indexes.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add an edge to both indexes.
+    fn add(&mut self, from: &BeadId, to: &BeadId, kind: DepKind) {
+        self.out_edges
+            .entry(from.clone())
+            .or_default()
+            .push((to.clone(), kind));
+        self.in_edges
+            .entry(to.clone())
+            .or_default()
+            .push((from.clone(), kind));
+    }
+
+    /// Remove an edge from both indexes.
+    fn remove(&mut self, from: &BeadId, to: &BeadId, kind: DepKind) {
+        if let Some(edges) = self.out_edges.get_mut(from) {
+            edges.retain(|(t, k)| !(t == to && *k == kind));
+        }
+        if let Some(edges) = self.in_edges.get_mut(to) {
+            edges.retain(|(f, k)| !(f == from && *k == kind));
+        }
+    }
+
+    /// Get outgoing edges from a bead.
+    pub fn out_edges(&self, id: &BeadId) -> &[(BeadId, DepKind)] {
+        self.out_edges.get(id).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Get incoming edges to a bead.
+    pub fn in_edges(&self, id: &BeadId) -> &[(BeadId, DepKind)] {
+        self.in_edges.get(id).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+}
 
 /// Error from requiring a live bead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +91,10 @@ pub struct CanonicalState {
     live: BTreeMap<BeadId, Bead>,
     tombstones: BTreeMap<TombstoneKey, Tombstone>,
     deps: BTreeMap<DepKey, DepEdge>,
+    /// Derived indexes for O(1) dependency lookups.
+    /// Not serialized - rebuilt on load and updated incrementally.
+    #[serde(skip, default)]
+    dep_indexes: DepIndexes,
 }
 
 impl CanonicalState {
@@ -201,12 +257,40 @@ impl CanonicalState {
     }
 
     /// Insert or update a dependency edge.
+    ///
+    /// Maintains the dep indexes incrementally.
     pub fn insert_dep(&mut self, edge: DepEdge) {
         let key = edge.key.clone();
+        let from = key.from().clone();
+        let to = key.to().clone();
+        let kind = key.kind();
+
         if let Some(existing) = self.deps.get(&key) {
+            let was_active = existing.is_active();
             let merged = DepEdge::join(existing, &edge);
+            let is_active = merged.is_active();
+
+            // Update index if activity state changed
+            match (was_active, is_active) {
+                (true, false) => {
+                    // Active -> Deleted: remove from index
+                    self.dep_indexes.remove(&from, &to, kind);
+                }
+                (false, true) => {
+                    // Deleted -> Active: add to index
+                    self.dep_indexes.add(&from, &to, kind);
+                }
+                _ => {
+                    // No change in activity state
+                }
+            }
+
             self.deps.insert(key, merged);
         } else {
+            // New edge
+            if edge.is_active() {
+                self.dep_indexes.add(&from, &to, kind);
+            }
             self.deps.insert(key, edge);
         }
     }
@@ -327,6 +411,9 @@ impl CanonicalState {
                 .or_insert_with(|| edge.clone());
         }
 
+        // Rebuild derived indexes from merged deps
+        result.rebuild_dep_indexes();
+
         if errors.is_empty() {
             Ok(result)
         } else {
@@ -351,6 +438,7 @@ impl CanonicalState {
     /// Remove soft-deleted deps (where deleted is Some).
     ///
     /// Returns number of deps removed.
+    /// Note: Does not rebuild indexes since deleted deps aren't in indexes anyway.
     pub fn gc_deleted_deps(&mut self) -> usize {
         let before = self.deps.len();
         self.deps.retain(|_, e| e.is_active());
@@ -358,19 +446,49 @@ impl CanonicalState {
     }
 
     /// Get all active deps for a bead (outgoing).
+    ///
+    /// Uses the derived index for O(neighbors) lookup instead of O(all deps).
     pub fn deps_from(&self, id: &BeadId) -> Vec<&DepEdge> {
-        self.deps
-            .values()
-            .filter(|e| e.is_active() && e.key.from() == id)
+        self.dep_indexes
+            .out_edges(id)
+            .iter()
+            .filter_map(|(to, kind)| {
+                let key = DepKey::new(id.clone(), to.clone(), *kind).ok()?;
+                self.deps.get(&key)
+            })
             .collect()
     }
 
     /// Get all active deps to a bead (incoming).
+    ///
+    /// Uses the derived index for O(neighbors) lookup instead of O(all deps).
     pub fn deps_to(&self, id: &BeadId) -> Vec<&DepEdge> {
-        self.deps
-            .values()
-            .filter(|e| e.is_active() && e.key.to() == id)
+        self.dep_indexes
+            .in_edges(id)
+            .iter()
+            .filter_map(|(from, kind)| {
+                let key = DepKey::new(from.clone(), id.clone(), *kind).ok()?;
+                self.deps.get(&key)
+            })
             .collect()
+    }
+
+    /// Rebuild the derived dep indexes from scratch.
+    ///
+    /// Call this after deserializing state or after `join()`.
+    pub fn rebuild_dep_indexes(&mut self) {
+        self.dep_indexes = DepIndexes::new();
+        for edge in self.deps.values() {
+            if edge.is_active() {
+                self.dep_indexes
+                    .add(edge.key.from(), edge.key.to(), edge.key.kind());
+            }
+        }
+    }
+
+    /// Access the dep indexes (for queries that need direct access).
+    pub fn dep_indexes(&self) -> &DepIndexes {
+        &self.dep_indexes
     }
 
     fn has_any_tombstone(&self, id: &BeadId) -> bool {
@@ -381,6 +499,7 @@ impl CanonicalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::dep::DepLife;
     use crate::core::identity::ActorId;
     use crate::core::time::{Stamp, WriteStamp};
 
@@ -665,5 +784,217 @@ mod tests {
 
         // Verify modification persisted
         assert_eq!(state.get_live(&id).unwrap().fields.title.value, "modified");
+    }
+
+    // =========================================================================
+    // Dep Index Tests
+    // =========================================================================
+
+    #[test]
+    fn dep_index_insert_active_edge() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let from = BeadId::parse("bd-aaa").unwrap();
+        let to = BeadId::parse("bd-bbb").unwrap();
+
+        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let edge = DepEdge::new(key, stamp);
+
+        state.insert_dep(edge);
+
+        // Should be in out_edges for "from"
+        let out = state.dep_indexes().out_edges(&from);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], (to.clone(), DepKind::Blocks));
+
+        // Should be in in_edges for "to"
+        let in_ = state.dep_indexes().in_edges(&to);
+        assert_eq!(in_.len(), 1);
+        assert_eq!(in_[0], (from.clone(), DepKind::Blocks));
+    }
+
+    #[test]
+    fn dep_index_insert_deleted_edge() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let from = BeadId::parse("bd-aaa").unwrap();
+        let to = BeadId::parse("bd-bbb").unwrap();
+
+        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let life = crate::core::crdt::Lww::new(DepLife::Deleted, stamp.clone());
+        let edge = DepEdge::with_life(key, stamp, life);
+
+        state.insert_dep(edge);
+
+        // Deleted edge should NOT be in indexes
+        assert!(state.dep_indexes().out_edges(&from).is_empty());
+        assert!(state.dep_indexes().in_edges(&to).is_empty());
+    }
+
+    #[test]
+    fn dep_index_transition_active_to_deleted() {
+        let mut state = CanonicalState::new();
+        let stamp1 = make_stamp(1000, 0, "alice");
+        let stamp2 = make_stamp(2000, 0, "bob");
+        let from = BeadId::parse("bd-aaa").unwrap();
+        let to = BeadId::parse("bd-bbb").unwrap();
+
+        // Insert active edge
+        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let edge = DepEdge::new(key.clone(), stamp1);
+        state.insert_dep(edge);
+
+        // Should be in indexes
+        assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
+
+        // Now delete it
+        let life = crate::core::crdt::Lww::new(DepLife::Deleted, stamp2.clone());
+        let deleted_edge = DepEdge::with_life(key, stamp2, life);
+        state.insert_dep(deleted_edge);
+
+        // Should be removed from indexes
+        assert!(state.dep_indexes().out_edges(&from).is_empty());
+        assert!(state.dep_indexes().in_edges(&to).is_empty());
+    }
+
+    #[test]
+    fn dep_index_transition_deleted_to_active() {
+        let mut state = CanonicalState::new();
+        let stamp1 = make_stamp(1000, 0, "alice");
+        let stamp2 = make_stamp(2000, 0, "bob");
+        let from = BeadId::parse("bd-aaa").unwrap();
+        let to = BeadId::parse("bd-bbb").unwrap();
+
+        // Insert deleted edge first
+        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let life = crate::core::crdt::Lww::new(DepLife::Deleted, stamp1.clone());
+        let edge = DepEdge::with_life(key.clone(), stamp1, life);
+        state.insert_dep(edge);
+
+        // Should NOT be in indexes
+        assert!(state.dep_indexes().out_edges(&from).is_empty());
+
+        // Now restore it (active edge with newer stamp)
+        let restored_edge = DepEdge::new(key, stamp2);
+        state.insert_dep(restored_edge);
+
+        // Should be in indexes now
+        assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
+        assert_eq!(state.dep_indexes().in_edges(&to).len(), 1);
+    }
+
+    #[test]
+    fn dep_index_deps_from_uses_index() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let from = BeadId::parse("bd-aaa").unwrap();
+        let to1 = BeadId::parse("bd-bbb").unwrap();
+        let to2 = BeadId::parse("bd-ccc").unwrap();
+
+        // Add two deps from the same source
+        let key1 = DepKey::new(from.clone(), to1.clone(), DepKind::Blocks).unwrap();
+        let key2 = DepKey::new(from.clone(), to2.clone(), DepKind::Parent).unwrap();
+        state.insert_dep(DepEdge::new(key1, stamp.clone()));
+        state.insert_dep(DepEdge::new(key2, stamp));
+
+        let deps = state.deps_from(&from);
+        assert_eq!(deps.len(), 2);
+
+        // Verify the edges are correct
+        let to_ids: std::collections::HashSet<_> =
+            deps.iter().map(|e| e.key.to().clone()).collect();
+        assert!(to_ids.contains(&to1));
+        assert!(to_ids.contains(&to2));
+    }
+
+    #[test]
+    fn dep_index_deps_to_uses_index() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let from1 = BeadId::parse("bd-aaa").unwrap();
+        let from2 = BeadId::parse("bd-bbb").unwrap();
+        let to = BeadId::parse("bd-ccc").unwrap();
+
+        // Add two deps to the same target
+        let key1 = DepKey::new(from1.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key2 = DepKey::new(from2.clone(), to.clone(), DepKind::Blocks).unwrap();
+        state.insert_dep(DepEdge::new(key1, stamp.clone()));
+        state.insert_dep(DepEdge::new(key2, stamp));
+
+        let deps = state.deps_to(&to);
+        assert_eq!(deps.len(), 2);
+
+        // Verify the edges are correct
+        let from_ids: std::collections::HashSet<_> =
+            deps.iter().map(|e| e.key.from().clone()).collect();
+        assert!(from_ids.contains(&from1));
+        assert!(from_ids.contains(&from2));
+    }
+
+    #[test]
+    fn dep_index_rebuild_from_deps() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let from = BeadId::parse("bd-aaa").unwrap();
+        let to = BeadId::parse("bd-bbb").unwrap();
+
+        // Manually insert into deps map (simulating deserialization)
+        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let edge = DepEdge::new(key, stamp);
+        state.deps.insert(edge.key.clone(), edge);
+
+        // Index should be empty (not maintained)
+        assert!(state.dep_indexes().out_edges(&from).is_empty());
+
+        // Rebuild indexes
+        state.rebuild_dep_indexes();
+
+        // Now index should be populated
+        assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
+        assert_eq!(state.dep_indexes().in_edges(&to).len(), 1);
+    }
+
+    #[test]
+    fn dep_index_join_rebuilds_indexes() {
+        let stamp = make_stamp(1000, 0, "alice");
+        let from = BeadId::parse("bd-aaa").unwrap();
+        let to = BeadId::parse("bd-bbb").unwrap();
+
+        // State A: has one dep
+        let mut state_a = CanonicalState::new();
+        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        state_a.insert_dep(DepEdge::new(key, stamp));
+
+        // State B: empty
+        let state_b = CanonicalState::new();
+
+        // Join should rebuild indexes
+        let merged = CanonicalState::join(&state_a, &state_b).unwrap();
+
+        // Index should be populated in merged state
+        assert_eq!(merged.dep_indexes().out_edges(&from).len(), 1);
+        assert_eq!(merged.dep_indexes().in_edges(&to).len(), 1);
+    }
+
+    #[test]
+    fn dep_index_multiple_kinds() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let from = BeadId::parse("bd-aaa").unwrap();
+        let to = BeadId::parse("bd-bbb").unwrap();
+
+        // Add multiple deps of different kinds between same beads
+        let key1 = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key2 = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
+        state.insert_dep(DepEdge::new(key1, stamp.clone()));
+        state.insert_dep(DepEdge::new(key2, stamp));
+
+        // Should have two edges in indexes
+        let out = state.dep_indexes().out_edges(&from);
+        assert_eq!(out.len(), 2);
+
+        let kinds: std::collections::HashSet<_> = out.iter().map(|(_, k)| *k).collect();
+        assert!(kinds.contains(&DepKind::Blocks));
+        assert!(kinds.contains(&DepKind::Related));
     }
 }
