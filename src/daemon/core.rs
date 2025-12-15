@@ -44,13 +44,13 @@ pub struct Daemon {
 
 impl Daemon {
     /// Create a new daemon.
-    pub fn new(actor: ActorId, timer_tx: Sender<RemoteUrl>) -> Self {
+    pub fn new(actor: ActorId) -> Self {
         Daemon {
             repos: BTreeMap::new(),
             path_to_remote: HashMap::new(),
             clock: Clock::new(),
             actor,
-            scheduler: SyncScheduler::new(timer_tx),
+            scheduler: SyncScheduler::new(),
         }
     }
 
@@ -298,11 +298,15 @@ impl Daemon {
         }
     }
 
-    /// Handle a debounce timer firing.
-    ///
-    /// Returns true if we should start a sync.
-    pub fn handle_timer(&mut self, remote: &RemoteUrl) -> bool {
-        self.scheduler.should_fire(remote)
+    pub fn next_sync_deadline(&mut self) -> Option<Instant> {
+        self.scheduler.next_deadline()
+    }
+
+    pub fn fire_due_syncs(&mut self, git_tx: &Sender<GitOp>) {
+        let due = self.scheduler.drain_due(Instant::now());
+        for remote in due {
+            self.maybe_start_sync(&remote, git_tx);
+        }
     }
 
     /// Get iterator over all repos.

@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::time::Instant;
 
 use crossbeam::channel::{Receiver, Sender};
 
@@ -29,13 +30,20 @@ pub struct RequestMessage {
 pub fn run_state_loop(
     mut daemon: Daemon,
     req_rx: Receiver<RequestMessage>,
-    timer_rx: Receiver<RemoteUrl>,
     git_tx: Sender<GitOp>,
     git_result_rx: Receiver<(RemoteUrl, SyncResult)>,
 ) {
     let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<Response>>> = HashMap::new();
 
     loop {
+        let tick = match daemon.next_sync_deadline() {
+            Some(deadline) => {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                crossbeam::channel::after(wait)
+            }
+            None => crossbeam::channel::never(),
+        };
+
         crossbeam::select! {
             // Client request
             recv(req_rx) -> msg => {
@@ -100,6 +108,7 @@ pub fn run_state_loop(
                             return;
                         }
 
+                        daemon.fire_due_syncs(&git_tx);
                         flush_sync_waiters(&daemon, &mut sync_waiters);
                     }
                     Err(_) => {
@@ -110,14 +119,9 @@ pub fn run_state_loop(
                 }
             }
 
-            // Debounce timer fired
-            recv(timer_rx) -> msg => {
-                if let Ok(remote) = msg {
-                    if daemon.handle_timer(&remote) {
-                        daemon.maybe_start_sync(&remote, &git_tx);
-                    }
-                    flush_sync_waiters(&daemon, &mut sync_waiters);
-                }
+            recv(tick) -> _ => {
+                daemon.fire_due_syncs(&git_tx);
+                flush_sync_waiters(&daemon, &mut sync_waiters);
             }
 
             // Git operation completed
@@ -125,6 +129,7 @@ pub fn run_state_loop(
                 if let Ok((remote, result)) = msg {
                     daemon.complete_sync(&remote, result);
                 }
+                daemon.fire_due_syncs(&git_tx);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
             }
         }
