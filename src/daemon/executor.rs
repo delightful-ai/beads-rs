@@ -14,7 +14,7 @@ use crossbeam::channel::Sender;
 use super::core::Daemon;
 use super::git_worker::GitOp;
 use super::ipc::{Response, ResponsePayload};
-use super::ops::{BeadPatch, OpError, OpResult, Patch};
+use super::ops::{BeadPatch, MapLiveError, OpError, OpResult, Patch};
 use crate::core::{
     Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, Closure, DepEdge, DepKey, DepKind,
     DepLife, Labels, Lww, Note, NoteId, Priority, Stamp, Tombstone, WallClock, Workflow,
@@ -291,14 +291,9 @@ impl Daemon {
         // Check bead existence and CAS (scope to drop borrow)
         {
             let repo_state = self.repo_state_mut(&remote);
-            let bead = match repo_state.state.get_live(id) {
-                Some(b) => b,
-                None => {
-                    if repo_state.state.get_tombstone(id).is_some() {
-                        return Response::err(OpError::BeadDeleted(id.clone()));
-                    }
-                    return Response::err(OpError::NotFound(id.clone()));
-                }
+            let bead = match repo_state.state.require_live(id).map_live_err(id) {
+                Ok(b) => b,
+                Err(e) => return Response::err(e),
             };
 
             // CAS check
@@ -318,9 +313,12 @@ impl Daemon {
             by: actor,
         };
 
-        // Re-borrow for mutations
+        // Re-borrow for mutations (safe: bead confirmed to exist above, no deletions between)
         let repo_state = self.repo_state_mut(&remote);
-        let bead = repo_state.state.get_live_mut(id).unwrap();
+        let bead = match repo_state.state.require_live_mut(id).map_live_err(id) {
+            Ok(b) => b,
+            Err(e) => return Response::err(e),
+        };
 
         // Apply patch
         if let Patch::Set(v) = patch.title {
@@ -418,9 +416,9 @@ impl Daemon {
         // Check bead state (scope to drop borrow)
         {
             let repo_state = self.repo_state_mut(&remote);
-            let bead = match repo_state.state.get_live(id) {
-                Some(b) => b,
-                None => return Response::err(OpError::NotFound(id.clone())),
+            let bead = match repo_state.state.require_live(id).map_live_err(id) {
+                Ok(b) => b,
+                Err(e) => return Response::err(e),
             };
 
             // Check if already closed
@@ -440,9 +438,12 @@ impl Daemon {
             by: actor,
         };
 
-        // Re-borrow for mutations
+        // Re-borrow for mutations (safe: bead confirmed to exist above, no deletions between)
         let repo_state = self.repo_state_mut(&remote);
-        let bead = repo_state.state.get_live_mut(id).unwrap();
+        let bead = match repo_state.state.require_live_mut(id).map_live_err(id) {
+            Ok(b) => b,
+            Err(e) => return Response::err(e),
+        };
         let closure = Closure::new(reason, on_branch);
         bead.fields.workflow = Lww::new(Workflow::Closed(closure), stamp);
 
@@ -461,9 +462,9 @@ impl Daemon {
         // Check bead state (scope to drop borrow)
         {
             let repo_state = self.repo_state_mut(&remote);
-            let bead = match repo_state.state.get_live(id) {
-                Some(b) => b,
-                None => return Response::err(OpError::NotFound(id.clone())),
+            let bead = match repo_state.state.require_live(id).map_live_err(id) {
+                Ok(b) => b,
+                Err(e) => return Response::err(e),
             };
 
             // Check if actually closed
@@ -484,9 +485,12 @@ impl Daemon {
             by: actor,
         };
 
-        // Re-borrow for mutations
+        // Re-borrow for mutations (safe: bead confirmed to exist above, no deletions between)
         let repo_state = self.repo_state_mut(&remote);
-        let bead = repo_state.state.get_live_mut(id).unwrap();
+        let bead = match repo_state.state.require_live_mut(id).map_live_err(id) {
+            Ok(b) => b,
+            Err(e) => return Response::err(e),
+        };
         bead.fields.workflow = Lww::new(Workflow::Open, stamp);
 
         self.mark_dirty_and_schedule(&remote);
@@ -510,11 +514,8 @@ impl Daemon {
         // Check bead existence (scope to drop borrow)
         {
             let repo_state = self.repo_state_mut(&remote);
-            if repo_state.state.get_live(id).is_none() {
-                if repo_state.state.get_tombstone(id).is_some() {
-                    return Response::err(OpError::BeadDeleted(id.clone()));
-                }
-                return Response::err(OpError::NotFound(id.clone()));
+            if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
+                return Response::err(e);
             }
         }
 
@@ -679,8 +680,8 @@ impl Daemon {
         // Check bead existence (scope to drop borrow)
         {
             let repo_state = self.repo_state_mut(&remote);
-            if repo_state.state.get_live(id).is_none() {
-                return Response::err(OpError::NotFound(id.clone()));
+            if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
+                return Response::err(e);
             }
         }
 
@@ -688,10 +689,12 @@ impl Daemon {
         let write_stamp = self.clock_mut().tick();
         let actor = self.actor().clone();
 
-        // Re-borrow for mutations
+        // Re-borrow for mutations (safe: bead confirmed to exist above, no deletions between)
         let repo_state = self.repo_state_mut(&remote);
-        // Safe: bead existence checked above
-        let bead = repo_state.state.get_live_mut(id).unwrap();
+        let bead = match repo_state.state.require_live_mut(id).map_live_err(id) {
+            Ok(b) => b,
+            Err(e) => return Response::err(e),
+        };
 
         // Generate unique note ID
         let note_id = NoteId::generate();
@@ -778,9 +781,9 @@ impl Daemon {
         // Check bead state and claim ownership (scope to drop borrow)
         {
             let repo_state = self.repo_state_mut(&remote);
-            let bead = match repo_state.state.get_live(id) {
-                Some(b) => b,
-                None => return Response::err(OpError::NotFound(id.clone())),
+            let bead = match repo_state.state.require_live(id).map_live_err(id) {
+                Ok(b) => b,
+                Err(e) => return Response::err(e),
             };
 
             // Check if claimed by this actor
@@ -798,9 +801,12 @@ impl Daemon {
             by: actor,
         };
 
-        // Re-borrow for mutations
+        // Re-borrow for mutations (safe: bead confirmed to exist above, no deletions between)
         let repo_state = self.repo_state_mut(&remote);
-        let bead = repo_state.state.get_live_mut(id).unwrap();
+        let bead = match repo_state.state.require_live_mut(id).map_live_err(id) {
+            Ok(b) => b,
+            Err(e) => return Response::err(e),
+        };
         bead.fields.claim = Lww::new(Claim::Unclaimed, stamp.clone());
         // Unclaiming transitions back to open
         bead.fields.workflow = Lww::new(Workflow::Open, stamp);
@@ -829,9 +835,9 @@ impl Daemon {
         // Check bead state and claim ownership (scope to drop borrow)
         {
             let repo_state = self.repo_state_mut(&remote);
-            let bead = match repo_state.state.get_live(id) {
-                Some(b) => b,
-                None => return Response::err(OpError::NotFound(id.clone())),
+            let bead = match repo_state.state.require_live(id).map_live_err(id) {
+                Ok(b) => b,
+                Err(e) => return Response::err(e),
             };
 
             // Check if claimed by this actor
@@ -852,9 +858,12 @@ impl Daemon {
             by: actor.clone(),
         };
 
-        // Re-borrow for mutations
+        // Re-borrow for mutations (safe: bead confirmed to exist above, no deletions between)
         let repo_state = self.repo_state_mut(&remote);
-        let bead = repo_state.state.get_live_mut(id).unwrap();
+        let bead = match repo_state.state.require_live_mut(id).map_live_err(id) {
+            Ok(b) => b,
+            Err(e) => return Response::err(e),
+        };
         bead.fields.claim = Lww::new(Claim::claimed(actor, Some(expires)), stamp);
 
         self.mark_dirty_and_schedule(&remote);

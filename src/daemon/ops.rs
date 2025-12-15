@@ -425,6 +425,28 @@ impl OpError {
     }
 }
 
+impl OpError {
+    /// Convert a LiveLookupError to OpError with the given bead ID.
+    pub fn from_live_lookup(err: crate::core::LiveLookupError, id: BeadId) -> Self {
+        match err {
+            crate::core::LiveLookupError::NotFound => OpError::NotFound(id),
+            crate::core::LiveLookupError::Deleted => OpError::BeadDeleted(id),
+        }
+    }
+}
+
+/// Extension trait for mapping LiveLookupError to OpError.
+pub trait MapLiveError<T> {
+    /// Map a LiveLookupError to OpError using the given bead ID.
+    fn map_live_err(self, id: &BeadId) -> Result<T, OpError>;
+}
+
+impl<T> MapLiveError<T> for Result<T, crate::core::LiveLookupError> {
+    fn map_live_err(self, id: &BeadId) -> Result<T, OpError> {
+        self.map_err(|e| OpError::from_live_lookup(e, id.clone()))
+    }
+}
+
 // =============================================================================
 // OpResult - Operation results
 // =============================================================================
