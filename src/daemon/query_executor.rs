@@ -9,7 +9,7 @@ use crossbeam::channel::Sender;
 use super::core::Daemon;
 use super::git_worker::GitOp;
 use super::ipc::{Response, ResponsePayload};
-use super::ops::OpError;
+use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use crate::api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
@@ -26,18 +26,12 @@ impl Daemon {
         };
         let repo_state = self.repo_state(&remote);
 
-        match repo_state.state.get_live(id) {
-            Some(bead) => {
+        match repo_state.state.require_live(id).map_live_err(id) {
+            Ok(bead) => {
                 let issue = Issue::from_bead(bead);
                 Response::ok(ResponsePayload::Query(QueryResult::Issue(issue)))
             }
-            None => {
-                // Check if deleted
-                if repo_state.state.get_tombstone(id).is_some() {
-                    return Response::err(OpError::BeadDeleted(id.clone()));
-                }
-                Response::err(OpError::NotFound(id.clone()))
-            }
+            Err(e) => Response::err(e),
         }
     }
 
@@ -181,8 +175,8 @@ impl Daemon {
         let repo_state = self.repo_state(&remote);
 
         // Check if bead exists
-        if repo_state.state.get_live(id).is_none() {
-            return Response::err(OpError::NotFound(id.clone()));
+        if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
+            return Response::err(e);
         }
 
         // Collect all edges in the transitive closure
@@ -221,8 +215,8 @@ impl Daemon {
         let repo_state = self.repo_state(&remote);
 
         // Check if bead exists
-        if repo_state.state.get_live(id).is_none() {
-            return Response::err(OpError::NotFound(id.clone()));
+        if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
+            return Response::err(e);
         }
 
         let mut incoming = Vec::new();
@@ -521,18 +515,18 @@ impl Daemon {
             matched.push((id, bead));
         }
 
-        if group_by.is_none() {
+        let Some(group_by) = group_by else {
             return Response::ok(ResponsePayload::Query(QueryResult::Count(
                 CountResult::Simple {
                     count: matched.len(),
                 },
             )));
-        }
+        };
 
         let mut counts: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         for (id, bead) in &matched {
-            match group_by.unwrap() {
+            match group_by {
                 "status" => {
                     let group = if bead.fields.workflow.value.is_closed() {
                         "closed".to_string()
