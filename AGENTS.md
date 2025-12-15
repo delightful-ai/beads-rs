@@ -15,6 +15,15 @@ bd close <id>         # Done
 
 Run `bd prime` for full workflow.
 
+### Follow-up Beads
+
+When you notice out-of-scope work while implementing something, **file a bead immediately**—don't just mention it in commit messages.
+
+```bash
+bd create "Hardcoded 30s timeout in sync.rs:234" --type=bug --priority=2
+bd create "executor.rs:145 check-then-unwrap should use require_live" --type=chore --priority=3
+```
+
 ### Writing Good Beads
 
 Each bead should be **one self-contained, independently doable thing**. If you're writing a bead that says "and also..." — stop and make two beads.
