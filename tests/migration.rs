@@ -8,6 +8,17 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+fn test_runtime_dir() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("beads-test-runtime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("failed to create test runtime dir");
+        dir
+    })
+}
+
 /// Test fixture: working repo + bare remote.
 struct TestRepo {
     work_dir: TempDir,
@@ -68,6 +79,7 @@ impl TestRepo {
     fn bd(&self) -> Command {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.path());
+        cmd.env("XDG_RUNTIME_DIR", test_runtime_dir());
         cmd
     }
 }

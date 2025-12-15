@@ -4,8 +4,8 @@
 //! This module is pure formatting; handlers gather any extra data needed.
 
 use crate::api::{
-    BlockedIssue, CountResult, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary, Note,
-    StatusOutput, Tombstone,
+    BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
+    Note, StatusOutput, Tombstone,
 };
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
@@ -399,6 +399,7 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::Deleted(tombs) => render_deleted(tombs),
         QueryResult::DeletedLookup(out) => render_deleted_lookup(out),
         QueryResult::EpicStatus(statuses) => render_epic_statuses(statuses),
+        QueryResult::DaemonInfo(info) => render_daemon_info(info),
         QueryResult::Validation { warnings } => {
             if warnings.is_empty() {
                 "ok".into()
@@ -407,6 +408,13 @@ fn render_query(q: &QueryResult) -> String {
             }
         }
     }
+}
+
+fn render_daemon_info(info: &DaemonInfo) -> String {
+    format!(
+        "daemon {} (protocol {}, pid {})",
+        info.version, info.protocol_version, info.pid
+    )
 }
 
 fn render_status(out: &StatusOutput) -> String {
