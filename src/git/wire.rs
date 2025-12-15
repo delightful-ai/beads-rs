@@ -120,6 +120,8 @@ struct WireDep {
 #[derive(Serialize, Deserialize)]
 struct WireMeta {
     format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root_slug: Option<String>,
 }
 
 // =============================================================================
@@ -210,8 +212,11 @@ pub fn serialize_deps(state: &CanonicalState) -> Vec<u8> {
 }
 
 /// Serialize meta.json bytes.
-pub fn serialize_meta() -> Vec<u8> {
-    let meta = WireMeta { format_version: 1 };
+pub fn serialize_meta(root_slug: Option<&str>) -> Vec<u8> {
+    let meta = WireMeta {
+        format_version: 1,
+        root_slug: root_slug.map(|s| s.to_string()),
+    };
     let json = serde_json::to_string_pretty(&meta).expect("meta serialization failed");
     json.into_bytes()
 }
@@ -321,11 +326,20 @@ pub fn parse_deps(bytes: &[u8]) -> Result<Vec<DepEdge>, WireError> {
     Ok(deps)
 }
 
+/// Parsed metadata from meta.json.
+pub struct ParsedMeta {
+    pub format_version: u32,
+    pub root_slug: Option<String>,
+}
+
 /// Parse meta.json bytes.
-pub fn parse_meta(bytes: &[u8]) -> Result<u32, WireError> {
+pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
     let content = String::from_utf8(bytes.to_vec())?;
     let meta: WireMeta = serde_json::from_str(&content)?;
-    Ok(meta.format_version)
+    Ok(ParsedMeta {
+        format_version: meta.format_version,
+        root_slug: meta.root_slug,
+    })
 }
 
 // =============================================================================

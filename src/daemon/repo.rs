@@ -14,6 +14,10 @@ pub struct RepoState {
     /// The current canonical state (beads, tombstones, deps).
     pub state: CanonicalState,
 
+    /// Root slug for bead IDs (from meta.json).
+    /// When set, new bead IDs will use this slug (e.g., "myproject-xxx").
+    pub root_slug: Option<String>,
+
     /// All known clone paths for this remote.
     pub known_paths: HashSet<PathBuf>,
 
@@ -44,6 +48,7 @@ impl RepoState {
     pub fn new() -> Self {
         RepoState {
             state: CanonicalState::new(),
+            root_slug: None,
             known_paths: HashSet::new(),
             dirty: false,
             last_mutation: None,
@@ -59,6 +64,7 @@ impl RepoState {
     pub fn with_state(state: CanonicalState) -> Self {
         RepoState {
             state,
+            root_slug: None,
             known_paths: HashSet::new(),
             dirty: false,
             last_mutation: None,
@@ -70,9 +76,14 @@ impl RepoState {
         }
     }
 
-    /// Create a new RepoState with state and initial clone path.
-    pub fn with_state_and_path(state: CanonicalState, path: PathBuf) -> Self {
+    /// Create a new RepoState with state, root slug, and initial clone path.
+    pub fn with_state_and_path(
+        state: CanonicalState,
+        root_slug: Option<String>,
+        path: PathBuf,
+    ) -> Self {
         let mut s = Self::with_state(state);
+        s.root_slug = root_slug;
         s.known_paths.insert(path);
         s.last_refresh = Some(Instant::now());
         s

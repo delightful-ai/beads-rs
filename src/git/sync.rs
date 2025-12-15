@@ -33,6 +33,8 @@ pub struct Fetched {
     pub remote_oid: Oid,
     /// Parsed remote state.
     pub remote_state: CanonicalState,
+    /// Root slug from meta.json (if any).
+    pub root_slug: Option<String>,
 }
 
 /// Merged phase - have merged state ready to commit.
@@ -45,6 +47,8 @@ pub struct Merged {
     pub parent_oid: Oid,
     /// Diff summary for commit message.
     pub diff: SyncDiff,
+    /// Root slug from meta.json (if any).
+    pub root_slug: Option<String>,
 }
 
 /// Committed phase - have local commit, ready to push.
@@ -225,31 +229,33 @@ impl SyncProcess<Idle> {
         }
 
         // Get base state - prefer remote, fall back to local
-        let (base_oid, base_state) = match repo.refname_to_id("refs/remotes/origin/beads/store") {
-            Ok(oid) => {
-                let state = read_state_at_oid(repo, oid)?;
-                (oid, state)
-            }
-            Err(_) => {
-                // No remote - check local ref (handles local-only repos)
-                match repo.refname_to_id("refs/heads/beads/store") {
-                    Ok(local_oid) => {
-                        let state = read_state_at_oid(repo, local_oid)?;
-                        (local_oid, state)
-                    }
-                    Err(_) => {
-                        // Neither remote nor local - truly first sync
-                        (Oid::zero(), CanonicalState::new())
+        let (base_oid, base_state, root_slug) =
+            match repo.refname_to_id("refs/remotes/origin/beads/store") {
+                Ok(oid) => {
+                    let loaded = read_state_at_oid(repo, oid)?;
+                    (oid, loaded.state, loaded.root_slug)
+                }
+                Err(_) => {
+                    // No remote - check local ref (handles local-only repos)
+                    match repo.refname_to_id("refs/heads/beads/store") {
+                        Ok(local_oid) => {
+                            let loaded = read_state_at_oid(repo, local_oid)?;
+                            (local_oid, loaded.state, loaded.root_slug)
+                        }
+                        Err(_) => {
+                            // Neither remote nor local - truly first sync
+                            (Oid::zero(), CanonicalState::new(), None)
+                        }
                     }
                 }
-            }
-        };
+            };
 
         Ok(SyncProcess {
             repo_path: self.repo_path,
             phase: Fetched {
                 remote_oid: base_oid,
                 remote_state: base_state,
+                root_slug,
             },
         })
     }
@@ -270,6 +276,7 @@ impl SyncProcess<Fetched> {
         let Fetched {
             remote_oid,
             remote_state,
+            root_slug,
         } = self.phase;
 
         // Fast path: if remote is empty/uninitialized, just use local
@@ -282,6 +289,7 @@ impl SyncProcess<Fetched> {
                     collisions: Vec::new(),
                     parent_oid: remote_oid,
                     diff,
+                    root_slug,
                 },
             });
         }
@@ -320,6 +328,7 @@ impl SyncProcess<Fetched> {
                 collisions,
                 parent_oid: remote_oid,
                 diff,
+                root_slug,
             },
         })
     }
@@ -336,6 +345,7 @@ impl SyncProcess<Merged> {
             state,
             parent_oid,
             diff,
+            root_slug,
             ..
         } = self.phase;
 
@@ -343,7 +353,7 @@ impl SyncProcess<Merged> {
         let state_bytes = wire::serialize_state(&state);
         let tombs_bytes = wire::serialize_tombstones(&state);
         let deps_bytes = wire::serialize_deps(&state);
-        let meta_bytes = wire::serialize_meta();
+        let meta_bytes = wire::serialize_meta(root_slug.as_deref());
 
         // Write blobs to ODB
         let state_oid = repo.blob(&state_bytes)?;
@@ -483,8 +493,14 @@ impl SyncProcess<Committed> {
 // Helpers
 // =============================================================================
 
+/// Data loaded from a beads store commit.
+pub struct LoadedStore {
+    pub state: CanonicalState,
+    pub root_slug: Option<String>,
+}
+
 /// Read state from a commit oid.
-pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<CanonicalState, SyncError> {
+pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, SyncError> {
     let commit = repo.find_commit(oid)?;
     let tree = commit.tree()?;
 
@@ -515,6 +531,23 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<CanonicalState, 
         .peel_to_blob()?;
     let deps = wire::parse_deps(deps_blob.content())?;
 
+    // Read meta.json for root_slug
+    let root_slug = if let Some(meta_entry) = tree.get_name("meta.json") {
+        if let Ok(meta_obj) = repo.find_object(meta_entry.id(), Some(ObjectType::Blob)) {
+            if let Ok(meta_blob) = meta_obj.peel_to_blob() {
+                wire::parse_meta(meta_blob.content())
+                    .ok()
+                    .and_then(|m| m.root_slug)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Build state
     let mut state = CanonicalState::new();
     for bead in beads {
@@ -527,7 +560,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<CanonicalState, 
         state.insert_dep(dep);
     }
 
-    Ok(state)
+    Ok(LoadedStore { state, root_slug })
 }
 
 /// Compute diff between two states for commit message.
@@ -659,6 +692,90 @@ pub fn sync_with_retry(
     }
 }
 
+/// Derive a root slug from repository info.
+///
+/// Priority:
+/// 1. Remote URL basename (e.g., "github.com/foo/bar.git" -> "bar")
+/// 2. Working directory name (e.g., "/home/user/bar" -> "bar")
+/// 3. Fallback to "bd"
+///
+/// The slug is sanitized to be valid for bead IDs (lowercase alphanumeric + hyphens).
+fn derive_root_slug(repo: &Repository) -> String {
+    // Try remote URL first
+    if let Ok(remote) = repo.find_remote("origin")
+        && let Some(url) = remote.url()
+        && let Some(slug) = extract_slug_from_url(url)
+    {
+        return slug;
+    }
+
+    // Try workdir name
+    if let Some(workdir) = repo.workdir()
+        && let Some(name) = workdir.file_name().and_then(|n| n.to_str())
+    {
+        let sanitized = sanitize_slug(name);
+        if !sanitized.is_empty() {
+            return sanitized;
+        }
+    }
+
+    // Fallback
+    "bd".to_string()
+}
+
+/// Extract a slug from a git remote URL.
+fn extract_slug_from_url(url: &str) -> Option<String> {
+    // Handle various URL formats:
+    // - git@github.com:user/repo.git
+    // - https://github.com/user/repo.git
+    // - https://github.com/user/repo
+    // - file:///path/to/repo
+
+    let path = if url.contains(':') && !url.contains("://") {
+        // SSH format: git@github.com:user/repo.git
+        url.split(':').next_back()?
+    } else {
+        // URL format or file path
+        url.trim_end_matches('/')
+    };
+
+    // Get the last path component
+    let basename = path.rsplit('/').next()?;
+
+    // Remove .git suffix
+    let name = basename.strip_suffix(".git").unwrap_or(basename);
+
+    let sanitized = sanitize_slug(name);
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+/// Sanitize a string into a valid bead ID slug.
+fn sanitize_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_hyphen = true; // Prevent leading hyphens
+
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            last_was_hyphen = false;
+        } else if !last_was_hyphen && (c == '-' || c == '_' || c == '.') {
+            slug.push('-');
+            last_was_hyphen = true;
+        }
+    }
+
+    // Remove trailing hyphens
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    slug
+}
+
 /// Initialize the beads ref if it doesn't exist.
 ///
 /// Handles the race condition where multiple daemons try to init:
@@ -709,12 +826,15 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
             return Ok(());
         }
 
+        // Derive root slug from repo name
+        let root_slug = derive_root_slug(repo);
+
         // Create empty initial state
         let state = CanonicalState::new();
         let state_bytes = wire::serialize_state(&state);
         let tombs_bytes = wire::serialize_tombstones(&state);
         let deps_bytes = wire::serialize_deps(&state);
-        let meta_bytes = wire::serialize_meta();
+        let meta_bytes = wire::serialize_meta(Some(&root_slug));
 
         // Write blobs
         let state_oid = repo.blob(&state_bytes)?;

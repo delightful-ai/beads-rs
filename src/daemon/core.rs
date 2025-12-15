@@ -133,13 +133,17 @@ impl Daemon {
                 .map_err(|_| OpError::Internal("git thread not responding"))?;
 
             match respond_rx.recv() {
-                Ok(Ok(state)) => {
-                    if let Some(max_stamp) = state.max_write_stamp() {
+                Ok(Ok(loaded)) => {
+                    if let Some(max_stamp) = loaded.state.max_write_stamp() {
                         self.clock.receive(&max_stamp);
                     }
                     self.repos.insert(
                         remote.clone(),
-                        RepoState::with_state_and_path(state, repo.to_owned()),
+                        RepoState::with_state_and_path(
+                            loaded.state,
+                            loaded.root_slug,
+                            repo.to_owned(),
+                        ),
                     );
                 }
                 Ok(Err(SyncError::NoLocalRef(_))) => {
@@ -191,12 +195,16 @@ impl Daemon {
                 .map_err(|_| OpError::Internal("git thread not responding"))?;
 
             match respond_rx.recv() {
-                Ok(Ok(state)) => {
-                    if let Some(max_stamp) = state.max_write_stamp() {
+                Ok(Ok(loaded)) => {
+                    if let Some(max_stamp) = loaded.state.max_write_stamp() {
                         self.clock.receive(&max_stamp);
                     }
                     if let Some(repo_state) = self.repo_state_mut(&remote) {
-                        repo_state.state = state;
+                        repo_state.state = loaded.state;
+                        // Update root_slug if remote has one and we don't
+                        if loaded.root_slug.is_some() {
+                            repo_state.root_slug = loaded.root_slug;
+                        }
                         repo_state.last_refresh = Some(Instant::now());
                     }
                 }

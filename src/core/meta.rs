@@ -42,17 +42,34 @@ impl Default for FormatVersion {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
     pub format_version: FormatVersion,
+    /// Root slug for bead IDs in this repository.
+    /// When set, new bead IDs will use this slug (e.g., "myproject-xxx").
+    /// When None, falls back to inferring from existing IDs or "bd".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_slug: Option<String>,
 }
 
 impl Meta {
     pub fn new(format_version: FormatVersion) -> Self {
-        Self { format_version }
+        Self {
+            format_version,
+            root_slug: None,
+        }
     }
 
     /// Create meta with current format version.
     pub fn current() -> Self {
         Self {
             format_version: FormatVersion::CURRENT,
+            root_slug: None,
+        }
+    }
+
+    /// Create meta with a specific root slug.
+    pub fn with_root_slug(root_slug: String) -> Self {
+        Self {
+            format_version: FormatVersion::CURRENT,
+            root_slug: Some(root_slug),
         }
     }
 }

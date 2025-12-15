@@ -7,7 +7,7 @@ use git2::Repository;
 use crate::Error;
 use crate::core::CanonicalState;
 use crate::git::SyncError;
-use crate::git::sync::read_state_at_oid;
+use crate::git::sync::{LoadedStore, read_state_at_oid};
 
 /// Open the git repository containing the current directory.
 pub fn discover() -> Result<(Repository, PathBuf), Error> {
@@ -28,6 +28,16 @@ pub fn discover() -> Result<(Repository, PathBuf), Error> {
 ///
 /// Errors if ref doesn't exist (uninitialized repo).
 pub fn load_state(repo: &Repository) -> Result<CanonicalState, Error> {
+    let oid = repo
+        .refname_to_id("refs/heads/beads/store")
+        .map_err(|_| SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
+    Ok(read_state_at_oid(repo, oid)?.state)
+}
+
+/// Load state and metadata from the beads store ref.
+///
+/// Errors if ref doesn't exist (uninitialized repo).
+pub fn load_store(repo: &Repository) -> Result<LoadedStore, Error> {
     let oid = repo
         .refname_to_id("refs/heads/beads/store")
         .map_err(|_| SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
