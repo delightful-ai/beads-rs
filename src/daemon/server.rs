@@ -52,16 +52,14 @@ pub fn run_state_loop(
                         // Sync barrier: wait until repo is clean.
                         if let Request::SyncWait { repo } = request {
                             match daemon.ensure_loaded_and_maybe_start_sync(&repo, &git_tx) {
-                                Ok(remote) => {
-                                    let clean = daemon
-                                        .repo_state(&remote)
-                                        .map(|s| !s.dirty && !s.sync_in_progress)
-                                        .unwrap_or(true);
+                                Ok(loaded) => {
+                                    let repo_state = daemon.repo_state(&loaded);
+                                    let clean = !repo_state.dirty && !repo_state.sync_in_progress;
 
                                     if clean {
                                         let _ = respond.send(Response::ok(super::ipc::ResponsePayload::synced()));
                                     } else {
-                                        sync_waiters.entry(remote).or_default().push(respond);
+                                        sync_waiters.entry(loaded.remote().clone()).or_default().push(respond);
                                     }
                                 }
                                 Err(e) => {
@@ -140,7 +138,7 @@ fn flush_sync_waiters(daemon: &Daemon, waiters: &mut HashMap<RemoteUrl, Vec<Send
         .keys()
         .filter(|remote| {
             daemon
-                .repo_state(remote)
+                .repo_state_by_url(remote)
                 .map(|s| !s.dirty && !s.sync_in_progress)
                 .unwrap_or(true)
         })

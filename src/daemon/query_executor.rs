@@ -24,7 +24,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         match repo_state.state.get_live(id) {
             Some(bead) => {
@@ -52,7 +52,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         let mut views: Vec<IssueSummary> = repo_state
             .state
@@ -130,7 +130,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         // Collect IDs that are blocked by *blocking* deps (kind=blocks).
         let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
@@ -178,7 +178,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         // Check if bead exists
         if repo_state.state.get_live(id).is_none() {
@@ -218,7 +218,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         // Check if bead exists
         if repo_state.state.get_live(id).is_none() {
@@ -253,7 +253,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         let bead = match repo_state.state.get_live(id) {
             Some(b) => b,
@@ -271,7 +271,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         let blocked_by = compute_blocked_by(repo_state);
         let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
@@ -335,7 +335,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         let blocked_by = compute_blocked_by(repo_state);
         let mut out: Vec<BlockedIssue> = Vec::new();
@@ -385,7 +385,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         let status = status.map(|s| s.trim()).filter(|s| !s.is_empty());
         if let Some(s) = status
@@ -462,7 +462,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         let blocked_by = compute_blocked_by(repo_state);
 
@@ -598,7 +598,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         if let Some(id) = id {
             let record = repo_state.state.get_tombstone(id).map(Tombstone::from);
@@ -637,7 +637,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         let statuses = compute_epic_statuses(repo_state, eligible_only);
         Response::ok(ResponsePayload::Query(QueryResult::EpicStatus(statuses)))
@@ -649,7 +649,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote).unwrap();
+        let repo_state = self.repo_state(&remote);
 
         // Run validation checks
         let mut errors = Vec::new();
