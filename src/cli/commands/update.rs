@@ -34,6 +34,9 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
     if let Some(priority) = args.priority {
         patch.priority = Patch::Set(priority);
     }
+    if let Some(bead_type) = args.bead_type {
+        patch.bead_type = Patch::Set(bead_type);
+    }
     if let Some(status) = args.status {
         patch.status = Patch::Set(status);
     }

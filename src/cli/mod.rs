@@ -497,6 +497,10 @@ pub struct UpdateArgs {
     #[arg(short = 'p', long, value_parser = parse_priority)]
     pub priority: Option<Priority>,
 
+    /// Change the issue type (bug, feature, task, epic, chore).
+    #[arg(short = 't', long = "type", alias = "issue-type", value_parser = parse_bead_type)]
+    pub bead_type: Option<BeadType>,
+
     /// Compat: assignee/claim.
     #[arg(short = 'a', long)]
     pub assignee: Option<String>,

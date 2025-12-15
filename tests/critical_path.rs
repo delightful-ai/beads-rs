@@ -528,6 +528,24 @@ fn test_update_bead() {
         .success()
         .stdout(predicate::str::contains("Updated title"));
 
+    // Update type
+    repo.bd()
+        .args(["update", id, "--type=epic", "--json"])
+        .assert()
+        .success();
+
+    repo.bd()
+        .args(["show", id, "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"epic\""));
+
+    // Invalid type should fail.
+    repo.bd()
+        .args(["update", id, "--type=nope"])
+        .assert()
+        .failure();
+
     // Update priority
     repo.bd()
         .args(["update", id, "--priority=0", "--json"])
