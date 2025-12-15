@@ -17,12 +17,19 @@ use crate::git::sync::{SyncProcess, init_beads_ref, sync_with_retry};
 /// Result of a sync operation.
 pub type SyncResult = Result<CanonicalState, SyncError>;
 
+/// Result of a load operation (includes metadata).
+#[derive(Clone)]
+pub struct LoadResult {
+    pub state: CanonicalState,
+    pub root_slug: Option<String>,
+}
+
 /// Operations sent from state thread to git thread.
 pub enum GitOp {
     /// Load state from git ref (blocking - first access to a repo).
     Load {
         repo: PathBuf,
-        respond: Sender<Result<CanonicalState, SyncError>>,
+        respond: Sender<Result<LoadResult, SyncError>>,
     },
 
     /// Background sync (non-blocking - result sent via result channel).
@@ -72,11 +79,14 @@ impl GitWorker {
     }
 
     /// Load state from beads/store ref.
-    pub fn load(&mut self, path: &Path) -> Result<CanonicalState, SyncError> {
+    pub fn load(&mut self, path: &Path) -> Result<LoadResult, SyncError> {
         let repo = self.open(path)?;
         // Always fetch before reading, and fall back to local if remote missing.
         let fetched = SyncProcess::new(path.to_owned()).fetch(repo)?;
-        Ok(fetched.phase.remote_state)
+        Ok(LoadResult {
+            state: fetched.phase.remote_state,
+            root_slug: fetched.phase.root_slug,
+        })
     }
 
     /// Sync local state to remote.

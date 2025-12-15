@@ -129,6 +129,7 @@ impl Daemon {
             (None, None) => (
                 generate_unique_id(
                     &repo_state.state,
+                    repo_state.root_slug.as_deref(),
                     &title,
                     &desc_str,
                     &actor,
@@ -969,13 +970,16 @@ fn next_child_id(state: &crate::core::CanonicalState, parent: &BeadId) -> Result
 /// - Progressive extension on collision using a nonce
 fn generate_unique_id(
     state: &crate::core::CanonicalState,
+    root_slug: Option<&str>,
     title: &str,
     description: &str,
     actor: &crate::core::ActorId,
     stamp: &crate::core::WriteStamp,
     remote: &crate::daemon::RemoteUrl,
 ) -> BeadId {
-    let slug = preferred_bead_slug(state);
+    let slug = root_slug
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| infer_bead_slug(state));
     let num_top_level = state
         .iter_live()
         .filter(|(id, _)| id.is_top_level())
@@ -1048,7 +1052,8 @@ fn generate_hash_suffix(
     encode_base36(&hash[..num_bytes], len)
 }
 
-fn preferred_bead_slug(state: &crate::core::CanonicalState) -> String {
+/// Infer slug from existing beads (fallback when root_slug not set).
+fn infer_bead_slug(state: &crate::core::CanonicalState) -> String {
     use std::collections::BTreeMap;
 
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
