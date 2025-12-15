@@ -362,6 +362,80 @@ fn test_epic_with_subtasks() {
 }
 
 #[test]
+fn test_update_parent_and_unparent() {
+    let repo = TestRepo::new();
+    repo.bd().arg("init").assert().success();
+
+    let output = repo
+        .bd()
+        .args(["create", "Epic", "--type=epic", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let epic_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let output = repo
+        .bd()
+        .args(["create", "Child", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let child_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Reparent.
+    repo.bd()
+        .args(["update", &child_id, "--parent", &epic_id, "--json"])
+        .assert()
+        .success();
+
+    repo.bd()
+        .args(["dep", "tree", &child_id, "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"kind\": \"parent\""))
+        .stdout(predicate::str::contains(format!("\"to\": \"{epic_id}\"")));
+
+    // Unparent.
+    repo.bd()
+        .args(["update", &child_id, "--no-parent", "--json"])
+        .assert()
+        .success();
+
+    repo.bd()
+        .args(["dep", "tree", &child_id, "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"kind\": \"parent\"").not());
+
+    // Invalid parent.
+    repo.bd()
+        .args(["update", &child_id, "--parent=bd-doesnotexist", "--json"])
+        .assert()
+        .failure();
+
+    // Cycle: make child a parent of epic, then attempt to parent epic to child.
+    repo.bd()
+        .args(["update", &child_id, "--parent", &epic_id, "--json"])
+        .assert()
+        .success();
+
+    repo.bd()
+        .args(["update", &epic_id, "--parent", &child_id, "--json"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn test_labels() {
     let repo = TestRepo::new();
     repo.bd().arg("init").assert().success();

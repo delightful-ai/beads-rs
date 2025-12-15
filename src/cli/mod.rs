@@ -467,6 +467,14 @@ pub struct DeletedArgs {
 pub struct UpdateArgs {
     pub id: String,
 
+    /// Reparent the bead (adds/removes `parent` dependency).
+    #[arg(long)]
+    pub parent: Option<String>,
+
+    /// Remove any existing parent relationship.
+    #[arg(long = "no-parent", conflicts_with = "parent")]
+    pub no_parent: bool,
+
     #[arg(long)]
     pub title: Option<String>,
 
