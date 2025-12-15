@@ -20,6 +20,15 @@ use super::identity::BeadId;
 use super::time::WallClock;
 use super::tombstone::{Tombstone, TombstoneKey};
 
+/// Error from requiring a live bead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveLookupError {
+    /// Bead was never created or doesn't exist.
+    NotFound,
+    /// Bead exists but has been deleted.
+    Deleted,
+}
+
 /// Canonical state - the CRDT for the entire bead store.
 ///
 /// Invariant: An ID cannot be both live and globally deleted (tombstone lineage=None).
@@ -98,6 +107,43 @@ impl CanonicalState {
     /// Get a mutable live bead by ID.
     pub fn get_live_mut(&mut self, id: &BeadId) -> Option<&mut Bead> {
         self.live.get_mut(id)
+    }
+
+    /// Require a live bead, returning appropriate error if not found or deleted.
+    ///
+    /// This is a combined lookup that replaces the common pattern of:
+    /// ```ignore
+    /// if state.get_live(id).is_none() {
+    ///     if state.get_tombstone(id).is_some() {
+    ///         return Err(BeadDeleted);
+    ///     }
+    ///     return Err(NotFound);
+    /// }
+    /// let bead = state.get_live(id).unwrap();
+    /// ```
+    pub fn require_live(&self, id: &BeadId) -> Result<&Bead, LiveLookupError> {
+        if let Some(bead) = self.live.get(id) {
+            return Ok(bead);
+        }
+        if self
+            .tombstones
+            .contains_key(&TombstoneKey::global(id.clone()))
+        {
+            return Err(LiveLookupError::Deleted);
+        }
+        Err(LiveLookupError::NotFound)
+    }
+
+    /// Require a mutable live bead, returning appropriate error if not found or deleted.
+    pub fn require_live_mut(&mut self, id: &BeadId) -> Result<&mut Bead, LiveLookupError> {
+        // Check tombstone first to avoid borrowing issues
+        if self
+            .tombstones
+            .contains_key(&TombstoneKey::global(id.clone()))
+        {
+            return Err(LiveLookupError::Deleted);
+        }
+        self.live.get_mut(id).ok_or(LiveLookupError::NotFound)
     }
 
     /// Get the maximum WriteStamp across all beads.
@@ -526,5 +572,98 @@ mod tests {
                 .contains_key(&TombstoneKey::global(id.clone())),
             "tombstone should exist"
         );
+    }
+
+    #[test]
+    fn require_live_returns_bead_when_exists() {
+        use crate::core::bead::{BeadCore, BeadFields};
+        use crate::core::collections::Labels;
+        use crate::core::composite::{Claim, Workflow};
+        use crate::core::crdt::Lww;
+        use crate::core::domain::{BeadType, Priority};
+
+        let mut state = CanonicalState::new();
+        let id = BeadId::parse("bd-abc").unwrap();
+        let stamp = make_stamp(1000, 0, "alice");
+
+        let core = BeadCore::new(id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("test".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        state.insert(Bead::new(core, fields)).unwrap();
+
+        let result = state.require_live(&id);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().fields.title.value, "test");
+    }
+
+    #[test]
+    fn require_live_returns_not_found_for_unknown_id() {
+        let state = CanonicalState::new();
+        let id = BeadId::parse("bd-abc").unwrap();
+
+        let result = state.require_live(&id);
+        assert!(matches!(result, Err(LiveLookupError::NotFound)));
+    }
+
+    #[test]
+    fn require_live_returns_deleted_for_tombstoned_id() {
+        let mut state = CanonicalState::new();
+        let id = BeadId::parse("bd-abc").unwrap();
+        let stamp = make_stamp(1000, 0, "alice");
+
+        state.delete(Tombstone::new(id.clone(), stamp, None));
+
+        let result = state.require_live(&id);
+        assert!(matches!(result, Err(LiveLookupError::Deleted)));
+    }
+
+    #[test]
+    fn require_live_mut_returns_mutable_bead() {
+        use crate::core::bead::{BeadCore, BeadFields};
+        use crate::core::collections::Labels;
+        use crate::core::composite::{Claim, Workflow};
+        use crate::core::crdt::Lww;
+        use crate::core::domain::{BeadType, Priority};
+
+        let mut state = CanonicalState::new();
+        let id = BeadId::parse("bd-abc").unwrap();
+        let stamp = make_stamp(1000, 0, "alice");
+
+        let core = BeadCore::new(id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("test".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        state.insert(Bead::new(core, fields)).unwrap();
+
+        // Modify via require_live_mut
+        let new_stamp = make_stamp(2000, 0, "bob");
+        let bead = state.require_live_mut(&id).unwrap();
+        bead.fields.title = Lww::new("modified".to_string(), new_stamp);
+
+        // Verify modification persisted
+        assert_eq!(state.get_live(&id).unwrap().fields.title.value, "modified");
     }
 }
