@@ -720,17 +720,15 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        // Get actor and current time for checks
+        // Get actor and current time for pre-check
         let actor = self.actor().clone();
         let now_ms = self.clock().wall_ms();
 
-        // Check bead state and claim (scope to drop borrow)
-        {
-            let repo_state = self.repo_state_mut(&remote);
-            let bead = match repo_state.state.get_live(id) {
-                Some(b) => b,
-                None => return Response::err(OpError::NotFound(id.clone())),
-            };
+        let result = self.with_mutation(&remote, |repo_state, stamp| {
+            let bead = repo_state
+                .state
+                .get_live_mut(id)
+                .ok_or_else(|| OpError::NotFound(id.clone()))?;
 
             // Check if already claimed (and not expired)
             if let Claim::Claimed {
@@ -740,35 +738,31 @@ impl Daemon {
             {
                 let now = WallClock(now_ms);
                 if exp >= now && assignee != &actor {
-                    return Response::err(OpError::AlreadyClaimed {
+                    return Err(OpError::AlreadyClaimed {
                         by: assignee.clone(),
                         expires: Some(exp),
                     });
                 }
             }
+
+            let expires = WallClock(stamp.at.wall_ms + lease_secs * 1000);
+            bead.fields.claim = Lww::new(Claim::claimed(actor, Some(expires)), stamp.clone());
+            // Claiming also transitions to in_progress
+            bead.fields.workflow = Lww::new(Workflow::InProgress, stamp);
+
+            Ok(expires)
+        });
+
+        match result {
+            Ok(expires) => {
+                self.mark_dirty_and_schedule(&remote);
+                Response::ok(ResponsePayload::Op(OpResult::Claimed {
+                    id: id.clone(),
+                    expires,
+                }))
+            }
+            Err(e) => Response::err(e),
         }
-
-        // Advance clock (needs &mut self)
-        let write_stamp = self.clock_mut().tick();
-        let expires = WallClock(write_stamp.wall_ms + lease_secs * 1000);
-        let stamp = Stamp {
-            at: write_stamp,
-            by: actor.clone(),
-        };
-
-        // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote);
-        let bead = repo_state.state.get_live_mut(id).unwrap();
-        bead.fields.claim = Lww::new(Claim::claimed(actor, Some(expires)), stamp.clone());
-        // Claiming also transitions to in_progress
-        bead.fields.workflow = Lww::new(Workflow::InProgress, stamp);
-
-        self.mark_dirty_and_schedule(&remote);
-
-        Response::ok(ResponsePayload::Op(OpResult::Claimed {
-            id: id.clone(),
-            expires,
-        }))
     }
 
     /// Release a claim.

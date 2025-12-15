@@ -34,7 +34,7 @@ impl LoadedRemote {
     }
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
-use crate::core::{ActorId, BeadId, CanonicalState};
+use crate::core::{ActorId, BeadId, CanonicalState, Stamp};
 use crate::git::SyncError;
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
@@ -98,6 +98,42 @@ impl Daemon {
         self.repos
             .get_mut(proof.remote())
             .expect("LoadedRemote guarantees repo exists")
+    }
+
+    /// Execute a mutation with clock tick and stamp creation handled atomically.
+    ///
+    /// This helper eliminates the awkward borrow-checker dance where you need to:
+    /// 1. Borrow repo_state to check something
+    /// 2. Drop the borrow to call clock_mut().tick()
+    /// 3. Re-borrow and unwrap (because "I proved it exists earlier")
+    ///
+    /// Instead, the closure receives both the mutable repo state and a fresh stamp,
+    /// allowing "check + mutate" in a single borrow scope.
+    ///
+    /// # Example
+    /// ```ignore
+    /// self.with_mutation(&loaded, |repo_state, stamp| {
+    ///     let bead = repo_state.state.get_live_mut(id)
+    ///         .ok_or_else(|| OpError::NotFound(id.clone()))?;
+    ///     bead.fields.workflow = Lww::new(Workflow::Closed(closure), stamp);
+    ///     Ok(())
+    /// })?;
+    /// ```
+    pub(crate) fn with_mutation<R>(
+        &mut self,
+        proof: &LoadedRemote,
+        f: impl FnOnce(&mut RepoState, Stamp) -> Result<R, OpError>,
+    ) -> Result<R, OpError> {
+        let write_stamp = self.clock_mut().tick();
+        let stamp = Stamp {
+            at: write_stamp,
+            by: self.actor.clone(),
+        };
+        let repo_state = self
+            .repos
+            .get_mut(proof.remote())
+            .expect("LoadedRemote guarantees repo exists");
+        f(repo_state, stamp)
     }
 
     /// Get repo state by raw remote URL (for internal sync waiters, etc.).
