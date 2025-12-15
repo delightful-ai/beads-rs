@@ -51,7 +51,6 @@ pub fn run_daemon() -> Result<()> {
 
     // Create channels.
     let (req_tx, req_rx) = crossbeam::channel::unbounded::<RequestMessage>();
-    let (timer_tx, timer_rx) = crossbeam::channel::unbounded::<RemoteUrl>();
     let (git_tx, git_rx) = crossbeam::channel::unbounded();
     let (git_result_tx, git_result_rx) =
         crossbeam::channel::unbounded::<(RemoteUrl, crate::daemon::SyncResult)>();
@@ -67,12 +66,12 @@ pub fn run_daemon() -> Result<()> {
     let actor = ActorId::new(actor_raw)?;
 
     // Create daemon core and git worker.
-    let daemon = Daemon::new(actor, timer_tx);
+    let daemon = Daemon::new(actor);
     let git_worker = GitWorker::new(git_result_tx);
 
     // Spawn state thread.
     let state_handle = std::thread::spawn(move || {
-        run_state_loop(daemon, req_rx, timer_rx, git_tx, git_result_rx);
+        run_state_loop(daemon, req_rx, git_tx, git_result_rx);
     });
 
     // Spawn git thread.

@@ -3,10 +3,10 @@
 //! Provides:
 //! - `SyncScheduler` - Manages delayed sync triggers
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-
-use crossbeam::channel::Sender;
 
 use super::remote::RemoteUrl;
 
@@ -19,29 +19,38 @@ pub struct SyncScheduler {
     /// Pending syncs: remote -> scheduled fire time.
     pending: HashMap<RemoteUrl, Instant>,
 
+    /// Heap of (fire_at, remote) for fast "next deadline" lookup.
+    ///
+    /// We may push multiple entries for the same remote; stale entries are
+    /// discarded by checking against `pending`.
+    heap: BinaryHeap<Reverse<(Instant, RemoteUrl)>>,
+
     /// Default debounce delay.
     default_delay: Duration,
+}
 
-    /// Channel to send timer completions.
-    timer_tx: Sender<RemoteUrl>,
+impl Default for SyncScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SyncScheduler {
     /// Create a new scheduler.
-    pub fn new(timer_tx: Sender<RemoteUrl>) -> Self {
+    pub fn new() -> Self {
         SyncScheduler {
             pending: HashMap::new(),
+            heap: BinaryHeap::new(),
             default_delay: Duration::from_millis(500),
-            timer_tx,
         }
     }
 
     /// Create with custom default delay.
-    pub fn with_delay(timer_tx: Sender<RemoteUrl>, delay: Duration) -> Self {
+    pub fn with_delay(delay: Duration) -> Self {
         SyncScheduler {
             pending: HashMap::new(),
+            heap: BinaryHeap::new(),
             default_delay: delay,
-            timer_tx,
         }
     }
 
@@ -52,39 +61,50 @@ impl SyncScheduler {
 
     /// Schedule a sync for a repo after a specific delay.
     pub fn schedule_after(&mut self, remote: RemoteUrl, delay: Duration) {
-        let fire_at = Instant::now() + delay;
+        self.schedule_after_at(remote, delay, Instant::now());
+    }
 
-        // Only schedule if not already pending with an earlier time
-        if let Some(&existing) = self.pending.get(&remote)
-            && existing <= fire_at
-        {
-            // Already have an earlier or equal pending sync
+    fn schedule_after_at(&mut self, remote: RemoteUrl, delay: Duration, now: Instant) {
+        let candidate = now + delay;
+        let fire_at = self
+            .pending
+            .get(&remote)
+            .copied()
+            .map(|existing| existing.max(candidate))
+            .unwrap_or(candidate);
+
+        if self.pending.get(&remote).copied() == Some(fire_at) {
             return;
         }
 
         self.pending.insert(remote.clone(), fire_at);
-
-        // Spawn timer thread
-        let tx = self.timer_tx.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(delay);
-            // Ignore send errors - receiver may have been dropped
-            let _ = tx.send(remote);
-        });
+        self.heap.push(Reverse((fire_at, remote)));
     }
 
-    /// Check if a sync should fire for a repo.
-    ///
-    /// Returns true if the repo has a pending sync that's ready.
-    /// Removes the pending entry if it fires.
-    pub fn should_fire(&mut self, remote: &RemoteUrl) -> bool {
-        if let Some(&fire_at) = self.pending.get(remote)
-            && Instant::now() >= fire_at
-        {
-            self.pending.remove(remote);
-            return true;
+    /// Get the next scheduled deadline across all repos, if any.
+    pub fn next_deadline(&mut self) -> Option<Instant> {
+        self.pop_stale();
+        self.heap.peek().map(|Reverse((t, _))| *t)
+    }
+
+    /// Drain all repos whose deadline is due at `now`.
+    pub fn drain_due(&mut self, now: Instant) -> Vec<RemoteUrl> {
+        let mut due = Vec::new();
+        loop {
+            self.pop_stale();
+            let Some(Reverse((fire_at, remote))) = self.heap.peek().cloned() else {
+                break;
+            };
+            if fire_at > now {
+                break;
+            }
+            let _ = self.heap.pop();
+            if self.pending.get(&remote).copied() == Some(fire_at) {
+                self.pending.remove(&remote);
+                due.push(remote);
+            }
         }
-        false
+        due
     }
 
     /// Cancel a pending sync.
@@ -101,52 +121,113 @@ impl SyncScheduler {
     pub fn pending_repos(&self) -> Vec<&RemoteUrl> {
         self.pending.keys().collect()
     }
+
+    fn pop_stale(&mut self) {
+        while let Some(Reverse((fire_at, remote))) = self.heap.peek() {
+            match self.pending.get(remote).copied() {
+                Some(current) if current == *fire_at => break,
+                _ => {
+                    let _ = self.heap.pop();
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crossbeam::channel;
-
     use super::*;
 
     #[test]
-    fn schedule_and_fire() {
-        let (tx, _rx) = channel::unbounded();
-        let mut scheduler = SyncScheduler::with_delay(tx, Duration::from_millis(10));
+    fn schedule_and_drain_due() {
+        let mut scheduler = SyncScheduler::with_delay(Duration::from_millis(10));
 
         let remote = RemoteUrl("example.com/foo/bar".into());
-        scheduler.schedule(remote.clone());
+        let base = Instant::now();
+        scheduler.schedule_after_at(remote.clone(), Duration::from_millis(10), base);
 
         assert!(scheduler.is_pending(&remote));
+        assert_eq!(
+            scheduler.next_deadline(),
+            Some(base + Duration::from_millis(10))
+        );
 
-        // Wait for timer
-        std::thread::sleep(Duration::from_millis(15));
+        let due = scheduler.drain_due(base + Duration::from_millis(9));
+        assert!(due.is_empty());
 
-        assert!(scheduler.should_fire(&remote));
+        let due = scheduler.drain_due(base + Duration::from_millis(10));
+        assert_eq!(due, vec![remote.clone()]);
         assert!(!scheduler.is_pending(&remote));
     }
 
     #[test]
-    fn reschedule_extends() {
-        let (tx, _rx) = channel::unbounded();
-        let mut scheduler = SyncScheduler::with_delay(tx, Duration::from_millis(100));
+    fn reschedule_debounces_later() {
+        let mut scheduler = SyncScheduler::with_delay(Duration::from_millis(10));
 
         let remote = RemoteUrl("example.com/foo/bar".into());
+        let base = Instant::now();
 
-        // Schedule first
-        scheduler.schedule(remote.clone());
+        scheduler.schedule_after_at(remote.clone(), Duration::from_millis(10), base);
+        scheduler.schedule_after_at(
+            remote.clone(),
+            Duration::from_millis(10),
+            base + Duration::from_millis(5),
+        );
 
-        // Schedule again with shorter delay - shouldn't change since we have earlier
-        scheduler.schedule_after(remote.clone(), Duration::from_millis(50));
+        // Debounce pushes the deadline out to (last_schedule + delay).
+        assert_eq!(
+            scheduler.next_deadline(),
+            Some(base + Duration::from_millis(15))
+        );
 
-        // The original schedule should still be pending
         assert!(scheduler.is_pending(&remote));
     }
 
     #[test]
+    fn backoff_never_shortens_deadline() {
+        let mut scheduler = SyncScheduler::with_delay(Duration::from_millis(10));
+
+        let remote = RemoteUrl("example.com/foo/bar".into());
+        let base = Instant::now();
+
+        scheduler.schedule_after_at(remote.clone(), Duration::from_millis(10), base);
+        // Longer backoff should extend the deadline, not be ignored.
+        scheduler.schedule_after_at(
+            remote.clone(),
+            Duration::from_millis(50),
+            base + Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            scheduler.next_deadline(),
+            Some(base + Duration::from_millis(51))
+        );
+    }
+
+    #[test]
+    fn stress_reschedules_do_not_accumulate_due_fires() {
+        let mut scheduler = SyncScheduler::with_delay(Duration::from_millis(10));
+
+        let remote = RemoteUrl("example.com/foo/bar".into());
+        let base = Instant::now();
+
+        for i in 0..1000u64 {
+            scheduler.schedule_after_at(
+                remote.clone(),
+                Duration::from_millis(10),
+                base + Duration::from_millis(i),
+            );
+        }
+
+        let due = scheduler.drain_due(base + Duration::from_millis(1010));
+        assert_eq!(due, vec![remote.clone()]);
+        assert!(scheduler.next_deadline().is_none());
+        assert!(!scheduler.is_pending(&remote));
+    }
+
+    #[test]
     fn cancel() {
-        let (tx, _rx) = channel::unbounded();
-        let mut scheduler = SyncScheduler::with_delay(tx, Duration::from_millis(1000));
+        let mut scheduler = SyncScheduler::with_delay(Duration::from_millis(1000));
 
         let remote = RemoteUrl("example.com/foo/bar".into());
         scheduler.schedule(remote.clone());
