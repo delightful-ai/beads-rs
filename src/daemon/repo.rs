@@ -44,6 +44,9 @@ pub struct RepoState {
 
     /// Number of consecutive sync failures (for exponential backoff).
     pub consecutive_failures: u32,
+
+    /// Monotonic counter for WAL entries.
+    pub wal_sequence: u64,
 }
 
 impl RepoState {
@@ -61,6 +64,7 @@ impl RepoState {
             last_sync_wall_ms: None,
             last_refresh: None,
             consecutive_failures: 0,
+            wal_sequence: 0,
         }
     }
 
@@ -78,6 +82,7 @@ impl RepoState {
             last_sync_wall_ms: None,
             last_refresh: None,
             consecutive_failures: 0,
+            wal_sequence: 0,
         }
     }
 

@@ -55,18 +55,6 @@ pub enum GitOp {
         actor: ActorId,
     },
 
-    /// Local-only commit for durability (blocking - called after each mutation).
-    ///
-    /// Writes state to refs/heads/beads/store without fetching or pushing.
-    /// This ensures acknowledged mutations survive crashes.
-    LocalCommit {
-        repo: PathBuf,
-        remote: RemoteUrl,
-        state: CanonicalState,
-        root_slug: Option<String>,
-        respond: Sender<Result<(), SyncError>>,
-    },
-
     /// Initialize beads ref (blocking - bd init command).
     Init {
         repo: PathBuf,
@@ -179,22 +167,6 @@ impl GitWorker {
         init_beads_ref(repo, 5)
     }
 
-    /// Commit state locally for durability (no fetch/push).
-    ///
-    /// This creates a local-only commit on refs/heads/beads/store,
-    /// ensuring mutations survive daemon crashes. The full sync
-    /// will later merge with remote and push.
-    pub fn commit_local(
-        &mut self,
-        path: &Path,
-        state: &CanonicalState,
-        root_slug: Option<&str>,
-    ) -> Result<(), SyncError> {
-        use crate::git::sync::commit_local_only;
-        let repo = self.open(path)?;
-        commit_local_only(repo, state, root_slug)
-    }
-
     /// Process a single GitOp.
     fn handle_op(&mut self, op: GitOp) -> bool {
         match op {
@@ -216,17 +188,6 @@ impl GitWorker {
             } => {
                 let result = self.sync(&repo, &state, &actor);
                 let _ = self.result_tx.send(GitResult::Sync(remote, result));
-            }
-
-            GitOp::LocalCommit {
-                repo,
-                remote: _,
-                state,
-                root_slug,
-                respond,
-            } => {
-                let result = self.commit_local(&repo, &state, root_slug.as_deref());
-                let _ = respond.send(result);
             }
 
             GitOp::Init { repo, respond } => {
