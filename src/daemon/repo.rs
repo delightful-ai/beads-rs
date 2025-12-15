@@ -180,6 +180,7 @@ mod tests {
         let state = RepoState::new();
         assert!(!state.dirty);
         assert!(!state.sync_in_progress);
+        assert!(!state.refresh_in_progress);
         assert_eq!(state.consecutive_failures, 0);
     }
 

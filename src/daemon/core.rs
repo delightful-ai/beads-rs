@@ -760,3 +760,150 @@ fn error_payload(code: &str, message: &str) -> ErrorPayload {
         details: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::CanonicalState;
+    use crate::daemon::git_worker::LoadResult;
+
+    fn test_actor() -> ActorId {
+        ActorId::new("test@host".to_string()).unwrap()
+    }
+
+    fn test_remote() -> RemoteUrl {
+        RemoteUrl("example.com/test/repo".into())
+    }
+
+    #[test]
+    fn complete_refresh_clears_in_progress_flag() {
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        // Manually insert a repo in refresh_in_progress state
+        let mut repo_state = RepoState::new();
+        repo_state.refresh_in_progress = true;
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        // Complete refresh with success
+        let result = Ok(LoadResult {
+            state: CanonicalState::new(),
+            root_slug: None,
+            needs_sync: false,
+        });
+        daemon.complete_refresh(&remote, result);
+
+        let repo_state = daemon.repos.get(&remote).unwrap();
+        assert!(!repo_state.refresh_in_progress);
+        assert!(repo_state.last_refresh.is_some());
+    }
+
+    #[test]
+    fn complete_refresh_clears_flag_on_error() {
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        let mut repo_state = RepoState::new();
+        repo_state.refresh_in_progress = true;
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        // Complete refresh with error
+        let result = Err(SyncError::NoLocalRef("/test".to_string()));
+        daemon.complete_refresh(&remote, result);
+
+        let repo_state = daemon.repos.get(&remote).unwrap();
+        assert!(!repo_state.refresh_in_progress);
+        // last_refresh should NOT be updated on error
+        assert!(repo_state.last_refresh.is_none());
+    }
+
+    #[test]
+    fn complete_refresh_applies_state_when_clean() {
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        let mut repo_state = RepoState::new();
+        repo_state.refresh_in_progress = true;
+        repo_state.dirty = false; // Clean state
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        // Create fresh state with some content
+        let fresh_state = CanonicalState::new();
+        let result = Ok(LoadResult {
+            state: fresh_state.clone(),
+            root_slug: Some("fresh-slug".to_string()),
+            needs_sync: false,
+        });
+        daemon.complete_refresh(&remote, result);
+
+        let repo_state = daemon.repos.get(&remote).unwrap();
+        assert_eq!(repo_state.root_slug, Some("fresh-slug".to_string()));
+    }
+
+    #[test]
+    fn complete_refresh_skips_state_when_dirty() {
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        let mut repo_state = RepoState::new();
+        repo_state.refresh_in_progress = true;
+        repo_state.dirty = true; // Dirty - mutations happened during refresh
+        repo_state.root_slug = Some("original-slug".to_string());
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        // Try to apply refresh
+        let result = Ok(LoadResult {
+            state: CanonicalState::new(),
+            root_slug: Some("new-slug".to_string()),
+            needs_sync: false,
+        });
+        daemon.complete_refresh(&remote, result);
+
+        let repo_state = daemon.repos.get(&remote).unwrap();
+        // Should keep original slug since dirty
+        assert_eq!(repo_state.root_slug, Some("original-slug".to_string()));
+        // But last_refresh should still be updated
+        assert!(repo_state.last_refresh.is_some());
+    }
+
+    #[test]
+    fn complete_refresh_schedules_sync_when_needs_sync() {
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        let mut repo_state = RepoState::new();
+        repo_state.refresh_in_progress = true;
+        repo_state.dirty = false;
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        // Refresh shows local has changes remote doesn't
+        let result = Ok(LoadResult {
+            state: CanonicalState::new(),
+            root_slug: None,
+            needs_sync: true,
+        });
+        daemon.complete_refresh(&remote, result);
+
+        let repo_state = daemon.repos.get(&remote).unwrap();
+        // Should mark dirty to trigger sync
+        assert!(repo_state.dirty);
+        // And scheduler should have it pending
+        assert!(daemon.scheduler.is_pending(&remote));
+    }
+
+    #[test]
+    fn complete_refresh_unknown_remote_is_noop() {
+        let mut daemon = Daemon::new(test_actor());
+        let unknown = RemoteUrl("unknown.com/repo".into());
+
+        // Should not panic on unknown remote
+        let result = Ok(LoadResult {
+            state: CanonicalState::new(),
+            root_slug: None,
+            needs_sync: false,
+        });
+        daemon.complete_refresh(&unknown, result);
+        // Just verify no panic and daemon is still valid
+        assert!(daemon.repos.is_empty());
+    }
+}
