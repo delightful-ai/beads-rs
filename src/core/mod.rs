@@ -37,7 +37,7 @@ pub use error::{
 };
 pub use identity::{ActorId, BeadId, BranchName, ContentHash, NoteId};
 pub use meta::{FormatVersion, Meta};
-pub use state::{CanonicalState, LiveLookupError};
+pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use stores::{DepStore, TombstoneStore};
 pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};
