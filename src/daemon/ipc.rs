@@ -511,6 +511,10 @@ impl Response {
 }
 
 /// Successful response payload.
+///
+/// Uses untagged serialization for backward compatibility. Unit-like variants
+/// use wrapper structs with a `result` field to avoid serializing as `null`,
+/// which would be ambiguous during deserialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 #[allow(clippy::large_enum_variant)]
@@ -522,15 +526,68 @@ pub enum ResponsePayload {
     Query(QueryResult),
 
     /// Sync completed.
-    Synced,
+    Synced(SyncedPayload),
 
     /// Init completed.
-    Initialized,
-
-    /// Pong.
-    Pong,
+    Initialized(InitializedPayload),
 
     /// Shutdown ack.
+    ShuttingDown(ShuttingDownPayload),
+}
+
+impl ResponsePayload {
+    /// Create a synced payload.
+    pub fn synced() -> Self {
+        ResponsePayload::Synced(SyncedPayload::default())
+    }
+
+    /// Create an initialized payload.
+    pub fn initialized() -> Self {
+        ResponsePayload::Initialized(InitializedPayload::default())
+    }
+
+    /// Create a shutting down payload.
+    pub fn shutting_down() -> Self {
+        ResponsePayload::ShuttingDown(ShuttingDownPayload::default())
+    }
+}
+
+/// Payload for sync completion. Uses typed discriminant for unambiguous deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncedPayload {
+    result: SyncedTag,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+enum SyncedTag {
+    #[default]
+    #[serde(rename = "synced")]
+    Synced,
+}
+
+/// Payload for init completion. Uses typed discriminant for unambiguous deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InitializedPayload {
+    result: InitializedTag,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+enum InitializedTag {
+    #[default]
+    #[serde(rename = "initialized")]
+    Initialized,
+}
+
+/// Payload for shutdown acknowledgment. Uses typed discriminant for unambiguous deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ShuttingDownPayload {
+    result: ShuttingDownTag,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+enum ShuttingDownTag {
+    #[default]
+    #[serde(rename = "shutting_down")]
     ShuttingDown,
 }
 
@@ -1013,9 +1070,45 @@ mod tests {
 
     #[test]
     fn response_ok() {
-        let resp = Response::ok(ResponsePayload::Synced);
+        let resp = Response::ok(ResponsePayload::synced());
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"ok\""));
+        // Synced now serializes to {"result":"synced"}, not null
+        assert!(json.contains("\"result\":\"synced\""));
+    }
+
+    #[test]
+    fn unit_variants_are_distinguishable() {
+        // Each variant must serialize to a distinct, non-null value with result field
+        let synced = serde_json::to_string(&ResponsePayload::synced()).unwrap();
+        let initialized = serde_json::to_string(&ResponsePayload::initialized()).unwrap();
+        let shutting_down = serde_json::to_string(&ResponsePayload::shutting_down()).unwrap();
+
+        assert!(synced.contains("\"result\":\"synced\""));
+        assert!(initialized.contains("\"result\":\"initialized\""));
+        assert!(shutting_down.contains("\"result\":\"shutting_down\""));
+
+        // None serialize as null
+        assert!(!synced.contains("null"));
+        assert!(!initialized.contains("null"));
+        assert!(!shutting_down.contains("null"));
+
+        // All are distinct
+        assert_ne!(synced, initialized);
+        assert_ne!(synced, shutting_down);
+        assert_ne!(initialized, shutting_down);
+    }
+
+    #[test]
+    fn unit_variants_roundtrip() {
+        // Verify each variant can be deserialized back correctly
+        let synced_json = serde_json::to_string(&ResponsePayload::synced()).unwrap();
+        let parsed: ResponsePayload = serde_json::from_str(&synced_json).unwrap();
+        assert!(matches!(parsed, ResponsePayload::Synced(_)));
+
+        let init_json = serde_json::to_string(&ResponsePayload::initialized()).unwrap();
+        let parsed: ResponsePayload = serde_json::from_str(&init_json).unwrap();
+        assert!(matches!(parsed, ResponsePayload::Initialized(_)));
     }
 
     #[test]
@@ -1039,6 +1132,7 @@ mod tests {
         };
         let resp = Response::ok(ResponsePayload::Query(QueryResult::DaemonInfo(info)));
         let json = serde_json::to_string(&resp).unwrap();
+        // Query variant serializes directly to its content (untagged)
         assert!(json.contains("\"result\":\"daemon_info\""));
         assert!(json.contains("\"version\""));
         assert!(json.contains("\"protocol_version\""));

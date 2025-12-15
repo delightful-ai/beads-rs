@@ -16,10 +16,9 @@ pub fn render_human(payload: &ResponsePayload) -> String {
     match payload {
         ResponsePayload::Op(op) => render_op(op),
         ResponsePayload::Query(q) => render_query(q),
-        ResponsePayload::Synced => "synced".into(),
-        ResponsePayload::Initialized => "initialized".into(),
-        ResponsePayload::Pong => "pong".into(),
-        ResponsePayload::ShuttingDown => "shutting down".into(),
+        ResponsePayload::Synced(_) => "synced".into(),
+        ResponsePayload::Initialized(_) => "initialized".into(),
+        ResponsePayload::ShuttingDown(_) => "shutting down".into(),
     }
 }
 
