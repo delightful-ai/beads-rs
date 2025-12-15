@@ -12,6 +12,7 @@ use crate::daemon::IpcError;
 use crate::daemon::ipc::ErrorPayload;
 use crate::daemon::ipc::{encode_response, ensure_socket_dir};
 use crate::daemon::server::RequestMessage;
+use crate::daemon::wal::Wal;
 use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop, run_state_loop};
 use crate::daemon::{Request, Response, decode_request};
 
@@ -81,8 +82,16 @@ pub fn run_daemon() -> Result<()> {
         .unwrap_or(default_actor);
     let actor = ActorId::new(actor_raw)?;
 
+    // Create WAL for mutation durability.
+    let wal = Wal::new(&dir).map_err(|e| match e {
+        crate::daemon::wal::WalError::Io(io) => IpcError::Io(io),
+        crate::daemon::wal::WalError::Json(json) => IpcError::Parse(json),
+        _ => IpcError::DaemonUnavailable(e.to_string()),
+    })?;
+    wal.cleanup_stale().ok(); // Clean up any stale .tmp files from crashes
+
     // Create daemon core and git worker.
-    let daemon = Daemon::new(actor);
+    let daemon = Daemon::new(actor, wal);
     let git_worker = GitWorker::new(git_result_tx);
 
     // Spawn state thread.

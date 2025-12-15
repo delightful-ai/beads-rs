@@ -18,6 +18,7 @@ use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
 use super::repo::RepoState;
 use super::scheduler::SyncScheduler;
+use super::wal::{Wal, WalEntry};
 
 /// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded` or
 /// `Daemon::ensure_repo_fresh`.
@@ -57,18 +58,27 @@ pub struct Daemon {
 
     /// Sync scheduler for debouncing.
     scheduler: SyncScheduler,
+
+    /// Write-ahead log for mutation durability.
+    wal: Wal,
 }
 
 impl Daemon {
     /// Create a new daemon.
-    pub fn new(actor: ActorId) -> Self {
+    pub fn new(actor: ActorId, wal: Wal) -> Self {
         Daemon {
             repos: BTreeMap::new(),
             path_to_remote: HashMap::new(),
             clock: Clock::new(),
             actor,
             scheduler: SyncScheduler::new(),
+            wal,
         }
+    }
+
+    /// Get a reference to the WAL.
+    pub fn wal(&self) -> &Wal {
+        &self.wal
     }
 
     /// Get the actor identity.
@@ -199,16 +209,54 @@ impl Daemon {
                     if let Some(max_stamp) = loaded.state.max_write_stamp() {
                         self.clock.receive(&max_stamp);
                     }
-                    let needs_sync = loaded.needs_sync;
-                    let mut repo_state = RepoState::with_state_and_path(
-                        loaded.state,
-                        loaded.root_slug,
-                        repo.to_owned(),
-                    );
+                    let mut needs_sync = loaded.needs_sync;
+                    let mut state = loaded.state;
+                    let mut root_slug = loaded.root_slug;
 
-                    // If local has changes that remote doesn't (crash recovery,
-                    // or daemon restart with local-only commits), mark dirty
-                    // so sync will push those changes.
+                    // WAL recovery: merge any state from WAL file
+                    if let Ok(Some(wal_entry)) = self.wal.read(&remote) {
+                        tracing::info!(
+                            "recovering WAL for {:?} (sequence {})",
+                            remote,
+                            wal_entry.sequence
+                        );
+
+                        // Advance clock for WAL timestamps
+                        if let Some(max_stamp) = wal_entry.state.max_write_stamp() {
+                            self.clock.receive(&max_stamp);
+                        }
+
+                        // CRDT merge WAL state with git state
+                        match CanonicalState::join(&state, &wal_entry.state) {
+                            Ok(merged) => {
+                                state = merged;
+                                // WAL slug takes precedence if set
+                                if wal_entry.root_slug.is_some() {
+                                    root_slug = wal_entry.root_slug;
+                                }
+                                // WAL had data - need to sync it to remote
+                                needs_sync = true;
+                            }
+                            Err(errs) => {
+                                tracing::warn!(
+                                    "WAL merge failed for {:?}: {:?}, using git state only",
+                                    remote,
+                                    errs
+                                );
+                            }
+                        }
+
+                        // Delete WAL - will be re-written on next mutation
+                        if let Err(e) = self.wal.delete(&remote) {
+                            tracing::warn!("failed to delete WAL for {:?}: {}", remote, e);
+                        }
+                    }
+
+                    let mut repo_state =
+                        RepoState::with_state_and_path(state, root_slug, repo.to_owned());
+
+                    // If local/WAL has changes that remote doesn't (crash recovery),
+                    // mark dirty so sync will push those changes.
                     if needs_sync {
                         repo_state.mark_dirty();
                         self.scheduler.schedule(remote.clone());
@@ -400,6 +448,11 @@ impl Daemon {
                 } else {
                     // No mutations during sync - just take synced state
                     repo_state.complete_sync(synced_state, self.clock.wall_ms());
+
+                    // State is now durable in remote - delete WAL
+                    if let Err(e) = self.wal.delete(remote) {
+                        tracing::warn!("failed to delete WAL after sync for {:?}: {}", remote, e);
+                    }
                 }
             }
             Err(e) => {
@@ -413,42 +466,34 @@ impl Daemon {
         }
     }
 
-    /// Mark repo as dirty, commit locally for durability, and schedule sync.
+    /// Mark repo as dirty, write to WAL for durability, and schedule sync.
     ///
     /// This is the key durability mechanism: before returning success to the client,
-    /// we write the state to a local git commit. If the daemon crashes before the
-    /// debounced sync completes, the state is recoverable from the local ref.
+    /// we write the state to the WAL file. If the daemon crashes before the
+    /// debounced sync completes, the state is recoverable from the WAL on restart.
     ///
     /// Infallible because `LoadedRemote` proves existence.
-    pub fn mark_dirty_and_schedule(&mut self, proof: &LoadedRemote, git_tx: &Sender<GitOp>) {
+    pub fn mark_dirty_and_schedule(&mut self, proof: &LoadedRemote, _git_tx: &Sender<GitOp>) {
         let repo_state = self
             .repos
             .get_mut(proof.remote())
             .expect("LoadedRemote guarantees repo exists");
 
-        // Get data needed for local commit
+        // Get data needed for WAL
         let state = repo_state.state.clone();
         let root_slug = repo_state.root_slug.clone();
-        let path = repo_state.any_valid_path().cloned();
+        let sequence = repo_state.wal_sequence;
+        repo_state.wal_sequence += 1;
 
         repo_state.mark_dirty();
 
-        // Commit locally for durability (blocking)
-        if let Some(repo_path) = path {
-            let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
-            let _ = git_tx.send(GitOp::LocalCommit {
-                repo: repo_path,
-                remote: proof.remote().clone(),
-                state,
-                root_slug,
-                respond: respond_tx,
-            });
-            // Wait for commit to complete - this is intentionally blocking
-            // to ensure durability before we return success to the client.
-            // Errors are logged but don't fail the mutation (degraded durability).
-            if let Err(e) = respond_rx.recv() {
-                tracing::warn!("local commit channel error: {}", e);
-            }
+        // Write to WAL for durability (blocking but fast)
+        let entry = WalEntry::new(state, root_slug, sequence, self.clock.wall_ms());
+
+        if let Err(e) = self.wal.write(proof.remote(), &entry) {
+            tracing::warn!("WAL write failed for {:?}: {}", proof.remote(), e);
+            // Degraded durability - mutation proceeds but won't survive crash
+            // until next successful WAL write or remote sync.
         }
 
         self.scheduler.schedule(proof.remote().clone());
@@ -766,6 +811,8 @@ mod tests {
     use super::*;
     use crate::core::CanonicalState;
     use crate::daemon::git_worker::LoadResult;
+    use crate::daemon::wal::Wal;
+    use tempfile::TempDir;
 
     fn test_actor() -> ActorId {
         ActorId::new("test@host".to_string()).unwrap()
@@ -775,9 +822,16 @@ mod tests {
         RemoteUrl("example.com/test/repo".into())
     }
 
+    fn test_wal() -> (TempDir, Wal) {
+        let tmp = TempDir::new().unwrap();
+        let wal = Wal::new(tmp.path()).unwrap();
+        (tmp, wal)
+    }
+
     #[test]
     fn complete_refresh_clears_in_progress_flag() {
-        let mut daemon = Daemon::new(test_actor());
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
 
         // Manually insert a repo in refresh_in_progress state
@@ -800,7 +854,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_clears_flag_on_error() {
-        let mut daemon = Daemon::new(test_actor());
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
 
         let mut repo_state = RepoState::new();
@@ -819,7 +874,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_applies_state_when_clean() {
-        let mut daemon = Daemon::new(test_actor());
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
 
         let mut repo_state = RepoState::new();
@@ -842,7 +898,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_skips_state_when_dirty() {
-        let mut daemon = Daemon::new(test_actor());
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
 
         let mut repo_state = RepoState::new();
@@ -868,7 +925,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_schedules_sync_when_needs_sync() {
-        let mut daemon = Daemon::new(test_actor());
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
 
         let mut repo_state = RepoState::new();
@@ -893,7 +951,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_unknown_remote_is_noop() {
-        let mut daemon = Daemon::new(test_actor());
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
         let unknown = RemoteUrl("unknown.com/repo".into());
 
         // Should not panic on unknown remote

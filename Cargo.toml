@@ -24,6 +24,7 @@ tracing-tree = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.9"
 sha2 = "0.10"
+hex = "0.4"
 git2 = "0.20"
 crossbeam = "0.8"
 signal-hook = "0.3"

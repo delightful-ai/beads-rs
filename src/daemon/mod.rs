@@ -20,6 +20,7 @@ pub mod repo;
 pub mod run;
 pub mod scheduler;
 pub mod server;
+pub mod wal;
 
 pub use core::{Daemon, LoadedRemote};
 
