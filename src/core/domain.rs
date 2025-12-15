@@ -56,7 +56,7 @@ impl DepKind {
 ///
 /// Validated at construction - invalid values are unrepresentable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "u8", into = "u8")]
 pub struct Priority(u8);
 
 impl Priority {
@@ -88,5 +88,52 @@ impl Priority {
 impl Default for Priority {
     fn default() -> Self {
         Self::MEDIUM
+    }
+}
+
+impl TryFrom<u8> for Priority {
+    type Error = CoreError;
+    fn try_from(n: u8) -> Result<Self, Self::Error> {
+        Priority::new(n)
+    }
+}
+
+impl From<Priority> for u8 {
+    fn from(p: Priority) -> u8 {
+        p.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn priority_serde_validates_on_deserialize() {
+        // Valid values
+        for val in 0..=4u8 {
+            let json = val.to_string();
+            let p: Priority = serde_json::from_str(&json).unwrap();
+            assert_eq!(p.value(), val);
+        }
+
+        // Invalid: out of range
+        let json = "5";
+        let err = serde_json::from_str::<Priority>(json).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+
+        let json = "255";
+        let err = serde_json::from_str::<Priority>(json).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn priority_serde_roundtrip() {
+        for val in 0..=4u8 {
+            let p = Priority::new(val).unwrap();
+            let json = serde_json::to_string(&p).unwrap();
+            let back: Priority = serde_json::from_str(&json).unwrap();
+            assert_eq!(p, back);
+        }
     }
 }
