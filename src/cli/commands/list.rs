@@ -1,7 +1,8 @@
+use super::super::render;
 use super::super::{Ctx, ListArgs, SearchArgs, parse_sort, print_ok, send};
 use crate::core::ActorId;
-use crate::daemon::ipc::Request;
-use crate::daemon::query::Filters;
+use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::query::{Filters, QueryResult};
 use crate::{Error, Result};
 
 pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
@@ -41,6 +42,16 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         filters,
     };
     let ok = send(&req)?;
+
+    // Handle show_labels flag for human output
+    if !ctx.json
+        && let ResponsePayload::Query(QueryResult::Issues(ref views)) = ok
+    {
+        let output = render::render_issue_list_opts(views, args.show_labels);
+        println!("{}", output);
+        return Ok(());
+    }
+
     print_ok(&ok, ctx.json)
 }
 

@@ -105,7 +105,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
 
             println!(
                 "{}",
-                render::render_show(&view, &outgoing_views, &incoming, &notes, args.labels)
+                render::render_show(&view, &outgoing_views, &incoming, &notes)
             );
             Ok(())
         }

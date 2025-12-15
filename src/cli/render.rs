@@ -245,7 +245,6 @@ pub fn render_show(
     outgoing: &[IssueSummary],
     incoming: &IncomingGroups,
     notes: &[Note],
-    show_labels: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("\n{}: {}\n", bead.id, bead.title));
@@ -280,7 +279,7 @@ pub fn render_show(
         out.push_str(&format!("\nAcceptance Criteria:\n{}\n", a));
     }
 
-    if show_labels && !bead.labels.is_empty() {
+    if !bead.labels.is_empty() {
         out.push_str(&format!("\nLabels: {}\n", fmt_labels(&bead.labels)));
     }
 
@@ -559,22 +558,27 @@ fn render_notes(notes: &[Note]) -> String {
 }
 
 fn render_issue_list(views: &[IssueSummary]) -> String {
+    render_issue_list_opts(views, false)
+}
+
+/// Render issue list with options.
+pub fn render_issue_list_opts(views: &[IssueSummary], show_labels: bool) -> String {
     let mut out = String::new();
     for v in views {
-        out.push_str(&render_issue_summary(v));
+        out.push_str(&render_issue_summary_opts(v, show_labels));
         out.push('\n');
     }
     out.trim_end().into()
 }
 
-fn render_issue_summary(v: &IssueSummary) -> String {
+fn render_issue_summary_opts(v: &IssueSummary, show_labels: bool) -> String {
     let mut s = format!("{} [P{}] [{}] {}", v.id, v.priority, v.issue_type, v.status);
     if let Some(a) = &v.assignee
         && !a.is_empty()
     {
         s.push_str(&format!(" @{}", a));
     }
-    if !v.labels.is_empty() {
+    if show_labels && !v.labels.is_empty() {
         s.push_str(&format!(" {}", fmt_labels(&v.labels)));
     }
     s.push_str(&format!(" - {}", v.title));

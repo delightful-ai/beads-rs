@@ -267,10 +267,6 @@ pub struct CreateArgs {
 #[derive(Args, Debug)]
 pub struct ShowArgs {
     pub id: String,
-
-    /// Show labels
-    #[arg(short = 'l', long)]
-    pub labels: bool,
 }
 
 #[derive(Args, Debug)]
@@ -294,6 +290,10 @@ pub struct ListArgs {
     /// Label filter (repeat or comma-separated).
     #[arg(short = 'l', long = "label", alias = "labels", value_delimiter = ',', num_args = 0..)]
     pub labels: Vec<String>,
+
+    /// Show labels in output.
+    #[arg(short = 'L', long = "show-labels")]
+    pub show_labels: bool,
 
     /// Limit results.
     #[arg(short = 'n', long)]
