@@ -14,9 +14,11 @@ use super::Clock;
 use super::git_worker::GitOp;
 use super::ipc::{ErrorPayload, Request, Response, ResponsePayload};
 use super::ops::OpError;
+use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
 use super::repo::RepoState;
 use super::scheduler::SyncScheduler;
+use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{ActorId, BeadId, CanonicalState};
 use crate::git::SyncError;
 
@@ -594,7 +596,13 @@ impl Daemon {
                 }
             }
 
-            Request::Ping => Response::ok(ResponsePayload::Pong),
+            Request::Ping => Response::ok(ResponsePayload::Query(QueryResult::DaemonInfo(
+                ApiDaemonInfo {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: super::ipc::IPC_PROTOCOL_VERSION,
+                    pid: std::process::id(),
+                },
+            ))),
 
             Request::Shutdown => Response::ok(ResponsePayload::ShuttingDown),
         }

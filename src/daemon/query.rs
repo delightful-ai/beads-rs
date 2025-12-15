@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
-    BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult,
+    BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo,
     DeletedLookup as ApiDeletedLookup, DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue,
     IssueSummary, Note as ApiNote, StatusOutput as ApiStatusOutput, Tombstone as ApiTombstone,
 };
@@ -475,6 +475,9 @@ pub enum QueryResult {
 
     /// Validation result.
     Validation { warnings: Vec<String> },
+
+    /// Daemon info (handshake).
+    DaemonInfo(ApiDaemonInfo),
 }
 
 // NOTE: daemon IPC uses the canonical `crate::api` schemas for issues/notes/deps.

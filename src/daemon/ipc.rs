@@ -22,6 +22,8 @@ use super::query::{Filters, Query, QueryResult};
 use crate::core::{BeadId, BeadType, CoreError, DepKind, InvalidId, Priority};
 use crate::error::{Effect, Transience};
 
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
+
 // =============================================================================
 // Request - All IPC requests
 // =============================================================================
@@ -591,6 +593,13 @@ pub enum IpcError {
 
     #[error("daemon unavailable: {0}")]
     DaemonUnavailable(String),
+
+    #[error("daemon version mismatch; restart the daemon and retry")]
+    DaemonVersionMismatch {
+        daemon: Option<crate::api::DaemonInfo>,
+        client_version: String,
+        protocol_version: u32,
+    },
 }
 
 impl IpcError {
@@ -601,6 +610,7 @@ impl IpcError {
             IpcError::InvalidId(_) => "invalid_id",
             IpcError::Disconnected => "disconnected",
             IpcError::DaemonUnavailable(_) => "daemon_unavailable",
+            IpcError::DaemonVersionMismatch { .. } => "daemon_version_mismatch",
         }
     }
 
@@ -610,6 +620,7 @@ impl IpcError {
             IpcError::DaemonUnavailable(_) | IpcError::Io(_) | IpcError::Disconnected => {
                 Transience::Retryable
             }
+            IpcError::DaemonVersionMismatch { .. } => Transience::Retryable,
             IpcError::Parse(_) | IpcError::InvalidId(_) => Transience::Permanent,
         }
     }
@@ -621,6 +632,7 @@ impl IpcError {
             IpcError::DaemonUnavailable(_) | IpcError::Parse(_) | IpcError::InvalidId(_) => {
                 Effect::None
             }
+            IpcError::DaemonVersionMismatch { .. } => Effect::None,
         }
     }
 }
@@ -848,12 +860,14 @@ fn connect_with_autostart(socket: &PathBuf) -> Result<UnixStream, IpcError> {
     }
 }
 
-fn send_request_over_stream(mut stream: UnixStream, req: &Request) -> Result<Response, IpcError> {
+fn write_req_line(stream: &mut UnixStream, req: &Request) -> Result<(), IpcError> {
     let mut json = serde_json::to_string(req)?;
     json.push('\n');
     stream.write_all(json.as_bytes())?;
+    Ok(())
+}
 
-    let mut reader = BufReader::new(stream);
+fn read_resp_line(reader: &mut BufReader<UnixStream>) -> Result<Response, IpcError> {
     let mut line = String::new();
     let bytes_read = reader.read_line(&mut line)?;
     // EOF means daemon closed connection (likely just shut down)
@@ -862,15 +876,75 @@ fn send_request_over_stream(mut stream: UnixStream, req: &Request) -> Result<Res
             "daemon not running (stale socket)".into(),
         ));
     }
-
     Ok(serde_json::from_str(&line)?)
+}
+
+fn verify_daemon_version(
+    writer: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+) -> Result<(), IpcError> {
+    write_req_line(writer, &Request::Ping)?;
+    let resp = read_resp_line(reader)?;
+    let Response::Ok { ok } = resp else {
+        return Err(IpcError::DaemonVersionMismatch {
+            daemon: None,
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: IPC_PROTOCOL_VERSION,
+        });
+    };
+
+    let ResponsePayload::Query(QueryResult::DaemonInfo(info)) = ok else {
+        return Err(IpcError::DaemonVersionMismatch {
+            daemon: None,
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: IPC_PROTOCOL_VERSION,
+        });
+    };
+
+    if info.protocol_version != IPC_PROTOCOL_VERSION || info.version != env!("CARGO_PKG_VERSION") {
+        return Err(IpcError::DaemonVersionMismatch {
+            daemon: Some(info),
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: IPC_PROTOCOL_VERSION,
+        });
+    }
+
+    Ok(())
+}
+
+fn send_request_over_stream(stream: UnixStream, req: &Request) -> Result<Response, IpcError> {
+    let mut writer = stream;
+    let reader_stream = writer.try_clone()?;
+    let mut reader = BufReader::new(reader_stream);
+
+    // Verify daemon version/protocol once per connection.
+    if !matches!(req, Request::Ping) {
+        verify_daemon_version(&mut writer, &mut reader)?;
+    }
+
+    write_req_line(&mut writer, req)?;
+    read_resp_line(&mut reader)
 }
 
 /// Send a request to the daemon and receive a response.
 pub fn send_request(req: &Request) -> Result<Response, IpcError> {
     let socket = socket_path();
-    let stream = connect_with_autostart(&socket)?;
-    send_request_over_stream(stream, req)
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let stream = connect_with_autostart(&socket)?;
+        match send_request_over_stream(stream, req) {
+            Ok(resp) => return Ok(resp),
+            Err(IpcError::DaemonVersionMismatch { daemon, .. }) if attempts == 1 => {
+                // Best-effort restart for daemons new enough to report pid.
+                if let Some(info) = daemon {
+                    let _ = try_restart_daemon(info.pid, &socket);
+                }
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Send a request without auto-starting the daemon.
@@ -881,6 +955,28 @@ pub fn send_request_no_autostart(req: &Request) -> Result<Response, IpcError> {
     let stream = UnixStream::connect(&socket)
         .map_err(|e| IpcError::DaemonUnavailable(format!("daemon not running: {}", e)))?;
     send_request_over_stream(stream, req)
+}
+
+fn try_restart_daemon(pid: u32, socket: &PathBuf) -> Result<(), IpcError> {
+    // Try SIGTERM and wait for the socket to go away.
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if rc != 0 {
+        return Err(IpcError::DaemonUnavailable(format!(
+            "failed to stop daemon pid {pid}"
+        )));
+    }
+
+    let deadline = SystemTime::now() + Duration::from_secs(5);
+    while SystemTime::now() < deadline {
+        if UnixStream::connect(socket).is_err() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    Err(IpcError::DaemonUnavailable(
+        "timed out waiting for daemon to stop".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -932,5 +1028,20 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"err\""));
         assert!(json.contains("not_found"));
+    }
+
+    #[test]
+    fn ping_info_serializes_as_query() {
+        let info = crate::api::DaemonInfo {
+            version: "0.0.0-test".to_string(),
+            protocol_version: IPC_PROTOCOL_VERSION,
+            pid: 123,
+        };
+        let resp = Response::ok(ResponsePayload::Query(QueryResult::DaemonInfo(info)));
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"result\":\"daemon_info\""));
+        assert!(json.contains("\"version\""));
+        assert!(json.contains("\"protocol_version\""));
+        assert!(json.contains("\"pid\""));
     }
 }

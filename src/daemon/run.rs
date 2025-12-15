@@ -12,7 +12,7 @@ use crate::daemon::IpcError;
 use crate::daemon::ipc::ErrorPayload;
 use crate::daemon::ipc::{encode_response, ensure_socket_dir};
 use crate::daemon::server::RequestMessage;
-use crate::daemon::{Daemon, GitWorker, RemoteUrl, run_git_loop, run_state_loop, socket_path};
+use crate::daemon::{Daemon, GitWorker, RemoteUrl, run_git_loop, run_state_loop};
 use crate::daemon::{Request, Response, decode_request};
 
 /// Run the daemon in the current process.
@@ -20,8 +20,9 @@ use crate::daemon::{Request, Response, decode_request};
 /// This never returns on success until a shutdown signal is received.
 pub fn run_daemon() -> Result<()> {
     // Ensure socket directory exists with safe permissions.
-    let _ = ensure_socket_dir()?;
-    let socket = socket_path();
+    let dir = ensure_socket_dir()?;
+    let socket = dir.join("daemon.sock");
+    let meta_path = dir.join("daemon.meta.json");
 
     // If another daemon is already listening, exit quietly.
     if UnixStream::connect(&socket).is_ok() {
@@ -40,6 +41,22 @@ pub fn run_daemon() -> Result<()> {
         let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
     }
     eprintln!("daemon listening on {:?}", socket);
+
+    // Write daemon metadata for client version checks.
+    let meta = crate::api::DaemonInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: crate::daemon::ipc::IPC_PROTOCOL_VERSION,
+        pid: std::process::id(),
+    };
+    let _ = std::fs::write(
+        &meta_path,
+        serde_json::to_vec(&meta).unwrap_or_else(|_| b"{}".to_vec()),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&meta_path, std::fs::Permissions::from_mode(0o600));
+    }
 
     // Set up signal handling for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -122,6 +139,7 @@ pub fn run_daemon() -> Result<()> {
     let _ = git_handle.join();
 
     let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&meta_path);
     eprintln!("daemon stopped");
     Ok(())
 }
