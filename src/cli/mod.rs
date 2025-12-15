@@ -267,6 +267,10 @@ pub struct CreateArgs {
 #[derive(Args, Debug)]
 pub struct ShowArgs {
     pub id: String,
+
+    /// Show labels
+    #[arg(short = 'l', long)]
+    pub labels: bool,
 }
 
 #[derive(Args, Debug)]
@@ -534,7 +538,9 @@ pub struct CloseArgs {
 
 #[derive(Args, Debug)]
 pub struct DeleteArgs {
-    pub id: String,
+    /// One or more issue IDs to delete.
+    #[arg(required = true, num_args = 1..)]
+    pub ids: Vec<String>,
 
     #[arg(long)]
     pub reason: Option<String>,

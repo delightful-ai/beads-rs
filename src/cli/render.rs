@@ -245,6 +245,7 @@ pub fn render_show(
     outgoing: &[IssueSummary],
     incoming: &IncomingGroups,
     notes: &[Note],
+    show_labels: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("\n{}: {}\n", bead.id, bead.title));
@@ -279,7 +280,7 @@ pub fn render_show(
         out.push_str(&format!("\nAcceptance Criteria:\n{}\n", a));
     }
 
-    if !bead.labels.is_empty() {
+    if show_labels && !bead.labels.is_empty() {
         out.push_str(&format!("\nLabels: {}\n", fmt_labels(&bead.labels)));
     }
 

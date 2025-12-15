@@ -264,7 +264,7 @@ impl Daemon {
         }
 
         // Mark dirty and schedule sync
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::Created { id }))
     }
@@ -394,7 +394,7 @@ impl Daemon {
         }
 
         // Mark dirty and schedule sync
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::Updated { id: id.clone() }))
     }
@@ -447,7 +447,7 @@ impl Daemon {
         let closure = Closure::new(reason, on_branch);
         bead.fields.workflow = Lww::new(Workflow::Closed(closure), stamp);
 
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::Closed { id: id.clone() }))
     }
@@ -493,7 +493,7 @@ impl Daemon {
         };
         bead.fields.workflow = Lww::new(Workflow::Open, stamp);
 
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::Reopened { id: id.clone() }))
     }
@@ -537,7 +537,7 @@ impl Daemon {
         repo_state.state.remove_live(id);
         repo_state.state.insert_tombstone(tombstone);
 
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::Deleted { id: id.clone() }))
     }
@@ -578,8 +578,9 @@ impl Daemon {
             }
 
             // Check for circular dependency: if there's a path from `to` to `from`,
-            // adding `from -> to` would create a cycle
-            if would_create_cycle(&repo_state.state, from, to) {
+            // adding `from -> to` would create a cycle.
+            // Only DAG-enforced kinds (Blocks, Parent) reject cycles.
+            if would_create_cycle(&repo_state.state, from, to, kind) {
                 return Response::err(OpError::ValidationFailed {
                     field: "dependency".into(),
                     reason: format!(
@@ -606,7 +607,7 @@ impl Daemon {
 
         repo_state.state.insert_dep(edge);
 
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::DepAdded {
             from: from.clone(),
@@ -656,7 +657,7 @@ impl Daemon {
 
         repo_state.state.insert_dep(edge);
 
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::DepRemoved {
             from: from.clone(),
@@ -702,7 +703,7 @@ impl Daemon {
         let note = Note::new(note_id.clone(), content, actor, write_stamp);
         bead.notes.insert(note);
 
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::NoteAdded {
             bead_id: id.clone(),
@@ -758,7 +759,7 @@ impl Daemon {
 
         match result {
             Ok(expires) => {
-                self.mark_dirty_and_schedule(&remote);
+                self.mark_dirty_and_schedule(&remote, git_tx);
                 Response::ok(ResponsePayload::Op(OpResult::Claimed {
                     id: id.clone(),
                     expires,
@@ -811,7 +812,7 @@ impl Daemon {
         // Unclaiming transitions back to open
         bead.fields.workflow = Lww::new(Workflow::Open, stamp);
 
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::Unclaimed { id: id.clone() }))
     }
@@ -866,7 +867,7 @@ impl Daemon {
         };
         bead.fields.claim = Lww::new(Claim::claimed(actor, Some(expires)), stamp);
 
-        self.mark_dirty_and_schedule(&remote);
+        self.mark_dirty_and_schedule(&remote, git_tx);
 
         Response::ok(ResponsePayload::Op(OpResult::ClaimExtended {
             id: id.clone(),
@@ -1108,11 +1109,27 @@ fn encode_base36(bytes: &[u8], len: usize) -> String {
 }
 
 /// Check if adding a dependency from `from` to `to` would create a cycle.
-/// Returns true if there's already a path from `to` back to `from` (via deps_from).
-fn would_create_cycle(state: &crate::core::CanonicalState, from: &BeadId, to: &BeadId) -> bool {
+///
+/// Only checks for cycles when the dependency kind requires DAG enforcement
+/// (i.e., `Blocks` and `Parent`). `Related` and `DiscoveredFrom` are
+/// informational links that can form cycles.
+///
+/// Returns true if there's already a path from `to` back to `from` via
+/// DAG-enforced edges.
+fn would_create_cycle(
+    state: &crate::core::CanonicalState,
+    from: &BeadId,
+    to: &BeadId,
+    kind: DepKind,
+) -> bool {
     use std::collections::HashSet;
 
-    // BFS from `to` following deps_from edges to see if we can reach `from`
+    // Only DAG-enforced kinds need cycle checking
+    if !kind.requires_dag() {
+        return false;
+    }
+
+    // BFS from `to` following DAG-enforced deps to see if we can reach `from`
     let mut visited = HashSet::new();
     let mut queue = vec![to.clone()];
 
@@ -1125,9 +1142,9 @@ fn would_create_cycle(state: &crate::core::CanonicalState, from: &BeadId, to: &B
         }
         visited.insert(current.clone());
 
-        // Follow outgoing deps (current depends on these)
+        // Follow outgoing DAG-enforced deps only
         for edge in state.deps_from(&current) {
-            if !visited.contains(edge.key.to()) {
+            if edge.key.kind().requires_dag() && !visited.contains(edge.key.to()) {
                 queue.push(edge.key.to().clone());
             }
         }

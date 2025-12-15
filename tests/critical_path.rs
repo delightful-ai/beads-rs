@@ -1846,6 +1846,145 @@ fn test_self_dependency_prevention() {
         );
 }
 
+/// Related dependencies should allow cycles (they're informational links).
+#[test]
+fn test_related_deps_allow_cycles() {
+    let repo = TestRepo::new();
+    repo.bd().arg("init").assert().success();
+
+    // Create two issues
+    let out1 = repo
+        .bd()
+        .args(["create", "Issue A", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let out2 = repo
+        .bd()
+        .args(["create", "Issue B", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A related to B
+    repo.bd()
+        .args(["dep", "add", &id_a, &id_b, "--kind=related"])
+        .assert()
+        .success();
+
+    // B related to A - should succeed (cycles allowed for related)
+    repo.bd()
+        .args(["dep", "add", &id_b, &id_a, "--kind=related"])
+        .assert()
+        .success();
+}
+
+/// discovered_from deps should also allow cycles.
+#[test]
+fn test_discovered_from_deps_allow_cycles() {
+    let repo = TestRepo::new();
+    repo.bd().arg("init").assert().success();
+
+    // Create two issues
+    let out1 = repo
+        .bd()
+        .args(["create", "Issue A", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let out2 = repo
+        .bd()
+        .args(["create", "Issue B", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A discovered from B
+    repo.bd()
+        .args(["dep", "add", &id_a, &id_b, "--kind=discovered_from"])
+        .assert()
+        .success();
+
+    // B discovered from A - should succeed (cycles allowed for discovered_from)
+    repo.bd()
+        .args(["dep", "add", &id_b, &id_a, "--kind=discovered_from"])
+        .assert()
+        .success();
+}
+
+/// Parent deps should still enforce DAG (no cycles).
+#[test]
+fn test_parent_deps_reject_cycles() {
+    let repo = TestRepo::new();
+    repo.bd().arg("init").assert().success();
+
+    // Create two issues
+    let out1 = repo
+        .bd()
+        .args(["create", "Issue A", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let out2 = repo
+        .bd()
+        .args(["create", "Issue B", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A's parent is B
+    repo.bd()
+        .args(["dep", "add", &id_a, &id_b, "--kind=parent"])
+        .assert()
+        .success();
+
+    // B's parent is A - should fail (cycles rejected for parent)
+    repo.bd()
+        .args(["dep", "add", &id_b, &id_a, "--kind=parent"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("circular").or(predicate::str::contains("cycle")));
+}
+
 #[test]
 fn test_operations_on_deleted_issue() {
     let repo = TestRepo::new();
