@@ -32,7 +32,9 @@ pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
 pub use dep::{DepEdge, DepKey, DepLife};
 pub use domain::{BeadType, DepKind, Priority};
-pub use error::{CollisionError, CoreError, InvalidId, InvalidLabel, RangeError};
+pub use error::{
+    CollisionError, CoreError, InvalidDependency, InvalidId, InvalidLabel, RangeError,
+};
 pub use identity::{ActorId, BeadId, BranchName, ContentHash, NoteId};
 pub use meta::{FormatVersion, Meta};
 pub use state::CanonicalState;

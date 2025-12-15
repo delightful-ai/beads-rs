@@ -232,7 +232,15 @@ impl Daemon {
             if repo_state.state.get_live(&parent_id).is_none() {
                 return Response::err(OpError::NotFound(parent_id));
             }
-            let key = DepKey::new(id.clone(), parent_id, DepKind::Parent);
+            let key = match DepKey::new(id.clone(), parent_id, DepKind::Parent) {
+                Ok(k) => k,
+                Err(e) => {
+                    return Response::err(OpError::ValidationFailed {
+                        field: "parent".into(),
+                        reason: e.reason,
+                    });
+                }
+            };
             repo_state
                 .state
                 .insert_dep(DepEdge::new(key, stamp.clone()));
@@ -240,7 +248,15 @@ impl Daemon {
 
         // Dependency edges.
         for (kind, to) in parsed_deps {
-            let key = DepKey::new(id.clone(), to, kind);
+            let key = match DepKey::new(id.clone(), to, kind) {
+                Ok(k) => k,
+                Err(e) => {
+                    return Response::err(OpError::ValidationFailed {
+                        field: "dependency".into(),
+                        reason: e.reason,
+                    });
+                }
+            };
             repo_state
                 .state
                 .insert_dep(DepEdge::new(key, stamp.clone()));
@@ -533,13 +549,16 @@ impl Daemon {
         kind: DepKind,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        // Check for self-dependency
-        if from == to {
-            return Response::err(OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: "cannot create self-dependency".into(),
-            });
-        }
+        // Validate DepKey (rejects self-dependencies)
+        let key = match DepKey::new(from.clone(), to.clone(), kind) {
+            Ok(k) => k,
+            Err(e) => {
+                return Response::err(OpError::ValidationFailed {
+                    field: "dependency".into(),
+                    reason: e.reason,
+                });
+            }
+        };
 
         let remote = match self.ensure_repo_loaded(repo, git_tx) {
             Ok(r) => r,
@@ -581,7 +600,6 @@ impl Daemon {
         let repo_state = self.repo_state_mut(&remote).unwrap();
 
         // Create dependency edge (new edges are active by default)
-        let key = DepKey::new(from.clone(), to.clone(), kind);
         let edge = DepEdge::new(key, stamp);
 
         repo_state.state.insert_dep(edge);
@@ -603,6 +621,17 @@ impl Daemon {
         kind: DepKind,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        // Validate DepKey (self-deps can't exist, so can't be removed)
+        let key = match DepKey::new(from.clone(), to.clone(), kind) {
+            Ok(k) => k,
+            Err(e) => {
+                return Response::err(OpError::ValidationFailed {
+                    field: "dependency".into(),
+                    reason: e.reason,
+                });
+            }
+        };
+
         let remote = match self.ensure_repo_loaded(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
@@ -620,7 +649,6 @@ impl Daemon {
         let repo_state = self.repo_state_mut(&remote).unwrap();
 
         // Create a deleted edge (will merge with existing)
-        let key = DepKey::new(from.clone(), to.clone(), kind);
         let life = Lww::new(DepLife::Deleted, stamp.clone());
         let edge = DepEdge::with_life(key, stamp, life);
 
@@ -1090,8 +1118,8 @@ fn would_create_cycle(state: &crate::core::CanonicalState, from: &BeadId, to: &B
 
         // Follow outgoing deps (current depends on these)
         for edge in state.deps_from(&current) {
-            if !visited.contains(&edge.key.to) {
-                queue.push(edge.key.to.clone());
+            if !visited.contains(edge.key.to()) {
+                queue.push(edge.key.to().clone());
             }
         }
     }

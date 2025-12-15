@@ -144,7 +144,8 @@ mod tests {
             BeadId::parse("bd-abc").unwrap(),
             BeadId::parse("bd-xyz").unwrap(),
             DepKind::Blocks,
-        );
+        )
+        .unwrap();
 
         // Insert edge
         let edge1 = DepEdge::new(key.clone(), make_stamp(1000, "alice"));

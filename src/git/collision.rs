@@ -159,7 +159,7 @@ fn resolve_single(
     // 2. Update deps referencing old ID
     let deps_to_update: Vec<_> = state
         .iter_deps()
-        .filter(|(key, _)| key.from == *old_id || key.to == *old_id)
+        .filter(|(key, _)| key.from() == old_id || key.to() == old_id)
         .map(|(key, edge)| (key.clone(), edge.clone()))
         .collect();
 
@@ -168,19 +168,22 @@ fn resolve_single(
         state.remove_dep(&old_key);
 
         // Create new dep with updated ID
-        let new_key = DepKey::new(
-            if old_key.from == *old_id {
-                new_id.clone()
-            } else {
-                old_key.from.clone()
-            },
-            if old_key.to == *old_id {
-                new_id.clone()
-            } else {
-                old_key.to.clone()
-            },
-            old_key.kind,
-        );
+        let new_from = if old_key.from() == old_id {
+            new_id.clone()
+        } else {
+            old_key.from().clone()
+        };
+        let new_to = if old_key.to() == old_id {
+            new_id.clone()
+        } else {
+            old_key.to().clone()
+        };
+
+        // This should always succeed since we're remapping existing deps
+        // (if old_key was valid, new_key will be valid unless from == to after remap,
+        // which can't happen since old_id != new_id)
+        let new_key = DepKey::new(new_from, new_to, old_key.kind())
+            .expect("collision remap should not create self-dep");
 
         let new_edge = DepEdge::new(new_key, edge.created.clone());
         state.insert_dep(new_edge);

@@ -6,26 +6,77 @@
 //! The `DepLife` enum with `Lww<DepLife>` makes delete-vs-restore
 //! pure LWW comparison - algebraically cleaner than `Option<Stamp>`.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::crdt::Lww;
 use super::domain::DepKind;
+use super::error::InvalidDependency;
 use super::identity::BeadId;
 use super::time::Stamp;
 
 /// Dependency identity tuple.
 ///
-/// Deps are unique by (from, to, kind).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Deps are unique by (from, to, kind). Self-dependencies are structurally
+/// impossible - the constructor validates that `from != to`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DepKey {
-    pub from: BeadId,
-    pub to: BeadId,
-    pub kind: DepKind,
+    from: BeadId,
+    to: BeadId,
+    kind: DepKind,
 }
 
 impl DepKey {
-    pub fn new(from: BeadId, to: BeadId, kind: DepKind) -> Self {
-        Self { from, to, kind }
+    /// Create a new dependency key.
+    ///
+    /// Returns an error if `from == to` (self-dependency).
+    pub fn new(from: BeadId, to: BeadId, kind: DepKind) -> Result<Self, InvalidDependency> {
+        if from == to {
+            return Err(InvalidDependency {
+                reason: format!("cannot create self-dependency on {}", from),
+            });
+        }
+        Ok(Self { from, to, kind })
+    }
+
+    /// Get the source bead ID (the bead that depends on another).
+    pub fn from(&self) -> &BeadId {
+        &self.from
+    }
+
+    /// Get the target bead ID (the bead being depended on).
+    pub fn to(&self) -> &BeadId {
+        &self.to
+    }
+
+    /// Get the dependency kind.
+    pub fn kind(&self) -> DepKind {
+        self.kind
+    }
+}
+
+/// Serde proxy for DepKey that validates on deserialization.
+#[derive(Serialize, Deserialize)]
+struct DepKeyProxy {
+    from: BeadId,
+    to: BeadId,
+    kind: DepKind,
+}
+
+impl Serialize for DepKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        DepKeyProxy {
+            from: self.from.clone(),
+            to: self.to.clone(),
+            kind: self.kind,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DepKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let proxy = DepKeyProxy::deserialize(deserializer)?;
+        DepKey::new(proxy.from, proxy.to, proxy.kind).map_err(serde::de::Error::custom)
     }
 }
 
@@ -137,6 +188,42 @@ mod tests {
             BeadId::parse("bd-xyz").unwrap(),
             DepKind::Blocks,
         )
+        .unwrap()
+    }
+
+    #[test]
+    fn self_dependency_rejected() {
+        let id = BeadId::parse("bd-abc").unwrap();
+        let result = DepKey::new(id.clone(), id, DepKind::Blocks);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.reason.contains("self-dependency"));
+    }
+
+    #[test]
+    fn accessors_work() {
+        let from = BeadId::parse("bd-abc").unwrap();
+        let to = BeadId::parse("bd-xyz").unwrap();
+        let key = DepKey::new(from.clone(), to.clone(), DepKind::Parent).unwrap();
+        assert_eq!(key.from(), &from);
+        assert_eq!(key.to(), &to);
+        assert_eq!(key.kind(), DepKind::Parent);
+    }
+
+    #[test]
+    fn serde_roundtrip() {
+        let key = make_key();
+        let json = serde_json::to_string(&key).unwrap();
+        let parsed: DepKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(key, parsed);
+    }
+
+    #[test]
+    fn serde_rejects_self_dep() {
+        // Manually craft JSON with from == to
+        let json = r#"{"from":"bd-abc","to":"bd-abc","kind":"blocks"}"#;
+        let result: Result<DepKey, _> = serde_json::from_str(json);
+        assert!(result.is_err());
     }
 
     #[test]
