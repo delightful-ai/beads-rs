@@ -25,7 +25,7 @@ bd init
 bd setup claude # or cursor or aider
 ```
 
-and you're done!
+then, ask your coding agent to run `bd onboard`, and you're done!
 
 ## why
 
