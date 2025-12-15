@@ -50,6 +50,14 @@ impl DepKind {
             Self::DiscoveredFrom => "discovered_from",
         }
     }
+
+    /// Returns true if this dependency kind requires DAG enforcement (no cycles).
+    ///
+    /// - `Blocks` and `Parent` have ordering semantics and must be acyclic.
+    /// - `Related` and `DiscoveredFrom` are informational links and can be cyclic.
+    pub fn requires_dag(&self) -> bool {
+        matches!(self, Self::Blocks | Self::Parent)
+    }
 }
 
 /// Priority level: 0-4 inclusive, 0 = critical.

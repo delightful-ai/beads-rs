@@ -776,6 +776,67 @@ fn sanitize_slug(name: &str) -> String {
     slug
 }
 
+/// Commit state locally without fetching or pushing.
+///
+/// This is used for durability: after each mutation, we commit locally
+/// so the change survives crashes. The full sync will later merge with
+/// remote and push.
+///
+/// The commit is parented on the current local ref (if it exists),
+/// maintaining a linear local history that gets "squashed" when pushed.
+pub fn commit_local_only(
+    repo: &Repository,
+    state: &CanonicalState,
+    root_slug: Option<&str>,
+) -> Result<(), SyncError> {
+    // Get current local ref as parent (if exists)
+    let parent_oid = repo.refname_to_id("refs/heads/beads/store").ok();
+
+    // Serialize state to blobs
+    let state_bytes = wire::serialize_state(state);
+    let tombs_bytes = wire::serialize_tombstones(state);
+    let deps_bytes = wire::serialize_deps(state);
+    let meta_bytes = wire::serialize_meta(root_slug);
+
+    // Write blobs to ODB
+    let state_oid = repo.blob(&state_bytes)?;
+    let tombs_oid = repo.blob(&tombs_bytes)?;
+    let deps_oid = repo.blob(&deps_bytes)?;
+    let meta_oid = repo.blob(&meta_bytes)?;
+
+    // Build tree
+    let mut builder = repo.treebuilder(None)?;
+    builder.insert("state.jsonl", state_oid, 0o100644)?;
+    builder.insert("tombstones.jsonl", tombs_oid, 0o100644)?;
+    builder.insert("deps.jsonl", deps_oid, 0o100644)?;
+    builder.insert("meta.json", meta_oid, 0o100644)?;
+    let tree_oid = builder.write()?;
+    let tree = repo.find_tree(tree_oid)?;
+
+    // Create signature
+    let sig = Signature::now("beads", "beads@localhost")?;
+
+    // Create commit with single parent (linear history)
+    let parents: Vec<_> = if let Some(oid) = parent_oid {
+        let parent_commit = repo.find_commit(oid)?;
+        vec![parent_commit]
+    } else {
+        vec![]
+    };
+
+    let parent_refs: Vec<_> = parents.iter().collect();
+    repo.commit(
+        Some("refs/heads/beads/store"),
+        &sig,
+        &sig,
+        "beads(local): mutation",
+        &tree,
+        &parent_refs,
+    )?;
+
+    Ok(())
+}
+
 /// Initialize the beads ref if it doesn't exist.
 ///
 /// Handles the race condition where multiple daemons try to init:
