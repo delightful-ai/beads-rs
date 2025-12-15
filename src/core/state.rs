@@ -315,7 +315,7 @@ impl CanonicalState {
     pub fn deps_from(&self, id: &BeadId) -> Vec<&DepEdge> {
         self.deps
             .values()
-            .filter(|e| e.is_active() && &e.key.from == id)
+            .filter(|e| e.is_active() && e.key.from() == id)
             .collect()
     }
 
@@ -323,7 +323,7 @@ impl CanonicalState {
     pub fn deps_to(&self, id: &BeadId) -> Vec<&DepEdge> {
         self.deps
             .values()
-            .filter(|e| e.is_active() && &e.key.to == id)
+            .filter(|e| e.is_active() && e.key.to() == id)
             .collect()
     }
 

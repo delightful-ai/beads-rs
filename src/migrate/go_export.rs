@@ -340,7 +340,7 @@ fn dep_to_edge(dep: &GoDependency, actor: &ActorId, root_slug: &str) -> Result<D
         .unwrap_or_else(|| actor.as_str().to_string());
     let created_by = ActorId::new(created_by_raw)?;
     let created_stamp = Stamp::new(WriteStamp::new(created_ms, 0), created_by);
-    let key = DepKey::new(from, to, kind);
+    let key = DepKey::new(from, to, kind).map_err(crate::core::CoreError::from)?;
     Ok(DepEdge::new(key, created_stamp))
 }
 

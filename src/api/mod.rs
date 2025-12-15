@@ -159,9 +159,9 @@ pub struct DepEdge {
 impl From<&CoreDepEdge> for DepEdge {
     fn from(edge: &CoreDepEdge) -> Self {
         Self {
-            from: edge.key.from.as_str().to_string(),
-            to: edge.key.to.as_str().to_string(),
-            kind: edge.key.kind.as_str().to_string(),
+            from: edge.key.from().as_str().to_string(),
+            to: edge.key.to().as_str().to_string(),
+            kind: edge.key.kind().as_str().to_string(),
             created_at: edge.created.at.clone(),
             created_by: edge.created.by.as_str().to_string(),
             deleted_at: edge.deleted_stamp().map(|s| s.at.clone()),

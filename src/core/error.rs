@@ -48,6 +48,13 @@ pub struct CollisionError {
     pub id: String,
 }
 
+/// Invalid dependency edge.
+#[derive(Debug, Error, Clone)]
+#[error("invalid dependency: {reason}")]
+pub struct InvalidDependency {
+    pub reason: String,
+}
+
 /// Canonical error enum for core capability.
 #[derive(Debug, Error, Clone)]
 #[non_exhaustive]
@@ -60,6 +67,8 @@ pub enum CoreError {
     Range(#[from] RangeError),
     #[error(transparent)]
     Collision(#[from] CollisionError),
+    #[error(transparent)]
+    InvalidDependency(#[from] InvalidDependency),
 }
 
 impl CoreError {

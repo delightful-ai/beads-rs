@@ -190,9 +190,9 @@ pub fn serialize_deps(state: &CanonicalState) -> Vec<u8> {
 
     for (_, edge) in deps {
         let wire = WireDep {
-            from: edge.key.from.as_str().to_string(),
-            to: edge.key.to.as_str().to_string(),
-            kind: dep_kind_to_str(edge.key.kind),
+            from: edge.key.from().as_str().to_string(),
+            to: edge.key.to().as_str().to_string(),
+            kind: dep_kind_to_str(edge.key.kind()),
             created_at: stamp_to_wire(&edge.created.at),
             created_by: edge.created.by.as_str().to_string(),
             deleted_at: edge.deleted_stamp().map(|s| stamp_to_wire(&s.at)),
@@ -297,7 +297,8 @@ pub fn parse_deps(bytes: &[u8]) -> Result<Vec<DepEdge>, WireError> {
             BeadId::parse(&wire.from).map_err(|e| WireError::InvalidValue(e.to_string()))?,
             BeadId::parse(&wire.to).map_err(|e| WireError::InvalidValue(e.to_string()))?,
             str_to_dep_kind(&wire.kind)?,
-        );
+        )
+        .map_err(|e| WireError::InvalidValue(e.reason))?;
         let created = Stamp::new(
             wire_to_stamp(wire.created_at),
             ActorId::new(wire.created_by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
