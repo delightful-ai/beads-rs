@@ -18,6 +18,21 @@ use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
 use super::repo::RepoState;
 use super::scheduler::SyncScheduler;
+
+/// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded` or
+/// `Daemon::ensure_repo_fresh`.
+///
+/// This type provides compile-time proof that a repo exists in the daemon's state,
+/// eliminating the need for `.unwrap()` calls when accessing repo state after loading.
+#[derive(Debug, Clone)]
+pub struct LoadedRemote(RemoteUrl);
+
+impl LoadedRemote {
+    /// Get the underlying remote URL.
+    pub fn remote(&self) -> &RemoteUrl {
+        &self.0
+    }
+}
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{ActorId, BeadId, CanonicalState};
 use crate::git::SyncError;
@@ -71,14 +86,24 @@ impl Daemon {
         &mut self.clock
     }
 
-    /// Get repo state by remote if loaded.
-    pub(crate) fn repo_state(&self, remote: &RemoteUrl) -> Option<&RepoState> {
-        self.repos.get(remote)
+    /// Get repo state. Infallible because `LoadedRemote` proves existence.
+    pub(crate) fn repo_state(&self, proof: &LoadedRemote) -> &RepoState {
+        self.repos
+            .get(proof.remote())
+            .expect("LoadedRemote guarantees repo exists")
     }
 
-    /// Get mutable repo state by remote if loaded.
-    pub(crate) fn repo_state_mut(&mut self, remote: &RemoteUrl) -> Option<&mut RepoState> {
-        self.repos.get_mut(remote)
+    /// Get mutable repo state. Infallible because `LoadedRemote` proves existence.
+    pub(crate) fn repo_state_mut(&mut self, proof: &LoadedRemote) -> &mut RepoState {
+        self.repos
+            .get_mut(proof.remote())
+            .expect("LoadedRemote guarantees repo exists")
+    }
+
+    /// Get repo state by raw remote URL (for internal sync waiters, etc.).
+    /// Returns None if not loaded.
+    pub(crate) fn repo_state_by_url(&self, remote: &RemoteUrl) -> Option<&RepoState> {
+        self.repos.get(remote)
     }
 
     /// Resolve a repo path to a normalized remote URL.
@@ -114,11 +139,12 @@ impl Daemon {
     /// Ensure repo is loaded, fetching from git if needed.
     ///
     /// This is a blocking operation - sends Load to git thread and waits.
+    /// Returns a `LoadedRemote` proof that can be used for infallible state access.
     pub fn ensure_repo_loaded(
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<RemoteUrl, OpError> {
+    ) -> Result<LoadedRemote, OpError> {
         let remote = self.resolve_remote(repo)?;
         self.path_to_remote.insert(repo.to_owned(), remote.clone());
 
@@ -160,30 +186,28 @@ impl Daemon {
             repo_state.register_path(repo.to_owned());
         }
 
-        Ok(remote)
+        Ok(LoadedRemote(remote))
     }
 
     /// Ensure repo is loaded and reasonably fresh from remote.
     ///
     /// For clean (non-dirty) repos, we periodically re-load from git so read-only
     /// commands observe updates pushed by other machines or daemons.
+    /// Returns a `LoadedRemote` proof that can be used for infallible state access.
     pub fn ensure_repo_fresh(
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<RemoteUrl, OpError> {
-        let remote = self.ensure_repo_loaded(repo, git_tx)?;
+    ) -> Result<LoadedRemote, OpError> {
+        let loaded = self.ensure_repo_loaded(repo, git_tx)?;
 
-        let needs_refresh = self
-            .repo_state(&remote)
-            .map(|s| {
-                !s.dirty
-                    && !s.sync_in_progress
-                    && s.last_refresh
-                        .map(|t| t.elapsed() >= REFRESH_TTL)
-                        .unwrap_or(true)
-            })
-            .unwrap_or(false);
+        let repo_state = self.repo_state(&loaded);
+        let needs_refresh = !repo_state.dirty
+            && !repo_state.sync_in_progress
+            && repo_state
+                .last_refresh
+                .map(|t| t.elapsed() >= REFRESH_TTL)
+                .unwrap_or(true);
 
         if needs_refresh {
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
@@ -195,18 +219,17 @@ impl Daemon {
                 .map_err(|_| OpError::Internal("git thread not responding"))?;
 
             match respond_rx.recv() {
-                Ok(Ok(loaded)) => {
-                    if let Some(max_stamp) = loaded.state.max_write_stamp() {
+                Ok(Ok(fresh)) => {
+                    if let Some(max_stamp) = fresh.state.max_write_stamp() {
                         self.clock.receive(&max_stamp);
                     }
-                    if let Some(repo_state) = self.repo_state_mut(&remote) {
-                        repo_state.state = loaded.state;
-                        // Update root_slug if remote has one and we don't
-                        if loaded.root_slug.is_some() {
-                            repo_state.root_slug = loaded.root_slug;
-                        }
-                        repo_state.last_refresh = Some(Instant::now());
+                    let repo_state = self.repo_state_mut(&loaded);
+                    repo_state.state = fresh.state;
+                    // Update root_slug if remote has one and we don't
+                    if fresh.root_slug.is_some() {
+                        repo_state.root_slug = fresh.root_slug;
                     }
+                    repo_state.last_refresh = Some(Instant::now());
                 }
                 Ok(Err(SyncError::NoLocalRef(_))) => {
                     return Err(OpError::RepoNotInitialized(repo.to_owned()));
@@ -220,7 +243,7 @@ impl Daemon {
             }
         }
 
-        Ok(remote)
+        Ok(loaded)
     }
 
     /// Maybe start a background sync for a repo.
@@ -257,10 +280,10 @@ impl Daemon {
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<RemoteUrl, OpError> {
-        let remote = self.ensure_repo_loaded(repo, git_tx)?;
-        self.maybe_start_sync(&remote, git_tx);
-        Ok(remote)
+    ) -> Result<LoadedRemote, OpError> {
+        let loaded = self.ensure_repo_loaded(repo, git_tx)?;
+        self.maybe_start_sync(loaded.remote(), git_tx);
+        Ok(loaded)
     }
 
     /// Complete a sync operation.
@@ -310,12 +333,14 @@ impl Daemon {
         }
     }
 
-    /// Mark repo as dirty and schedule sync.
-    pub fn mark_dirty_and_schedule(&mut self, remote: &RemoteUrl) {
-        if let Some(repo_state) = self.repos.get_mut(remote) {
-            repo_state.mark_dirty();
-            self.scheduler.schedule(remote.clone());
-        }
+    /// Mark repo as dirty and schedule sync. Infallible because `LoadedRemote` proves existence.
+    pub fn mark_dirty_and_schedule(&mut self, proof: &LoadedRemote) {
+        let repo_state = self
+            .repos
+            .get_mut(proof.remote())
+            .expect("LoadedRemote guarantees repo exists");
+        repo_state.mark_dirty();
+        self.scheduler.schedule(proof.remote().clone());
     }
 
     pub fn next_sync_deadline(&mut self) -> Option<Instant> {

@@ -21,7 +21,7 @@ pub mod run;
 pub mod scheduler;
 pub mod server;
 
-pub use core::Daemon;
+pub use core::{Daemon, LoadedRemote};
 
 pub use clock::Clock;
 pub use git_worker::{GitOp, GitWorker, SyncResult, run_git_loop};

@@ -82,7 +82,7 @@ impl Daemon {
         };
 
         // Re-borrow repo_state for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
 
         // Parse dependency specs first (for validation + source_repo inheritance).
         let parsed_deps = match parse_dep_specs(&dependencies) {
@@ -134,7 +134,7 @@ impl Daemon {
                     &desc_str,
                     &actor,
                     &write_stamp,
-                    &remote,
+                    remote.remote(),
                 ),
                 None,
             ),
@@ -290,7 +290,7 @@ impl Daemon {
 
         // Check bead existence and CAS (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             let bead = match repo_state.state.get_live(id) {
                 Some(b) => b,
                 None => {
@@ -319,7 +319,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
         let bead = repo_state.state.get_live_mut(id).unwrap();
 
         // Apply patch
@@ -417,7 +417,7 @@ impl Daemon {
 
         // Check bead state (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             let bead = match repo_state.state.get_live(id) {
                 Some(b) => b,
                 None => return Response::err(OpError::NotFound(id.clone())),
@@ -441,7 +441,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
         let bead = repo_state.state.get_live_mut(id).unwrap();
         let closure = Closure::new(reason, on_branch);
         bead.fields.workflow = Lww::new(Workflow::Closed(closure), stamp);
@@ -460,7 +460,7 @@ impl Daemon {
 
         // Check bead state (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             let bead = match repo_state.state.get_live(id) {
                 Some(b) => b,
                 None => return Response::err(OpError::NotFound(id.clone())),
@@ -485,7 +485,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
         let bead = repo_state.state.get_live_mut(id).unwrap();
         bead.fields.workflow = Lww::new(Workflow::Open, stamp);
 
@@ -509,7 +509,7 @@ impl Daemon {
 
         // Check bead existence (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             if repo_state.state.get_live(id).is_none() {
                 if repo_state.state.get_tombstone(id).is_some() {
                     return Response::err(OpError::BeadDeleted(id.clone()));
@@ -527,7 +527,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
 
         // Create tombstone
         let tombstone = Tombstone::new(id.clone(), stamp, reason);
@@ -568,7 +568,7 @@ impl Daemon {
 
         // Check both beads exist and detect cycles (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             if repo_state.state.get_live(from).is_none() {
                 return Response::err(OpError::NotFound(from.clone()));
             }
@@ -598,7 +598,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
 
         // Create dependency edge (new edges are active by default)
         let edge = DepEdge::new(key, stamp);
@@ -647,7 +647,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
 
         // Create a deleted edge (will merge with existing)
         let life = Lww::new(DepLife::Deleted, stamp.clone());
@@ -678,7 +678,7 @@ impl Daemon {
 
         // Check bead existence (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             if repo_state.state.get_live(id).is_none() {
                 return Response::err(OpError::NotFound(id.clone()));
             }
@@ -689,7 +689,8 @@ impl Daemon {
         let actor = self.actor().clone();
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
+        // Safe: bead existence checked above
         let bead = repo_state.state.get_live_mut(id).unwrap();
 
         // Generate unique note ID
@@ -725,7 +726,7 @@ impl Daemon {
 
         // Check bead state and claim (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             let bead = match repo_state.state.get_live(id) {
                 Some(b) => b,
                 None => return Response::err(OpError::NotFound(id.clone())),
@@ -756,7 +757,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
         let bead = repo_state.state.get_live_mut(id).unwrap();
         bead.fields.claim = Lww::new(Claim::claimed(actor, Some(expires)), stamp.clone());
         // Claiming also transitions to in_progress
@@ -782,7 +783,7 @@ impl Daemon {
 
         // Check bead state and claim ownership (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             let bead = match repo_state.state.get_live(id) {
                 Some(b) => b,
                 None => return Response::err(OpError::NotFound(id.clone())),
@@ -804,7 +805,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
         let bead = repo_state.state.get_live_mut(id).unwrap();
         bead.fields.claim = Lww::new(Claim::Unclaimed, stamp.clone());
         // Unclaiming transitions back to open
@@ -833,7 +834,7 @@ impl Daemon {
 
         // Check bead state and claim ownership (scope to drop borrow)
         {
-            let repo_state = self.repo_state_mut(&remote).unwrap();
+            let repo_state = self.repo_state_mut(&remote);
             let bead = match repo_state.state.get_live(id) {
                 Some(b) => b,
                 None => return Response::err(OpError::NotFound(id.clone())),
@@ -858,7 +859,7 @@ impl Daemon {
         };
 
         // Re-borrow for mutations
-        let repo_state = self.repo_state_mut(&remote).unwrap();
+        let repo_state = self.repo_state_mut(&remote);
         let bead = repo_state.state.get_live_mut(id).unwrap();
         bead.fields.claim = Lww::new(Claim::claimed(actor, Some(expires)), stamp);
 
