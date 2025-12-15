@@ -14,7 +14,7 @@ use super::error::{CoreError, InvalidId};
 ///
 /// Agents name themselves. No validation beyond non-empty.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct ActorId(String);
 
 impl ActorId {
@@ -48,6 +48,19 @@ impl fmt::Display for ActorId {
     }
 }
 
+impl TryFrom<String> for ActorId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        ActorId::new(s)
+    }
+}
+
+impl From<ActorId> for String {
+    fn from(id: ActorId) -> String {
+        id.0
+    }
+}
+
 /// Alphabet for bead IDs (legacy + hash IDs).
 ///
 /// beads-go hash IDs are lowercase hex, but legacy short IDs were lowercase
@@ -63,7 +76,7 @@ const NOTE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopq
 /// Suffix is lowercase alphanumeric. Hierarchical children append `.N`.
 /// Only daemon generates new IDs (pub(crate)).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct BeadId(String);
 
 impl BeadId {
@@ -237,11 +250,24 @@ impl fmt::Display for BeadId {
     }
 }
 
+impl TryFrom<String> for BeadId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        BeadId::parse(&s)
+    }
+}
+
+impl From<BeadId> for String {
+    fn from(id: BeadId) -> String {
+        id.0
+    }
+}
+
 /// Note identifier - unique within a bead.
 ///
 /// Daemon-generated, no specific format required.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct NoteId(String);
 
 impl NoteId {
@@ -285,6 +311,19 @@ impl fmt::Debug for NoteId {
 impl fmt::Display for NoteId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for NoteId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        NoteId::new(s)
+    }
+}
+
+impl From<NoteId> for String {
+    fn from(id: NoteId) -> String {
+        id.0
     }
 }
 
@@ -469,5 +508,68 @@ mod tests {
         let id = BeadId::parse("beads-rs-abc1.2").unwrap();
         let rewritten = id.with_slug("other-repo").unwrap();
         assert_eq!(rewritten.as_str(), "other-repo-abc1.2");
+    }
+
+    // Serde boundary validation tests
+    #[test]
+    fn actor_id_serde_validates_on_deserialize() {
+        // Valid
+        let json = r#""some-actor""#;
+        let actor: ActorId = serde_json::from_str(json).unwrap();
+        assert_eq!(actor.as_str(), "some-actor");
+
+        // Invalid: empty
+        let json = r#""""#;
+        let err = serde_json::from_str::<ActorId>(json).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn bead_id_serde_validates_on_deserialize() {
+        // Valid
+        let json = r#""bd-abc123""#;
+        let id: BeadId = serde_json::from_str(json).unwrap();
+        assert_eq!(id.as_str(), "bd-abc123");
+
+        // Invalid: missing separator
+        let json = r#""invalid""#;
+        let err = serde_json::from_str::<BeadId>(json).unwrap_err();
+        assert!(err.to_string().contains("separator"));
+
+        // Invalid: empty
+        let json = r#""""#;
+        let err = serde_json::from_str::<BeadId>(json).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn note_id_serde_validates_on_deserialize() {
+        // Valid
+        let json = r#""note123""#;
+        let id: NoteId = serde_json::from_str(json).unwrap();
+        assert_eq!(id.as_str(), "note123");
+
+        // Invalid: empty
+        let json = r#""""#;
+        let err = serde_json::from_str::<NoteId>(json).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn identity_types_serde_roundtrip() {
+        let actor = ActorId::new("test-actor").unwrap();
+        let json = serde_json::to_string(&actor).unwrap();
+        let back: ActorId = serde_json::from_str(&json).unwrap();
+        assert_eq!(actor, back);
+
+        let bead = BeadId::parse("bd-xyz").unwrap();
+        let json = serde_json::to_string(&bead).unwrap();
+        let back: BeadId = serde_json::from_str(&json).unwrap();
+        assert_eq!(bead, back);
+
+        let note = NoteId::new("note-id").unwrap();
+        let json = serde_json::to_string(&note).unwrap();
+        let back: NoteId = serde_json::from_str(&json).unwrap();
+        assert_eq!(note, back);
     }
 }
