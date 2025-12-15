@@ -656,6 +656,8 @@ pub enum IpcError {
         daemon: Option<crate::api::DaemonInfo>,
         client_version: String,
         protocol_version: u32,
+        /// If set, the mismatch was detected via a parse failure.
+        parse_error: Option<String>,
     },
 }
 
@@ -936,17 +938,39 @@ fn read_resp_line(reader: &mut BufReader<UnixStream>) -> Result<Response, IpcErr
     Ok(serde_json::from_str(&line)?)
 }
 
+/// Read response line, converting parse errors to version mismatch.
+///
+/// Used during version verification where a parse failure likely indicates
+/// an incompatible daemon version.
+fn read_resp_line_version_check(reader: &mut BufReader<UnixStream>) -> Result<Response, IpcError> {
+    let mut line = String::new();
+    let bytes_read = reader.read_line(&mut line)?;
+    if bytes_read == 0 || line.trim().is_empty() {
+        return Err(IpcError::DaemonUnavailable(
+            "daemon not running (stale socket)".into(),
+        ));
+    }
+    serde_json::from_str(&line).map_err(|e| IpcError::DaemonVersionMismatch {
+        daemon: None,
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: IPC_PROTOCOL_VERSION,
+        parse_error: Some(e.to_string()),
+    })
+}
+
 fn verify_daemon_version(
     writer: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
 ) -> Result<(), IpcError> {
     write_req_line(writer, &Request::Ping)?;
-    let resp = read_resp_line(reader)?;
+    // Use version-check variant that converts parse errors to version mismatch
+    let resp = read_resp_line_version_check(reader)?;
     let Response::Ok { ok } = resp else {
         return Err(IpcError::DaemonVersionMismatch {
             daemon: None,
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: IPC_PROTOCOL_VERSION,
+            parse_error: None,
         });
     };
 
@@ -955,6 +979,7 @@ fn verify_daemon_version(
             daemon: None,
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: IPC_PROTOCOL_VERSION,
+            parse_error: Some("unexpected response payload type".into()),
         });
     };
 
@@ -963,6 +988,7 @@ fn verify_daemon_version(
             daemon: Some(info),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: IPC_PROTOCOL_VERSION,
+            parse_error: None,
         });
     }
 
@@ -993,9 +1019,14 @@ pub fn send_request(req: &Request) -> Result<Response, IpcError> {
         match send_request_over_stream(stream, req) {
             Ok(resp) => return Ok(resp),
             Err(IpcError::DaemonVersionMismatch { daemon, .. }) if attempts == 1 => {
-                // Best-effort restart for daemons new enough to report pid.
+                // Try to restart the daemon. If we have a PID, use it.
+                // Otherwise, try to find and kill the daemon by socket.
                 if let Some(info) = daemon {
                     let _ = try_restart_daemon(info.pid, &socket);
+                } else {
+                    // No PID available (likely old daemon or parse error).
+                    // Try to kill by finding the process holding the socket.
+                    let _ = try_restart_daemon_by_socket(&socket);
                 }
                 continue;
             }
@@ -1034,6 +1065,28 @@ fn try_restart_daemon(pid: u32, socket: &PathBuf) -> Result<(), IpcError> {
     Err(IpcError::DaemonUnavailable(
         "timed out waiting for daemon to stop".into(),
     ))
+}
+
+/// Try to restart daemon when we don't have the PID.
+///
+/// This is a fallback for when the daemon is too old to report its PID,
+/// or when we couldn't parse the response at all. We remove the socket
+/// file to force a fresh daemon on the next connection attempt.
+fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
+    // Remove the socket file. The old daemon will continue running but
+    // won't receive new connections. A new daemon will be spawned on
+    // the next connection attempt.
+    //
+    // This is imperfect (orphans the old daemon) but better than failing.
+    // The old daemon will eventually exit when it has no work.
+    if let Err(e) = fs::remove_file(socket)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(IpcError::DaemonUnavailable(format!(
+            "failed to remove stale socket: {e}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1137,5 +1190,113 @@ mod tests {
         assert!(json.contains("\"version\""));
         assert!(json.contains("\"protocol_version\""));
         assert!(json.contains("\"pid\""));
+    }
+
+    #[test]
+    fn version_mismatch_error_includes_parse_error() {
+        let err = IpcError::DaemonVersionMismatch {
+            daemon: None,
+            client_version: "0.1.0".into(),
+            protocol_version: 1,
+            parse_error: Some("data did not match any variant".into()),
+        };
+        // Error should indicate version mismatch
+        assert_eq!(err.code(), "daemon_version_mismatch");
+        // The error message should be actionable
+        assert!(err.to_string().contains("restart the daemon"));
+    }
+
+    #[test]
+    fn version_mismatch_is_retryable() {
+        let err = IpcError::DaemonVersionMismatch {
+            daemon: None,
+            client_version: "0.1.0".into(),
+            protocol_version: 1,
+            parse_error: None,
+        };
+        assert!(err.transience().is_retryable());
+    }
+
+    #[test]
+    fn invalid_json_would_cause_parse_error() {
+        // Simulate what an old/incompatible daemon might send
+        let bad_json = r#"{"unexpected": "format"}"#;
+        let result: Result<Response, _> = serde_json::from_str(bad_json);
+        assert!(result.is_err());
+        // This is the error type that would be converted to DaemonVersionMismatch
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("did not match"));
+    }
+
+    // Regression tests: verify all ResponsePayload variants roundtrip through Response
+    mod response_roundtrip {
+        use super::*;
+
+        fn roundtrip_response(resp: Response) {
+            let json = serde_json::to_string(&resp).unwrap();
+            let parsed: Response = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("Failed to parse: {e}\nJSON: {json}"));
+            // Re-serialize to verify structural equality
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2, "Roundtrip mismatch");
+        }
+
+        #[test]
+        fn op_created() {
+            let resp = Response::ok(ResponsePayload::Op(OpResult::Created {
+                id: BeadId::parse("bd-abc").unwrap(),
+            }));
+            roundtrip_response(resp);
+        }
+
+        #[test]
+        fn op_updated() {
+            let resp = Response::ok(ResponsePayload::Op(OpResult::Updated {
+                id: BeadId::parse("bd-abc").unwrap(),
+            }));
+            roundtrip_response(resp);
+        }
+
+        #[test]
+        fn query_issues_empty() {
+            let resp = Response::ok(ResponsePayload::Query(QueryResult::Issues(vec![])));
+            roundtrip_response(resp);
+        }
+
+        #[test]
+        fn query_daemon_info() {
+            let info = crate::api::DaemonInfo {
+                version: "0.1.0".into(),
+                protocol_version: IPC_PROTOCOL_VERSION,
+                pid: 12345,
+            };
+            let resp = Response::ok(ResponsePayload::Query(QueryResult::DaemonInfo(info)));
+            roundtrip_response(resp);
+        }
+
+        #[test]
+        fn synced() {
+            roundtrip_response(Response::ok(ResponsePayload::synced()));
+        }
+
+        #[test]
+        fn initialized() {
+            roundtrip_response(Response::ok(ResponsePayload::initialized()));
+        }
+
+        #[test]
+        fn shutting_down() {
+            roundtrip_response(Response::ok(ResponsePayload::shutting_down()));
+        }
+
+        #[test]
+        fn error_response() {
+            let resp = Response::err(ErrorPayload {
+                code: "test_error".into(),
+                message: "Something went wrong".into(),
+                details: Some(serde_json::json!({"key": "value"})),
+            });
+            roundtrip_response(resp);
+        }
     }
 }
