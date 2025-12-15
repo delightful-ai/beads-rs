@@ -51,9 +51,8 @@ pub fn run_state_loop(
                     Ok(RequestMessage { request, respond }) => {
                         // Sync barrier: wait until repo is clean.
                         if let Request::SyncWait { repo } = request {
-                            match daemon.ensure_repo_loaded(&repo, &git_tx) {
+                            match daemon.ensure_loaded_and_maybe_start_sync(&repo, &git_tx) {
                                 Ok(remote) => {
-                                    daemon.maybe_start_sync(&remote, &git_tx);
                                     let clean = daemon
                                         .repo_state(&remote)
                                         .map(|s| !s.dirty && !s.sync_in_progress)
