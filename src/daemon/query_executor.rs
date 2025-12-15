@@ -614,7 +614,9 @@ impl Daemon {
         let mut tombs: Vec<Tombstone> = repo_state
             .state
             .iter_tombstones()
-            .filter(|(_, t)| cutoff_ms.map(|c| t.deleted.at.wall_ms >= c).unwrap_or(true))
+            .filter(|(_, t)| {
+                t.lineage.is_none() && cutoff_ms.map(|c| t.deleted.at.wall_ms >= c).unwrap_or(true)
+            })
             .map(|(_, t)| Tombstone::from(t))
             .collect();
 

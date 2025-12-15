@@ -903,7 +903,7 @@ fn next_child_id(state: &crate::core::CanonicalState, parent: &BeadId) -> Result
     for id in state
         .iter_live()
         .map(|(id, _)| id)
-        .chain(state.iter_tombstones().map(|(id, _)| id))
+        .chain(state.iter_tombstones().map(|(k, _)| &k.id))
     {
         let Some(rest) = id.as_str().strip_prefix(&prefix) else {
             continue;
@@ -926,7 +926,7 @@ fn next_child_id(state: &crate::core::CanonicalState, parent: &BeadId) -> Result
             }
         })?;
 
-        if state.get_live(&candidate).is_none() && state.get_tombstone(&candidate).is_none() {
+        if !state.contains(&candidate) {
             return Ok(candidate);
         }
         next += 1;
@@ -960,7 +960,7 @@ fn generate_unique_id(
             let short = generate_hash_suffix(title, description, actor, stamp, remote, len, nonce);
             let candidate =
                 BeadId::parse(&format!("{}-{}", slug, short)).expect("generated id must be valid");
-            if state.get_live(&candidate).is_none() && state.get_tombstone(&candidate).is_none() {
+            if !state.contains(&candidate) {
                 return candidate;
             }
         }
@@ -1027,7 +1027,7 @@ fn preferred_bead_slug(state: &crate::core::CanonicalState) -> String {
     for id in state
         .iter_live()
         .map(|(id, _)| id)
-        .chain(state.iter_tombstones().map(|(id, _)| id))
+        .chain(state.iter_tombstones().map(|(k, _)| &k.id))
     {
         *counts.entry(id.slug()).or_default() += 1;
     }
