@@ -1,5 +1,6 @@
 use super::super::render;
 use super::super::{Ctx, UpdateArgs, current_actor_string, fetch_issue, print_ok, send};
+use crate::core::DepKind;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
 use crate::daemon::query::QueryResult;
@@ -7,6 +8,23 @@ use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
     let mut patch = BeadPatch::default();
+
+    let parent_action = if args.no_parent {
+        Some(None)
+    } else if let Some(p) = &args.parent {
+        let v = p.trim();
+        if v.is_empty()
+            || v == "-"
+            || v.eq_ignore_ascii_case("none")
+            || v.eq_ignore_ascii_case("null")
+        {
+            Some(None)
+        } else {
+            Some(Some(v.to_string()))
+        }
+    } else {
+        None
+    };
 
     if let Some(title) = args.title {
         patch.title = Patch::Set(title);
@@ -65,6 +83,49 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
             cas: None,
         };
         let _ = send(&req)?;
+    }
+
+    // Parent relationship (child -> parent edge).
+    if let Some(new_parent) = parent_action {
+        let deps = send(&Request::Deps {
+            repo: ctx.repo.clone(),
+            id: args.id.clone(),
+        })?;
+
+        let outgoing = match deps {
+            ResponsePayload::Query(QueryResult::Deps { outgoing, .. }) => outgoing,
+            _ => Vec::new(),
+        };
+
+        let existing_parents: Vec<String> = outgoing
+            .into_iter()
+            .filter(|e| e.kind == "parent")
+            .map(|e| e.to)
+            .collect();
+
+        if let Some(ref desired) = new_parent
+            && existing_parents.len() == 1
+            && existing_parents[0] == *desired
+        {
+            // No-op.
+        } else {
+            for parent in existing_parents {
+                let _ = send(&Request::RemoveDep {
+                    repo: ctx.repo.clone(),
+                    from: args.id.clone(),
+                    to: parent,
+                    kind: DepKind::Parent,
+                })?;
+            }
+            if let Some(parent) = new_parent {
+                let _ = send(&Request::AddDep {
+                    repo: ctx.repo.clone(),
+                    from: args.id.clone(),
+                    to: parent,
+                    kind: DepKind::Parent,
+                })?;
+            }
+        }
     }
 
     // Notes
