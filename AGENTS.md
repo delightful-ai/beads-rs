@@ -83,7 +83,7 @@ A local daemon holds canonical state in memory and schedules git sync after muta
 - `src/migrate/`: import utilities (currently beads-go JSONL export)
 - `src/bin/`: `bd` entrypoint and tracing setup
 - `.github/`: CI workflows and issue templates
-- `.cargo/config.toml`: local `cargo` aliases (CI currently calls `cargo xtask coverage`; see note below)
+- `.cargo/config.toml`: local `cargo` aliases
 - `flake.nix` / `shell.nix`: optional Nix dev shells
 
 ## AGENTS.md Hierarchy
@@ -130,4 +130,4 @@ AGENTS files are layered “executable context”: when editing `src/daemon/ipc.
 
 ## CI Note
 
-`.github/workflows/build.yml` runs `cargo xtask coverage`, but this repo currently only has the alias in `.cargo/config.toml` and no `xtask` package. If you touch coverage, either add the missing `xtask/` crate or update the workflow.
+This repo does not currently run a coverage job in CI.
