@@ -199,14 +199,22 @@ impl Daemon {
                     if let Some(max_stamp) = loaded.state.max_write_stamp() {
                         self.clock.receive(&max_stamp);
                     }
-                    self.repos.insert(
-                        remote.clone(),
-                        RepoState::with_state_and_path(
-                            loaded.state,
-                            loaded.root_slug,
-                            repo.to_owned(),
-                        ),
+                    let needs_sync = loaded.needs_sync;
+                    let mut repo_state = RepoState::with_state_and_path(
+                        loaded.state,
+                        loaded.root_slug,
+                        repo.to_owned(),
                     );
+
+                    // If local has changes that remote doesn't (crash recovery,
+                    // or daemon restart with local-only commits), mark dirty
+                    // so sync will push those changes.
+                    if needs_sync {
+                        repo_state.mark_dirty();
+                        self.scheduler.schedule(remote.clone());
+                    }
+
+                    self.repos.insert(remote.clone(), repo_state);
                 }
                 Ok(Err(SyncError::NoLocalRef(_))) => {
                     return Err(OpError::RepoNotInitialized(repo.to_owned()));
@@ -227,8 +235,11 @@ impl Daemon {
 
     /// Ensure repo is loaded and reasonably fresh from remote.
     ///
-    /// For clean (non-dirty) repos, we periodically re-load from git so read-only
-    /// commands observe updates pushed by other machines or daemons.
+    /// For clean (non-dirty) repos, we periodically kick off a background refresh
+    /// so read-only commands observe updates pushed by other machines or daemons.
+    /// This is non-blocking - it returns cached state immediately and applies
+    /// fresh state when the background load completes.
+    ///
     /// Returns a `LoadedRemote` proof that can be used for infallible state access.
     pub fn ensure_repo_fresh(
         &mut self,
@@ -240,46 +251,79 @@ impl Daemon {
         let repo_state = self.repo_state(&loaded);
         let needs_refresh = !repo_state.dirty
             && !repo_state.sync_in_progress
+            && !repo_state.refresh_in_progress
             && repo_state
                 .last_refresh
                 .map(|t| t.elapsed() >= REFRESH_TTL)
                 .unwrap_or(true);
 
         if needs_refresh {
-            let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
-            git_tx
-                .send(GitOp::Load {
-                    repo: repo.to_owned(),
-                    respond: respond_tx,
-                })
-                .map_err(|_| OpError::Internal("git thread not responding"))?;
+            // Get a valid path for the refresh operation
+            let path = repo_state.any_valid_path().cloned();
 
-            match respond_rx.recv() {
-                Ok(Ok(fresh)) => {
-                    if let Some(max_stamp) = fresh.state.max_write_stamp() {
-                        self.clock.receive(&max_stamp);
-                    }
-                    let repo_state = self.repo_state_mut(&loaded);
+            if let Some(refresh_path) = path {
+                // Mark refresh in progress before sending to avoid races
+                let repo_state = self.repo_state_mut(&loaded);
+                repo_state.refresh_in_progress = true;
+
+                // Kick off background refresh - don't wait for result
+                let _ = git_tx.send(GitOp::Refresh {
+                    repo: refresh_path,
+                    remote: loaded.remote().clone(),
+                });
+            }
+        }
+
+        // Return immediately with cached state
+        Ok(loaded)
+    }
+
+    /// Complete a background refresh operation.
+    ///
+    /// Called when git thread reports refresh result. Applies fresh state
+    /// if refresh succeeded, otherwise just clears the in-progress flag.
+    pub fn complete_refresh(
+        &mut self,
+        remote: &RemoteUrl,
+        result: Result<super::git_worker::LoadResult, SyncError>,
+    ) {
+        let repo_state = match self.repos.get_mut(remote) {
+            Some(s) => s,
+            None => return,
+        };
+
+        repo_state.refresh_in_progress = false;
+
+        match result {
+            Ok(fresh) => {
+                // Advance clock to account for remote stamps
+                if let Some(max_stamp) = fresh.state.max_write_stamp() {
+                    self.clock.receive(&max_stamp);
+                }
+
+                // Only apply refresh if repo is still clean (no mutations happened
+                // during the refresh). If dirty, we'll sync soon anyway.
+                if !repo_state.dirty {
                     repo_state.state = fresh.state;
                     // Update root_slug if remote has one and we don't
                     if fresh.root_slug.is_some() {
                         repo_state.root_slug = fresh.root_slug;
                     }
-                    repo_state.last_refresh = Some(Instant::now());
                 }
-                Ok(Err(SyncError::NoLocalRef(_))) => {
-                    return Err(OpError::RepoNotInitialized(repo.to_owned()));
-                }
-                Ok(Err(e)) => {
-                    return Err(OpError::Sync(e));
-                }
-                Err(_) => {
-                    return Err(OpError::Internal("git thread died"));
+                repo_state.last_refresh = Some(Instant::now());
+
+                // If refresh showed we have local changes that need syncing
+                if fresh.needs_sync && !repo_state.dirty {
+                    repo_state.mark_dirty();
+                    self.scheduler.schedule(remote.clone());
                 }
             }
+            Err(e) => {
+                // Refresh failed - log and continue with cached state.
+                // Next TTL hit will retry.
+                tracing::debug!("background refresh failed for {:?}: {:?}", remote, e);
+            }
         }
-
-        Ok(loaded)
     }
 
     /// Maybe start a background sync for a repo.
@@ -369,13 +413,44 @@ impl Daemon {
         }
     }
 
-    /// Mark repo as dirty and schedule sync. Infallible because `LoadedRemote` proves existence.
-    pub fn mark_dirty_and_schedule(&mut self, proof: &LoadedRemote) {
+    /// Mark repo as dirty, commit locally for durability, and schedule sync.
+    ///
+    /// This is the key durability mechanism: before returning success to the client,
+    /// we write the state to a local git commit. If the daemon crashes before the
+    /// debounced sync completes, the state is recoverable from the local ref.
+    ///
+    /// Infallible because `LoadedRemote` proves existence.
+    pub fn mark_dirty_and_schedule(&mut self, proof: &LoadedRemote, git_tx: &Sender<GitOp>) {
         let repo_state = self
             .repos
             .get_mut(proof.remote())
             .expect("LoadedRemote guarantees repo exists");
+
+        // Get data needed for local commit
+        let state = repo_state.state.clone();
+        let root_slug = repo_state.root_slug.clone();
+        let path = repo_state.any_valid_path().cloned();
+
         repo_state.mark_dirty();
+
+        // Commit locally for durability (blocking)
+        if let Some(repo_path) = path {
+            let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+            let _ = git_tx.send(GitOp::LocalCommit {
+                repo: repo_path,
+                remote: proof.remote().clone(),
+                state,
+                root_slug,
+                respond: respond_tx,
+            });
+            // Wait for commit to complete - this is intentionally blocking
+            // to ensure durability before we return success to the client.
+            // Errors are logged but don't fail the mutation (degraded durability).
+            if let Err(e) = respond_rx.recv() {
+                tracing::warn!("local commit channel error: {}", e);
+            }
+        }
+
         self.scheduler.schedule(proof.remote().clone());
     }
 

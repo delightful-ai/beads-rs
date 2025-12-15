@@ -13,7 +13,7 @@ use std::time::Instant;
 use crossbeam::channel::{Receiver, Sender};
 
 use super::core::Daemon;
-use super::git_worker::{GitOp, SyncResult};
+use super::git_worker::{GitOp, GitResult};
 use super::ipc::{Request, Response, decode_request, encode_response};
 use super::remote::RemoteUrl;
 
@@ -31,7 +31,7 @@ pub fn run_state_loop(
     mut daemon: Daemon,
     req_rx: Receiver<RequestMessage>,
     git_tx: Sender<GitOp>,
-    git_result_rx: Receiver<(RemoteUrl, SyncResult)>,
+    git_result_rx: Receiver<GitResult>,
 ) {
     let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<Response>>> = HashMap::new();
 
@@ -92,9 +92,17 @@ pub fn run_state_loop(
                                 .count();
 
                             while pending > 0 {
-                                if let Ok((remote, result)) = git_result_rx.recv() {
-                                    daemon.complete_sync(&remote, result);
-                                    pending -= 1;
+                                if let Ok(result) = git_result_rx.recv() {
+                                    match result {
+                                        GitResult::Sync(remote, sync_result) => {
+                                            daemon.complete_sync(&remote, sync_result);
+                                            pending -= 1;
+                                        }
+                                        GitResult::Refresh(remote, refresh_result) => {
+                                            // Just complete any in-flight refreshes during shutdown
+                                            daemon.complete_refresh(&remote, refresh_result);
+                                        }
+                                    }
                                 } else {
                                     break;
                                 }
@@ -123,8 +131,15 @@ pub fn run_state_loop(
 
             // Git operation completed
             recv(git_result_rx) -> msg => {
-                if let Ok((remote, result)) = msg {
-                    daemon.complete_sync(&remote, result);
+                if let Ok(result) = msg {
+                    match result {
+                        GitResult::Sync(remote, sync_result) => {
+                            daemon.complete_sync(&remote, sync_result);
+                        }
+                        GitResult::Refresh(remote, refresh_result) => {
+                            daemon.complete_refresh(&remote, refresh_result);
+                        }
+                    }
                 }
                 daemon.fire_due_syncs(&git_tx);
                 flush_sync_waiters(&daemon, &mut sync_waiters);

@@ -12,7 +12,7 @@ use crate::daemon::IpcError;
 use crate::daemon::ipc::ErrorPayload;
 use crate::daemon::ipc::{encode_response, ensure_socket_dir};
 use crate::daemon::server::RequestMessage;
-use crate::daemon::{Daemon, GitWorker, RemoteUrl, run_git_loop, run_state_loop};
+use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop, run_state_loop};
 use crate::daemon::{Request, Response, decode_request};
 
 /// Run the daemon in the current process.
@@ -69,8 +69,7 @@ pub fn run_daemon() -> Result<()> {
     // Create channels.
     let (req_tx, req_rx) = crossbeam::channel::unbounded::<RequestMessage>();
     let (git_tx, git_rx) = crossbeam::channel::unbounded();
-    let (git_result_tx, git_result_rx) =
-        crossbeam::channel::unbounded::<(RemoteUrl, crate::daemon::SyncResult)>();
+    let (git_result_tx, git_result_rx) = crossbeam::channel::unbounded::<GitResult>();
 
     // Create actor ID (allow override via BD_ACTOR).
     let username = whoami::username();

@@ -30,6 +30,9 @@ pub struct RepoState {
     /// Whether a sync is currently in progress.
     pub sync_in_progress: bool,
 
+    /// Whether a background refresh is currently in progress.
+    pub refresh_in_progress: bool,
+
     /// Time of last successful sync.
     pub last_sync: Option<Instant>,
 
@@ -53,6 +56,7 @@ impl RepoState {
             dirty: false,
             last_mutation: None,
             sync_in_progress: false,
+            refresh_in_progress: false,
             last_sync: None,
             last_sync_wall_ms: None,
             last_refresh: None,
@@ -69,6 +73,7 @@ impl RepoState {
             dirty: false,
             last_mutation: None,
             sync_in_progress: false,
+            refresh_in_progress: false,
             last_sync: None,
             last_sync_wall_ms: None,
             last_refresh: None,
