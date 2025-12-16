@@ -20,6 +20,8 @@ use super::repo::RepoState;
 use super::scheduler::SyncScheduler;
 use super::wal::{Wal, WalEntry};
 
+use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
+
 /// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded` or
 /// `Daemon::ensure_repo_fresh`.
 ///
@@ -61,11 +63,23 @@ pub struct Daemon {
 
     /// Write-ahead log for mutation durability.
     wal: Wal,
+
+    /// Go-compatibility export context.
+    export_ctx: Option<ExportContext>,
 }
 
 impl Daemon {
     /// Create a new daemon.
     pub fn new(actor: ActorId, wal: Wal) -> Self {
+        // Initialize Go-compat export context (best effort - don't fail daemon startup)
+        let export_ctx = match ExportContext::new() {
+            Ok(ctx) => Some(ctx),
+            Err(e) => {
+                tracing::warn!("Failed to initialize Go-compat export: {}", e);
+                None
+            }
+        };
+
         Daemon {
             repos: BTreeMap::new(),
             path_to_remote: HashMap::new(),
@@ -73,6 +87,7 @@ impl Daemon {
             actor,
             scheduler: SyncScheduler::new(),
             wal,
+            export_ctx,
         }
     }
 
@@ -263,6 +278,9 @@ impl Daemon {
                     }
 
                     self.repos.insert(remote.clone(), repo_state);
+
+                    // Initial Go-compat export for newly loaded repo
+                    self.export_go_compat(&remote);
                 }
                 Ok(Err(SyncError::NoLocalRef(_))) => {
                     return Err(OpError::RepoNotInitialized(repo.to_owned()));
@@ -276,6 +294,9 @@ impl Daemon {
             }
         } else if let Some(repo_state) = self.repos.get_mut(&remote) {
             repo_state.register_path(repo.to_owned());
+
+            // Update symlinks for newly registered clone path
+            self.export_go_compat(&remote);
         }
 
         Ok(LoadedRemote(remote))
@@ -418,51 +439,91 @@ impl Daemon {
     ///
     /// Called when git thread reports sync result.
     pub fn complete_sync(&mut self, remote: &RemoteUrl, result: Result<CanonicalState, SyncError>) {
-        let repo_state = match self.repos.get_mut(remote) {
-            Some(s) => s,
-            None => return,
+        let sync_succeeded = {
+            let repo_state = match self.repos.get_mut(remote) {
+                Some(s) => s,
+                None => return,
+            };
+
+            match result {
+                Ok(synced_state) => {
+                    // Advance clock to account for remote stamps
+                    if let Some(max_stamp) = synced_state.max_write_stamp() {
+                        self.clock.receive(&max_stamp);
+                    }
+
+                    // If mutations happened during sync, merge them
+                    if repo_state.dirty {
+                        // Merge local mutations with synced state
+                        match CanonicalState::join(&synced_state, &repo_state.state) {
+                            Ok(merged) => {
+                                repo_state.complete_sync(merged, self.clock.wall_ms());
+                                // Still dirty from mutations during sync - reschedule
+                                repo_state.dirty = true;
+                                self.scheduler.schedule(remote.clone());
+                            }
+                            Err(_) => {
+                                // Merge failed - just take synced state, we'll catch up next sync
+                                repo_state.complete_sync(synced_state, self.clock.wall_ms());
+                            }
+                        }
+                    } else {
+                        // No mutations during sync - just take synced state
+                        repo_state.complete_sync(synced_state, self.clock.wall_ms());
+
+                        // State is now durable in remote - delete WAL
+                        if let Err(e) = self.wal.delete(remote) {
+                            tracing::warn!(
+                                "failed to delete WAL after sync for {:?}: {}",
+                                remote,
+                                e
+                            );
+                        }
+                    }
+                    true
+                }
+                Err(e) => {
+                    eprintln!("sync failed for {:?}: {:?}", remote, e);
+                    repo_state.fail_sync();
+
+                    // Exponential backoff
+                    let backoff = Duration::from_millis(repo_state.backoff_ms());
+                    self.scheduler.schedule_after(remote.clone(), backoff);
+                    false
+                }
+            }
         };
 
-        match result {
-            Ok(synced_state) => {
-                // Advance clock to account for remote stamps
-                if let Some(max_stamp) = synced_state.max_write_stamp() {
-                    self.clock.receive(&max_stamp);
-                }
+        // Export Go-compatible JSONL after successful sync
+        if sync_succeeded {
+            self.export_go_compat(remote);
+        }
+    }
 
-                // If mutations happened during sync, merge them
-                if repo_state.dirty {
-                    // Merge local mutations with synced state
-                    match CanonicalState::join(&synced_state, &repo_state.state) {
-                        Ok(merged) => {
-                            repo_state.complete_sync(merged, self.clock.wall_ms());
-                            // Still dirty from mutations during sync - reschedule
-                            repo_state.dirty = true;
-                            self.scheduler.schedule(remote.clone());
-                        }
-                        Err(_) => {
-                            // Merge failed - just take synced state, we'll catch up next sync
-                            repo_state.complete_sync(synced_state, self.clock.wall_ms());
-                        }
-                    }
-                } else {
-                    // No mutations during sync - just take synced state
-                    repo_state.complete_sync(synced_state, self.clock.wall_ms());
+    /// Export state to Go-compatible JSONL format.
+    ///
+    /// Called after successful sync to keep .beads/issues.jsonl in sync.
+    fn export_go_compat(&self, remote: &RemoteUrl) {
+        let Some(ref ctx) = self.export_ctx else {
+            return;
+        };
 
-                    // State is now durable in remote - delete WAL
-                    if let Err(e) = self.wal.delete(remote) {
-                        tracing::warn!("failed to delete WAL after sync for {:?}: {}", remote, e);
-                    }
-                }
-            }
+        let Some(repo_state) = self.repos.get(remote) else {
+            return;
+        };
+
+        // Export to canonical location
+        let export_path = match export_jsonl(&repo_state.state, ctx, remote.as_str()) {
+            Ok(path) => path,
             Err(e) => {
-                eprintln!("sync failed for {:?}: {:?}", remote, e);
-                repo_state.fail_sync();
-
-                // Exponential backoff
-                let backoff = Duration::from_millis(repo_state.backoff_ms());
-                self.scheduler.schedule_after(remote.clone(), backoff);
+                tracing::warn!("Go-compat export failed for {:?}: {}", remote, e);
+                return;
             }
+        };
+
+        // Create/update symlinks in each clone
+        if let Err(e) = ensure_symlinks(&export_path, &repo_state.known_paths) {
+            tracing::warn!("Go-compat symlink update failed for {:?}: {}", remote, e);
         }
     }
 

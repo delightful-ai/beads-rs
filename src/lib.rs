@@ -1,6 +1,7 @@
 pub mod api;
 #[cfg(feature = "cli")]
 pub mod cli;
+pub mod compat;
 pub mod core;
 pub mod daemon;
 pub mod error;
