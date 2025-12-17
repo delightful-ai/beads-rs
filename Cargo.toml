@@ -1,6 +1,6 @@
 [package]
 name = "beads-rs"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -11,6 +11,7 @@ authors = ["Darin <darinkishore@protonmail.com>"]
 keywords = ["cli", "git", "crdt", "issue-tracker", "agents"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
+exclude = [".beads/"]
 
 # Dual CLI + library crate
 
