@@ -200,6 +200,10 @@ pub enum Request {
     },
 
     // === Control ===
+    /// Force reload state from git (invalidates cache).
+    /// Use after external changes to refs/heads/beads/store (e.g., migration).
+    Refresh { repo: PathBuf },
+
     /// Force sync now.
     Sync { repo: PathBuf },
 
@@ -528,6 +532,9 @@ pub enum ResponsePayload {
     /// Sync completed.
     Synced(SyncedPayload),
 
+    /// Refresh completed (state reloaded from git).
+    Refreshed(RefreshedPayload),
+
     /// Init completed.
     Initialized(InitializedPayload),
 
@@ -544,6 +551,11 @@ impl ResponsePayload {
     /// Create an initialized payload.
     pub fn initialized() -> Self {
         ResponsePayload::Initialized(InitializedPayload::default())
+    }
+
+    /// Create a refreshed payload.
+    pub fn refreshed() -> Self {
+        ResponsePayload::Refreshed(RefreshedPayload::default())
     }
 
     /// Create a shutting down payload.
@@ -563,6 +575,19 @@ enum SyncedTag {
     #[default]
     #[serde(rename = "synced")]
     Synced,
+}
+
+/// Payload for refresh completion. Uses typed discriminant for unambiguous deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RefreshedPayload {
+    result: RefreshedTag,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+enum RefreshedTag {
+    #[default]
+    #[serde(rename = "refreshed")]
+    Refreshed,
 }
 
 /// Payload for init completion. Uses typed discriminant for unambiguous deserialization.

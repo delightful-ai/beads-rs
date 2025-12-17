@@ -395,6 +395,24 @@ impl Daemon {
         }
     }
 
+    /// Force reload state from git, invalidating any cached state.
+    ///
+    /// Use this after external changes to refs/heads/beads/store (e.g., migration).
+    /// This is a blocking operation that fetches fresh state from git.
+    pub fn force_reload(
+        &mut self,
+        repo: &Path,
+        git_tx: &Sender<GitOp>,
+    ) -> Result<LoadedRemote, OpError> {
+        let remote = self.resolve_remote(repo)?;
+
+        // Remove cached state so ensure_repo_loaded will do a fresh load
+        self.repos.remove(&remote);
+
+        // Now load fresh from git
+        self.ensure_repo_loaded(repo, git_tx)
+    }
+
     /// Maybe start a background sync for a repo.
     ///
     /// Only starts if:
@@ -811,6 +829,15 @@ impl Daemon {
             Request::Validate { repo } => self.query_validate(&repo, git_tx),
 
             // Control
+            Request::Refresh { repo } => {
+                // Force reload from git (invalidates cached state).
+                // Used after external changes like migration.
+                match self.force_reload(&repo, git_tx) {
+                    Ok(_) => Response::ok(ResponsePayload::refreshed()),
+                    Err(e) => Response::err(e),
+                }
+            }
+
             Request::Sync { repo } => {
                 // Force immediate sync (used for graceful shutdown)
                 match self.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {

@@ -1,5 +1,6 @@
 use super::super::{Ctx, MigrateCmd, current_actor_string};
 use crate::core::{ActorId, FormatVersion};
+use crate::daemon::ipc::{Request, send_request};
 use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
@@ -86,6 +87,12 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                     eprintln!("  - {w}");
                 }
             }
+
+            // Notify daemon to refresh its cached state (if running).
+            // Ignore errors - daemon may not be running.
+            let _ = send_request(&Request::Refresh {
+                repo: ctx.repo.clone(),
+            });
 
             let payload = serde_json::json!({
                 "dry_run": false,
