@@ -32,6 +32,9 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
         eprintln!("note: --force is ignored in beads-rs (not required)");
     }
 
+    // Warn if creating without description (unless title contains "test")
+    let warn_no_desc = description.is_none() && !title.to_lowercase().contains("test");
+
     let req = Request::Create {
         repo: ctx.repo.clone(),
         id: args.id,
@@ -59,6 +62,14 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     };
 
     let issue = fetch_issue(ctx, &created_id)?;
+
+    // Print warning to stderr (visible even in --json mode)
+    if warn_no_desc {
+        eprintln!(
+            "[WARNING] Creating issue '{}' without description. Issues without descriptions lack context for future work.",
+            issue.title
+        );
+    }
     if ctx.json {
         print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
     } else {

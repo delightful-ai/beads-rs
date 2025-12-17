@@ -212,11 +212,11 @@ pub struct CreateArgs {
     pub priority: Option<Priority>,
 
     /// Description.
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long, allow_hyphen_values = true)]
     pub description: Option<String>,
 
     /// Alias for --description (GitHub CLI convention).
-    #[arg(long = "body", hide = true)]
+    #[arg(long = "body", hide = true, allow_hyphen_values = true)]
     pub body: Option<String>,
 
     /// Assignee (compat; only supports current actor).
@@ -232,11 +232,15 @@ pub struct CreateArgs {
     pub label: Vec<String>,
 
     /// Design text.
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub design: Option<String>,
 
     /// Acceptance criteria text.
-    #[arg(long = "acceptance", alias = "acceptance-criteria")]
+    #[arg(
+        long = "acceptance",
+        alias = "acceptance-criteria",
+        allow_hyphen_values = true
+    )]
     pub acceptance: Option<String>,
 
     /// External reference (e.g., "gh-9", "jira-ABC").
@@ -482,17 +486,21 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub title: Option<String>,
 
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long, allow_hyphen_values = true)]
     pub description: Option<String>,
 
     /// Alias for --description (GitHub CLI convention).
-    #[arg(long = "body", hide = true)]
+    #[arg(long = "body", hide = true, allow_hyphen_values = true)]
     pub body: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub design: Option<String>,
 
-    #[arg(long = "acceptance", alias = "acceptance-criteria")]
+    #[arg(
+        long = "acceptance",
+        alias = "acceptance-criteria",
+        allow_hyphen_values = true
+    )]
     pub acceptance: Option<String>,
 
     /// External reference (e.g., "gh-9", "jira-ABC").
@@ -524,7 +532,7 @@ pub struct UpdateArgs {
     pub remove_label: Vec<String>,
 
     /// Add a note.
-    #[arg(long = "notes", alias = "note")]
+    #[arg(long = "notes", alias = "note", allow_hyphen_values = true)]
     pub notes: Option<String>,
 }
 
