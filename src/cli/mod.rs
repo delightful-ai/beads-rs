@@ -271,6 +271,10 @@ pub struct CreateArgs {
 #[derive(Args, Debug)]
 pub struct ShowArgs {
     pub id: String,
+
+    /// No-op for compatibility (children are always shown).
+    #[arg(long, hide = true)]
+    pub children: bool,
 }
 
 #[derive(Args, Debug)]
