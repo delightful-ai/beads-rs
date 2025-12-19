@@ -1,13 +1,14 @@
 use super::super::render;
-use super::super::{Ctx, ShowArgs, fetch_issue_summary, print_ok, send};
+use super::super::{Ctx, ShowArgs, fetch_issue_summary, normalize_bead_id, print_ok, send};
 use crate::Result;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::QueryResult;
 
 pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
+    let id = normalize_bead_id(&args.id)?;
     let req = Request::Show {
         repo: ctx.repo.clone(),
-        id: args.id,
+        id,
     };
     let ok = send(&req)?;
     if ctx.json {

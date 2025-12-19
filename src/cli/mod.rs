@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, builder::BoolishValueParser};
 
-use crate::core::{BeadType, DepKind, Priority};
+use crate::core::{BeadId, BeadType, DepKind, Priority};
 use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
 use crate::daemon::query::{QueryResult, SortField};
 use crate::{Error, Result};
@@ -892,6 +892,57 @@ fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(&abs).unwrap_or(abs))
 }
 
+pub(super) fn normalize_bead_id(id: &str) -> Result<String> {
+    normalize_bead_id_for("id", id)
+}
+
+pub(super) fn normalize_bead_id_for(field: &str, id: &str) -> Result<String> {
+    let parsed = BeadId::parse(id).map_err(|e| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: field.into(),
+            reason: e.to_string(),
+        })
+    })?;
+    Ok(parsed.as_str().to_string())
+}
+
+pub(super) fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<String>> {
+    ids.into_iter().map(|id| normalize_bead_id(&id)).collect()
+}
+
+pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for spec in specs {
+        for part in spec.split(',') {
+            let p = part.trim();
+            if p.is_empty() {
+                continue;
+            }
+
+            let (kind_opt, id_raw) = if let Some((k, id)) = p.split_once(':') {
+                let kind = parse_dep_kind(k).map_err(|msg| {
+                    Error::Op(crate::daemon::OpError::ValidationFailed {
+                        field: "deps".into(),
+                        reason: msg,
+                    })
+                })?;
+                (Some(kind), id.trim())
+            } else {
+                (None, p)
+            };
+
+            let id = normalize_bead_id_for("deps", id_raw)?;
+            let entry = if let Some(kind) = kind_opt {
+                format!("{}:{}", kind.as_str(), id)
+            } else {
+                id
+            };
+            out.push(entry);
+        }
+    }
+    Ok(out)
+}
+
 fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
     let s = if json {
         serde_json::to_string_pretty(payload).map_err(crate::daemon::IpcError::from)?
@@ -1067,22 +1118,31 @@ fn parse_dep_edge(
     from_raw: &str,
     to_raw: &str,
 ) -> std::result::Result<(DepKind, String, String), String> {
-    let (kind_from, from) = split_kind_id(from_raw)?;
-    let (kind_to, to) = split_kind_id(to_raw)?;
+    let (kind_from, from_raw) = split_kind_id(from_raw)?;
+    let (kind_to, to_raw) = split_kind_id(to_raw)?;
 
     let kind = kind_flag
         .or(kind_from)
         .or(kind_to)
         .unwrap_or(DepKind::Blocks);
 
+    let from = BeadId::parse(&from_raw)
+        .map_err(|e| format!("invalid from id {from_raw:?}: {e}"))?
+        .as_str()
+        .to_string();
+    let to = BeadId::parse(&to_raw)
+        .map_err(|e| format!("invalid to id {to_raw:?}: {e}"))?
+        .as_str()
+        .to_string();
+
     Ok((kind, from, to))
 }
 
 fn split_kind_id(raw: &str) -> std::result::Result<(Option<DepKind>, String), String> {
     if let Some((k, id)) = raw.split_once(':') {
-        Ok((Some(parse_dep_kind(k)?), id.to_string()))
+        Ok((Some(parse_dep_kind(k)?), id.trim().to_string()))
     } else {
-        Ok((None, raw.to_string()))
+        Ok((None, raw.trim().to_string()))
     }
 }
 

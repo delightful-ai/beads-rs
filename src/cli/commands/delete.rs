@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::super::{Ctx, DeleteArgs, send};
+use super::super::{Ctx, DeleteArgs, normalize_bead_ids, send};
 use crate::Result;
 use crate::daemon::ipc::Request;
 
@@ -13,7 +13,8 @@ struct DeleteResult {
 pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
     let mut results: Vec<DeleteResult> = Vec::new();
 
-    for id in args.ids {
+    let ids = normalize_bead_ids(args.ids)?;
+    for id in ids {
         let req = Request::Delete {
             repo: ctx.repo.clone(),
             id: id.clone(),

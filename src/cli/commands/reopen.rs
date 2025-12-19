@@ -1,8 +1,9 @@
-use super::super::{Ctx, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use crate::Result;
 use crate::daemon::ipc::Request;
 
 pub(crate) fn handle(ctx: &Ctx, id: String) -> Result<()> {
+    let id = normalize_bead_id(&id)?;
     let req = Request::Reopen {
         repo: ctx.repo.clone(),
         id,

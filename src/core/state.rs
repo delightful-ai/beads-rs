@@ -502,12 +502,261 @@ mod tests {
     use crate::core::dep::DepLife;
     use crate::core::identity::ActorId;
     use crate::core::time::{Stamp, WriteStamp};
+    use proptest::prelude::*;
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
             WriteStamp::new(wall_ms, counter),
             ActorId::new(actor).unwrap(),
         )
+    }
+
+    fn actor_id(actor: &str) -> ActorId {
+        ActorId::new(actor).unwrap_or_else(|e| panic!("invalid actor id {actor}: {e}"))
+    }
+
+    fn bead_id(id: &str) -> BeadId {
+        BeadId::parse(id).unwrap_or_else(|e| panic!("invalid bead id {id}: {e}"))
+    }
+
+    fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
+        use crate::core::bead::{BeadCore, BeadFields};
+        use crate::core::collections::Labels;
+        use crate::core::composite::{Claim, Workflow};
+        use crate::core::crdt::Lww;
+        use crate::core::domain::{BeadType, Priority};
+
+        let core = BeadCore::new(id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
+    #[derive(Clone, Debug)]
+    enum Entry {
+        Live { id: String, stamp: Stamp },
+        Tombstone { id: String, stamp: Stamp },
+    }
+
+    fn assert_invariants(state: &CanonicalState) {
+        for id in state.live.keys() {
+            assert!(
+                !state
+                    .tombstones
+                    .contains_key(&TombstoneKey::global(id.clone())),
+                "live bead has global tombstone: {id}"
+            );
+        }
+
+        for (key, edge) in state.deps.iter() {
+            let from = key.from();
+            let to = key.to();
+            let kind = key.kind();
+            let out_has = state
+                .dep_indexes
+                .out_edges(from)
+                .iter()
+                .any(|(t, k)| t == to && *k == kind);
+            let in_has = state
+                .dep_indexes
+                .in_edges(to)
+                .iter()
+                .any(|(f, k)| f == from && *k == kind);
+
+            if edge.is_active() {
+                assert!(out_has, "missing out-edge for {from}->{to:?}");
+                assert!(in_has, "missing in-edge for {from:?}->{to}");
+            } else {
+                assert!(!out_has, "deleted edge still in out-index");
+                assert!(!in_has, "deleted edge still in in-index");
+            }
+        }
+    }
+
+    fn state_fingerprint(state: &CanonicalState) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let state_bytes = crate::git::wire::serialize_state(state)
+            .unwrap_or_else(|e| panic!("serialize state failed: {e}"));
+        let tomb_bytes = crate::git::wire::serialize_tombstones(state)
+            .unwrap_or_else(|e| panic!("serialize tombstones failed: {e}"));
+        let deps_bytes = crate::git::wire::serialize_deps(state)
+            .unwrap_or_else(|e| panic!("serialize deps failed: {e}"));
+        (state_bytes, tomb_bytes, deps_bytes)
+    }
+
+    fn base58_id_strategy() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("[1-9A-HJ-NP-Za-km-z]{5,8}")
+            .unwrap_or_else(|e| panic!("regex failed: {e}"))
+            .prop_map(|suffix| format!("bd-{suffix}"))
+    }
+
+    fn stamp_strategy() -> impl Strategy<Value = Stamp> {
+        let actor = prop_oneof![Just("alice"), Just("bob"), Just("carol")];
+        (0u64..10_000, 0u32..5, actor).prop_map(|(wall_ms, counter, actor)| {
+            Stamp::new(WriteStamp::new(wall_ms, counter), actor_id(actor))
+        })
+    }
+
+    fn entry_strategy() -> impl Strategy<Value = Entry> {
+        (base58_id_strategy(), stamp_strategy(), any::<bool>()).prop_map(|(id, stamp, is_live)| {
+            if is_live {
+                Entry::Live { id, stamp }
+            } else {
+                Entry::Tombstone { id, stamp }
+            }
+        })
+    }
+
+    fn dep_strategy() -> impl Strategy<Value = DepEdge> {
+        let kind = prop_oneof![
+            Just(DepKind::Blocks),
+            Just(DepKind::Parent),
+            Just(DepKind::Related),
+            Just(DepKind::DiscoveredFrom),
+        ];
+        (
+            base58_id_strategy(),
+            base58_id_strategy(),
+            kind,
+            stamp_strategy(),
+            prop::option::of(stamp_strategy()),
+        )
+            .prop_filter("deps cannot be self-referential", |(from, to, _, _, _)| {
+                from != to
+            })
+            .prop_map(|(from, to, kind, created, deleted)| {
+                let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
+                    .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+                let mut edge = DepEdge::new(key, created.clone());
+                if let Some(deleted) = deleted {
+                    edge.delete(deleted);
+                }
+                edge
+            })
+    }
+
+    fn state_strategy() -> impl Strategy<Value = CanonicalState> {
+        (
+            prop::collection::vec(entry_strategy(), 0..12),
+            prop::collection::vec(dep_strategy(), 0..12),
+        )
+            .prop_map(|(entries, deps)| {
+                let mut state = CanonicalState::new();
+                for entry in entries {
+                    match entry {
+                        Entry::Live { id, stamp } => {
+                            let bead = make_bead(&bead_id(&id), &stamp);
+                            if let Err(err) = state.insert(bead) {
+                                panic!("insert bead failed: {err:?}");
+                            }
+                        }
+                        Entry::Tombstone { id, stamp } => {
+                            state.delete(Tombstone::new(bead_id(&id), stamp, None));
+                        }
+                    }
+                }
+                for dep in deps {
+                    state.insert_dep(dep);
+                }
+                state
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
+
+        #[test]
+        fn join_commutative(a in state_strategy(), b in state_strategy()) {
+            let ab = CanonicalState::join(&a, &b)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let ba = CanonicalState::join(&b, &a)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            assert_invariants(&ab);
+            assert_invariants(&ba);
+            prop_assert_eq!(state_fingerprint(&ab), state_fingerprint(&ba));
+        }
+
+        #[test]
+        fn join_idempotent(a in state_strategy()) {
+            let aa = CanonicalState::join(&a, &a)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            assert_invariants(&aa);
+            prop_assert_eq!(state_fingerprint(&aa), state_fingerprint(&a));
+        }
+
+        #[test]
+        fn join_associative(a in state_strategy(), b in state_strategy(), c in state_strategy()) {
+            let ab = CanonicalState::join(&a, &b)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let left = CanonicalState::join(&ab, &c)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let bc = CanonicalState::join(&b, &c)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let right = CanonicalState::join(&a, &bc)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            assert_invariants(&left);
+            assert_invariants(&right);
+            prop_assert_eq!(state_fingerprint(&left), state_fingerprint(&right));
+        }
+
+        #[test]
+        fn join_resurrection_rule_prefers_newer_bead(
+            bead_stamp in stamp_strategy(),
+            tomb_stamp in stamp_strategy(),
+        ) {
+            let id = bead_id("bd-resurrection");
+            let bead = make_bead(&id, &bead_stamp);
+            let tomb = Tombstone::new(id.clone(), tomb_stamp.clone(), None);
+
+            let mut state_bead = CanonicalState::new();
+            state_bead.insert_live(bead);
+            let mut state_tomb = CanonicalState::new();
+            state_tomb.insert_tombstone(tomb);
+
+            let merged = CanonicalState::join(&state_bead, &state_tomb)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+
+            let is_live = merged.get_live(&id).is_some();
+            if bead_stamp > tomb_stamp {
+                prop_assert!(is_live);
+            } else {
+                prop_assert!(!is_live);
+            }
+        }
+
+        #[test]
+        fn lineage_tombstone_only_kills_matching_lineage(
+            bead_stamp in stamp_strategy(),
+            tomb_stamp in stamp_strategy(),
+            other_stamp in stamp_strategy(),
+        ) {
+            prop_assume!(other_stamp != bead_stamp);
+
+            let id = bead_id("bd-lineage");
+            let bead = make_bead(&id, &bead_stamp);
+            let tomb = Tombstone::new_collision(id.clone(), tomb_stamp.clone(), other_stamp, None);
+
+            let mut state_bead = CanonicalState::new();
+            state_bead.insert_live(bead);
+            let mut state_tomb = CanonicalState::new();
+            state_tomb.insert_tombstone(tomb);
+
+            let merged = CanonicalState::join(&state_bead, &state_tomb)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+
+            prop_assert!(merged.get_live(&id).is_some());
+        }
     }
 
     #[test]

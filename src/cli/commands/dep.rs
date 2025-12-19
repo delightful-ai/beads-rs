@@ -1,4 +1,4 @@
-use super::super::{Ctx, DepCmd, parse_dep_edge, print_ok, send};
+use super::super::{Ctx, DepCmd, normalize_bead_id, parse_dep_edge, print_ok, send};
 use crate::daemon::ipc::Request;
 use crate::{Error, Result};
 
@@ -39,6 +39,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
             print_ok(&ok, ctx.json)
         }
         DepCmd::Tree { id } => {
+            let id = normalize_bead_id(&id)?;
             let req = Request::DepTree {
                 repo: ctx.repo.clone(),
                 id,

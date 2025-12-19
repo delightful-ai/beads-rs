@@ -597,6 +597,80 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn actor_id(actor: &str) -> ActorId {
+        ActorId::new(actor).unwrap_or_else(|e| panic!("invalid actor id {actor}: {e}"))
+    }
+
+    fn bead_id(id: &str) -> BeadId {
+        BeadId::parse(id).unwrap_or_else(|e| panic!("invalid bead id {id}: {e}"))
+    }
+
+    fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
+        let core = BeadCore::new(id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
+    fn base58_id_strategy() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("[1-9A-HJ-NP-Za-km-z]{5,8}")
+            .unwrap_or_else(|e| panic!("regex failed: {e}"))
+            .prop_map(|suffix| format!("bd-{suffix}"))
+    }
+
+    fn stamp_strategy() -> impl Strategy<Value = Stamp> {
+        let actor = prop_oneof![Just("alice"), Just("bob"), Just("carol")];
+        (0u64..10_000, 0u32..5, actor).prop_map(|(wall_ms, counter, actor)| {
+            Stamp::new(WriteStamp::new(wall_ms, counter), actor_id(actor))
+        })
+    }
+
+    fn tombstone_strategy() -> impl Strategy<Value = Tombstone> {
+        (base58_id_strategy(), stamp_strategy())
+            .prop_map(|(id, stamp)| Tombstone::new(bead_id(&id), stamp, None))
+    }
+
+    fn dep_strategy() -> impl Strategy<Value = DepEdge> {
+        let kind = prop_oneof![
+            Just(DepKind::Blocks),
+            Just(DepKind::Parent),
+            Just(DepKind::Related),
+            Just(DepKind::DiscoveredFrom),
+        ];
+        (
+            base58_id_strategy(),
+            base58_id_strategy(),
+            kind,
+            stamp_strategy(),
+            prop::option::of(stamp_strategy()),
+        )
+            .prop_filter("deps cannot be self-referential", |(from, to, _, _, _)| {
+                from != to
+            })
+            .prop_map(|(from, to, kind, created, deleted)| {
+                let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
+                    .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+                let mut edge = DepEdge::new(key, created.clone());
+                if let Some(deleted) = deleted {
+                    edge.delete(deleted);
+                }
+                edge
+            })
+    }
 
     #[test]
     fn roundtrip_empty_state() {
@@ -604,5 +678,74 @@ mod tests {
         let bytes = serialize_state(&state).unwrap();
         let beads = parse_state(&bytes).unwrap();
         assert!(beads.is_empty());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
+
+        #[test]
+        fn roundtrip_state(beads in prop::collection::vec((base58_id_strategy(), stamp_strategy()), 0..12)) {
+            let mut state = CanonicalState::new();
+            for (id, stamp) in beads {
+                let bead = make_bead(&bead_id(&id), &stamp);
+                if let Err(err) = state.insert(bead) {
+                    panic!("insert bead failed: {err:?}");
+                }
+            }
+
+            let bytes = serialize_state(&state).unwrap_or_else(|e| panic!("serialize_state failed: {e}"));
+            let parsed = parse_state(&bytes).unwrap_or_else(|e| panic!("parse_state failed: {e}"));
+            let mut rebuilt = CanonicalState::new();
+            for bead in parsed {
+                rebuilt.insert_live(bead);
+            }
+            let bytes2 = serialize_state(&rebuilt).unwrap_or_else(|e| panic!("serialize_state failed: {e}"));
+            prop_assert_eq!(bytes, bytes2);
+        }
+
+        #[test]
+        fn roundtrip_tombstones(tombs in prop::collection::vec(tombstone_strategy(), 0..12)) {
+            let mut state = CanonicalState::new();
+            for tomb in tombs {
+                state.delete(tomb);
+            }
+            let bytes = serialize_tombstones(&state)
+                .unwrap_or_else(|e| panic!("serialize_tombstones failed: {e}"));
+            let parsed = parse_tombstones(&bytes)
+                .unwrap_or_else(|e| panic!("parse_tombstones failed: {e}"));
+            let mut rebuilt = CanonicalState::new();
+            for tomb in parsed {
+                rebuilt.delete(tomb);
+            }
+            let bytes2 = serialize_tombstones(&rebuilt)
+                .unwrap_or_else(|e| panic!("serialize_tombstones failed: {e}"));
+            prop_assert_eq!(bytes, bytes2);
+        }
+
+        #[test]
+        fn roundtrip_deps(deps in prop::collection::vec(dep_strategy(), 0..12)) {
+            let mut state = CanonicalState::new();
+            for dep in deps {
+                state.insert_dep(dep);
+            }
+            let bytes = serialize_deps(&state).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
+            let parsed = parse_deps(&bytes).unwrap_or_else(|e| panic!("parse_deps failed: {e}"));
+            let mut rebuilt = CanonicalState::new();
+            for dep in parsed {
+                rebuilt.insert_dep(dep);
+            }
+            let bytes2 = serialize_deps(&rebuilt).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
+            prop_assert_eq!(bytes, bytes2);
+        }
+
+        #[test]
+        fn roundtrip_meta(root in proptest::option::of(base58_id_strategy()), stamp in proptest::option::of((0u64..10_000, 0u32..5))) {
+            let write_stamp = stamp.map(|(wall_ms, counter)| WriteStamp::new(wall_ms, counter));
+            let bytes = serialize_meta(root.as_deref(), write_stamp.as_ref())
+                .unwrap_or_else(|e| panic!("serialize_meta failed: {e}"));
+            let parsed = parse_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
+            prop_assert_eq!(parsed.root_slug, root);
+            prop_assert_eq!(parsed.last_write_stamp, write_stamp);
+        }
     }
 }

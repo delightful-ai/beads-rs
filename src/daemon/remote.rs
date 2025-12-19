@@ -35,19 +35,19 @@ impl fmt::Display for RemoteUrl {
 /// - `ssh://git@github.com/foo/bar`  → `github.com/foo/bar`
 pub fn normalize_url(url: &str) -> String {
     let mut u = url.trim();
+    if u.is_empty() {
+        return String::new();
+    }
+
     if let Some(stripped) = u.strip_suffix(".git") {
         u = stripped;
     }
+    u = u.trim_end_matches('/');
 
-    // SSH scp-style: git@host:path
-    if let Some(rest) = u.strip_prefix("git@")
-        && let Some((host, path)) = rest.split_once(':')
-    {
-        return format!("{}/{}", host, path.trim_start_matches('/'));
-    }
-
-    // Scheme URLs: https://host/path or ssh://git@host/path
-    if let Some((_, after_scheme)) = u.split_once("://") {
+    if let Some((scheme, after_scheme)) = u.split_once("://") {
+        if scheme.eq_ignore_ascii_case("file") {
+            return after_scheme.trim_end_matches('/').to_string();
+        }
         let after_at = after_scheme
             .rsplit_once('@')
             .map(|(_, r)| r)
@@ -56,10 +56,68 @@ pub fn normalize_url(url: &str) -> String {
         let host = parts.next().unwrap_or("");
         let path = parts.next().unwrap_or("");
         if !host.is_empty() && !path.is_empty() {
-            return format!("{}/{}", host, path.trim_start_matches('/'));
+            return format!("{}/{}", normalize_host(host), path.trim_start_matches('/'));
         }
     }
 
-    // Fallback: use as-is (covers file:// and local path remotes).
+    if let Some((left, right)) = u.split_once(':')
+        && !right.is_empty()
+        && !left.contains('/')
+        && (left.contains('@') || left.contains('.'))
+    {
+        let host = left.rsplit_once('@').map(|(_, h)| h).unwrap_or(left);
+        return format!("{}/{}", normalize_host(host), right.trim_start_matches('/'));
+    }
+
     u.to_string()
+}
+
+fn normalize_host(host: &str) -> String {
+    if let Some((host_part, port)) = host.split_once(':') {
+        format!("{}:{}", host_part.to_lowercase(), port)
+    } else {
+        host.to_lowercase()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_https_and_ssh() {
+        assert_eq!(
+            normalize_url("https://github.com/foo/bar.git"),
+            "github.com/foo/bar"
+        );
+        assert_eq!(
+            normalize_url("git@github.com:foo/bar.git"),
+            "github.com/foo/bar"
+        );
+        assert_eq!(
+            normalize_url("ssh://git@github.com/foo/bar"),
+            "github.com/foo/bar"
+        );
+    }
+
+    #[test]
+    fn normalize_with_port_and_case() {
+        assert_eq!(
+            normalize_url("ssh://git@GITHUB.com:2222/foo/bar"),
+            "github.com:2222/foo/bar"
+        );
+    }
+
+    #[test]
+    fn normalize_trims_slashes() {
+        assert_eq!(
+            normalize_url("git@github.com:foo/bar/"),
+            "github.com/foo/bar"
+        );
+    }
+
+    #[test]
+    fn normalize_file_urls_are_stable() {
+        assert_eq!(normalize_url("file:///tmp/example.git"), "/tmp/example");
+    }
 }

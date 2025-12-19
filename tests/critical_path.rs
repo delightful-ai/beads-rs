@@ -3,6 +3,9 @@
 //! These tests run the actual `bd` binary against temp git repos.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -17,6 +20,47 @@ fn test_runtime_dir() -> &'static std::path::Path {
         std::fs::create_dir_all(&dir).expect("failed to create test runtime dir");
         dir
     })
+}
+
+fn bd_with_runtime(repo: &Path, runtime_dir: &Path) -> Command {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
+    cmd.current_dir(repo);
+    cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    cmd.env("BD_WAL_DIR", runtime_dir);
+    cmd
+}
+
+fn socket_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("beads").join("daemon.sock")
+}
+
+fn daemon_pid(runtime_dir: &Path) -> u32 {
+    use beads_rs::daemon::ipc::{Request, Response, ResponsePayload};
+    use beads_rs::daemon::query::QueryResult;
+
+    let socket = socket_path(runtime_dir);
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(&socket).expect("connect daemon socket");
+    let mut json = serde_json::to_string(&Request::Ping).expect("serialize ping");
+    json.push('\n');
+    stream.write_all(json.as_bytes()).expect("write ping");
+    stream.flush().expect("flush ping");
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read ping response");
+    let resp: Response = serde_json::from_str(&line).expect("parse ping response");
+    let Response::Ok { ok } = resp else {
+        panic!("unexpected ping response: {resp:?}");
+    };
+    let ResponsePayload::Query(QueryResult::DaemonInfo(info)) = ok else {
+        panic!("unexpected ping payload: {ok:?}");
+    };
+    info.pid
+}
+
+fn parse_response_payload(bytes: &[u8]) -> beads_rs::daemon::ipc::ResponsePayload {
+    serde_json::from_slice(bytes).expect("parse response payload")
 }
 
 /// Test fixture: working repo + bare remote.
@@ -3282,4 +3326,74 @@ fn test_show_with_all_optional_fields() {
         .stdout(predicate::str::contains("A design doc"))
         .stdout(predicate::str::contains("Acceptance criteria"))
         .stdout(predicate::str::contains("important"));
+}
+
+#[test]
+fn test_crash_recovery_replays_wal() {
+    use beads_rs::daemon::ipc::ResponsePayload;
+    use beads_rs::daemon::ops::OpResult;
+    use beads_rs::daemon::query::QueryResult;
+    use beads_rs::git::sync::read_state_at_oid;
+    use git2::Repository;
+
+    let repo = TestRepo::new();
+    let runtime_dir = TempDir::new().expect("failed to create runtime dir");
+    let wal_dir = runtime_dir.path().join("wal");
+
+    let output = bd_with_runtime(repo.path(), runtime_dir.path())
+        .args(["create", "Crash recovery", "--json"])
+        .output()
+        .expect("run bd create");
+    assert!(output.status.success());
+    let payload = parse_response_payload(&output.stdout);
+    let id = match payload {
+        ResponsePayload::Op(OpResult::Created { id }) => id,
+        ResponsePayload::Query(QueryResult::Issue(issue)) => {
+            beads_rs::core::BeadId::parse(&issue.id)
+                .unwrap_or_else(|e| panic!("invalid issue id in create response: {e}"))
+        }
+        other => panic!("unexpected create payload: {other:?}"),
+    };
+
+    let wal_entries: Vec<_> = std::fs::read_dir(&wal_dir)
+        .expect("read wal dir")
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "wal"))
+        .collect();
+    assert!(!wal_entries.is_empty(), "expected WAL entry before crash");
+
+    let pid = daemon_pid(runtime_dir.path());
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    assert_eq!(rc, 0, "failed to SIGKILL daemon pid {pid}");
+    std::thread::sleep(Duration::from_millis(100));
+
+    let list_out = bd_with_runtime(repo.path(), runtime_dir.path())
+        .args(["list", "--json"])
+        .output()
+        .expect("run bd list");
+    assert!(list_out.status.success());
+    let list_payload = parse_response_payload(&list_out.stdout);
+    let ResponsePayload::Query(QueryResult::Issues(issues)) = list_payload else {
+        panic!("unexpected list payload: {list_payload:?}");
+    };
+    assert!(
+        issues.iter().any(|issue| issue.id == id.as_str()),
+        "expected recovered issue to appear after restart"
+    );
+
+    let sync_out = bd_with_runtime(repo.path(), runtime_dir.path())
+        .args(["sync", "--json"])
+        .output()
+        .expect("run bd sync");
+    assert!(sync_out.status.success());
+
+    let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
+    let remote_oid = remote_repo
+        .refname_to_id("refs/heads/beads/store")
+        .expect("remote beads ref");
+    let remote_state = read_state_at_oid(&remote_repo, remote_oid).expect("read remote state");
+    assert!(
+        remote_state.state.get_live(&id).is_some(),
+        "expected recovered issue to sync to remote"
+    );
 }

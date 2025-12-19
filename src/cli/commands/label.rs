@@ -1,7 +1,8 @@
 use serde::Serialize;
 
 use super::super::render;
-use super::super::{Ctx, LabelBatchArgs, LabelCmd, fetch_issue, send};
+use super::super::{Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, send};
+use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
 use crate::daemon::query::{Filters, QueryResult};
@@ -105,6 +106,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             Ok(())
         }
         LabelCmd::List { id } => {
+            let id = normalize_bead_id(&id)?;
             let issue = fetch_issue(ctx, &id)?;
             if ctx.json {
                 println!(
@@ -166,7 +168,16 @@ fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<String>, String)> {
             reason: "expected: <issue-id...> <label>".into(),
         })
     })?;
-    let ids = parts;
+    let mut ids = Vec::with_capacity(parts.len());
+    for raw in parts {
+        let parsed = BeadId::parse(&raw).map_err(|e| {
+            Error::Op(crate::daemon::OpError::ValidationFailed {
+                field: "id".into(),
+                reason: e.to_string(),
+            })
+        })?;
+        ids.push(parsed.as_str().to_string());
+    }
     Ok((ids, label))
 }
 
