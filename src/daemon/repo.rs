@@ -7,7 +7,26 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::core::CanonicalState;
+use crate::core::{CanonicalState, WriteStamp};
+
+#[derive(Clone, Debug)]
+pub struct FetchErrorRecord {
+    pub message: String,
+    pub wall_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct DivergenceRecord {
+    pub local_oid: String,
+    pub remote_oid: String,
+    pub wall_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClockSkewRecord {
+    pub delta_ms: i64,
+    pub wall_ms: u64,
+}
 
 /// In-memory state for a single repository.
 pub struct RepoState {
@@ -47,6 +66,18 @@ pub struct RepoState {
 
     /// Monotonic counter for WAL entries.
     pub wal_sequence: u64,
+
+    /// Last observed write stamp (from state or meta).
+    pub last_seen_stamp: Option<WriteStamp>,
+
+    /// Last fetch error (best-effort).
+    pub last_fetch_error: Option<FetchErrorRecord>,
+
+    /// Last divergence detected between local and remote.
+    pub last_divergence: Option<DivergenceRecord>,
+
+    /// Last detected clock skew.
+    pub last_clock_skew: Option<ClockSkewRecord>,
 }
 
 impl RepoState {
@@ -65,6 +96,10 @@ impl RepoState {
             last_refresh: None,
             consecutive_failures: 0,
             wal_sequence: 0,
+            last_seen_stamp: None,
+            last_fetch_error: None,
+            last_divergence: None,
+            last_clock_skew: None,
         }
     }
 
@@ -83,6 +118,10 @@ impl RepoState {
             last_refresh: None,
             consecutive_failures: 0,
             wal_sequence: 0,
+            last_seen_stamp: None,
+            last_fetch_error: None,
+            last_divergence: None,
+            last_clock_skew: None,
         }
     }
 

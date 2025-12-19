@@ -9,7 +9,7 @@
 //! - Deps: all references to loser's old ID are updated
 //! - Tombstone: added for loser's old ID to prevent resurrection
 
-use crate::core::{Bead, BeadId, CanonicalState, DepEdge, DepKey, Stamp, Tombstone};
+use crate::core::{Bead, BeadId, CanonicalState, CoreError, DepEdge, DepKey, Stamp, Tombstone};
 
 /// Represents a detected ID collision between two beads.
 #[derive(Debug, Clone)]
@@ -89,8 +89,9 @@ fn determine_winner(local: &Bead, remote: &Bead) -> (CollisionSide, CollisionSid
 fn generate_remap_id(original: &BeadId, local: &CanonicalState, remote: &CanonicalState) -> BeadId {
     // Generate a new ID longer than the original root suffix, capped to 8.
     let target_len = (original.root_len() + 1).clamp(3, 8);
+    let slug = original.slug_value();
     loop {
-        let new_id = BeadId::generate_with_slug(original.slug(), target_len);
+        let new_id = BeadId::generate_with_slug(&slug, target_len);
         if new_id != *original && !local.contains(&new_id) && !remote.contains(&new_id) {
             return new_id;
         }
@@ -109,7 +110,7 @@ pub fn resolve_collisions(
     remote: &CanonicalState,
     collisions: &[Collision],
     resolution_stamp: Stamp,
-) -> (CanonicalState, CanonicalState) {
+) -> Result<(CanonicalState, CanonicalState), CoreError> {
     let mut local_resolved = local.clone();
     let mut remote_resolved = remote.clone();
 
@@ -121,7 +122,7 @@ pub fn resolve_collisions(
                     &collision.id,
                     &collision.loser_new_id,
                     &resolution_stamp,
-                );
+                )?;
             }
             CollisionSide::Remote => {
                 resolve_single(
@@ -129,12 +130,12 @@ pub fn resolve_collisions(
                     &collision.id,
                     &collision.loser_new_id,
                     &resolution_stamp,
-                );
+                )?;
             }
         }
     }
 
-    (local_resolved, remote_resolved)
+    Ok((local_resolved, remote_resolved))
 }
 
 /// Resolve a single collision in a state.
@@ -143,7 +144,7 @@ fn resolve_single(
     old_id: &BeadId,
     new_id: &BeadId,
     resolution_stamp: &Stamp,
-) {
+) -> Result<(), CoreError> {
     // 1. Remove bead from old ID, update its core.id, reinsert at new ID
     if let Some(mut bead) = state.remove_live(old_id) {
         let lineage = bead.core.created().clone();
@@ -182,12 +183,13 @@ fn resolve_single(
         // This should always succeed since we're remapping existing deps
         // (if old_key was valid, new_key will be valid unless from == to after remap,
         // which can't happen since old_id != new_id)
-        let new_key = DepKey::new(new_from, new_to, old_key.kind())
-            .expect("collision remap should not create self-dep");
+        let new_key = DepKey::new(new_from, new_to, old_key.kind())?;
 
         let new_edge = DepEdge::new(new_key, edge.created.clone());
         state.insert_dep(new_edge);
     }
+
+    Ok(())
 }
 
 /// Check if a collision resolution is deterministic.
@@ -210,7 +212,8 @@ fn verify_determinism(local: &Bead, remote: &Bead) -> bool {
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadType, Claim, Lww, Priority, Workflow, WriteStamp,
+        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Lww, Priority, Workflow,
+        WriteStamp,
     };
 
     fn make_bead(id: &str, wall_ms: u64, actor: &str) -> Bead {
@@ -287,7 +290,7 @@ mod tests {
         let resolution_stamp = Stamp::new(WriteStamp::new(5000, 0), resolver);
 
         let (local_resolved, remote_resolved) =
-            resolve_collisions(&local, &remote, &collisions, resolution_stamp);
+            resolve_collisions(&local, &remote, &collisions, resolution_stamp).unwrap();
         let merged = CanonicalState::join(&local_resolved, &remote_resolved).unwrap();
 
         // Winner retains the original ID.
@@ -314,5 +317,35 @@ mod tests {
             })
             .expect("collision tombstone should exist");
         assert!(tomb.lineage.is_some());
+    }
+
+    #[test]
+    fn collision_resolution_errors_on_self_dep_after_remap() {
+        let id = BeadId::parse("bd-abc").unwrap();
+        let new_id = BeadId::parse("bd-abcd").unwrap();
+
+        let mut local = CanonicalState::new();
+        local.insert(make_bead(id.as_str(), 1000, "alice")).unwrap();
+
+        let dep_stamp = Stamp::new(WriteStamp::new(1500, 0), ActorId::new("alice").unwrap());
+        let dep_key = DepKey::new(id.clone(), new_id.clone(), DepKind::Blocks).unwrap();
+        local.insert_dep(DepEdge::new(dep_key, dep_stamp));
+
+        let collision = Collision {
+            id: id.clone(),
+            winner: CollisionSide::Remote,
+            loser: CollisionSide::Local,
+            loser_new_id: new_id.clone(),
+        };
+        let resolution_stamp =
+            Stamp::new(WriteStamp::new(2000, 0), ActorId::new("resolver").unwrap());
+
+        let result = resolve_collisions(
+            &local,
+            &CanonicalState::new(),
+            &[collision],
+            resolution_stamp,
+        );
+        assert!(result.is_err());
     }
 }

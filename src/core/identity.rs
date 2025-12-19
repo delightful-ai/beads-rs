@@ -156,11 +156,10 @@ impl BeadId {
     /// Generate a new bead ID with given suffix length.
     ///
     /// Only daemon should call this.
-    pub(crate) fn generate_with_slug(slug: &str, len: usize) -> Self {
+    pub(crate) fn generate_with_slug(slug: &BeadSlug, len: usize) -> Self {
         use rand::Rng;
         assert!(len >= 3, "bead id suffix must be >=3 chars");
 
-        let slug = normalize_bead_slug(slug).expect("internal slug must be valid");
         let mut rng = rand::rng();
         let suffix: String = (0..len)
             .map(|_| {
@@ -169,7 +168,7 @@ impl BeadId {
             })
             .collect();
 
-        Self(format!("{}-{}", slug, suffix))
+        Self(format!("{}-{}", slug.as_str(), suffix))
     }
 
     pub fn as_str(&self) -> &str {
@@ -178,6 +177,11 @@ impl BeadId {
 
     pub fn slug(&self) -> &str {
         self.0.rfind('-').map(|i| &self.0[..i]).unwrap_or("bd")
+    }
+
+    /// Return a strongly-typed slug derived from this ID.
+    pub fn slug_value(&self) -> BeadSlug {
+        BeadSlug(self.slug().to_string())
     }
 
     pub fn is_top_level(&self) -> bool {
@@ -206,6 +210,46 @@ impl BeadId {
             .and_then(|r| r.split('.').next())
             .map(|s| s.len())
             .unwrap_or(0)
+    }
+}
+
+/// Bead slug (validated).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct BeadSlug(String);
+
+impl BeadSlug {
+    pub fn parse(raw: &str) -> Result<Self, CoreError> {
+        Ok(Self(normalize_bead_slug(raw)?))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BeadSlug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BeadSlug({:?})", self.0)
+    }
+}
+
+impl fmt::Display for BeadSlug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for BeadSlug {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        BeadSlug::parse(&s)
+    }
+}
+
+impl From<BeadSlug> for String {
+    fn from(slug: BeadSlug) -> String {
+        slug.0
     }
 }
 
@@ -501,6 +545,18 @@ mod tests {
     fn bead_id_slug_is_canonicalized() {
         let id = BeadId::parse("BeAds-Rs-abc1").unwrap();
         assert_eq!(id.as_str(), "beads-rs-abc1");
+    }
+
+    #[test]
+    fn bead_slug_parse_normalizes() {
+        let slug = BeadSlug::parse("  BeAds-Rs  ").unwrap();
+        assert_eq!(slug.as_str(), "beads-rs");
+    }
+
+    #[test]
+    fn bead_slug_rejects_invalid() {
+        assert!(BeadSlug::parse("bad slug").is_err());
+        assert!(BeadSlug::parse("-bad").is_err());
     }
 
     #[test]

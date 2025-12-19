@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::core::{ActorId, BeadId, BeadType, DepKind, Priority, WallClock};
+use crate::core::{ActorId, BeadId, BeadType, CoreError, DepKind, Priority, WallClock};
+use crate::daemon::wal::WalError;
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
 
@@ -365,6 +366,12 @@ pub enum OpError {
     #[error("bead is deleted: {0}")]
     BeadDeleted(BeadId),
 
+    #[error(transparent)]
+    Wal(#[from] WalError),
+
+    #[error("wal merge conflict: {errors:?}")]
+    WalMerge { errors: Vec<CoreError> },
+
     #[error("cannot unclaim - not claimed by you")]
     NotClaimedByYou,
 
@@ -390,6 +397,8 @@ impl OpError {
             OpError::RepoNotInitialized(_) => "repo_not_initialized",
             OpError::Sync(_) => "sync_failed",
             OpError::BeadDeleted(_) => "bead_deleted",
+            OpError::Wal(_) => "wal_error",
+            OpError::WalMerge { .. } => "wal_merge_conflict",
             OpError::NotClaimedByYou => "not_claimed_by_you",
             OpError::DepNotFound => "dep_not_found",
             OpError::Internal(_) => "internal",
@@ -400,6 +409,11 @@ impl OpError {
     pub fn transience(&self) -> Transience {
         match self {
             OpError::Sync(e) => e.transience(),
+            OpError::Wal(e) => match e {
+                WalError::Io(_) => Transience::Retryable,
+                WalError::Json(_) | WalError::VersionMismatch { .. } => Transience::Permanent,
+            },
+            OpError::WalMerge { .. } => Transience::Permanent,
             OpError::AlreadyClaimed { .. } => Transience::Retryable,
             OpError::NotFound(_)
             | OpError::AlreadyExists(_)
@@ -420,6 +434,7 @@ impl OpError {
     pub fn effect(&self) -> Effect {
         match self {
             OpError::Sync(e) => e.effect(),
+            OpError::Wal(_) | OpError::WalMerge { .. } => Effect::None,
             _ => Effect::None,
         }
     }

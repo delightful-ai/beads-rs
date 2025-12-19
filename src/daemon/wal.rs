@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::remote::RemoteUrl;
-use crate::core::CanonicalState;
+use crate::core::{Bead, BeadId, CanonicalState, DepEdge, DepKey, Tombstone, TombstoneKey};
 
 /// WAL format version.
 const WAL_VERSION: u32 = 1;
@@ -26,11 +26,80 @@ pub struct WalEntry {
     /// Wall clock time when written (for debugging).
     pub written_at_ms: u64,
     /// Full state snapshot.
+    #[serde(with = "wal_state")]
     pub state: CanonicalState,
     /// Root slug for bead IDs.
     pub root_slug: Option<String>,
     /// Monotonic sequence number.
     pub sequence: u64,
+}
+
+mod wal_state {
+    use super::*;
+    use serde::de::Error as DeError;
+    use serde::{Deserializer, Serializer};
+    use std::collections::BTreeMap;
+
+    #[derive(Serialize, Deserialize)]
+    struct WalStateVec {
+        live: Vec<Bead>,
+        tombstones: Vec<Tombstone>,
+        deps: Vec<DepEdge>,
+    }
+
+    #[derive(Deserialize)]
+    struct WalStateMap {
+        live: BTreeMap<BeadId, Bead>,
+        tombstones: BTreeMap<TombstoneKey, Tombstone>,
+        deps: BTreeMap<DepKey, DepEdge>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WalStateRepr {
+        Vecs(WalStateVec),
+        Maps(WalStateMap),
+    }
+
+    pub fn serialize<S>(state: &CanonicalState, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let snapshot = WalStateVec {
+            live: state.iter_live().map(|(_, bead)| bead.clone()).collect(),
+            tombstones: state
+                .iter_tombstones()
+                .map(|(_, tomb)| tomb.clone())
+                .collect(),
+            deps: state.iter_deps().map(|(_, dep)| dep.clone()).collect(),
+        };
+        snapshot.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<CanonicalState, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let (live, tombstones, deps) = match WalStateRepr::deserialize(deserializer)? {
+            WalStateRepr::Vecs(snapshot) => (snapshot.live, snapshot.tombstones, snapshot.deps),
+            WalStateRepr::Maps(snapshot) => (
+                snapshot.live.into_values().collect(),
+                snapshot.tombstones.into_values().collect(),
+                snapshot.deps.into_values().collect(),
+            ),
+        };
+        let mut state = CanonicalState::new();
+        for bead in live {
+            state.insert(bead).map_err(DeError::custom)?;
+        }
+        for tombstone in tombstones {
+            state.insert_tombstone(tombstone);
+        }
+        for dep in deps {
+            state.insert_dep(dep);
+        }
+        Ok(state)
+    }
 }
 
 impl WalEntry {
@@ -66,7 +135,7 @@ pub enum WalError {
 
 /// Write-Ahead Log manager.
 ///
-/// Stores per-remote WAL files in a subdirectory of the socket dir.
+/// Stores per-remote WAL files in a subdirectory of a persistent base dir.
 pub struct Wal {
     dir: PathBuf,
 }
@@ -75,8 +144,8 @@ impl Wal {
     /// Create a new WAL manager.
     ///
     /// Creates the WAL directory if it doesn't exist.
-    pub fn new(socket_dir: &Path) -> Result<Self, WalError> {
-        let dir = socket_dir.join("wal");
+    pub fn new(base_dir: &Path) -> Result<Self, WalError> {
+        let dir = base_dir.join("wal");
         fs::create_dir_all(&dir)?;
 
         #[cfg(unix)]
@@ -86,6 +155,82 @@ impl Wal {
         }
 
         Ok(Wal { dir })
+    }
+
+    /// Best-effort migration from a legacy runtime WAL directory.
+    ///
+    /// The legacy path is `<runtime_dir>/wal`. Any WAL files found there are
+    /// copied into the persistent WAL dir. If both exist, the newer entry wins.
+    pub fn migrate_from_runtime_dir(&self, runtime_dir: &Path) {
+        let legacy_dir = runtime_dir.join("wal");
+        if legacy_dir == self.dir || !legacy_dir.exists() {
+            return;
+        }
+
+        let entries = match fs::read_dir(&legacy_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("wal migration: failed to read {:?}: {}", legacy_dir, e);
+                return;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "wal") {
+                continue;
+            }
+            let file_name = match path.file_name() {
+                Some(name) => name.to_os_string(),
+                None => continue,
+            };
+            let dest = self.dir.join(&file_name);
+            if dest == path {
+                continue;
+            }
+
+            if !dest.exists() {
+                if let Err(e) = copy_then_remove(&path, &dest) {
+                    tracing::warn!("wal migration: failed to move {:?}: {}", path, e);
+                }
+                continue;
+            }
+
+            let src_entry = read_entry_at(&path);
+            let dest_entry = read_entry_at(&dest);
+
+            match (src_entry, dest_entry) {
+                (Ok(src), Ok(dest_entry)) => {
+                    if is_newer(&src, &dest_entry) {
+                        if let Err(e) = copy_then_remove(&path, &dest) {
+                            tracing::warn!("wal migration: failed to update {:?}: {}", dest, e);
+                        }
+                    } else if let Err(e) = fs::remove_file(&path) {
+                        tracing::warn!("wal migration: failed to remove {:?}: {}", path, e);
+                    }
+                }
+                (Ok(_), Err(_)) => {
+                    if let Err(e) = copy_then_remove(&path, &dest) {
+                        tracing::warn!("wal migration: failed to update {:?}: {}", dest, e);
+                    }
+                }
+                (Err(e), Ok(_)) => {
+                    tracing::warn!(
+                        "wal migration: keeping legacy WAL {:?} (unreadable): {}",
+                        path,
+                        e
+                    );
+                }
+                (Err(e1), Err(e2)) => {
+                    tracing::warn!(
+                        "wal migration: keeping legacy WAL {:?} (unreadable): {}, {}",
+                        path,
+                        e1,
+                        e2
+                    );
+                }
+            }
+        }
     }
 
     /// Get the WAL file path for a remote.
@@ -193,9 +338,64 @@ impl Wal {
     }
 }
 
+/// Default base directory for WAL storage.
+///
+/// Uses `BD_WAL_DIR` if set, otherwise `$XDG_DATA_HOME/beads-rs` or
+/// `~/.local/share/beads-rs`.
+pub fn default_wal_base_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("BD_WAL_DIR")
+        && !dir.trim().is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+
+    data_home().join("beads-rs")
+}
+
+fn data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(".local")
+                .join("share")
+        })
+}
+
+fn read_entry_at(path: &Path) -> Result<WalEntry, WalError> {
+    let data = fs::read(path)?;
+    let entry: WalEntry = serde_json::from_slice(&data)?;
+    if entry.version != WAL_VERSION {
+        return Err(WalError::VersionMismatch {
+            expected: WAL_VERSION,
+            got: entry.version,
+        });
+    }
+    Ok(entry)
+}
+
+fn is_newer(a: &WalEntry, b: &WalEntry) -> bool {
+    a.sequence > b.sequence || (a.sequence == b.sequence && a.written_at_ms > b.written_at_ms)
+}
+
+fn copy_then_remove(src: &Path, dest: &Path) -> Result<(), WalError> {
+    fs::copy(src, dest)?;
+    fs::remove_file(src)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{
+        ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Lww, Priority,
+        Stamp, Workflow, WriteStamp,
+    };
+    use serde::Serialize;
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     fn test_remote() -> RemoteUrl {
@@ -222,6 +422,102 @@ mod tests {
         assert_eq!(loaded.root_slug, Some("test-slug".into()));
         assert_eq!(loaded.sequence, 42);
         assert_eq!(loaded.written_at_ms, 1234567890);
+    }
+
+    fn make_bead(id: &str, stamp: &Stamp) -> Bead {
+        let core = BeadCore::new(BeadId::parse(id).unwrap(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("test".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::new(2).unwrap(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Default::default(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::Open, stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
+    #[test]
+    fn write_read_roundtrip_with_tombstones_and_deps() {
+        let tmp = TempDir::new().unwrap();
+        let wal = Wal::new(tmp.path()).unwrap();
+        let remote = test_remote();
+
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(1234, 0), actor);
+
+        let mut state = CanonicalState::new();
+        state.insert(make_bead("bd-abc", &stamp)).unwrap();
+        state.insert_tombstone(Tombstone::new(
+            BeadId::parse("bd-del").unwrap(),
+            stamp.clone(),
+            None,
+        ));
+        let dep_key = DepKey::new(
+            BeadId::parse("bd-abc").unwrap(),
+            BeadId::parse("bd-def").unwrap(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        state.insert_dep(DepEdge::new(dep_key, stamp.clone()));
+
+        let entry = WalEntry::new(state, None, 7, 42);
+        wal.write(&remote, &entry).unwrap();
+
+        let loaded = wal.read(&remote).unwrap().unwrap();
+        assert_eq!(loaded.state.live_count(), 1);
+        assert_eq!(loaded.state.tombstone_count(), 1);
+        assert_eq!(loaded.state.dep_count(), 1);
+    }
+
+    #[test]
+    fn read_legacy_map_state_format() {
+        #[derive(Serialize)]
+        struct LegacyWalState {
+            live: BTreeMap<BeadId, Bead>,
+            tombstones: BTreeMap<TombstoneKey, Tombstone>,
+            deps: BTreeMap<DepKey, DepEdge>,
+        }
+
+        #[derive(Serialize)]
+        struct LegacyWalEntry {
+            version: u32,
+            written_at_ms: u64,
+            state: LegacyWalState,
+            root_slug: Option<String>,
+            sequence: u64,
+        }
+
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor);
+        let bead = make_bead("bd-abc", &stamp);
+
+        let mut live = BTreeMap::new();
+        live.insert(bead.core.id.clone(), bead);
+
+        let legacy = LegacyWalEntry {
+            version: WAL_VERSION,
+            written_at_ms: 1,
+            state: LegacyWalState {
+                live,
+                tombstones: BTreeMap::new(),
+                deps: BTreeMap::new(),
+            },
+            root_slug: None,
+            sequence: 1,
+        };
+
+        let data = serde_json::to_vec(&legacy).unwrap();
+        let loaded: WalEntry = serde_json::from_slice(&data).unwrap();
+        assert_eq!(loaded.state.live_count(), 1);
+        assert_eq!(loaded.state.tombstone_count(), 0);
+        assert_eq!(loaded.state.dep_count(), 0);
     }
 
     #[test]
@@ -280,5 +576,41 @@ mod tests {
 
         assert_eq!(loaded1.root_slug, Some("slug1".into()));
         assert_eq!(loaded2.root_slug, Some("slug2".into()));
+    }
+
+    #[test]
+    fn migrate_from_runtime_dir_moves_wal() {
+        let legacy_base = TempDir::new().unwrap();
+        let new_base = TempDir::new().unwrap();
+        let legacy = Wal::new(legacy_base.path()).unwrap();
+        let current = Wal::new(new_base.path()).unwrap();
+        let remote = test_remote();
+
+        let entry = WalEntry::new(CanonicalState::new(), None, 1, 123);
+        legacy.write(&remote, &entry).unwrap();
+        assert!(legacy.exists(&remote));
+
+        current.migrate_from_runtime_dir(legacy_base.path());
+        assert!(current.exists(&remote));
+        assert!(!legacy.exists(&remote));
+    }
+
+    #[test]
+    fn migrate_prefers_newer_sequence() {
+        let legacy_base = TempDir::new().unwrap();
+        let new_base = TempDir::new().unwrap();
+        let legacy = Wal::new(legacy_base.path()).unwrap();
+        let current = Wal::new(new_base.path()).unwrap();
+        let remote = test_remote();
+
+        let older = WalEntry::new(CanonicalState::new(), None, 1, 100);
+        let newer = WalEntry::new(CanonicalState::new(), None, 2, 200);
+
+        current.write(&remote, &older).unwrap();
+        legacy.write(&remote, &newer).unwrap();
+
+        current.migrate_from_runtime_dir(legacy_base.path());
+        let loaded = current.read(&remote).unwrap().unwrap();
+        assert_eq!(loaded.sequence, 2);
     }
 }

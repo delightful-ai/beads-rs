@@ -82,6 +82,7 @@ impl TestRepo {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.path());
         cmd.env("XDG_RUNTIME_DIR", test_runtime_dir());
+        cmd.env("BD_WAL_DIR", test_runtime_dir());
         cmd
     }
 }
@@ -2513,6 +2514,7 @@ fn test_init_fails_without_origin_remote() {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
     cmd.current_dir(work_dir.path());
     cmd.env("XDG_RUNTIME_DIR", runtime_dir.path());
+    cmd.env("BD_WAL_DIR", runtime_dir.path());
     cmd.arg("init").assert().failure();
 
     // Best-effort: shut down the daemon started for this test.

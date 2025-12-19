@@ -122,6 +122,8 @@ struct WireMeta {
     format_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     root_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_write_stamp: Option<WireStamp>,
 }
 
 // =============================================================================
@@ -131,7 +133,7 @@ struct WireMeta {
 /// Serialize state to state.jsonl bytes.
 ///
 /// Sorted by bead ID, one JSON object per line.
-pub fn serialize_state(state: &CanonicalState) -> Vec<u8> {
+pub fn serialize_state(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
     let mut lines = Vec::new();
 
     // Sort by ID
@@ -140,7 +142,7 @@ pub fn serialize_state(state: &CanonicalState) -> Vec<u8> {
 
     for (_, bead) in beads {
         let wire = bead_to_wire(bead);
-        let json = serde_json::to_string(&wire).expect("bead serialization failed");
+        let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
 
@@ -148,11 +150,11 @@ pub fn serialize_state(state: &CanonicalState) -> Vec<u8> {
     if !output.is_empty() {
         output.push('\n');
     }
-    output.into_bytes()
+    Ok(output.into_bytes())
 }
 
 /// Serialize tombstones to tombstones.jsonl bytes.
-pub fn serialize_tombstones(state: &CanonicalState) -> Vec<u8> {
+pub fn serialize_tombstones(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
     let mut lines = Vec::new();
 
     let mut tombs: Vec<_> = state.iter_tombstones().collect();
@@ -172,7 +174,7 @@ pub fn serialize_tombstones(state: &CanonicalState) -> Vec<u8> {
             lineage_created_at,
             lineage_created_by,
         };
-        let json = serde_json::to_string(&wire).expect("tombstone serialization failed");
+        let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
 
@@ -180,11 +182,11 @@ pub fn serialize_tombstones(state: &CanonicalState) -> Vec<u8> {
     if !output.is_empty() {
         output.push('\n');
     }
-    output.into_bytes()
+    Ok(output.into_bytes())
 }
 
 /// Serialize deps to deps.jsonl bytes.
-pub fn serialize_deps(state: &CanonicalState) -> Vec<u8> {
+pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
     let mut lines = Vec::new();
 
     let mut deps: Vec<_> = state.iter_deps().collect();
@@ -200,7 +202,7 @@ pub fn serialize_deps(state: &CanonicalState) -> Vec<u8> {
             deleted_at: edge.deleted_stamp().map(|s| stamp_to_wire(&s.at)),
             deleted_by: edge.deleted_stamp().map(|s| s.by.as_str().to_string()),
         };
-        let json = serde_json::to_string(&wire).expect("dep serialization failed");
+        let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
 
@@ -208,17 +210,21 @@ pub fn serialize_deps(state: &CanonicalState) -> Vec<u8> {
     if !output.is_empty() {
         output.push('\n');
     }
-    output.into_bytes()
+    Ok(output.into_bytes())
 }
 
 /// Serialize meta.json bytes.
-pub fn serialize_meta(root_slug: Option<&str>) -> Vec<u8> {
+pub fn serialize_meta(
+    root_slug: Option<&str>,
+    last_write_stamp: Option<&WriteStamp>,
+) -> Result<Vec<u8>, WireError> {
     let meta = WireMeta {
         format_version: 1,
         root_slug: root_slug.map(|s| s.to_string()),
+        last_write_stamp: last_write_stamp.map(stamp_to_wire),
     };
-    let json = serde_json::to_string_pretty(&meta).expect("meta serialization failed");
-    json.into_bytes()
+    let json = serde_json::to_string_pretty(&meta)?;
+    Ok(json.into_bytes())
 }
 
 // =============================================================================
@@ -330,6 +336,7 @@ pub fn parse_deps(bytes: &[u8]) -> Result<Vec<DepEdge>, WireError> {
 pub struct ParsedMeta {
     pub format_version: u32,
     pub root_slug: Option<String>,
+    pub last_write_stamp: Option<WriteStamp>,
 }
 
 /// Parse meta.json bytes.
@@ -339,6 +346,7 @@ pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
     Ok(ParsedMeta {
         format_version: meta.format_version,
         root_slug: meta.root_slug,
+        last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
     })
 }
 
@@ -593,7 +601,7 @@ mod tests {
     #[test]
     fn roundtrip_empty_state() {
         let state = CanonicalState::new();
-        let bytes = serialize_state(&state);
+        let bytes = serialize_state(&state).unwrap();
         let beads = parse_state(&bytes).unwrap();
         assert!(beads.is_empty());
     }

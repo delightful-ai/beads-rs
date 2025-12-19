@@ -67,7 +67,29 @@ impl ExportContext {
 
 impl Default for ExportContext {
     fn default() -> Self {
-        Self::new().expect("failed to create export context")
+        match Self::new() {
+            Ok(ctx) => ctx,
+            Err(err) => {
+                let fallback = std::env::temp_dir().join("beads-rs").join("exports");
+                if let Err(e) = fs::create_dir_all(&fallback) {
+                    tracing::warn!(
+                        "failed to create export context (primary: {}, fallback: {}): {}",
+                        err,
+                        fallback.display(),
+                        e
+                    );
+                } else {
+                    tracing::warn!(
+                        "failed to create export context ({}); using fallback {}",
+                        err,
+                        fallback.display()
+                    );
+                }
+                Self {
+                    exports_dir: fallback,
+                }
+            }
+        }
     }
 }
 

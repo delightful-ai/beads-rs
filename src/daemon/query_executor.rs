@@ -13,7 +13,7 @@ use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use crate::api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
-    Note, StatusOutput, StatusSummary, SyncStatus, Tombstone,
+    Note, StatusOutput, StatusSummary, SyncStatus, SyncWarning, Tombstone,
 };
 use crate::core::{BeadId, DepKind, DepLife};
 
@@ -24,7 +24,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         match repo_state.state.require_live(id).map_live_err(id) {
             Ok(bead) => {
@@ -46,7 +49,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         // Build children set if parent filter is specified.
         // Parent deps: from=child, to=parent, kind=Parent.
@@ -148,7 +154,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         // Collect IDs that are blocked by *blocking* deps (kind=blocks).
         let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
@@ -211,7 +220,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         // Check if bead exists
         if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
@@ -251,7 +263,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         // Check if bead exists
         if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
@@ -286,7 +301,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         let bead = match repo_state.state.get_live(id) {
             Some(b) => b,
@@ -304,7 +322,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         let blocked_by = compute_blocked_by(repo_state);
         let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
@@ -347,11 +368,33 @@ impl Daemon {
             epics_eligible_for_closure: Some(epics_eligible_for_closure),
         };
 
+        let mut warnings = Vec::new();
+        if let Some(fetch) = &repo_state.last_fetch_error {
+            warnings.push(SyncWarning::Fetch {
+                message: fetch.message.clone(),
+                at_wall_ms: fetch.wall_ms,
+            });
+        }
+        if let Some(diverged) = &repo_state.last_divergence {
+            warnings.push(SyncWarning::Diverged {
+                local_oid: diverged.local_oid.clone(),
+                remote_oid: diverged.remote_oid.clone(),
+                at_wall_ms: diverged.wall_ms,
+            });
+        }
+        if let Some(skew) = &repo_state.last_clock_skew {
+            warnings.push(SyncWarning::ClockSkew {
+                delta_ms: skew.delta_ms,
+                at_wall_ms: skew.wall_ms,
+            });
+        }
+
         let sync = SyncStatus {
             dirty: repo_state.dirty,
             sync_in_progress: repo_state.sync_in_progress,
             last_sync_wall_ms: repo_state.last_sync_wall_ms,
             consecutive_failures: repo_state.consecutive_failures,
+            warnings,
         };
 
         let out = StatusOutput {
@@ -368,7 +411,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         let blocked_by = compute_blocked_by(repo_state);
         let mut out: Vec<BlockedIssue> = Vec::new();
@@ -418,7 +464,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         let status = status.map(|s| s.trim()).filter(|s| !s.is_empty());
         if let Some(s) = status
@@ -495,7 +544,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         let blocked_by = compute_blocked_by(repo_state);
 
@@ -631,7 +683,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         if let Some(id) = id {
             let record = repo_state.state.get_tombstone(id).map(Tombstone::from);
@@ -670,7 +725,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         let statuses = compute_epic_statuses(repo_state, eligible_only);
         Response::ok(ResponsePayload::Query(QueryResult::EpicStatus(statuses)))
@@ -682,7 +740,10 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
-        let repo_state = self.repo_state(&remote);
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
 
         // Run validation checks
         let mut errors = Vec::new();

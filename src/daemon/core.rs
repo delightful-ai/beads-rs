@@ -16,7 +16,7 @@ use super::ipc::{ErrorPayload, Request, Response, ResponsePayload};
 use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
-use super::repo::RepoState;
+use super::repo::{ClockSkewRecord, DivergenceRecord, FetchErrorRecord, RepoState};
 use super::scheduler::SyncScheduler;
 use super::wal::{Wal, WalEntry};
 
@@ -25,8 +25,8 @@ use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
 /// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded` or
 /// `Daemon::ensure_repo_fresh`.
 ///
-/// This type provides compile-time proof that a repo exists in the daemon's state,
-/// eliminating the need for `.unwrap()` calls when accessing repo state after loading.
+/// This type signals that a repo should exist in the daemon's state; accessors
+/// still return Internal if the invariant is violated.
 #[derive(Debug, Clone)]
 pub struct LoadedRemote(RemoteUrl);
 
@@ -37,8 +37,10 @@ impl LoadedRemote {
     }
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
-use crate::core::{ActorId, BeadId, CanonicalState, Stamp};
+use crate::core::{ActorId, BeadId, CanonicalState, Stamp, WallClock, WriteStamp};
 use crate::git::SyncError;
+use crate::git::collision::{detect_collisions, resolve_collisions};
+use crate::git::sync::SyncOutcome;
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
 
@@ -111,54 +113,21 @@ impl Daemon {
         &mut self.clock
     }
 
-    /// Get repo state. Infallible because `LoadedRemote` proves existence.
-    pub(crate) fn repo_state(&self, proof: &LoadedRemote) -> &RepoState {
+    /// Get repo state. Returns Internal if invariant is violated.
+    pub(crate) fn repo_state(&self, proof: &LoadedRemote) -> Result<&RepoState, OpError> {
         self.repos
             .get(proof.remote())
-            .expect("LoadedRemote guarantees repo exists")
+            .ok_or(OpError::Internal("loaded repo missing from state"))
     }
 
-    /// Get mutable repo state. Infallible because `LoadedRemote` proves existence.
-    pub(crate) fn repo_state_mut(&mut self, proof: &LoadedRemote) -> &mut RepoState {
-        self.repos
-            .get_mut(proof.remote())
-            .expect("LoadedRemote guarantees repo exists")
-    }
-
-    /// Execute a mutation with clock tick and stamp creation handled atomically.
-    ///
-    /// This helper eliminates the awkward borrow-checker dance where you need to:
-    /// 1. Borrow repo_state to check something
-    /// 2. Drop the borrow to call clock_mut().tick()
-    /// 3. Re-borrow and unwrap (because "I proved it exists earlier")
-    ///
-    /// Instead, the closure receives both the mutable repo state and a fresh stamp,
-    /// allowing "check + mutate" in a single borrow scope.
-    ///
-    /// # Example
-    /// ```ignore
-    /// self.with_mutation(&loaded, |repo_state, stamp| {
-    ///     let bead = repo_state.state.get_live_mut(id)
-    ///         .ok_or_else(|| OpError::NotFound(id.clone()))?;
-    ///     bead.fields.workflow = Lww::new(Workflow::Closed(closure), stamp);
-    ///     Ok(())
-    /// })?;
-    /// ```
-    pub(crate) fn with_mutation<R>(
+    /// Get mutable repo state. Returns Internal if invariant is violated.
+    pub(crate) fn repo_state_mut(
         &mut self,
         proof: &LoadedRemote,
-        f: impl FnOnce(&mut RepoState, Stamp) -> Result<R, OpError>,
-    ) -> Result<R, OpError> {
-        let write_stamp = self.clock_mut().tick();
-        let stamp = Stamp {
-            at: write_stamp,
-            by: self.actor.clone(),
-        };
-        let repo_state = self
-            .repos
+    ) -> Result<&mut RepoState, OpError> {
+        self.repos
             .get_mut(proof.remote())
-            .expect("LoadedRemote guarantees repo exists");
-        f(repo_state, stamp)
+            .ok_or(OpError::Internal("loaded repo missing from state"))
     }
 
     /// Get repo state by raw remote URL (for internal sync waiters, etc.).
@@ -221,49 +190,73 @@ impl Daemon {
 
             match respond_rx.recv() {
                 Ok(Ok(loaded)) => {
-                    if let Some(max_stamp) = loaded.state.max_write_stamp() {
-                        self.clock.receive(&max_stamp);
+                    let mut last_seen_stamp = loaded.last_seen_stamp;
+                    if let Some(max_stamp) = last_seen_stamp.as_ref() {
+                        self.clock.receive(max_stamp);
                     }
                     let mut needs_sync = loaded.needs_sync;
                     let mut state = loaded.state;
                     let mut root_slug = loaded.root_slug;
 
                     // WAL recovery: merge any state from WAL file
-                    if let Ok(Some(wal_entry)) = self.wal.read(&remote) {
-                        tracing::info!(
-                            "recovering WAL for {:?} (sequence {})",
-                            remote,
-                            wal_entry.sequence
-                        );
+                    match self.wal.read(&remote) {
+                        Ok(Some(wal_entry)) => {
+                            tracing::info!(
+                                "recovering WAL for {:?} (sequence {})",
+                                remote,
+                                wal_entry.sequence
+                            );
 
-                        // Advance clock for WAL timestamps
-                        if let Some(max_stamp) = wal_entry.state.max_write_stamp() {
-                            self.clock.receive(&max_stamp);
-                        }
+                            // Advance clock for WAL timestamps
+                            if let Some(max_stamp) = wal_entry.state.max_write_stamp() {
+                                self.clock.receive(&max_stamp);
+                                last_seen_stamp = max_write_stamp(last_seen_stamp, Some(max_stamp));
+                            }
 
-                        // CRDT merge WAL state with git state
-                        match CanonicalState::join(&state, &wal_entry.state) {
-                            Ok(merged) => {
-                                state = merged;
-                                // WAL slug takes precedence if set
-                                if wal_entry.root_slug.is_some() {
-                                    root_slug = wal_entry.root_slug;
+                            // CRDT merge WAL state with git state
+                            match CanonicalState::join(&state, &wal_entry.state) {
+                                Ok(merged) => {
+                                    state = merged;
+                                    // WAL slug takes precedence if set
+                                    if wal_entry.root_slug.is_some() {
+                                        root_slug = wal_entry.root_slug;
+                                    }
+                                    // WAL had data - need to sync it to remote
+                                    needs_sync = true;
                                 }
-                                // WAL had data - need to sync it to remote
-                                needs_sync = true;
+                                Err(errs) => {
+                                    return Err(OpError::WalMerge { errors: errs });
+                                }
                             }
-                            Err(errs) => {
-                                tracing::warn!(
-                                    "WAL merge failed for {:?}: {:?}, using git state only",
-                                    remote,
-                                    errs
-                                );
-                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return Err(OpError::Wal(e));
                         }
                     }
 
+                    last_seen_stamp = max_write_stamp(last_seen_stamp, state.max_write_stamp());
+
+                    let now_wall_ms = WallClock::now().0;
+                    let clock_skew = last_seen_stamp
+                        .as_ref()
+                        .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
+
                     let mut repo_state =
                         RepoState::with_state_and_path(state, root_slug, repo.to_owned());
+                    repo_state.last_seen_stamp = last_seen_stamp;
+                    repo_state.last_clock_skew = clock_skew;
+                    repo_state.last_fetch_error =
+                        loaded.fetch_error.map(|message| FetchErrorRecord {
+                            message,
+                            wall_ms: now_wall_ms,
+                        });
+                    repo_state.last_divergence =
+                        loaded.divergence.map(|divergence| DivergenceRecord {
+                            local_oid: divergence.local_oid.to_string(),
+                            remote_oid: divergence.remote_oid.to_string(),
+                            wall_ms: now_wall_ms,
+                        });
 
                     // If local/WAL has changes that remote doesn't (crash recovery),
                     // mark dirty so sync will push those changes.
@@ -312,7 +305,7 @@ impl Daemon {
     ) -> Result<LoadedRemote, OpError> {
         let loaded = self.ensure_repo_loaded(repo, git_tx)?;
 
-        let repo_state = self.repo_state(&loaded);
+        let repo_state = self.repo_state(&loaded)?;
         let needs_refresh = !repo_state.dirty
             && !repo_state.sync_in_progress
             && !repo_state.refresh_in_progress
@@ -327,7 +320,7 @@ impl Daemon {
 
             if let Some(refresh_path) = path {
                 // Mark refresh in progress before sending to avoid races
-                let repo_state = self.repo_state_mut(&loaded);
+                let repo_state = self.repo_state_mut(&loaded)?;
                 repo_state.refresh_in_progress = true;
 
                 // Kick off background refresh - don't wait for result
@@ -361,8 +354,8 @@ impl Daemon {
         match result {
             Ok(fresh) => {
                 // Advance clock to account for remote stamps
-                if let Some(max_stamp) = fresh.state.max_write_stamp() {
-                    self.clock.receive(&max_stamp);
+                if let Some(max_stamp) = fresh.last_seen_stamp.as_ref() {
+                    self.clock.receive(max_stamp);
                 }
 
                 // Only apply refresh if repo is still clean (no mutations happened
@@ -375,6 +368,24 @@ impl Daemon {
                     }
                 }
                 repo_state.last_refresh = Some(Instant::now());
+
+                repo_state.last_seen_stamp =
+                    max_write_stamp(repo_state.last_seen_stamp.clone(), fresh.last_seen_stamp);
+
+                let now_wall_ms = WallClock::now().0;
+                repo_state.last_clock_skew = repo_state
+                    .last_seen_stamp
+                    .as_ref()
+                    .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
+                repo_state.last_fetch_error = fresh.fetch_error.map(|message| FetchErrorRecord {
+                    message,
+                    wall_ms: now_wall_ms,
+                });
+                repo_state.last_divergence = fresh.divergence.map(|divergence| DivergenceRecord {
+                    local_oid: divergence.local_oid.to_string(),
+                    remote_oid: divergence.remote_oid.to_string(),
+                    wall_ms: now_wall_ms,
+                });
 
                 // If refresh showed we have local changes that need syncing
                 if fresh.needs_sync && !repo_state.dirty {
@@ -451,61 +462,116 @@ impl Daemon {
     /// Complete a sync operation.
     ///
     /// Called when git thread reports sync result.
-    pub fn complete_sync(&mut self, remote: &RemoteUrl, result: Result<CanonicalState, SyncError>) {
-        let sync_succeeded = {
-            let repo_state = match self.repos.get_mut(remote) {
-                Some(s) => s,
-                None => return,
-            };
+    pub fn complete_sync(&mut self, remote: &RemoteUrl, result: Result<SyncOutcome, SyncError>) {
+        let mut backoff_ms = None;
+        let mut sync_succeeded = false;
 
-            match result {
-                Ok(synced_state) => {
-                    // Advance clock to account for remote stamps
-                    if let Some(max_stamp) = synced_state.max_write_stamp() {
-                        self.clock.receive(&max_stamp);
-                    }
-
-                    // If mutations happened during sync, merge them
-                    if repo_state.dirty {
-                        // Merge local mutations with synced state
-                        match CanonicalState::join(&synced_state, &repo_state.state) {
-                            Ok(merged) => {
-                                repo_state.complete_sync(merged, self.clock.wall_ms());
-                                // Still dirty from mutations during sync - reschedule
-                                repo_state.dirty = true;
-                                self.scheduler.schedule(remote.clone());
-                            }
-                            Err(_) => {
-                                // Merge failed - just take synced state, we'll catch up next sync
-                                repo_state.complete_sync(synced_state, self.clock.wall_ms());
-                            }
-                        }
-                    } else {
-                        // No mutations during sync - just take synced state
-                        repo_state.complete_sync(synced_state, self.clock.wall_ms());
-
-                        // State is now durable in remote - delete WAL
-                        if let Err(e) = self.wal.delete(remote) {
-                            tracing::warn!(
-                                "failed to delete WAL after sync for {:?}: {}",
-                                remote,
-                                e
-                            );
-                        }
-                    }
-                    true
+        match result {
+            Ok(outcome) => {
+                let synced_state = outcome.state;
+                // Advance clock to account for remote stamps
+                if let Some(max_stamp) = outcome.last_seen_stamp.as_ref() {
+                    self.clock.receive(max_stamp);
                 }
-                Err(e) => {
-                    eprintln!("sync failed for {:?}: {:?}", remote, e);
-                    repo_state.fail_sync();
+                let resolution_stamp = {
+                    let write_stamp = self.clock_mut().tick();
+                    Stamp {
+                        at: write_stamp,
+                        by: self.actor.clone(),
+                    }
+                };
 
-                    // Exponential backoff
-                    let backoff = Duration::from_millis(repo_state.backoff_ms());
-                    self.scheduler.schedule_after(remote.clone(), backoff);
-                    false
+                let repo_state = match self.repos.get_mut(remote) {
+                    Some(s) => s,
+                    None => return,
+                };
+
+                repo_state.last_seen_stamp =
+                    max_write_stamp(repo_state.last_seen_stamp.clone(), outcome.last_seen_stamp);
+                let now_wall_ms = WallClock::now().0;
+                repo_state.last_clock_skew = repo_state
+                    .last_seen_stamp
+                    .as_ref()
+                    .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
+                repo_state.last_divergence =
+                    outcome.divergence.map(|divergence| DivergenceRecord {
+                        local_oid: divergence.local_oid.to_string(),
+                        remote_oid: divergence.remote_oid.to_string(),
+                        wall_ms: now_wall_ms,
+                    });
+
+                // If mutations happened during sync, merge them
+                if repo_state.dirty {
+                    let local_state = repo_state.state.clone();
+                    let merged = match CanonicalState::join(&synced_state, &local_state) {
+                        Ok(merged) => Ok(merged),
+                        Err(mut errs) => {
+                            let collisions = detect_collisions(&local_state, &synced_state);
+                            if collisions.is_empty() {
+                                Err(errs)
+                            } else {
+                                match resolve_collisions(
+                                    &local_state,
+                                    &synced_state,
+                                    &collisions,
+                                    resolution_stamp,
+                                ) {
+                                    Ok((local_resolved, remote_resolved)) => {
+                                        CanonicalState::join(&remote_resolved, &local_resolved)
+                                    }
+                                    Err(err) => {
+                                        errs.push(err);
+                                        Err(errs)
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    match merged {
+                        Ok(merged) => {
+                            repo_state.complete_sync(merged, self.clock.wall_ms());
+                            // Still dirty from mutations during sync - reschedule
+                            repo_state.dirty = true;
+                            self.scheduler.schedule(remote.clone());
+                            sync_succeeded = true;
+                        }
+                        Err(errs) => {
+                            tracing::error!(
+                                "merge after sync failed for {:?}: {:?}; preserving local state",
+                                remote,
+                                errs
+                            );
+                            repo_state.fail_sync();
+                            backoff_ms = Some(repo_state.backoff_ms());
+                        }
+                    }
+                } else {
+                    // No mutations during sync - just take synced state
+                    repo_state.complete_sync(synced_state, self.clock.wall_ms());
+
+                    // State is now durable in remote - delete WAL
+                    if let Err(e) = self.wal.delete(remote) {
+                        tracing::warn!("failed to delete WAL after sync for {:?}: {}", remote, e);
+                    }
+                    sync_succeeded = true;
                 }
             }
-        };
+            Err(e) => {
+                eprintln!("sync failed for {:?}: {:?}", remote, e);
+                let repo_state = match self.repos.get_mut(remote) {
+                    Some(s) => s,
+                    None => return,
+                };
+                repo_state.fail_sync();
+                backoff_ms = Some(repo_state.backoff_ms());
+            }
+        }
+
+        if let Some(backoff) = backoff_ms {
+            let backoff = Duration::from_millis(backoff);
+            self.scheduler.schedule_after(remote.clone(), backoff);
+        }
 
         // Export Go-compatible JSONL after successful sync
         if sync_succeeded {
@@ -540,37 +606,58 @@ impl Daemon {
         }
     }
 
-    /// Mark repo as dirty, write to WAL for durability, and schedule sync.
+    /// Apply a mutation with WAL durability.
     ///
-    /// This is the key durability mechanism: before returning success to the client,
-    /// we write the state to the WAL file. If the daemon crashes before the
-    /// debounced sync completes, the state is recoverable from the WAL on restart.
-    ///
-    /// Infallible because `LoadedRemote` proves existence.
-    pub fn mark_dirty_and_schedule(&mut self, proof: &LoadedRemote, _git_tx: &Sender<GitOp>) {
-        let repo_state = self
-            .repos
-            .get_mut(proof.remote())
-            .expect("LoadedRemote guarantees repo exists");
+    /// The mutation runs against a cloned state. If the WAL write fails,
+    /// the in-memory state is left unchanged and the error is returned.
+    pub(crate) fn apply_wal_mutation<R>(
+        &mut self,
+        proof: &LoadedRemote,
+        f: impl FnOnce(&mut CanonicalState, Stamp) -> Result<R, OpError>,
+    ) -> Result<R, OpError> {
+        let (mut next_state, root_slug, sequence, last_seen_stamp) = {
+            let repo_state = self.repo_state(proof)?;
+            (
+                repo_state.state.clone(),
+                repo_state.root_slug.clone(),
+                repo_state.wal_sequence,
+                repo_state.last_seen_stamp.clone(),
+            )
+        };
 
-        // Get data needed for WAL
-        let state = repo_state.state.clone();
-        let root_slug = repo_state.root_slug.clone();
-        let sequence = repo_state.wal_sequence;
-        repo_state.wal_sequence += 1;
-
-        repo_state.mark_dirty();
-
-        // Write to WAL for durability (blocking but fast)
-        let entry = WalEntry::new(state, root_slug, sequence, self.clock.wall_ms());
-
-        if let Err(e) = self.wal.write(proof.remote(), &entry) {
-            tracing::warn!("WAL write failed for {:?}: {}", proof.remote(), e);
-            // Degraded durability - mutation proceeds but won't survive crash
-            // until next successful WAL write or remote sync.
+        if let Some(floor) = last_seen_stamp.as_ref() {
+            self.clock.receive(floor);
         }
+        let now_wall_ms = WallClock::now().0;
+        let clock_skew = last_seen_stamp
+            .as_ref()
+            .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
 
+        let write_stamp = self.clock_mut().tick();
+        let stamp = Stamp {
+            at: write_stamp.clone(),
+            by: self.actor.clone(),
+        };
+
+        let result = f(&mut next_state, stamp)?;
+
+        let entry = WalEntry::new(
+            next_state.clone(),
+            root_slug,
+            sequence,
+            self.clock.wall_ms(),
+        );
+        self.wal.write(proof.remote(), &entry)?;
+
+        let repo_state = self.repo_state_mut(proof)?;
+        repo_state.state = next_state;
+        repo_state.wal_sequence = sequence + 1;
+        repo_state.last_seen_stamp = Some(write_stamp);
+        repo_state.last_clock_skew = clock_skew;
+        repo_state.mark_dirty();
         self.scheduler.schedule(proof.remote().clone());
+
+        Ok(result)
     }
 
     pub fn next_sync_deadline(&mut self) -> Option<Instant> {
@@ -889,10 +976,36 @@ fn error_payload(code: &str, message: &str) -> ErrorPayload {
     }
 }
 
+const CLOCK_SKEW_WARN_MS: u64 = 5 * 60 * 1000;
+
+fn detect_clock_skew(now_ms: u64, reference_ms: u64) -> Option<ClockSkewRecord> {
+    let delta_ms = now_ms as i64 - reference_ms as i64;
+    if delta_ms.unsigned_abs() >= CLOCK_SKEW_WARN_MS {
+        Some(ClockSkewRecord {
+            delta_ms,
+            wall_ms: now_ms,
+        })
+    } else {
+        None
+    }
+}
+
+fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<WriteStamp> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(std::cmp::max(a, b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::CanonicalState;
+    use crate::core::{
+        Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Labels, Lww, Priority,
+        Stamp, WallClock, Workflow, WriteStamp,
+    };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::wal::Wal;
     use tempfile::TempDir;
@@ -911,6 +1024,33 @@ mod tests {
         (tmp, wal)
     }
 
+    fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
+        Stamp::new(
+            WriteStamp::new(wall_ms, 0),
+            ActorId::new(actor.to_string()).unwrap(),
+        )
+    }
+
+    fn make_bead(id: &str, wall_ms: u64, actor: &str) -> Bead {
+        let stamp = make_stamp(wall_ms, actor);
+        let core = BeadCore::new(BeadId::parse(id).unwrap(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("test".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::Open, stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp),
+        };
+        Bead::new(core, fields)
+    }
+
     #[test]
     fn complete_refresh_clears_in_progress_flag() {
         let (_tmp, wal) = test_wal();
@@ -927,6 +1067,9 @@ mod tests {
             state: CanonicalState::new(),
             root_slug: None,
             needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
         });
         daemon.complete_refresh(&remote, result);
 
@@ -972,6 +1115,9 @@ mod tests {
             state: fresh_state.clone(),
             root_slug: Some("fresh-slug".to_string()),
             needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
         });
         daemon.complete_refresh(&remote, result);
 
@@ -996,6 +1142,9 @@ mod tests {
             state: CanonicalState::new(),
             root_slug: Some("new-slug".to_string()),
             needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
         });
         daemon.complete_refresh(&remote, result);
 
@@ -1022,6 +1171,9 @@ mod tests {
             state: CanonicalState::new(),
             root_slug: None,
             needs_sync: true,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
         });
         daemon.complete_refresh(&remote, result);
 
@@ -1043,6 +1195,9 @@ mod tests {
             state: CanonicalState::new(),
             root_slug: None,
             needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
         });
         daemon.complete_refresh(&unknown, result);
         // Just verify no panic and daemon is still valid
@@ -1071,7 +1226,12 @@ mod tests {
         daemon.repos.insert(remote.clone(), repo_state);
 
         // Complete sync with success
-        daemon.complete_sync(&remote, Ok(CanonicalState::new()));
+        let outcome = SyncOutcome {
+            state: CanonicalState::new(),
+            divergence: None,
+            last_seen_stamp: None,
+        };
+        daemon.complete_sync(&remote, Ok(outcome));
 
         // WAL should be deleted after successful sync on clean state
         assert!(!daemon.wal.exists(&remote));
@@ -1099,7 +1259,12 @@ mod tests {
         daemon.repos.insert(remote.clone(), repo_state);
 
         // Complete sync with success
-        daemon.complete_sync(&remote, Ok(CanonicalState::new()));
+        let outcome = SyncOutcome {
+            state: CanonicalState::new(),
+            divergence: None,
+            last_seen_stamp: None,
+        };
+        daemon.complete_sync(&remote, Ok(outcome));
 
         // WAL should NOT be deleted - dirty state needs another sync
         assert!(daemon.wal.exists(&remote));
@@ -1130,5 +1295,104 @@ mod tests {
 
         // WAL should NOT be deleted on failure
         assert!(daemon.wal.exists(&remote));
+    }
+
+    #[test]
+    fn wal_write_failure_aborts_mutation() {
+        let (tmp, wal) = test_wal();
+        let remote = test_remote();
+
+        // Remove WAL directory to force write failure.
+        let wal_dir = tmp.path().join("wal");
+        std::fs::remove_dir_all(&wal_dir).unwrap();
+
+        let mut daemon = Daemon::new(test_actor(), wal);
+        daemon.repos.insert(remote.clone(), RepoState::new());
+
+        let proof = LoadedRemote(remote.clone());
+        let result = daemon.apply_wal_mutation(&proof, |state, stamp| {
+            let bead = make_bead("bd-abc", stamp.at.wall_ms, stamp.by.as_str());
+            state.insert_live(bead);
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(OpError::Wal(_))));
+        let repo_state = daemon.repos.get(&remote).unwrap();
+        assert_eq!(repo_state.state.live_count(), 0);
+        assert_eq!(repo_state.wal_sequence, 0);
+    }
+
+    #[test]
+    fn apply_wal_mutation_clamps_to_last_seen_stamp() {
+        let (_tmp, wal) = test_wal();
+        let remote = test_remote();
+        let mut daemon = Daemon::new(test_actor(), wal);
+
+        let future_stamp = WriteStamp::new(WallClock::now().0 + 60_000, 0);
+        let mut repo_state = RepoState::new();
+        repo_state.last_seen_stamp = Some(future_stamp.clone());
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        let proof = LoadedRemote(remote.clone());
+        let result = daemon.apply_wal_mutation(&proof, |state, stamp| {
+            let bead = make_bead("bd-abc", stamp.at.wall_ms, stamp.by.as_str());
+            state.insert_live(bead);
+            Ok(stamp.at.clone())
+        });
+
+        let applied_stamp = result.unwrap();
+        assert!(applied_stamp >= future_stamp);
+    }
+
+    #[test]
+    fn complete_sync_resolves_collisions_for_dirty_state() {
+        let (_tmp, wal) = test_wal();
+        let remote = test_remote();
+        let mut daemon = Daemon::new(test_actor(), wal);
+
+        let winner = make_bead("bd-abc", 1000, "alice");
+        let loser = make_bead("bd-abc", 2000, "bob");
+
+        let mut synced_state = CanonicalState::new();
+        synced_state.insert_live(winner.clone());
+
+        let mut local_state = CanonicalState::new();
+        local_state.insert_live(loser);
+
+        let mut repo_state = RepoState::new();
+        repo_state.state = local_state;
+        repo_state.dirty = true;
+        repo_state.sync_in_progress = true;
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        let outcome = SyncOutcome {
+            last_seen_stamp: synced_state.max_write_stamp(),
+            state: synced_state,
+            divergence: None,
+        };
+        daemon.complete_sync(&remote, Ok(outcome));
+
+        let repo_state = daemon.repos.get(&remote).unwrap();
+        assert_eq!(repo_state.state.live_count(), 2);
+
+        let id = BeadId::parse("bd-abc").unwrap();
+        let merged = repo_state.state.get_live(&id).unwrap();
+        assert_eq!(merged.core.created(), winner.core.created());
+    }
+
+    #[test]
+    fn detect_clock_skew_flags_large_delta() {
+        let now = 1_700_000_000_000u64;
+        let reference = now - (CLOCK_SKEW_WARN_MS + 1);
+        let skew = detect_clock_skew(now, reference).unwrap();
+        assert!(skew.delta_ms > 0);
+        assert_eq!(skew.wall_ms, now);
+    }
+
+    #[test]
+    fn detect_clock_skew_ignores_small_delta() {
+        let now = 1_700_000_000_000u64;
+        let reference = now - (CLOCK_SKEW_WARN_MS - 1);
+        assert!(detect_clock_skew(now, reference).is_none());
     }
 }

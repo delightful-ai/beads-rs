@@ -27,11 +27,31 @@ pub struct DaemonInfo {
 // =============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SyncWarning {
+    Fetch {
+        message: String,
+        at_wall_ms: u64,
+    },
+    Diverged {
+        local_oid: String,
+        remote_oid: String,
+        at_wall_ms: u64,
+    },
+    ClockSkew {
+        delta_ms: i64,
+        at_wall_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncStatus {
     pub dirty: bool,
     pub sync_in_progress: bool,
     pub last_sync_wall_ms: Option<u64>,
     pub consecutive_failures: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<SyncWarning>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

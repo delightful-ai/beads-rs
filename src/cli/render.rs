@@ -5,11 +5,12 @@
 
 use crate::api::{
     BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
-    Note, StatusOutput, Tombstone,
+    Note, StatusOutput, SyncWarning, Tombstone,
 };
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
 use crate::daemon::query::QueryResult;
+use std::sync::LazyLock;
 
 /// Render a daemon response for human output.
 pub fn render_human(payload: &ResponsePayload) -> String {
@@ -459,6 +460,48 @@ fn render_status(out: &StatusOutput) -> String {
             "  consecutive_failures: {}\n",
             sync.consecutive_failures
         ));
+        if !sync.warnings.is_empty() {
+            buf.push_str("  warnings:\n");
+            for warning in &sync.warnings {
+                match warning {
+                    SyncWarning::Fetch {
+                        message,
+                        at_wall_ms,
+                    } => {
+                        buf.push_str(&format!(
+                            "    fetch_error: {} (at {})\n",
+                            message,
+                            fmt_wall_ms(*at_wall_ms)
+                        ));
+                    }
+                    SyncWarning::Diverged {
+                        local_oid,
+                        remote_oid,
+                        at_wall_ms,
+                    } => {
+                        buf.push_str(&format!(
+                            "    divergence: local {} remote {} (at {})\n",
+                            local_oid,
+                            remote_oid,
+                            fmt_wall_ms(*at_wall_ms)
+                        ));
+                    }
+                    SyncWarning::ClockSkew {
+                        delta_ms,
+                        at_wall_ms,
+                    } => {
+                        let direction = if *delta_ms >= 0 { "ahead" } else { "behind" };
+                        let abs_ms = delta_ms.unsigned_abs();
+                        buf.push_str(&format!(
+                            "    clock_skew: {} ms {} (at {})\n",
+                            abs_ms,
+                            direction,
+                            fmt_wall_ms(*at_wall_ms)
+                        ));
+                    }
+                }
+            }
+        }
     }
     buf.push('\n');
     buf
@@ -686,12 +729,16 @@ fn fmt_labels(labels: &[String]) -> String {
     out
 }
 
+static WALL_MS_FORMAT: LazyLock<Option<Vec<time::format_description::FormatItem<'static>>>> =
+    LazyLock::new(|| time::format_description::parse("[year]-[month]-[day] [hour]:[minute]").ok());
+
 fn fmt_wall_ms(ms: u64) -> String {
     use time::OffsetDateTime;
-    use time::format_description::parse;
 
-    let fmt = parse("[year]-[month]-[day] [hour]:[minute]").unwrap();
     let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    dt.format(&fmt).unwrap_or_else(|_| ms.to_string())
+    match WALL_MS_FORMAT.as_deref() {
+        Some(fmt) => dt.format(fmt).unwrap_or_else(|_| ms.to_string()),
+        None => ms.to_string(),
+    }
 }

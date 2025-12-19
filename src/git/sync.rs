@@ -13,24 +13,29 @@
 
 use std::path::{Path, PathBuf};
 
-use git2::{ObjectType, Oid, Repository, Signature};
+use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 
 use super::collision::{Collision, detect_collisions, resolve_collisions};
 use super::error::SyncError;
 use super::wire;
-use crate::core::{CanonicalState, Stamp};
+use crate::core::{CanonicalState, Stamp, WriteStamp};
 
 // =============================================================================
 // Phase markers (zero-sized types for typestate)
 // =============================================================================
+
+#[derive(Clone, Copy)]
+enum FetchPolicy {
+    Strict,
+    BestEffort,
+}
 
 /// Initial phase - ready to start sync.
 pub struct Idle;
 
 /// Fetched phase - have remote state.
 pub struct Fetched {
-    /// Local ref oid (will be parent of our commit).
-    /// This is `refs/heads/beads/store`, not the remote tracking ref.
+    /// Local ref oid (`refs/heads/beads/store`).
     pub local_oid: Oid,
     /// Remote oid (for detecting divergence, may differ from local_oid).
     pub remote_oid: Oid,
@@ -38,6 +43,12 @@ pub struct Fetched {
     pub remote_state: CanonicalState,
     /// Root slug from meta.json (if any).
     pub root_slug: Option<String>,
+    /// Max write stamp stored in meta.json (if any).
+    pub parent_meta_stamp: Option<WriteStamp>,
+    /// Fetch error from best-effort mode (if any).
+    pub fetch_error: Option<String>,
+    /// Divergence detected between local and remote refs (if any).
+    pub divergence: Option<DivergenceInfo>,
 }
 
 /// Merged phase - have merged state ready to commit.
@@ -52,6 +63,8 @@ pub struct Merged {
     pub diff: SyncDiff,
     /// Root slug from meta.json (if any).
     pub root_slug: Option<String>,
+    /// Max write stamp from parent meta.json (if any).
+    pub parent_meta_stamp: Option<WriteStamp>,
 }
 
 /// Committed phase - have local commit, ready to push.
@@ -60,6 +73,21 @@ pub struct Committed {
     pub commit_oid: Oid,
     /// The merged state.
     pub state: CanonicalState,
+}
+
+/// Local/remote divergence info (non-linear history).
+#[derive(Clone, Debug)]
+pub struct DivergenceInfo {
+    pub local_oid: Oid,
+    pub remote_oid: Oid,
+}
+
+/// Result of a successful sync (state + diagnostics).
+#[derive(Clone, Debug)]
+pub struct SyncOutcome {
+    pub state: CanonicalState,
+    pub divergence: Option<DivergenceInfo>,
+    pub last_seen_stamp: Option<WriteStamp>,
 }
 
 /// A single change tracked for commit message.
@@ -207,9 +235,22 @@ impl SyncProcess<Idle> {
     ///
     /// If no remote ref exists, creates an empty initial state.
     pub fn fetch(self, repo: &Repository) -> Result<SyncProcess<Fetched>, SyncError> {
+        self.fetch_inner(repo, FetchPolicy::Strict)
+    }
+
+    /// Best-effort fetch (allows offline/local-only operation).
+    pub fn fetch_best_effort(self, repo: &Repository) -> Result<SyncProcess<Fetched>, SyncError> {
+        self.fetch_inner(repo, FetchPolicy::BestEffort)
+    }
+
+    fn fetch_inner(
+        self,
+        repo: &Repository,
+        policy: FetchPolicy,
+    ) -> Result<SyncProcess<Fetched>, SyncError> {
+        let mut fetch_error = None;
         // Fetch from origin
         if let Ok(mut remote) = repo.find_remote("origin") {
-            // Ignore fetch errors - remote might not exist yet
             let cfg = repo.config().ok();
             let mut callbacks = git2::RemoteCallbacks::new();
             callbacks.credentials(move |url, username_from_url, allowed| {
@@ -228,57 +269,95 @@ impl SyncProcess<Idle> {
             });
             let mut fo = git2::FetchOptions::new();
             fo.remote_callbacks(callbacks);
-            let _ = remote.fetch(&["refs/heads/beads/store"], Some(&mut fo), None);
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            if let Err(e) = remote.fetch(&[refspec], Some(&mut fo), None) {
+                match policy {
+                    FetchPolicy::Strict => return Err(SyncError::Fetch(e)),
+                    FetchPolicy::BestEffort => {
+                        fetch_error = Some(e.to_string());
+                        tracing::warn!("beads fetch failed (best-effort): {}", e);
+                    }
+                }
+            }
         }
 
+        let local_oid_opt = refname_to_id_optional(repo, "refs/heads/beads/store")?;
+        let remote_oid_opt = refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?;
+
         // Get remote state for CRDT merge
-        let (remote_oid, remote_state, root_slug) =
-            match repo.refname_to_id("refs/remotes/origin/beads/store") {
-                Ok(oid) => {
-                    let loaded = read_state_at_oid(repo, oid)?;
-                    (oid, loaded.state, loaded.root_slug)
+        let (remote_oid, remote_state, root_slug, parent_meta_stamp) = match remote_oid_opt {
+            Some(oid) => {
+                let loaded = read_state_at_oid(repo, oid)?;
+                (oid, loaded.state, loaded.root_slug, loaded.last_write_stamp)
+            }
+            None => match local_oid_opt {
+                Some(local_oid) => {
+                    let loaded = read_state_at_oid(repo, local_oid)?;
+                    (
+                        local_oid,
+                        loaded.state,
+                        loaded.root_slug,
+                        loaded.last_write_stamp,
+                    )
                 }
-                Err(_) => {
-                    // No remote - check local ref (handles local-only repos)
-                    match repo.refname_to_id("refs/heads/beads/store") {
-                        Ok(local_oid) => {
-                            let loaded = read_state_at_oid(repo, local_oid)?;
-                            (local_oid, loaded.state, loaded.root_slug)
-                        }
-                        Err(_) => {
-                            // Neither remote nor local - truly first sync
-                            (Oid::zero(), CanonicalState::new(), None)
+                None => (Oid::zero(), CanonicalState::new(), None, None),
+            },
+        };
+
+        // Fast-forward local ref to match remote only when it's safe.
+        let mut divergence = None;
+        if let Some(remote_oid) = remote_oid_opt {
+            match local_oid_opt {
+                Some(local_oid) => {
+                    if local_oid != remote_oid {
+                        let remote_is_descendant = repo
+                            .graph_descendant_of(remote_oid, local_oid)
+                            .map_err(SyncError::MergeBase)?;
+                        if remote_is_descendant {
+                            repo.reference(
+                                "refs/heads/beads/store",
+                                remote_oid,
+                                false,
+                                "beads sync: fast-forward to remote",
+                            )?;
+                        } else {
+                            let local_is_descendant = repo
+                                .graph_descendant_of(local_oid, remote_oid)
+                                .map_err(SyncError::MergeBase)?;
+                            if !local_is_descendant {
+                                divergence = Some(DivergenceInfo {
+                                    local_oid,
+                                    remote_oid,
+                                });
+                            }
+                            ensure_backup_ref(repo, local_oid)?;
                         }
                     }
                 }
-            };
-
-        // Fast-forward local ref to match remote if they differ.
-        // This ensures our commit (which will parent on remote_oid) can update the local ref.
-        // Safe because we're about to merge daemon state with remote state anyway.
-        if !remote_oid.is_zero() {
-            let local_oid = repo
-                .refname_to_id("refs/heads/beads/store")
-                .unwrap_or(Oid::zero());
-
-            if local_oid != remote_oid {
-                // Update local ref to match remote
-                repo.reference(
-                    "refs/heads/beads/store",
-                    remote_oid,
-                    true, // force
-                    "beads sync: fast-forward to remote",
-                )?;
+                None => {
+                    repo.reference(
+                        "refs/heads/beads/store",
+                        remote_oid,
+                        true,
+                        "beads sync: init local from remote",
+                    )?;
+                }
             }
         }
+
+        let local_oid =
+            refname_to_id_optional(repo, "refs/heads/beads/store")?.unwrap_or(Oid::zero());
 
         Ok(SyncProcess {
             repo_path: self.repo_path,
             phase: Fetched {
-                local_oid: remote_oid, // After fast-forward, local matches remote
+                local_oid,
                 remote_oid,
                 remote_state,
                 root_slug,
+                parent_meta_stamp,
+                fetch_error,
+                divergence,
             },
         })
     }
@@ -301,7 +380,15 @@ impl SyncProcess<Fetched> {
             remote_oid,
             remote_state,
             root_slug,
+            parent_meta_stamp,
+            ..
         } = self.phase;
+
+        let parent_oid = if remote_oid.is_zero() {
+            local_oid
+        } else {
+            remote_oid
+        };
 
         // Fast path: if remote is empty/uninitialized, just use local
         if remote_oid.is_zero() {
@@ -311,9 +398,10 @@ impl SyncProcess<Fetched> {
                 phase: Merged {
                     state: local_state.clone(),
                     collisions: Vec::new(),
-                    parent_oid: local_oid, // Use local ref as parent
+                    parent_oid,
                     diff,
                     root_slug,
+                    parent_meta_stamp,
                 },
             });
         }
@@ -326,6 +414,7 @@ impl SyncProcess<Fetched> {
             (local_state.clone(), remote_state)
         } else {
             resolve_collisions(local_state, &remote_state, &collisions, resolution_stamp)
+                .map_err(SyncError::CollisionResolution)?
         };
 
         // Pairwise CRDT merge
@@ -350,9 +439,10 @@ impl SyncProcess<Fetched> {
             phase: Merged {
                 state: merged,
                 collisions,
-                parent_oid: local_oid, // Use local ref as parent
+                parent_oid,
                 diff,
                 root_slug,
+                parent_meta_stamp,
             },
         })
     }
@@ -370,14 +460,22 @@ impl SyncProcess<Merged> {
             parent_oid,
             diff,
             root_slug,
+            parent_meta_stamp,
             ..
         } = self.phase;
 
         // Serialize state to blobs
-        let state_bytes = wire::serialize_state(&state);
-        let tombs_bytes = wire::serialize_tombstones(&state);
-        let deps_bytes = wire::serialize_deps(&state);
-        let meta_bytes = wire::serialize_meta(root_slug.as_deref());
+        let state_bytes = wire::serialize_state(&state)?;
+        let tombs_bytes = wire::serialize_tombstones(&state)?;
+        let deps_bytes = wire::serialize_deps(&state)?;
+        let mut meta_last_stamp = state.max_write_stamp();
+        if let Some(parent_stamp) = parent_meta_stamp {
+            meta_last_stamp = match meta_last_stamp {
+                Some(state_stamp) => Some(std::cmp::max(state_stamp, parent_stamp)),
+                None => Some(parent_stamp),
+            };
+        }
+        let meta_bytes = wire::serialize_meta(root_slug.as_deref(), meta_last_stamp.as_ref())?;
 
         // Write blobs to ODB
         let state_oid = repo.blob(&state_bytes)?;
@@ -521,6 +619,7 @@ impl SyncProcess<Committed> {
 pub struct LoadedStore {
     pub state: CanonicalState,
     pub root_slug: Option<String>,
+    pub last_write_stamp: Option<WriteStamp>,
 }
 
 /// Read state from a commit oid.
@@ -555,22 +654,17 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         .peel_to_blob()?;
     let deps = wire::parse_deps(deps_blob.content())?;
 
-    // Read meta.json for root_slug
-    let root_slug = if let Some(meta_entry) = tree.get_name("meta.json") {
-        if let Ok(meta_obj) = repo.find_object(meta_entry.id(), Some(ObjectType::Blob)) {
-            if let Ok(meta_blob) = meta_obj.peel_to_blob() {
-                wire::parse_meta(meta_blob.content())
-                    .ok()
-                    .and_then(|m| m.root_slug)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // Read meta.json for root_slug + last_write_stamp
+    let mut root_slug = None;
+    let mut last_write_stamp = None;
+    if let Some(meta_entry) = tree.get_name("meta.json")
+        && let Ok(meta_obj) = repo.find_object(meta_entry.id(), Some(ObjectType::Blob))
+        && let Ok(meta_blob) = meta_obj.peel_to_blob()
+        && let Ok(meta) = wire::parse_meta(meta_blob.content())
+    {
+        root_slug = meta.root_slug;
+        last_write_stamp = meta.last_write_stamp;
+    }
 
     // Build state
     let mut state = CanonicalState::new();
@@ -588,7 +682,11 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
     // but we rebuild to guarantee consistency after bulk loading)
     state.rebuild_dep_indexes();
 
-    Ok(LoadedStore { state, root_slug })
+    Ok(LoadedStore {
+        state,
+        root_slug,
+        last_write_stamp,
+    })
 }
 
 /// Compute diff between two states for commit message.
@@ -636,6 +734,15 @@ fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
     }
 
     diff
+}
+
+fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<WriteStamp> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(std::cmp::max(a, b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 /// Detect which fields changed between two beads by comparing LWW stamps.
@@ -695,18 +802,27 @@ pub fn sync_with_retry(
     local_state: &CanonicalState,
     resolution_stamp: Stamp,
     max_retries: usize,
-) -> Result<CanonicalState, SyncError> {
+) -> Result<SyncOutcome, SyncError> {
     let mut retries = 0;
 
     loop {
-        let result = SyncProcess::new(repo_path.to_owned())
-            .fetch(repo)?
+        let fetched = SyncProcess::new(repo_path.to_owned()).fetch(repo)?;
+        let divergence = fetched.phase.divergence.clone();
+        let parent_meta_stamp = fetched.phase.parent_meta_stamp.clone();
+        let result = fetched
             .merge(local_state, resolution_stamp.clone())?
             .commit(repo)?
             .push(repo);
 
         match result {
-            Ok(state) => return Ok(state),
+            Ok(state) => {
+                let last_seen_stamp = max_write_stamp(state.max_write_stamp(), parent_meta_stamp);
+                return Ok(SyncOutcome {
+                    state,
+                    divergence,
+                    last_seen_stamp,
+                });
+            }
             Err(SyncError::NonFastForward) => {
                 retries += 1;
                 if retries > max_retries {
@@ -804,6 +920,23 @@ fn sanitize_slug(name: &str) -> String {
     slug
 }
 
+fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, SyncError> {
+    match repo.refname_to_id(name) {
+        Ok(oid) => Ok(Some(oid)),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(SyncError::Git(e)),
+    }
+}
+
+fn ensure_backup_ref(repo: &Repository, oid: Oid) -> Result<(), SyncError> {
+    let name = format!("refs/beads/backup/{}", oid);
+    if repo.refname_to_id(&name).is_ok() {
+        return Ok(());
+    }
+    repo.reference(&name, oid, false, "beads sync: backup local ref")?;
+    Ok(())
+}
+
 /// Initialize the beads ref if it doesn't exist.
 ///
 /// Handles the race condition where multiple daemons try to init:
@@ -815,6 +948,11 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
     let mut retries = 0;
 
     loop {
+        // If local ref already exists, treat init as a no-op.
+        if refname_to_id_optional(repo, "refs/heads/beads/store")?.is_some() {
+            return Ok(());
+        }
+
         // Always fetch first
         if let Ok(mut remote) = repo.find_remote("origin") {
             let cfg = repo.config().ok();
@@ -835,23 +973,23 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
             });
             let mut fo = git2::FetchOptions::new();
             fo.remote_callbacks(callbacks);
-            let _ = remote.fetch(&["refs/heads/beads/store"], Some(&mut fo), None);
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote
+                .fetch(&[refspec], Some(&mut fo), None)
+                .map_err(SyncError::Fetch)?;
 
             // If remote has the ref, point local to it
-            if let Ok(remote_oid) = repo.refname_to_id("refs/remotes/origin/beads/store") {
+            if let Some(remote_oid) =
+                refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?
+            {
                 repo.reference(
                     "refs/heads/beads/store",
                     remote_oid,
-                    true,
+                    false,
                     "beads init from remote",
                 )?;
                 return Ok(());
             }
-        }
-
-        // No remote - check if local already exists
-        if repo.refname_to_id("refs/heads/beads/store").is_ok() {
-            return Ok(());
         }
 
         // Derive root slug from repo name
@@ -859,10 +997,10 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
 
         // Create empty initial state
         let state = CanonicalState::new();
-        let state_bytes = wire::serialize_state(&state);
-        let tombs_bytes = wire::serialize_tombstones(&state);
-        let deps_bytes = wire::serialize_deps(&state);
-        let meta_bytes = wire::serialize_meta(Some(&root_slug));
+        let state_bytes = wire::serialize_state(&state)?;
+        let tombs_bytes = wire::serialize_tombstones(&state)?;
+        let deps_bytes = wire::serialize_deps(&state)?;
+        let meta_bytes = wire::serialize_meta(Some(&root_slug), None)?;
 
         // Write blobs
         let state_oid = repo.blob(&state_bytes)?;
@@ -960,6 +1098,55 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn write_store_commit(repo: &Repository, parent: Option<Oid>, message: &str) -> Oid {
+        write_store_commit_with_meta(repo, parent, message, None)
+    }
+
+    fn write_store_commit_with_meta(
+        repo: &Repository,
+        parent: Option<Oid>,
+        message: &str,
+        last_stamp: Option<WriteStamp>,
+    ) -> Oid {
+        let state = CanonicalState::new();
+        let state_bytes = wire::serialize_state(&state).unwrap();
+        let tombs_bytes = wire::serialize_tombstones(&state).unwrap();
+        let deps_bytes = wire::serialize_deps(&state).unwrap();
+        let meta_bytes = wire::serialize_meta(Some("test"), last_stamp.as_ref()).unwrap();
+
+        let state_oid = repo.blob(&state_bytes).unwrap();
+        let tombs_oid = repo.blob(&tombs_bytes).unwrap();
+        let deps_oid = repo.blob(&deps_bytes).unwrap();
+        let meta_oid = repo.blob(&meta_bytes).unwrap();
+
+        let mut builder = repo.treebuilder(None).unwrap();
+        builder.insert("state.jsonl", state_oid, 0o100644).unwrap();
+        builder
+            .insert("tombstones.jsonl", tombs_oid, 0o100644)
+            .unwrap();
+        builder.insert("deps.jsonl", deps_oid, 0o100644).unwrap();
+        builder.insert("meta.json", meta_oid, 0o100644).unwrap();
+        let tree_oid = builder.write().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+
+        let sig = Signature::now("test", "test@example.com").unwrap();
+        let parents = parent
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .map(|p| vec![p])
+            .unwrap_or_default();
+        let parent_refs: Vec<_> = parents.iter().collect();
+        repo.commit(
+            Some("refs/heads/beads/store"),
+            &sig,
+            &sig,
+            message,
+            &tree,
+            &parent_refs,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn sync_diff_count_message() {
@@ -1030,5 +1217,139 @@ mod tests {
         let msg = diff.to_commit_message();
         assert!(msg.contains("..."));
         assert!(!msg.contains("truncated to fit"));
+    }
+
+    #[test]
+    fn read_state_at_oid_reads_meta_last_write_stamp() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let stamp = WriteStamp::new(1234, 7);
+        let oid = write_store_commit_with_meta(&repo, None, "meta", Some(stamp.clone()));
+
+        let loaded = read_state_at_oid(&repo, oid).unwrap();
+        assert_eq!(loaded.last_write_stamp, Some(stamp));
+    }
+
+    #[test]
+    fn fetch_preserves_local_ahead_and_creates_backup() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let remote_oid = write_store_commit(&remote_repo, None, "remote");
+
+        // Fetch remote into local tracking ref.
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut fo = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut fo), None).unwrap();
+        }
+
+        local_repo
+            .reference("refs/heads/beads/store", remote_oid, true, "init local")
+            .unwrap();
+
+        let local_oid = write_store_commit(&local_repo, Some(remote_oid), "local");
+        assert_ne!(local_oid, remote_oid);
+
+        let _fetched = SyncProcess::new(local_dir).fetch(&local_repo).unwrap();
+
+        let local_after = local_repo.refname_to_id("refs/heads/beads/store").unwrap();
+        assert_eq!(local_after, local_oid);
+
+        let backup_ref = format!("refs/beads/backup/{}", local_oid);
+        let backup_oid = local_repo.refname_to_id(&backup_ref).unwrap();
+        assert_eq!(backup_oid, local_oid);
+    }
+
+    #[test]
+    fn fetch_best_effort_surfaces_error() {
+        let tmp = TempDir::new().unwrap();
+        let local_dir = tmp.path().join("local");
+        let local_repo = Repository::init(&local_dir).unwrap();
+
+        local_repo.remote("origin", "/does/not/exist").unwrap();
+
+        let fetched = SyncProcess::new(local_dir)
+            .fetch_best_effort(&local_repo)
+            .unwrap();
+        assert!(fetched.phase.fetch_error.is_some());
+    }
+
+    #[test]
+    fn fetch_updates_remote_tracking_ref() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let remote_oid = write_store_commit(&remote_repo, None, "remote");
+
+        let _fetched = SyncProcess::new(local_dir).fetch(&local_repo).unwrap();
+        let tracking_oid = local_repo
+            .refname_to_id("refs/remotes/origin/beads/store")
+            .unwrap();
+        assert_eq!(tracking_oid, remote_oid);
+    }
+
+    #[test]
+    fn fetch_detects_divergence() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let remote_oid = write_store_commit(&remote_repo, None, "remote");
+
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut fo = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut fo), None).unwrap();
+        }
+
+        let local_oid = write_store_commit(&local_repo, None, "local");
+        assert_ne!(local_oid, remote_oid);
+
+        let fetched = SyncProcess::new(local_dir).fetch(&local_repo).unwrap();
+        assert!(fetched.phase.divergence.is_some());
+    }
+
+    #[test]
+    fn init_does_not_override_existing_local_ref() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let _remote_oid = write_store_commit(&remote_repo, None, "remote");
+        let local_oid = write_store_commit(&local_repo, None, "local");
+
+        init_beads_ref(&local_repo, 1).unwrap();
+
+        let local_after = local_repo.refname_to_id("refs/heads/beads/store").unwrap();
+        assert_eq!(local_after, local_oid);
     }
 }

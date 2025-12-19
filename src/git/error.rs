@@ -63,6 +63,9 @@ pub enum SyncError {
     #[error("merge conflict: {errors:?}")]
     MergeConflict { errors: Vec<CoreError> },
 
+    #[error("collision resolution failed: {0}")]
+    CollisionResolution(CoreError),
+
     #[error(transparent)]
     PushRejected(#[from] PushRejected),
 
@@ -97,6 +100,7 @@ impl SyncError {
             | SyncError::NoCommonAncestor
             | SyncError::Wire(_)
             | SyncError::MergeConflict { .. }
+            | SyncError::CollisionResolution(_)
             | SyncError::Git(_) => Transience::Permanent,
         }
     }

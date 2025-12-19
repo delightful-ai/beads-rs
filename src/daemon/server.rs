@@ -53,7 +53,13 @@ pub fn run_state_loop(
                         if let Request::SyncWait { repo } = request {
                             match daemon.ensure_loaded_and_maybe_start_sync(&repo, &git_tx) {
                                 Ok(loaded) => {
-                                    let repo_state = daemon.repo_state(&loaded);
+                                    let repo_state = match daemon.repo_state(&loaded) {
+                                        Ok(repo_state) => repo_state,
+                                        Err(e) => {
+                                            let _ = respond.send(Response::err(e));
+                                            continue;
+                                        }
+                                    };
                                     let clean = !repo_state.dirty && !repo_state.sync_in_progress;
 
                                     if clean {

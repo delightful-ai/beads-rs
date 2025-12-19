@@ -160,7 +160,41 @@ fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<String>, String)> {
         }));
     }
     let mut parts = batch.args;
-    let label = parts.pop().unwrap();
+    let label = parts.pop().ok_or_else(|| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "label".into(),
+            reason: "expected: <issue-id...> <label>".into(),
+        })
+    })?;
     let ids = parts;
     Ok((ids, label))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_label_batch_requires_label() {
+        let err = split_label_batch(LabelBatchArgs {
+            args: vec!["bd-123".into()],
+        })
+        .unwrap_err();
+        match err {
+            Error::Op(crate::daemon::OpError::ValidationFailed { field, .. }) => {
+                assert_eq!(field, "label");
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_label_batch_parses_ids_and_label() {
+        let (ids, label) = split_label_batch(LabelBatchArgs {
+            args: vec!["bd-1".into(), "bd-2".into(), "bug".into()],
+        })
+        .unwrap();
+        assert_eq!(label, "bug");
+        assert_eq!(ids, vec!["bd-1".to_string(), "bd-2".to_string()]);
+    }
 }

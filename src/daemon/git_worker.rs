@@ -3,19 +3,19 @@
 //! Owns git2::Repository handles (which are !Send !Sync) and runs on a dedicated thread.
 //! Receives GitOp messages from state thread, sends results back.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::path::{Path, PathBuf};
 
 use crossbeam::channel::{Receiver, Sender};
 use git2::Repository;
 
 use super::remote::RemoteUrl;
-use crate::core::{ActorId, CanonicalState, Stamp};
+use crate::core::{ActorId, CanonicalState, Stamp, WriteStamp};
 use crate::git::error::SyncError;
-use crate::git::sync::{SyncProcess, init_beads_ref, sync_with_retry};
+use crate::git::sync::{DivergenceInfo, SyncOutcome, SyncProcess, init_beads_ref, sync_with_retry};
 
 /// Result of a sync operation.
-pub type SyncResult = Result<CanonicalState, SyncError>;
+pub type SyncResult = Result<SyncOutcome, SyncError>;
 
 /// Result of a load operation (includes metadata).
 #[derive(Clone)]
@@ -25,6 +25,12 @@ pub struct LoadResult {
     /// True if local state has changes that need to be pushed to remote.
     /// This happens when local durable commits exist that haven't been synced.
     pub needs_sync: bool,
+    /// Last observed write stamp (from state or meta).
+    pub last_seen_stamp: Option<WriteStamp>,
+    /// Best-effort fetch error (if any).
+    pub fetch_error: Option<String>,
+    /// Divergence detected between local and remote refs (if any).
+    pub divergence: Option<DivergenceInfo>,
 }
 
 /// Result of a background refresh operation.
@@ -85,12 +91,14 @@ impl GitWorker {
 
     /// Open or get cached repository.
     fn open(&mut self, path: &Path) -> Result<&Repository, SyncError> {
-        if !self.repos.contains_key(path) {
-            let repo =
-                Repository::open(path).map_err(|e| SyncError::OpenRepo(path.to_owned(), e))?;
-            self.repos.insert(path.to_owned(), repo);
+        match self.repos.entry(path.to_owned()) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let repo =
+                    Repository::open(path).map_err(|e| SyncError::OpenRepo(path.to_owned(), e))?;
+                Ok(entry.insert(repo))
+            }
         }
-        Ok(self.repos.get(path).unwrap())
     }
 
     /// Load state from beads/store ref.
@@ -109,18 +117,21 @@ impl GitWorker {
         let repo = self.open(path)?;
 
         // Step 1: Read local state if exists
-        let (local_state, local_slug) =
+        let (local_state, local_slug, local_meta_stamp) =
             if let Ok(local_oid) = repo.refname_to_id("refs/heads/beads/store") {
                 let loaded = read_state_at_oid(repo, local_oid)?;
-                (loaded.state, loaded.root_slug)
+                (loaded.state, loaded.root_slug, loaded.last_write_stamp)
             } else {
-                (CanonicalState::new(), None)
+                (CanonicalState::new(), None, None)
             };
 
         // Step 2: Fetch remote and read its state
-        let fetched = SyncProcess::new(path.to_owned()).fetch(repo)?;
+        let fetched = SyncProcess::new(path.to_owned()).fetch_best_effort(repo)?;
         let remote_state = fetched.phase.remote_state;
         let remote_slug = fetched.phase.root_slug;
+        let remote_meta_stamp = fetched.phase.parent_meta_stamp;
+        let fetch_error = fetched.phase.fetch_error.clone();
+        let divergence = fetched.phase.divergence.clone();
 
         // Step 3: CRDT merge - both local and remote are authoritative
         let merged = CanonicalState::join(&local_state, &remote_state)
@@ -138,10 +149,17 @@ impl GitWorker {
             || merged.tombstone_count() > remote_state.tombstone_count()
             || merged.dep_count() > remote_state.dep_count();
 
+        let merged_stamp = merged.max_write_stamp();
+        let meta_stamp = max_write_stamp(local_meta_stamp, remote_meta_stamp);
+        let last_seen_stamp = max_write_stamp(merged_stamp, meta_stamp);
+
         Ok(LoadResult {
             state: merged,
             root_slug,
             needs_sync,
+            last_seen_stamp,
+            fetch_error,
+            divergence,
         })
     }
 
@@ -200,6 +218,15 @@ impl GitWorker {
             }
         }
         true // Continue processing
+    }
+}
+
+fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<WriteStamp> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(std::cmp::max(a, b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
