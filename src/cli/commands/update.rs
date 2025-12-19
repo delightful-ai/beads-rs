@@ -1,5 +1,8 @@
 use super::super::render;
-use super::super::{Ctx, UpdateArgs, current_actor_string, fetch_issue, print_ok, send};
+use super::super::{
+    Ctx, UpdateArgs, current_actor_string, fetch_issue, normalize_bead_id, normalize_bead_id_for,
+    print_ok, send,
+};
 use crate::core::DepKind;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
@@ -7,6 +10,7 @@ use crate::daemon::query::QueryResult;
 use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
+    let id = normalize_bead_id(&args.id)?;
     let mut patch = BeadPatch::default();
 
     let parent_action = if args.no_parent {
@@ -20,7 +24,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
         {
             Some(None)
         } else {
-            Some(Some(v.to_string()))
+            Some(Some(normalize_bead_id_for("parent", v)?))
         }
     } else {
         None
@@ -61,7 +65,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
 
     // Labels add/remove => fetch current labels, then set full list.
     if !args.add_label.is_empty() || !args.remove_label.is_empty() {
-        let issue = fetch_issue(ctx, &args.id)?;
+        let issue = fetch_issue(ctx, &id)?;
         let mut labels = issue.labels;
         for l in args.add_label {
             if !labels.contains(&l) {
@@ -78,7 +82,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
         patch.validate()?;
         let req = Request::Update {
             repo: ctx.repo.clone(),
-            id: args.id.clone(),
+            id: id.clone(),
             patch,
             cas: None,
         };
@@ -89,7 +93,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
     if let Some(new_parent) = parent_action {
         let deps = send(&Request::Deps {
             repo: ctx.repo.clone(),
-            id: args.id.clone(),
+            id: id.clone(),
         })?;
 
         let outgoing = match deps {
@@ -112,7 +116,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
             for parent in existing_parents {
                 let _ = send(&Request::RemoveDep {
                     repo: ctx.repo.clone(),
-                    from: args.id.clone(),
+                    from: id.clone(),
                     to: parent,
                     kind: DepKind::Parent,
                 })?;
@@ -120,7 +124,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
             if let Some(parent) = new_parent {
                 let _ = send(&Request::AddDep {
                     repo: ctx.repo.clone(),
-                    from: args.id.clone(),
+                    from: id.clone(),
                     to: parent,
                     kind: DepKind::Parent,
                 })?;
@@ -132,7 +136,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
     if let Some(content) = args.notes {
         let note = Request::AddNote {
             repo: ctx.repo.clone(),
-            id: args.id.clone(),
+            id: id.clone(),
             content,
         };
         let _ = send(&note)?;
@@ -143,7 +147,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
         if assignee == "none" || assignee == "-" || assignee == "unassigned" {
             let req = Request::Unclaim {
                 repo: ctx.repo.clone(),
-                id: args.id.clone(),
+                id: id.clone(),
             };
             let _ = send(&req)?;
         } else {
@@ -157,7 +161,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
             }
             let req = Request::Claim {
                 repo: ctx.repo.clone(),
-                id: args.id.clone(),
+                id: id.clone(),
                 lease_secs: 3600,
             };
             let _ = send(&req)?;
@@ -165,7 +169,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
     }
 
     // Emit updated view / summary.
-    let issue = fetch_issue(ctx, &args.id)?;
+    let issue = fetch_issue(ctx, &id)?;
     if ctx.json {
         print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
     } else {

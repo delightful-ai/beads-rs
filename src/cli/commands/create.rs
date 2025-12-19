@@ -1,7 +1,9 @@
 use std::io::BufRead;
 
 use super::super::render;
-use super::super::{CreateArgs, Ctx, fetch_issue, print_ok, send};
+use super::super::{
+    CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_ok, send,
+};
 use crate::core::BeadType;
 use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
 use crate::daemon::ops::OpResult;
@@ -35,10 +37,22 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     // Warn if creating without description (unless title contains "test")
     let warn_no_desc = description.is_none() && !title.to_lowercase().contains("test");
 
+    let id = args
+        .id
+        .take()
+        .map(|raw| normalize_bead_id_for("id", &raw))
+        .transpose()?;
+    let parent = args
+        .parent
+        .take()
+        .map(|raw| normalize_bead_id_for("parent", &raw))
+        .transpose()?;
+    let dependencies = normalize_dep_specs(args.deps)?;
+
     let req = Request::Create {
         repo: ctx.repo.clone(),
-        id: args.id,
-        parent: args.parent,
+        id,
+        parent,
         title,
         bead_type,
         priority,
@@ -49,7 +63,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
         external_ref: args.external_ref,
         estimated_minutes: args.estimate,
         labels,
-        dependencies: args.deps,
+        dependencies,
     };
 
     let created_payload = send(&req)?;
@@ -135,6 +149,15 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     let mut failed = Vec::new();
 
     for t in templates {
+        let dependencies = match normalize_dep_specs(t.dependencies.clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                failed.push(t.title.clone());
+                eprintln!("error creating issue {:?}: {e}", t.title);
+                continue;
+            }
+        };
+
         let req = Request::Create {
             repo: ctx.repo.clone(),
             id: None,
@@ -149,7 +172,7 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
             external_ref: None,
             estimated_minutes: None,
             labels: t.labels.clone(),
-            dependencies: t.dependencies.clone(),
+            dependencies,
         };
 
         // Best-effort: keep going on per-issue failures.

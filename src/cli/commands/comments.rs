@@ -1,5 +1,7 @@
 use super::super::render;
-use super::super::{CommentAddArgs, CommentsArgs, CommentsCmd, Ctx, print_ok, send};
+use super::super::{
+    CommentAddArgs, CommentsArgs, CommentsCmd, Ctx, normalize_bead_id, print_ok, send,
+};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::QueryResult;
 use crate::{Error, Result};
@@ -14,7 +16,8 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
                     reason: "missing issue id".into(),
                 })
             })?;
-            let id_for_render = id.clone();
+            let id_for_render = normalize_bead_id(&id)?;
+            let id = id_for_render.clone();
             let req = Request::Notes {
                 repo: ctx.repo.clone(),
                 id,
@@ -47,9 +50,10 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
         s.trim().to_string()
     };
 
+    let id = normalize_bead_id(&args.id)?;
     let req = Request::AddNote {
         repo: ctx.repo.clone(),
-        id: args.id,
+        id,
         content,
     };
     let ok = send(&req)?;

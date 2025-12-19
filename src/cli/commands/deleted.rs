@@ -1,5 +1,5 @@
 use super::super::render;
-use super::super::{Ctx, DeletedArgs, print_ok, send};
+use super::super::{Ctx, DeletedArgs, normalize_bead_id, print_ok, send};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::QueryResult;
 use crate::{Error, Result};
@@ -11,10 +11,11 @@ pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
         Some(parse_since_ms(&args.since)?)
     };
 
+    let id = args.id.as_deref().map(normalize_bead_id).transpose()?;
     let req = Request::Deleted {
         repo: ctx.repo.clone(),
         since_ms,
-        id: args.id.clone(),
+        id,
     };
     let ok = send(&req)?;
     if ctx.json {

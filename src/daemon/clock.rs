@@ -5,6 +5,21 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub trait TimeSource: Send + Sync {
+    fn now_ms(&self) -> u64;
+}
+
+pub struct SystemTimeSource;
+
+impl TimeSource for SystemTimeSource {
+    fn now_ms(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+}
+
 use crate::core::WriteStamp;
 
 /// Hybrid Logical Clock.
@@ -17,14 +32,21 @@ pub struct Clock {
     wall_ms: u64,
     /// Logical counter for tie-breaking within same wall time.
     counter: u32,
+    time_source: Box<dyn TimeSource>,
 }
 
 impl Clock {
     /// Create a new clock initialized to current wall time.
     pub fn new() -> Self {
+        Self::with_time_source(Box::new(SystemTimeSource))
+    }
+
+    pub fn with_time_source(time_source: Box<dyn TimeSource>) -> Self {
+        let now = time_source.now_ms();
         Self {
-            wall_ms: Self::now_ms(),
+            wall_ms: now,
             counter: 0,
+            time_source,
         }
     }
 
@@ -34,7 +56,7 @@ impl Clock {
     /// - Returned stamp is strictly greater than any previous stamp from this clock
     /// - Monotonic even if wall clock goes backward
     pub fn tick(&mut self) -> WriteStamp {
-        let now = Self::now_ms();
+        let now = self.time_source.now_ms();
 
         if now > self.wall_ms {
             // Wall clock advanced - use new time, reset counter
@@ -53,7 +75,7 @@ impl Clock {
     /// Ensures next tick() will produce a stamp > remote.
     /// Call this when receiving state from sync.
     pub fn receive(&mut self, remote: &WriteStamp) {
-        let now = Self::now_ms();
+        let now = self.time_source.now_ms();
 
         if remote.wall_ms > self.wall_ms {
             // Remote is ahead - adopt its time
@@ -76,14 +98,6 @@ impl Clock {
     pub fn wall_ms(&self) -> u64 {
         self.wall_ms
     }
-
-    /// Current wall time in milliseconds since Unix epoch.
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    }
 }
 
 impl Default for Clock {
@@ -95,6 +109,8 @@ impl Default for Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn tick_is_monotonic() {
@@ -132,5 +148,43 @@ mod tests {
 
         let s3 = clock.tick();
         assert!(s3 > s2);
+    }
+
+    struct TestTimeSource {
+        now: Arc<AtomicU64>,
+    }
+
+    impl TimeSource for TestTimeSource {
+        fn now_ms(&self) -> u64 {
+            self.now.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn backward_jump_keeps_monotonicity() {
+        let now = Arc::new(AtomicU64::new(1_000));
+        let source = Box::new(TestTimeSource { now: now.clone() });
+        let mut clock = Clock::with_time_source(source);
+
+        let s1 = clock.tick();
+        now.store(900, Ordering::SeqCst);
+        let s2 = clock.tick();
+
+        assert!(s2 > s1);
+        assert_eq!(s2.wall_ms, s1.wall_ms);
+    }
+
+    #[test]
+    fn forward_jump_advances_wall_time() {
+        let now = Arc::new(AtomicU64::new(1_000));
+        let source = Box::new(TestTimeSource { now: now.clone() });
+        let mut clock = Clock::with_time_source(source);
+
+        let s1 = clock.tick();
+        now.store(2_000, Ordering::SeqCst);
+        let s2 = clock.tick();
+
+        assert!(s2 > s1);
+        assert_eq!(s2.wall_ms, 2_000);
     }
 }
