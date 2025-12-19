@@ -260,11 +260,6 @@ impl Daemon {
                                 );
                             }
                         }
-
-                        // Delete WAL - will be re-written on next mutation
-                        if let Err(e) = self.wal.delete(&remote) {
-                            tracing::warn!("failed to delete WAL for {:?}: {}", remote, e);
-                        }
                     }
 
                     let mut repo_state =
@@ -1052,5 +1047,88 @@ mod tests {
         daemon.complete_refresh(&unknown, result);
         // Just verify no panic and daemon is still valid
         assert!(daemon.repos.is_empty());
+    }
+
+    #[test]
+    fn complete_sync_success_clean_deletes_wal() {
+        use crate::daemon::wal::WalEntry;
+
+        let (tmp, wal) = test_wal();
+        let remote = test_remote();
+
+        // Write a WAL entry
+        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
+        wal.write(&remote, &entry).unwrap();
+        assert!(wal.exists(&remote));
+
+        // Create daemon with WAL, recreating from same dir
+        let wal = Wal::new(tmp.path()).unwrap();
+        let mut daemon = Daemon::new(test_actor(), wal);
+
+        // Insert a clean repo state
+        let mut repo_state = RepoState::new();
+        repo_state.dirty = false;
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        // Complete sync with success
+        daemon.complete_sync(&remote, Ok(CanonicalState::new()));
+
+        // WAL should be deleted after successful sync on clean state
+        assert!(!daemon.wal.exists(&remote));
+    }
+
+    #[test]
+    fn complete_sync_success_dirty_keeps_wal() {
+        use crate::daemon::wal::WalEntry;
+
+        let (tmp, wal) = test_wal();
+        let remote = test_remote();
+
+        // Write a WAL entry
+        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
+        wal.write(&remote, &entry).unwrap();
+        assert!(wal.exists(&remote));
+
+        // Create daemon with WAL
+        let wal = Wal::new(tmp.path()).unwrap();
+        let mut daemon = Daemon::new(test_actor(), wal);
+
+        // Insert a DIRTY repo state (mutations happened during sync)
+        let mut repo_state = RepoState::new();
+        repo_state.dirty = true;
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        // Complete sync with success
+        daemon.complete_sync(&remote, Ok(CanonicalState::new()));
+
+        // WAL should NOT be deleted - dirty state needs another sync
+        assert!(daemon.wal.exists(&remote));
+    }
+
+    #[test]
+    fn complete_sync_failure_keeps_wal() {
+        use crate::daemon::wal::WalEntry;
+
+        let (tmp, wal) = test_wal();
+        let remote = test_remote();
+
+        // Write a WAL entry
+        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
+        wal.write(&remote, &entry).unwrap();
+        assert!(wal.exists(&remote));
+
+        // Create daemon with WAL
+        let wal = Wal::new(tmp.path()).unwrap();
+        let mut daemon = Daemon::new(test_actor(), wal);
+
+        // Insert repo state
+        let repo_state = RepoState::new();
+        daemon.repos.insert(remote.clone(), repo_state);
+
+        // Complete sync with failure
+        daemon.complete_sync(&remote, Err(SyncError::NonFastForward));
+
+        // WAL should NOT be deleted on failure
+        assert!(daemon.wal.exists(&remote));
     }
 }

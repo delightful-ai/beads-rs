@@ -29,9 +29,12 @@ pub struct Idle;
 
 /// Fetched phase - have remote state.
 pub struct Fetched {
-    /// Remote HEAD oid (will be parent of our commit).
+    /// Local ref oid (will be parent of our commit).
+    /// This is `refs/heads/beads/store`, not the remote tracking ref.
+    pub local_oid: Oid,
+    /// Remote oid (for detecting divergence, may differ from local_oid).
     pub remote_oid: Oid,
-    /// Parsed remote state.
+    /// Parsed remote state (for CRDT merge).
     pub remote_state: CanonicalState,
     /// Root slug from meta.json (if any).
     pub root_slug: Option<String>,
@@ -43,7 +46,7 @@ pub struct Merged {
     pub state: CanonicalState,
     /// Collisions that were resolved.
     pub collisions: Vec<Collision>,
-    /// Parent oid for commit (remote HEAD).
+    /// Parent oid for commit (local ref, not remote).
     pub parent_oid: Oid,
     /// Diff summary for commit message.
     pub diff: SyncDiff,
@@ -228,8 +231,8 @@ impl SyncProcess<Idle> {
             let _ = remote.fetch(&["refs/heads/beads/store"], Some(&mut fo), None);
         }
 
-        // Get base state - prefer remote, fall back to local
-        let (base_oid, base_state, root_slug) =
+        // Get remote state for CRDT merge
+        let (remote_oid, remote_state, root_slug) =
             match repo.refname_to_id("refs/remotes/origin/beads/store") {
                 Ok(oid) => {
                     let loaded = read_state_at_oid(repo, oid)?;
@@ -250,11 +253,31 @@ impl SyncProcess<Idle> {
                 }
             };
 
+        // Fast-forward local ref to match remote if they differ.
+        // This ensures our commit (which will parent on remote_oid) can update the local ref.
+        // Safe because we're about to merge daemon state with remote state anyway.
+        if !remote_oid.is_zero() {
+            let local_oid = repo
+                .refname_to_id("refs/heads/beads/store")
+                .unwrap_or(Oid::zero());
+
+            if local_oid != remote_oid {
+                // Update local ref to match remote
+                repo.reference(
+                    "refs/heads/beads/store",
+                    remote_oid,
+                    true, // force
+                    "beads sync: fast-forward to remote",
+                )?;
+            }
+        }
+
         Ok(SyncProcess {
             repo_path: self.repo_path,
             phase: Fetched {
-                remote_oid: base_oid,
-                remote_state: base_state,
+                local_oid: remote_oid, // After fast-forward, local matches remote
+                remote_oid,
+                remote_state,
                 root_slug,
             },
         })
@@ -274,6 +297,7 @@ impl SyncProcess<Fetched> {
         resolution_stamp: Stamp,
     ) -> Result<SyncProcess<Merged>, SyncError> {
         let Fetched {
+            local_oid,
             remote_oid,
             remote_state,
             root_slug,
@@ -287,7 +311,7 @@ impl SyncProcess<Fetched> {
                 phase: Merged {
                     state: local_state.clone(),
                     collisions: Vec::new(),
-                    parent_oid: remote_oid,
+                    parent_oid: local_oid, // Use local ref as parent
                     diff,
                     root_slug,
                 },
@@ -326,7 +350,7 @@ impl SyncProcess<Fetched> {
             phase: Merged {
                 state: merged,
                 collisions,
-                parent_oid: remote_oid,
+                parent_oid: local_oid, // Use local ref as parent
                 diff,
                 root_slug,
             },
