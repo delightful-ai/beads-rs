@@ -307,6 +307,10 @@ pub struct ListArgs {
     #[arg(long)]
     pub sort: Option<String>,
 
+    /// Filter by parent epic ID (shows children of this epic).
+    #[arg(long)]
+    pub parent: Option<String>,
+
     /// Optional text query (matches title/description).
     #[arg(value_name = "QUERY", num_args = 0..)]
     pub query: Vec<String>,
@@ -591,14 +595,19 @@ pub struct CommentAddArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum DepCmd {
+    /// Add a dependency: FROM depends on TO (FROM waits for TO to complete).
     Add(DepAddArgs),
+    /// Remove a dependency between two issues.
     Rm(DepRmArgs),
+    /// Show dependency tree for an issue.
     Tree { id: String },
 }
 
 #[derive(Args, Debug)]
 pub struct DepAddArgs {
+    /// Issue that depends on another (waits for TO to complete).
     pub from: String,
+    /// Issue that must complete first (blocks FROM).
     pub to: String,
     #[arg(long, alias = "type", value_parser = parse_dep_kind)]
     pub kind: Option<DepKind>,

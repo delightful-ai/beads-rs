@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::{
     BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo,
     DeletedLookup as ApiDeletedLookup, DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue,
-    IssueSummary, Note as ApiNote, StatusOutput as ApiStatusOutput, Tombstone as ApiTombstone,
+    IssueSummary, Note as ApiNote, ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput,
+    Tombstone as ApiTombstone,
 };
 use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
 
@@ -120,6 +121,10 @@ pub struct Filters {
     /// Sort direction (default: descending).
     #[serde(default)]
     pub ascending: bool,
+
+    /// Filter by parent epic ID (only show children).
+    #[serde(default)]
+    pub parent: Option<BeadId>,
 }
 
 /// Fields to sort by.
@@ -457,6 +462,9 @@ pub enum QueryResult {
 
     /// Blocked issues.
     Blocked(Vec<ApiBlockedIssue>),
+
+    /// Ready issues with summary counts.
+    Ready(ApiReadyResult),
 
     /// Stale issues.
     Stale(Vec<IssueSummary>),

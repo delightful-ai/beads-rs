@@ -48,10 +48,34 @@ impl Daemon {
         };
         let repo_state = self.repo_state(&remote);
 
+        // Build children set if parent filter is specified.
+        // Parent deps: from=child, to=parent, kind=Parent.
+        let children_of_parent: Option<std::collections::HashSet<&BeadId>> =
+            filters.parent.as_ref().map(|parent_id| {
+                repo_state
+                    .state
+                    .iter_deps()
+                    .filter(|(_, edge)| {
+                        edge.life.value == DepLife::Active
+                            && edge.key.kind() == DepKind::Parent
+                            && edge.key.to() == parent_id
+                    })
+                    .map(|(_, edge)| edge.key.from())
+                    .collect()
+            });
+
         let mut views: Vec<IssueSummary> = repo_state
             .state
             .iter_live()
-            .filter(|(_, bead)| filters.matches(bead))
+            .filter(|(id, bead)| {
+                // If parent filter specified, only include children of that parent.
+                if let Some(ref children) = children_of_parent
+                    && !children.contains(id)
+                {
+                    return false;
+                }
+                filters.matches(bead)
+            })
             .map(|(_, bead)| IssueSummary::from_bead(bead))
             .collect();
 
@@ -139,14 +163,23 @@ impl Daemon {
             }
         }
 
+        // Count blocked and closed issues for summary.
+        let mut blocked_count = 0usize;
+        let mut closed_count = 0usize;
+
         let mut views: Vec<IssueSummary> = repo_state
             .state
             .iter_live()
             .filter(|(id, bead)| {
-                // Must be open
-                !bead.fields.workflow.value.is_closed()
-                    // Must not be blocked
-                    && !blocked.contains(id)
+                if bead.fields.workflow.value.is_closed() {
+                    closed_count += 1;
+                    return false;
+                }
+                if blocked.contains(id) {
+                    blocked_count += 1;
+                    return false;
+                }
+                true
             })
             .map(|(_, bead)| IssueSummary::from_bead(bead))
             .collect();
@@ -163,7 +196,13 @@ impl Daemon {
             views.truncate(limit);
         }
 
-        Response::ok(ResponsePayload::Query(QueryResult::Issues(views)))
+        let result = crate::api::ReadyResult {
+            issues: views,
+            blocked_count,
+            closed_count,
+        };
+
+        Response::ok(ResponsePayload::Query(QueryResult::Ready(result)))
     }
 
     /// Get dependency tree for a bead.

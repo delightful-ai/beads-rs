@@ -14,8 +14,11 @@ pub(crate) fn handle(ctx: &Ctx, args: ReadyArgs) -> Result<()> {
         return print_ok(&ok, true);
     }
     match ok {
-        ResponsePayload::Query(QueryResult::Issues(views)) => {
-            println!("{}", render::render_ready(&views));
+        ResponsePayload::Query(QueryResult::Ready(result)) => {
+            println!(
+                "{}",
+                render::render_ready(&result.issues, result.blocked_count, result.closed_count)
+            );
             Ok(())
         }
         other => print_ok(&other, false),

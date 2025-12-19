@@ -40,33 +40,39 @@ pub fn render_updated(id: &str) -> String {
     format!("✓ Updated issue: {id}")
 }
 
-pub fn render_ready(views: &[IssueSummary]) -> String {
-    if views.is_empty() {
-        return "\n✨ No ready work found\n".into();
-    }
+pub fn render_ready(views: &[IssueSummary], blocked_count: usize, closed_count: usize) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "\n📋 Ready work ({} issues with no blockers):\n\n",
-        views.len()
-    ));
-    for (i, v) in views.iter().enumerate() {
+    if views.is_empty() {
+        out.push_str("\n✨ No ready work found\n");
+    } else {
         out.push_str(&format!(
-            "{}. [P{}] {}: {}\n",
-            i + 1,
-            v.priority,
-            v.id,
-            v.title
+            "\n📋 Ready work ({} issues with no blockers):\n\n",
+            views.len()
         ));
-        if let Some(m) = v.estimated_minutes {
-            out.push_str(&format!("   Estimate: {} min\n", m));
+        for (i, v) in views.iter().enumerate() {
+            out.push_str(&format!(
+                "{}. [P{}] {}: {}\n",
+                i + 1,
+                v.priority,
+                v.id,
+                v.title
+            ));
+            if let Some(m) = v.estimated_minutes {
+                out.push_str(&format!("   Estimate: {} min\n", m));
+            }
+            if let Some(a) = &v.assignee
+                && !a.is_empty()
+            {
+                out.push_str(&format!("   Assignee: {}\n", a));
+            }
         }
-        if let Some(a) = &v.assignee
-            && !a.is_empty()
-        {
-            out.push_str(&format!("   Assignee: {}\n", a));
-        }
+        out.push('\n');
     }
-    out.push('\n');
+    // Always show summary footer so agents understand context.
+    out.push_str(&format!(
+        "{} blocked, {} closed — run `bd blocked` to see what's stuck\n",
+        blocked_count, closed_count
+    ));
     out
 }
 
@@ -394,6 +400,9 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::Notes(notes) => render_notes(notes),
         QueryResult::Status(out) => render_status(out),
         QueryResult::Blocked(blocked) => render_blocked(blocked),
+        QueryResult::Ready(result) => {
+            render_ready(&result.issues, result.blocked_count, result.closed_count)
+        }
         QueryResult::Stale(issues) => render_issue_list(issues),
         QueryResult::Count(result) => render_count(result),
         QueryResult::Deleted(tombs) => render_deleted(tombs),

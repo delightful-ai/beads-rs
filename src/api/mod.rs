@@ -72,6 +72,18 @@ pub struct BlockedIssue {
 }
 
 // =============================================================================
+// Ready
+// =============================================================================
+
+/// Ready result with summary counts for context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyResult {
+    pub issues: Vec<IssueSummary>,
+    pub blocked_count: usize,
+    pub closed_count: usize,
+}
+
+// =============================================================================
 // Epic
 // =============================================================================
 

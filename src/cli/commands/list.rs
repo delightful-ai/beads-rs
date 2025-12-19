@@ -1,6 +1,6 @@
 use super::super::render;
 use super::super::{Ctx, ListArgs, SearchArgs, parse_sort, print_ok, send};
-use crate::core::ActorId;
+use crate::core::{ActorId, BeadId};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::{Filters, QueryResult};
 use crate::{Error, Result};
@@ -16,6 +16,17 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     } else {
         Some(args.query.join(" "))
     };
+    let parent = args
+        .parent
+        .as_deref()
+        .map(BeadId::parse)
+        .transpose()
+        .map_err(|e| {
+            Error::Op(crate::daemon::OpError::ValidationFailed {
+                field: "parent".into(),
+                reason: e.to_string(),
+            })
+        })?;
     let mut filters = Filters {
         status: args.status,
         priority: args.priority,
@@ -24,6 +35,7 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         labels,
         limit: args.limit,
         search,
+        parent,
         ..Default::default()
     };
     if let Some(sort) = args.sort {
