@@ -60,12 +60,12 @@ pub fn maybe_spawn_auto_upgrade() {
         return;
     }
 
-    if let Ok(Some(state)) = read_state() {
-        if let Some(last) = state.last_check_wall_ms {
-            let now = wall_ms();
-            if now.saturating_sub(last) < AUTO_CHECK_INTERVAL.as_millis() as u64 {
-                return;
-            }
+    if let Ok(Some(state)) = read_state()
+        && let Some(last) = state.last_check_wall_ms
+    {
+        let now = wall_ms();
+        if now.saturating_sub(last) < AUTO_CHECK_INTERVAL.as_millis() as u64 {
+            return;
         }
     }
 
