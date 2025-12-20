@@ -108,19 +108,14 @@ pub fn export_jsonl(
     // Collect and sort issues by ID for stable output
     let mut issues: Vec<GoIssue> = Vec::new();
 
-    // Export live beads
+    // Export live beads only - tombstones stay in CRDT layer (tombstones.jsonl)
+    // but aren't exported to Go-compat format since:
+    // 1. beads-go doesn't export them (deleted = removed from export)
+    // 2. beads_viewer (bv) doesn't recognize status="tombstone"
     for (id, bead) in state.iter_live() {
         let deps: Vec<_> = state.deps_from(id);
         let is_blocked = is_bead_blocked(id, state);
         issues.push(GoIssue::from_bead(bead, &deps, is_blocked));
-    }
-
-    // Export global tombstones (not collision tombstones)
-    for (key, tombstone) in state.iter_tombstones() {
-        // Only export global tombstones (lineage=None)
-        if key.lineage.is_none() {
-            issues.push(GoIssue::from_tombstone(tombstone));
-        }
     }
 
     // Sort by ID for stable diffs
@@ -338,7 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn test_export_with_tombstone() {
+    fn test_tombstones_not_exported() {
+        // Tombstones stay in CRDT layer (tombstones.jsonl) but are NOT exported
+        // to Go-compat format - matches beads-go behavior where deleted = gone
         use crate::core::identity::{ActorId, BeadId};
         use crate::core::time::{Stamp, WriteStamp};
         use crate::core::tombstone::Tombstone;
@@ -362,9 +359,10 @@ mod tests {
         let path = export_jsonl(&state, &ctx, "git@example.com:test.git").unwrap();
         let content = fs::read_to_string(&path).unwrap();
 
-        assert!(content.contains("bd-xyz"));
-        assert!(content.contains("\"status\":\"tombstone\""));
-        assert!(content.contains("\"delete_reason\":\"deleted by user\""));
+        // Tombstones should NOT appear in export
+        assert!(content.is_empty(), "tombstones should not be exported");
+        assert!(!content.contains("bd-xyz"));
+        assert!(!content.contains("tombstone"));
     }
 
     #[test]
