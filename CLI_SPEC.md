@@ -15,6 +15,7 @@ claim / unclaim (they use update --status, we make explicit)
 comment (they call it comment, we can alias to note)
 dep add / dep rm / dep tree
 status
+upgrade
 ```
 
 **their flags we match:**
@@ -121,6 +122,13 @@ global flags:
 -q, --quiet        Errors only
 -v, --verbose      Debug output
 --version
+
+
+additional commands:
+
+```
+upgrade         → install latest bd binary + restart daemon
+```
 
 
 what we drop and why:

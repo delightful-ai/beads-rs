@@ -27,6 +27,7 @@ fn bd_with_runtime(repo: &Path, runtime_dir: &Path) -> Command {
     cmd.current_dir(repo);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("BD_WAL_DIR", runtime_dir);
+    cmd.env("BD_NO_AUTO_UPGRADE", "1");
     cmd
 }
 
@@ -127,6 +128,7 @@ impl TestRepo {
         cmd.current_dir(self.path());
         cmd.env("XDG_RUNTIME_DIR", test_runtime_dir());
         cmd.env("BD_WAL_DIR", test_runtime_dir());
+        cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd
     }
 }
@@ -2559,6 +2561,7 @@ fn test_init_fails_without_origin_remote() {
     cmd.current_dir(work_dir.path());
     cmd.env("XDG_RUNTIME_DIR", runtime_dir.path());
     cmd.env("BD_WAL_DIR", runtime_dir.path());
+    cmd.env("BD_NO_AUTO_UPGRADE", "1");
     cmd.arg("init").assert().failure();
 
     // Best-effort: shut down the daemon started for this test.

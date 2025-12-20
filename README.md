@@ -51,7 +51,7 @@ beads-rs is a **drop-in replacement** for core workflows. the main difference is
 | multi-repo state sharing | not yet |
 | jira integration | not yet |
 | doctor/repair commands | not yet |
-| config system | not yet |
+| config system | partial (auto-upgrade) |
 | templates | not yet |
 | compaction/decay | not yet |
 
@@ -91,6 +91,32 @@ bd setup claude
 bd setup cursor
 bd setup aider
 ```
+
+## upgrade
+
+```bash
+bd upgrade
+```
+
+auto-upgrade is enabled by default and controlled by a toml config:
+`$XDG_CONFIG_HOME/beads-rs/config.toml` (or `~/.config/beads-rs/config.toml`).
+
+## config
+
+beads reads a single config file:
+
+```
+~/.config/beads-rs/config.toml
+```
+
+example:
+
+```toml
+auto_upgrade = true
+```
+
+override location with `BD_CONFIG_DIR`. disable auto-upgrade for a single run with
+`BD_NO_AUTO_UPGRADE=1`.
 
 ## docs
 

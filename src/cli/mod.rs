@@ -105,6 +105,9 @@ pub enum Commands {
     /// Wait for debounced sync flush to complete.
     Sync,
 
+    /// Upgrade bd to the latest version.
+    Upgrade(UpgradeArgs),
+
     /// Update a bead.
     Update(UpdateArgs),
 
@@ -266,6 +269,13 @@ pub struct CreateArgs {
     /// No-op (compat). beads-rs doesn't require forcing.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct UpgradeArgs {
+    /// Run upgrade in the background (internal).
+    #[arg(long, hide = true, default_value_t = false)]
+    pub background: bool,
 }
 
 #[derive(Args, Debug)]
@@ -802,6 +812,10 @@ pub fn run(cli: Cli) -> Result<()> {
         unsafe { std::env::set_var("BD_ACTOR", actor) };
     }
 
+    if !matches!(cli.command, Commands::Daemon { .. } | Commands::Upgrade(_)) {
+        crate::upgrade::maybe_spawn_auto_upgrade();
+    }
+
     match cli.command {
         Commands::Daemon { cmd } => match cmd {
             DaemonCmd::Run => crate::daemon::run_daemon(),
@@ -818,6 +832,7 @@ pub fn run(cli: Cli) -> Result<()> {
         },
         // Onboard doesn't require an initialized beads repo
         Commands::Onboard(args) => commands::onboard::handle(args.output.as_deref()),
+        Commands::Upgrade(args) => commands::upgrade::handle(cli.json, args.background),
         cmd => {
             let repo = resolve_repo(cli.repo)?;
             let ctx = Ctx {
@@ -850,11 +865,12 @@ pub fn run(cli: Cli) -> Result<()> {
                 Commands::Epic { cmd } => commands::epic::handle(&ctx, cmd),
                 Commands::Status => commands::status::handle(&ctx),
                 Commands::Migrate { cmd } => commands::migrate::handle(&ctx, cmd),
-                // Daemon, Prime, Setup, and Onboard handled above.
+                // Daemon, Prime, Setup, Onboard, and Upgrade handled above.
                 Commands::Daemon { .. }
                 | Commands::Prime
                 | Commands::Setup { .. }
-                | Commands::Onboard(_) => Ok(()),
+                | Commands::Onboard(_)
+                | Commands::Upgrade(_) => Ok(()),
             }
         }
     }

@@ -23,3 +23,4 @@ pub(super) mod status;
 pub(super) mod sync;
 pub(super) mod unclaim;
 pub(super) mod update;
+pub(super) mod upgrade;

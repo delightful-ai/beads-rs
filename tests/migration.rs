@@ -80,6 +80,7 @@ impl TestRepo {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.path());
         cmd.env("XDG_RUNTIME_DIR", test_runtime_dir());
+        cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd
     }
 }

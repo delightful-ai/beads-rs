@@ -2,6 +2,7 @@ pub mod api;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod compat;
+pub mod config;
 pub mod core;
 pub mod daemon;
 pub mod error;
@@ -9,6 +10,7 @@ pub mod git;
 pub mod migrate;
 mod paths;
 pub mod repo;
+pub mod upgrade;
 
 pub use error::{Effect, Error, Transience};
 pub type Result<T> = std::result::Result<T, Error>;
