@@ -16,7 +16,7 @@
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
         };
-        version = "0.1.20";
+        version = "0.1.21";
       in
       {
 
