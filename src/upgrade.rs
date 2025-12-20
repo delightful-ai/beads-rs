@@ -257,10 +257,13 @@ fn build_with_cargo() -> Result<tempfile::TempPath> {
     let temp_dir = tempfile::tempdir().map_err(|e| upgrade_error(format!("{e}")))?;
     let root = temp_dir.path().to_path_buf();
 
+    // Install from GitHub to get the latest release version
+    // (crates.io may lag behind GitHub releases)
     let status = Command::new("cargo")
         .args([
             "install",
-            "beads-rs",
+            "--git",
+            "https://github.com/delightful-ai/beads-rs.git",
             "--root",
             root.to_str().unwrap_or("."),
             "--force",
