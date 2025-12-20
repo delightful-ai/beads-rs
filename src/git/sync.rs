@@ -49,6 +49,8 @@ pub struct Fetched {
     pub fetch_error: Option<String>,
     /// Divergence detected between local and remote refs (if any).
     pub divergence: Option<DivergenceInfo>,
+    /// Force-push detected on remote tracking ref (if any).
+    pub force_push: Option<ForcePushInfo>,
 }
 
 /// Merged phase - have merged state ready to commit.
@@ -82,11 +84,19 @@ pub struct DivergenceInfo {
     pub remote_oid: Oid,
 }
 
+/// Remote history rewrite info (force-push).
+#[derive(Clone, Debug)]
+pub struct ForcePushInfo {
+    pub previous_remote_oid: Oid,
+    pub remote_oid: Oid,
+}
+
 /// Result of a successful sync (state + diagnostics).
 #[derive(Clone, Debug)]
 pub struct SyncOutcome {
     pub state: CanonicalState,
     pub divergence: Option<DivergenceInfo>,
+    pub force_push: Option<ForcePushInfo>,
     pub last_seen_stamp: Option<WriteStamp>,
 }
 
@@ -249,6 +259,7 @@ impl SyncProcess<Idle> {
         policy: FetchPolicy,
     ) -> Result<SyncProcess<Fetched>, SyncError> {
         let mut fetch_error = None;
+        let prev_remote_oid_opt = refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?;
         // Fetch from origin
         if let Ok(mut remote) = repo.find_remote("origin") {
             let cfg = repo.config().ok();
@@ -283,6 +294,20 @@ impl SyncProcess<Idle> {
 
         let local_oid_opt = refname_to_id_optional(repo, "refs/heads/beads/store")?;
         let remote_oid_opt = refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?;
+        let mut force_push = None;
+        if let (Some(prev_remote_oid), Some(remote_oid)) = (prev_remote_oid_opt, remote_oid_opt)
+            && prev_remote_oid != remote_oid
+        {
+            let remote_is_descendant = repo
+                .graph_descendant_of(remote_oid, prev_remote_oid)
+                .map_err(SyncError::MergeBase)?;
+            if !remote_is_descendant {
+                force_push = Some(ForcePushInfo {
+                    previous_remote_oid: prev_remote_oid,
+                    remote_oid,
+                });
+            }
+        }
 
         // Get remote state for CRDT merge
         let (remote_oid, remote_state, root_slug, parent_meta_stamp) = match remote_oid_opt {
@@ -358,6 +383,7 @@ impl SyncProcess<Idle> {
                 parent_meta_stamp,
                 fetch_error,
                 divergence,
+                force_push,
             },
         })
     }
@@ -421,14 +447,7 @@ impl SyncProcess<Fetched> {
         let mut merged = CanonicalState::join(&local_resolved, &remote_resolved)
             .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
 
-        // Garbage collect old tombstones (30 day TTL) and soft-deleted deps
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let now = crate::core::WallClock(now_ms);
-        const TOMBSTONE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000; // 30 days
-        merged.gc_tombstones(TOMBSTONE_TTL_MS, now);
+        // Garbage collect soft-deleted deps. We intentionally never GC tombstones.
         merged.gc_deleted_deps();
 
         // Compute diff for commit message
@@ -803,10 +822,14 @@ pub fn sync_with_retry(
     max_retries: usize,
 ) -> Result<SyncOutcome, SyncError> {
     let mut retries = 0;
+    let mut force_push = None;
 
     loop {
         let fetched = SyncProcess::new(repo_path.to_owned()).fetch(repo)?;
         let divergence = fetched.phase.divergence.clone();
+        if force_push.is_none() {
+            force_push = fetched.phase.force_push.clone();
+        }
         let parent_meta_stamp = fetched.phase.parent_meta_stamp.clone();
         let result = fetched
             .merge(local_state, resolution_stamp.clone())?
@@ -819,6 +842,7 @@ pub fn sync_with_retry(
                 return Ok(SyncOutcome {
                     state,
                     divergence,
+                    force_push,
                     last_seen_stamp,
                 });
             }
@@ -1970,6 +1994,7 @@ mod tests {
             if let Err(e) = push_store(&local_repo) {
                 return Err(e);
             }
+            let _ = SyncProcess::new(local_dir.clone()).fetch(&local_repo);
             let local_oid = write_store_commit(&local_repo, Some(base), "local");
             let _ = write_chain(&remote_repo, None, rewrite_steps, "force");
 
@@ -1978,7 +2003,7 @@ mod tests {
                 Err(e) => return Err(TestCaseError::fail(format!("fetch: {e}"))),
             };
 
-            prop_assert!(fetched.phase.divergence.is_some());
+            prop_assert!(fetched.phase.force_push.is_some());
             let local_after = match local_ref(&local_repo) {
                 Ok(oid) => oid,
                 Err(e) => return Err(e),

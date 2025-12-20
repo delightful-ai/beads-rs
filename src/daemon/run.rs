@@ -27,7 +27,7 @@ pub fn run_daemon() -> Result<()> {
 
     // If another daemon is already listening, exit quietly.
     if UnixStream::connect(&socket).is_ok() {
-        eprintln!("daemon already running on {:?}", socket);
+        tracing::warn!("daemon already running on {:?}", socket);
         return Ok(());
     }
 
@@ -41,7 +41,7 @@ pub fn run_daemon() -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
     }
-    eprintln!("daemon listening on {:?}", socket);
+    tracing::info!("daemon listening on {:?}", socket);
 
     // Write daemon metadata for client version checks.
     let meta = crate::api::DaemonInfo {
@@ -112,7 +112,7 @@ pub fn run_daemon() -> Result<()> {
     // Run socket acceptor with shutdown check.
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            eprintln!("shutdown signal received");
+            tracing::info!("shutdown signal received");
             break;
         }
 
@@ -128,7 +128,7 @@ pub fn run_daemon() -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(e) => {
-                eprintln!("accept error: {}", e);
+                tracing::error!("accept error: {}", e);
             }
         }
     }
@@ -150,7 +150,7 @@ pub fn run_daemon() -> Result<()> {
 
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(&meta_path);
-    eprintln!("daemon stopped");
+    tracing::info!("daemon stopped");
     Ok(())
 }
 
@@ -163,7 +163,7 @@ fn handle_client(
     let reader = match stream.try_clone() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("failed to clone stream: {}", e);
+            tracing::error!("failed to clone stream: {}", e);
             return;
         }
     };

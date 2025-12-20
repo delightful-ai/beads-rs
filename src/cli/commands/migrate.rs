@@ -82,9 +82,9 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
             };
 
             if !report.warnings.is_empty() {
-                eprintln!("warnings:");
+                tracing::warn!("warnings:");
                 for w in &report.warnings {
-                    eprintln!("  - {w}");
+                    tracing::warn!("  - {w}");
                 }
             }
 

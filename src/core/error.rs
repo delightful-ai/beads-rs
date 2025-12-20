@@ -55,6 +55,13 @@ pub struct InvalidDependency {
     pub reason: String,
 }
 
+/// Invalid dependency kind string.
+#[derive(Debug, Error, Clone)]
+#[error("dependency kind `{raw}` is invalid")]
+pub struct InvalidDepKind {
+    pub raw: String,
+}
+
 /// Canonical error enum for core capability.
 #[derive(Debug, Error, Clone)]
 #[non_exhaustive]
@@ -69,6 +76,8 @@ pub enum CoreError {
     Collision(#[from] CollisionError),
     #[error(transparent)]
     InvalidDependency(#[from] InvalidDependency),
+    #[error(transparent)]
+    InvalidDepKind(#[from] InvalidDepKind),
 }
 
 impl CoreError {

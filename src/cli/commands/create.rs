@@ -1,4 +1,4 @@
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 
 use super::super::render;
 use super::super::{
@@ -31,7 +31,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     labels.extend(args.label);
 
     if args.force && !ctx.json {
-        eprintln!("note: --force is ignored in beads-rs (not required)");
+        tracing::warn!("note: --force is ignored in beads-rs (not required)");
     }
 
     // Warn if creating without description (unless title contains "test")
@@ -79,8 +79,10 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
 
     // Print warning to stderr (visible even in --json mode)
     if warn_no_desc {
-        eprintln!(
-            "[WARNING] Creating issue '{}' without description. Issues without descriptions lack context for future work.",
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "⚠ Creating issue '{}' without description. Issues without descriptions lack context for future work.",
             issue.title
         );
     }
@@ -153,7 +155,7 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
             Ok(v) => v,
             Err(e) => {
                 failed.push(t.title.clone());
-                eprintln!("error creating issue {:?}: {e}", t.title);
+                tracing::error!("error creating issue {:?}: {e}", t.title);
                 continue;
             }
         };
@@ -184,7 +186,7 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
             Response::Ok { ok } => {
                 // Unexpected ok payload; treat as failure for bulk mode.
                 failed.push(t.title.clone());
-                eprintln!(
+                tracing::warn!(
                     "warning: unexpected response creating {:?}: {ok:?}",
                     t.title
                 );
@@ -192,9 +194,11 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
             }
             Response::Err { err } => {
                 failed.push(t.title.clone());
-                eprintln!(
+                tracing::error!(
                     "error creating issue {:?}: {} - {}",
-                    t.title, err.code, err.message
+                    t.title,
+                    err.code,
+                    err.message
                 );
                 continue;
             }
@@ -205,9 +209,9 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     }
 
     if !failed.is_empty() {
-        eprintln!("\n✗ Failed to create {} issue(s):", failed.len());
+        tracing::error!("✗ Failed to create {} issue(s):", failed.len());
         for title in &failed {
-            eprintln!("  - {title}");
+            tracing::error!("  - {title}");
         }
     }
 

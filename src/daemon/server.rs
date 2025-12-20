@@ -186,7 +186,7 @@ pub fn run_socket_thread(listener: UnixListener, req_tx: Sender<RequestMessage>)
                 std::thread::spawn(move || handle_client(stream, req_tx));
             }
             Err(e) => {
-                eprintln!("accept error: {}", e);
+                tracing::error!("accept error: {}", e);
             }
         }
     }
@@ -199,7 +199,7 @@ fn handle_client(stream: UnixStream, req_tx: Sender<RequestMessage>) {
     let reader = match stream.try_clone() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("failed to clone stream: {}", e);
+            tracing::error!("failed to clone stream: {}", e);
             return;
         }
     };

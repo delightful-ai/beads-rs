@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::error::{CoreError, RangeError};
+use super::error::{CoreError, InvalidDepKind, RangeError};
 
 /// Issue type classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -51,12 +51,34 @@ impl DepKind {
         }
     }
 
+    pub fn parse(raw: &str) -> Result<Self, CoreError> {
+        let s = raw.trim().to_lowercase().replace('-', "_");
+        match s.as_str() {
+            "blocks" | "block" => Ok(DepKind::Blocks),
+            "parent" | "parent_child" | "parentchild" => Ok(DepKind::Parent),
+            "related" | "relates" => Ok(DepKind::Related),
+            "discovered_from" | "discoveredfrom" => Ok(DepKind::DiscoveredFrom),
+            _ => Err(InvalidDepKind {
+                raw: raw.to_string(),
+            }
+            .into()),
+        }
+    }
+
     /// Returns true if this dependency kind requires DAG enforcement (no cycles).
     ///
     /// - `Blocks` and `Parent` have ordering semantics and must be acyclic.
     /// - `Related` and `DiscoveredFrom` are informational links and can be cyclic.
     pub fn requires_dag(&self) -> bool {
         matches!(self, Self::Blocks | Self::Parent)
+    }
+}
+
+impl std::str::FromStr for DepKind {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        DepKind::parse(s)
     }
 }
 
@@ -115,6 +137,30 @@ impl From<Priority> for u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dep_kind_parse_accepts_aliases() {
+        assert_eq!(DepKind::parse("blocks").unwrap(), DepKind::Blocks);
+        assert_eq!(DepKind::parse("block").unwrap(), DepKind::Blocks);
+        assert_eq!(DepKind::parse("parent").unwrap(), DepKind::Parent);
+        assert_eq!(DepKind::parse("parent-child").unwrap(), DepKind::Parent);
+        assert_eq!(DepKind::parse("related").unwrap(), DepKind::Related);
+        assert_eq!(DepKind::parse("relates").unwrap(), DepKind::Related);
+        assert_eq!(
+            DepKind::parse("discovered_from").unwrap(),
+            DepKind::DiscoveredFrom
+        );
+        assert_eq!(
+            DepKind::parse("discoveredfrom").unwrap(),
+            DepKind::DiscoveredFrom
+        );
+    }
+
+    #[test]
+    fn dep_kind_parse_rejects_unknown() {
+        let err = DepKind::parse("unknown").unwrap_err();
+        assert!(err.to_string().contains("dependency kind"));
+    }
 
     #[test]
     fn priority_serde_validates_on_deserialize() {

@@ -23,6 +23,13 @@ pub struct DivergenceRecord {
 }
 
 #[derive(Clone, Debug)]
+pub struct ForcePushRecord {
+    pub previous_remote_oid: String,
+    pub remote_oid: String,
+    pub wall_ms: u64,
+}
+
+#[derive(Clone, Debug)]
 pub struct ClockSkewRecord {
     pub delta_ms: i64,
     pub wall_ms: u64,
@@ -76,6 +83,9 @@ pub struct RepoState {
     /// Last divergence detected between local and remote.
     pub last_divergence: Option<DivergenceRecord>,
 
+    /// Last detected remote force-push.
+    pub last_force_push: Option<ForcePushRecord>,
+
     /// Last detected clock skew.
     pub last_clock_skew: Option<ClockSkewRecord>,
 }
@@ -99,6 +109,7 @@ impl RepoState {
             last_seen_stamp: None,
             last_fetch_error: None,
             last_divergence: None,
+            last_force_push: None,
             last_clock_skew: None,
         }
     }
@@ -121,6 +132,7 @@ impl RepoState {
             last_seen_stamp: None,
             last_fetch_error: None,
             last_divergence: None,
+            last_force_push: None,
             last_clock_skew: None,
         }
     }

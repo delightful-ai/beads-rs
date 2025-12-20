@@ -30,7 +30,7 @@ impl ExportContext {
     ///
     /// Uses `$XDG_DATA_HOME/beads-rs/exports` or `~/.local/share/beads-rs/exports`.
     pub fn new() -> io::Result<Self> {
-        let data_dir = data_home().join("beads-rs").join("exports");
+        let data_dir = crate::paths::data_dir().join("exports");
         fs::create_dir_all(&data_dir)?;
 
         #[cfg(unix)]
@@ -244,20 +244,6 @@ fn hash_remote(remote_url: &str) -> String {
     let result = hasher.finalize();
     // Use first 16 bytes (32 hex chars) for reasonable uniqueness
     hex::encode(&result[..16])
-}
-
-/// Get the XDG data home directory.
-fn data_home() -> PathBuf {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".local")
-                .join("share")
-        })
 }
 
 #[cfg(test)]

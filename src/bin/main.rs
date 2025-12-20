@@ -8,14 +8,14 @@ fn main() {
     init_tracing(cli.verbose);
 
     if let Err(e) = cli::run(cli) {
-        eprintln!("error: {}", e);
+        tracing::error!("error: {}", e);
         std::process::exit(1);
     }
 }
 
 fn init_tracing(verbose: u8) {
     let level = match verbose {
-        0 => LevelFilter::OFF,
+        0 => LevelFilter::ERROR,
         1 => LevelFilter::INFO,
         _ => LevelFilter::DEBUG,
     };

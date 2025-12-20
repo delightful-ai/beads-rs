@@ -31,6 +31,8 @@ pub struct LoadResult {
     pub fetch_error: Option<String>,
     /// Divergence detected between local and remote refs (if any).
     pub divergence: Option<DivergenceInfo>,
+    /// Force-push detected on remote tracking ref (if any).
+    pub force_push: Option<crate::git::sync::ForcePushInfo>,
 }
 
 /// Result of a background refresh operation.
@@ -132,6 +134,7 @@ impl GitWorker {
         let remote_meta_stamp = fetched.phase.parent_meta_stamp;
         let fetch_error = fetched.phase.fetch_error.clone();
         let divergence = fetched.phase.divergence.clone();
+        let force_push = fetched.phase.force_push.clone();
 
         // Step 3: CRDT merge - both local and remote are authoritative
         let merged = CanonicalState::join(&local_state, &remote_state)
@@ -160,6 +163,7 @@ impl GitWorker {
             last_seen_stamp,
             fetch_error,
             divergence,
+            force_push,
         })
     }
 

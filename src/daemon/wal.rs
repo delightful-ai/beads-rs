@@ -340,29 +340,15 @@ impl Wal {
 
 /// Default base directory for WAL storage.
 ///
-/// Uses `BD_WAL_DIR` if set, otherwise `$XDG_DATA_HOME/beads-rs` or
-/// `~/.local/share/beads-rs`.
+/// Uses `BD_WAL_DIR` if set, otherwise `BD_DATA_DIR` or
+/// `$XDG_DATA_HOME/beads-rs` (`~/.local/share/beads-rs`).
 pub fn default_wal_base_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("BD_WAL_DIR")
         && !dir.trim().is_empty()
     {
         return PathBuf::from(dir);
     }
-
-    data_home().join("beads-rs")
-}
-
-fn data_home() -> PathBuf {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".local")
-                .join("share")
-        })
+    crate::paths::data_dir()
 }
 
 fn read_entry_at(path: &Path) -> Result<WalEntry, WalError> {

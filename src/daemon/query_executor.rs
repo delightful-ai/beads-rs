@@ -3,6 +3,7 @@
 //! Queries are pure reads - no clock, no dirty, no scheduling.
 
 use std::path::Path;
+use std::time::Instant;
 
 use crossbeam::channel::Sender;
 
@@ -15,7 +16,7 @@ use crate::api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
     Note, StatusOutput, StatusSummary, SyncStatus, SyncWarning, Tombstone,
 };
-use crate::core::{BeadId, DepKind, DepLife};
+use crate::core::{BeadId, DepKind, DepLife, WallClock};
 
 impl Daemon {
     /// Get a single bead.
@@ -382,6 +383,13 @@ impl Daemon {
                 at_wall_ms: diverged.wall_ms,
             });
         }
+        if let Some(force_push) = &repo_state.last_force_push {
+            warnings.push(SyncWarning::ForcePush {
+                previous_remote_oid: force_push.previous_remote_oid.clone(),
+                remote_oid: force_push.remote_oid.clone(),
+                at_wall_ms: force_push.wall_ms,
+            });
+        }
         if let Some(skew) = &repo_state.last_clock_skew {
             warnings.push(SyncWarning::ClockSkew {
                 delta_ms: skew.delta_ms,
@@ -389,10 +397,24 @@ impl Daemon {
             });
         }
 
+        let next_retry = self.next_sync_deadline_for(remote.remote());
+        let (next_retry_wall_ms, next_retry_in_ms) = match next_retry {
+            Some(deadline) => {
+                let now = Instant::now();
+                let now_wall = WallClock::now().0;
+                let delta = deadline.saturating_duration_since(now);
+                let delta_ms = delta.as_millis() as u64;
+                (Some(now_wall.saturating_add(delta_ms)), Some(delta_ms))
+            }
+            None => (None, None),
+        };
+
         let sync = SyncStatus {
             dirty: repo_state.dirty,
             sync_in_progress: repo_state.sync_in_progress,
             last_sync_wall_ms: repo_state.last_sync_wall_ms,
+            next_retry_wall_ms,
+            next_retry_in_ms,
             consecutive_failures: repo_state.consecutive_failures,
             warnings,
         };

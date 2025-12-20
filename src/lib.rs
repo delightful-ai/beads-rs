@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod error;
 pub mod git;
 pub mod migrate;
+mod paths;
 pub mod repo;
 
 pub use error::{Effect, Error, Transience};

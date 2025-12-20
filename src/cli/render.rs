@@ -456,6 +456,14 @@ fn render_status(out: &StatusOutput) -> String {
         buf.push_str(&format!("  dirty:             {}\n", sync.dirty));
         buf.push_str(&format!("  in_progress:       {}\n", sync.sync_in_progress));
         buf.push_str(&format!("  last_sync:         {}\n", last));
+        if let Some(next_retry) = sync.next_retry_wall_ms {
+            let mut line = format!("  next_retry:       {}", fmt_wall_ms(next_retry));
+            if let Some(in_ms) = sync.next_retry_in_ms {
+                line.push_str(&format!(" (in {})", fmt_duration_ms(in_ms)));
+            }
+            line.push('\n');
+            buf.push_str(&line);
+        }
         buf.push_str(&format!(
             "  consecutive_failures: {}\n",
             sync.consecutive_failures
@@ -482,6 +490,18 @@ fn render_status(out: &StatusOutput) -> String {
                         buf.push_str(&format!(
                             "    divergence: local {} remote {} (at {})\n",
                             local_oid,
+                            remote_oid,
+                            fmt_wall_ms(*at_wall_ms)
+                        ));
+                    }
+                    SyncWarning::ForcePush {
+                        previous_remote_oid,
+                        remote_oid,
+                        at_wall_ms,
+                    } => {
+                        buf.push_str(&format!(
+                            "    force_push: {} -> {} (at {})\n",
+                            previous_remote_oid,
                             remote_oid,
                             fmt_wall_ms(*at_wall_ms)
                         ));
@@ -741,4 +761,20 @@ fn fmt_wall_ms(ms: u64) -> String {
         Some(fmt) => dt.format(fmt).unwrap_or_else(|_| ms.to_string()),
         None => ms.to_string(),
     }
+}
+
+fn fmt_duration_ms(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let secs = ms as f64 / 1000.0;
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let mins = secs / 60.0;
+    if mins < 60.0 {
+        return format!("{mins:.1}m");
+    }
+    let hours = mins / 60.0;
+    format!("{hours:.1}h")
 }

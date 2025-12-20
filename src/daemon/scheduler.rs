@@ -117,6 +117,11 @@ impl SyncScheduler {
         self.pending.contains_key(remote)
     }
 
+    /// Get the scheduled deadline for a repo, if pending.
+    pub fn deadline_for(&self, remote: &RemoteUrl) -> Option<Instant> {
+        self.pending.get(remote).copied()
+    }
+
     /// Get all pending repos.
     pub fn pending_repos(&self) -> Vec<&RemoteUrl> {
         self.pending.keys().collect()

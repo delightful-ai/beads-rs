@@ -964,9 +964,9 @@ fn send(req: &Request) -> Result<ResponsePayload> {
     match send_request(req) {
         Ok(Response::Ok { ok }) => Ok(ok),
         Ok(Response::Err { err }) => {
-            eprintln!("error: {} - {}", err.code, err.message);
+            tracing::error!("error: {} - {}", err.code, err.message);
             if let Some(details) = err.details {
-                eprintln!("details: {}", details);
+                tracing::error!("details: {}", details);
             }
             std::process::exit(1);
         }
@@ -1078,14 +1078,7 @@ fn parse_status(raw: &str) -> std::result::Result<String, String> {
 }
 
 fn parse_dep_kind(raw: &str) -> std::result::Result<DepKind, String> {
-    let s = raw.trim().to_lowercase().replace('-', "_");
-    match s.as_str() {
-        "blocks" | "block" => Ok(DepKind::Blocks),
-        "parent" | "parent_child" | "parentchild" => Ok(DepKind::Parent),
-        "related" | "relates" => Ok(DepKind::Related),
-        "discovered_from" | "discoveredfrom" => Ok(DepKind::DiscoveredFrom),
-        _ => Err(format!("invalid dep kind `{raw}`")),
-    }
+    DepKind::parse(raw).map_err(|e| e.to_string())
 }
 
 fn parse_sort(raw: &str) -> std::result::Result<(SortField, bool), String> {

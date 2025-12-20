@@ -16,7 +16,9 @@ use super::ipc::{ErrorPayload, Request, Response, ResponsePayload};
 use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
-use super::repo::{ClockSkewRecord, DivergenceRecord, FetchErrorRecord, RepoState};
+use super::repo::{
+    ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
+};
 use super::scheduler::SyncScheduler;
 use super::wal::{Wal, WalEntry};
 
@@ -111,6 +113,11 @@ impl Daemon {
     /// Get mutable clock.
     pub fn clock_mut(&mut self) -> &mut Clock {
         &mut self.clock
+    }
+
+    /// Get the next scheduled sync deadline for a remote, if any.
+    pub(crate) fn next_sync_deadline_for(&self, remote: &RemoteUrl) -> Option<Instant> {
+        self.scheduler.deadline_for(remote)
     }
 
     /// Get repo state. Returns Internal if invariant is violated.
@@ -257,6 +264,12 @@ impl Daemon {
                             remote_oid: divergence.remote_oid.to_string(),
                             wall_ms: now_wall_ms,
                         });
+                    repo_state.last_force_push =
+                        loaded.force_push.map(|force_push| ForcePushRecord {
+                            previous_remote_oid: force_push.previous_remote_oid.to_string(),
+                            remote_oid: force_push.remote_oid.to_string(),
+                            wall_ms: now_wall_ms,
+                        });
 
                     // If local/WAL has changes that remote doesn't (crash recovery),
                     // mark dirty so sync will push those changes.
@@ -386,6 +399,11 @@ impl Daemon {
                     remote_oid: divergence.remote_oid.to_string(),
                     wall_ms: now_wall_ms,
                 });
+                repo_state.last_force_push = fresh.force_push.map(|force_push| ForcePushRecord {
+                    previous_remote_oid: force_push.previous_remote_oid.to_string(),
+                    remote_oid: force_push.remote_oid.to_string(),
+                    wall_ms: now_wall_ms,
+                });
 
                 // If refresh showed we have local changes that need syncing
                 if fresh.needs_sync && !repo_state.dirty {
@@ -499,6 +517,11 @@ impl Daemon {
                         remote_oid: divergence.remote_oid.to_string(),
                         wall_ms: now_wall_ms,
                     });
+                repo_state.last_force_push = outcome.force_push.map(|force_push| ForcePushRecord {
+                    previous_remote_oid: force_push.previous_remote_oid.to_string(),
+                    remote_oid: force_push.remote_oid.to_string(),
+                    wall_ms: now_wall_ms,
+                });
 
                 // If mutations happened during sync, merge them
                 if repo_state.dirty {
@@ -558,7 +581,7 @@ impl Daemon {
                 }
             }
             Err(e) => {
-                eprintln!("sync failed for {:?}: {:?}", remote, e);
+                tracing::error!("sync failed for {:?}: {:?}", remote, e);
                 let repo_state = match self.repos.get_mut(remote) {
                     Some(s) => s,
                     None => return,
@@ -1070,6 +1093,7 @@ mod tests {
             last_seen_stamp: None,
             fetch_error: None,
             divergence: None,
+            force_push: None,
         });
         daemon.complete_refresh(&remote, result);
 
@@ -1118,6 +1142,7 @@ mod tests {
             last_seen_stamp: None,
             fetch_error: None,
             divergence: None,
+            force_push: None,
         });
         daemon.complete_refresh(&remote, result);
 
@@ -1145,6 +1170,7 @@ mod tests {
             last_seen_stamp: None,
             fetch_error: None,
             divergence: None,
+            force_push: None,
         });
         daemon.complete_refresh(&remote, result);
 
@@ -1174,6 +1200,7 @@ mod tests {
             last_seen_stamp: None,
             fetch_error: None,
             divergence: None,
+            force_push: None,
         });
         daemon.complete_refresh(&remote, result);
 
@@ -1198,6 +1225,7 @@ mod tests {
             last_seen_stamp: None,
             fetch_error: None,
             divergence: None,
+            force_push: None,
         });
         daemon.complete_refresh(&unknown, result);
         // Just verify no panic and daemon is still valid
@@ -1229,6 +1257,7 @@ mod tests {
         let outcome = SyncOutcome {
             state: CanonicalState::new(),
             divergence: None,
+            force_push: None,
             last_seen_stamp: None,
         };
         daemon.complete_sync(&remote, Ok(outcome));
@@ -1262,6 +1291,7 @@ mod tests {
         let outcome = SyncOutcome {
             state: CanonicalState::new(),
             divergence: None,
+            force_push: None,
             last_seen_stamp: None,
         };
         daemon.complete_sync(&remote, Ok(outcome));
@@ -1369,6 +1399,7 @@ mod tests {
             last_seen_stamp: synced_state.max_write_stamp(),
             state: synced_state,
             divergence: None,
+            force_push: None,
         };
         daemon.complete_sync(&remote, Ok(outcome));
 
