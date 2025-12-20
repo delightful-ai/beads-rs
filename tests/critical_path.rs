@@ -3383,8 +3383,9 @@ fn test_crash_recovery_replays_wal() {
     assert!(!wal_entries.is_empty(), "expected WAL entry before crash");
 
     let pid = daemon_pid(runtime_dir.path());
-    let rc = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-    assert_eq!(rc, 0, "failed to SIGKILL daemon pid {pid}");
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), Signal::SIGKILL).expect("failed to SIGKILL daemon");
     std::thread::sleep(Duration::from_millis(100));
 
     let list_out = bd_with_runtime(repo.path(), runtime_dir.path())

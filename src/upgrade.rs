@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, load_or_init};
 use crate::daemon::OpError;
-use crate::daemon::ipc::{Request, send_request_no_autostart, socket_path};
+use crate::daemon::ipc::{Request, send_request_no_autostart, socket_path, wait_for_daemon_ready};
 use crate::{Error, Result};
 
 const AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -374,25 +374,41 @@ fn stop_daemon() -> Result<bool> {
         return Ok(false);
     }
 
+    // Try graceful shutdown first
     let _ = send_request_no_autostart(&Request::Shutdown);
-    wait_for_daemon_stop(&socket)?;
-    Ok(true)
-}
 
-fn wait_for_daemon_stop(socket: &PathBuf) -> Result<()> {
-    let deadline = SystemTime::now() + Duration::from_secs(5);
+    // Wait for graceful stop (3 seconds)
+    let deadline = SystemTime::now() + Duration::from_secs(3);
     while SystemTime::now() < deadline {
-        if std::os::unix::net::UnixStream::connect(socket).is_err() {
-            return Ok(());
+        if std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            return Ok(true);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Err(upgrade_error(
-        "timed out waiting for daemon to stop".to_string(),
-    ))
+
+    // Try to read PID from meta file and force kill
+    let meta_path = socket.with_file_name("daemon.meta.json");
+    if let Ok(contents) = fs::read_to_string(&meta_path)
+        && let Ok(meta) = serde_json::from_str::<crate::api::DaemonInfo>(&contents)
+    {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        tracing::warn!("daemon did not stop gracefully, killing pid {}", meta.pid);
+        let _ = kill(Pid::from_raw(meta.pid as i32), Signal::SIGKILL);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Clean up socket and meta files
+    let _ = fs::remove_file(&socket);
+    let _ = fs::remove_file(&meta_path);
+
+    Ok(true)
 }
 
 fn start_daemon(install_path: &Path) -> Result<()> {
+    // Get expected version from the new binary
+    let expected_version = get_binary_version(install_path)?;
+
     let mut cmd = Command::new(install_path);
     cmd.arg("daemon").arg("run");
     cmd.stdin(Stdio::null())
@@ -400,7 +416,32 @@ fn start_daemon(install_path: &Path) -> Result<()> {
         .stderr(Stdio::null());
     cmd.spawn()
         .map_err(|e| upgrade_error(format!("failed to start daemon: {e}")))?;
-    Ok(())
+
+    // Wait for new daemon to be responsive with correct version
+    wait_for_daemon_ready(&expected_version)
+        .map_err(|e| upgrade_error(format!("new daemon failed to start: {e}")))
+}
+
+fn get_binary_version(path: &Path) -> Result<String> {
+    let output = Command::new(path).arg("--version").output().map_err(|e| {
+        upgrade_error(format!(
+            "failed to get version from {}: {e}",
+            path.display()
+        ))
+    })?;
+
+    let version_line = String::from_utf8_lossy(&output.stdout);
+    // Parse "bd X.Y.Z" format
+    version_line
+        .split_whitespace()
+        .nth(1)
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            upgrade_error(format!(
+                "failed to parse version from: {}",
+                version_line.trim()
+            ))
+        })
 }
 
 fn read_state() -> Result<Option<UpgradeState>> {

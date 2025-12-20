@@ -811,11 +811,6 @@ where
 
 /// Run the CLI (used by bin).
 pub fn run(cli: Cli) -> Result<()> {
-    if let Some(actor) = &cli.actor {
-        // set_var is unsafe in 2024 due to global process env races; CLI is a boundary.
-        unsafe { std::env::set_var("BD_ACTOR", actor) };
-    }
-
     if !matches!(cli.command, Commands::Daemon { .. } | Commands::Upgrade(_)) {
         crate::upgrade::maybe_spawn_auto_upgrade();
     }

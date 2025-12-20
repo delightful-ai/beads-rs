@@ -803,8 +803,17 @@ pub fn socket_path() -> PathBuf {
         .unwrap_or_else(|_| per_user_tmp_dir().join("daemon.sock"))
 }
 
+/// Read daemon metadata from the meta file.
+/// Returns None if file doesn't exist or is corrupt.
+fn read_daemon_meta() -> Option<crate::api::DaemonInfo> {
+    let dir = ensure_socket_dir().ok()?;
+    let meta_path = dir.join("daemon.meta.json");
+    let contents = fs::read_to_string(&meta_path).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
 fn per_user_tmp_dir() -> PathBuf {
-    let uid = unsafe { libc::geteuid() };
+    let uid = nix::unistd::geteuid();
     PathBuf::from("/tmp").join(format!("beads-{}", uid))
 }
 
@@ -1035,29 +1044,60 @@ fn send_request_over_stream(stream: UnixStream, req: &Request) -> Result<Respons
 }
 
 /// Send a request to the daemon and receive a response.
+///
+/// Retries up to 3 times on version mismatch or stale socket errors,
+/// with exponential backoff between attempts.
 pub fn send_request(req: &Request) -> Result<Response, IpcError> {
+    const MAX_ATTEMPTS: u32 = 3;
     let socket = socket_path();
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        let stream = connect_with_autostart(&socket)?;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let stream = match connect_with_autostart(&socket) {
+            Ok(s) => s,
+            Err(e) => {
+                if attempt >= MAX_ATTEMPTS {
+                    return Err(e);
+                }
+                let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
+                std::thread::sleep(backoff);
+                continue;
+            }
+        };
+
         match send_request_over_stream(stream, req) {
             Ok(resp) => return Ok(resp),
-            Err(IpcError::DaemonVersionMismatch { daemon, .. }) if attempts == 1 => {
-                // Try to restart the daemon. If we have a PID, use it.
-                // Otherwise, try to find and kill the daemon by socket.
+            Err(IpcError::DaemonVersionMismatch { daemon, .. }) if attempt < MAX_ATTEMPTS => {
+                tracing::info!(
+                    "daemon version mismatch, restarting (attempt {}/{})",
+                    attempt,
+                    MAX_ATTEMPTS
+                );
+
+                // Try to restart the daemon
                 if let Some(info) = daemon {
-                    let _ = try_restart_daemon(info.pid, &socket);
+                    let _ = kill_daemon_forcefully(info.pid, &socket);
                 } else {
-                    // No PID available (likely old daemon or parse error).
-                    // Try to kill by finding the process holding the socket.
                     let _ = try_restart_daemon_by_socket(&socket);
                 }
-                continue;
+
+                // Exponential backoff: 100ms, 200ms, 400ms
+                let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
+                std::thread::sleep(backoff);
+            }
+            Err(IpcError::DaemonUnavailable(ref msg)) if attempt < MAX_ATTEMPTS => {
+                tracing::debug!("daemon unavailable ({}), retrying", msg);
+                // Socket might have gone stale mid-request
+                let _ = try_restart_daemon_by_socket(&socket);
+                let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
+                std::thread::sleep(backoff);
             }
             Err(e) => return Err(e),
         }
     }
+
+    Err(IpcError::DaemonUnavailable(
+        "max retry attempts exceeded".into(),
+    ))
 }
 
 /// Send a request without auto-starting the daemon.
@@ -1070,16 +1110,87 @@ pub fn send_request_no_autostart(req: &Request) -> Result<Response, IpcError> {
     send_request_over_stream(stream, req)
 }
 
-fn try_restart_daemon(pid: u32, socket: &PathBuf) -> Result<(), IpcError> {
-    // Try SIGTERM and wait for the socket to go away.
-    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-    if rc != 0 {
+/// Wait for daemon to be ready and responding with expected version.
+///
+/// Returns Ok if daemon is responsive with matching version, Err on timeout (30s).
+pub fn wait_for_daemon_ready(expected_version: &str) -> Result<(), IpcError> {
+    let socket = socket_path();
+    let deadline = SystemTime::now() + Duration::from_secs(30);
+    let mut backoff = Duration::from_millis(50);
+
+    while SystemTime::now() < deadline {
+        match UnixStream::connect(&socket) {
+            Ok(stream) => {
+                let mut writer = stream;
+                let reader_stream = match writer.try_clone() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        std::thread::sleep(backoff);
+                        backoff = std::cmp::min(backoff * 2, Duration::from_millis(500));
+                        continue;
+                    }
+                };
+                let mut reader = BufReader::new(reader_stream);
+
+                if write_req_line(&mut writer, &Request::Ping).is_err() {
+                    std::thread::sleep(backoff);
+                    backoff = std::cmp::min(backoff * 2, Duration::from_millis(500));
+                    continue;
+                }
+
+                if let Ok(Response::Ok {
+                    ok: ResponsePayload::Query(QueryResult::DaemonInfo(info)),
+                }) = read_resp_line(&mut reader)
+                {
+                    if info.version == expected_version {
+                        tracing::info!("daemon ready with version {}", expected_version);
+                        return Ok(());
+                    }
+                    // Wrong version - old daemon hasn't fully died yet
+                    tracing::debug!(
+                        "daemon has version {}, waiting for {}",
+                        info.version,
+                        expected_version
+                    );
+                }
+                std::thread::sleep(backoff);
+                backoff = std::cmp::min(backoff * 2, Duration::from_millis(500));
+            }
+            Err(_) => {
+                std::thread::sleep(backoff);
+                backoff = std::cmp::min(backoff * 2, Duration::from_millis(200));
+            }
+        }
+    }
+
+    Err(IpcError::DaemonUnavailable(format!(
+        "timed out waiting for daemon version {}",
+        expected_version
+    )))
+}
+
+/// Kill daemon with SIGTERM, escalating to SIGKILL if needed.
+fn kill_daemon_forcefully(pid: u32, socket: &PathBuf) -> Result<(), IpcError> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    let nix_pid = Pid::from_raw(pid as i32);
+
+    // First try SIGTERM (graceful)
+    if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
+        // ESRCH = no such process - already dead, that's fine
+        if e == nix::errno::Errno::ESRCH {
+            let _ = fs::remove_file(socket);
+            let _ = fs::remove_file(socket.with_file_name("daemon.meta.json"));
+            return Ok(());
+        }
         return Err(IpcError::DaemonUnavailable(format!(
-            "failed to stop daemon pid {pid}"
+            "failed to stop daemon pid {pid}: {e}"
         )));
     }
 
-    let deadline = SystemTime::now() + Duration::from_secs(5);
+    // Wait for graceful shutdown (3 seconds)
+    let deadline = SystemTime::now() + Duration::from_secs(3);
     while SystemTime::now() < deadline {
         if UnixStream::connect(socket).is_err() {
             return Ok(());
@@ -1087,23 +1198,49 @@ fn try_restart_daemon(pid: u32, socket: &PathBuf) -> Result<(), IpcError> {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    Err(IpcError::DaemonUnavailable(
-        "timed out waiting for daemon to stop".into(),
-    ))
+    // Escalate to SIGKILL
+    tracing::warn!(
+        "daemon pid {} did not stop gracefully, sending SIGKILL",
+        pid
+    );
+    if let Err(e) = kill(nix_pid, Signal::SIGKILL)
+        && e != nix::errno::Errno::ESRCH
+    {
+        return Err(IpcError::DaemonUnavailable(format!(
+            "failed to kill daemon pid {pid}: {e}"
+        )));
+    }
+
+    // Wait for socket to become stale (2 more seconds)
+    let deadline = SystemTime::now() + Duration::from_secs(2);
+    while SystemTime::now() < deadline {
+        if UnixStream::connect(socket).is_err() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Force remove socket and meta as last resort
+    let _ = fs::remove_file(socket);
+    let _ = fs::remove_file(socket.with_file_name("daemon.meta.json"));
+    Ok(())
 }
 
-/// Try to restart daemon when we don't have the PID.
+/// Try to restart daemon when we don't have the PID from response.
 ///
-/// This is a fallback for when the daemon is too old to report its PID,
-/// or when we couldn't parse the response at all. We remove the socket
-/// file to force a fresh daemon on the next connection attempt.
+/// Uses daemon.meta.json to find PID if available.
 fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
-    // Remove the socket file. The old daemon will continue running but
-    // won't receive new connections. A new daemon will be spawned on
-    // the next connection attempt.
-    //
-    // This is imperfect (orphans the old daemon) but better than failing.
-    // The old daemon will eventually exit when it has no work.
+    // Try to get PID from meta file first
+    if let Some(meta) = read_daemon_meta() {
+        tracing::debug!("found daemon pid {} from meta file", meta.pid);
+        return kill_daemon_forcefully(meta.pid, socket);
+    }
+
+    // No meta file (very old daemon or corrupt state)
+    tracing::warn!("no daemon meta file found, removing stale socket");
+
+    // Best effort: remove socket file. The orphaned daemon will eventually
+    // exit when it has no clients and no work.
     if let Err(e) = fs::remove_file(socket)
         && e.kind() != std::io::ErrorKind::NotFound
     {
@@ -1111,6 +1248,10 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
             "failed to remove stale socket: {e}"
         )));
     }
+
+    // Also remove meta file if present
+    let _ = fs::remove_file(socket.with_file_name("daemon.meta.json"));
+
     Ok(())
 }
 

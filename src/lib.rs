@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod api;
 #[cfg(feature = "cli")]
 pub mod cli;
