@@ -53,3 +53,6 @@ Icon
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# bv (beads viewer) local config and caches
+.bv/
