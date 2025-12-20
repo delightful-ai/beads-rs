@@ -291,11 +291,20 @@ fn resolve_install_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
 
-    if let Ok(exe) = std::env::current_exe() {
+    // Try current exe location if its parent dir is writable
+    // (skip on NixOS/read-only locations like /nix/store)
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && is_dir_writable(dir)
+    {
         return Ok(exe);
     }
 
-    if let Some(path) = find_in_path("bd") {
+    // Try finding bd in PATH, but only if its location is writable
+    if let Some(path) = find_in_path("bd")
+        && let Some(dir) = path.parent()
+        && is_dir_writable(dir)
+    {
         return Ok(path);
     }
 
