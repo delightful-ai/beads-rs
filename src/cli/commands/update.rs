@@ -12,6 +12,15 @@ use crate::{Error, Result};
 pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let mut patch = BeadPatch::default();
+    let close_reason = normalize_reason(args.reason);
+    let status_closed = matches!(args.status.as_deref(), Some("closed"));
+
+    if close_reason.is_some() && !status_closed {
+        return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "reason".into(),
+            reason: "--reason requires --status=closed".into(),
+        }));
+    }
 
     let parent_action = if args.no_parent {
         Some(None)
@@ -60,7 +69,11 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
         patch.bead_type = Patch::Set(bead_type);
     }
     if let Some(status) = args.status {
-        patch.status = Patch::Set(status);
+        if status == "closed" && close_reason.is_some() {
+            // Close via explicit close op to preserve reason.
+        } else {
+            patch.status = Patch::Set(status);
+        }
     }
 
     // Labels add/remove => fetch current labels, then set full list.
@@ -168,6 +181,16 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
         }
     }
 
+    if status_closed && close_reason.is_some() {
+        let req = Request::Close {
+            repo: ctx.repo.clone(),
+            id: id.clone(),
+            reason: close_reason,
+            on_branch: None,
+        };
+        let _ = send(&req)?;
+    }
+
     // Emit updated view / summary.
     let issue = fetch_issue(ctx, &id)?;
     if ctx.json {
@@ -198,4 +221,19 @@ fn resolve_description(
         (None, Some(b)) => Ok(Some(b)),
         (None, None) => Ok(None),
     }
+}
+
+fn normalize_reason(reason: Option<String>) -> Option<String> {
+    reason.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed == "-"
+            || trimmed.eq_ignore_ascii_case("none")
+            || trimmed.eq_ignore_ascii_case("null")
+        {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }

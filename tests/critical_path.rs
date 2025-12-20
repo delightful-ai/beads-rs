@@ -690,6 +690,23 @@ fn test_update_bead() {
         .assert()
         .success()
         .stdout(predicate::str::contains("New description"));
+
+    // Close via update with reason.
+    repo.bd()
+        .args(["update", id, "--status=closed", "--reason=Done", "--json"])
+        .assert()
+        .success();
+
+    let output = repo
+        .bd()
+        .args(["show", id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["data"]["closed_reason"].as_str(), Some("Done"));
 }
 
 #[test]

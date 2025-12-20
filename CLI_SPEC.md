@@ -51,6 +51,7 @@ update:
   --design
   --acceptance
   -s, --status
+  --reason
   -p, --priority
   -a, --assignee
   --add-label

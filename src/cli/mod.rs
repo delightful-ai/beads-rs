@@ -532,6 +532,10 @@ pub struct UpdateArgs {
     #[arg(short = 's', long, value_parser = parse_status)]
     pub status: Option<String>,
 
+    /// Close reason (only valid with --status=closed).
+    #[arg(long, allow_hyphen_values = true)]
+    pub reason: Option<String>,
+
     #[arg(short = 'p', long, value_parser = parse_priority)]
     pub priority: Option<Priority>,
 
