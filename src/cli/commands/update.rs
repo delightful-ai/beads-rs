@@ -1,7 +1,7 @@
 use super::super::render;
 use super::super::{
     Ctx, UpdateArgs, current_actor_string, fetch_issue, normalize_bead_id, normalize_bead_id_for,
-    print_ok, send,
+    normalize_dep_specs, print_ok, send,
 };
 use crate::core::DepKind;
 use crate::daemon::ipc::{Request, ResponsePayload};
@@ -142,6 +142,24 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
                     kind: DepKind::Parent,
                 })?;
             }
+        }
+    }
+
+    // Add dependencies
+    if !args.deps.is_empty() {
+        let dep_specs = normalize_dep_specs(args.deps)?;
+        for spec in dep_specs {
+            let (kind, to) = if let Some((k, i)) = spec.split_once(':') {
+                (DepKind::parse(k).unwrap_or(DepKind::Blocks), i.to_string())
+            } else {
+                (DepKind::Blocks, spec)
+            };
+            let _ = send(&Request::AddDep {
+                repo: ctx.repo.clone(),
+                from: id.clone(),
+                to,
+                kind,
+            })?;
         }
     }
 

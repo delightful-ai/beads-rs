@@ -556,6 +556,10 @@ pub struct UpdateArgs {
     /// Add a note.
     #[arg(long = "notes", alias = "note", allow_hyphen_values = true)]
     pub notes: Option<String>,
+
+    /// Dependencies to add (repeat or comma-separated): "type:id" or "id" (defaults to blocks).
+    #[arg(long = "deps", value_delimiter = ',', num_args = 0..)]
+    pub deps: Vec<String>,
 }
 
 #[derive(Args, Debug)]

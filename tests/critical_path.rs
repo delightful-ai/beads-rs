@@ -3255,6 +3255,142 @@ fn test_update_multiple_fields_at_once() {
 }
 
 #[test]
+fn test_update_deps() {
+    let repo = TestRepo::new();
+    repo.bd().arg("init").assert().success();
+
+    // Create two tasks
+    let output1 = repo
+        .bd()
+        .args(["create", "Task A", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_a = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let output2 = repo
+        .bd()
+        .args(["create", "Task B", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_b = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let output3 = repo
+        .bd()
+        .args(["create", "Task C", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_c = serde_json::from_slice::<serde_json::Value>(&output3).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Use update --deps to add dependencies: A depends on B and C
+    repo.bd()
+        .args(["update", &id_a, &format!("--deps={},{}", id_b, id_c)])
+        .assert()
+        .success();
+
+    // Verify A is blocked (depends on B and C which are open)
+    repo.bd()
+        .args(["blocked", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task A"));
+
+    // Verify B and C are ready (no blockers)
+    repo.bd()
+        .args(["ready", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task B"))
+        .stdout(predicate::str::contains("Task C"))
+        .stdout(predicate::str::contains("Task A").not());
+
+    // Close B and C, then A should become ready
+    repo.bd().args(["close", &id_b]).assert().success();
+    repo.bd().args(["close", &id_c]).assert().success();
+
+    repo.bd()
+        .args(["ready", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task A"));
+}
+
+#[test]
+fn test_update_deps_with_kind() {
+    let repo = TestRepo::new();
+    repo.bd().arg("init").assert().success();
+
+    // Create two tasks
+    let output1 = repo
+        .bd()
+        .args(["create", "Main task", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_main = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let output2 = repo
+        .bd()
+        .args(["create", "Discovered bug", "--type=bug", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id_bug = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Use update --deps with discovered_from kind
+    let dep_spec = format!("discovered_from:{}", id_main);
+    repo.bd()
+        .args(["update", &id_bug, &format!("--deps={}", dep_spec)])
+        .assert()
+        .success();
+
+    // Verify the bug shows the discovered_from relationship in deps_outgoing
+    let show_output = repo
+        .bd()
+        .args(["show", &id_bug, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&show_output).unwrap();
+    let deps_outgoing = json["data"]["deps_outgoing"].as_array().unwrap();
+    assert_eq!(deps_outgoing.len(), 1);
+    assert_eq!(
+        deps_outgoing[0]["kind"].as_str().unwrap(),
+        "discovered_from"
+    );
+    assert_eq!(deps_outgoing[0]["to"].as_str().unwrap(), id_main);
+}
+
+#[test]
 fn test_filter_no_results() {
     let repo = TestRepo::new();
     repo.bd().arg("init").assert().success();

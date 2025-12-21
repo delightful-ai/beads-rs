@@ -11,13 +11,10 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
         id,
     };
     let ok = send(&req)?;
-    if ctx.json {
-        return print_ok(&ok, true);
-    }
 
     match ok {
-        ResponsePayload::Query(QueryResult::Issue(view)) => {
-            // Fetch deps + notes for richer show output.
+        ResponsePayload::Query(QueryResult::Issue(mut view)) => {
+            // Fetch deps for richer show output.
             let deps_payload = send(&Request::Deps {
                 repo: ctx.repo.clone(),
                 id: view.id.clone(),
@@ -29,6 +26,14 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
                 _ => (Vec::new(), Vec::new()),
             };
 
+            // For JSON mode, include deps in the response and return early
+            if ctx.json {
+                view.deps_incoming = incoming_edges;
+                view.deps_outgoing = outgoing_edges;
+                return print_ok(&ResponsePayload::Query(QueryResult::Issue(view)), true);
+            }
+
+            // Human mode: fetch notes and build richer display
             let notes_payload = send(&Request::Notes {
                 repo: ctx.repo.clone(),
                 id: view.id.clone(),

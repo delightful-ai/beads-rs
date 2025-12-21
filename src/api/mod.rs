@@ -278,6 +278,14 @@ pub struct Issue {
     pub content_hash: String,
 
     pub notes: Vec<Note>,
+
+    /// Incoming dependencies (edges where this issue is the target).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps_incoming: Vec<DepEdge>,
+
+    /// Outgoing dependencies (edges where this issue is the source).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps_outgoing: Vec<DepEdge>,
 }
 
 /// Summary issue representation (no note bodies).
@@ -371,6 +379,8 @@ impl Issue {
             estimated_minutes: bead.fields.estimated_minutes.value,
             content_hash: bead.content_hash().to_hex(),
             notes,
+            deps_incoming: Vec::new(),
+            deps_outgoing: Vec::new(),
         }
     }
 }
