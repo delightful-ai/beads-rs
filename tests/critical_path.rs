@@ -409,6 +409,95 @@ fn test_epic_with_subtasks() {
 }
 
 #[test]
+fn test_epic_show_progress_display() {
+    let repo = TestRepo::new();
+    repo.bd().arg("init").assert().success();
+
+    // Create an epic with multiple children
+    let output = repo
+        .bd()
+        .args(["create", "Test Epic", "--type=epic", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let epic_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create subtasks with different priorities
+    let output1 = repo
+        .bd()
+        .args([
+            "create",
+            "High priority task",
+            "--type=task",
+            "--priority=0",
+            "--parent",
+            &epic_id,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let task1_id = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let output2 = repo
+        .bd()
+        .args([
+            "create",
+            "Low priority task",
+            "--type=task",
+            "--priority=3",
+            "--parent",
+            &epic_id,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let _task2_id = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    repo.bd()
+        .args([
+            "create",
+            "Medium priority task",
+            "--type=task",
+            "--priority=2",
+            "--parent",
+            &epic_id,
+        ])
+        .assert()
+        .success();
+
+    // Close one task
+    repo.bd().args(["close", &task1_id]).assert().success();
+
+    // Show the epic (human output) - should show progress bar and breakdown
+    repo.bd()
+        .args(["show", &epic_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Progress: 1/3 done"))
+        .stdout(predicate::str::contains("Remaining (2)"))
+        .stdout(predicate::str::contains("Done (1)"))
+        .stdout(predicate::str::contains("[P2]")) // Medium priority shown
+        .stdout(predicate::str::contains("[P3]")); // Low priority shown
+}
+
+#[test]
 fn test_update_parent_and_unparent() {
     let repo = TestRepo::new();
     repo.bd().arg("init").assert().success();

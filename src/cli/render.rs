@@ -302,12 +302,17 @@ pub fn render_show(
     }
 
     if !incoming.children.is_empty() {
-        out.push_str(&format!("\nChildren ({}):\n", incoming.children.len()));
-        for dep in &incoming.children {
-            out.push_str(&format!(
-                "  ↳ {}: {} [P{}]\n",
-                dep.id, dep.title, dep.priority
-            ));
+        // For epics, show detailed progress with done/remaining breakdown
+        if bead.issue_type == "epic" {
+            render_epic_children(&mut out, &incoming.children);
+        } else {
+            out.push_str(&format!("\nChildren ({}):\n", incoming.children.len()));
+            for dep in &incoming.children {
+                out.push_str(&format!(
+                    "  ↳ {}: {} [P{}]\n",
+                    dep.id, dep.title, dep.priority
+                ));
+            }
         }
     }
     if !incoming.blocks.is_empty() {
@@ -352,6 +357,83 @@ pub fn render_show(
 
     out.push('\n');
     out
+}
+
+/// Render epic children with progress breakdown and priority sorting.
+fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
+    let mut done: Vec<&IssueSummary> = Vec::new();
+    let mut remaining: Vec<&IssueSummary> = Vec::new();
+
+    for child in children {
+        if child.status == "closed" {
+            done.push(child);
+        } else {
+            remaining.push(child);
+        }
+    }
+
+    // Sort remaining by priority (P0 first), then by status (in_progress before open)
+    remaining.sort_by(|a, b| {
+        a.priority.cmp(&b.priority).then_with(|| {
+            // in_progress before open
+            let a_prog = a.status == "in_progress";
+            let b_prog = b.status == "in_progress";
+            b_prog.cmp(&a_prog)
+        })
+    });
+
+    // Sort done by updated_at (most recent first)
+    done.sort_by(|a, b| b.updated_at.wall_ms.cmp(&a.updated_at.wall_ms));
+
+    let total = children.len();
+    let done_count = done.len();
+    let pct = if total > 0 {
+        (done_count * 100) / total
+    } else {
+        0
+    };
+
+    // Progress bar
+    let bar_width = 20;
+    let filled = (bar_width * done_count) / total.max(1);
+    let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+    out.push_str(&format!(
+        "\n📊 Progress: {}/{} done ({}%)\n",
+        done_count, total, pct
+    ));
+    out.push_str(&format!("   [{}]\n", bar));
+
+    if !remaining.is_empty() {
+        out.push_str(&format!("\n🔴 Remaining ({}):\n", remaining.len()));
+        for child in &remaining {
+            let status_icon = if child.status == "in_progress" {
+                "🔄"
+            } else {
+                "○"
+            };
+            let assignee = child
+                .assignee
+                .as_ref()
+                .filter(|a| !a.is_empty())
+                .map(|a| format!(" @{}", a))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  {} [P{}] {}: {}{}\n",
+                status_icon, child.priority, child.id, child.title, assignee
+            ));
+        }
+    }
+
+    if !done.is_empty() {
+        out.push_str(&format!("\n✅ Done ({}):\n", done.len()));
+        for child in &done {
+            out.push_str(&format!(
+                "  ✓ {}: {}\n",
+                child.id, child.title
+            ));
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
