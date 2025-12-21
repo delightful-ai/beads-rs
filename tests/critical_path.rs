@@ -485,14 +485,14 @@ fn test_epic_show_progress_display() {
     // Close one task
     repo.bd().args(["close", &task1_id]).assert().success();
 
-    // Show the epic (human output) - should show progress bar and breakdown
+    // Show the epic (human output) - should show progress and breakdown
     repo.bd()
         .args(["show", &epic_id])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Progress: 1/3 done"))
-        .stdout(predicate::str::contains("Remaining (2)"))
-        .stdout(predicate::str::contains("Done (1)"))
+        .stdout(predicate::str::contains("Progress: 1/3 done (33%)"))
+        .stdout(predicate::str::contains("Remaining (2):"))
+        .stdout(predicate::str::contains("Done (1):"))
         .stdout(predicate::str::contains("[P2]")) // Medium priority shown
         .stdout(predicate::str::contains("[P3]")); // Low priority shown
 }

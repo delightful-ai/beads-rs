@@ -393,24 +393,18 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
         0
     };
 
-    // Progress bar
-    let bar_width = 20;
-    let filled = (bar_width * done_count) / total.max(1);
-    let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
-
     out.push_str(&format!(
-        "\n📊 Progress: {}/{} done ({}%)\n",
+        "\nProgress: {}/{} done ({}%)\n",
         done_count, total, pct
     ));
-    out.push_str(&format!("   [{}]\n", bar));
 
     if !remaining.is_empty() {
-        out.push_str(&format!("\n🔴 Remaining ({}):\n", remaining.len()));
+        out.push_str(&format!("\nRemaining ({}):\n", remaining.len()));
         for child in &remaining {
-            let status_icon = if child.status == "in_progress" {
-                "🔄"
+            let status_marker = if child.status == "in_progress" {
+                ">"
             } else {
-                "○"
+                " "
             };
             let assignee = child
                 .assignee
@@ -419,17 +413,17 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
                 .map(|a| format!(" @{}", a))
                 .unwrap_or_default();
             out.push_str(&format!(
-                "  {} [P{}] {}: {}{}\n",
-                status_icon, child.priority, child.id, child.title, assignee
+                " {}[P{}] {}: {}{}\n",
+                status_marker, child.priority, child.id, child.title, assignee
             ));
         }
     }
 
     if !done.is_empty() {
-        out.push_str(&format!("\n✅ Done ({}):\n", done.len()));
+        out.push_str(&format!("\nDone ({}):\n", done.len()));
         for child in &done {
             out.push_str(&format!(
-                "  ✓ {}: {}\n",
+                "  [x] {}: {}\n",
                 child.id, child.title
             ));
         }
