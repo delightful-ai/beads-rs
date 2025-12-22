@@ -422,10 +422,7 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     if !done.is_empty() {
         out.push_str(&format!("\nDone ({}):\n", done.len()));
         for child in &done {
-            out.push_str(&format!(
-                "  [x] {}: {}\n",
-                child.id, child.title
-            ));
+            out.push_str(&format!("  [x] {}: {}\n", child.id, child.title));
         }
     }
 }
