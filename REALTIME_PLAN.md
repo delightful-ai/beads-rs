@@ -197,6 +197,15 @@ and are optionally published via checkpoint metadata later. Keep initial
 implementation minimal: load policies at store open; changes require restart
 or explicit reload op.
 
+Reload semantics (normative):
+- Add an admin-only reload operation that re-reads namespaces.toml and validates it.
+- Live-reload MAY apply changes that do not alter on-disk format or cross-component invariants:
+  - visibility, ready_eligible, retention windows, ttl_basis (if GC marker semantics unchanged)
+  - per-namespace limits (max record bytes, max ops) if only tightening constraints
+- Changes that MUST require restart (or explicit "drain+restart" workflow):
+  - checkpoint group membership, durable_copy_via_git toggles, replication listen params,
+    replicate_mode changes that would require reconnecting sessions or rewriting durable sets.
+
 Rationale:
 - If policies are Git-authoritative too early, you couple checkpoint import to
   configuration semantics, complicating bootstrapping and migration.
@@ -401,6 +410,12 @@ Recommendation to lock now: LocalFsync means: append record, flush, fsync the
 active segment file. On Unix, also fsync the directory when creating a new
 segment file (on rotation), not on every record. This mirrors current snapshot
 WAL logic (fsync file then directory after rename).
+
+Performance note (recommended, correctness-preserving):
+- The daemon MAY implement bounded group commit for LocalFsync and stronger classes:
+  - multiple events can be appended under a single SQLite transaction and one fsync,
+    as long as receipts are not returned until after the fsync and transaction commit.
+  - bounds MUST be enforced (max latency/events/bytes) to keep tail latency predictable.
 
 Rationale:
 - Record-level fsync is the durability promise. Segment creation is metadata.
@@ -655,6 +670,18 @@ These defaults are not optional; implementations MUST enforce bounds.
 - WAL_SEGMENT_MAX_AGE default 60s.
 - MAX_WAL_RECORD_BYTES MUST be enforced; default <= 16 MiB.
 
+Content-level limits (normative defaults; can be tightened per-namespace):
+- MAX_NOTE_BYTES default 64 KiB (reject larger note_append content).
+- MAX_OPS_PER_TXN default 10,000 (sum across bead/deps/notes ops).
+- MAX_NOTE_APPENDS_PER_TXN default 1,000.
+- MAX_LABELS_PER_BEAD default 256 (apply-time enforcement).
+
+- WAL_GROUP_COMMIT_MAX_LATENCY_MS default 2ms (0 disables group commit).
+- WAL_GROUP_COMMIT_MAX_EVENTS default 64.
+- WAL_GROUP_COMMIT_MAX_BYTES default 1 MiB.
+- MAX_SNAPSHOT_BYTES default 512 MiB (reject larger; require Git checkpoint or admin override).
+- MAX_CONCURRENT_SNAPSHOTS default 1 per store (queue additional requests or reject).
+
 CBOR decoding limits (normative):
 - MAX_CBOR_DEPTH default 32 (prevents pathological nesting).
 - MAX_CBOR_MAP_ENTRIES default 10,000 (prevents resource exhaustion during decode).
@@ -681,6 +708,9 @@ Update `Cargo.toml` with required categories:
 - `rusqlite` for WAL index
 - `crc32c` for WAL and replication framing
 - Existing: `sha2`, `hex`, `serde`, `serde_json`, `thiserror`
+- Observability (recommended for production operability):
+  - `tracing`, `tracing-subscriber`
+  - optional: `metrics` + exporter (Prometheus or log-based)
 
 ### 1.2 Core module exports
 
@@ -808,6 +838,10 @@ TxnDeltaV1 contains operation lists (all intra-namespace):
 - dep_upserts: Vec<{ from, to, kind, live_at, live_by, ... }>
 - dep_deletes: Vec<{ from, to, kind, dead_at, dead_by, ... }>
 - note_appends: Vec<{ note_id, bead_id, content, author, at }>
+
+Limits (normative):
+- note_append.content MUST be <= MAX_NOTE_BYTES.
+- Total ops in TxnDeltaV1 MUST be <= MAX_OPS_PER_TXN (reject at mutation planning and at replication ingest).
 
 Event-time rule:
 - `event_time_ms` MUST equal the physical wall time used to mint the write stamp
@@ -1049,7 +1083,13 @@ pub struct EventWal { /* store_dir, index, open segments */ }
 pub struct EventBytes {
   pub eid: EventId,
   pub sha: [u8; 32],
+  pub prev_sha: Option<[u8; 32]>, // fast-path chain link (also present in envelope bytes)
   pub bytes: Vec<u8>, // canonical CBOR EventEnvelope bytes (includes sha256/prev_sha256)
+}
+
+/// Locally-produced event input. MUST omit origin_seq/sha/prev_sha.
+pub struct EventDraft {
+  pub envelope_without_ids: EventEnvelope, // origin_seq=0, sha256/prev_sha256 unset
 }
 
 pub struct AppendResult {
@@ -1060,7 +1100,14 @@ pub struct AppendResult {
 
 impl EventWal {
   pub fn open(store_dir: &Path, meta: &StoreMeta) -> Result<Self, WalError>;
-  pub fn append(&mut self, ns: &NamespaceId, events: &[EventEnvelope])
+  /// Append locally-authored events (origin_replica_id == meta.replica_id).
+  /// Allocates origin_seq and fills prev_sha256/sha256 deterministically.
+  pub fn append_local(&mut self, ns: &NamespaceId, drafts: &[EventDraft])
+    -> Result<AppendResult, WalError>;
+  /// Ingest remote-authored events as-is using canonical bytes received from the origin.
+  /// The caller MUST enforce contiguity and prev_sha continuity before calling.
+  pub fn ingest_remote_bytes(&mut self, ns: &NamespaceId, origin: &ReplicaId,
+                             frames: &[EventBytes])
     -> Result<AppendResult, WalError>;
   pub fn fsync_namespace(&mut self, ns: &NamespaceId) -> Result<(), WalError>;
   pub fn stream_range_bytes(&self, ns: &NamespaceId, origin: &ReplicaId,
@@ -1075,22 +1122,37 @@ impl EventWal {
 ```
 
 Implementation details:
-- `append` allocates origin_seq, computes canonical bytes + sha, writes frames,
-  fsyncs per durability, records index entries, and returns assigned ids.
+- `append_local` allocates origin_seq (SQLite counter), sets prev_sha256 from a
+  durable head cache (or index lookup on cold start), computes canonical bytes + sha,
+  writes frames, fsyncs per durability, records index entries, and returns assigned ids.
+- `ingest_remote_bytes` does NOT allocate origin_seq and MUST NOT re-encode bytes.
+  It writes validated canonical bytes, records index entries, and returns ids.
 - `stream_range` reads canonical bytes from WAL and decodes (or streams bytes
   directly; still must validate hash).
 - `replay` rebuilds in-memory state or index from WAL segments.
 
 ### 5.6 WAL append flow (authoritative)
 
+Local append (authoritative):
 1) Acquire per-namespace append lock.
-2) Build canonical bytes and sha256 for each event.
-3) Allocate origin_seq inside SQLite transaction (table-backed counter).
-4) Write framed records to active segment.
-5) If new segment created, fsync directory once.
-6) For LocalFsync or stronger, fsync active segment file.
-7) Record event offsets and metadata in SQLite and commit transaction.
-8) Return assigned EventIds (and optionally updated watermarks).
+2) Allocate origin_seq inside SQLite transaction (table-backed counter).
+3) Resolve prev_sha256 for (ns, local_replica_id, origin_seq-1) from an in-memory
+   head cache (populate at open; update on each successful fsync+commit).
+4) Encode canonical envelope bytes and compute sha256.
+5) Write framed record(s) to active segment.
+6) If new segment created, fsync directory once.
+7) For LocalFsync or stronger, fsync active segment file.
+8) Record event offsets + sha + prev_sha in SQLite and commit transaction.
+9) Update in-memory head cache and return assigned EventIds.
+
+Remote ingest (authoritative):
+1) Caller enforces contiguity: origin_seq == durable_seen+1 and prev_sha matches
+   the current head sha for (ns, origin).
+2) Acquire per-namespace append lock.
+3) Write framed record(s) using provided canonical bytes (no re-encode).
+4) Fsync per durability policy used for remote ingest (durable means "on disk here").
+5) Record offsets + sha + prev_sha in SQLite and commit.
+6) Advance durable/applied watermarks via StoreRuntime and update head cache.
 
 ### 5.7 WAL pruning and local snapshots
 
@@ -1111,6 +1173,9 @@ Retention + pruning gates (normative):
   - replay safety: either (a) the segment's events are included in a durable
     checkpoint for that namespace/group, or (b) policy explicitly allows "WAL-only"
     durability without Git replay.
+  - operational safety: if Git is the only checkpoint lane in use,
+    the daemon MUST maintain a verified local checkpoint cache before allowing pruning.
+    Otherwise a temporary Git outage can make the store unrecoverable after restart.
 - Idempotency receipts MUST be garbage collected:
   - default window recommendation: keep >= 7 days of client_request_id receipts
     (configurable per namespace), OR cap by total rows/bytes to prevent DB bloat.
@@ -1126,6 +1191,7 @@ SQLite is used as a rebuildable index, not the source of truth.
 ```rust
 pub trait WalIndex {
   fn record_event(&self, ns: &NamespaceId, eid: &EventId, sha: [u8; 32],
+                  prev_sha: Option<[u8; 32]>,
                   segment_path: &Path, offset: u64, len: u32,
                   event_time_ms: u64, txn_id: TxnId,
                   client_request_id: Option<ClientRequestId>)
@@ -1155,6 +1221,7 @@ CREATE TABLE events (
   origin_replica_id BLOB NOT NULL,
   origin_seq INTEGER NOT NULL,
   sha BLOB NOT NULL,
+  prev_sha BLOB, -- nullable; present for seq>1
   segment_path TEXT NOT NULL, -- MUST be a store-relative path, not absolute
   segment_offset INTEGER NOT NULL,
   len INTEGER NOT NULL,
@@ -1282,6 +1349,9 @@ pub struct StoreRuntime {
   wal: EventWal,
   watermarks_applied: WatermarkMap,
   watermarks_durable: WatermarkMap,
+  /// Fast chain heads: last durable sha per (ns, origin). Used for prev_sha fill
+  /// and for gap validation without decoding envelope bytes.
+  head_sha: BTreeMap<NamespaceId, BTreeMap<ReplicaId, [u8; 32]>>,
   gc: GcRuntime, // retention enforcement + WAL pruning + receipt GC
   gap_buffer: GapBufferByNsOrigin,
   peer_acks: PeerAckTable,
@@ -1310,8 +1380,25 @@ pub struct StoreRuntime {
 3) Load or create StoreMeta (replica_id stable on disk).
 4) Load namespaces.toml and validate policies (fail fast).
 5) Open WAL and SQLite index; rebuild index if needed.
-6) Load baseline state (legacy WAL snapshot, checkpoint import, or empty).
-7) Start IPC server, replication listener, replication manager, checkpoint scheduler.
+6) Verify filesystem WAL segments before serving traffic (normative):
+   - For every wal/<namespace>/segment-*.wal file, read the segment header and verify:
+     - store_id/store_epoch match StoreMeta,
+     - namespace in header matches directory,
+     - wal_format_version supported.
+   - On mismatch, fail fast with an operator-facing remediation (archive or delete).
+7) Recover baseline state (normative, deterministic):
+   - Preferred: import latest verified local checkpoint cache for each group (if present).
+   - Else: import latest Git checkpoint heads for configured groups (if available).
+   - Else: migration import (legacy git ref / legacy snapshot WAL) into namespace "core".
+   - Else: start empty.
+   - Merge multiple imported baselines deterministically via CRDT join per namespace.
+   - Initialize applied+durable watermarks to the merged max(meta.included) for each
+     imported namespace/origin.
+8) Replay WAL to reach "now" (normative):
+   - For each namespace, scan/index segments as needed, then apply only events with
+     origin_seq > baseline watermark (per origin) in contiguous order.
+   - Advance applied and durable watermarks as events are applied and fsync-confirmed.
+9) Start IPC server, replication listener, replication manager, checkpoint scheduler.
 
 ### 7.4 Identity discovery and repo binding
 
@@ -1335,6 +1422,10 @@ MutationEngine responsibilities:
 - Build exactly one EventEnvelope (kind=TxnV1) per client mutation request.
   If the request would exceed MAX_WAL_RECORD_BYTES, return an explicit error
   instructing the client to split the operation into multiple requests.
+- Enforce content-level limits before encoding:
+  - reject note_appends with content > MAX_NOTE_BYTES,
+  - reject txns with total ops > MAX_OPS_PER_TXN,
+  - enforce per-bead label count and other bounded fields.
 - Support client_request_id idempotency.
 
 ### 8.2 Event sequencing and idempotency
@@ -1425,6 +1516,7 @@ Body:
 EventFrameV1:
 - eid: EventId
 - sha256: bytes(32)
+- prev_sha256?: bytes(32)  (omitted for seq==1)
 - bytes: bytes  (canonical CBOR EventEnvelope bytes, including sha256/prev_sha256)
 
 Rules:
@@ -1434,6 +1526,8 @@ Rules:
 - Receiver MUST validate:
   - store_id/store_epoch match
   - sha256 matches envelope content
+  - if prev_sha256 present, it MUST match the receiver's current head sha for that
+    (namespace, origin_replica_id) before buffering/appending
   - if event_id already exists, sha256 matches prior observed sha256
 - Receiver applies idempotently, buffers gaps, and advances seen_map only when
   contiguous.
@@ -1444,6 +1538,8 @@ Ingestion ordering rule (clarified, normative):
 - If origin_seq > durable_seen + 1, receiver MUST buffer (bounded) and issue WANT.
 - Only after missing prefix arrives and prev_sha256 continuity can be verified
   may buffered events be appended and applied in order.
+- Remote ingest MUST call EventWal::ingest_remote_bytes (not append_local) so
+  origin_seq is preserved and canonical bytes are persisted unchanged.
 
 ### 9.5 ACK
 
@@ -1494,6 +1590,16 @@ SNAPSHOT_END body:
 
 Rules:
 - Hash must be verified before applying snapshot.
+- Resumability rule (normative):
+  - If resume_from_chunk is supported, the sender MUST materialize the full snapshot
+    byte stream once (temp file under store_dir/snap/) and stream chunks from that file.
+  - The sender MUST NOT regenerate a new tar/zstd stream for the same snapshot_id.
+  - If the temp artifact is missing/expired, the sender MUST respond with
+    ERROR(code="snapshot_expired") and require restart from chunk 0.
+- Resource limits (normative):
+  - The sender MUST enforce MAX_SNAPSHOT_BYTES before announcing total_chunks.
+  - The receiver MUST enforce MAX_SNAPSHOT_BYTES and reject early (before allocation)
+    if total_chunks * chunk_size_bytes exceeds limit.
 
 ### 9.8 Gap handling and flow control
 
@@ -1597,6 +1703,7 @@ Use checkpoint layout for realtime snapshots:
 - Send SNAPSHOT_BEGIN with hash and chunk count.
 - Stream SNAPSHOT_CHUNK frames.
 - Verify hash, extract, import, merge, advance watermarks.
+- Keep the snapshot artifact until completion (SNAPSHOT_END) or TTL expiry so resume works.
 
 ---
 
@@ -1737,6 +1844,10 @@ Rules:
 5) Write meta.json including included watermarks (durable), manifest_hash, content_hash.
 6) Create commit on group ref.
 7) Push.
+8) Cache the exported checkpoint locally (recommended, operational):
+   - Store a verified copy (or hardlinks) under the store dir cache path.
+   - Keep only the last N checkpoints per group (default N=3), prune older caches
+     after successful newer writes.
 
 ### 13.9 Import / merge algorithm (normative)
 
@@ -1784,6 +1895,7 @@ $BD_DATA_DIR/stores/<store_id>/
   wal/<namespace>/*.wal
   index/wal.sqlite
   snap/
+  checkpoint_cache/<group>/<checkpoint_id>/
 ```
 
 Update `src/paths.rs`:
@@ -1826,6 +1938,19 @@ Add admin/introspection ops:
   checkpoint durations, GC sweep stats).
 - `admin.verify_store`: runs offline-ish verification checks (segment headers match
   meta, content_hash recompute for last checkpoint, index vs WAL spot checks).
+- `admin.reload_policies`: reloads namespaces.toml, validates, applies safe live changes,
+  and returns a diff summary (applied vs requires_restart).
+
+Observability requirements (normative):
+- Every mutation MUST be traceable end-to-end via txn_id and (if present) client_request_id.
+- Replication sessions MUST log peer identity (replica_id + authenticated identity) and
+  namespace authorization decisions.
+- Emit at minimum:
+  - counters: wal_append_ok/err, wal_fsync_ok/err, apply_ok/err, repl_events_in/out,
+    checkpoint_export_ok/err, snapshot_send_ok/err
+  - gauges: IPC inflight, repl ingest queue bytes/events, checkpoint job queue depth,
+    per-peer lag (durable watermark diff)
+  - histograms: wal_append_duration, wal_fsync_duration, apply_duration, checkpoint_duration
 
 Graceful shutdown (normative):
 - On SIGTERM / shutdown request: stop accepting new mutation requests, drain in-flight
