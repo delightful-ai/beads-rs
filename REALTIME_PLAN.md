@@ -361,13 +361,21 @@ Options:
 3) One directory per namespace (spec) vs a flat directory with namespace in filename.
 
 Recommendation to lock now: keep spec directory layout `wal/<namespace>/` and
-name segments with a sortable prefix plus first seq: `segment-<created_at_ms>-<first_seq>.wal`
-(and maybe a random suffix if you ever allow multiple writers, but you probably will not).
+name segments with a sortable prefix plus segment id (available at creation time):
+`segment-<created_at_ms>-<segment_id>.wal`
+
+`first_seq` remains a useful operator hint, but it MUST live in durable metadata
+(segment header + SQLite `segments` table), not in the filename.
 
 Rationale:
 - Rebuild path needs deterministic ordering, and operators will look at filenames
-  to sanity-check state. Including first seq makes range serving and tail recovery
-  easier to debug.
+  to sanity-check state.
+- Embedding `first_seq` in the filename forces a rename after the first record is
+  appended (because `first_seq` is unknown at file creation). Renames add directory
+  fsyncs and create crash states (half-renamed segments or index rows pointing at
+  a path that never became durable).
+- `segment_id` is stable, globally unique, and becomes a natural join key across
+  logs, SQLite rows, and filenames.
 
 Risks if deferred:
 - Index rebuild logic implicitly assumes ordering, then you rename format later
@@ -502,6 +510,10 @@ Modules impacted:
 What must be true to proceed safely:
 - Define backpressure and bounds at the channel boundary, so a fast peer cannot OOM
   the daemon by sending huge batches.
+- When ingest queue is full, the session MUST apply backpressure by:
+  - stopping reads (letting TCP backpressure kick in), OR
+  - responding with ERROR(code="overloaded") and closing the connection.
+  Silent unbounded buffering is forbidden.
 
 ### 0.14 IPC protocol evolution
 
@@ -648,6 +660,12 @@ CBOR decoding limits (normative):
 - MAX_CBOR_MAP_ENTRIES default 10,000 (prevents resource exhaustion during decode).
 - MAX_CBOR_ARRAY_ENTRIES default 10,000.
 - Reject payloads exceeding these limits before fully decoding.
+
+Internal backpressure defaults (normative):
+- MAX_IPC_INFLIGHT_MUTATIONS default 1024 (reject or apply backpressure when exceeded).
+- MAX_REPL_INGEST_QUEUE_BYTES default 32 MiB per session (bounded channel).
+- MAX_REPL_INGEST_QUEUE_EVENTS default 50,000 per session.
+- MAX_CHECKPOINT_JOB_QUEUE default 8 per store (coalesce by group when full).
 
 ---
 
@@ -966,7 +984,7 @@ for migration and one-release compatibility.
 ### 5.2 File layout and framing (spec-aligned)
 
 Directory layout under store dir:
-- `wal/<namespace>/segment-<created_at_ms>-<first_seq>.wal`
+- `wal/<namespace>/segment-<created_at_ms>-<segment_id>.wal`
 - `index/wal.sqlite`
 - `snap/` for snapshot temp files
 
@@ -1001,10 +1019,12 @@ Tail recovery:
 
 ### 5.3 WAL segment naming and meaning of first_seq
 
-Segment filename: `segment-<created_at_ms>-<first_seq>.wal`:
+Segment filename: `segment-<created_at_ms>-<segment_id>.wal`:
 - `created_at_ms` from segment header.
+- `segment_id` from segment header.
 - `first_seq` is the origin_seq of the first record written to the segment
-  (from any origin). It is for operator visibility only.
+  (from any origin). It is recorded in the segment header and SQLite for operator
+  visibility only.
 - WAL index is authoritative for range serving and should not rely on filename
   semantics beyond ordering.
 
@@ -1026,13 +1046,29 @@ Legacy:
 ```rust
 pub struct EventWal { /* store_dir, index, open segments */ }
 
+pub struct EventBytes {
+  pub eid: EventId,
+  pub sha: [u8; 32],
+  pub bytes: Vec<u8>, // canonical CBOR EventEnvelope bytes (includes sha256/prev_sha256)
+}
+
+pub struct AppendResult {
+  pub event_ids: Vec<EventId>,
+  pub shas: Vec<[u8; 32]>,
+  pub bytes_written: u64,
+}
+
 impl EventWal {
   pub fn open(store_dir: &Path, meta: &StoreMeta) -> Result<Self, WalError>;
-  pub fn append(&mut self, ns: &NamespaceId, events: &[EventEnvelope]) -> Result<(), WalError>;
+  pub fn append(&mut self, ns: &NamespaceId, events: &[EventEnvelope])
+    -> Result<AppendResult, WalError>;
   pub fn fsync_namespace(&mut self, ns: &NamespaceId) -> Result<(), WalError>;
+  pub fn stream_range_bytes(&self, ns: &NamespaceId, origin: &ReplicaId,
+                            from_seq_exclusive: u64, max_bytes: usize)
+    -> Result<Vec<EventBytes>, WalError>;
   pub fn stream_range(&self, ns: &NamespaceId, origin: &ReplicaId,
                       from_seq_exclusive: u64, max_bytes: usize)
-    -> Result<Vec<EventEnvelope>, WalError>;
+    -> Result<Vec<EventEnvelope>, WalError>; // convenience wrapper
   pub fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<u64, WalError>;
   pub fn replay(&self, ns: &NamespaceId) -> Result<(), WalError>;
 }
@@ -1063,6 +1099,21 @@ Implementation details:
 - Keep WAL indefinitely on anchors if configured for audit.
 - Local snapshots (compaction) are optional but must include included watermarks
   and GC floors, and must be versioned.
+
+Retention + pruning gates (normative):
+- Implement a background GC/retention worker that:
+  - evaluates namespace retention policies (ttl/size/forever),
+  - emits NamespaceGcMarker events when policy requires (only by gc_authority),
+  - applies GC floors and schedules actual deletion/compaction work.
+- WAL segment pruning MUST be gated by BOTH:
+  - safety for replication: segment contains no events above the minimum durable
+    watermark required by any eligible replica still tracked by policy, AND
+  - replay safety: either (a) the segment's events are included in a durable
+    checkpoint for that namespace/group, or (b) policy explicitly allows "WAL-only"
+    durability without Git replay.
+- Idempotency receipts MUST be garbage collected:
+  - default window recommendation: keep >= 7 days of client_request_id receipts
+    (configurable per namespace), OR cap by total rows/bytes to prevent DB bloat.
 
 ---
 
@@ -1178,6 +1229,15 @@ Notes:
   but remains a Vec for forward compatibility.
 - meta should store schema version and store_id for sanity checks.
 
+Startup sanity checks (normative):
+- On every store open (even when index exists), the daemon MUST verify:
+  - meta.store_id/store_epoch match StoreMeta (fail fast if mismatch).
+  - For each segments row: last_indexed_offset <= current file length, else treat
+    as index corruption and force rebuild for that namespace.
+  - origin_seq.next_seq >= (max(origin_seq) observed in events table) + 1, else
+    recompute origin_seq from events table (or full WAL scan if events table missing).
+- If any check fails, rebuild the index from WAL segments before allowing appends.
+
 ### 6.3 Semantics
 
 - WAL is authoritative; SQLite can be dropped and rebuilt.
@@ -1198,8 +1258,12 @@ Notes:
 
 SQLite PRAGMA choices (normative):
 - `journal_mode = WAL` for concurrent reads during writes.
-- `synchronous = NORMAL` for WAL mode (fsync at checkpoint, not every commit).
+- `synchronous = FULL` by default to avoid losing committed origin_seq / receipt data
+  across power loss. `NORMAL` may be allowed only behind an explicit configuration
+  flag that also enables mandatory open-time index catch-up + origin_seq recompute.
 - `cache_size = -16000` (16 MiB cache) or configurable.
+- `busy_timeout = 5000` (or configurable) to avoid spurious SQLITE_BUSY under load.
+- `foreign_keys = ON` (defensive, even if schema uses few FKs initially).
 - Document these choices explicitly; do not rely on SQLite defaults.
 
 ---
@@ -1218,10 +1282,12 @@ pub struct StoreRuntime {
   wal: EventWal,
   watermarks_applied: WatermarkMap,
   watermarks_durable: WatermarkMap,
+  gc: GcRuntime, // retention enforcement + WAL pruning + receipt GC
   gap_buffer: GapBufferByNsOrigin,
   peer_acks: PeerAckTable,
   broadcaster: EventBroadcaster,
   idempotency: IdempotencyStore,
+  checkpoint: CheckpointRuntime, // worker thread + job queue + last results
 }
 ```
 
@@ -1317,8 +1383,9 @@ Replication uses framed CBOR messages (same framing as WAL).
 ### 9.2 Message envelope
 
 CBOR map `{ v, type, body }` with `minicbor`.
-Event payloads embed EventEnvelope (canonical bytes or decoded objects);
-hash verification is mandatory.
+Event payloads SHOULD embed canonical EventEnvelope bytes (see EventBytes/EventFrameV1);
+decoding into EventEnvelope structs is required only for apply and validation.
+Hash verification remains mandatory.
 
 ### 9.3 Handshake and protocol negotiation
 
@@ -1353,7 +1420,12 @@ Version negotiation:
 ### 9.4 EVENTS
 
 Body:
-- events: [EventEnvelope]
+- events: [EventFrameV1]
+
+EventFrameV1:
+- eid: EventId
+- sha256: bytes(32)
+- bytes: bytes  (canonical CBOR EventEnvelope bytes, including sha256/prev_sha256)
 
 Rules:
 - Sender MAY batch.
@@ -1568,9 +1640,21 @@ Sharding rule:
 
 JSON encoding requirements:
 - UTF-8
-- stable key ordering for objects
+- stable key ordering for objects (canonical JSON, see below)
 - no extra whitespace
 - each JSONL line ends with "\n"
+
+Canonical JSON (normative):
+- All JSON objects MUST be serialized with keys sorted by UTF-8 byte order ascending,
+  recursively for nested objects.
+- Writers MUST NOT rely on HashMap iteration order at any layer.
+- Introduce a shared helper used by checkpoint export and manifest/meta writers:
+  - `src/core/json_canon.rs` (or `src/git/checkpoint/json_canon.rs`)
+  - API sketch: `fn to_canon_json_bytes<T: Serialize>(v: &T) -> Vec<u8>`
+- Canonical JSON MUST emit:
+  - no insignificant whitespace,
+  - deterministic escaping as per serde_json,
+  - no NaN/Infinity floats (reject if encountered).
 
 ### 13.4 manifest.json (normative)
 
@@ -1582,6 +1666,7 @@ manifest.json fields:
 - files: { "<path>": "<sha256-hex>" } for each file present excluding meta.json and manifest.json
 
 Missing shards are treated as empty and therefore do not appear in files.
+manifest_hash MUST be computed over canonical JSON bytes (not "pretty" JSON).
 
 ### 13.5 meta.json (required fields)
 
@@ -1640,10 +1725,18 @@ Rules:
    - Regenerate only dirty shard files since the last exported checkpoint for the group.
    - Reuse previous checkpoint blobs for unchanged shard paths.
    - Determinism rule remains: regenerated shard JSONL lines MUST be sorted as specified.
-3) Write manifest.json.
-4) Write meta.json including included watermarks (durable), manifest_hash, content_hash.
-5) Create commit on group ref.
-6) Push.
+3) Snapshot barrier (normative):
+   - The coordinator thread MUST capture:
+     - included watermarks (durable) for the group
+     - a consistent view of the shard contents to be written (full or dirty-only)
+   - This captured payload (CheckpointSnapshot) MUST be immutable and handed to a
+     checkpoint worker thread for file I/O, hashing, commit creation, and push.
+   - The snapshot MUST NOT claim inclusion of watermarks that are not represented
+     by the shard contents in that snapshot.
+4) Write manifest.json.
+5) Write meta.json including included watermarks (durable), manifest_hash, content_hash.
+6) Create commit on group ref.
+7) Push.
 
 ### 13.9 Import / merge algorithm (normative)
 
@@ -1672,6 +1765,9 @@ Add a checkpoint scheduler:
 - Debounce after local mutations.
 - Max interval and max events per spec.
 - One in-flight push per checkpoint group.
+- Heavy checkpoint work (export, hash, commit, push) SHOULD run in a dedicated
+  worker thread. The coordinator owns the snapshot barrier and only submits
+  immutable jobs, so mutation/replication latency remains stable.
 
 Separate replication reconnect/backoff logic from checkpoint scheduling.
 
@@ -1725,6 +1821,11 @@ Add admin/introspection ops:
   replication sessions (peers, last_ack, lag), checkpoint groups (dirty/in-flight/last push).
 - `admin.flush`: forces fsync for a namespace (and optionally triggers checkpoint now).
 - `admin.rebuild_index`: rebuilds SQLite index from WAL (explicit operator action).
+- `admin.metrics`: returns a simple text or JSON snapshot of key counters and
+  latencies (append/fsync p50/p95, queue depths, replication lag per peer/ns,
+  checkpoint durations, GC sweep stats).
+- `admin.verify_store`: runs offline-ish verification checks (segment headers match
+  meta, content_hash recompute for last checkpoint, index vs WAL spot checks).
 
 Graceful shutdown (normative):
 - On SIGTERM / shutdown request: stop accepting new mutation requests, drain in-flight
@@ -1793,6 +1894,15 @@ Add deterministic tests for:
 - store-global lock enforcement
 - admin.status correctness under load (watermarks/segment stats are consistent)
 - graceful shutdown does not lose locally durable events
+
+Add fuzzing + crash safety validation (recommended):
+- cargo-fuzz targets:
+  - WAL frame decode (length/crc/tail truncation)
+  - CBOR EventEnvelope decode with bounds (depth, map entries, array entries)
+  - replication message decode (HELLO/WELCOME/EVENTS)
+- crash tests (integration):
+  - inject SIGKILL during append (after write before fsync, after fsync before index commit, etc)
+  - assert recovery behavior: no duplicate origin_seq, tail truncation correct, index rebuild correct
 
 ---
 
