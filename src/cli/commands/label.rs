@@ -4,7 +4,6 @@ use super::super::render;
 use super::super::{Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, send};
 use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
-use crate::daemon::ops::{BeadPatch, Patch};
 use crate::daemon::query::{Filters, QueryResult};
 use crate::{Error, Result};
 
@@ -27,20 +26,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             let (ids, label) = split_label_batch(batch)?;
             let mut results: Vec<LabelChange> = Vec::new();
             for id in ids {
-                let issue = fetch_issue(ctx, &id)?;
-                let mut labels = issue.labels;
-                if !labels.iter().any(|l| l == &label) {
-                    labels.push(label.clone());
-                }
-                let patch = BeadPatch {
-                    labels: Patch::Set(labels),
-                    ..Default::default()
-                };
-                let req = Request::Update {
+                let req = Request::AddLabels {
                     repo: ctx.repo.clone(),
                     id: id.clone(),
-                    patch,
-                    cas: None,
+                    labels: vec![label.clone()],
                 };
                 let _ = send(&req)?;
 
@@ -69,18 +58,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             let (ids, label) = split_label_batch(batch)?;
             let mut results: Vec<LabelChange> = Vec::new();
             for id in ids {
-                let issue = fetch_issue(ctx, &id)?;
-                let mut labels = issue.labels;
-                labels.retain(|l| l != &label);
-                let patch = BeadPatch {
-                    labels: Patch::Set(labels),
-                    ..Default::default()
-                };
-                let req = Request::Update {
+                let req = Request::RemoveLabels {
                     repo: ctx.repo.clone(),
                     id: id.clone(),
-                    patch,
-                    cas: None,
+                    labels: vec![label.clone()],
                 };
                 let _ = send(&req)?;
 

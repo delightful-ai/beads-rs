@@ -71,6 +71,28 @@ pub enum Request {
         cas: Option<String>,
     },
 
+    /// Add labels to a bead.
+    AddLabels {
+        repo: PathBuf,
+        id: String,
+        labels: Vec<String>,
+    },
+
+    /// Remove labels from a bead.
+    RemoveLabels {
+        repo: PathBuf,
+        id: String,
+        labels: Vec<String>,
+    },
+
+    /// Set or clear a parent relationship.
+    SetParent {
+        repo: PathBuf,
+        id: String,
+        #[serde(default)]
+        parent: Option<String>,
+    },
+
     /// Close a bead.
     Close {
         repo: PathBuf,
@@ -278,6 +300,37 @@ impl Request {
                     id,
                     patch: patch.clone(),
                     cas: cas.clone(),
+                }))
+            }
+
+            Request::AddLabels { repo, id, labels } => {
+                let id = BeadId::parse(id).map_err(map_core_invalid_id)?;
+                Ok(Some(BeadOp::AddLabels {
+                    repo: repo.clone(),
+                    id,
+                    labels: labels.clone(),
+                }))
+            }
+
+            Request::RemoveLabels { repo, id, labels } => {
+                let id = BeadId::parse(id).map_err(map_core_invalid_id)?;
+                Ok(Some(BeadOp::RemoveLabels {
+                    repo: repo.clone(),
+                    id,
+                    labels: labels.clone(),
+                }))
+            }
+
+            Request::SetParent { repo, id, parent } => {
+                let id = BeadId::parse(id).map_err(map_core_invalid_id)?;
+                let parent = match parent {
+                    Some(raw) => Some(BeadId::parse(raw).map_err(map_core_invalid_id)?),
+                    None => None,
+                };
+                Ok(Some(BeadOp::SetParent {
+                    repo: repo.clone(),
+                    id,
+                    parent,
                 }))
             }
 

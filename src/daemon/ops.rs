@@ -222,6 +222,28 @@ pub enum BeadOp {
         cas: Option<String>,
     },
 
+    /// Add labels to a bead.
+    AddLabels {
+        repo: PathBuf,
+        id: BeadId,
+        labels: Vec<String>,
+    },
+
+    /// Remove labels from a bead.
+    RemoveLabels {
+        repo: PathBuf,
+        id: BeadId,
+        labels: Vec<String>,
+    },
+
+    /// Set or clear a parent relationship.
+    SetParent {
+        repo: PathBuf,
+        id: BeadId,
+        #[serde(default)]
+        parent: Option<BeadId>,
+    },
+
     /// Close a bead.
     Close {
         repo: PathBuf,
@@ -292,6 +314,9 @@ impl BeadOp {
         match self {
             BeadOp::Create { repo, .. } => repo,
             BeadOp::Update { repo, .. } => repo,
+            BeadOp::AddLabels { repo, .. } => repo,
+            BeadOp::RemoveLabels { repo, .. } => repo,
+            BeadOp::SetParent { repo, .. } => repo,
             BeadOp::Close { repo, .. } => repo,
             BeadOp::Reopen { repo, .. } => repo,
             BeadOp::Delete { repo, .. } => repo,
@@ -309,6 +334,9 @@ impl BeadOp {
         match self {
             BeadOp::Create { .. } => None,
             BeadOp::Update { id, .. } => Some(id),
+            BeadOp::AddLabels { id, .. } => Some(id),
+            BeadOp::RemoveLabels { id, .. } => Some(id),
+            BeadOp::SetParent { id, .. } => Some(id),
             BeadOp::Close { id, .. } => Some(id),
             BeadOp::Reopen { id, .. } => Some(id),
             BeadOp::Delete { id, .. } => Some(id),

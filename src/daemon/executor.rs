@@ -17,7 +17,8 @@ use super::ipc::{Response, ResponsePayload};
 use super::ops::{BeadPatch, MapLiveError, OpError, OpResult, Patch};
 use crate::core::{
     Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge, DepKey,
-    DepKind, DepLife, DepSpec, Labels, Lww, Note, NoteId, Priority, Tombstone, WallClock, Workflow,
+    DepKind, DepLife, DepSpec, Label, Labels, Lww, Note, NoteId, Priority, Tombstone, WallClock,
+    Workflow,
 };
 
 impl Daemon {
@@ -358,6 +359,172 @@ impl Daemon {
                         });
                     }
                 }
+            }
+
+            Ok(())
+        });
+
+        match result {
+            Ok(()) => Response::ok(ResponsePayload::Op(OpResult::Updated { id: id.clone() })),
+            Err(e) => Response::err(e),
+        }
+    }
+
+    /// Add labels to a bead.
+    pub fn apply_add_labels(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        labels: Vec<String>,
+        _git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let parsed = match parse_label_list(labels) {
+            Ok(v) => v,
+            Err(e) => return Response::err(e),
+        };
+
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
+            Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+
+        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+            let bead = state.require_live_mut(id).map_live_err(id)?;
+            let mut labels = bead.fields.labels.value.clone();
+            for label in parsed {
+                labels.insert(label);
+            }
+            bead.fields.labels = Lww::new(labels, stamp.clone());
+            Ok(())
+        });
+
+        match result {
+            Ok(()) => Response::ok(ResponsePayload::Op(OpResult::Updated { id: id.clone() })),
+            Err(e) => Response::err(e),
+        }
+    }
+
+    /// Remove labels from a bead.
+    pub fn apply_remove_labels(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        labels: Vec<String>,
+        _git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let parsed = match parse_label_list(labels) {
+            Ok(v) => v,
+            Err(e) => return Response::err(e),
+        };
+
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
+            Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+
+        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+            let bead = state.require_live_mut(id).map_live_err(id)?;
+            let mut labels = bead.fields.labels.value.clone();
+            for label in parsed {
+                labels.remove(label.as_str());
+            }
+            bead.fields.labels = Lww::new(labels, stamp.clone());
+            Ok(())
+        });
+
+        match result {
+            Ok(()) => Response::ok(ResponsePayload::Op(OpResult::Updated { id: id.clone() })),
+            Err(e) => Response::err(e),
+        }
+    }
+
+    /// Replace the parent relationship for a bead.
+    pub fn apply_set_parent(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        parent: Option<BeadId>,
+        _git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
+            Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+
+        let existing_parents = {
+            let repo_state = match self.repo_state(&remote) {
+                Ok(repo_state) => repo_state,
+                Err(e) => return Response::err(e),
+            };
+
+            if repo_state.state.get_live(id).is_none() {
+                return Response::err(OpError::NotFound(id.clone()));
+            }
+
+            let existing: Vec<BeadId> = repo_state
+                .state
+                .deps_from(id)
+                .into_iter()
+                .filter(|edge| edge.key.kind() == DepKind::Parent)
+                .map(|edge| edge.key.to().clone())
+                .collect();
+
+            match &parent {
+                Some(desired) => {
+                    if repo_state.state.get_live(desired).is_none() {
+                        return Response::err(OpError::NotFound(desired.clone()));
+                    }
+                    if existing.len() == 1 && existing[0] == *desired {
+                        return Response::ok(ResponsePayload::Op(OpResult::Updated {
+                            id: id.clone(),
+                        }));
+                    }
+                    if would_create_cycle(&repo_state.state, id, desired, DepKind::Parent) {
+                        return Response::err(OpError::ValidationFailed {
+                            field: "parent".into(),
+                            reason: format!(
+                                "circular dependency: {} already depends on {} (directly or transitively)",
+                                desired, id
+                            ),
+                        });
+                    }
+                }
+                None => {
+                    if existing.is_empty() {
+                        return Response::ok(ResponsePayload::Op(OpResult::Updated {
+                            id: id.clone(),
+                        }));
+                    }
+                }
+            }
+
+            existing
+        };
+
+        let new_parent = parent.clone();
+        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+            for existing_parent in existing_parents {
+                let key =
+                    DepKey::new(id.clone(), existing_parent, DepKind::Parent).map_err(|e| {
+                        OpError::ValidationFailed {
+                            field: "parent".into(),
+                            reason: e.reason,
+                        }
+                    })?;
+                let life = Lww::new(DepLife::Deleted, stamp.clone());
+                let edge = DepEdge::with_life(key, stamp.clone(), life);
+                state.insert_dep(edge);
+            }
+
+            if let Some(parent_id) = new_parent {
+                let key =
+                    DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
+                        OpError::ValidationFailed {
+                            field: "parent".into(),
+                            reason: e.reason,
+                        }
+                    })?;
+                state.insert_dep(DepEdge::new(key, stamp.clone()));
             }
 
             Ok(())
@@ -792,6 +959,18 @@ impl Daemon {
             Err(e) => Response::err(e),
         }
     }
+}
+
+fn parse_label_list(labels: Vec<String>) -> Result<Vec<Label>, OpError> {
+    let mut parsed = Vec::new();
+    for raw in labels {
+        let label = Label::parse(raw).map_err(|e| OpError::ValidationFailed {
+            field: "labels".into(),
+            reason: e.to_string(),
+        })?;
+        parsed.push(label);
+    }
+    Ok(parsed)
 }
 
 fn next_child_id(state: &crate::core::CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {

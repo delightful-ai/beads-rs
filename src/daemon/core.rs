@@ -837,6 +837,39 @@ impl Daemon {
                 self.apply_update(&repo, &id, patch, cas, git_tx)
             }
 
+            Request::AddLabels { repo, id, labels } => {
+                let id = match BeadId::parse(&id) {
+                    Ok(id) => id,
+                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                };
+                self.apply_add_labels(&repo, &id, labels, git_tx)
+            }
+
+            Request::RemoveLabels { repo, id, labels } => {
+                let id = match BeadId::parse(&id) {
+                    Ok(id) => id,
+                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                };
+                self.apply_remove_labels(&repo, &id, labels, git_tx)
+            }
+
+            Request::SetParent { repo, id, parent } => {
+                let id = match BeadId::parse(&id) {
+                    Ok(id) => id,
+                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                };
+                let parent = match parent {
+                    Some(raw) => match BeadId::parse(&raw) {
+                        Ok(parent) => Some(parent),
+                        Err(e) => {
+                            return Response::err(error_payload("invalid_id", &e.to_string()));
+                        }
+                    },
+                    None => None,
+                };
+                self.apply_set_parent(&repo, &id, parent, git_tx)
+            }
+
             Request::Close {
                 repo,
                 id,

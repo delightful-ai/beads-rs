@@ -9,11 +9,13 @@ use crate::daemon::ops::{BeadPatch, Patch};
 use crate::daemon::query::QueryResult;
 use crate::{Error, Result};
 
-pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
+pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let mut patch = BeadPatch::default();
     let close_reason = normalize_reason(args.reason);
     let status_closed = matches!(args.status.as_deref(), Some("closed"));
+    let add_labels = std::mem::take(&mut args.add_label);
+    let remove_labels = std::mem::take(&mut args.remove_label);
 
     if close_reason.is_some() && !status_closed {
         return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
@@ -76,21 +78,6 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
         }
     }
 
-    // Labels add/remove => fetch current labels, then set full list.
-    if !args.add_label.is_empty() || !args.remove_label.is_empty() {
-        let issue = fetch_issue(ctx, &id)?;
-        let mut labels = issue.labels;
-        for l in args.add_label {
-            if !labels.contains(&l) {
-                labels.push(l);
-            }
-        }
-        for l in args.remove_label {
-            labels.retain(|x| x != &l);
-        }
-        patch.labels = Patch::Set(labels);
-    }
-
     if !patch.is_empty() {
         patch.validate()?;
         let req = Request::Update {
@@ -102,47 +89,32 @@ pub(crate) fn handle(ctx: &Ctx, args: UpdateArgs) -> Result<()> {
         let _ = send(&req)?;
     }
 
-    // Parent relationship (child -> parent edge).
-    if let Some(new_parent) = parent_action {
-        let deps = send(&Request::Deps {
+    if !add_labels.is_empty() {
+        let req = Request::AddLabels {
             repo: ctx.repo.clone(),
             id: id.clone(),
-        })?;
-
-        let outgoing = match deps {
-            ResponsePayload::Query(QueryResult::Deps { outgoing, .. }) => outgoing,
-            _ => Vec::new(),
+            labels: add_labels,
         };
+        let _ = send(&req)?;
+    }
 
-        let existing_parents: Vec<String> = outgoing
-            .into_iter()
-            .filter(|e| e.kind == "parent")
-            .map(|e| e.to)
-            .collect();
+    if !remove_labels.is_empty() {
+        let req = Request::RemoveLabels {
+            repo: ctx.repo.clone(),
+            id: id.clone(),
+            labels: remove_labels,
+        };
+        let _ = send(&req)?;
+    }
 
-        if let Some(ref desired) = new_parent
-            && existing_parents.len() == 1
-            && existing_parents[0] == *desired
-        {
-            // No-op.
-        } else {
-            for parent in existing_parents {
-                let _ = send(&Request::RemoveDep {
-                    repo: ctx.repo.clone(),
-                    from: id.clone(),
-                    to: parent,
-                    kind: DepKind::Parent,
-                })?;
-            }
-            if let Some(parent) = new_parent {
-                let _ = send(&Request::AddDep {
-                    repo: ctx.repo.clone(),
-                    from: id.clone(),
-                    to: parent,
-                    kind: DepKind::Parent,
-                })?;
-            }
-        }
+    // Parent relationship (child -> parent edge).
+    if let Some(new_parent) = parent_action {
+        let req = Request::SetParent {
+            repo: ctx.repo.clone(),
+            id: id.clone(),
+            parent: new_parent,
+        };
+        let _ = send(&req)?;
     }
 
     // Add dependencies
