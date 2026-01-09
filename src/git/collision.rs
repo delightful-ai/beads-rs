@@ -185,8 +185,8 @@ fn resolve_single(
         // which can't happen since old_id != new_id)
         let new_key = DepKey::new(new_from, new_to, old_key.kind())?;
 
-        let new_edge = DepEdge::new(new_key, edge.created.clone());
-        state.insert_dep(new_edge);
+        let new_edge = DepEdge::with_life(edge.created.clone(), edge.life.clone());
+        state.insert_dep(new_key, new_edge);
     }
 
     Ok(())
@@ -329,7 +329,7 @@ mod tests {
 
         let dep_stamp = Stamp::new(WriteStamp::new(1500, 0), ActorId::new("alice").unwrap());
         let dep_key = DepKey::new(id.clone(), new_id.clone(), DepKind::Blocks).unwrap();
-        local.insert_dep(DepEdge::new(dep_key, dep_stamp));
+        local.insert_dep(dep_key, DepEdge::new(dep_stamp));
 
         let collision = Collision {
             id: id.clone(),

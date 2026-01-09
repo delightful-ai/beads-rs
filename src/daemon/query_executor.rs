@@ -62,12 +62,12 @@ impl Daemon {
                 repo_state
                     .state
                     .iter_deps()
-                    .filter(|(_, edge)| {
+                    .filter(|(key, edge)| {
                         edge.life.value == DepLife::Active
-                            && edge.key.kind() == DepKind::Parent
-                            && edge.key.to() == parent_id
+                            && key.kind() == DepKind::Parent
+                            && key.to() == parent_id
                     })
-                    .map(|(_, edge)| edge.key.from())
+                    .map(|(key, _)| key.from())
                     .collect()
             });
 
@@ -162,14 +162,14 @@ impl Daemon {
 
         // Collect IDs that are blocked by *blocking* deps (kind=blocks).
         let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
-        for (_, edge) in repo_state.state.iter_deps() {
+        for (key, edge) in repo_state.state.iter_deps() {
             // Only count active `blocks` edges where the target is not closed.
             if edge.life.value == DepLife::Active
-                && edge.key.kind() == crate::core::DepKind::Blocks
-                && let Some(to_bead) = repo_state.state.get_live(edge.key.to())
+                && key.kind() == crate::core::DepKind::Blocks
+                && let Some(to_bead) = repo_state.state.get_live(key.to())
                 && !to_bead.fields.workflow.value.is_closed()
             {
-                blocked.insert(edge.key.from());
+                blocked.insert(key.from());
             }
         }
 
@@ -238,11 +238,11 @@ impl Daemon {
                 continue;
             }
 
-            for (_, edge) in repo_state.state.iter_deps() {
-                if edge.key.from() == &current && edge.life.value == DepLife::Active {
-                    edges.push(DepEdge::from(edge));
-                    if !visited.contains(edge.key.to()) {
-                        queue.push_back(edge.key.to().clone());
+            for (key, edge) in repo_state.state.iter_deps() {
+                if key.from() == &current && edge.life.value == DepLife::Active {
+                    edges.push(DepEdge::from((key, edge)));
+                    if !visited.contains(key.to()) {
+                        queue.push_back(key.to().clone());
                     }
                 }
             }
@@ -273,16 +273,16 @@ impl Daemon {
         let mut incoming = Vec::new();
         let mut outgoing = Vec::new();
 
-        for (_, edge) in repo_state.state.iter_deps() {
+        for (key, edge) in repo_state.state.iter_deps() {
             if edge.life.value != DepLife::Active {
                 continue;
             }
 
-            if edge.key.from() == id {
-                outgoing.push(DepEdge::from(edge));
+            if key.from() == id {
+                outgoing.push(DepEdge::from((key, edge)));
             }
-            if edge.key.to() == id {
-                incoming.push(DepEdge::from(edge));
+            if key.to() == id {
+                incoming.push(DepEdge::from((key, edge)));
             }
         }
 
@@ -767,24 +767,24 @@ impl Daemon {
         let mut errors = Vec::new();
 
         // Check for orphan dependencies
-        for (_, edge) in repo_state.state.iter_deps() {
+        for (key, edge) in repo_state.state.iter_deps() {
             if edge.life.value != DepLife::Active {
                 continue;
             }
-            if repo_state.state.get_live(edge.key.from()).is_none() {
+            if repo_state.state.get_live(key.from()).is_none() {
                 errors.push(format!(
                     "orphan dep: {} depends on {} but {} doesn't exist",
-                    edge.key.from().as_str(),
-                    edge.key.to().as_str(),
-                    edge.key.from().as_str()
+                    key.from().as_str(),
+                    key.to().as_str(),
+                    key.from().as_str()
                 ));
             }
-            if repo_state.state.get_live(edge.key.to()).is_none() {
+            if repo_state.state.get_live(key.to()).is_none() {
                 errors.push(format!(
                     "orphan dep: {} depends on {} but {} doesn't exist",
-                    edge.key.from().as_str(),
-                    edge.key.to().as_str(),
-                    edge.key.to().as_str()
+                    key.from().as_str(),
+                    key.to().as_str(),
+                    key.to().as_str()
                 ));
             }
         }
@@ -804,9 +804,9 @@ impl Daemon {
                 if !visited.insert(current.clone()) {
                     continue;
                 }
-                for (_, edge) in repo_state.state.iter_deps() {
-                    if edge.key.from() == &current && edge.life.value == DepLife::Active {
-                        queue.push_back(edge.key.to().clone());
+                for (key, edge) in repo_state.state.iter_deps() {
+                    if key.from() == &current && edge.life.value == DepLife::Active {
+                        queue.push_back(key.to().clone());
                     }
                 }
             }
@@ -824,16 +824,16 @@ fn compute_blocked_by(
     let mut blocked: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
 
-    for (_, edge) in repo_state.state.iter_deps() {
+    for (key, edge) in repo_state.state.iter_deps() {
         if edge.life.value != DepLife::Active {
             continue;
         }
-        if edge.key.kind() != DepKind::Blocks {
+        if key.kind() != DepKind::Blocks {
             continue;
         }
 
         // Only count blockers that are currently open (not closed).
-        if let Some(to_bead) = repo_state.state.get_live(edge.key.to()) {
+        if let Some(to_bead) = repo_state.state.get_live(key.to()) {
             if to_bead.fields.workflow.value.is_closed() {
                 continue;
             }
@@ -842,9 +842,9 @@ fn compute_blocked_by(
         }
 
         blocked
-            .entry(edge.key.from().clone())
+            .entry(key.from().clone())
             .or_default()
-            .push(edge.key.to().clone());
+            .push(key.to().clone());
     }
 
     blocked
@@ -857,17 +857,17 @@ fn compute_epic_statuses(
     // Build epic -> children mapping from parent edges.
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
-    for (_, edge) in repo_state.state.iter_deps() {
+    for (key, edge) in repo_state.state.iter_deps() {
         if edge.life.value != DepLife::Active {
             continue;
         }
-        if edge.key.kind() != DepKind::Parent {
+        if key.kind() != DepKind::Parent {
             continue;
         }
         children
-            .entry(edge.key.to().clone())
+            .entry(key.to().clone())
             .or_default()
-            .push(edge.key.from().clone());
+            .push(key.from().clone());
     }
 
     let mut out = Vec::new();

@@ -1,7 +1,7 @@
 //! Layer 6: Dependency edges
 //!
 //! DepKey: identity tuple (from, to, kind)
-//! DepEdge: key + created + life (active/deleted via LWW)
+//! DepEdge: created + life (active/deleted via LWW)
 //!
 //! The `DepLife` enum with `Lww<DepLife>` makes delete-vs-restore
 //! pure LWW comparison - algebraically cleaner than `Option<Stamp>`.
@@ -155,24 +155,22 @@ pub enum DepLife {
 /// - Keep earlier `created` for stable provenance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DepEdge {
-    pub key: DepKey,
     pub created: Stamp,
     pub life: Lww<DepLife>,
 }
 
 impl DepEdge {
     /// Create a new active dependency.
-    pub fn new(key: DepKey, created: Stamp) -> Self {
+    pub fn new(created: Stamp) -> Self {
         Self {
-            key,
             created: created.clone(),
             life: Lww::new(DepLife::Active, created),
         }
     }
 
     /// Create a dependency with explicit life state.
-    pub fn with_life(key: DepKey, created: Stamp, life: Lww<DepLife>) -> Self {
-        Self { key, created, life }
+    pub fn with_life(created: Stamp, life: Lww<DepLife>) -> Self {
+        Self { created, life }
     }
 
     /// Check if edge is active (not deleted).
@@ -213,8 +211,6 @@ impl DepEdge {
     /// - Life uses pure LWW comparison (higher stamp wins)
     /// - Keep earlier created for stable provenance
     pub fn join(a: &Self, b: &Self) -> Self {
-        debug_assert_eq!(a.key, b.key, "join requires same key");
-
         // Keep earlier created for stable provenance
         let created = if a.created <= b.created {
             a.created.clone()
@@ -225,11 +221,7 @@ impl DepEdge {
         // Life is pure LWW
         let life = Lww::join(&a.life, &b.life);
 
-        Self {
-            key: a.key.clone(),
-            created,
-            life,
-        }
+        Self { created, life }
     }
 }
 
@@ -288,9 +280,8 @@ mod tests {
 
     #[test]
     fn new_edge_is_active() {
-        let key = make_key();
         let stamp = make_stamp(1000, "alice");
-        let edge = DepEdge::new(key, stamp);
+        let edge = DepEdge::new(stamp);
         assert!(edge.is_active());
         assert!(!edge.is_deleted());
     }
@@ -324,9 +315,8 @@ mod tests {
 
     #[test]
     fn delete_marks_deleted() {
-        let key = make_key();
         let stamp = make_stamp(1000, "alice");
-        let mut edge = DepEdge::new(key, stamp);
+        let mut edge = DepEdge::new(stamp);
 
         let delete_stamp = make_stamp(2000, "bob");
         edge.delete(delete_stamp.clone());
@@ -337,9 +327,8 @@ mod tests {
 
     #[test]
     fn restore_undeletes() {
-        let key = make_key();
         let stamp = make_stamp(1000, "alice");
-        let mut edge = DepEdge::new(key, stamp);
+        let mut edge = DepEdge::new(stamp);
 
         edge.delete(make_stamp(2000, "bob"));
         assert!(edge.is_deleted());
@@ -350,15 +339,14 @@ mod tests {
 
     #[test]
     fn join_lww_later_wins() {
-        let key = make_key();
         let stamp = make_stamp(1000, "alice");
 
         // Edge A: deleted at t=2000
-        let mut edge_a = DepEdge::new(key.clone(), stamp.clone());
+        let mut edge_a = DepEdge::new(stamp.clone());
         edge_a.delete(make_stamp(2000, "bob"));
 
         // Edge B: active at t=3000 (restored)
-        let mut edge_b = DepEdge::new(key.clone(), stamp.clone());
+        let mut edge_b = DepEdge::new(stamp.clone());
         edge_b.delete(make_stamp(2000, "bob"));
         edge_b.restore(make_stamp(3000, "charlie"));
 
@@ -369,10 +357,8 @@ mod tests {
 
     #[test]
     fn join_keeps_earlier_created() {
-        let key = make_key();
-
-        let edge_a = DepEdge::new(key.clone(), make_stamp(1000, "alice"));
-        let edge_b = DepEdge::new(key.clone(), make_stamp(2000, "bob"));
+        let edge_a = DepEdge::new(make_stamp(1000, "alice"));
+        let edge_b = DepEdge::new(make_stamp(2000, "bob"));
 
         let merged = DepEdge::join(&edge_a, &edge_b);
         assert_eq!(merged.created, make_stamp(1000, "alice"));

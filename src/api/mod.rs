@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    Bead, Claim, DepEdge as CoreDepEdge, Tombstone as CoreTombstone, WallClock, Workflow,
-    WriteStamp,
+    Bead, Claim, DepEdge as CoreDepEdge, DepKey as CoreDepKey, Tombstone as CoreTombstone,
+    WallClock, Workflow, WriteStamp,
 };
 
 // =============================================================================
@@ -197,12 +197,12 @@ pub struct DepEdge {
     pub deleted_by: Option<String>,
 }
 
-impl From<&CoreDepEdge> for DepEdge {
-    fn from(edge: &CoreDepEdge) -> Self {
+impl From<(&CoreDepKey, &CoreDepEdge)> for DepEdge {
+    fn from((key, edge): (&CoreDepKey, &CoreDepEdge)) -> Self {
         Self {
-            from: edge.key.from().as_str().to_string(),
-            to: edge.key.to().as_str().to_string(),
-            kind: edge.key.kind().as_str().to_string(),
+            from: key.from().as_str().to_string(),
+            to: key.to().as_str().to_string(),
+            kind: key.kind().as_str().to_string(),
             created_at: edge.created.at.clone(),
             created_by: edge.created.by.as_str().to_string(),
             deleted_at: edge.deleted_stamp().map(|s| s.at.clone()),

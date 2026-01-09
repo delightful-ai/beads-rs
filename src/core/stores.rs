@@ -28,8 +28,7 @@ impl DepStore {
     }
 
     /// Insert or merge - auto-joins if key exists.
-    pub fn upsert(&mut self, edge: DepEdge) {
-        let key = edge.key.clone();
+    pub fn upsert(&mut self, key: DepKey, edge: DepEdge) {
         self.by_key
             .entry(key)
             .and_modify(|existing| *existing = DepEdge::join(existing, &edge))
@@ -63,8 +62,8 @@ impl DepStore {
     /// Merge two dep stores.
     pub fn join(a: &Self, b: &Self) -> Self {
         let mut result = a.clone();
-        for edge in b.by_key.values() {
-            result.upsert(edge.clone());
+        for (key, edge) in &b.by_key {
+            result.upsert(key.clone(), edge.clone());
         }
         result
     }
@@ -148,14 +147,14 @@ mod tests {
         .unwrap();
 
         // Insert edge
-        let edge1 = DepEdge::new(key.clone(), make_stamp(1000, "alice"));
-        store.upsert(edge1);
+        let edge1 = DepEdge::new(make_stamp(1000, "alice"));
+        store.upsert(key.clone(), edge1);
         assert!(store.get(&key).unwrap().is_active());
 
         // Upsert with deletion
-        let mut edge2 = DepEdge::new(key.clone(), make_stamp(1000, "alice"));
+        let mut edge2 = DepEdge::new(make_stamp(1000, "alice"));
         edge2.delete(make_stamp(2000, "bob"));
-        store.upsert(edge2);
+        store.upsert(key.clone(), edge2);
 
         // Should be deleted now (merged)
         assert!(store.get(&key).unwrap().is_deleted());

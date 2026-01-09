@@ -44,7 +44,14 @@ mod wal_state {
     struct WalStateVec {
         live: Vec<Bead>,
         tombstones: Vec<Tombstone>,
-        deps: Vec<DepEdge>,
+        deps: Vec<WalDep>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct WalDep {
+        key: DepKey,
+        #[serde(flatten)]
+        edge: DepEdge,
     }
 
     #[derive(Deserialize)]
@@ -71,7 +78,13 @@ mod wal_state {
                 .iter_tombstones()
                 .map(|(_, tomb)| tomb.clone())
                 .collect(),
-            deps: state.iter_deps().map(|(_, dep)| dep.clone()).collect(),
+            deps: state
+                .iter_deps()
+                .map(|(key, dep)| WalDep {
+                    key: key.clone(),
+                    edge: dep.clone(),
+                })
+                .collect(),
         };
         snapshot.serialize(serializer)
     }
@@ -85,7 +98,11 @@ mod wal_state {
             WalStateRepr::Maps(snapshot) => (
                 snapshot.live.into_values().collect(),
                 snapshot.tombstones.into_values().collect(),
-                snapshot.deps.into_values().collect(),
+                snapshot
+                    .deps
+                    .into_iter()
+                    .map(|(key, edge)| WalDep { key, edge })
+                    .collect(),
             ),
         };
         let mut state = CanonicalState::new();
@@ -96,7 +113,7 @@ mod wal_state {
             state.insert_tombstone(tombstone);
         }
         for dep in deps {
-            state.insert_dep(dep);
+            state.insert_dep(dep.key, dep.edge);
         }
         Ok(state)
     }
@@ -451,7 +468,7 @@ mod tests {
             DepKind::Blocks,
         )
         .unwrap();
-        state.insert_dep(DepEdge::new(dep_key, stamp.clone()));
+        state.insert_dep(dep_key, DepEdge::new(stamp.clone()));
 
         let entry = WalEntry::new(state, None, 7, 42);
         wal.write(&remote, &entry).unwrap();

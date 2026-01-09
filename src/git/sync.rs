@@ -692,8 +692,8 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
     for tomb in tombstones {
         state.insert_tombstone(tomb);
     }
-    for dep in deps {
-        state.insert_dep(dep);
+    for (key, dep) in deps {
+        state.insert_dep(key, dep);
     }
 
     // Ensure dep indexes are built (insert_dep does this incrementally,

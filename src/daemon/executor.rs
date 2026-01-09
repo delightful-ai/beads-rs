@@ -227,7 +227,7 @@ impl Daemon {
                         reason: e.reason,
                     }
                 })?;
-                state.insert_dep(DepEdge::new(key, stamp.clone()));
+                state.insert_dep(key, DepEdge::new(stamp.clone()));
             }
 
             // Dependency edges.
@@ -237,7 +237,7 @@ impl Daemon {
                         field: "dependency".into(),
                         reason: e.reason,
                     })?;
-                state.insert_dep(DepEdge::new(key, stamp.clone()));
+                state.insert_dep(key, DepEdge::new(stamp.clone()));
             }
 
             Ok(id)
@@ -398,8 +398,8 @@ impl Daemon {
                 .state
                 .deps_from(id)
                 .into_iter()
-                .filter(|edge| edge.key.kind() == DepKind::Parent)
-                .map(|edge| edge.key.to().clone())
+                .filter(|(key, _)| key.kind() == DepKind::Parent)
+                .map(|(key, _)| key.to().clone())
                 .collect();
 
             match &parent {
@@ -445,8 +445,8 @@ impl Daemon {
                         }
                     })?;
                 let life = Lww::new(DepLife::Deleted, stamp.clone());
-                let edge = DepEdge::with_life(key, stamp.clone(), life);
-                state.insert_dep(edge);
+                let edge = DepEdge::with_life(stamp.clone(), life);
+                state.insert_dep(key, edge);
             }
 
             if let Some(parent_id) = new_parent {
@@ -457,7 +457,7 @@ impl Daemon {
                             reason: e.reason,
                         }
                     })?;
-                state.insert_dep(DepEdge::new(key, stamp.clone()));
+                state.insert_dep(key, DepEdge::new(stamp.clone()));
             }
 
             Ok(())
@@ -646,8 +646,8 @@ impl Daemon {
         }
 
         let result = self.apply_wal_mutation(&remote, |state, stamp| {
-            let edge = DepEdge::new(key, stamp);
-            state.insert_dep(edge);
+            let edge = DepEdge::new(stamp);
+            state.insert_dep(key, edge);
             Ok(())
         });
 
@@ -687,8 +687,8 @@ impl Daemon {
 
         let result = self.apply_wal_mutation(&remote, |state, stamp| {
             let life = Lww::new(DepLife::Deleted, stamp.clone());
-            let edge = DepEdge::with_life(key, stamp, life);
-            state.insert_dep(edge);
+            let edge = DepEdge::with_life(stamp, life);
+            state.insert_dep(key, edge);
             Ok(())
         });
 
@@ -1140,9 +1140,9 @@ fn would_create_cycle(
         visited.insert(current.clone());
 
         // Follow outgoing DAG-enforced deps only
-        for edge in state.deps_from(&current) {
-            if edge.key.kind().requires_dag() && !visited.contains(edge.key.to()) {
-                queue.push(edge.key.to().clone());
+        for (key, _) in state.deps_from(&current) {
+            if key.kind().requires_dag() && !visited.contains(key.to()) {
+                queue.push(key.to().clone());
             }
         }
     }

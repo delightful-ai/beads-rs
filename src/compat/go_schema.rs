@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::core::bead::Bead;
 use crate::core::composite::{Claim, Note, Workflow};
-use crate::core::dep::DepEdge;
+use crate::core::dep::{DepEdge, DepKey};
 use crate::core::domain::DepKind;
 use crate::core::state::CanonicalState;
 use crate::core::tombstone::Tombstone;
@@ -99,7 +99,7 @@ impl GoIssue {
     /// Convert a Rust Bead to a Go-compatible issue.
     ///
     /// `is_blocked` should be true if the bead has unfinished blocking dependencies.
-    pub fn from_bead(bead: &Bead, deps: &[&DepEdge], is_blocked: bool) -> Self {
+    pub fn from_bead(bead: &Bead, deps: &[(DepKey, &DepEdge)], is_blocked: bool) -> Self {
         let status = derive_status(&bead.fields.workflow.value, is_blocked);
 
         let (closed_at, close_reason) = match bead.fields.workflow.value.closure() {
@@ -125,8 +125,8 @@ impl GoIssue {
 
         let dependencies: Vec<GoDependency> = deps
             .iter()
-            .filter(|e| e.is_active())
-            .map(|e| GoDependency::from_edge(e, bead.core.id.as_str()))
+            .filter(|(_, edge)| edge.is_active())
+            .map(|(key, edge)| GoDependency::from_edge(key, edge, bead.core.id.as_str()))
             .collect();
 
         let comments: Vec<GoComment> = bead
@@ -206,11 +206,11 @@ impl GoIssue {
 }
 
 impl GoDependency {
-    fn from_edge(edge: &DepEdge, issue_id: &str) -> Self {
+    fn from_edge(key: &DepKey, edge: &DepEdge, issue_id: &str) -> Self {
         GoDependency {
             issue_id: issue_id.to_string(),
-            depends_on_id: edge.key.to().as_str().to_string(),
-            dep_type: dep_kind_to_go_type(edge.key.kind()),
+            depends_on_id: key.to().as_str().to_string(),
+            dep_type: dep_kind_to_go_type(key.kind()),
             created_at: stamp_to_rfc3339(&edge.created),
             created_by: edge.created.by.as_str().to_string(),
         }
@@ -275,18 +275,18 @@ fn write_stamp_to_rfc3339(ws: &crate::core::time::WriteStamp) -> String {
 /// Check if a bead is blocked by unfinished dependencies.
 pub fn is_bead_blocked(bead_id: &crate::core::identity::BeadId, state: &CanonicalState) -> bool {
     // Get all dependencies where this bead depends on something
-    for edge in state.deps_from(bead_id) {
+    for (key, edge) in state.deps_from(bead_id) {
         if !edge.is_active() {
             continue;
         }
 
         // Only Blocks kind actually blocks
-        if edge.key.kind() != DepKind::Blocks {
+        if key.kind() != DepKind::Blocks {
             continue;
         }
 
         // Check if the target bead is not closed
-        if let Some(target) = state.get(edge.key.to())
+        if let Some(target) = state.get(key.to())
             && !target.fields.workflow.value.is_closed()
         {
             return true;

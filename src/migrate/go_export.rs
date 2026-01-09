@@ -106,7 +106,7 @@ pub fn import_go_export(
     let reader = BufReader::new(file);
 
     let mut state = CanonicalState::new();
-    let mut deps_to_insert: Vec<DepEdge> = Vec::new();
+    let mut deps_to_insert: Vec<(DepKey, DepEdge)> = Vec::new();
     let mut report = GoImportReport::default();
 
     let mut chosen_slug: Option<String> = root_slug
@@ -174,8 +174,8 @@ pub fn import_go_export(
             // Dependencies from tombstones are still imported.
             if let Some(deps) = issue.dependencies {
                 for dep in deps {
-                    if let Ok(edge) = dep_to_edge(&dep, actor, slug) {
-                        deps_to_insert.push(edge);
+                    if let Ok((key, edge)) = dep_to_edge(&dep, actor, slug) {
+                        deps_to_insert.push((key, edge));
                     } else {
                         report.warnings.push(format!(
                             "line {}: skipped invalid dep {:?}",
@@ -300,7 +300,7 @@ pub fn import_go_export(
         if let Some(deps) = issue.dependencies {
             for dep in deps {
                 match dep_to_edge(&dep, actor, slug) {
-                    Ok(edge) => deps_to_insert.push(edge),
+                    Ok((key, edge)) => deps_to_insert.push((key, edge)),
                     Err(e) => report.warnings.push(format!(
                         "line {}: invalid dep {} -> {} ({}) : {}",
                         line_no + 1,
@@ -314,8 +314,8 @@ pub fn import_go_export(
         }
     }
 
-    for edge in deps_to_insert {
-        state.insert_dep(edge);
+    for (key, edge) in deps_to_insert {
+        state.insert_dep(key, edge);
         report.deps += 1;
     }
 
@@ -329,7 +329,7 @@ pub fn import_go_export(
     Ok((state, report))
 }
 
-fn dep_to_edge(dep: &GoDependency, actor: &ActorId, root_slug: &str) -> Result<DepEdge> {
+fn dep_to_edge(dep: &GoDependency, actor: &ActorId, root_slug: &str) -> Result<(DepKey, DepEdge)> {
     let from = BeadId::parse(&dep.issue_id)?.with_slug(root_slug)?;
     let to = BeadId::parse(&dep.depends_on_id)?.with_slug(root_slug)?;
     let kind = parse_dep_kind(&dep.dep_type)?;
@@ -342,7 +342,7 @@ fn dep_to_edge(dep: &GoDependency, actor: &ActorId, root_slug: &str) -> Result<D
     let created_by = ActorId::new(created_by_raw)?;
     let created_stamp = Stamp::new(WriteStamp::new(created_ms, 0), created_by);
     let key = DepKey::new(from, to, kind).map_err(crate::core::CoreError::from)?;
-    Ok(DepEdge::new(key, created_stamp))
+    Ok((key, DepEdge::new(created_stamp)))
 }
 
 fn parse_rfc3339_ms(raw: &str) -> Result<u64> {

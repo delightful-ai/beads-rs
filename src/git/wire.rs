@@ -192,11 +192,11 @@ pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
     let mut deps: Vec<_> = state.iter_deps().collect();
     deps.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-    for (_, edge) in deps {
+    for (key, edge) in deps {
         let wire = WireDep {
-            from: edge.key.from().as_str().to_string(),
-            to: edge.key.to().as_str().to_string(),
-            kind: dep_kind_to_str(edge.key.kind()),
+            from: key.from().as_str().to_string(),
+            to: key.to().as_str().to_string(),
+            kind: dep_kind_to_str(key.kind()),
             created_at: stamp_to_wire(&edge.created.at),
             created_by: edge.created.by.as_str().to_string(),
             deleted_at: edge.deleted_stamp().map(|s| stamp_to_wire(&s.at)),
@@ -295,7 +295,7 @@ pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
 }
 
 /// Parse deps.jsonl bytes.
-pub fn parse_deps(bytes: &[u8]) -> Result<Vec<DepEdge>, WireError> {
+pub fn parse_deps(bytes: &[u8]) -> Result<Vec<(DepKey, DepEdge)>, WireError> {
     let content = String::from_utf8(bytes.to_vec())?;
     let mut deps = Vec::new();
 
@@ -322,11 +322,11 @@ pub fn parse_deps(bytes: &[u8]) -> Result<Vec<DepEdge>, WireError> {
             _ => None,
         };
 
-        let mut edge = DepEdge::new(key, created);
+        let mut edge = DepEdge::new(created);
         if let Some(del) = deleted {
             edge.delete(del);
         }
-        deps.push(edge);
+        deps.push((key, edge));
     }
 
     Ok(deps)
@@ -644,7 +644,7 @@ mod tests {
             .prop_map(|(id, stamp)| Tombstone::new(bead_id(&id), stamp, None))
     }
 
-    fn dep_strategy() -> impl Strategy<Value = DepEdge> {
+    fn dep_strategy() -> impl Strategy<Value = (DepKey, DepEdge)> {
         let kind = prop_oneof![
             Just(DepKind::Blocks),
             Just(DepKind::Parent),
@@ -664,11 +664,11 @@ mod tests {
             .prop_map(|(from, to, kind, created, deleted)| {
                 let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
                     .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
-                let mut edge = DepEdge::new(key, created.clone());
+                let mut edge = DepEdge::new(created.clone());
                 if let Some(deleted) = deleted {
                     edge.delete(deleted);
                 }
-                edge
+                (key, edge)
             })
     }
 
@@ -725,14 +725,14 @@ mod tests {
         #[test]
         fn roundtrip_deps(deps in prop::collection::vec(dep_strategy(), 0..12)) {
             let mut state = CanonicalState::new();
-            for dep in deps {
-                state.insert_dep(dep);
+            for (key, dep) in deps {
+                state.insert_dep(key, dep);
             }
             let bytes = serialize_deps(&state).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
             let parsed = parse_deps(&bytes).unwrap_or_else(|e| panic!("parse_deps failed: {e}"));
             let mut rebuilt = CanonicalState::new();
-            for dep in parsed {
-                rebuilt.insert_dep(dep);
+            for (key, dep) in parsed {
+                rebuilt.insert_dep(key, dep);
             }
             let bytes2 = serialize_deps(&rebuilt).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
             prop_assert_eq!(bytes, bytes2);
