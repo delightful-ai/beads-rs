@@ -2,7 +2,8 @@ use std::io::{BufRead, Write};
 
 use super::super::render;
 use super::super::{
-    CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_ok, send,
+    CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_ok,
+    resolve_description, send,
 };
 use crate::core::BeadType;
 use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
@@ -113,28 +114,6 @@ fn resolve_title(positional: Option<String>, flag: Option<String>) -> Result<Str
             field: "title".into(),
             reason: "title required (or use --file to create from markdown)".into(),
         })),
-    }
-}
-
-fn resolve_description(
-    description: Option<String>,
-    body: Option<String>,
-) -> Result<Option<String>> {
-    match (description, body) {
-        (Some(d), Some(b)) => {
-            if d != b {
-                return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-                    field: "description".into(),
-                    reason: format!(
-                        "cannot specify both --description and --body with different values (--description={d:?}, --body={b:?})"
-                    ),
-                }));
-            }
-            Ok(Some(d))
-        }
-        (Some(d), None) => Ok(Some(d)),
-        (None, Some(b)) => Ok(Some(b)),
-        (None, None) => Ok(None),
     }
 }
 

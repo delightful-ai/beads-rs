@@ -1,7 +1,7 @@
 use super::super::render;
 use super::super::{
     Ctx, UpdateArgs, current_actor_string, fetch_issue, normalize_bead_id, normalize_bead_id_for,
-    normalize_dep_specs, print_ok, send,
+    normalize_dep_specs, print_ok, resolve_description, send,
 };
 use crate::core::DepKind;
 use crate::daemon::ipc::{Request, ResponsePayload};
@@ -189,28 +189,6 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         println!("{}", render::render_updated(&issue.id));
     }
     Ok(())
-}
-
-fn resolve_description(
-    description: Option<String>,
-    body: Option<String>,
-) -> Result<Option<String>> {
-    match (description, body) {
-        (Some(d), Some(b)) => {
-            if d != b {
-                return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-                    field: "description".into(),
-                    reason: format!(
-                        "cannot specify both --description and --body with different values (--description={d:?}, --body={b:?})"
-                    ),
-                }));
-            }
-            Ok(Some(d))
-        }
-        (Some(d), None) => Ok(Some(d)),
-        (None, Some(b)) => Ok(Some(b)),
-        (None, None) => Ok(None),
-    }
 }
 
 fn normalize_reason(reason: Option<String>) -> Option<String> {

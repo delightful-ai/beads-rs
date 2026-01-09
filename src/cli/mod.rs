@@ -929,6 +929,28 @@ pub(super) fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<String>> {
     ids.into_iter().map(|id| normalize_bead_id(&id)).collect()
 }
 
+pub(super) fn resolve_description(
+    description: Option<String>,
+    body: Option<String>,
+) -> Result<Option<String>> {
+    match (description, body) {
+        (Some(d), Some(b)) => {
+            if d != b {
+                return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
+                    field: "description".into(),
+                    reason: format!(
+                        "cannot specify both --description and --body with different values (--description={d:?}, --body={b:?})"
+                    ),
+                }));
+            }
+            Ok(Some(d))
+        }
+        (Some(d), None) => Ok(Some(d)),
+        (None, Some(b)) => Ok(Some(b)),
+        (None, None) => Ok(None),
+    }
+}
+
 pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
     let parsed = crate::core::DepSpec::parse_list(&specs).map_err(|e| {
         Error::Op(crate::daemon::OpError::ValidationFailed {
