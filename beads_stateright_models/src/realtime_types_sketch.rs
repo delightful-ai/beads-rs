@@ -83,7 +83,6 @@ use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
-use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -318,7 +317,7 @@ pub struct NamespaceId(String);
 
 #[derive(Error, Debug)]
 pub enum NamespaceIdError {
-    #[error("namespace must match [a-z][a-z0-9_]{0,31}, got: {0}")]
+    #[error("namespace must match [a-z][a-z0-9_]{{0,31}}, got: {0}")]
     Invalid(String),
 }
 
@@ -469,8 +468,11 @@ pub mod testing_caps {
 // 6. Watermarks: applied vs durable (Plan §0.12)
 // =================================================================================================
 
-pub enum Applied {}
-pub enum Durable {}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Applied;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Durable;
 
 #[derive(Error, Debug)]
 pub enum WatermarkError {
@@ -1254,7 +1256,7 @@ impl OriginStreamState {
 // To keep this model-checkable, the session `step()` emits **effects**.
 // A real runtime executes the effects and feeds results back as messages.
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SessionId(pub u64);
 
 #[derive(Clone, Debug)]
@@ -1496,8 +1498,8 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
         return StepResult { next, effects };
     }
 
-    // Helper for hard close.
-    let mut hard_close = |code: &str| {
+    // Helper for hard close (does not capture `next` or `effects` to avoid borrow conflicts).
+    let hard_close = |next: &mut SessionCore, effects: &mut Vec<SessionEffect>, code: &str| {
         next.phase = SessionPhaseCore::Closed { code: code.to_string() };
         effects.push(SessionEffect::Network(ToNetwork::Close { code: code.to_string() }));
     };
@@ -1509,18 +1511,18 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
         (SessionPhaseCore::AwaitHello, ReplMsgV1::Hello(hello)) => {
             // Store identity check (Plan §9.3, §9.10)
             if hello.store_id != next.store.store_id || hello.store_epoch != next.store.store_epoch {
-                hard_close("wrong_store");
+                hard_close(&mut next, &mut effects, "wrong_store");
                 return StepResult { next, effects };
             }
             if hello.sender_replica_id == next.local_replica_id {
-                hard_close("replica_id_collision");
+                hard_close(&mut next, &mut effects, "replica_id_collision");
                 return StepResult { next, effects };
             }
 
             let negotiated = match negotiate_version(&next.protocol, hello.protocol_version, hello.min_protocol_version) {
                 Ok(v) => v,
                 Err(_) => {
-                    hard_close("version_incompatible");
+                    hard_close(&mut next, &mut effects, "version_incompatible");
                     return StepResult { next, effects };
                 }
             };
@@ -1540,6 +1542,9 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
                 receiver_replica_id: next.local_replica_id,
                 accepted_namespaces: accepted.iter().cloned().collect(),
                 receiver_seen_durable: Watermarks::<Durable>::default(),
+                receiver_seen_durable_heads: None,
+                receiver_seen_applied: None,
+                receiver_seen_applied_heads: None,
                 max_frame_bytes: max_frame_bytes as u32,
             };
 
@@ -1568,19 +1573,19 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
         }
 
         (SessionPhaseCore::New, ReplMsgV1::Error { code }) => {
-            hard_close(&format!("peer_error:{code}"));
+            hard_close(&mut next, &mut effects, &format!("peer_error:{code}"));
         }
 
         // Outbound: AwaitWelcome -> verify -> Established
         (SessionPhaseCore::AwaitWelcome { .. }, ReplMsgV1::Welcome(welcome)) => {
             if welcome.store_id != next.store.store_id || welcome.store_epoch != next.store.store_epoch {
-                hard_close("wrong_store");
+                hard_close(&mut next, &mut effects, "wrong_store");
                 return StepResult { next, effects };
             }
             if welcome.receiver_replica_id == next.local_replica_id {
                 // This is not actually a collision; it is the peer telling us our id.
                 // Still, if the protocol is confused here, closing is safer.
-                hard_close("welcome_identity_confused");
+                hard_close(&mut next, &mut effects, "welcome_identity_confused");
                 return StepResult { next, effects };
             }
 
@@ -1609,7 +1614,7 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
         | SessionPhaseCore::Live { negotiated }, ReplMsgV1::Events(frames)) => {
             // Batch bounds and negotiated frame limit (Plan §0.19, §9.8)
             if let Err(e) = validate_events_batch(&frames, &next.limits, negotiated.max_frame_bytes) {
-                hard_close(&format!("batch_invalid:{e}"));
+                hard_close(&mut next, &mut effects, &format!("batch_invalid:{e}"));
                 return StepResult { next, effects };
             }
 
@@ -1620,7 +1625,7 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
             for frame in frames {
                 // Namespace gating: if not accepted, reject.
                 if !negotiated.accepted_namespaces.contains(&frame.eid.namespace) {
-                    hard_close("namespace_not_accepted");
+                    hard_close(&mut next, &mut effects, "namespace_not_accepted");
                     return StepResult { next, effects };
                 }
 
@@ -1646,7 +1651,7 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
                 ) {
                     Ok(v) => v,
                     Err(e) => {
-                        hard_close(&format!("event_rejected:{e}"));
+                        hard_close(&mut next, &mut effects, &format!("event_rejected:{e}"));
                         return StepResult { next, effects };
                     }
                 };
@@ -1671,7 +1676,7 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
                         }));
                     }
                     IngestDecision::Reject { code } => {
-                        hard_close(&format!("gap_reject:{code}"));
+                        hard_close(&mut next, &mut effects, &format!("gap_reject:{code}"));
                         return StepResult { next, effects };
                     }
                 }
@@ -1694,15 +1699,15 @@ pub fn session_step(core: &SessionCore, deps: &StepDeps<'_>, msg: ReplMsgV1) -> 
         (SessionPhaseCore::Established { .. }
         | SessionPhaseCore::Syncing { .. }
         | SessionPhaseCore::Live { .. }, ReplMsgV1::Error { code }) => {
-            hard_close(&format!("peer_error:{code}"));
+            hard_close(&mut next, &mut effects, &format!("peer_error:{code}"));
         }
 
         // Any message in the wrong phase: close hard.
         (_, ReplMsgV1::Welcome(_)) if matches!(next.phase, SessionPhaseCore::AwaitHello | SessionPhaseCore::New) => {
-            hard_close("unexpected_welcome");
+            hard_close(&mut next, &mut effects, "unexpected_welcome");
         }
         (_, ReplMsgV1::Hello(_)) if matches!(next.phase, SessionPhaseCore::AwaitWelcome { .. }) => {
-            hard_close("unexpected_hello");
+            hard_close(&mut next, &mut effects, "unexpected_hello");
         }
 
         // Default: ignore or close based on policy.
