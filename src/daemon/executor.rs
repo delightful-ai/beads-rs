@@ -17,8 +17,8 @@ use super::ipc::{Response, ResponsePayload};
 use super::ops::{BeadPatch, MapLiveError, OpError, OpResult};
 use crate::core::{
     Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge, DepKey,
-    DepKind, DepLife, DepSpec, Label, Labels, Lww, Note, NoteId, Priority, Tombstone, WallClock,
-    Workflow,
+    DepKind, DepLife, DepSpec, Label, Labels, Lww, Note, NoteId, NoteLog, Priority, Tombstone,
+    WallClock, Workflow,
 };
 
 impl Daemon {
@@ -728,7 +728,7 @@ impl Daemon {
         let actor = self.actor().clone();
         let result = self.apply_wal_mutation(&remote, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
-            let note_id = NoteId::generate();
+            let note_id = generate_unique_note_id(&bead.notes, || NoteId::generate());
             let note = Note::new(note_id.clone(), content, actor, stamp.at);
             bead.notes.insert(note);
             Ok(note_id)
@@ -1150,11 +1150,23 @@ fn would_create_cycle(
     false
 }
 
+fn generate_unique_note_id<F>(notes: &NoteLog, mut next_id: F) -> NoteId
+where
+    F: FnMut() -> NoteId,
+{
+    let mut note_id = next_id();
+    while notes.contains(&note_id) {
+        note_id = next_id();
+    }
+    note_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadType, Claim, Lww, Priority, Stamp, Workflow, WriteStamp,
+        ActorId, BeadCore, BeadFields, BeadType, Claim, Lww, Note, NoteLog, Priority, Stamp,
+        Workflow, WriteStamp,
     };
 
     fn make_bead(id: &str, wall_ms: u64, actor: &ActorId) -> Bead {
@@ -1222,5 +1234,26 @@ mod tests {
         let id = generate_unique_id(&state, Some("myrepo"), "title", "", &actor, &stamp, &remote)
             .unwrap();
         assert!(id.as_str().starts_with("myrepo-"));
+    }
+
+    #[test]
+    fn generate_unique_note_id_retries_on_collision() {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = WriteStamp::new(1000, 0);
+        let note_id = NoteId::new("dup").unwrap();
+        let note = Note::new(note_id.clone(), "hi".to_string(), actor, stamp);
+
+        let mut notes = NoteLog::new();
+        notes.insert(note);
+
+        let ids = vec!["dup", "dup", "uniq"];
+        let mut idx = 0usize;
+        let generated = generate_unique_note_id(&notes, || {
+            let id = ids[idx];
+            idx += 1;
+            NoteId::new(id).unwrap()
+        });
+
+        assert_eq!(generated.as_str(), "uniq");
     }
 }
