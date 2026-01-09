@@ -1,16 +1,11 @@
 use super::super::render;
-use super::super::{Ctx, ListArgs, SearchArgs, parse_sort, print_ok, send};
-use crate::core::{ActorId, BeadId};
+use super::super::{Ctx, ListArgs, SearchArgs, apply_common_filters, parse_sort, print_ok, send};
+use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::{Filters, QueryResult};
 use crate::{Error, Result};
 
 pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
-    let labels = if args.labels.is_empty() {
-        None
-    } else {
-        Some(args.labels)
-    };
     let search = if args.query.is_empty() {
         None
     } else {
@@ -27,17 +22,18 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
                 reason: e.to_string(),
             })
         })?;
-    let mut filters = Filters {
-        status: args.status,
-        priority: args.priority,
-        bead_type: args.bead_type,
-        assignee: args.assignee.map(ActorId::new).transpose()?,
-        labels,
-        limit: args.limit,
-        search,
-        parent,
-        ..Default::default()
-    };
+    let mut filters = Filters::default();
+    apply_common_filters(
+        &mut filters,
+        args.status.clone(),
+        args.priority,
+        args.bead_type,
+        args.assignee.clone(),
+        args.labels.clone(),
+    )?;
+    filters.limit = args.limit;
+    filters.search = search;
+    filters.parent = parent;
     if let Some(sort) = args.sort {
         let (field, ascending) = parse_sort(&sort).map_err(|msg| {
             Error::Op(crate::daemon::OpError::ValidationFailed {

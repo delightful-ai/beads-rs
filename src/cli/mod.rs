@@ -951,6 +951,22 @@ pub(super) fn resolve_description(
     }
 }
 
+pub(super) fn apply_common_filters(
+    filters: &mut crate::daemon::query::Filters,
+    status: Option<String>,
+    priority: Option<Priority>,
+    bead_type: Option<BeadType>,
+    assignee: Option<String>,
+    labels: Vec<String>,
+) -> Result<()> {
+    filters.status = status;
+    filters.priority = priority;
+    filters.bead_type = bead_type;
+    filters.assignee = assignee.map(crate::core::ActorId::new).transpose()?;
+    filters.labels = if labels.is_empty() { None } else { Some(labels) };
+    Ok(())
+}
+
 pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
     let parsed = crate::core::DepSpec::parse_list(&specs).map_err(|e| {
         Error::Op(crate::daemon::OpError::ValidationFailed {

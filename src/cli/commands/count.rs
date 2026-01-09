@@ -1,26 +1,24 @@
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
 
-use super::super::{CountArgs, Ctx, print_ok, send};
-use crate::core::{ActorId, BeadId};
+use super::super::{CountArgs, Ctx, apply_common_filters, print_ok, send};
+use crate::core::BeadId;
 use crate::daemon::ipc::Request;
 use crate::daemon::query::Filters;
 use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, args: CountArgs) -> Result<()> {
-    let mut filters = Filters {
-        status: args.status.clone(),
-        priority: args.priority,
-        priority_min: args.priority_min,
-        priority_max: args.priority_max,
-        bead_type: args.bead_type,
-        assignee: args.assignee.as_deref().map(ActorId::new).transpose()?,
-        ..Default::default()
-    };
-
-    if !args.labels.is_empty() {
-        filters.labels = Some(args.labels.clone());
-    }
+    let mut filters = Filters::default();
+    apply_common_filters(
+        &mut filters,
+        args.status.clone(),
+        args.priority,
+        args.bead_type,
+        args.assignee.clone(),
+        args.labels.clone(),
+    )?;
+    filters.priority_min = args.priority_min;
+    filters.priority_max = args.priority_max;
     if !args.labels_any.is_empty() {
         filters.labels_any = Some(args.labels_any.clone());
     }
