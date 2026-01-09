@@ -122,10 +122,24 @@ Keep it simple.
 
 Lock metadata + stale handling (normative):
 - The lock file MUST contain (at least): store_id, replica_id, pid, started_at_ms, daemon_version.
+- The lock file SHOULD also include: last_heartbeat_ms.
+  The daemon SHOULD update last_heartbeat_ms periodically while holding the lock
+  (recommended: every 10s). Failure to update MUST NOT affect correctness; heartbeat
+  is advisory for staleness detection.
 - On lock acquisition failure:
   - If the lock is held, fail fast with a clear error pointing to lock metadata.
   - If the lock appears stale (pid does not exist), provide a documented manual
     recovery procedure (do not auto-delete by default).
+
+Recovery ergonomics (recommended):
+- Provide a CLI helper `bd store unlock --store-id <id>` that:
+  - reads lock metadata and displays it,
+  - checks if pid exists on the local system,
+  - if pid does NOT exist: removes the lock file (safe case),
+  - if pid exists but is a different process (e.g., pid reuse): removes the lock file,
+  - if pid exists and appears to be a daemon process: requires `--force` flag,
+  - logs the unlock action for traceability.
+- This reduces unsafe manual `rm` of lock files while still allowing recovery.
 
 Rationale:
 - Today, durability is "atomic rename + fsync" into a single snapshot WAL file.
@@ -278,6 +292,23 @@ Hashing rule (clarified, normative):
 - sha256 MUST be computed over canonical_preimage_bytes.
 - WAL storage and replication payloads MUST use canonical_envelope_bytes.
 
+Canonical-acceptance rule (normative):
+- Any EventEnvelope bytes accepted from disk (WAL replay) or network (replication)
+  MUST already be in canonical CBOR form (RFC 8949 canonical CBOR), not merely
+  "definite-length".
+- "Canonical" here includes (at minimum):
+  - definite-length maps/arrays/strings,
+  - keys sorted by canonical CBOR ordering,
+  - shortest-form integer encodings (no non-minimal additional bytes),
+  - no floats,
+  - no duplicate keys.
+- Receivers MUST validate canonicalness before persisting remote events.
+  The reference implementation strategy is:
+  1) decode losslessly (preserving unknown keys/values),
+  2) re-encode via the canonical encoder to canonical_envelope_bytes,
+  3) byte-compare with received bytes.
+  If different: reject with corruption/protocol error.
+
 Rationale:
 - The minute you ship events between replicas, the hash is a correctness primitive.
   If encoding differs across platforms or versions, you have a fork in reality.
@@ -319,6 +350,11 @@ Encoding rule (normative):
 - canonical_preimage_bytes and canonical_envelope_bytes MUST include unknown entries
   exactly as received (byte-for-byte) and MUST sort all keys (known + unknown)
   by canonical CBOR key ordering.
+
+Canonical-bytes precondition (normative):
+- Because unknown key/value bytes are preserved byte-for-byte, decoders MUST reject
+  any unknown key/value that is not already canonical CBOR. Otherwise older nodes
+  cannot reliably reconstruct canonical_preimage_bytes for hash verification.
 
 ### 0.7 Delta schema choice
 
@@ -545,6 +581,13 @@ What must be true to proceed safely:
   and ensure checkpoint import advances durable watermarks accordingly.
 - prev_sha256 continuity MUST be validated against the durable chain head (not applied).
 
+Head sha tracking rule (normative):
+- Whenever a watermark advances, StoreRuntime MUST also track the corresponding head sha
+  (sha at that seq) for that (namespace, origin). This is required for:
+  - prev_sha256 continuity checks for seq+1,
+  - early divergence detection in replication handshakes/ACKs,
+  - correctness after WAL pruning.
+
 ### 0.12.1 Hash-chain continuity across pruning and checkpoint baselines (normative)
 
 Problem:
@@ -624,6 +667,14 @@ Modules impacted:
 What must be true to proceed safely:
 - Decide how receipts appear on failure paths (timeouts). Spec suggests a retryable
   error including receipt. This needs a clear ErrorPayload extension strategy.
+
+Error payload standardization (normative):
+- All error codes and payloads MUST conform to REALTIME_ERRORS.md.
+- ErrorPayload shape: `{ code: string, message: string, retryable: bool, retry_after_ms?: u64, details?: object, receipt?: DurabilityReceipt }`
+- IPC error responses MUST use this payload shape (JSON).
+- Replication ERROR frames MUST use the same payload shape (CBOR).
+- Error codes are stable once added (never removed, never renamed); new codes may be added.
+- Clients MUST handle unknown codes gracefully (treat as non-retryable unless `retryable=true`).
 
 ### 0.15 Git checkpoint lane redesign
 
@@ -756,6 +807,17 @@ CBOR decoding limits (normative):
 - MAX_CBOR_TEXT_STRING_LEN default 16 MiB (same bound as bytes strings).
 - Reject payloads exceeding these limits before fully decoding.
 
+Clock/HLC safety (normative defaults):
+- HLC_MAX_FORWARD_DRIFT_MS default 600_000 (10 minutes).
+- This check applies ONLY within a continuous daemon session, not across restarts.
+- On startup: initialize last_physical_ms = max(persisted_last_physical_ms, system_time_ms).
+  This anchors the HLC to "now" if the daemon was offline for any duration.
+- On mint (after startup): if system_time_ms > last_physical_ms + HLC_MAX_FORWARD_DRIFT_MS,
+  clamp physical_ms to last_physical_ms + HLC_MAX_FORWARD_DRIFT_MS, increment logical,
+  and emit a warning + metric.
+- Rationale: protects against VM resume or NTP step mid-session; does not penalize
+  normal "came back after vacation" restarts.
+
 Definite-length rule (normative for hashed structures):
 - EventEnvelope and EventFrameV1 decoding MUST reject indefinite-length maps/arrays/strings.
 
@@ -764,6 +826,11 @@ Internal backpressure defaults (normative):
 - MAX_REPL_INGEST_QUEUE_BYTES default 32 MiB per session (bounded channel).
 - MAX_REPL_INGEST_QUEUE_EVENTS default 50,000 per session.
 - MAX_CHECKPOINT_JOB_QUEUE default 8 per store (coalesce by group when full).
+
+Hot-path streaming cache (recommended defaults):
+- EVENT_HOT_CACHE_MAX_BYTES default 64 MiB per store (0 disables).
+- EVENT_HOT_CACHE_MAX_EVENTS default 200,000 per store (0 disables).
+- MAX_BROADCAST_SUBSCRIBERS default 256 (reject additional subscribers).
 
 Overload shedding (new, normative):
 - Add AdmissionController that enforces priority:
@@ -813,6 +880,7 @@ Update `src/core/mod.rs` (and `src/lib.rs` if needed) to re-export:
 - durability
 - apply
 - store_state (if split out)
+- error (ErrorCode + ErrorPayload; see REALTIME_ERRORS.md)
 
 ---
 
@@ -834,7 +902,8 @@ Add newtypes and identifiers in `src/core/identity.rs`:
 Add store metadata struct for on-disk identity, prefer `src/core/store_meta.rs`:
 - `StoreMeta { store_id, store_epoch, replica_id, store_format_version,
                wal_format_version, checkpoint_format_version,
-               replication_protocol_version, created_at_ms }`
+               replication_protocol_version, index_schema_version, created_at_ms }`
+- `index_schema_version`: wal.sqlite schema version for in-place migrations
 
 Additional spec-derived identity rules:
 - `store_id` is generated once at store init and persisted in meta.json.
@@ -930,6 +999,13 @@ Rationale:
 Add `src/core/watermark.rs`:
 - `WatermarkMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, u64>>`
   (deterministic ordering)
+- `WatermarkHeadMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, [u8; 32]>>`
+  where each entry is the sha256 of the event at the corresponding watermark seq.
+
+Head sha invariant (normative):
+- If `watermarks_*[ns][origin] == 0`, then the head sha MAY be absent for that origin.
+- If `watermarks_*[ns][origin] > 0`, then the head sha MUST be known (from WAL, index,
+  or checkpoint included_heads) before accepting (ns,origin,seq+1) events.
 
 Helpers:
 - `get(ns, origin) -> u64` (default 0)
@@ -941,6 +1017,7 @@ Use cases:
 - Checkpoint inclusion proof
 - Durability receipts (min_seen)
 - Subscription gating (require_min_seen)
+- Early divergence detection in replication handshakes/ACKs
 
 ### 2.4 Event envelopes and deltas
 
@@ -1072,6 +1149,13 @@ Persistence requirement (normative):
 - On mint, if system_time_ms < last_physical_ms, clamp physical_ms to last_physical_ms
   and increment logical_counter.
 
+Forward-jump handling (normative):
+- On startup: initialize last_physical_ms = max(persisted_last_physical_ms, system_time_ms).
+- On mint (after startup), if system_time_ms > last_physical_ms + HLC_MAX_FORWARD_DRIFT_MS,
+  clamp physical_ms to last_physical_ms + HLC_MAX_FORWARD_DRIFT_MS and increment logical_counter.
+- The daemon MUST log this as a clock anomaly and include it in admin.status/admin.doctor
+  (e.g., last_clock_anomaly_at_ms, last_clock_anomaly_kind, last_clock_anomaly_delta_ms).
+
 Recovery requirement (normative):
 - If the SQLite index is rebuilt or missing, the daemon MUST reconstruct HLC state
   by scanning locally-authored WAL records and taking max(hlc_max) per ActorId.
@@ -1090,6 +1174,9 @@ for non-hashed messages only.
   - sort by encoded key length, then by encoded key bytes.
 - No floats in event envelopes to avoid canonical float ambiguity.
 - Exclude sha256 and prev_sha256 from the hash input.
+- Reject non-canonical integer encodings (non-minimal additional bytes).
+- Reject any CBOR tags in EventEnvelope (simplifies canonical validation and
+  prevents alternate encodings for the same semantic value).
 
 ### 3.2 Encoding strategy
 - Implement `EventEnvelope::encode_canonical()` using `minicbor::Encoder`.
@@ -1105,6 +1192,23 @@ for non-hashed messages only.
 ### 3.3 Why not minicbor_serde for hashing
 - Serde does not guarantee canonical key ordering.
 - Canonical ordering is required for tamper-evident hashes.
+
+### 3.4 Canonical validation on decode (normative)
+
+Add `validate_canonical_envelope_bytes(bytes: &[u8]) -> Result<EventEnvelope, DecodeError>`:
+- MUST enforce the CBOR decoding limits in 0.19.
+- MUST enforce the definite-length rule for hashed structures.
+- MUST be lossless for unknown fields (0.6.1).
+- MUST compute sha256 over canonical_preimage_bytes and verify it equals the
+  envelope sha256 field.
+- MUST re-encode canonical_envelope_bytes and byte-compare with the input bytes.
+  If mismatch: reject as non-canonical (protocol/corruption).
+
+Implementation note:
+- This validator should NOT require decoding the full delta payload to validate
+  canonicalness and hash correctness; it is sufficient to parse envelope fields,
+  preserve unknown fields, and treat delta as an opaque CBOR item whose bytes are
+  included in canonical re-encoding.
 
 ---
 
@@ -1223,6 +1327,23 @@ Rotation triggers:
 - max bytes (default 32 MiB)
 - max age (default 60s)
 
+Segment creation (normative):
+- New segments MUST be created atomically:
+  1) create `segment-<created_at_ms>-<segment_id>.wal.tmp` with O_EXCL,
+  2) write the full segment header,
+  3) fsync the temp file,
+  4) rename to `.wal`,
+  5) fsync the `wal/<namespace>/` directory.
+- On startup, any `*.wal.tmp` files MUST be treated as incomplete segments and MUST NOT
+  be replayed. Implementations SHOULD delete them after verifying they are not referenced
+  by wal.sqlite (segments table).
+
+Sealed segment invariant (normative):
+- When a segment is rotated, it becomes sealed (immutable). The daemon MUST record:
+  - sealed=1 and final_len (bytes) in wal.sqlite segments table.
+- On startup, sealed segments MUST have `file_len == final_len`. If not, treat as
+  corruption and fail fast (requires operator intervention).
+
 Max record size:
 - Must enforce MAX_WAL_RECORD_BYTES (default <= 16 MiB).
 - Records larger than limit must be rejected at write time and error at read time.
@@ -1231,9 +1352,24 @@ Tail recovery:
 - If EOF occurs mid-record, ignore partial tail and truncate to last valid boundary.
 - If crc mismatch at tail, truncate to last valid boundary.
 - If corruption is detected not at tail, fail with explicit error by default.
-- Repair mode MAY attempt resynchronization by scanning forward for the next
-  `record_magic` within a bounded window, then continue indexing. Apply MUST still
-  enforce per-(ns, origin) contiguity and prev_sha continuity.
+
+Online vs offline repair boundary (normative):
+- While the daemon is accepting writes, it MUST ONLY perform tail truncation repairs
+  (EOF mid-record, crc mismatch at tail).
+- If corruption is detected not at tail, the daemon MUST fail fast and MUST NOT attempt
+  mid-file resynchronization while live. It MUST emit an operator action: run offline fsck.
+
+Offline repair (recommended):
+- Provide an offline tool (library + CLI) `bd store fsck` that can be run when the daemon
+  is stopped (or in maintenance/read-only mode). It:
+  - scans wal/<ns> segments and validates headers, frame CRCs, sha256, prev_sha continuity,
+    and per-(ns,origin) contiguity;
+  - cross-checks wal.sqlite offsets (if present);
+  - emits the same deterministic report schema as admin.doctor.
+- `bd store fsck --repair` MAY perform bounded repairs:
+  - truncate corrupted tails,
+  - quarantine corrupted mid-file segments (move to wal/<ns>/quarantine/),
+  - rebuild wal.sqlite from WAL (drop + rebuild).
 
 ### 5.3 WAL segment naming and meaning of first_seq
 
@@ -1334,11 +1470,12 @@ Local append (authoritative):
 Remote ingest (authoritative):
 1) Caller enforces contiguity: origin_seq == durable_seen+1 and prev_sha matches
    the current head sha for (ns, origin).
-2) Acquire per-namespace append lock.
-3) Write framed record(s) using provided canonical bytes (no re-encode).
-4) Fsync per durability policy used for remote ingest (durable means "on disk here").
-5) Record offsets + sha + prev_sha in SQLite and commit.
-6) Advance durable/applied watermarks via StoreRuntime and update head cache.
+2) Caller MUST validate canonical bytes + sha correctness via validate_canonical_envelope_bytes (3.4).
+3) Acquire per-namespace append lock.
+4) Write framed record(s) using provided canonical bytes (no re-encode).
+5) Fsync per durability policy used for remote ingest (durable means "on disk here").
+6) Record offsets + sha + prev_sha in SQLite and commit.
+7) Advance durable/applied watermarks via StoreRuntime and update head cache.
 
 ### 5.7 WAL pruning and local snapshots
 
@@ -1488,6 +1625,12 @@ CREATE TABLE meta (
   value TEXT NOT NULL
 );
 
+-- Required meta keys (normative):
+-- meta.store_id (uuid)
+-- meta.store_epoch (u64)
+-- meta.index_schema_version (u32)
+-- meta.wal_format_version (u32)
+
 -- HLC persistence (minimal)
 CREATE TABLE hlc (
   actor_id TEXT PRIMARY KEY,
@@ -1502,6 +1645,8 @@ CREATE TABLE segments (
   segment_path TEXT NOT NULL,      -- relative to store_dir
   created_at_ms INTEGER NOT NULL,
   last_indexed_offset INTEGER NOT NULL,
+  sealed INTEGER NOT NULL DEFAULT 0,
+  final_len INTEGER,               -- set when sealed=1
   PRIMARY KEY (namespace, segment_id)
 );
 CREATE INDEX segments_by_ns_created
@@ -1572,6 +1717,22 @@ SQLite PRAGMA choices (normative):
 - `busy_timeout = 5000` (or configurable) to avoid spurious SQLITE_BUSY under load.
 - `foreign_keys = ON` (defensive, even if schema uses few FKs initially).
 - Document these choices explicitly; do not rely on SQLite defaults.
+
+SQLite bloat control (recommended):
+- Set `auto_vacuum = INCREMENTAL` at DB creation time (must be set before tables exist).
+- After receipt GC, run bounded `PRAGMA incremental_vacuum(N)` where N is derived from
+  MAX_BACKGROUND_IO_BYTES_PER_SEC to prevent WAL/index files from growing forever.
+- Periodically run `PRAGMA wal_checkpoint(TRUNCATE)` (for wal.sqlite's own -wal file)
+  in the background, also bounded by MAX_BACKGROUND_IO_BYTES_PER_SEC.
+- Suggested frequency: after every N receipt GC operations OR every M minutes, whichever
+  comes first (defaults: N=1000, M=60).
+
+Schema migration policy (normative):
+- If meta.index_schema_version < binary-supported schema version:
+  - for additive migrations (new tables/columns): perform in-place migration at startup,
+    then update meta.index_schema_version.
+  - for incompatible migrations: refuse to start in write mode until operator runs
+    admin.rebuild_index (or explicit `admin.migrate_index --rebuild`).
 
 ### 6.5 Crash-consistency contract (normative)
 
@@ -1679,6 +1840,32 @@ Replace or augment current resolve_remote():
 - Migration-only fallback: UUIDv5(normalized_remote_url).
 - Persist mapping path -> StoreId; do not rekey on URL changes.
 
+### 7.5 EventBroadcaster and hot-cache (recommended)
+
+Define EventBroadcaster as BOTH:
+1) a bounded pub/sub mechanism for new events, and
+2) a bounded in-memory hot-cache of canonical EventEnvelope bytes.
+
+Requirements:
+- On successful WAL append (local or remote), StoreRuntime MUST publish:
+  - EventId, sha, prev_sha, namespace, and canonical envelope bytes (Bytes).
+- The broadcaster MUST enforce backpressure:
+  - bounded channels (by bytes/events),
+  - slow subscribers MAY be dropped with ERROR(code="subscriber_lagged").
+- Hot-cache eviction MUST be deterministic and bounded:
+  - eviction by total bytes and/or total events (FIFO is sufficient).
+
+Replication fast-path:
+- Outbound replication sessions SHOULD subscribe to the broadcaster.
+- If a peer is caught up (or within cache retention), the sender SHOULD stream events
+  directly from hot-cache without reading WAL segments.
+- If a peer falls behind beyond cache retention, the sender MUST fall back to WAL index
+  + segment reads via stream_range_bytes.
+
+Subscribe IPC fast-path:
+- Subscribe SHOULD stream from broadcaster; historical backfill uses WAL reads gated by
+  require_min_seen and bounded by MAX_EVENT_BATCH_BYTES.
+
 ---
 
 ## 8) Mutation pipeline refactor (events-first)
@@ -1770,7 +1957,9 @@ HELLO body:
 - requested_namespaces
 - offered_namespaces
 - seen_durable (per requested namespace)  // contiguous durable watermark map
+- seen_durable_heads? (per requested namespace) // sha256 at seen_durable for origins present
 - seen_applied? (per requested namespace) // optional; helps peers reason about read lag
+- seen_applied_heads? (per requested namespace) // sha256 at seen_applied (optional)
 - capabilities (supports_snapshots, supports_live_stream, supports_compression)
 
 WELCOME body:
@@ -1781,7 +1970,9 @@ WELCOME body:
 - welcome_nonce
 - accepted_namespaces
 - receiver_seen_durable (per accepted namespace)
+- receiver_seen_durable_heads? (per accepted namespace)
 - receiver_seen_applied? (per accepted namespace)
+- receiver_seen_applied_heads? (per accepted namespace)
 - live_stream_enabled
 - max_frame_bytes (effective limit)
 
@@ -1806,7 +1997,7 @@ Rules:
   increasing origin_seq order.
 - Receiver MUST validate:
   - store_id/store_epoch match
-  - sha256 matches envelope content
+  - bytes are canonical EventEnvelope CBOR (3.4) and sha256 verifies
   - if prev_sha256 present, it MUST match the receiver's current head sha for that
     (namespace, origin_replica_id) before buffering/appending
   - if event_id already exists, sha256 matches prior observed sha256
@@ -1826,13 +2017,23 @@ Ingestion ordering rule (clarified, normative):
 
 Body:
 - durable: { namespace -> { origin_replica_id -> u64 } }
+- durable_heads?: { namespace -> { origin_replica_id -> bytes(32) } }
 - applied?: { namespace -> { origin_replica_id -> u64 } }
+- applied_heads?: { namespace -> { origin_replica_id -> bytes(32) } }
 
 Rules:
 - durable advances only after WAL fsync or snapshot/checkpoint that guarantees replay.
 - applied advances only after apply_event.
 - Both vectors monotonic per (namespace, origin).
 - ACKs may be standalone or piggybacked.
+
+Head-hash rule (normative):
+- If an ACK includes durable_heads/applied_heads for an origin, the sha MUST be the
+  hash at the corresponding seq value in the same ACK message.
+- If a peer reports the same seq but a different head sha for a (namespace, origin),
+  this indicates divergence/corruption. The receiver MUST:
+  - stop streaming EVENTS for that origin,
+  - request SNAPSHOT_REQUIRED (or close with ERROR(code="diverged")).
 
 ### 9.6 WANT
 
@@ -1941,6 +2142,12 @@ Replicate only namespaces where policy requires it:
 - Store id mismatch: close connection with ERROR(code="wrong_store").
 - Store epoch mismatch: reject and require snapshot/bootstrap; do not merge state.
 - Equivocation: same EventId with different sha is protocol corruption; terminate session.
+
+Error payload and retry metadata (normative):
+- All error codes MUST be defined in REALTIME_ERRORS.md.
+- ERROR frames MUST set retryable=true only when the peer can retry safely without
+  human intervention (e.g., overloaded, temporary network, snapshot_expired).
+- For retryable errors, ERROR SHOULD include retry_after_ms to avoid thundering herds.
 
 ---
 
@@ -2305,6 +2512,13 @@ Response changes:
 - include DurabilityReceipt on success
 - on timeout waiting for remote durability, return retryable error including receipt
 
+Error response shape (normative):
+- All IPC errors MUST use ErrorPayload as defined in 0.14 and REALTIME_ERRORS.md.
+- Mutation timeout waiting for stronger durability MUST return:
+  - code="durability_timeout"
+  - retryable=true
+  - receipt present (so client can retry idempotently)
+
 IPC_PROTOCOL_VERSION bump only when adding streaming responses.
 
 Add to all read/query requests (normative):
@@ -2344,17 +2558,37 @@ Add admin/introspection ops:
 - `admin.gc_now`: triggers retention enforcement + receipt GC for selected namespaces.
 - `admin.prune_wal`: runs WAL pruning evaluation with dry_run option and explicit
   acknowledgement gates (never prune implicitly via IPC).
+- `admin.maintenance_mode`: toggles maintenance/read-only mode:
+  - when enabled: reject new mutations/replication ingest with ERROR(code="maintenance_mode"),
+    but allow admin/read operations.
+  - required for any online repair actions beyond tail truncation.
 - `admin.reload_policies`: reloads namespaces.toml, validates, applies safe live changes,
   and returns a diff summary (applied vs requires_restart).
 - `admin.rotate_replica_id`: generates a new replica_id, updates meta.json, logs the
   old -> new mapping. Used for recovery from duplicated store directories.
 - `admin.fingerprint`: returns stable convergence fingerprints:
-  - per-namespace: { namespace -> { state_sha256, tombstones_sha256, deps_sha256 } }
+  - per-namespace: { namespace -> { state_sha256, tombstones_sha256, deps_sha256, namespace_root } }
   - includes watermarks_applied and watermarks_durable used as the basis
   - supports modes:
-    - full (may be expensive)
+    - full (may be expensive; includes per-shard hashes)
     - sample(N) (bounded; good for periodic monitoring)
   Intended use: quickly detect divergence across replicas and validate repairs.
+
+Fingerprint algorithm (normative; Merkle-ish, shard-based):
+- For each namespace and each type in fixed order: [state, tombstones, deps]:
+  - define shard_hash[00..ff] where shard_hash[i] is sha256 of the canonical JSONL bytes
+    for that shard file, and empty shards use sha256 of empty bytes.
+  - define type_root = sha256( concat( i_byte || shard_hash[i]_bytes ) for i=0..255 ).
+- Define namespace_root = sha256( concat( type_root_state || type_root_tombstones || type_root_deps ) ).
+- `admin.fingerprint` MUST return:
+  - namespace_root (and type_roots) in all modes,
+  - per-shard hashes in "full" mode (bounded by response size),
+  - `sample(N)` returns N deterministically sampled shard indices plus their hashes.
+    Sampling uses sha256(namespace || request_nonce) to select indices, so different
+    calls sample different shards.
+
+Operational win:
+- This allows pinpointing divergence ("deps shard 7f differs") and enables targeted repair tooling.
 
 Observability requirements (normative):
 - Every mutation MUST be traceable end-to-end via txn_id and (if present) client_request_id.
@@ -2472,6 +2706,13 @@ Add fuzzing + crash safety validation (recommended):
 - crash tests (integration):
   - inject SIGKILL during append (after write before fsync, after fsync before index commit, etc)
   - assert recovery behavior: no duplicate origin_seq, tail truncation correct, index rebuild correct
+
+Add offline fsck tests (recommended):
+- golden corpus tests for `bd store fsck` output stability
+- fixtures that include:
+  - tail truncation cases
+  - mid-file corruption cases (must require offline mode to repair)
+  - quarantine + rebuild index workflows
 
 ---
 
