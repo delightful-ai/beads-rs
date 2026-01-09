@@ -13,6 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 
@@ -852,8 +853,11 @@ pub fn sync_with_retry(
 ) -> Result<SyncOutcome, SyncError> {
     let mut retries = 0;
     let mut force_push = None;
+    let started = Instant::now();
 
     loop {
+        let attempt = retries + 1;
+        tracing::debug!(attempt, "sync attempt");
         let fetched = SyncProcess::new(repo_path.to_owned()).fetch(repo)?;
         let divergence = fetched.phase.divergence.clone();
         if force_push.is_none() {
@@ -867,6 +871,8 @@ pub fn sync_with_retry(
 
         match result {
             Ok(state) => {
+                let elapsed_ms = started.elapsed().as_millis();
+                tracing::info!(elapsed_ms, retries, "sync succeeded");
                 let last_seen_stamp = max_write_stamp(state.max_write_stamp(), parent_meta_stamp);
                 return Ok(SyncOutcome {
                     state,
@@ -878,12 +884,18 @@ pub fn sync_with_retry(
             Err(SyncError::NonFastForward) => {
                 retries += 1;
                 if retries > max_retries {
+                    let elapsed_ms = started.elapsed().as_millis();
+                    tracing::warn!(elapsed_ms, retries, "sync retry limit exceeded");
                     return Err(SyncError::TooManyRetries(retries));
                 }
                 // Loop will fetch again and re-merge
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                let elapsed_ms = started.elapsed().as_millis();
+                tracing::warn!(elapsed_ms, retries, error = ?e, "sync failed");
+                return Err(e);
+            }
         }
     }
 }

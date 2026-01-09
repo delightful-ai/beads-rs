@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, hash_map::Entry};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
@@ -255,7 +256,16 @@ impl GitWorker {
                 state,
                 actor,
             } => {
+                let span =
+                    tracing::info_span!("sync", remote = %remote, repo = %repo.display());
+                let _guard = span.enter();
+                let started = Instant::now();
                 let result = self.sync(&repo, &state, &actor);
+                let elapsed_ms = started.elapsed().as_millis();
+                match &result {
+                    Ok(_) => tracing::info!(elapsed_ms, "sync completed"),
+                    Err(err) => tracing::warn!(elapsed_ms, error = ?err, "sync failed"),
+                }
                 let _ = self.result_tx.send(GitResult::Sync(remote, result));
             }
 
