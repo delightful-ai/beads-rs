@@ -82,6 +82,7 @@ pub enum Commands {
     Show(ShowArgs),
 
     /// List beads.
+    #[command(alias = "ls")]
     List(ListArgs),
 
     /// Search beads by text (alias for list QUERY).
@@ -135,6 +136,7 @@ pub enum Commands {
     Comment(CommentAddArgs),
 
     /// Dependency operations.
+    #[command(alias = "deps", alias = "dependencies")]
     Dep {
         #[command(subcommand)]
         cmd: DepCmd,
