@@ -709,6 +709,57 @@ pub enum EventKindV1 {
     NamespaceGcMarkerV1(NamespaceGcMarkerV1),
 }
 
+// =================================================================================================
+// 8.1 GC floor enforcement helpers (Plan §2.4, §9.4; Model #5)
+// =================================================================================================
+//
+// These helpers model the floor rule: events with event_time_ms <= gc_floor_ms[ns]
+// are ignored as state mutations but still advance contiguity/ACK elsewhere.
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AppliedEvent {
+    pub id: EventId,
+    pub event_time_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NamespaceApplyState {
+    pub gc_floor_ms: BTreeMap<NamespaceId, u64>,
+    pub applied: BTreeSet<AppliedEvent>,
+}
+
+impl NamespaceApplyState {
+    pub fn gc_floor_ms(&self, ns: &NamespaceId) -> u64 {
+        self.gc_floor_ms.get(ns).copied().unwrap_or(0)
+    }
+
+    pub fn apply_event_with_floor(&mut self, event: AppliedEvent) -> bool {
+        let floor = self.gc_floor_ms(&event.id.namespace);
+        if should_ignore_event_due_to_floor(event.event_time_ms, floor) {
+            return false;
+        }
+        self.applied.insert(event);
+        true
+    }
+
+    pub fn apply_gc_marker(&mut self, ns: &NamespaceId, marker: &NamespaceGcMarkerV1) {
+        if !marker.enforce_floor {
+            return;
+        }
+        let current = self.gc_floor_ms(ns);
+        if marker.cutoff_ms <= current {
+            return;
+        }
+        self.gc_floor_ms.insert(ns.clone(), marker.cutoff_ms);
+        self.applied
+            .retain(|event| &event.id.namespace != ns || event.event_time_ms > marker.cutoff_ms);
+    }
+}
+
+pub fn should_ignore_event_due_to_floor(event_time_ms: u64, gc_floor_ms: u64) -> bool {
+    event_time_ms <= gc_floor_ms
+}
+
 /// Envelope common fields (Plan §2.4)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventEnvelopeCommon {
@@ -1786,4 +1837,44 @@ impl ReplSession<PhaseNew> {
 fn main() {
     // This is a types-first, literate module.
     // The “executable” property means it compiles and can be imported by models/tests.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::num::NonZeroU64;
+    use uuid::Uuid;
+
+    #[test]
+    fn gc_floor_retroactively_clears_applied_events() {
+        let ns = NamespaceId::try_from("core").expect("namespace");
+        let origin = ReplicaId(Uuid::new_v4());
+        let event_id = EventId {
+            origin_replica_id: origin,
+            namespace: ns.clone(),
+            origin_seq: Seq1(NonZeroU64::new(1).unwrap()),
+        };
+        let event = AppliedEvent {
+            id: event_id,
+            event_time_ms: 5,
+        };
+        let marker = NamespaceGcMarkerV1 {
+            cutoff_ms: 5,
+            gc_authority_replica_id: origin,
+            enforce_floor: true,
+        };
+
+        let mut state_event_then_gc = NamespaceApplyState::default();
+        assert!(state_event_then_gc.apply_event_with_floor(event.clone()));
+        state_event_then_gc.apply_gc_marker(&ns, &marker);
+
+        let mut state_gc_then_event = NamespaceApplyState::default();
+        state_gc_then_event.apply_gc_marker(&ns, &marker);
+        assert!(!state_gc_then_event.apply_event_with_floor(event.clone()));
+
+        assert!(state_event_then_gc.applied.is_empty());
+        assert!(state_gc_then_event.applied.is_empty());
+        assert_eq!(state_event_then_gc.gc_floor_ms(&ns), 5);
+        assert_eq!(state_event_then_gc, state_gc_then_event);
+    }
 }
