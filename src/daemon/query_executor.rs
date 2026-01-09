@@ -194,12 +194,8 @@ impl Daemon {
             .map(|(_, bead)| IssueSummary::from_bead(bead))
             .collect();
 
-        // Sort by priority (high to low), then created_at (oldest first)
-        views.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.created_at.cmp(&b.created_at))
-        });
+        // Sort by priority (low to high), then created_at (oldest first).
+        sort_ready_issues(&mut views);
 
         // Apply limit
         if let Some(limit) = limit {
@@ -911,4 +907,58 @@ fn compute_epic_statuses(
 
     out.sort_by(|a, b| a.epic.id.cmp(&b.epic.id));
     out
+}
+
+fn sort_ready_issues(issues: &mut [IssueSummary]) {
+    issues.sort_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.created_at.cmp(&b.created_at))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sort_ready_issues;
+    use crate::api::IssueSummary;
+    use crate::core::WriteStamp;
+
+    fn issue_summary(id: &str, priority: u8, created_at_ms: u64) -> IssueSummary {
+        let stamp = WriteStamp::new(created_at_ms, 0);
+        IssueSummary {
+            id: id.to_string(),
+            title: format!("title-{id}"),
+            description: "desc".to_string(),
+            design: None,
+            acceptance_criteria: None,
+            status: "open".to_string(),
+            priority,
+            issue_type: "task".to_string(),
+            labels: Vec::new(),
+            assignee: None,
+            assignee_expires: None,
+            created_at: stamp.clone(),
+            created_by: "tester".to_string(),
+            updated_at: stamp,
+            updated_by: "tester".to_string(),
+            estimated_minutes: None,
+            content_hash: "hash".to_string(),
+            note_count: 0,
+        }
+    }
+
+    #[test]
+    fn ready_sort_orders_by_priority_then_created_at() {
+        let mut issues = vec![
+            issue_summary("a", 2, 30),
+            issue_summary("b", 0, 20),
+            issue_summary("c", 1, 10),
+            issue_summary("d", 0, 5),
+        ];
+
+        sort_ready_issues(&mut issues);
+
+        let ids: Vec<&str> = issues.iter().map(|issue| issue.id.as_str()).collect();
+        assert_eq!(ids, vec!["d", "b", "c", "a"]);
+    }
 }
