@@ -930,36 +930,17 @@ pub(super) fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<String>> {
 }
 
 pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    for spec in specs {
-        for part in spec.split(',') {
-            let p = part.trim();
-            if p.is_empty() {
-                continue;
-            }
+    let parsed = crate::core::DepSpec::parse_list(&specs).map_err(|e| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "deps".into(),
+            reason: e.to_string(),
+        })
+    })?;
 
-            let (kind_opt, id_raw) = if let Some((k, id)) = p.split_once(':') {
-                let kind = parse_dep_kind(k).map_err(|msg| {
-                    Error::Op(crate::daemon::OpError::ValidationFailed {
-                        field: "deps".into(),
-                        reason: msg,
-                    })
-                })?;
-                (Some(kind), id.trim())
-            } else {
-                (None, p)
-            };
-
-            let id = normalize_bead_id_for("deps", id_raw)?;
-            let entry = if let Some(kind) = kind_opt {
-                format!("{}:{}", kind.as_str(), id)
-            } else {
-                id
-            };
-            out.push(entry);
-        }
-    }
-    Ok(out)
+    Ok(parsed
+        .into_iter()
+        .map(|spec| spec.to_spec_string())
+        .collect())
 }
 
 fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {

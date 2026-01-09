@@ -10,9 +10,69 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::crdt::Lww;
 use super::domain::DepKind;
-use super::error::InvalidDependency;
+use super::error::{CoreError, InvalidDependency};
 use super::identity::BeadId;
 use super::time::Stamp;
+
+/// Parsed dependency spec from CLI/IPC input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepSpec {
+    kind: DepKind,
+    id: BeadId,
+}
+
+impl DepSpec {
+    /// Create a new dependency spec.
+    pub fn new(kind: DepKind, id: BeadId) -> Self {
+        Self { kind, id }
+    }
+
+    /// Parse a single dependency spec (`kind:id` or `id`).
+    pub fn parse(raw: &str) -> Result<Self, CoreError> {
+        let trimmed = raw.trim();
+        let (kind, id_raw) = if let Some((k, id)) = trimmed.split_once(':') {
+            (DepKind::parse(k)?, id.trim())
+        } else {
+            (DepKind::Blocks, trimmed)
+        };
+        let id = BeadId::parse(id_raw)?;
+        Ok(Self::new(kind, id))
+    }
+
+    /// Parse a list of dependency specs, allowing comma-separated lists.
+    pub fn parse_list(raw: &[String]) -> Result<Vec<Self>, CoreError> {
+        let mut out = Vec::new();
+        for spec in raw {
+            for part in spec.split(',') {
+                let p = part.trim();
+                if p.is_empty() {
+                    continue;
+                }
+                out.push(Self::parse(p)?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Get the dependency kind.
+    pub fn kind(&self) -> DepKind {
+        self.kind
+    }
+
+    /// Get the dependency target bead ID.
+    pub fn id(&self) -> &BeadId {
+        &self.id
+    }
+
+    /// Format the spec string, omitting the default kind.
+    pub fn to_spec_string(&self) -> String {
+        if self.kind == DepKind::Blocks {
+            self.id.as_str().to_string()
+        } else {
+            format!("{}:{}", self.kind.as_str(), self.id.as_str())
+        }
+    }
+}
 
 /// Dependency identity tuple.
 ///
@@ -233,6 +293,33 @@ mod tests {
         let edge = DepEdge::new(key, stamp);
         assert!(edge.is_active());
         assert!(!edge.is_deleted());
+    }
+
+    #[test]
+    fn dep_spec_parse_list_handles_kinds_and_commas() {
+        let specs = vec![
+            "blocks:bd-abc,bd-xyz".to_string(),
+            "related:bd-rel".to_string(),
+        ];
+        let parsed = DepSpec::parse_list(&specs).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].kind(), DepKind::Blocks);
+        assert_eq!(parsed[0].id().as_str(), "bd-abc");
+        assert_eq!(parsed[1].kind(), DepKind::Blocks);
+        assert_eq!(parsed[1].id().as_str(), "bd-xyz");
+        assert_eq!(parsed[2].kind(), DepKind::Related);
+        assert_eq!(parsed[2].id().as_str(), "bd-rel");
+    }
+
+    #[test]
+    fn dep_spec_to_spec_string_omits_default_kind() {
+        let id = BeadId::parse("bd-abc").unwrap();
+        let spec = DepSpec::new(DepKind::Blocks, id);
+        assert_eq!(spec.to_spec_string(), "bd-abc");
+
+        let id = BeadId::parse("bd-rel").unwrap();
+        let spec = DepSpec::new(DepKind::Related, id);
+        assert_eq!(spec.to_spec_string(), "related:bd-rel");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use super::ipc::{Response, ResponsePayload};
 use super::ops::{BeadPatch, MapLiveError, OpError, OpResult, Patch};
 use crate::core::{
     Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge, DepKey,
-    DepKind, DepLife, Labels, Lww, Note, NoteId, Priority, Tombstone, WallClock, Workflow,
+    DepKind, DepLife, DepSpec, Labels, Lww, Note, NoteId, Priority, Tombstone, WallClock, Workflow,
 };
 
 impl Daemon {
@@ -81,9 +81,14 @@ impl Daemon {
         };
 
         // Parse dependency specs first (for validation + source_repo inheritance).
-        let parsed_deps = match parse_dep_specs(&dependencies) {
+        let parsed_deps = match DepSpec::parse_list(&dependencies) {
             Ok(v) => v,
-            Err(e) => return Response::err(e),
+            Err(e) => {
+                return Response::err(OpError::ValidationFailed {
+                    field: "deps".into(),
+                    reason: e.to_string(),
+                });
+            }
         };
 
         // Validate + canonicalize labels.
@@ -152,18 +157,18 @@ impl Daemon {
             };
 
             // Validate dep targets exist (parity with beads-go daemon).
-            for (_, to) in &parsed_deps {
-                if state.get_live(to).is_none() {
-                    return Err(OpError::NotFound(to.clone()));
+            for spec in &parsed_deps {
+                if state.get_live(spec.id()).is_none() {
+                    return Err(OpError::NotFound(spec.id().clone()));
                 }
             }
 
             // Inherit source_repo from discovered-from parent if present.
             let mut source_repo_value: Option<String> = None;
-            if let Some((_, from_id)) = parsed_deps
+            if let Some(spec) = parsed_deps
                 .iter()
-                .find(|(k, _)| matches!(k, DepKind::DiscoveredFrom))
-                && let Some(parent_bead) = state.get_live(from_id)
+                .find(|spec| matches!(spec.kind(), DepKind::DiscoveredFrom))
+                && let Some(parent_bead) = state.get_live(spec.id())
                 && let Some(sr) = &parent_bead.fields.source_repo.value
                 && !sr.trim().is_empty()
             {
@@ -225,9 +230,9 @@ impl Daemon {
             }
 
             // Dependency edges.
-            for (kind, to) in parsed_deps {
-                let key =
-                    DepKey::new(id.clone(), to, kind).map_err(|e| OpError::ValidationFailed {
+            for spec in parsed_deps {
+                let key = DepKey::new(id.clone(), spec.id().clone(), spec.kind())
+                    .map_err(|e| OpError::ValidationFailed {
                         field: "dependency".into(),
                         reason: e.reason,
                     })?;
@@ -786,45 +791,6 @@ impl Daemon {
             })),
             Err(e) => Response::err(e),
         }
-    }
-}
-
-fn parse_dep_specs(raw: &[String]) -> Result<Vec<(DepKind, BeadId)>, OpError> {
-    let mut out = Vec::new();
-    for spec in raw {
-        for part in spec.split(',') {
-            let p = part.trim();
-            if p.is_empty() {
-                continue;
-            }
-
-            let (kind, id_raw) = if let Some((k, id)) = p.split_once(':') {
-                (parse_dep_kind_str(k)?, id.trim())
-            } else {
-                (DepKind::Blocks, p)
-            };
-
-            let to = BeadId::parse(id_raw).map_err(|e| OpError::ValidationFailed {
-                field: "deps".into(),
-                reason: e.to_string(),
-            })?;
-            out.push((kind, to));
-        }
-    }
-    Ok(out)
-}
-
-fn parse_dep_kind_str(raw: &str) -> Result<DepKind, OpError> {
-    let s = raw.trim().to_lowercase().replace('-', "_");
-    match s.as_str() {
-        "blocks" | "block" => Ok(DepKind::Blocks),
-        "parent" | "parent_child" | "parentchild" => Ok(DepKind::Parent),
-        "related" | "relates" => Ok(DepKind::Related),
-        "discovered_from" | "discoveredfrom" => Ok(DepKind::DiscoveredFrom),
-        _ => Err(OpError::ValidationFailed {
-            field: "deps".into(),
-            reason: format!("invalid dependency type {raw:?}"),
-        }),
     }
 }
 

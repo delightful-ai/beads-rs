@@ -30,7 +30,7 @@ pub use bead::{Bead, BeadCore, BeadFields};
 pub use collections::{Label, Labels, NoteLog};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
-pub use dep::{DepEdge, DepKey, DepLife};
+pub use dep::{DepEdge, DepKey, DepLife, DepSpec};
 pub use domain::{BeadType, DepKind, Priority};
 pub use error::{
     CollisionError, CoreError, InvalidDependency, InvalidId, InvalidLabel, RangeError,
