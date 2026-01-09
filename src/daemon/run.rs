@@ -9,12 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::Result;
 use crate::core::ActorId;
 use crate::daemon::IpcError;
-use crate::daemon::ipc::ErrorPayload;
-use crate::daemon::ipc::{encode_response, ensure_socket_dir};
-use crate::daemon::server::RequestMessage;
+use crate::daemon::ipc::ensure_socket_dir;
+use crate::daemon::server::{RequestMessage, handle_client};
 use crate::daemon::wal::{Wal, default_wal_base_dir};
 use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop, run_state_loop};
-use crate::daemon::{Request, Response, decode_request};
+use crate::daemon::Request;
 
 /// Run the daemon in the current process.
 ///
@@ -152,81 +151,4 @@ pub fn run_daemon() -> Result<()> {
     let _ = std::fs::remove_file(&meta_path);
     tracing::info!("daemon stopped");
     Ok(())
-}
-
-fn handle_client(
-    stream: std::os::unix::net::UnixStream,
-    req_tx: crossbeam::channel::Sender<RequestMessage>,
-) {
-    use std::io::{BufRead, BufReader, Write};
-
-    let reader = match stream.try_clone() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("failed to clone stream: {}", e);
-            return;
-        }
-    };
-    let reader = BufReader::new(reader);
-    let mut writer = stream;
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request = match decode_request(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = Response::err(ErrorPayload {
-                    code: "parse_error".into(),
-                    message: e.to_string(),
-                    details: None,
-                });
-                let bytes = encode_response(&resp).unwrap_or_else(|e| {
-                    let msg = e.to_string().replace('"', "\\\"");
-                    format!(r#"{{"err":{{"code":"internal","message":"{}"}}}}\n"#, msg).into_bytes()
-                });
-                let _ = write!(writer, "{}", String::from_utf8_lossy(&bytes));
-                let _ = writer.flush();
-                continue;
-            }
-        };
-
-        let is_shutdown = matches!(request, Request::Shutdown);
-
-        let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
-        if req_tx
-            .send(RequestMessage {
-                request,
-                respond: respond_tx,
-            })
-            .is_err()
-        {
-            break;
-        }
-
-        let response = match respond_rx.recv() {
-            Ok(r) => r,
-            Err(_) => break,
-        };
-
-        let bytes = encode_response(&response).unwrap_or_else(|e| {
-            let msg = e.to_string().replace('"', "\\\"");
-            format!(r#"{{"err":{{"code":"internal","message":"{}"}}}}\n"#, msg).into_bytes()
-        });
-        if write!(writer, "{}", String::from_utf8_lossy(&bytes)).is_err() {
-            break;
-        }
-        let _ = writer.flush();
-
-        if is_shutdown {
-            break;
-        }
-    }
 }

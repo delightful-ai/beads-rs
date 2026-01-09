@@ -1065,10 +1065,9 @@ impl Daemon {
                 }
             }
 
-            Request::SyncWait { repo: _ } => Response::err(error_payload(
-                "internal",
-                "SyncWait must be handled by the daemon state loop",
-            )),
+            Request::SyncWait { .. } => {
+                unreachable!("SyncWait is handled by the daemon state loop")
+            }
 
             Request::Init { repo } => {
                 let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);

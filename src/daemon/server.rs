@@ -195,7 +195,7 @@ pub fn run_socket_thread(listener: UnixListener, req_tx: Sender<RequestMessage>)
 /// Handle a single client connection.
 ///
 /// Reads requests, sends to state thread, waits for response, writes back.
-fn handle_client(stream: UnixStream, req_tx: Sender<RequestMessage>) {
+pub(super) fn handle_client(stream: UnixStream, req_tx: Sender<RequestMessage>) {
     let reader = match stream.try_clone() {
         Ok(r) => r,
         Err(e) => {
