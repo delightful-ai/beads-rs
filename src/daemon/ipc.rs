@@ -1153,6 +1153,7 @@ mod tests {
     // Regression tests: verify all ResponsePayload variants roundtrip through Response
     mod response_roundtrip {
         use super::*;
+        use crate::core::BeadId;
 
         fn roundtrip_response(resp: Response) {
             let json = serde_json::to_string(&resp).unwrap();
