@@ -1,6 +1,6 @@
-# Default recipe - show available commands
+# Default recipe - point to available commands
 default:
-    @just --list
+    @echo "Run 'just --list' to see available commands."
 
 # Run all checks (fmt, clippy, test)
 check: fmt-check lint test
