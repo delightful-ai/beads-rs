@@ -12,13 +12,18 @@
 //! The spec text you pasted earlier implied buffering out-of-order should be allowed.
 //! This model is a nice place to decide which behavior you actually want.
 
-use beads_stateright_models::spec::{NamespaceId, ReplicaId, Sha256, StoreEpoch, StoreIdentity, StoreId};
-use beads_stateright_models::toy_codec::{make_event, verify_bytes, VerifyError, WireEnvelope};
-use stateright::{Model, Property};
+use beads_stateright_models::spec::{NamespaceId, ReplicaId, Seq1, Sha256, StoreEpoch, StoreIdentity, StoreId};
+use beads_stateright_models::toy_codec::ToyEnvelope;
+use stateright::{report::WriteReporter, Checker, Model, Property};
+use std::num::NonZeroU64;
 use std::time::Duration;
 use uuid::Uuid;
 
 const MAX_SEQ: u8 = 4;
+
+fn seq1(seq: u8) -> Seq1 {
+    Seq1(NonZeroU64::new(seq as u64).expect("seq must be > 0"))
+}
 
 #[derive(Clone, Debug)]
 struct HashPrevModel {
@@ -42,7 +47,7 @@ struct Obs {
     seq: u8,
     expected_next: bool,
     ok: bool,
-    err: Option<VerifyError>,
+    err: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -66,8 +71,8 @@ impl HashPrevModel {
         assert!(seq >= 1);
         let mut prev: Option<Sha256> = None;
         for s in 1..=seq {
-            let ev = make_event(self.store, self.ns.clone(), self.origin, s, prev);
-            prev = Some(ev.wire.sha);
+            let env = ToyEnvelope::new(self.store, self.ns.clone(), self.origin, seq1(s), s, prev);
+            prev = Some(env.sha);
         }
         prev.unwrap()
     }
@@ -88,7 +93,7 @@ impl HashPrevModel {
 
         // Start from an internally-consistent envelope (honest sender).
         let prev = self.true_prev_for(seq);
-        let mut ev = make_event(store, self.ns.clone(), self.origin, seq, prev);
+        let mut env = ToyEnvelope::new(store, self.ns.clone(), self.origin, seq1(seq), seq, prev);
 
         match kind {
             CorruptKind::Valid | CorruptKind::WrongStore => {
@@ -96,17 +101,17 @@ impl HashPrevModel {
             }
             CorruptKind::WrongPrev => {
                 // Flip prev without changing sha (sha excludes prev in this spec).
-                ev.wire.prev = Some(Sha256([0xAA; 32]));
+                env.prev = Some(Sha256([0xAA; 32]));
             }
             CorruptKind::WrongSha => {
                 // Flip sha without changing preimage.
-                let mut b = ev.wire.sha.0;
+                let mut b = env.sha.0;
                 b[0] ^= 0x01;
-                ev.wire.sha = Sha256(b);
+                env.sha = Sha256(b);
             }
         }
 
-        serde_json::to_vec(&ev.wire).expect("json encode")
+        env.encode_envelope_bytes()
     }
 }
 
@@ -148,11 +153,11 @@ impl Model for HashPrevModel {
         let expected_next = action.seq == next.durable + 1;
         let bytes = self.build_bytes(action.seq, action.kind.clone());
 
-        let res = verify_bytes(self.store, next.head, &bytes);
+        let res = ToyEnvelope::verify(&bytes, self.store, next.head);
 
         match res {
             Ok(verified) => {
-                next.durable = verified.seq;
+                next.durable = verified.pre.seq as u8;
                 next.head = Some(verified.sha);
                 next.last = Some(Obs {
                     kind: action.kind,
@@ -181,7 +186,7 @@ impl Model for HashPrevModel {
         vec![
             // If the sender constructs a valid event and it is exactly the expected next seq,
             // verification must succeed.
-            Property::always("valid expected-next events verify", |_, s| {
+            Property::always("valid expected-next events verify", |_, s: &State| {
                 match &s.last {
                     Some(obs) if obs.kind == CorruptKind::Valid && obs.expected_next => obs.ok,
                     _ => true,
@@ -189,7 +194,7 @@ impl Model for HashPrevModel {
             }),
 
             // Any corruption kind should force failure.
-            Property::always("corrupt events fail verification", |_, s| {
+            Property::always("corrupt events fail verification", |_, s: &State| {
                 match &s.last {
                     Some(obs) if obs.kind != CorruptKind::Valid => !obs.ok,
                     _ => true,
@@ -197,7 +202,7 @@ impl Model for HashPrevModel {
             }),
 
             // Reachability: it's possible to verify a full prefix.
-            Property::sometimes("can verify full prefix", |_, s| s.durable == MAX_SEQ),
+            Property::sometimes("can verify full prefix", |_, s: &State| s.durable == MAX_SEQ),
         ]
     }
 }
@@ -221,10 +226,36 @@ fn main() -> Result<(), pico_args::Error> {
         origin: ReplicaId(Uuid::new_v4()),
     };
 
-    model
-        .checker()
-        .threads(num_cpus::get())
-        .timeout_duration(Duration::from_secs(60))
-        .command(pico_args::Arguments::from_env().finish())?
-        .run()
+    let mut args = pico_args::Arguments::from_env();
+    match args.subcommand()?.as_deref() {
+        Some("explore") => {
+            let address = args
+                .opt_free_from_str()?
+                .unwrap_or("localhost:3000".to_string());
+            println!("Exploring hash/prev verification on {address}.");
+            model
+                .clone()
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .serve(address);
+        }
+        Some("check") | None => {
+            println!("Model checking hash/prev verification.");
+            model
+                .clone()
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .spawn_dfs()
+                .report(&mut WriteReporter::new(&mut std::io::stdout()));
+        }
+        _ => {
+            println!("USAGE:");
+            println!("  hash_prev_machine check");
+            println!("  hash_prev_machine explore [ADDRESS]");
+        }
+    }
+
+    Ok(())
 }

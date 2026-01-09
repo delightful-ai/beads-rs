@@ -7,7 +7,7 @@
 //! - if seq  > durable+1 => buffer (bounded) and emit WANT(durable)
 //! - if seq <= durable => duplicate noop
 
-use stateright::{Model, Property};
+use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -134,7 +134,7 @@ impl Model for GapWant {
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
             // Safety: forwarded batches are always contiguous, and end exactly at `durable`.
-            Property::always("forwarded batches are contiguous", |_, s| {
+            Property::always("forwarded batches are contiguous", |_, s: &State| {
                 if s.last_forwarded.is_empty() {
                     return true;
                 }
@@ -152,11 +152,11 @@ impl Model for GapWant {
                 true
             }),
             // Safety: nothing buffered is <= durable+1; if it were, we should have forwarded it.
-            Property::always("buffered items are strictly beyond the next expected", |_, s| {
+            Property::always("buffered items are strictly beyond the next expected", |_, s: &State| {
                 s.buffered.iter().all(|b| *b > s.durable + 1)
             }),
             // Liveness-ish: it's possible to reach durable==MAX_SEQ.
-            Property::sometimes("can fully catch up", |_, s| s.durable == MAX_SEQ),
+            Property::sometimes("can fully catch up", |_, s: &State| s.durable == MAX_SEQ),
         ]
     }
 }
@@ -164,10 +164,34 @@ impl Model for GapWant {
 fn main() -> Result<(), pico_args::Error> {
     env_logger::init();
 
-    GapWant
-        .checker()
-        .threads(num_cpus::get())
-        .timeout_duration(Duration::from_secs(60))
-        .command(pico_args::Arguments::from_env().finish())?
-        .run()
+    let mut args = pico_args::Arguments::from_env();
+    match args.subcommand()?.as_deref() {
+        Some("explore") => {
+            let address = args
+                .opt_free_from_str()?
+                .unwrap_or("localhost:3000".to_string());
+            println!("Exploring gap/WANT state space on {address}.");
+            GapWant
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .serve(address);
+        }
+        Some("check") | None => {
+            println!("Model checking gap/WANT semantics.");
+            GapWant
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .spawn_dfs()
+                .report(&mut WriteReporter::new(&mut std::io::stdout()));
+        }
+        _ => {
+            println!("USAGE:");
+            println!("  gap_want_machine check");
+            println!("  gap_want_machine explore [ADDRESS]");
+        }
+    }
+
+    Ok(())
 }

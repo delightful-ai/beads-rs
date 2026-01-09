@@ -7,7 +7,7 @@
 //! - observing both variants for the same seq *forces* the model into `errored`
 //! - observing the same variant repeatedly is safe (idempotent)
 
-use stateright::{Model, Property};
+use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -104,11 +104,11 @@ impl Model for EquivocationGate {
         vec![
             // Safety: if we have ever observed both variants for any seq,
             // we must have errored.
-            Property::always("both sha variants implies hard-close", |_, s| {
+            Property::always("both sha variants implies hard-close", |_, s: &State| {
                 !saw_both_variants(&s.seen_mask) || s.errored
             }),
             // Liveness: equivocation is reachable in this model.
-            Property::sometimes("equivocation reachable", |_, s| s.errored),
+            Property::sometimes("equivocation reachable", |_, s: &State| s.errored),
         ]
     }
 }
@@ -116,10 +116,34 @@ impl Model for EquivocationGate {
 fn main() -> Result<(), pico_args::Error> {
     env_logger::init();
 
-    EquivocationGate
-        .checker()
-        .threads(num_cpus::get())
-        .timeout_duration(Duration::from_secs(60))
-        .command(pico_args::Arguments::from_env().finish())?
-        .run()
+    let mut args = pico_args::Arguments::from_env();
+    match args.subcommand()?.as_deref() {
+        Some("explore") => {
+            let address = args
+                .opt_free_from_str()?
+                .unwrap_or("localhost:3000".to_string());
+            println!("Exploring equivocation detection on {address}.");
+            EquivocationGate
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .serve(address);
+        }
+        Some("check") | None => {
+            println!("Model checking equivocation detection.");
+            EquivocationGate
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .spawn_dfs()
+                .report(&mut WriteReporter::new(&mut std::io::stdout()));
+        }
+        _ => {
+            println!("USAGE:");
+            println!("  equivocation_machine check");
+            println!("  equivocation_machine explore [ADDRESS]");
+        }
+    }
+
+    Ok(())
 }

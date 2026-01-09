@@ -8,8 +8,7 @@
 //! - negotiated max_frame_bytes never exceeds local limit
 
 use beads_stateright_models::spec::{negotiate_version, NamespaceId, ProtocolRange, ReplicaId, StoreEpoch, StoreId, StoreIdentity};
-use stateright::Model;
-use stateright::Property;
+use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::collections::BTreeSet;
 use std::time::Duration;
 use uuid::Uuid;
@@ -30,7 +29,7 @@ struct State {
     phase: Phase,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum HelloCase {
     Good,
     WrongStore,
@@ -84,15 +83,15 @@ impl HandshakeModel {
             _ => self.local_max_frame_bytes * 2, // peer may claim bigger; we must clamp
         };
 
-        let ns_a = NamespaceId::new("a");
-        let ns_b = NamespaceId::new("b");
-        let ns_c = NamespaceId::new("c");
+        let ns_a = NamespaceId("a".into());
+        let ns_b = NamespaceId("b".into());
+        let ns_c = NamespaceId("c".into());
 
         let (requested, offered) = match c {
-            HelloCase::Good => (vec![ns_a], vec![ns_a, ns_c]),
-            HelloCase::EmptyNamespaceIntersection => (vec![ns_a], vec![ns_b]),
-            HelloCase::RequestedNotAllowed => (vec![ns_c], vec![ns_c]),
-            _ => (vec![ns_a], vec![ns_a]),
+            HelloCase::Good => (vec![ns_a.clone()], vec![ns_a, ns_c.clone()]),
+            HelloCase::EmptyNamespaceIntersection => (vec![ns_a.clone()], vec![ns_b]),
+            HelloCase::RequestedNotAllowed => (vec![ns_c.clone()], vec![ns_c]),
+            _ => (vec![ns_a.clone()], vec![ns_a]),
         };
 
         (peer_store, peer_replica, peer_max, peer_min, peer_max_frame_bytes, requested, offered)
@@ -120,7 +119,7 @@ impl HandshakeModel {
                 }
 
                 // Version negotiation gating.
-                let version = match negotiate_version(&self.protocol, peer_max, peer_min) {
+                let version = match negotiate_version(self.protocol, peer_max, peer_min) {
                     Ok(v) => v,
                     Err(_) => {
                         return State {
@@ -180,13 +179,12 @@ impl Model for HandshakeModel {
         }
     }
 
-    fn next_state(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        Some(self.step(state, action))
+    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
+        Some(self.step(state, &action))
     }
 
     fn properties(&self) -> Vec<Property<Self>> {
-        let locally_allowed = self.locally_allowed.clone();
-        vec![Property::always("negotiated invariants", move |_m, s| match &s.phase {
+        vec![Property::always("negotiated invariants", |m, s: &State| match &s.phase {
             Phase::Established {
                 version,
                 max_frame_bytes,
@@ -201,7 +199,7 @@ impl Model for HandshakeModel {
                     return false;
                 }
                 // accepted respects local policy
-                accepted.is_subset(&locally_allowed)
+                accepted.is_subset(&m.locally_allowed)
             }
             _ => true,
         })]
@@ -216,7 +214,7 @@ fn main() -> Result<(), pico_args::Error> {
         store_epoch: StoreEpoch(1),
     };
 
-    let locally_allowed = BTreeSet::from([NamespaceId::new("a"), NamespaceId::new("b")]);
+    let locally_allowed = BTreeSet::from([NamespaceId("a".into()), NamespaceId("b".into())]);
 
     let model = HandshakeModel {
         local_store,
@@ -227,10 +225,35 @@ fn main() -> Result<(), pico_args::Error> {
     };
 
     let mut args = pico_args::Arguments::from_env();
-    model
-        .checker()
-        .threads(num_cpus::get())
-        .timeout_duration(Duration::from_secs(20))
-        .command(args.finish())?
-        .run()
+    match args.subcommand()?.as_deref() {
+        Some("explore") => {
+            let address = args
+                .opt_free_from_str()?
+                .unwrap_or("localhost:3000".to_string());
+            println!("Exploring identity handshake state space on {address}.");
+            model
+                .clone()
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(20))
+                .serve(address);
+        }
+        Some("check") | None => {
+            println!("Model checking identity handshake.");
+            model
+                .clone()
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(20))
+                .spawn_dfs()
+                .report(&mut WriteReporter::new(&mut std::io::stdout()));
+        }
+        _ => {
+            println!("USAGE:");
+            println!("  identity_handshake check");
+            println!("  identity_handshake explore [ADDRESS]");
+        }
+    }
+
+    Ok(())
 }

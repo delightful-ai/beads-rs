@@ -8,7 +8,7 @@
 //! **Intentionally abstract**:
 //! - no hashing, no bytes, no namespaces. We model one (ns, origin) stream.
 
-use stateright::{Model, Property};
+use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -163,12 +163,12 @@ impl Model for SessionCoordinator {
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
             // Safety: session never "gets ahead" of coordinator truth.
-            Property::always("session durable never exceeds coordinator durable", |_, s| {
+            Property::always("session durable never exceeds coordinator durable", |_, s: &State| {
                 s.session_durable <= s.coord_durable
             }),
 
             // Safety: any pending ingest must start at session_durable+1.
-            Property::always("pending ingest starts at next expected", |_, s| {
+            Property::always("pending ingest starts at next expected", |_, s: &State| {
                 if let Some(batch) = &s.pending_ingest {
                     let expected = s.session_durable + 1;
                     batch.first().copied() == Some(expected)
@@ -181,13 +181,13 @@ impl Model for SessionCoordinator {
             }),
 
             // Safety: coordinator durable is exactly the max element in the log (contiguous ingest).
-            Property::always("coordinator durable matches its log max", |_, s| {
+            Property::always("coordinator durable matches its log max", |_, s: &State| {
                 let max = s.coord_log.iter().copied().max().unwrap_or(0);
                 max == s.coord_durable
             }),
 
             // Liveness-ish: system can reach full catch-up.
-            Property::sometimes("can fully replicate", |_, s| {
+            Property::sometimes("can fully replicate", |_, s: &State| {
                 s.coord_durable == MAX_SEQ && s.session_durable == MAX_SEQ
             }),
         ]
@@ -197,10 +197,34 @@ impl Model for SessionCoordinator {
 fn main() -> Result<(), pico_args::Error> {
     env_logger::init();
 
-    SessionCoordinator
-        .checker()
-        .threads(num_cpus::get())
-        .timeout_duration(Duration::from_secs(60))
-        .command(pico_args::Arguments::from_env().finish())?
-        .run()
+    let mut args = pico_args::Arguments::from_env();
+    match args.subcommand()?.as_deref() {
+        Some("explore") => {
+            let address = args
+                .opt_free_from_str()?
+                .unwrap_or("localhost:3000".to_string());
+            println!("Exploring session/coordinator boundary on {address}.");
+            SessionCoordinator
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .serve(address);
+        }
+        Some("check") | None => {
+            println!("Model checking session/coordinator boundary.");
+            SessionCoordinator
+                .checker()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .spawn_dfs()
+                .report(&mut WriteReporter::new(&mut std::io::stdout()));
+        }
+        _ => {
+            println!("USAGE:");
+            println!("  session_coordinator_boundary check");
+            println!("  session_coordinator_boundary explore [ADDRESS]");
+        }
+    }
+
+    Ok(())
 }
