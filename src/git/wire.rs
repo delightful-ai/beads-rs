@@ -233,7 +233,7 @@ pub fn serialize_meta(
 
 /// Parse state.jsonl bytes into beads.
 pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
-    let content = String::from_utf8(bytes.to_vec())?;
+    let content = parse_utf8(bytes)?;
     let mut beads = Vec::new();
 
     for line in content.lines() {
@@ -250,7 +250,7 @@ pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
 
 /// Parse tombstones.jsonl bytes.
 pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
-    let content = String::from_utf8(bytes.to_vec())?;
+    let content = parse_utf8(bytes)?;
     let mut tombs = Vec::new();
 
     for line in content.lines() {
@@ -296,7 +296,7 @@ pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
 
 /// Parse deps.jsonl bytes.
 pub fn parse_deps(bytes: &[u8]) -> Result<Vec<(DepKey, DepEdge)>, WireError> {
-    let content = String::from_utf8(bytes.to_vec())?;
+    let content = parse_utf8(bytes)?;
     let mut deps = Vec::new();
 
     for line in content.lines() {
@@ -341,13 +341,18 @@ pub struct ParsedMeta {
 
 /// Parse meta.json bytes.
 pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
-    let content = String::from_utf8(bytes.to_vec())?;
+    let content = parse_utf8(bytes)?;
     let meta: WireMeta = serde_json::from_str(&content)?;
     Ok(ParsedMeta {
         format_version: meta.format_version,
         root_slug: meta.root_slug,
         last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
     })
+}
+
+fn parse_utf8(bytes: &[u8]) -> Result<&str, WireError> {
+    std::str::from_utf8(bytes)
+        .map_err(|e| WireError::InvalidValue(format!("utf-8 error: {e}")))
 }
 
 // =============================================================================
