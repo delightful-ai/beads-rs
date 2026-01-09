@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## Version Control
+
+We use `jj` for our version control so we can easily put changes together. As you make chunks of changes, please jj describe your changes so they're tracked.
+
 ## Issue Tracking
 
 **bd** is infrastructure for you, the agent. It's your external memory.
