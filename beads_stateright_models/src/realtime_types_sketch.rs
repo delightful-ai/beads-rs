@@ -21,6 +21,7 @@
 //!   - Replication protocol messages and rules: Plan §9
 //!   - Bounds: Plan §0.19
 //!   - Idempotency and receipts: Plan §0.11, §8.2
+//!   - Durability classes and coordinator rules: Plan §10
 //!
 //! The goal here is not to “implement everything”, but to make invalid states difficult to
 //! represent and easy to detect at boundaries.
@@ -53,6 +54,7 @@
 //! - Identity machine: StoreId / StoreEpoch / ReplicaId gating (Plan §0.1, §2.1)
 //! - CBOR+hash machine: canonical preimage vs envelope bytes, unknown-key preservation (Plan §0.6)
 //! - Watermark machine: applied vs durable, contiguity vs monotonic observation (Plan §0.12)
+//! - Durability receipt machine: idempotency records and durability classes (Plan §0.11, §10)
 //! - Equivocation machine: same EventId different sha is fatal (Plan §9.4)
 //! - Gap/WANT machine: buffer bounded gaps, WANT missing prefix, never skip gaps (Plan §9.4, §9.8)
 //! - Replication session phases: handshake -> syncing -> live -> closing (Plan §9.3 / §9.8)
@@ -109,6 +111,58 @@ pub struct Limits {
     pub max_repl_gap_bytes: usize,
     pub repl_gap_timeout_ms: u64,
 
+    /// Keepalive/dead connection detection (Plan §0.19).
+    pub keepalive_ms: u64,
+    pub dead_ms: u64,
+
+    /// WAL segment lifecycle (Plan §0.9).
+    pub wal_segment_max_bytes: usize,
+    pub wal_segment_max_age_ms: u64,
+
+    /// Group commit bounds (Plan §0.19).
+    pub wal_group_commit_max_latency_ms: u64,
+    pub wal_group_commit_max_events: usize,
+    pub wal_group_commit_max_bytes: usize,
+
+    /// Replica ingest queue bounds (Plan §0.19).
+    pub max_repl_ingest_queue_bytes: usize,
+    pub max_repl_ingest_queue_events: usize,
+
+    /// IPC and background queues (Plan §0.19).
+    pub max_ipc_inflight_mutations: usize,
+    pub max_checkpoint_job_queue: usize,
+    pub max_broadcast_subscribers: usize,
+
+    /// Hot cache bounds (Plan §0.19).
+    pub event_hot_cache_max_bytes: usize,
+    pub event_hot_cache_max_events: usize,
+
+    /// Per-origin batching fairness (Plan §9.8).
+    pub max_events_per_origin_per_batch: usize,
+    pub max_bytes_per_origin_per_batch: usize,
+
+    /// Snapshot bounds (Plan §0.19, §13.9.1).
+    pub max_snapshot_bytes: usize,
+    pub max_snapshot_entries: usize,
+    pub max_snapshot_entry_bytes: usize,
+    pub max_concurrent_snapshots: usize,
+    pub max_jsonl_line_bytes: usize,
+    pub max_jsonl_shard_bytes: usize,
+
+    /// CBOR decode limits (Plan §0.19).
+    pub max_cbor_depth: usize,
+    pub max_cbor_map_entries: usize,
+    pub max_cbor_array_entries: usize,
+    pub max_cbor_bytes_string_len: usize,
+    pub max_cbor_text_string_len: usize,
+
+    /// Rate limits (Plan §0.19).
+    pub max_repl_ingest_bytes_per_sec: usize,
+    pub max_background_io_bytes_per_sec: usize,
+
+    /// HLC safety bound (Plan §0.19).
+    pub hlc_max_forward_drift_ms: u64,
+
     /// Content-level bounds (Plan §0.19)
     pub max_note_bytes: usize,
     pub max_ops_per_txn: usize,
@@ -127,6 +181,47 @@ impl Default for Limits {
             max_repl_gap_events: 50_000,
             max_repl_gap_bytes: 32 * 1024 * 1024,
             repl_gap_timeout_ms: 30_000,
+
+            keepalive_ms: 5_000,
+            dead_ms: 30_000,
+
+            wal_segment_max_bytes: 32 * 1024 * 1024,
+            wal_segment_max_age_ms: 60_000,
+
+            wal_group_commit_max_latency_ms: 2,
+            wal_group_commit_max_events: 64,
+            wal_group_commit_max_bytes: 1 * 1024 * 1024,
+
+            max_repl_ingest_queue_bytes: 32 * 1024 * 1024,
+            max_repl_ingest_queue_events: 50_000,
+
+            max_ipc_inflight_mutations: 1024,
+            max_checkpoint_job_queue: 8,
+            max_broadcast_subscribers: 256,
+
+            event_hot_cache_max_bytes: 64 * 1024 * 1024,
+            event_hot_cache_max_events: 200_000,
+
+            max_events_per_origin_per_batch: 1024,
+            max_bytes_per_origin_per_batch: 1 * 1024 * 1024,
+
+            max_snapshot_bytes: 512 * 1024 * 1024,
+            max_snapshot_entries: 200_000,
+            max_snapshot_entry_bytes: 64 * 1024 * 1024,
+            max_concurrent_snapshots: 1,
+            max_jsonl_line_bytes: 4 * 1024 * 1024,
+            max_jsonl_shard_bytes: 256 * 1024 * 1024,
+
+            max_cbor_depth: 32,
+            max_cbor_map_entries: 10_000,
+            max_cbor_array_entries: 10_000,
+            max_cbor_bytes_string_len: 16 * 1024 * 1024,
+            max_cbor_text_string_len: 16 * 1024 * 1024,
+
+            max_repl_ingest_bytes_per_sec: 64 * 1024 * 1024,
+            max_background_io_bytes_per_sec: 128 * 1024 * 1024,
+
+            hlc_max_forward_drift_ms: 600_000,
 
             max_note_bytes: 64 * 1024,
             max_ops_per_txn: 10_000,
@@ -160,10 +255,32 @@ pub struct TxnId(pub Uuid);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClientRequestId(pub Uuid);
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SegmentId(pub Uuid);
+
+/// Digest of a canonicalized client request (Plan §0.11 idempotency safety).
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestDigest(pub [u8; 32]);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreIdentity {
     pub store_id: StoreId,
     pub store_epoch: StoreEpoch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreMeta {
+    pub store_id: StoreId,
+    pub store_epoch: StoreEpoch,
+    pub replica_id: ReplicaId,
+    pub store_format_version: u32,
+    pub wal_format_version: u32,
+    pub checkpoint_format_version: u32,
+    pub replication_protocol_version: u32,
+    pub index_schema_version: u32,
+    pub created_at_ms: u64,
 }
 
 // =================================================================================================
@@ -434,6 +551,46 @@ pub struct AppliedDurableWatermarks {
     pub durable: Watermarks<Durable>,
 }
 
+/// Head sha map keyed by (namespace, origin). Entries may be omitted for seq=0 (Plan §0.12.1).
+pub type WatermarkHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Sha256>>;
+
+// =================================================================================================
+// 6.1 Durability classes and receipts (Plan §10, §0.11)
+// =================================================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DurabilityClass {
+    LocalFsync,
+    ReplicatedFsync(u8),
+    GitCheckpointed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurabilityReceipt {
+    pub txn_id: TxnId,
+    pub event_ids: Vec<EventId>,
+    pub requested: DurabilityClass,
+    pub achieved: DurabilityClass,
+    /// Applied watermark snapshot at commit time (Plan §0.12).
+    pub min_seen: Watermarks<Applied>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReceiptState {
+    Pending,
+    Committed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientRequestRecord {
+    pub namespace: NamespaceId,
+    pub origin_replica_id: ReplicaId,
+    pub client_request_id: ClientRequestId,
+    pub request_digest: RequestDigest,
+    pub state: ReceiptState,
+    pub receipt: Option<DurabilityReceipt>,
+}
+
 // =================================================================================================
 // 7. Event identity and prev link (Plan §2.1 EventId; Plan §0.12.1 continuity)
 // =================================================================================================
@@ -632,6 +789,10 @@ pub enum ValidationError {
     BatchTooManyEvents { max: usize },
     #[error("batch exceeds max bytes {max}")]
     BatchTooManyBytes { max: usize },
+    #[error("batch exceeds max events per origin {max}")]
+    BatchTooManyEventsPerOrigin { max: usize },
+    #[error("batch exceeds max bytes per origin {max}")]
+    BatchTooManyBytesPerOrigin { max: usize },
     #[error("frame exceeds negotiated max_frame_bytes {max}")]
     FrameTooLarge { max: usize },
 }
@@ -799,6 +960,9 @@ pub struct HelloV1 {
     pub requested_namespaces: Vec<NamespaceId>,
     pub offered_namespaces: Vec<NamespaceId>,
     pub seen_durable: Watermarks<Durable>,
+    pub seen_durable_heads: Option<WatermarkHeads>,
+    pub seen_applied: Option<Watermarks<Applied>>,
+    pub seen_applied_heads: Option<WatermarkHeads>,
 }
 
 #[derive(Clone, Debug)]
@@ -809,13 +973,18 @@ pub struct WelcomeV1 {
     pub receiver_replica_id: ReplicaId,
     pub accepted_namespaces: Vec<NamespaceId>,
     pub receiver_seen_durable: Watermarks<Durable>,
+    pub receiver_seen_durable_heads: Option<WatermarkHeads>,
+    pub receiver_seen_applied: Option<Watermarks<Applied>>,
+    pub receiver_seen_applied_heads: Option<WatermarkHeads>,
     pub max_frame_bytes: u32,
 }
 
 #[derive(Clone, Debug)]
 pub struct AckV1 {
     pub durable: Watermarks<Durable>,
+    pub durable_heads: Option<WatermarkHeads>,
     pub applied: Option<Watermarks<Applied>>,
+    pub applied_heads: Option<WatermarkHeads>,
 }
 
 #[derive(Clone, Debug)]
@@ -869,6 +1038,8 @@ pub fn validate_events_batch(frames: &[EventFrameV1], limits: &Limits, negotiate
 
     let mut total = 0usize;
     let mut last_seq: BTreeMap<(NamespaceId, ReplicaId), u64> = BTreeMap::new();
+    let mut per_origin_events: BTreeMap<(NamespaceId, ReplicaId), usize> = BTreeMap::new();
+    let mut per_origin_bytes: BTreeMap<(NamespaceId, ReplicaId), usize> = BTreeMap::new();
 
     for f in frames {
         let len = f.bytes.0.len();
@@ -893,7 +1064,23 @@ pub fn validate_events_batch(frames: &[EventFrameV1], limits: &Limits, negotiate
                 return Err(ValidationError::BatchTooManyEvents { max: limits.max_event_batch_events });
             }
         }
-        last_seq.insert(key, s);
+        last_seq.insert(key.clone(), s);
+
+        let events = per_origin_events.entry(key.clone()).or_insert(0);
+        *events += 1;
+        if *events > limits.max_events_per_origin_per_batch {
+            return Err(ValidationError::BatchTooManyEventsPerOrigin {
+                max: limits.max_events_per_origin_per_batch,
+            });
+        }
+
+        let bytes = per_origin_bytes.entry(key).or_insert(0);
+        *bytes = bytes.saturating_add(len);
+        if *bytes > limits.max_bytes_per_origin_per_batch {
+            return Err(ValidationError::BatchTooManyBytesPerOrigin {
+                max: limits.max_bytes_per_origin_per_batch,
+            });
+        }
     }
 
     Ok(())
@@ -1595,4 +1782,3 @@ fn main() {
     // This is a types-first, literate module.
     // The “executable” property means it compiles and can be imported by models/tests.
 }
-
