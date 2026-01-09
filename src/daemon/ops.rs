@@ -378,6 +378,16 @@ pub enum OpError {
     #[error("dependency not found")]
     DepNotFound,
 
+    #[error(
+        "initial fetch timed out after {timeout_secs}s for {repo} (remote: {remote}). \
+Check SSH auth (ssh-add -l) or run `git fetch origin refs/heads/beads/store:refs/remotes/origin/beads/store`."
+    )]
+    LoadTimeout {
+        repo: PathBuf,
+        timeout_secs: u64,
+        remote: String,
+    },
+
     #[error("daemon internal error: {0}")]
     Internal(&'static str),
 }
@@ -401,6 +411,7 @@ impl OpError {
             OpError::WalMerge { .. } => "wal_merge_conflict",
             OpError::NotClaimedByYou => "not_claimed_by_you",
             OpError::DepNotFound => "dep_not_found",
+            OpError::LoadTimeout { .. } => "load_timeout",
             OpError::Internal(_) => "internal",
         }
     }
@@ -426,6 +437,7 @@ impl OpError {
             | OpError::BeadDeleted(_)
             | OpError::NotClaimedByYou
             | OpError::DepNotFound => Transience::Permanent,
+            OpError::LoadTimeout { .. } => Transience::Retryable,
             OpError::Internal(_) => Transience::Retryable,
         }
     }

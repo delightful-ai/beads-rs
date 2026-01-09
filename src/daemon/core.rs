@@ -11,7 +11,7 @@ use crossbeam::channel::Sender;
 use git2::Repository;
 
 use super::Clock;
-use super::git_worker::GitOp;
+use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{ErrorPayload, Request, Response, ResponsePayload};
 use super::ops::OpError;
 use super::query::QueryResult;
@@ -24,8 +24,8 @@ use super::wal::{Wal, WalEntry};
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
 
-/// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded` or
-/// `Daemon::ensure_repo_fresh`.
+/// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded`,
+/// `Daemon::ensure_repo_loaded_strict`, or `Daemon::ensure_repo_fresh`.
 ///
 /// This type signals that a repo should exist in the daemon's state; accessors
 /// still return Internal if the invariant is violated.
@@ -45,6 +45,7 @@ use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::sync::SyncOutcome;
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
+const LOAD_TIMEOUT_SECS: u64 = 30;
 
 /// The daemon coordinator.
 ///
@@ -173,10 +174,9 @@ impl Daemon {
         Ok(remote)
     }
 
-    /// Ensure repo is loaded, fetching from git if needed.
+    /// Ensure repo is loaded using cached refs, without blocking on network fetch.
     ///
-    /// This is a blocking operation - sends Load to git thread and waits.
-    /// Returns a `LoadedRemote` proof that can be used for infallible state access.
+    /// If no local refs exist, this will attempt a one-time fetch with a bounded timeout.
     pub fn ensure_repo_loaded(
         &mut self,
         repo: &Path,
@@ -186,7 +186,75 @@ impl Daemon {
         self.path_to_remote.insert(repo.to_owned(), remote.clone());
 
         if !self.repos.contains_key(&remote) {
+            let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+            git_tx
+                .send(GitOp::LoadLocal {
+                    repo: repo.to_owned(),
+                    respond: respond_tx,
+                })
+                .map_err(|_| OpError::Internal("git thread not responding"))?;
+
+            match respond_rx.recv() {
+                Ok(Ok(loaded)) => {
+                    self.apply_loaded_repo_state(&remote, repo, loaded)?;
+                }
+                Ok(Err(SyncError::NoLocalRef(_))) => {
+                    // No cached refs; attempt a bounded fetch to discover remote state.
+                    let timeout = load_timeout();
+                    let (fetch_tx, fetch_rx) = crossbeam::channel::bounded(1);
+                    git_tx
+                        .send(GitOp::Load {
+                            repo: repo.to_owned(),
+                            respond: fetch_tx,
+                        })
+                        .map_err(|_| OpError::Internal("git thread not responding"))?;
+
+                    match fetch_rx.recv_timeout(timeout) {
+                        Ok(Ok(loaded)) => {
+                            self.apply_loaded_repo_state(&remote, repo, loaded)?;
+                        }
+                        Ok(Err(SyncError::NoLocalRef(_))) => {
+                            return Err(OpError::RepoNotInitialized(repo.to_owned()));
+                        }
+                        Ok(Err(e)) => return Err(OpError::Sync(e)),
+                        Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                            return Err(OpError::LoadTimeout {
+                                repo: repo.to_owned(),
+                                timeout_secs: timeout.as_secs(),
+                                remote: remote.as_str().to_string(),
+                            });
+                        }
+                        Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                            return Err(OpError::Internal("git thread died"));
+                        }
+                    }
+                }
+                Ok(Err(e)) => return Err(OpError::Sync(e)),
+                Err(_) => return Err(OpError::Internal("git thread died")),
+            }
+        } else if let Some(repo_state) = self.repos.get_mut(&remote) {
+            repo_state.register_path(repo.to_owned());
+            self.export_go_compat(&remote);
+        }
+
+        Ok(LoadedRemote(remote))
+    }
+
+    /// Ensure repo is loaded, fetching from git if needed.
+    ///
+    /// This is a blocking operation - sends Load to git thread and waits with a bounded
+    /// timeout for the initial fetch. Returns a `LoadedRemote` proof for state access.
+    pub fn ensure_repo_loaded_strict(
+        &mut self,
+        repo: &Path,
+        git_tx: &Sender<GitOp>,
+    ) -> Result<LoadedRemote, OpError> {
+        let remote = self.resolve_remote(repo)?;
+        self.path_to_remote.insert(repo.to_owned(), remote.clone());
+
+        if !self.repos.contains_key(&remote) {
             // Blocking load from git (fetches remote first in GitWorker).
+            let timeout = load_timeout();
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
             git_tx
                 .send(GitOp::Load {
@@ -195,93 +263,9 @@ impl Daemon {
                 })
                 .map_err(|_| OpError::Internal("git thread not responding"))?;
 
-            match respond_rx.recv() {
+            match respond_rx.recv_timeout(timeout) {
                 Ok(Ok(loaded)) => {
-                    let mut last_seen_stamp = loaded.last_seen_stamp;
-                    if let Some(max_stamp) = last_seen_stamp.as_ref() {
-                        self.clock.receive(max_stamp);
-                    }
-                    let mut needs_sync = loaded.needs_sync;
-                    let mut state = loaded.state;
-                    let mut root_slug = loaded.root_slug;
-
-                    // WAL recovery: merge any state from WAL file
-                    match self.wal.read(&remote) {
-                        Ok(Some(wal_entry)) => {
-                            tracing::info!(
-                                "recovering WAL for {:?} (sequence {})",
-                                remote,
-                                wal_entry.sequence
-                            );
-
-                            // Advance clock for WAL timestamps
-                            if let Some(max_stamp) = wal_entry.state.max_write_stamp() {
-                                self.clock.receive(&max_stamp);
-                                last_seen_stamp = max_write_stamp(last_seen_stamp, Some(max_stamp));
-                            }
-
-                            // CRDT merge WAL state with git state
-                            match CanonicalState::join(&state, &wal_entry.state) {
-                                Ok(merged) => {
-                                    state = merged;
-                                    // WAL slug takes precedence if set
-                                    if wal_entry.root_slug.is_some() {
-                                        root_slug = wal_entry.root_slug;
-                                    }
-                                    // WAL had data - need to sync it to remote
-                                    needs_sync = true;
-                                }
-                                Err(errs) => {
-                                    return Err(OpError::WalMerge { errors: errs });
-                                }
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            return Err(OpError::Wal(e));
-                        }
-                    }
-
-                    last_seen_stamp = max_write_stamp(last_seen_stamp, state.max_write_stamp());
-
-                    let now_wall_ms = WallClock::now().0;
-                    let clock_skew = last_seen_stamp
-                        .as_ref()
-                        .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
-
-                    let mut repo_state =
-                        RepoState::with_state_and_path(state, root_slug, repo.to_owned());
-                    repo_state.last_seen_stamp = last_seen_stamp;
-                    repo_state.last_clock_skew = clock_skew;
-                    repo_state.last_fetch_error =
-                        loaded.fetch_error.map(|message| FetchErrorRecord {
-                            message,
-                            wall_ms: now_wall_ms,
-                        });
-                    repo_state.last_divergence =
-                        loaded.divergence.map(|divergence| DivergenceRecord {
-                            local_oid: divergence.local_oid.to_string(),
-                            remote_oid: divergence.remote_oid.to_string(),
-                            wall_ms: now_wall_ms,
-                        });
-                    repo_state.last_force_push =
-                        loaded.force_push.map(|force_push| ForcePushRecord {
-                            previous_remote_oid: force_push.previous_remote_oid.to_string(),
-                            remote_oid: force_push.remote_oid.to_string(),
-                            wall_ms: now_wall_ms,
-                        });
-
-                    // If local/WAL has changes that remote doesn't (crash recovery),
-                    // mark dirty so sync will push those changes.
-                    if needs_sync {
-                        repo_state.mark_dirty();
-                        self.scheduler.schedule(remote.clone());
-                    }
-
-                    self.repos.insert(remote.clone(), repo_state);
-
-                    // Initial Go-compat export for newly loaded repo
-                    self.export_go_compat(&remote);
+                    self.apply_loaded_repo_state(&remote, repo, loaded)?;
                 }
                 Ok(Err(SyncError::NoLocalRef(_))) => {
                     return Err(OpError::RepoNotInitialized(repo.to_owned()));
@@ -289,7 +273,14 @@ impl Daemon {
                 Ok(Err(e)) => {
                     return Err(OpError::Sync(e));
                 }
-                Err(_) => {
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                    return Err(OpError::LoadTimeout {
+                        repo: repo.to_owned(),
+                        timeout_secs: timeout.as_secs(),
+                        remote: remote.as_str().to_string(),
+                    });
+                }
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                     return Err(OpError::Internal("git thread died"));
                 }
             }
@@ -301,6 +292,96 @@ impl Daemon {
         }
 
         Ok(LoadedRemote(remote))
+    }
+
+    fn apply_loaded_repo_state(
+        &mut self,
+        remote: &RemoteUrl,
+        repo: &Path,
+        loaded: LoadResult,
+    ) -> Result<(), OpError> {
+        let mut last_seen_stamp = loaded.last_seen_stamp;
+        if let Some(max_stamp) = last_seen_stamp.as_ref() {
+            self.clock.receive(max_stamp);
+        }
+        let mut needs_sync = loaded.needs_sync;
+        let mut state = loaded.state;
+        let mut root_slug = loaded.root_slug;
+
+        // WAL recovery: merge any state from WAL file
+        match self.wal.read(remote) {
+            Ok(Some(wal_entry)) => {
+                tracing::info!(
+                    "recovering WAL for {:?} (sequence {})",
+                    remote,
+                    wal_entry.sequence
+                );
+
+                // Advance clock for WAL timestamps
+                if let Some(max_stamp) = wal_entry.state.max_write_stamp() {
+                    self.clock.receive(&max_stamp);
+                    last_seen_stamp = max_write_stamp(last_seen_stamp, Some(max_stamp));
+                }
+
+                // CRDT merge WAL state with git state
+                match CanonicalState::join(&state, &wal_entry.state) {
+                    Ok(merged) => {
+                        state = merged;
+                        // WAL slug takes precedence if set
+                        if wal_entry.root_slug.is_some() {
+                            root_slug = wal_entry.root_slug;
+                        }
+                        // WAL had data - need to sync it to remote
+                        needs_sync = true;
+                    }
+                    Err(errs) => {
+                        return Err(OpError::WalMerge { errors: errs });
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(OpError::Wal(e));
+            }
+        }
+
+        last_seen_stamp = max_write_stamp(last_seen_stamp, state.max_write_stamp());
+
+        let now_wall_ms = WallClock::now().0;
+        let clock_skew = last_seen_stamp
+            .as_ref()
+            .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
+
+        let mut repo_state = RepoState::with_state_and_path(state, root_slug, repo.to_owned());
+        repo_state.last_seen_stamp = last_seen_stamp;
+        repo_state.last_clock_skew = clock_skew;
+        repo_state.last_fetch_error = loaded.fetch_error.map(|message| FetchErrorRecord {
+            message,
+            wall_ms: now_wall_ms,
+        });
+        repo_state.last_divergence = loaded.divergence.map(|divergence| DivergenceRecord {
+            local_oid: divergence.local_oid.to_string(),
+            remote_oid: divergence.remote_oid.to_string(),
+            wall_ms: now_wall_ms,
+        });
+        repo_state.last_force_push = loaded.force_push.map(|force_push| ForcePushRecord {
+            previous_remote_oid: force_push.previous_remote_oid.to_string(),
+            remote_oid: force_push.remote_oid.to_string(),
+            wall_ms: now_wall_ms,
+        });
+
+        // If local/WAL has changes that remote doesn't (crash recovery),
+        // mark dirty so sync will push those changes.
+        if needs_sync {
+            repo_state.mark_dirty();
+            self.scheduler.schedule(remote.clone());
+        }
+
+        self.repos.insert(remote.clone(), repo_state);
+
+        // Initial Go-compat export for newly loaded repo
+        self.export_go_compat(remote);
+        Ok(())
     }
 
     /// Ensure repo is loaded and reasonably fresh from remote.
@@ -434,7 +515,7 @@ impl Daemon {
         self.repos.remove(&remote);
 
         // Now load fresh from git
-        self.ensure_repo_loaded(repo, git_tx)
+        self.ensure_repo_loaded_strict(repo, git_tx)
     }
 
     /// Maybe start a background sync for a repo.
@@ -997,6 +1078,14 @@ fn error_payload(code: &str, message: &str) -> ErrorPayload {
         message: message.to_string(),
         details: None,
     }
+}
+
+fn load_timeout() -> Duration {
+    let override_secs = std::env::var("BD_LOAD_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|v| *v > 0);
+    Duration::from_secs(override_secs.unwrap_or(LOAD_TIMEOUT_SECS))
 }
 
 const CLOCK_SKEW_WARN_MS: u64 = 5 * 60 * 1000;

@@ -7,7 +7,7 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::path::{Path, PathBuf};
 
 use crossbeam::channel::{Receiver, Sender};
-use git2::Repository;
+use git2::{ErrorCode, Oid, Repository};
 
 use super::remote::RemoteUrl;
 use crate::core::{ActorId, CanonicalState, Stamp, WriteStamp};
@@ -45,6 +45,12 @@ pub enum GitResult {
 
 /// Operations sent from state thread to git thread.
 pub enum GitOp {
+    /// Load state from local refs only (no network).
+    LoadLocal {
+        repo: PathBuf,
+        respond: Sender<Result<LoadResult, SyncError>>,
+    },
+
     /// Load state from git ref (blocking - first access to a repo).
     Load {
         repo: PathBuf,
@@ -137,34 +143,70 @@ impl GitWorker {
         let force_push = fetched.phase.force_push.clone();
 
         // Step 3: CRDT merge - both local and remote are authoritative
-        let merged = CanonicalState::join(&local_state, &remote_state)
-            .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
-
-        // Prefer local slug if set, else remote
-        let root_slug = local_slug.or(remote_slug);
-
-        // Check if local has changes that remote doesn't.
-        // Simple heuristic: if merged has more items than remote, local had new data.
-        // This catches the common case of local-only commits. False negatives are
-        // acceptable (sync will happen eventually), false positives just trigger
-        // an extra sync that finds nothing to push.
-        let needs_sync = merged.live_count() > remote_state.live_count()
-            || merged.tombstone_count() > remote_state.tombstone_count()
-            || merged.dep_count() > remote_state.dep_count();
-
-        let merged_stamp = merged.max_write_stamp();
-        let meta_stamp = max_write_stamp(local_meta_stamp, remote_meta_stamp);
-        let last_seen_stamp = max_write_stamp(merged_stamp, meta_stamp);
-
-        Ok(LoadResult {
-            state: merged,
-            root_slug,
-            needs_sync,
-            last_seen_stamp,
+        build_load_result(
+            local_state,
+            local_slug,
+            local_meta_stamp,
+            remote_state,
+            remote_slug,
+            remote_meta_stamp,
             fetch_error,
             divergence,
             force_push,
-        })
+        )
+    }
+
+    /// Load state using only local refs (no network).
+    pub fn load_local(&mut self, path: &Path) -> Result<LoadResult, SyncError> {
+        use crate::core::CanonicalState;
+        use crate::git::sync::read_state_at_oid;
+
+        let repo = self.open(path)?;
+
+        let local_oid_opt = refname_to_id_optional(repo, "refs/heads/beads/store")?;
+        let remote_oid_opt = refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?;
+
+        if local_oid_opt.is_none() && remote_oid_opt.is_none() {
+            return Err(SyncError::NoLocalRef(path.display().to_string()));
+        }
+
+        let (local_state, local_slug, local_meta_stamp) = match local_oid_opt {
+            Some(oid) => {
+                let loaded = read_state_at_oid(repo, oid)?;
+                (loaded.state, loaded.root_slug, loaded.last_write_stamp)
+            }
+            None => (CanonicalState::new(), None, None),
+        };
+
+        let (remote_state, remote_slug, remote_meta_stamp) = match remote_oid_opt {
+            Some(oid) => {
+                let loaded = read_state_at_oid(repo, oid)?;
+                (loaded.state, loaded.root_slug, loaded.last_write_stamp)
+            }
+            None => {
+                if local_oid_opt.is_some() {
+                    (
+                        local_state.clone(),
+                        local_slug.clone(),
+                        local_meta_stamp.clone(),
+                    )
+                } else {
+                    (CanonicalState::new(), None, None)
+                }
+            }
+        };
+
+        build_load_result(
+            local_state,
+            local_slug,
+            local_meta_stamp,
+            remote_state,
+            remote_slug,
+            remote_meta_stamp,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Sync local state to remote.
@@ -192,6 +234,11 @@ impl GitWorker {
     /// Process a single GitOp.
     fn handle_op(&mut self, op: GitOp) -> bool {
         match op {
+            GitOp::LoadLocal { repo, respond } => {
+                let result = self.load_local(&repo);
+                let _ = respond.send(result);
+            }
+
             GitOp::Load { repo, respond } => {
                 let result = self.load(&repo);
                 let _ = respond.send(result);
@@ -222,6 +269,56 @@ impl GitWorker {
             }
         }
         true // Continue processing
+    }
+}
+
+fn build_load_result(
+    local_state: CanonicalState,
+    local_slug: Option<String>,
+    local_meta_stamp: Option<WriteStamp>,
+    remote_state: CanonicalState,
+    remote_slug: Option<String>,
+    remote_meta_stamp: Option<WriteStamp>,
+    fetch_error: Option<String>,
+    divergence: Option<DivergenceInfo>,
+    force_push: Option<crate::git::sync::ForcePushInfo>,
+) -> Result<LoadResult, SyncError> {
+    let merged =
+        CanonicalState::join(&local_state, &remote_state).map_err(|errs| SyncError::MergeConflict {
+            errors: errs,
+        })?;
+
+    let root_slug = local_slug.or(remote_slug);
+
+    // Check if local has changes that remote doesn't.
+    // Simple heuristic: if merged has more items than remote, local had new data.
+    // This catches the common case of local-only commits. False negatives are
+    // acceptable (sync will happen eventually), false positives just trigger
+    // an extra sync that finds nothing to push.
+    let needs_sync = merged.live_count() > remote_state.live_count()
+        || merged.tombstone_count() > remote_state.tombstone_count()
+        || merged.dep_count() > remote_state.dep_count();
+
+    let merged_stamp = merged.max_write_stamp();
+    let meta_stamp = max_write_stamp(local_meta_stamp, remote_meta_stamp);
+    let last_seen_stamp = max_write_stamp(merged_stamp, meta_stamp);
+
+    Ok(LoadResult {
+        state: merged,
+        root_slug,
+        needs_sync,
+        last_seen_stamp,
+        fetch_error,
+        divergence,
+        force_push,
+    })
+}
+
+fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, SyncError> {
+    match repo.refname_to_id(name) {
+        Ok(oid) => Ok(Some(oid)),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(SyncError::Git(e)),
     }
 }
 

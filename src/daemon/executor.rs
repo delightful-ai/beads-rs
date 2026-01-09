@@ -68,7 +68,7 @@ impl Daemon {
             });
         }
 
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -257,7 +257,7 @@ impl Daemon {
             return Response::err(e);
         }
 
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -373,7 +373,7 @@ impl Daemon {
         on_branch: Option<String>,
         _git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -413,7 +413,7 @@ impl Daemon {
 
     /// Reopen a closed bead.
     pub fn apply_reopen(&mut self, repo: &Path, id: &BeadId, _git_tx: &Sender<GitOp>) -> Response {
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -459,7 +459,7 @@ impl Daemon {
         reason: Option<String>,
         _git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -508,7 +508,7 @@ impl Daemon {
             }
         };
 
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -575,7 +575,7 @@ impl Daemon {
             }
         };
 
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -604,7 +604,7 @@ impl Daemon {
         content: String,
         _git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -646,7 +646,7 @@ impl Daemon {
         lease_secs: u64,
         _git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -694,7 +694,7 @@ impl Daemon {
 
     /// Release a claim.
     pub fn apply_unclaim(&mut self, repo: &Path, id: &BeadId, _git_tx: &Sender<GitOp>) -> Response {
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
@@ -743,7 +743,7 @@ impl Daemon {
         lease_secs: u64,
         _git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded(repo, _git_tx) {
+        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
