@@ -14,7 +14,7 @@ use crossbeam::channel::Sender;
 use super::core::Daemon;
 use super::git_worker::GitOp;
 use super::ipc::{Response, ResponsePayload};
-use super::ops::{BeadPatch, MapLiveError, OpError, OpResult, Patch};
+use super::ops::{BeadPatch, MapLiveError, OpError, OpResult};
 use crate::core::{
     Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge, DepKey,
     DepKind, DepLife, DepSpec, Label, Labels, Lww, Note, NoteId, Priority, Tombstone, WallClock,
@@ -292,74 +292,7 @@ impl Daemon {
             let bead = state.require_live_mut(id).map_live_err(id)?;
 
             // Apply patch
-            if let Patch::Set(v) = patch.title {
-                bead.fields.title = Lww::new(v, stamp.clone());
-            }
-            if let Patch::Set(v) = patch.description {
-                bead.fields.description = Lww::new(v, stamp.clone());
-            }
-            match patch.design {
-                Patch::Set(v) => bead.fields.design = Lww::new(Some(v), stamp.clone()),
-                Patch::Clear => bead.fields.design = Lww::new(None, stamp.clone()),
-                Patch::Keep => {}
-            }
-            match patch.acceptance_criteria {
-                Patch::Set(v) => bead.fields.acceptance_criteria = Lww::new(Some(v), stamp.clone()),
-                Patch::Clear => bead.fields.acceptance_criteria = Lww::new(None, stamp.clone()),
-                Patch::Keep => {}
-            }
-            if let Patch::Set(v) = patch.priority {
-                bead.fields.priority = Lww::new(v, stamp.clone());
-            }
-            if let Patch::Set(v) = patch.bead_type {
-                bead.fields.bead_type = Lww::new(v, stamp.clone());
-            }
-            if let Patch::Set(v) = patch.labels {
-                let mut labels = Labels::new();
-                for raw in v {
-                    let label =
-                        crate::core::Label::parse(raw).map_err(|e| OpError::ValidationFailed {
-                            field: "labels".into(),
-                            reason: e.to_string(),
-                        })?;
-                    labels.insert(label);
-                }
-                bead.fields.labels = Lww::new(labels, stamp.clone());
-            }
-            match patch.external_ref {
-                Patch::Set(v) => bead.fields.external_ref = Lww::new(Some(v), stamp.clone()),
-                Patch::Clear => bead.fields.external_ref = Lww::new(None, stamp.clone()),
-                Patch::Keep => {}
-            }
-            match patch.source_repo {
-                Patch::Set(v) => bead.fields.source_repo = Lww::new(Some(v), stamp.clone()),
-                Patch::Clear => bead.fields.source_repo = Lww::new(None, stamp.clone()),
-                Patch::Keep => {}
-            }
-            match patch.estimated_minutes {
-                Patch::Set(v) => bead.fields.estimated_minutes = Lww::new(Some(v), stamp.clone()),
-                Patch::Clear => bead.fields.estimated_minutes = Lww::new(None, stamp.clone()),
-                Patch::Keep => {}
-            }
-            // Handle status changes via workflow transitions
-            if let Patch::Set(status) = patch.status {
-                match status.as_str() {
-                    "open" => bead.fields.workflow = Lww::new(Workflow::Open, stamp.clone()),
-                    "in_progress" => {
-                        bead.fields.workflow = Lww::new(Workflow::InProgress, stamp.clone())
-                    }
-                    "closed" => {
-                        let closure = Closure::new(None, None);
-                        bead.fields.workflow = Lww::new(Workflow::Closed(closure), stamp.clone());
-                    }
-                    other => {
-                        return Err(OpError::ValidationFailed {
-                            field: "status".into(),
-                            reason: format!("unknown status {other:?}"),
-                        });
-                    }
-                }
-            }
+            patch.apply_to_fields(&mut bead.fields, &stamp)?;
 
             Ok(())
         });

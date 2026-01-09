@@ -12,7 +12,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::core::{ActorId, BeadId, BeadType, CoreError, DepKind, Priority, WallClock};
+use crate::core::{
+    ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, DepKind, Label, Labels, Lww,
+    Priority, Stamp, WallClock, Workflow,
+};
 use crate::daemon::wal::WalError;
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
@@ -172,6 +175,78 @@ impl BeadPatch {
             && self.source_repo.is_keep()
             && self.estimated_minutes.is_keep()
             && self.status.is_keep()
+    }
+
+    /// Apply this patch to bead fields.
+    pub fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError> {
+        if let Patch::Set(v) = &self.title {
+            fields.title = Lww::new(v.clone(), stamp.clone());
+        }
+        if let Patch::Set(v) = &self.description {
+            fields.description = Lww::new(v.clone(), stamp.clone());
+        }
+        match &self.design {
+            Patch::Set(v) => fields.design = Lww::new(Some(v.clone()), stamp.clone()),
+            Patch::Clear => fields.design = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        match &self.acceptance_criteria {
+            Patch::Set(v) => fields.acceptance_criteria = Lww::new(Some(v.clone()), stamp.clone()),
+            Patch::Clear => fields.acceptance_criteria = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        if let Patch::Set(v) = &self.priority {
+            fields.priority = Lww::new(*v, stamp.clone());
+        }
+        if let Patch::Set(v) = &self.bead_type {
+            fields.bead_type = Lww::new(*v, stamp.clone());
+        }
+        if let Patch::Set(v) = &self.labels {
+            let mut labels = Labels::new();
+            for raw in v {
+                let label = Label::parse(raw.clone()).map_err(|e| OpError::ValidationFailed {
+                    field: "labels".into(),
+                    reason: e.to_string(),
+                })?;
+                labels.insert(label);
+            }
+            fields.labels = Lww::new(labels, stamp.clone());
+        }
+        match &self.external_ref {
+            Patch::Set(v) => fields.external_ref = Lww::new(Some(v.clone()), stamp.clone()),
+            Patch::Clear => fields.external_ref = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        match &self.source_repo {
+            Patch::Set(v) => fields.source_repo = Lww::new(Some(v.clone()), stamp.clone()),
+            Patch::Clear => fields.source_repo = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        match &self.estimated_minutes {
+            Patch::Set(v) => fields.estimated_minutes = Lww::new(Some(*v), stamp.clone()),
+            Patch::Clear => fields.estimated_minutes = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        if let Patch::Set(status) = &self.status {
+            match status.as_str() {
+                "open" => fields.workflow = Lww::new(Workflow::Open, stamp.clone()),
+                "in_progress" => {
+                    fields.workflow = Lww::new(Workflow::InProgress, stamp.clone())
+                }
+                "closed" => {
+                    let closure = Closure::new(None, None);
+                    fields.workflow = Lww::new(Workflow::Closed(closure), stamp.clone());
+                }
+                other => {
+                    return Err(OpError::ValidationFailed {
+                        field: "status".into(),
+                        reason: format!("unknown status {other:?}"),
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
