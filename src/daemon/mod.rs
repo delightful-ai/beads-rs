@@ -30,7 +30,7 @@ pub use ipc::{
     ErrorPayload, IpcError, Request, Response, ResponsePayload, decode_request, encode_response,
     socket_path,
 };
-pub use ops::{BeadOp, BeadPatch, OpError, OpResult, Patch};
+pub use ops::{BeadPatch, OpError, OpResult, Patch};
 pub use query::{Filters, Query, QueryResult, SortField};
 pub use remote::RemoteUrl;
 pub use repo::RepoState;

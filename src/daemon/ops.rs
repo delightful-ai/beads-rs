@@ -3,7 +3,6 @@
 //! Provides:
 //! - `Patch<T>` - Three-way patch enum (Keep, Clear, Set)
 //! - `BeadPatch` - Partial update for bead fields
-//! - `BeadOp` - All mutation operations
 //! - `OpError` - Operation errors
 //! - `OpResult` - Operation results
 
@@ -13,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, DepKind, Label, Labels, Lww,
-    Priority, Stamp, WallClock, Workflow,
+    ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, Label, Labels, Lww, Priority, Stamp,
+    WallClock, Workflow,
 };
 use crate::daemon::wal::WalError;
 use crate::error::{Effect, Transience};
@@ -251,181 +250,6 @@ impl BeadPatch {
 }
 
 // =============================================================================
-// BeadOp - All mutation operations
-// =============================================================================
-
-/// Mutation operations on beads.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum BeadOp {
-    /// Create a new bead.
-    Create {
-        repo: PathBuf,
-        #[serde(default)]
-        id: Option<String>,
-        #[serde(default)]
-        parent: Option<String>,
-        title: String,
-        #[serde(rename = "type")]
-        bead_type: BeadType,
-        priority: Priority,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        design: Option<String>,
-        #[serde(default)]
-        acceptance_criteria: Option<String>,
-        #[serde(default)]
-        assignee: Option<String>,
-        #[serde(default)]
-        external_ref: Option<String>,
-        #[serde(default)]
-        estimated_minutes: Option<u32>,
-        #[serde(default)]
-        labels: Vec<String>,
-        #[serde(default)]
-        dependencies: Vec<String>,
-    },
-
-    /// Update an existing bead.
-    Update {
-        repo: PathBuf,
-        id: BeadId,
-        patch: BeadPatch,
-        /// Optional CAS check - if provided, operation fails if content hash doesn't match.
-        #[serde(default)]
-        cas: Option<String>,
-    },
-
-    /// Add labels to a bead.
-    AddLabels {
-        repo: PathBuf,
-        id: BeadId,
-        labels: Vec<String>,
-    },
-
-    /// Remove labels from a bead.
-    RemoveLabels {
-        repo: PathBuf,
-        id: BeadId,
-        labels: Vec<String>,
-    },
-
-    /// Set or clear a parent relationship.
-    SetParent {
-        repo: PathBuf,
-        id: BeadId,
-        #[serde(default)]
-        parent: Option<BeadId>,
-    },
-
-    /// Close a bead.
-    Close {
-        repo: PathBuf,
-        id: BeadId,
-        #[serde(default)]
-        reason: Option<String>,
-        #[serde(default)]
-        on_branch: Option<String>,
-    },
-
-    /// Reopen a closed bead.
-    Reopen { repo: PathBuf, id: BeadId },
-
-    /// Delete a bead (soft delete via tombstone).
-    Delete {
-        repo: PathBuf,
-        id: BeadId,
-        #[serde(default)]
-        reason: Option<String>,
-    },
-
-    /// Add a dependency.
-    AddDep {
-        repo: PathBuf,
-        from: BeadId,
-        to: BeadId,
-        kind: DepKind,
-    },
-
-    /// Remove a dependency (soft delete).
-    RemoveDep {
-        repo: PathBuf,
-        from: BeadId,
-        to: BeadId,
-        kind: DepKind,
-    },
-
-    /// Add a note to a bead.
-    AddNote {
-        repo: PathBuf,
-        id: BeadId,
-        content: String,
-    },
-
-    /// Claim a bead for the current actor.
-    Claim {
-        repo: PathBuf,
-        id: BeadId,
-        /// Lease duration in seconds.
-        lease_secs: u64,
-    },
-
-    /// Release a claim on a bead.
-    Unclaim { repo: PathBuf, id: BeadId },
-
-    /// Extend an existing claim.
-    ExtendClaim {
-        repo: PathBuf,
-        id: BeadId,
-        /// New lease duration in seconds.
-        lease_secs: u64,
-    },
-}
-
-impl BeadOp {
-    /// Get the repo path for this operation.
-    pub fn repo(&self) -> &PathBuf {
-        match self {
-            BeadOp::Create { repo, .. } => repo,
-            BeadOp::Update { repo, .. } => repo,
-            BeadOp::AddLabels { repo, .. } => repo,
-            BeadOp::RemoveLabels { repo, .. } => repo,
-            BeadOp::SetParent { repo, .. } => repo,
-            BeadOp::Close { repo, .. } => repo,
-            BeadOp::Reopen { repo, .. } => repo,
-            BeadOp::Delete { repo, .. } => repo,
-            BeadOp::AddDep { repo, .. } => repo,
-            BeadOp::RemoveDep { repo, .. } => repo,
-            BeadOp::AddNote { repo, .. } => repo,
-            BeadOp::Claim { repo, .. } => repo,
-            BeadOp::Unclaim { repo, .. } => repo,
-            BeadOp::ExtendClaim { repo, .. } => repo,
-        }
-    }
-
-    /// Get the bead ID if this operation targets a specific bead.
-    pub fn bead_id(&self) -> Option<&BeadId> {
-        match self {
-            BeadOp::Create { .. } => None,
-            BeadOp::Update { id, .. } => Some(id),
-            BeadOp::AddLabels { id, .. } => Some(id),
-            BeadOp::RemoveLabels { id, .. } => Some(id),
-            BeadOp::SetParent { id, .. } => Some(id),
-            BeadOp::Close { id, .. } => Some(id),
-            BeadOp::Reopen { id, .. } => Some(id),
-            BeadOp::Delete { id, .. } => Some(id),
-            BeadOp::AddDep { from, .. } => Some(from),
-            BeadOp::RemoveDep { from, .. } => Some(from),
-            BeadOp::AddNote { id, .. } => Some(id),
-            BeadOp::Claim { id, .. } => Some(id),
-            BeadOp::Unclaim { id, .. } => Some(id),
-            BeadOp::ExtendClaim { id, .. } => Some(id),
-        }
-    }
-}
-
-// =============================================================================
 // OpError - Operation errors
 // =============================================================================
 
@@ -648,26 +472,5 @@ mod tests {
 
         patch.title = Patch::Clear;
         assert!(patch.validate().is_err());
-    }
-
-    #[test]
-    fn bead_op_repo() {
-        let op = BeadOp::Create {
-            repo: PathBuf::from("/test"),
-            id: None,
-            parent: None,
-            title: "test".into(),
-            bead_type: BeadType::Task,
-            priority: Priority::default(),
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-        };
-        assert_eq!(op.repo(), &PathBuf::from("/test"));
     }
 }
