@@ -11,6 +11,7 @@
 //! - Retry on non-fast-forward: fetch again, re-merge
 //! - Meaningful commit messages: "beads(store): +2 created, ~1 updated"
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
@@ -18,7 +19,7 @@ use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 use super::collision::{Collision, detect_collisions, resolve_collisions};
 use super::error::SyncError;
 use super::wire;
-use crate::core::{CanonicalState, Stamp, WriteStamp};
+use crate::core::{BeadId, CanonicalState, Stamp, WriteStamp};
 
 // =============================================================================
 // Phase markers (zero-sized types for typestate)
@@ -710,9 +711,11 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
 /// Compute diff between two states for commit message.
 fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
     let mut diff = SyncDiff::default();
+    let deps_changed = dep_change_ids(before, after);
 
     // Count created and updated
     for (id, bead) in after.iter_live() {
+        let dep_changed = deps_changed.contains(id);
         match before.get_live(id) {
             None => {
                 diff.created += 1;
@@ -724,9 +727,17 @@ fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
                 });
             }
             Some(old_bead) => {
-                if bead.updated_stamp() != old_bead.updated_stamp() {
+                let field_changed = bead.updated_stamp() != old_bead.updated_stamp();
+                if field_changed || dep_changed {
                     diff.updated += 1;
-                    let changed_fields = detect_changed_fields(old_bead, bead);
+                    let mut changed_fields = if field_changed {
+                        detect_changed_fields(old_bead, bead)
+                    } else {
+                        Vec::new()
+                    };
+                    if dep_changed && !changed_fields.contains(&"deps") {
+                        changed_fields.push("deps");
+                    }
                     diff.details.push(ChangeDetail {
                         id: id.to_string(),
                         title: bead.title().to_string(),
@@ -752,6 +763,24 @@ fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
     }
 
     diff
+}
+
+fn dep_change_ids(before: &CanonicalState, after: &CanonicalState) -> BTreeSet<BeadId> {
+    let before_active: BTreeSet<_> = before
+        .iter_deps()
+        .filter(|(_, edge)| edge.is_active())
+        .map(|(key, _)| key.clone())
+        .collect();
+    let after_active: BTreeSet<_> = after
+        .iter_deps()
+        .filter(|(_, edge)| edge.is_active())
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    before_active
+        .symmetric_difference(&after_active)
+        .map(|key| key.from().clone())
+        .collect()
 }
 
 fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<WriteStamp> {
@@ -1137,6 +1166,33 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use tempfile::TempDir;
+    use crate::core::{
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepEdge, DepKey, DepKind,
+        Lww, Priority, Workflow,
+    };
+
+    fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
+        Stamp::new(WriteStamp::new(wall_ms, 0), ActorId::new(actor).unwrap())
+    }
+
+    fn make_bead(id: &str, stamp: &Stamp) -> Bead {
+        let core = BeadCore::new(BeadId::parse(id).unwrap(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("test".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::new(2).unwrap(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Default::default(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::Open, stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
 
     fn write_store_commit(repo: &Repository, parent: Option<Oid>, message: &str) -> Oid {
         write_store_commit_with_meta(repo, parent, message, None)
@@ -1212,6 +1268,34 @@ mod tests {
 
         let diff = SyncDiff::default();
         assert_eq!(diff.to_commit_message(), "beads(store): no changes");
+    }
+
+    #[test]
+    fn sync_diff_marks_dep_changes_as_updates() {
+        let stamp = make_stamp(1000, "alice");
+        let bead_a = make_bead("bd-aaa", &stamp);
+        let bead_b = make_bead("bd-bbb", &stamp);
+
+        let mut before = CanonicalState::new();
+        before.insert(bead_a).unwrap();
+        before.insert(bead_b).unwrap();
+
+        let mut after = before.clone();
+        let dep_key = DepKey::new(
+            BeadId::parse("bd-aaa").unwrap(),
+            BeadId::parse("bd-bbb").unwrap(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        after.insert_dep(dep_key, DepEdge::new(stamp));
+
+        let diff = compute_diff(&before, &after);
+        assert_eq!(diff.created, 0);
+        assert_eq!(diff.deleted, 0);
+        assert_eq!(diff.updated, 1);
+        assert_eq!(diff.details.len(), 1);
+        assert_eq!(diff.details[0].id, "bd-aaa");
+        assert!(diff.details[0].changed_fields.contains(&"deps"));
     }
 
     #[test]
