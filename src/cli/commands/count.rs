@@ -1,7 +1,4 @@
-use time::format_description::well_known::Rfc3339;
-use time::{Date, OffsetDateTime, Time};
-
-use super::super::{CountArgs, Ctx, apply_common_filters, print_ok, send};
+use super::super::{CountArgs, Ctx, apply_common_filters, parse_time_ms_opt, print_ok, send};
 use crate::core::BeadId;
 use crate::daemon::ipc::Request;
 use crate::daemon::query::Filters;
@@ -94,46 +91,4 @@ fn resolve_group_by(args: &CountArgs) -> Result<Option<String>> {
     }
 
     Ok(group_by.map(|s| s.to_string()))
-}
-
-fn parse_time_ms_opt(s: Option<&str>) -> Result<Option<u64>> {
-    let Some(s) = s else { return Ok(None) };
-    let s = s.trim();
-    if s.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(parse_time_ms(s).map_err(|msg| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "date".into(),
-            reason: msg,
-        })
-    })?))
-}
-
-fn parse_time_ms(s: &str) -> std::result::Result<u64, String> {
-    // RFC3339
-    if let Ok(dt) = OffsetDateTime::parse(s, &Rfc3339) {
-        return Ok(dt.unix_timestamp_nanos() as u64 / 1_000_000);
-    }
-
-    // YYYY-MM-DD (midnight UTC)
-    let fmt_date =
-        time::format_description::parse("[year]-[month]-[day]").map_err(|e| e.to_string())?;
-    if let Ok(date) = Date::parse(s, &fmt_date) {
-        let dt = date.with_time(Time::MIDNIGHT).assume_utc();
-        return Ok(dt.unix_timestamp_nanos() as u64 / 1_000_000);
-    }
-
-    // YYYY-MM-DD HH:MM:SS (UTC)
-    let fmt_dt = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
-        .map_err(|e| e.to_string())?;
-    if let Ok(dt) = time::PrimitiveDateTime::parse(s, &fmt_dt) {
-        let dt = dt.assume_utc();
-        return Ok(dt.unix_timestamp_nanos() as u64 / 1_000_000);
-    }
-
-    Err(format!(
-        "unsupported date format: {s:?} (use YYYY-MM-DD or RFC3339)"
-    ))
 }

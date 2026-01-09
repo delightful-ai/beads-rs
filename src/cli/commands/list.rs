@@ -1,5 +1,7 @@
 use super::super::render;
-use super::super::{Ctx, ListArgs, SearchArgs, apply_common_filters, parse_sort, print_ok, send};
+use super::super::{
+    Ctx, ListArgs, SearchArgs, apply_common_filters, parse_sort, parse_time_ms_opt, print_ok, send,
+};
 use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::{Filters, QueryResult};
@@ -31,6 +33,23 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         args.assignee.clone(),
         args.labels.clone(),
     )?;
+    filters.priority_min = args.priority_min;
+    filters.priority_max = args.priority_max;
+    if !args.labels_any.is_empty() {
+        filters.labels_any = Some(args.labels_any.clone());
+    }
+    filters.title_contains = args.title_contains.clone().filter(|s| !s.trim().is_empty());
+    filters.desc_contains = args.desc_contains.clone().filter(|s| !s.trim().is_empty());
+    filters.notes_contains = args.notes_contains.clone().filter(|s| !s.trim().is_empty());
+    filters.created_after = parse_time_ms_opt(args.created_after.as_deref())?;
+    filters.created_before = parse_time_ms_opt(args.created_before.as_deref())?;
+    filters.updated_after = parse_time_ms_opt(args.updated_after.as_deref())?;
+    filters.updated_before = parse_time_ms_opt(args.updated_before.as_deref())?;
+    filters.closed_after = parse_time_ms_opt(args.closed_after.as_deref())?;
+    filters.closed_before = parse_time_ms_opt(args.closed_before.as_deref())?;
+    filters.empty_description = args.empty_description;
+    filters.no_assignee = args.no_assignee;
+    filters.no_labels = args.no_labels;
     filters.limit = args.limit;
     filters.search = search;
     filters.parent = parent;

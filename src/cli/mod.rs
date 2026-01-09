@@ -9,6 +9,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, builder::BoolishValueParser};
+use time::format_description::well_known::Rfc3339;
+use time::{Date, OffsetDateTime, Time};
 
 use crate::core::{BeadId, BeadType, DepKind, Priority};
 use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
@@ -303,6 +305,14 @@ pub struct ListArgs {
     #[arg(short = 'p', long, value_parser = parse_priority)]
     pub priority: Option<Priority>,
 
+    /// Minimum priority (inclusive).
+    #[arg(long = "priority-min", value_parser = parse_priority)]
+    pub priority_min: Option<Priority>,
+
+    /// Maximum priority (inclusive).
+    #[arg(long = "priority-max", value_parser = parse_priority)]
+    pub priority_max: Option<Priority>,
+
     /// Assignee filter.
     #[arg(short = 'a', long)]
     pub assignee: Option<String>,
@@ -310,6 +320,58 @@ pub struct ListArgs {
     /// Label filter (repeat or comma-separated).
     #[arg(short = 'l', long = "label", alias = "labels", value_delimiter = ',', num_args = 0..)]
     pub labels: Vec<String>,
+
+    /// Label filter (OR: must have AT LEAST ONE). Repeat or comma-separated.
+    #[arg(long = "label-any", value_delimiter = ',', num_args = 0..)]
+    pub labels_any: Vec<String>,
+
+    /// Filter by title substring.
+    #[arg(long = "title-contains")]
+    pub title_contains: Option<String>,
+
+    /// Filter by description substring.
+    #[arg(long = "desc-contains")]
+    pub desc_contains: Option<String>,
+
+    /// Filter by notes substring.
+    #[arg(long = "notes-contains")]
+    pub notes_contains: Option<String>,
+
+    /// Filter issues created after date (YYYY-MM-DD or RFC3339).
+    #[arg(long = "created-after")]
+    pub created_after: Option<String>,
+
+    /// Filter issues created before date (YYYY-MM-DD or RFC3339).
+    #[arg(long = "created-before")]
+    pub created_before: Option<String>,
+
+    /// Filter issues updated after date (YYYY-MM-DD or RFC3339).
+    #[arg(long = "updated-after")]
+    pub updated_after: Option<String>,
+
+    /// Filter issues updated before date (YYYY-MM-DD or RFC3339).
+    #[arg(long = "updated-before")]
+    pub updated_before: Option<String>,
+
+    /// Filter issues closed after date (YYYY-MM-DD or RFC3339).
+    #[arg(long = "closed-after")]
+    pub closed_after: Option<String>,
+
+    /// Filter issues closed before date (YYYY-MM-DD or RFC3339).
+    #[arg(long = "closed-before")]
+    pub closed_before: Option<String>,
+
+    /// Filter issues with empty description.
+    #[arg(long = "empty-description")]
+    pub empty_description: bool,
+
+    /// Filter issues with no assignee.
+    #[arg(long = "no-assignee")]
+    pub no_assignee: bool,
+
+    /// Filter issues with no labels.
+    #[arg(long = "no-labels")]
+    pub no_labels: bool,
 
     /// Show labels in output.
     #[arg(short = 'L', long = "show-labels")]
@@ -1144,6 +1206,48 @@ fn parse_sort(raw: &str) -> std::result::Result<(SortField, bool), String> {
         _ => return Err(format!("invalid sort field `{raw}`")),
     };
     Ok((field, ascending))
+}
+
+fn parse_time_ms_opt(s: Option<&str>) -> Result<Option<u64>> {
+    let Some(s) = s else { return Ok(None) };
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(parse_time_ms(s).map_err(|msg| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "date".into(),
+            reason: msg,
+        })
+    })?))
+}
+
+fn parse_time_ms(s: &str) -> std::result::Result<u64, String> {
+    // RFC3339
+    if let Ok(dt) = OffsetDateTime::parse(s, &Rfc3339) {
+        return Ok(dt.unix_timestamp_nanos() as u64 / 1_000_000);
+    }
+
+    // YYYY-MM-DD (midnight UTC)
+    let fmt_date =
+        time::format_description::parse("[year]-[month]-[day]").map_err(|e| e.to_string())?;
+    if let Ok(date) = Date::parse(s, &fmt_date) {
+        let dt = date.with_time(Time::MIDNIGHT).assume_utc();
+        return Ok(dt.unix_timestamp_nanos() as u64 / 1_000_000);
+    }
+
+    // YYYY-MM-DD HH:MM:SS (UTC)
+    let fmt_dt = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
+        .map_err(|e| e.to_string())?;
+    if let Ok(dt) = time::PrimitiveDateTime::parse(s, &fmt_dt) {
+        let dt = dt.assume_utc();
+        return Ok(dt.unix_timestamp_nanos() as u64 / 1_000_000);
+    }
+
+    Err(format!(
+        "unsupported date format: {s:?} (use YYYY-MM-DD or RFC3339)"
+    ))
 }
 
 fn parse_dep_edge(
