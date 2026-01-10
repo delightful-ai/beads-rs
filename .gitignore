@@ -2,7 +2,7 @@
 
 todo.txt
 dist/
-
+.beads/*
 # will have compiled files and executables
 debug/
 target/
