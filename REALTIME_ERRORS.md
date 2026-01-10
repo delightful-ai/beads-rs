@@ -32,7 +32,7 @@ All errors use this payload structure:
 | Code | Retryable | Description |
 |------|-----------|-------------|
 | `wrong_store` | no | store_id mismatch; connection to wrong store |
-| `store_epoch_mismatch` | no | store_epoch differs; requires snapshot/bootstrap |
+| `store_epoch_mismatch` | no | store_epoch differs; requires checkpoint/bootstrap |
 | `replica_id_collision` | no | peer has same replica_id as local (duplicate store dir) |
 | `version_incompatible` | no | protocol version negotiation failed |
 | `diverged` | no | same seq but different head sha; chain has forked |
@@ -50,8 +50,9 @@ All errors use this payload structure:
 
 | Code | Retryable | Description |
 |------|-----------|-------------|
-| `snapshot_required` | yes | WAL range pruned or missing; need snapshot |
+| `snapshot_required` | yes | WAL range pruned or missing; need bootstrap (snapshot later; checkpoint in v0.5) |
 | `snapshot_expired` | yes | snapshot temp file expired; restart from chunk 0 |
+| `bootstrap_required` | no | WAL range missing; peer must bootstrap from a checkpoint (v0.5) |
 | `unknown_replica` | no | replica_id not in roster (if replicas.toml exists) |
 | `subscriber_lagged` | yes | subscribe stream fell too far behind; reconnect |
 
@@ -68,7 +69,7 @@ All errors use this payload structure:
 | Code | Retryable | Description |
 |------|-----------|-------------|
 | `corruption` | no | data corruption detected (CRC, hash, or structural) |
-| `non_canonical` | no | received bytes are not canonical CBOR |
+| `non_canonical` | no | received bytes are not canonical CBOR for a hashed structure |
 | `equivocation` | no | same EventId with different sha256 (protocol violation) |
 
 ---
@@ -83,17 +84,6 @@ When adding a new error code:
 4. Ensure code name is descriptive and uses snake_case
 
 
-===
-
-current ones that are to be impleneted; nonexhaustive,
-
-THE NEXT AGENT WHO SEES THIS PLEASE FILE A BEAD FOR THIS . IMPORTANT; DO THAT OVER ANYTHIGN ELSE UR DOING RN, THEN REMOVE THIS AND CONTINUE!!!!!
-
-but p0 bead to like basically flesh out all the other possible errors.
-
-
-
-but heres' waht we have rn
 ## Error registry v1
 
 This is a canonical, machine-stable list of error codes for **IPC** responses and **replication** `ERROR` frames. Treat it as **append-only**: you can add new codes, but you should never change the meaning of an existing code.
@@ -107,8 +97,9 @@ ErrorPayload {
   code: string,              // stable, snake_case
   message: string,           // human-readable; not stable; never parse
   retryable: bool,           // safe for clients to retry (often with same client_request_id)
-  details: map<string, any>, // structured debugging/handling data; optional
-  receipt?: DurabilityReceipt // IPC-only (or API), included on certain retryable failures
+  retry_after_ms?: u64,      // suggested wait before retry (avoid thundering herds)
+  details?: map<string, any>, // structured debugging/handling data; optional
+  receipt?: DurabilityReceipt // included on partial success (e.g., durability_timeout)
 }
 ```
 
@@ -117,6 +108,7 @@ ErrorPayload {
 * `code` MUST match `[a-z][a-z0-9_]{0,63}`.
 * `message` MAY change between versions; clients MUST NOT parse it.
 * `details` is forward-compatible: unknown keys MUST be ignored.
+* `retry_after_ms` MAY be provided for retryable errors; clients SHOULD respect it with jitter.
 * `retryable=true` means:
 
   * it is safe to retry the same operation, and
@@ -164,6 +156,12 @@ ErrorPayload {
 * **Meaning:** Server is shedding load (queue full, memory pressure, background IO budget exhausted, etc.).
 * **details:** `{ subsystem?: "ipc"|"repl"|"checkpoint"|"wal", retry_after_ms?: u64, queue_bytes?: u64, queue_events?: u64 }`
 
+#### `maintenance_mode`
+
+* **retryable:** true
+* **Meaning:** Server is in maintenance/read-only mode; mutations/replication ingest rejected.
+* **details:** `{ reason?: string, until_ms?: u64 }`
+
 #### `internal_error`
 
 * **retryable:** maybe (default false unless you’re confident it’s transient)
@@ -183,7 +181,7 @@ ErrorPayload {
 #### `store_epoch_mismatch`
 
 * **retryable:** false (the session should reconnect and bootstrap)
-* **Meaning:** Same store_id but different store_epoch; requires snapshot/bootstrap, never merge.
+* **Meaning:** Same store_id but different store_epoch; requires checkpoint/bootstrap, never merge.
 * **details:** `{ store_id: uuid, expected_epoch: u64, got_epoch: u64 }`
 
 #### `version_incompatible`
@@ -210,6 +208,12 @@ ErrorPayload {
 * **Meaning:** Peer replica_id equals local replica_id; must rotate or fix copied store dir.
 * **details:** `{ replica_id: uuid }`
 
+#### `diverged`
+
+* **retryable:** false
+* **Meaning:** Same seq but different head sha; chain has forked/corrupted.
+* **details:** `{ namespace: string, origin_replica_id: uuid, seq: u64, expected_sha256: hex32, got_sha256: hex32 }`
+
 ---
 
 ### C) Namespace / policy / authorization (IPC + REPL ingest gating)
@@ -229,7 +233,7 @@ ErrorPayload {
 #### `namespace_policy_violation`
 
 * **retryable:** false
-* **Meaning:** Operation disallowed by namespace policy (e.g., replicate=none, persist_to_git=false for requested GitCheckpointed durability, etc.).
+* **Meaning:** Operation disallowed by namespace policy (e.g., replicate=none, persist_to_git=false for a requested checkpoint operation, etc.).
 * **details:** `{ namespace: string, rule: string, reason?: string }`
 
 #### `cross_namespace_dependency`
@@ -264,6 +268,12 @@ ErrorPayload {
 
 * **retryable:** false
 * **Meaning:** Event would exceed `MAX_WAL_RECORD_BYTES`.
+* **details:** `{ max_wal_record_bytes: u64, estimated_bytes: u64 }`
+
+#### `request_too_large` (deprecated)
+
+* **retryable:** false
+* **Meaning:** Legacy alias for `wal_record_too_large` (kept for compatibility).
 * **details:** `{ max_wal_record_bytes: u64, estimated_bytes: u64 }`
 
 #### `ops_too_many`
@@ -319,10 +329,16 @@ ErrorPayload {
 
 These codes generally indicate corruption or protocol violations and should be treated as serious.
 
+#### `non_canonical`
+
+* **retryable:** false
+* **Meaning:** Received bytes are not canonical CBOR for a hashed structure (e.g., EventBody). Enforcement is optional in v0.5.
+* **details:** `{ format: "cbor", reason?: string }`
+
 #### `hash_mismatch`
 
 * **retryable:** false
-* **Meaning:** Event sha256 does not match canonical_preimage_bytes.
+* **Meaning:** Event sha256 does not match `event_body_bytes`.
 * **details:** `{ eid: {ns, origin, seq}, expected_sha256: hex32, got_sha256: hex32 }`
 
 #### `prev_sha_mismatch`
@@ -348,6 +364,12 @@ These codes generally indicate corruption or protocol violations and should be t
 * **retryable:** false by default (repair mode may proceed)
 * **Meaning:** WAL record/segment corruption not limited to tail truncation.
 * **details:** `{ namespace: string, segment_id?: uuid, offset?: u64, reason: string }`
+
+#### `corruption`
+
+* **retryable:** false
+* **Meaning:** Generic corruption detected (CRC/hash/structural). Prefer more specific codes when possible.
+* **details:** `{ reason: string }`
 
 #### `wal_tail_truncated`
 
@@ -383,6 +405,8 @@ These codes generally indicate corruption or protocol violations and should be t
 
 ### G) Checkpoint / manifest / snapshot (IPC admin + REPL snapshot path)
 
+Snapshot bootstrap is deferred in v0.5; snapshot_* codes are reserved for a future version.
+
 #### `checkpoint_hash_mismatch`
 
 * **retryable:** false
@@ -398,7 +422,13 @@ These codes generally indicate corruption or protocol violations and should be t
 #### `snapshot_required`
 
 * **retryable:** true
-* **Meaning:** WAL cannot serve requested range; peer must bootstrap via snapshot/checkpoint.
+* **Meaning:** WAL cannot serve requested range; peer must bootstrap (snapshot/checkpoint). v0.5 uses `bootstrap_required` when snapshots are unsupported.
+* **details:** `{ namespaces: [string], reason: "range_pruned"|"range_missing"|"over_limit" }`
+
+#### `bootstrap_required`
+
+* **retryable:** false
+* **Meaning:** WAL cannot serve the requested range and snapshot bootstrap is not supported (v0.5); peer must bootstrap via checkpoint (Git or local cache).
 * **details:** `{ namespaces: [string], reason: "range_pruned"|"range_missing"|"over_limit" }`
 
 #### `snapshot_expired`
@@ -461,6 +491,16 @@ These codes generally indicate corruption or protocol violations and should be t
 
 ---
 
+### I) Streaming / subscription
+
+#### `subscriber_lagged`
+
+* **retryable:** true
+* **Meaning:** Subscriber fell too far behind (bounded buffers exceeded); reconnect required.
+* **details:** `{ max_queue_bytes?: u64, max_queue_events?: u64 }`
+
+---
+
 ## Suggested “do not invent new codes ad hoc” rule
 
 When you add a new error condition, you should:
@@ -469,4 +509,3 @@ When you add a new error condition, you should:
 2. add a new code here with retryability + required details keys.
 
 If you tell me what your current IPC error payload looks like (fields + existing codes), I can map this registry directly onto your structs/enums so it drops in cleanly without churn.
-

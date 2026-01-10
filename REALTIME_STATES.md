@@ -1,6 +1,6 @@
 Absolutely. Reading your spec, you don’t have “one system” so much as a stack of interlocking little machines (identity machine, event-log machine, replication machine, durability machine, checkpoint machine, GC machine…). If you try to model all of it at once, Stateright turns into a fog machine. If you model the right *seams* in the right order, you get counterexamples that map directly to real bugs.
 
-Below is the “model portfolio” I’d want for Beads v0.4, in order of importance. For each, I’ll say what it buys you, what you can safely abstract away, and the properties that make it genuinely informative about the implementation.
+Below is the “model portfolio” I’d want for Beads v0.5, in order of importance. For each, I’ll say what it buys you, what you can safely abstract away, and the properties that make it genuinely informative about the implementation.
 
 ---
 
@@ -64,7 +64,7 @@ This model becomes “real” when:
 
 ## 2) Model: Durability semantics and “ACK means durable”
 
-**Why it’s #2:** your spec makes durability an explicit contract (`LOCAL_FSYNC`, `REPLICATED_FSYNC(k)`, optional Git counting). The failure modes are subtle: acknowledging too early, counting the wrong replicas, or not handling retries correctly.
+**Why it’s #2:** your spec makes durability an explicit contract (`LOCAL_FSYNC`, `REPLICATED_FSYNC(k)`). The failure modes are subtle: acknowledging too early, counting the wrong replicas, or not handling retries correctly.
 
 ### Scope
 
@@ -113,7 +113,7 @@ If you keep that logic pure (no IO inside), you can reuse it in a Stateright mod
   * `txn_id`
   * set/list of `event_id`s
   * “receipt”
-* The “PENDING vs COMMITTED” shape you describe in the plan.
+* The stable idempotency mapping table shape (request_sha256 + txn_id + event_ids), and receipt reconstruction on demand.
 * Crash/restart nondeterminism: you can model “process crashes” at specific cut points.
 
 ### What to abstract away
@@ -128,7 +128,7 @@ Safety invariants:
 1. **At-most-once per client_request_id:** For a fixed `(ns, client_request_id)`, the system produces at most one logical mutation (same `txn_id`, same event_ids).
 2. **Retry returns original identity:** A retry with same `client_request_id` returns the original receipt, never a fresh `txn_id`, never new `event_id`s.
 3. **No stamp remint on retry:** Any stamp minted by the first attempt is identical on all successful retries.
-4. **Mismatch detection:** If the same `client_request_id` is reused with a different request digest, the system rejects (your plan calls this out, and it’s a huge footgun preventer).
+4. **Mismatch detection:** If the same `client_request_id` is reused with a different request digest (`request_sha256`), the system rejects (`client_request_id_reuse_mismatch`).
 
 Crash-window reachability checks:
 
@@ -162,7 +162,7 @@ This is the model that best maps to a deterministic, replayable integration test
 
   * `state_digest` (not full state)
   * `included` watermark vector
-  * `included_heads` per `(ns, origin)` if you rely on hash-chain continuity after pruning
+* `included_heads` per `(ns, origin)` becomes important once WAL pruning is enabled (deferred in v0.5)
 * Model multiple writers pushing to the same ref and non-FF failures.
 * Model import + merge and “advance durable to at least meta.included”.
 
@@ -192,9 +192,9 @@ If you model that control loop, you will catch the “claimed included advanced 
 
 ---
 
-## 5) Model: GC authority, GC markers, and floors
+## 5) Model: GC authority, GC markers, and floors (deferred in v0.5)
 
-**Why it’s #5:** GC is one of those features that seems “backgroundy” until it destroys correctness. Your spec is careful: only the authority decides, and everyone else enforces `gc_floor_ms`. Also: old events become no-ops but still advance watermarks.
+**Why it’s here:** GC is one of those features that seems “backgroundy” until it destroys correctness. In v0.5 it’s explicitly deferred, but it’s still worth modeling early so you don’t paint yourself into a corner.
 
 ### Scope
 
@@ -297,9 +297,9 @@ This is the model that prevents the “wf turned on and now core never catches u
 
 ### Scope
 
-* The ordering contract you describe (append record, fsync, index commit, apply, receipt finalize).
+* The ordering contract you describe (append record, fsync, index commit, apply, receipt reconstruction).
 * Crash at any cut point.
-* Recovery behavior: replay WAL, rebuild/catch-up index, reconcile pending receipts.
+* Recovery behavior: replay WAL, rebuild/catch-up index, reconstruct idempotency mapping.
 
 ### What to abstract away
 
@@ -325,7 +325,7 @@ This becomes extremely informative if you align the model’s cut points with re
 
 ### What to test/model
 
-* Canonical CBOR encoding for `EventEnvelope` preimage and full envelope.
+* Canonical CBOR encoding for `EventBody` bytes and stable sha256 computation.
 * `sha256` computation stability.
 * Checkpoint `manifest_hash` and `content_hash` recomputation and reject-on-mismatch behavior.
 
@@ -365,4 +365,3 @@ Without asking you a bunch of questions, I can propose a very specific first Sta
 * Properties: the 5 invariants from Model #1 plus the “no false durability” invariant from Model #2.
 
 If you tell me what operations you want to include first (just `bead_upsert`? also `bead_delete`? notes?), I’ll pick the smallest “state digest” that still catches the real merge bugs you care about (resurrection, note collision, dep cross-namespace rejection).
-

@@ -1,21 +1,20 @@
 # Beads Replication and Persistence Spec
 
-**Version:** v0.4 (replaces v0.3)
+**Version:** v0.5 (supersedes v0.4)
 **Status:** Normative unless marked "Implementation-defined"
 **Audience:** You, future contributors, and "future-you at 3am"
 **Scope:** Store format, WAL/event model, daemon-to-daemon replication protocol, client durability/ACK policies, Git checkpoint export/import, namespace policy semantics, and bootstrap/GC flows.
 
 ---
 
-## 0. What changed from v0.3 (why these updates)
+## 0. What changed from v0.4 (why these updates)
 
-1. Selective replication is first-class: sequencing and watermarks are per-namespace.
-2. Durability/ACK is explicitly enforced by the replication protocol, with retry safety.
-3. TTL/GC is deterministic via a GC authority and GC floors.
-4. Checkpoint cadence is debounced and bounded; Git may be used as a hot path.
-5. Store discovery uses a dedicated Git meta ref (no remote URL identity dependence).
-6. WAL framing is hardened (segment headers + checksums + truncation rules).
-7. Protocol negotiation and safety bounds are explicit (versions, frame sizes, keepalives).
+1. Hashing model simplified: events are hashed over raw `EventBody` CBOR bytes; `sha256`/`prev_sha256` live in WAL/replication headers (not inside the hashed CBOR payload).
+2. Idempotency simplified: stable `(namespace, origin_replica_id, client_request_id)` mapping + receipt reconstruction (no PENDING/COMMITTED state machine).
+3. Durability scope tightened: v0.5 supports `LOCAL_FSYNC` and `REPLICATED_FSYNC(k)` only; Git checkpoints are not a client-requestable wait target in v0.5.
+4. Snapshot bootstrap over realtime is deferred in v0.5; bootstrap relies on checkpoints (Git or local cache).
+5. Retention/GC markers and WAL pruning are deferred in v0.5 (policies are parsed/validated; enforcement is future work).
+6. Checkpoint hashing clarified: `manifest.json` lists per-file sha256 + byte size and `content_hash` is computed over a canonical meta preimage (non-recursive). `included_heads` is optional in v0.5 (becomes required once WAL pruning is enabled).
 
 ---
 
@@ -40,9 +39,9 @@ A namespace can use either or both lanes depending on policy. This keeps Git str
 
 ---
 
-## 0.3 Decisions (locked for v0.4)
+## 0.3 Decisions (locked for v0.5)
 
-These decisions are now considered locked for v0.4 planning and implementation.
+These decisions are now considered locked for v0.5 planning and implementation.
 
 1. Store identity and discovery:
    - `store_id` remains a UUID.
@@ -56,28 +55,29 @@ These decisions are now considered locked for v0.4 planning and implementation.
    - `origin_seq` is monotonic per `(origin_replica_id, namespace)`.
    - `seen_map` tracks highest contiguous sequence and must handle gaps (buffer + WANT).
 
-3. Delta v1 format:
-   - Use join-fragment deltas with per-field stamps (not patch-level, not snapshot-as-event).
-   - `bead_upsert` includes a bead object with per-field stamps (may be partial); `dep_upsert` includes a full dep edge; `note_append` includes the full note; `bead_delete` includes tombstone with optional lineage.
-   - Notes are append-only and are replicated via `note_append`.
+3. Event kind + delta v1 format:
+   - Base event kind is `txn_v1`.
+   - Delta is `TxnDeltaV1` containing operation lists: `bead_upserts`, `bead_deletes`, `dep_upserts`, `dep_deletes`, `note_appends`.
+   - Operation schemas (WireBead, dep edge, tombstone, note) keep the v0.4 field/stamp semantics; v0.5 bundles them into one txn event.
 
 4. Refs and migration:
    - New canonical Git ref: `refs/beads/<store_id>/<group_name>`.
    - Keep `refs/heads/beads/store` as a compatibility alias during migration.
 
-5. Snapshot encoding (realtime bootstrap):
-   - Reuse the Git checkpoint layout as the snapshot payload (meta.json + sharded JSONL), optionally packaged (tar/zstd) for transport.
-   - No separate snapshot schema is introduced in v0.4.
+5. Snapshot bootstrap (realtime):
+   - Deferred in v0.5. Bootstrap uses checkpoints (Git or local checkpoint cache).
+   - When reintroduced, snapshot payloads will reuse the Git checkpoint layout (meta.json + sharded JSONL), optionally packaged (tar/zstd).
 
-6. Git durable copy:
-   - `durable_copy_via_git` is opt-in per checkpoint group and follows section 6.5.
+6. Git checkpoints:
+   - Git checkpoints remain the deterministic checkpoint lane for bootstrap and recovery.
+   - v0.5 does not count Git checkpoints toward mutation durability acks (no `GIT_CHECKPOINTED` wait target).
 
 ---
 
-## 0.4 Additional defaults (locked for v0.4)
+## 0.4 Additional defaults (locked for v0.5)
 
 1. Event WAL compaction and pruning:
-   - Prune only when a local snapshot `included` watermarks cover the segment and retention policy allows it; keep WAL indefinitely on anchors if configured for audit.
+   - WAL pruning is deferred in v0.5; retain WAL segments. Retention policies are parsed and validated, but enforcement is future work.
 
 2. Gap handling persistence:
    - Buffer out-of-order events in memory up to a strict bound and issue WANT.
@@ -87,7 +87,7 @@ These decisions are now considered locked for v0.4 planning and implementation.
    - ACKs carry `durable` and `applied` watermarks; durability classes use `durable`.
 
 4. Snapshot transport framing:
-   - Stream tar+zstd payload in fixed-size chunks (e.g., 1 MiB) over the same framed protocol, with a monotonically increasing chunk index.
+   - Deferred in v0.5 (snapshot bootstrap is not supported).
 
 5. Store directory location:
    - `$BD_DATA_DIR/stores/<store_id>/` for repo-backed stores, with an implementation-defined fallback for local-only stores.
@@ -96,7 +96,9 @@ These decisions are now considered locked for v0.4 planning and implementation.
    - Read both legacy and new refs; write new canonical refs; mirror legacy refs for one release. If both exist and diverge, prefer the new ref and emit a warning.
 
 7. Canonical CBOR encoding:
-   - RFC 8949 canonical CBOR (definite lengths, sorted map keys, no duplicate keys).
+   - Locally-authored `EventBody` bytes MUST use RFC 8949 canonical CBOR (definite lengths, sorted map keys, no duplicate keys, no floats).
+   - Receivers MUST reject indefinite-length encodings and floats for hashed structures.
+   - Receivers MAY enforce full RFC 8949 canonical CBOR for `event_body_bytes` (rejecting non-canonical bytes).
 
 8. Safety bounds (defaults; implementation-defined but MUST exist):
    - `MAX_FRAME_BYTES` default 16 MiB.
@@ -289,9 +291,9 @@ Each replica MUST store each store under a directory containing:
 
 `meta.json` MUST include:
 
-* `store_format_version: int` (this spec implies `4`)
-* `wal_format_version: int` (this spec implies `1`)
-* `checkpoint_format_version: int` (this spec implies `4`)
+* `store_format_version: int` (this spec implies `5`)
+* `wal_format_version: int` (this spec implies `2`)
+* `checkpoint_format_version: int` (this spec implies `5`)
 * `replication_protocol_version: int` (this spec implies `1`)
 * `store_id: uuid`
 * `store_epoch: u64`
@@ -322,12 +324,15 @@ Each segment MUST begin with the following header (raw bytes, little-endian wher
 
 * `magic: 5 bytes` = ASCII "BDWAL"
 * `wal_format_version: u32_le`
+* `header_len: u32_le`
 * `store_id: 16 bytes` (UUID bytes)
 * `store_epoch: u64_le`
 * `namespace_len: u32_le`
 * `namespace_bytes: namespace_len bytes` (UTF-8)
 * `created_at_ms: u64_le`
+* `segment_id: 16 bytes` (UUID bytes)
 * `flags: u32_le`
+* `header_crc32c: u32_le` (Castagnoli over header bytes excluding this field)
 
 Readers MUST validate header fields. A mismatched `store_id` or `store_epoch` MUST be treated as store corruption or misconfiguration.
 
@@ -335,12 +340,17 @@ Readers MUST validate header fields. A mismatched `store_id` or `store_epoch` MU
 
 Each record is:
 
-* `u32_le length`
-* `u32_le crc32c` (Castagnoli) computed over the payload bytes
-* `length` bytes payload
+* `u32_le record_magic` = ASCII "BDR2"
+* `u32_le length` (bytes of `record_header` + `payload`)
+* `u32_le crc32c` (Castagnoli) computed over bytes from `record_header` through end of payload
+* `record_header` (versioned + length-delimited; includes ids + sha/prev and optional request metadata)
+* `payload` = CBOR bytes of `EventBody` (locally-authored bytes are canonical; receivers MAY enforce canonical). The payload does NOT include `sha256` / `prev_sha256`.
 
-Payload encoding MUST be canonical CBOR (RFC 8949).
-The record payload MUST be an `EventEnvelope` object as defined in section 4.
+Payload encoding MUST be canonical CBOR for locally-authored events. Receivers MUST reject
+indefinite-length encodings and floats for hashed structures, and MAY reject non-canonical bytes.
+
+Hashing rule (v0.5):
+* `sha256 = SHA256(payload_bytes)` where `payload_bytes` are the raw `EventBody` CBOR bytes as stored/transmitted.
 
 ### 3.4.3 Crash recovery and corruption handling (normative)
 
@@ -380,11 +390,15 @@ Replicas SHOULD maintain a lightweight segment manifest to support fast WANT pla
 
 ## 4. Event model (WAL contents)
 
-### 4.1 Event envelope schema
+### 4.1 Event body schema (v0.5)
 
-Each WAL record MUST encode:
+Each WAL record / replication frame carries:
 
-**EventEnvelope**
+* `event_body_bytes` (CBOR bytes of `EventBody`; locally-authored bytes are canonical)
+* `sha256: bytes32 = SHA256(event_body_bytes)`
+* `prev_sha256?: bytes32` (optional chain link per `(origin_replica_id, namespace)`)
+
+**EventBody**
 
 * `envelope_v: int` (this spec implies `1`)
 * `store_id: uuid`
@@ -397,34 +411,20 @@ Each WAL record MUST encode:
 * `client_request_id: uuid?` (optional; idempotency key from the client)
 * `kind: enum` (see section 4.2)
 * `delta: map` (CBOR map; delta v1 MUST include `v: 1`)
-* `sha256: bytes32` (required; payload identity, see section 4.4)
-* `prev_sha256: bytes32?` (optional; hash chain per (origin_replica_id, namespace), see section 4.4)
+* `hlc_max?: map` (optional; used for HLC recovery; implementation-defined in v0.5)
 
 `event_time_ms` MUST equal the physical wall time used to mint the write stamp for the mutation that produced this event. If the delta contains multiple new write stamps, `event_time_ms` MUST be >= the max of their wall times and SHOULD be equal to it.
 
-### 4.2 Event kinds (normative set)
+### 4.2 Event kinds (v0.5 normative base)
 
-The following event kinds MUST exist:
+The following event kind MUST exist:
 
-1. `bead_upsert`
-   Delta contains a bead object (partial or full) with per-field write stamps (your existing semantics).
+1. `txn_v1`
+   Delta contains a `TxnDeltaV1` (v=1) with operation lists:
+   `bead_upserts`, `bead_deletes`, `dep_upserts`, `dep_deletes`, `note_appends`.
 
-2. `bead_delete`
-   Delta contains tombstone record (id, deleted_at, deleted_by, reason, optional lineage).
-
-3. `dep_upsert`
-   Delta contains a dependency edge record (from, to, kind, created_at/by, optional deleted_at/by).
-
-4. `dep_delete`
-   Delta contains soft-delete for a dependency edge (deleted_at/by).
-
-5. `note_append`
-   Delta contains (bead_id, note object) where note is append-only and uniquely identified.
-
-6. `namespace_gc_marker`
-   Delta indicates a maintenance action boundary for GC/retention and MUST include the cutoff parameters used (see section 10).
-
-Everything else MAY be layered on later, but these are the stable base.
+Reserved (deferred in v0.5):
+* `namespace_gc_marker` is reserved for future GC/retention enforcement once that work lands.
 
 ### 4.3 Event ordering, gaps, and idempotence
 
@@ -442,27 +442,32 @@ Replicas MUST tolerate events arriving out of order across origins and across na
 
 ### 4.4 Tamper-evidence hash (required; chain optional)
 
-* `sha256` MUST be present on every event.
-* `sha256` MUST be computed over the canonical CBOR encoding of `EventEnvelope` with `sha256` and `prev_sha256` omitted.
+* `sha256` MUST be present on every event frame/record.
+* `sha256` MUST be computed over the raw `event_body_bytes` exactly as stored/transmitted.
 * If `prev_sha256` is present, it MUST equal the previous event hash for the same `(origin_replica_id, namespace)` to form a hash chain.
+  Receivers MUST validate `prev_sha256` when appending contiguously; for out-of-order events, validation may be deferred until the predecessor is known.
 
 The optional chain does not affect merge correctness, but provides flight recorder integrity without Git mirroring.
 
 ---
 
-### 4.5 Delta payload schemas (v1, normative)
+### 4.5 Delta payload schemas (TxnDeltaV1, v1, normative)
 
-Delta payloads are CBOR maps with a required `v: 1` version field.
+TxnDeltaV1 is a CBOR map with a required `v: 1` version field and (optionally) any of:
+* `bead_upserts: [ { bead: WireBead } ]`
+* `bead_deletes: [ { id, deleted_at, deleted_by, ... } ]`
+* `dep_upserts: [ { from, to, kind, created_at, created_by, deleted_at?, deleted_by? } ]`
+* `dep_deletes: [ { from, to, kind, deleted_at, deleted_by } ]`
+* `note_appends: [ { bead_id, note } ]`
 
 Write stamps are encoded as `[wall_ms, counter]`. Actor attribution is carried in a separate field (e.g., `created_by`).
 
 The CBOR encoding MUST use deterministic ordering (sorted map keys, definite lengths).
 
-#### 4.5.1 `bead_upsert`
+#### 4.5.1 `bead_upsert` (TxnDeltaV1 entry)
 
-Delta:
+Entry:
 
-* `v: 1`
 * `bead: WireBead`
 
 `WireBead` uses the same field names as the Git checkpoint wire format:
@@ -475,15 +480,14 @@ Delta:
 * `_at`, `_by`, `_v?`
 
 Notes replication rule (normative):
-* In WAL/realtime `bead_upsert` deltas, `notes` SHOULD be omitted.
-* New notes MUST be replicated via `note_append`.
+* In WAL/realtime `bead_upserts`, `notes` SHOULD be omitted.
+* New notes MUST be replicated via `note_appends`.
 * A `bead_upsert` that includes `notes` MUST be interpreted as "at least these notes exist" (set-union), never as truncation or deletion of notes.
 
-#### 4.5.2 `bead_delete`
+#### 4.5.2 `bead_delete` (TxnDeltaV1 entry)
 
-Delta:
+Entry:
 
-* `v: 1`
 * `id`
 * `deleted_at`
 * `deleted_by`
@@ -491,11 +495,10 @@ Delta:
 * `lineage_created_at?`
 * `lineage_created_by?`
 
-#### 4.5.3 `dep_upsert`
+#### 4.5.3 `dep_upsert` (TxnDeltaV1 entry)
 
-Delta:
+Entry:
 
-* `v: 1`
 * `from`
 * `to`
 * `kind`
@@ -506,47 +509,32 @@ Delta:
 
 Rules (normative):
 * Dependency edges are intra-namespace:
-  - `from` and `to` MUST refer to beads in the same `EventEnvelope.namespace`.
+  - `from` and `to` MUST refer to beads in the same event namespace (`EventBody.namespace`).
   - Cross-namespace dependencies are not defined and MUST be rejected.
 
-#### 4.5.4 `dep_delete`
+#### 4.5.4 `dep_delete` (TxnDeltaV1 entry)
 
-Delta:
+Entry:
 
-* `v: 1`
 * `from`
 * `to`
 * `kind`
 * `deleted_at`
 * `deleted_by`
 
-#### 4.5.5 `note_append`
+#### 4.5.5 `note_append` (TxnDeltaV1 entry)
 
-Delta:
+Entry:
 
-* `v: 1`
 * `bead_id`
 * `note` with fields: `id`, `content`, `author`, `at`
 
 Note immutability rules (normative):
 * Notes are append-only. A note id collision where content differs MUST be treated as corruption and MUST be rejected.
 
-#### 4.5.6 `namespace_gc_marker`
+#### 4.5.6 `namespace_gc_marker` (reserved)
 
-Delta:
-
-* `v: 1`
-* `namespace`
-* `ttl_basis`
-* `cutoff_ms`
-* `safety_margin_ms`
-* `gc_authority_replica_id`
-* `enforce_floor: bool` (default true for ttl-based namespaces)
-
-If `enforce_floor=true`, replicas MUST:
-* set `gc_floor_ms[namespace] = max(gc_floor_ms[namespace], cutoff_ms)`
-* treat data older than the floor as purged (section 10)
-* ignore incoming events for that namespace where `event_time_ms <= gc_floor_ms[namespace]`
+Reserved for future GC/retention enforcement. Namespace GC markers are deferred in v0.5 and not valid in this version.
 
 ---
 
@@ -587,7 +575,7 @@ Monotonic `origin_seq` minting (normative):
 
 ## 6. Durability / ACK semantics (client-facing)
 
-We support three durability classes for mutations.
+We support two durability classes for mutations in v0.5.
 
 ### 6.1 Durability classes
 
@@ -598,9 +586,6 @@ Each mutation request MUST specify a durability class, or the daemon MUST apply 
 
 2. `REPLICATED_FSYNC(k)`
    ACK after local fsync+apply PLUS durable acknowledgements from at least `k` additional replicas for the exact event(s).
-
-3. `GIT_CHECKPOINTED` (optional, slow)
-   ACK only after a successful Git checkpoint push that includes the event(s).
 
 Implementations MAY expose `ANCHOR_FSYNC` as a convenience alias for `REPLICATED_FSYNC(1)` with anchor-only selection.
 
@@ -636,26 +621,9 @@ Replicas counted toward `REPLICATED_FSYNC(k)` MUST be eligible durable replicas:
 * Client-mode ephemeral replicas MUST NOT be counted as durable copies.
 Eligibility is policy-driven and SHOULD prioritize anchors.
 
-### 6.5 Optional: Git as an additional durable copy
+### 6.5 (Deferred) Git as a counted durable copy
 
-If `durable_copy_via_git=true` for the checkpoint group that includes a namespace, the coordinator MAY count a successful Git checkpoint push as one durable copy for that namespace.
-
-This MUST only be counted when all of the following are true:
-
-* the namespace has `persist_to_git=true`
-* the coordinator is the `primary_checkpoint_writer` for the group
-* the push succeeds and the configured `git_ref` is advanced on the remote
-* the pushed checkpoint `meta.json` has `included[namespace][origin_replica_id=self] >= origin_seq_of_event`
-
-When enabled, this Git durable copy MAY satisfy one of the `k` required copies in `REPLICATED_FSYNC(k)`, but it MUST NOT weaken the guarantees of `LOCAL_FSYNC` or `GIT_CHECKPOINTED`.
-
-This option is off by default and MUST be explicitly configured. It is intended to allow "better than Git" latency to coexist with Git-backed durability in fast environments.
-
-Additional requirement (normative):
-* If a coordinator counts a Git checkpoint push toward `REPLICATED_FSYNC(k)`, it MUST durably record a local inclusion proof mapping the relevant `txn_id` (or event_id range) to:
-  - the pushed checkpoint commit id, and
-  - the checkpoint `meta.included` watermark vector.
-* On restart, the coordinator MUST be able to reconstruct whether a given txn/event was already counted via Git durable copy to avoid double-counting across retries.
+v0.5 does not count Git checkpoints toward mutation durability acks. Git is the checkpoint/bootstrap lane, not a client wait target in v0.5.
 
 ### 6.6 Durability receipts and consistency tokens (normative API concept)
 
@@ -692,7 +660,7 @@ The protocol does NOT assume HTTP; it can run over TCP, WebSocket, or libp2p str
 
 ### 7.2 Message framing and encoding (normative)
 
-Replication messages use the same framing as WAL:
+Replication messages use length+crc32c framing shared with WAL tooling:
 
 * `u32_le length` + `u32_le crc32c` + `CBOR payload`
 
@@ -723,15 +691,16 @@ Body:
 * `seen: { namespace -> { origin_replica_id -> u64 } }` (only for requested namespaces)
 * `capabilities`:
 
-  * `supports_snapshots: bool`
+  * `supports_snapshots: bool` (reserved; MUST be false in v0.5)
   * `supports_live_stream: bool` (must be true for realtime)
   * `supports_compression: bool` (optional)
 
 Rules:
 
 * Receiver MUST reply with `WELCOME` or `ERROR`.
-* If protocol versions are incompatible, receiver MUST reply `ERROR(code="incompatible_version")`.
-* If `store_id` or `store_epoch` mismatches, receiver MUST reply `ERROR(code="wrong_store")`.
+* If protocol versions are incompatible, receiver MUST reply `ERROR(code="version_incompatible")`.
+* If `store_id` mismatches, receiver MUST reply `ERROR(code="wrong_store")`.
+* If `store_id` matches but `store_epoch` mismatches, receiver MUST reply `ERROR(code="store_epoch_mismatch")`.
 * Version compatibility rule:
   - Let `max_a = sender.protocol_version`, `min_a = sender.min_protocol_version`.
   - Let `max_b = receiver.protocol_version`, `min_b = receiver.min_protocol_version`.
@@ -756,16 +725,21 @@ Body:
 
 Body:
 
-* `code: string`
-* `message: string`
+* ErrorPayload as defined in `REALTIME_ERRORS.md` (code, message, retryable, retry_after_ms?, details?, receipt?)
 
 #### 4) `EVENTS`
 
-A stream message carrying one or more EventEnvelope objects.
+A stream message carrying one or more EventFrameV1 objects.
 
 Body:
 
-* `events: [EventEnvelope]`
+* `events: [EventFrameV1]`
+
+EventFrameV1:
+* `eid: { origin_replica_id, namespace, origin_seq }`
+* `sha256: bytes32`
+* `prev_sha256?: bytes32`
+* `bytes: bytes` (raw CBOR bytes of `EventBody`; locally-authored bytes are canonical)
 
 Rules:
 
@@ -773,8 +747,8 @@ Rules:
 * Sender MUST send events for a given `(namespace, origin_replica_id)` in strictly increasing `origin_seq` order.
 * Receiver MUST apply idempotently, buffer gaps, and update `seen_map` only when contiguous.
 * Receiver MUST validate:
-  - `store_id` and `store_epoch` match
-  - `sha256` matches the envelope content
+  - `store_id` and `store_epoch` match (from decoded EventBody)
+  - `sha256(bytes) == frame.sha256`
   - if event_id already exists, sha256 matches prior observed sha256
 
 #### 5) `ACK`
@@ -806,38 +780,11 @@ Rules:
 
 * Receiver SHOULD respond with `EVENTS` until satisfied.
 * A responder MUST use its index to avoid O(total WAL) scans when serving WANT.
+* If a responder cannot serve the requested range and snapshot bootstrap is not supported (v0.5), it MUST reply `ERROR(code="bootstrap_required")`.
 
-#### 7) Snapshot messages (optional but recommended)
+#### 7) Snapshot messages (deferred in v0.5)
 
-Used for fast bootstrap if WAL retention is insufficient.
-
-`SNAPSHOT_REQUEST` body:
-* `namespaces: [...]`
-* `min_included?: { namespace -> { origin_replica_id -> u64 } }`
-* `resume_from_chunk?: u64` (default 0)
-
-`SNAPSHOT_BEGIN` body:
-* `snapshot_id: uuid`
-* `namespaces: [...]`
-* `included: { namespace -> { origin_replica_id -> u64 } }`
-* `encoding: "checkpoint_tar_zstd_v1"` (default)
-* `chunk_size_bytes: u32` (default 1 MiB)
-* `total_chunks: u64`
-* `sha256: bytes32` (hash of full snapshot byte stream)
-
-`SNAPSHOT_CHUNK` body:
-* `snapshot_id: uuid`
-* `chunk_index: u64`
-* `bytes: bytes`
-
-`SNAPSHOT_END` body:
-* `snapshot_id: uuid`
-
-Rules:
-
-* If supported, receiver SHOULD provide snapshots for requested namespaces.
-* Snapshots MUST be consistent with included watermarks.
-* Receiver MUST verify snapshot hash before applying.
+Snapshot bootstrap over realtime is deferred in v0.5. Bootstrap relies on checkpoints (Git or local cache). Snapshot messages may be introduced in a later version.
 
 ### 7.4 Standard sync flow (normative)
 
@@ -957,12 +904,12 @@ JSON encoding requirements:
 
 #### 8.3.1 manifest.json (normative)
 
-`manifest.json` MUST be a deterministically-serialized JSON object containing:
+`manifest.json` MUST be a deterministically-serialized (canonical) JSON object containing:
 * `checkpoint_group: string`
 * `store_id: uuid`
 * `store_epoch: u64`
 * `namespaces: [string]` (sorted)
-* `files: { "<path>": "<sha256-hex>" }` for each file path present excluding `meta.json` and `manifest.json` (paths sorted)
+* `files: { "<path>": { "sha256": "<sha256-hex>", "bytes": <u64> } }` for each file path present excluding `meta.json` and `manifest.json` (paths sorted)
 
 Missing shards are treated as empty and therefore do not appear in `files`.
 
@@ -977,16 +924,19 @@ Checkpoint `meta.json` MUST include:
 * `namespaces: [string]` (included)
 * `created_at_ms: u64`
 * `created_by_replica_id: uuid`
+* `policy_hash: hex` (sha256 of canonical validated namespace policy representation)
+* `roster_hash?: hex` (sha256 of canonical validated replicas roster if present)
 * `included: { namespace -> { origin_replica_id -> u64 } }`
+* `included_heads?: { namespace -> { origin_replica_id -> sha256_hex } }` (optional in v0.5; required once WAL pruning is enabled)
 * `content_hash: hex` (REQUIRED; sha256 of canonical checkpoint tree content)
 * `manifest_hash: hex` (REQUIRED; sha256 of canonical manifest.json bytes)
 
-`content_hash` algorithm (normative):
-1. Enumerate all checkpoint files including `meta.json` and `manifest.json`, sorted by UTF-8 path bytes ascending.
-2. For each file, compute `file_hash = sha256(file_bytes)`.
-3. Build a byte stream:
-   - `path_bytes` + `\0` + `file_hash_hex` + `\n` for each file in order.
-4. `content_hash = sha256(stream)` encoded as lowercase hex.
+`content_hash` algorithm (non-recursive, normative):
+1. Write all shard files; compute each file's `sha256` and byte size.
+2. Write `manifest.json` (canonical JSON) and compute `manifest_hash = sha256(manifest.json bytes)` (lowercase hex).
+3. Build a meta preimage object equal to `meta.json` but with `content_hash` omitted.
+4. Serialize the meta preimage using canonical JSON bytes.
+5. `content_hash = sha256(meta_preimage_bytes)` (lowercase hex).
 
 Import rule (normative):
 * A replica importing a checkpoint MUST recompute `manifest_hash` and `content_hash` and reject the checkpoint if either mismatches.
@@ -1081,18 +1031,17 @@ A replica MUST be able to start and serve reads and writes even if network and G
 
 If a replica has no local snapshot/WAL:
 
-1. If repo-backed: fetch/import latest Git checkpoint(s) for groups
-2. If anchors available: request snapshot (section 7.3) then subscribe to events
-3. Else: start empty (only allowed if store init explicitly permits it)
+1. If repo-backed: fetch/import latest Git checkpoint(s) for groups.
+2. If an anchor can export a local checkpoint cache, import that checkpoint and then subscribe to events.
+3. Else: start empty (only allowed if store init explicitly permits it).
 
-Snapshot payloads sent over realtime MUST use the same layout as Git checkpoints (meta.json + sharded JSONL), optionally packaged for transport. This avoids multiple snapshot schemas and keeps Git-only and realtime bootstrap consistent.
-Recommended packaging for realtime snapshots is tar + zstd over the checkpoint directory tree.
+Snapshot bootstrap over realtime is deferred in v0.5. If WAL ranges are missing, peers return `bootstrap_required` and the replica must bootstrap from a checkpoint (Git or local cache).
 
 ### 9.3 Client (container) bootstrap
 
 Client mode:
 
-* Client fetches a snapshot from an anchor (or Git if allowed)
+* Client fetches a checkpoint from an anchor (or Git if allowed)
 * Then subscribes to live updates
 * Mutations are submitted to anchor with required durability
 
@@ -1106,7 +1055,10 @@ If a replica observes a checkpoint or replication peer with the same `store_id` 
 
 ---
 
-## 10. Retention and GC (explicit rules)
+## 10. Retention and GC (deferred in v0.5)
+
+v0.5 parses and validates retention policies but does not emit GC markers or prune WAL.
+The rules below are reserved for a future version and should not be treated as implemented behavior in v0.5.
 
 ### 10.1 Retention is namespace-scoped
 
@@ -1162,37 +1114,20 @@ Default:
 
 GC authority MUST sanity check its clock against the latest `event_time_ms` seen in the WAL for that namespace. If `now_ms + MAX_CLOCK_SKEW_MS < max_event_time_ms`, GC MUST halt and emit a warning (no GC events). Default `MAX_CLOCK_SKEW_MS` is 24h unless configured.
 
-### 10.6 GC floors (marker-driven, scalable)
+### 10.6 GC floors (deferred in v0.5)
 
-For namespaces with `retention != forever` and `replicate != none`, the default GC mechanism MUST be marker-driven:
+Deferred in v0.5. Namespace GC marker events and GC floor enforcement are reserved for a future version.
 
-* The GC authority emits `namespace_gc_marker` events that define an authoritative cutoff (GC floor).
-* Each replica MUST maintain `gc_floor_ms[namespace] = max(cutoff_ms)` observed.
-* Replicas MUST NOT use local wall clock time as authoritative for cutoff selection, but MUST enforce the replicated floor.
+### 10.7 WAL pruning (deferred in v0.5)
 
-Behavior (normative):
-* After a marker is applied with `enforce_floor=true`, replicas MUST:
-  - treat objects whose retention timestamp (per `ttl_basis`) is <= `gc_floor_ms` as purged (absent),
-  - treat incoming events for that namespace with `event_time_ms <= gc_floor_ms` as no-ops (but still advance `seen_map` and ACK normally),
-  - optionally physically prune purged objects from state/index and prune WAL segments when snapshot bases cover required watermarks.
-
-User-driven deletes (semantic deletes) MUST still be represented as `bead_delete` / `dep_delete` events.
-
-### 10.7 WAL pruning (bounded, deterministic enough)
-
-WAL segments MAY be pruned when:
-
-* all events in the segment are older than the namespace retention horizon **AND**
-* state needed for correctness is captured by a local snapshot newer than the segment (via `included` watermarks)
-
-Replicas MAY additionally keep WAL forever on anchors if configured for audit.
+Deferred in v0.5. WAL segments are retained; pruning safety gates and included_heads requirements are future work.
 
 ### 10.8 Offline guarantees (explicit)
 
 If a replica is offline longer than retention:
 
 * it is NOT guaranteed to catch up via missing events alone
-* it MUST reseed via snapshot (from anchors or Git checkpoint)
+* it MUST bootstrap via checkpoint (Git or local cache)
 
 This mirrors your tombstone TTL philosophy and is acceptable behavior.
 
