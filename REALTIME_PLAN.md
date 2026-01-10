@@ -1,4 +1,4 @@
-# REALTIME_SPEC_DRAFT Implementation Plan (Detailed, v0.4, self-contained)
+# REALTIME_SPEC_DRAFT Implementation Plan (Detailed, v0.5, self-contained)
 
 This document describes the fundamental, architecture-level changes required to
 implement REALTIME_SPEC_DRAFT. It is intentionally detailed and focuses on
@@ -20,7 +20,59 @@ This plan assumes the current baseline:
   apply_wal_mutation in `src/daemon/core.rs`).
 - CRDT semantics are LWW per-field plus tombstones/deps (`src/core/*`).
 
----
+-----
+
+## v0.5 scope changes (compared to v0.4)
+
+v0.5 narrows scope to land the durable event log + deterministic apply + replication,
+while removing several high-complexity features that are not required to achieve
+the core guarantees.
+
+### Added / changed in v0.5
+
+- Hashing model simplified (major):
+  - Events are hashed over the raw bytes of the EventBody CBOR payload.
+  - sha256 and prev_sha256 live in the WAL record header and replication frame header,
+    not inside the hashed CBOR payload.
+  - There is no longer a "preimage vs envelope" dual-encoding requirement.
+
+- Forward compatibility simplified:
+  - Unknown-key byte preservation for hash verification is no longer required.
+  - Nodes can store and forward raw EventBody bytes without re-encoding.
+
+- Idempotency storage simplified:
+  - Replace the 2-phase client_requests (PENDING/COMMITTED) state machine with a
+    stable idempotency mapping table. Receipts are reconstructed on demand.
+
+- Git checkpoints decoupled from durability:
+  - Git checkpoints remain a deterministic checkpoint lane for bootstrap/recovery.
+  - Git is not a requestable "wait target" durability class in v0.5.
+
+- WAL remains per-namespace:
+  - v0.5 explicitly keeps per-namespace WAL segments and SQLite indexing.
+  - No per-origin WAL directory structure is introduced in v0.5.
+
+### Deferred in v0.5 (explicit)
+
+- Namespace GC marker events and retention enforcement (policy parsed, not enforced by events).
+- WAL pruning and all correctness machinery required to safely delete WAL segments.
+- Replication snapshots (SNAPSHOT_* messages) and peer-to-peer snapshot bootstrap.
+  Bootstrap and catch-up rely on checkpoints (Git or local cache) in v0.5.
+
+### Removed in v0.5 (explicit)
+
+- Self-hashing CBOR envelopes (CBOR envelope containing its own sha256 / prev_sha256).
+- Unknown-field byte-for-byte preservation for hash reconstruction (the v0.4 0.6.1 requirement).
+- GitCheckpointed durability class as a client-requestable wait condition.
+
+### Migration notes (v0.5)
+
+- WAL/on-wire payloads are now EventBody bytes with sha/prev in headers; v0.4 prototype WAL
+  data is not compatible without a migration tool.
+- If multiple formats must coexist, bump wal_format_version and gate upgrades explicitly;
+  do not auto-mix formats in a single store.
+
+-----
 
 ## North star
 
@@ -269,7 +321,7 @@ What must be true to proceed safely:
   serialization), and "next seq" allocation must be tied to the same durability
   boundary as writing the record.
 
-### 0.6 Canonical CBOR encoding and hashing
+### 0.6 Canonical CBOR encoding and hashing (v0.5 simplified)
 
 Options:
 1) Use `minicbor_serde` everywhere and hope it matches canonical requirements
@@ -279,35 +331,30 @@ Options:
 3) Use numeric keys to reduce size and canonicalize easily, deviating from spec's
    human-readable field names.
 
-Recommendation to lock now: keep spec-aligned string keys for envelope and delta
-maps, and implement a canonical encoder for `EventEnvelope` that:
-1) encodes a definite-length map,
-2) emits keys in a precomputed canonical order (by canonical CBOR key ordering),
-3) never encodes floats,
-4) supports two canonical encodings:
-   - canonical_preimage_bytes: envelope encoded with `sha256` and `prev_sha256` omitted
-   - canonical_envelope_bytes: envelope encoded including `sha256` and `prev_sha256`
+Recommendation to lock now (v0.5): keep spec-aligned string keys for event body
+maps and implement a canonical encoder for the hashed payload `EventBody`.
 
-Hashing rule (clarified, normative):
-- sha256 MUST be computed over canonical_preimage_bytes.
-- WAL storage and replication payloads MUST use canonical_envelope_bytes.
+v0.5 removes the self-hashing envelope requirement. Instead:
+- The on-disk and on-wire payload is `event_body_bytes`: canonical CBOR encoding of EventBody.
+- `sha256 = SHA256(event_body_bytes)`.
+- `prev_sha256` is carried in the WAL record header and replication frame header
+  as a chain link for contiguity checks.
 
-Canonical-acceptance rule (normative):
-- Any EventEnvelope bytes accepted from disk (WAL replay) or network (replication)
-  MUST already be in canonical CBOR form (RFC 8949 canonical CBOR), not merely
-  "definite-length".
-- "Canonical" here includes (at minimum):
-  - definite-length maps/arrays/strings,
-  - keys sorted by canonical CBOR ordering,
-  - shortest-form integer encodings (no non-minimal additional bytes),
-  - no floats,
-  - no duplicate keys.
-- Receivers MUST validate canonicalness before persisting remote events.
-  The reference implementation strategy is:
-  1) decode losslessly (preserving unknown keys/values),
-  2) re-encode via the canonical encoder to canonical_envelope_bytes,
-  3) byte-compare with received bytes.
-  If different: reject with corruption/protocol error.
+Hashing rule (normative, v0.5):
+- sha256 MUST be computed over `event_body_bytes` exactly as stored/transmitted.
+- WAL storage and replication payloads MUST carry `event_body_bytes` unchanged.
+- Receivers MUST verify `sha256(event_body_bytes) == header.sha256` before persisting.
+
+Canonical acceptance (v0.5):
+- Locally-authored events MUST be encoded using the canonical encoder for EventBody
+  (definite-length, sorted keys, no floats).
+- Receivers MUST enforce decoding limits and MUST reject:
+  - payloads that exceed size/depth/map-entry bounds,
+  - indefinite-length encodings for hashed structures,
+  - floats in EventBody.
+- Receivers MAY enforce full RFC 8949 canonical CBOR for `event_body_bytes` by
+  implementation choice, but v0.5 does not require byte-compare re-encoding for
+  acceptance, because hashes are verified over raw bytes and raw bytes are persisted.
 
 Rationale:
 - The minute you ship events between replicas, the hash is a correctness primitive.
@@ -319,42 +366,25 @@ Risks if deferred:
   means WAL migration tools.
 
 Modules impacted:
-- new `src/core/event.rs` (EventEnvelope + encode_canonical + hash computation)
+- new `src/core/event.rs` (EventBody + encode_canonical + hash computation)
 - new `src/daemon/wal/frame.rs` (stores bytes, computes crc on bytes)
 - replication protocol modules (EVENTS frames contain canonical bytes)
 
 What must be true to proceed safely:
-- Decide now and encode explicitly:
-  - canonical_preimage_bytes is for hashing only.
-  - canonical_envelope_bytes is for WAL + wire.
-  The implementation MUST NOT conflate them.
+- The system must maintain a single definition of `event_body_bytes` and a stable
+  canonical encoder for locally-authored events so that the local replica does not
+  accidentally change its own event encoding across versions.
 
-### 0.6.1 Forward-compatible hashing via unknown-key preservation (normative)
+### 0.6.1 (Deferred in v0.5) Unknown-key byte preservation for self-hashing envelopes
 
-Problem:
-- Future protocol versions will add optional keys to EventEnvelope. Older nodes that
-  decode into a strict typed struct will drop unknown keys and then fail sha256
-  verification when re-encoding the preimage.
+v0.4 required lossless unknown-key byte preservation to support re-encoding a
+self-hashing envelope for verification.
 
-Requirement (normative):
-- EventEnvelope decoding MUST be *lossless* for unknown CBOR map entries.
-- The in-memory envelope representation MUST preserve:
-  - unknown key bytes (canonical CBOR bytes for the key)
-  - unknown value bytes (canonical CBOR bytes for the value)
-  so that canonical_preimage_bytes can be reconstructed exactly.
-- Duplicate keys are forbidden:
-  - If a key appears more than once (including once in known fields and once in extras),
-    decoding MUST fail with corruption error.
+v0.5 hashes over raw `event_body_bytes` and persists/forwards those bytes unchanged.
+This removes the need to reconstruct a canonical preimage byte-for-byte.
 
-Encoding rule (normative):
-- canonical_preimage_bytes and canonical_envelope_bytes MUST include unknown entries
-  exactly as received (byte-for-byte) and MUST sort all keys (known + unknown)
-  by canonical CBOR key ordering.
-
-Canonical-bytes precondition (normative):
-- Because unknown key/value bytes are preserved byte-for-byte, decoders MUST reject
-  any unknown key/value that is not already canonical CBOR. Otherwise older nodes
-  cannot reliably reconstruct canonical_preimage_bytes for hash verification.
+Deferred to a future version only if the design re-introduces a self-hashing CBOR
+envelope with embedded hash fields.
 
 ### 0.7 Delta schema choice
 
@@ -392,7 +422,7 @@ What must be true to proceed safely:
 
 Options:
 1) Apply events directly inside daemon state mutators.
-2) Create `core::apply_event(&mut CanonicalState, &EventEnvelope) -> ApplyOutcome`
+2) Create `core::apply_event(&mut CanonicalState, &EventBody) -> ApplyOutcome`
    as pure logic, keep all I/O and indexing outside.
 3) Apply returns index updates or notifications to keep side effects out.
 
@@ -492,47 +522,52 @@ What must be true to proceed safely:
 - WAL append must be atomic enough that replay either sees the record or does not.
   Tail-truncation rules must be implemented before trusting fsync boundaries.
 
-### 0.11 SQLite index schema (replication + idempotency + receipts)
+### 0.11 SQLite index schema (replication + idempotency + receipts) (v0.5 simplified)
 
 Options:
 1) Events table only, no watermarks table.
 2) Events + watermarks (plan suggests).
-3) Add receipts table keyed by txn_id and/or client_request_id.
+3) Add idempotency mapping table keyed by txn_id and/or client_request_id.
 
-Recommendation to lock now: implement events + watermarks + a dedicated
-`client_requests` (or `receipts`) table keyed by `(namespace, client_request_id)`
-that stores: txn_id, requested/achieved durability class, list of event ids
-(or compact range encoding), and min_seen watermark snapshot at commit time.
+Recommendation to lock now (v0.5): implement events + watermarks + a stable
+idempotency mapping table keyed by `(namespace, origin_replica_id, client_request_id)`
+that stores:
 
-Crash-safety refinement (normative):
-- client_requests MUST be a 2-phase state machine:
-  - PENDING row inserted as part of the same append/index transaction (bound to event_ids + txn_id)
-  - COMMITTED row finalized after apply and durability wait resolution, storing min_seen + proof
-- On startup, the daemon MUST reconcile any PENDING rows deterministically and either:
-  - finalize to COMMITTED, or
-  - leave PENDING if corresponding events are not present/durable and require repair.
+- request_sha256 (canonicalized mutation request digest)
+- txn_id
+- event_ids (typically 1 event in v0.5)
+- created_at_ms (optional convenience)
 
-Idempotency safety refinement (normative):
+Receipts are reconstructed on demand from:
+- the stored mapping (txn_id + event_ids),
+- current applied watermarks for `min_seen`,
+- current durability proof (local fsync and any observed replication ACKs).
+
+This removes the PENDING/COMMITTED state machine and its crash-reconciliation logic.
+
+Idempotency safety refinement (normative, v0.5):
 - client_requests MUST store a request digest `request_sha256` computed from the parsed
-  mutation request in a canonical form (excluding retry-only fields like wait_timeout_ms).
+  mutation request in a canonical form (excluding retry-only fields like wait_timeout_ms
+  and excluding durability wait targets).
 - If a request arrives with an existing (namespace, origin_replica_id, client_request_id)
   but a different request_sha256, the daemon MUST reject it with
   ERROR(code="client_request_id_reuse_mismatch") and MUST NOT return the prior receipt.
-- Additionally (normative): WAL record headers MUST persist request_sha256 for locally
-  authored events that carry client_request_id, so client_requests can be rebuilt from WAL
-  even if SQLite is dropped/corrupted.
+- WAL record headers MUST persist request_sha256 and client_request_id for locally
+  authored events so the idempotency mapping can be rebuilt from WAL if SQLite is
+  dropped/corrupted.
 
-Receipt semantics:
-- min_seen is applied watermarks at response/commit time.
-- If waiting for durability times out but local append succeeded, return a retryable
-  error including receipt.
-- On idempotent retry, the daemon SHOULD return the same txn_id + event_ids + min_seen,
-  but MAY return a stronger (monotonic) durability_proof if additional durability
+Receipt semantics (v0.5):
+- min_seen is the server's applied watermarks at the time of the response being produced.
+  On idempotent retry, min_seen may be >= the original response.
+- On idempotent retry, the daemon MUST return the same txn_id + event_ids.
+  The daemon MAY return a stronger (monotonic) durability_proof if additional durability
   has been achieved since the original response.
+- If replication ACK state is not persisted, retries after restart may return a weaker
+  durability_proof (e.g., LocalFsync only); this is acceptable and monotonic for new acks.
 
 Rationale:
-- Idempotency "return exact same receipt and do not mint new stamps" is much easier
-  if receipts are stored explicitly rather than reconstructed ad hoc.
+- Idempotency "return the same txn_id/event_ids" is preserved with a stable mapping,
+  while receipts can be reconstructed from current watermarks and observed durability.
 
 Risks if deferred:
 - You implement idempotency by scanning or uniqueness constraints, then later need
@@ -588,22 +623,13 @@ Head sha tracking rule (normative):
   - early divergence detection in replication handshakes/ACKs,
   - correctness after WAL pruning.
 
-### 0.12.1 Hash-chain continuity across pruning and checkpoint baselines (normative)
+### 0.12.1 (Deferred in v0.5) Hash-chain continuity across pruning and checkpoint baselines
 
-Problem:
-- prev_sha256 continuity checks require knowing the sha256 of the last included event for each
-  (namespace, origin_replica_id). After WAL pruning, that boundary event may not exist locally.
+v0.5 defers WAL pruning. The included_heads anchor mechanism exists for future pruning,
+but is not required for correctness in v0.5 because WAL segments are retained.
 
-Requirement:
-- Every checkpoint meta.json MUST include a chain anchor for each included (namespace, origin):
-  - `included_heads: { namespace -> { origin_replica_id -> sha256_hex } }`
-  - Each value is the sha256 of the event at seq = meta.included[namespace][origin_replica_id].
-  - If seq==0, the origin MAY be omitted from included_heads.
-
-Import rule:
-- On checkpoint import, StoreRuntime MUST seed `head_sha` from included_heads for any origin
-  where the local WAL does not include the boundary event, so that subsequent events can be
-  validated via prev_sha256 continuity.
+Deferred in v0.5:
+- included_heads is optional in v0.5 and becomes required only when WAL pruning is enabled.
 
 ### 0.13 Replication integration: threads vs core
 
@@ -769,7 +795,7 @@ If you want a top 5 lock-now list for early argument and alignment, it is:
 - StoreId as the sole correctness identity (RemoteUrl is legacy discovery only).
 - StoreState = namespaced map of CanonicalState (CanonicalState stays unchanged).
 - origin_seq allocation inside WAL append via SQLite-backed counter semantics.
-- One canonical CBOR bytestring used for WAL storage, wire transmission, and hashing.
+- EventBody bytes hashed and stored/forwarded unchanged; sha/prev live in headers.
 - New checkpoint lane modules, leaving existing git sync as legacy/migration only.
 
 ---
@@ -796,8 +822,8 @@ Content-level limits (normative defaults; can be tightened per-namespace):
 - WAL_GROUP_COMMIT_MAX_LATENCY_MS default 2ms (0 disables group commit).
 - WAL_GROUP_COMMIT_MAX_EVENTS default 64.
 - WAL_GROUP_COMMIT_MAX_BYTES default 1 MiB.
-- MAX_SNAPSHOT_BYTES default 512 MiB (reject larger; require Git checkpoint or admin override).
-- MAX_CONCURRENT_SNAPSHOTS default 1 per store (queue additional requests or reject).
+- MAX_SNAPSHOT_BYTES default 512 MiB (deferred in v0.5; applies to future snapshot bootstrap).
+- MAX_CONCURRENT_SNAPSHOTS default 1 per store (deferred in v0.5).
 
 CBOR decoding limits (normative):
 - MAX_CBOR_DEPTH default 32 (prevents pathological nesting).
@@ -819,7 +845,7 @@ Clock/HLC safety (normative defaults):
   normal "came back after vacation" restarts.
 
 Definite-length rule (normative for hashed structures):
-- EventEnvelope and EventFrameV1 decoding MUST reject indefinite-length maps/arrays/strings.
+- EventBody and EventFrameV1 decoding MUST reject indefinite-length maps/arrays/strings.
 
 Internal backpressure defaults (normative):
 - MAX_IPC_INFLIGHT_MUTATIONS default 1024 (reject or apply backpressure when exceeded).
@@ -837,7 +863,7 @@ Overload shedding (new, normative):
   1) local IPC mutations
   2) replication ingest
   3) WANT servicing
-  4) checkpoint/scrub/snapshot serving
+  4) checkpoint/scrub serving
 - When overloaded:
   - replication sessions MUST stop reads or close with ERROR(code="overloaded")
   - IPC mutations MAY return ERROR(code="overloaded") only when MAX_IPC_INFLIGHT_MUTATIONS exceeded
@@ -845,7 +871,7 @@ Overload shedding (new, normative):
 
 I/O budgeting defaults (normative; may be tightened):
 - MAX_REPL_INGEST_BYTES_PER_SEC default 64 MiB/s per session (token bucket; 0 disables).
-- MAX_BACKGROUND_IO_BYTES_PER_SEC default 128 MiB/s per store for checkpoint/snapshot/scrub work.
+- MAX_BACKGROUND_IO_BYTES_PER_SEC default 128 MiB/s per store for checkpoint/scrub work.
 - Priority rule (normative): WAL append+fsync for local mutations MUST NOT be starved by
   background jobs. Background jobs MUST yield when budgets are exhausted.
 
@@ -1019,19 +1045,21 @@ Use cases:
 - Subscription gating (require_min_seen)
 - Early divergence detection in replication handshakes/ACKs
 
-### 2.4 Event envelopes and deltas
+### 2.4 Event bodies and deltas (v0.5)
 
 Add `src/core/event.rs`:
 
-EventEnvelope fields (spec-aligned):
+EventBody fields (spec-aligned; v0.5 hashed payload):
 - envelope_v
 - store_id, store_epoch, namespace
 - origin_replica_id, origin_seq
 - event_time_ms, txn_id, client_request_id: Option<ClientRequestId>
 - hlc_max: Option<{ actor_id: ActorId, physical_ms: u64, logical: u32 }>
 - kind, delta
-- sha256, prev_sha256
-- unknown: CborUnknownFields  // preserves unrecognized CBOR map entries (see 0.6.1)
+
+Event linkage fields (not inside EventBody in v0.5):
+- sha256: bytes(32) computed as SHA256(event_body_bytes)
+- prev_sha256: optional bytes(32) stored in WAL record header / replication frame header
 
 ClientRequestId scope rule:
 - client_request_id uniqueness and idempotency MUST be scoped to:
@@ -1040,11 +1068,9 @@ ClientRequestId scope rule:
 
 EventKind:
 - TxnV1
-- NamespaceGcMarker
 
 DeltaV1:
 - TxnDeltaV1 (the default for client mutations; carries 0..N ops)
-- NamespaceGcMarkerV1
 
 TxnDeltaV1 contains operation lists (all intra-namespace):
 - bead_upserts: Vec<WireBeadPatch>
@@ -1068,10 +1094,11 @@ HLC max rule (normative):
   maximum stamp minted in the txn for the effective ActorId.
 - This field exists to support fast, correct HLC recovery after restart or index rebuild.
 
-Hash rules:
-- sha256 MUST be computed over canonical CBOR encoding of EventEnvelope with
-  sha256 and prev_sha256 omitted.
-- prev_sha256 (if present) MUST match the previous hash for same (origin_replica_id, namespace).
+Hash rules (v0.5):
+- event_body_bytes is the canonical CBOR encoding of EventBody.
+- sha256 MUST be computed over event_body_bytes exactly.
+- prev_sha256 (if present in headers) MUST match the previous sha256 for the same
+  (origin_replica_id, namespace).
 
 Delta guidance:
 - TxnDeltaV1 `bead_upserts` should omit notes; notes replicate via `note_appends`.
@@ -1081,8 +1108,8 @@ Delta guidance:
 - `bead_delete` includes deletion stamp and lineage fields if present.
 - `dep_upsert` and `dep_delete` include from/to/kind and life stamps.
 - `dep_upsert`/`dep_delete` are intra-namespace only; cross-namespace is rejected.
-- `namespace_gc_marker` includes ttl_basis, cutoff_ms, safety_margin_ms,
-  gc_authority_replica_id, enforce_floor.
+
+Namespace GC marker events are deferred in v0.5.
 
 ### 2.5 Wire bead representations
 
@@ -1100,17 +1127,15 @@ conversion logic:
 - notes? (note objects: id, content, author, at)
 - version metadata: _at, _by, _v?
 
-### 2.6 Durability semantics
+### 2.6 Durability semantics (v0.5)
 
 Add `src/core/durability.rs`:
 - `DurabilityClass`:
   - LocalFsync
   - ReplicatedFsync { k: u32 }
-  - GitCheckpointed
 - `DurabilityProofV1` (normative, extensible):
   - local_fsync: { at_ms: u64, durable_seq: WatermarkMap }  // proof of local disk durability
   - replicated: Option<{ k: u32, acked_by: Vec<ReplicaId> }>
-  - git: Option<{ checkpoint_group: String, git_ref: String, commit_id: String, included: WatermarkMap }>
 - `DurabilityReceipt`:
   - store_id, store_epoch, txn_id, events: Vec<EventId>
   - requested_class: DurabilityClass
@@ -1159,11 +1184,11 @@ Forward-jump handling (normative):
 Recovery requirement (normative):
 - If the SQLite index is rebuilt or missing, the daemon MUST reconstruct HLC state
   by scanning locally-authored WAL records and taking max(hlc_max) per ActorId.
-- This MUST NOT require decoding full deltas; it should use `hlc_max` from the envelope.
+- This MUST NOT require decoding full deltas; it should use `hlc_max` from EventBody.
 
 ---
 
-## 3) Canonical CBOR with minicbor
+## 3) Canonical CBOR with minicbor (v0.5)
 
 We will use `minicbor` directly for hashed payloads. `minicbor_serde` is allowed
 for non-hashed messages only.
@@ -1172,43 +1197,37 @@ for non-hashed messages only.
 - Definite-length maps and arrays only.
 - Keys sorted by canonical CBOR ordering:
   - sort by encoded key length, then by encoded key bytes.
-- No floats in event envelopes to avoid canonical float ambiguity.
-- Exclude sha256 and prev_sha256 from the hash input.
+- No floats in EventBody to avoid canonical float ambiguity.
 - Reject non-canonical integer encodings (non-minimal additional bytes).
-- Reject any CBOR tags in EventEnvelope (simplifies canonical validation and
+- Reject any CBOR tags in EventBody (simplifies canonical validation and
   prevents alternate encodings for the same semantic value).
 
-### 3.2 Encoding strategy
-- Implement `EventEnvelope::encode_canonical()` using `minicbor::Encoder`.
-- Precompute a canonical key order for envelope maps to avoid per-encode sorting.
-- Encoder MUST merge known fields and preserved unknown fields (0.6.1) and sort by
-  canonical CBOR key ordering.
+### 3.2 Encoding strategy (v0.5)
+- Implement `EventBody::encode_canonical_bytes()` using `minicbor::Encoder`.
+- Precompute a canonical key order for EventBody maps to avoid per-encode sorting.
 - Implement:
-  - `encode_canonical_preimage()` (omits sha256/prev_sha256)
-  - `encode_canonical_envelope()` (includes sha256/prev_sha256)
-  - `compute_sha256()` hashes preimage bytes
-  - WAL + wire always carry envelope bytes
+  - `encode_canonical_body()` -> event_body_bytes
+  - `compute_sha256(event_body_bytes)` -> sha256
+  - WAL + wire always carry `event_body_bytes` plus sha/prev in frame headers
 
 ### 3.3 Why not minicbor_serde for hashing
 - Serde does not guarantee canonical key ordering.
 - Canonical ordering is required for tamper-evident hashes.
 
-### 3.4 Canonical validation on decode (normative)
+### 3.4 EventBody validation on decode (normative, v0.5)
 
-Add `validate_canonical_envelope_bytes(bytes: &[u8]) -> Result<EventEnvelope, DecodeError>`:
+Add `decode_event_body(bytes: &[u8]) -> Result<EventBody, DecodeError>` and helpers:
 - MUST enforce the CBOR decoding limits in 0.19.
-- MUST enforce the definite-length rule for hashed structures.
-- MUST be lossless for unknown fields (0.6.1).
-- MUST compute sha256 over canonical_preimage_bytes and verify it equals the
-  envelope sha256 field.
-- MUST re-encode canonical_envelope_bytes and byte-compare with the input bytes.
-  If mismatch: reject as non-canonical (protocol/corruption).
+- MUST reject indefinite-length and floats in EventBody.
+- SHOULD reject duplicate keys (minicbor decoder behavior permitting).
+- Hash verification is performed by the WAL/replication frame validator:
+  - compute sha256 over raw bytes
+  - compare to sha256 provided by the frame header
 
 Implementation note:
-- This validator should NOT require decoding the full delta payload to validate
-  canonicalness and hash correctness; it is sufficient to parse envelope fields,
-  preserve unknown fields, and treat delta as an opaque CBOR item whose bytes are
-  included in canonical re-encoding.
+- Validation should not require decoding full deltas for basic integrity checks.
+  However, apply requires decoding deltas. The system may parse EventBody minimally
+  for admission checks, then fully decode only when applying.
 
 ---
 
@@ -1219,7 +1238,7 @@ Create a pure apply path so local mutations and remote events converge identical
 ### 4.1 Apply module (`src/core/apply.rs`)
 
 Add:
-- `apply_event(ns_state: &mut CanonicalState, event: &EventEnvelope)
+- `apply_event(ns_state: &mut CanonicalState, event: &EventBody)
    -> Result<ApplyOutcome, ApplyError>`
 
 Add shared gating helpers:
@@ -1251,9 +1270,7 @@ ApplyOutcome should include:
 - note_append:
   - Insert note if id not present.
   - If same id exists with different content, treat as corruption.
-- namespace_gc_marker:
-  - Update per-namespace GC floor and enforce safety margin logic.
-  - Actual deletion can be deferred to a background task.
+Namespace GC marker apply is deferred in v0.5.
 
 Idempotency:
 - Idempotency MUST be enforced by StoreRuntime via watermarks before calling apply_event.
@@ -1279,7 +1296,7 @@ for migration and one-release compatibility.
 Directory layout under store dir:
 - `wal/<namespace>/segment-<created_at_ms>-<segment_id>.wal`
 - `index/wal.sqlite`
-- `snap/` for snapshot temp files
+- `snap/` reserved for snapshot bootstrap temp files (deferred in v0.5)
 
 Segment header (raw bytes, little-endian where applicable):
 - magic: 5 bytes = ASCII "BDWAL"
@@ -1313,10 +1330,10 @@ Record framing (wal_format_version = 2):
 - request_sha256: 32 bytes (if flag set)  // sha256 of canonicalized mutation request (retry-stable)
 - sha256: 32 bytes
 - prev_sha256: 32 bytes (if flag set)
-- payload: canonical CBOR bytes of EventEnvelope (includes sha256/prev_sha256)
+- payload: canonical CBOR bytes of EventBody (does NOT include sha256/prev_sha256)
 
 Header consistency (normative):
-- record_header fields MUST match the decoded envelope fields.
+- record_header fields MUST match the decoded EventBody fields.
 - On mismatch, treat as corruption (fail unless repair mode).
 
 Forward compatibility rule (normative):
@@ -1405,13 +1422,13 @@ pub struct EventWal { /* store_dir, index, open segments */ }
 pub struct EventBytes {
   pub eid: EventId,
   pub sha: [u8; 32],
-  pub prev_sha: Option<[u8; 32]>, // fast-path chain link (also present in envelope bytes)
-  pub bytes: bytes::Bytes, // canonical CBOR bytes; MAY be a zero-copy view into an mmapped segment
+  pub prev_sha: Option<[u8; 32]>, // fast-path chain link (not in EventBody bytes)
+  pub bytes: bytes::Bytes, // canonical CBOR EventBody bytes; MAY be a zero-copy view into an mmapped segment
 }
 
 /// Locally-produced event input. MUST omit origin_seq/sha/prev_sha.
 pub struct EventDraft {
-  pub envelope_without_ids: EventEnvelope, // origin_seq=0, sha256/prev_sha256 unset
+  pub body_without_ids: EventBody, // origin_seq=0; origin_replica_id set to local
 }
 
 pub struct AppendResult {
@@ -1426,7 +1443,7 @@ impl EventWal {
   /// Allocates origin_seq and fills prev_sha256/sha256 deterministically.
   pub fn append_local(&mut self, ns: &NamespaceId, drafts: &[EventDraft])
     -> Result<AppendResult, WalError>;
-  /// Ingest remote-authored events as-is using canonical bytes received from the origin.
+  /// Ingest remote-authored events as-is using EventBody bytes received from the origin.
   /// The caller MUST enforce contiguity and prev_sha continuity before calling.
   pub fn ingest_remote_bytes(&mut self, ns: &NamespaceId, origin: &ReplicaId,
                              frames: &[EventBytes])
@@ -1437,7 +1454,7 @@ impl EventWal {
     -> Result<Vec<EventBytes>, WalError>;
   pub fn stream_range(&self, ns: &NamespaceId, origin: &ReplicaId,
                       from_seq_exclusive: u64, max_bytes: usize)
-    -> Result<Vec<EventEnvelope>, WalError>; // convenience wrapper
+    -> Result<Vec<EventBody>, WalError>; // convenience wrapper
   pub fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<u64, WalError>;
   pub fn replay(&self, ns: &NamespaceId) -> Result<(), WalError>;
 }
@@ -1445,11 +1462,11 @@ impl EventWal {
 
 Implementation details:
 - `append_local` allocates origin_seq (SQLite counter), sets prev_sha256 from a
-  durable head cache (or index lookup on cold start), computes canonical bytes + sha,
+  durable head cache (or index lookup on cold start), computes EventBody bytes + sha,
   writes frames, fsyncs per durability, records index entries, and returns assigned ids.
 - `ingest_remote_bytes` does NOT allocate origin_seq and MUST NOT re-encode bytes.
-  It writes validated canonical bytes, records index entries, and returns ids.
-- `stream_range` reads canonical bytes from WAL and decodes (or streams bytes
+  It writes validated EventBody bytes, records index entries, and returns ids.
+- `stream_range` reads EventBody bytes from WAL and decodes (or streams bytes
   directly; still must validate hash).
 - `replay` rebuilds in-memory state or index from WAL segments.
 
@@ -1460,7 +1477,7 @@ Local append (authoritative):
 2) Allocate origin_seq inside SQLite transaction (table-backed counter).
 3) Resolve prev_sha256 for (ns, local_replica_id, origin_seq-1) from an in-memory
    head cache (populate at open; update on each successful fsync+commit).
-4) Encode canonical envelope bytes and compute sha256.
+4) Encode canonical EventBody bytes and compute sha256.
 5) Write framed record(s) to active segment.
 6) If new segment created, fsync directory once.
 7) For LocalFsync or stronger, fsync active segment file.
@@ -1470,41 +1487,28 @@ Local append (authoritative):
 Remote ingest (authoritative):
 1) Caller enforces contiguity: origin_seq == durable_seen+1 and prev_sha matches
    the current head sha for (ns, origin).
-2) Caller MUST validate canonical bytes + sha correctness via validate_canonical_envelope_bytes (3.4).
+2) Caller MUST decode EventBody (bounds + definite-length + no floats) and MUST verify:
+   sha256(event_body_bytes) == frame_header.sha256, and EventBody fields match frame header
+   (store_id, store_epoch, namespace, origin_replica_id, origin_seq, txn_id, client_request_id).
 3) Acquire per-namespace append lock.
 4) Write framed record(s) using provided canonical bytes (no re-encode).
 5) Fsync per durability policy used for remote ingest (durable means "on disk here").
 6) Record offsets + sha + prev_sha in SQLite and commit.
 7) Advance durable/applied watermarks via StoreRuntime and update head cache.
 
-### 5.7 WAL pruning and local snapshots
+### 5.7 (Deferred in v0.5) WAL pruning and retention enforcement
 
-- WAL segments are authoritative; pruning only when a local snapshot `included`
-  watermarks cover the segment and retention policy allows it.
-- Pruning MUST NOT unlink a segment file while it is actively referenced by any
-  replication/WANT reader (e.g., mmapped or otherwise pinned). Implementations SHOULD
-  use refcounts or epoch-based deferral.
-- Keep WAL indefinitely on anchors if configured for audit.
-- Local snapshots (compaction) are optional but must include included watermarks
-  and GC floors, and must be versioned.
+v0.5 does not prune WAL segments. Namespace retention policies are parsed and validated,
+but enforcement via GC markers and segment deletion is deferred.
 
-Retention + pruning gates (normative):
-- Implement a background GC/retention worker that:
-  - evaluates namespace retention policies (ttl/size/forever),
-  - emits NamespaceGcMarker events when policy requires (only by gc_authority),
-  - applies GC floors and schedules actual deletion/compaction work.
-- WAL segment pruning MUST be gated by BOTH:
-  - safety for replication: segment contains no events above the minimum durable
-    watermark required by any eligible replica still tracked by policy, AND
-  - replay safety: either (a) the segment's events are included in a durable
-    checkpoint for that namespace/group, or (b) policy explicitly allows "WAL-only"
-    durability without Git replay.
-  - operational safety: if Git is the only checkpoint lane in use,
-    the daemon MUST maintain a verified local checkpoint cache before allowing pruning.
-    Otherwise a temporary Git outage can make the store unrecoverable after restart.
-- Idempotency receipts MUST be garbage collected:
-  - default window recommendation: keep >= 7 days of client_request_id receipts
-    (configurable per namespace), OR cap by total rows/bytes to prevent DB bloat.
+Retention + pruning gates:
+Deferred in v0.5 (requires WAL pruning work):
+- GC marker emission
+- GC floors
+- pruning safety gates
+- included_heads as a hard requirement
+
+Receipt GC remains recommended for SQLite bloat control, but is independent of WAL pruning.
 
 ---
 
@@ -1540,12 +1544,11 @@ pub trait WalIndexTxn {
                       applied: u64, durable: u64,
                       applied_head_sha: Option<[u8; 32]>,
                       durable_head_sha: Option<[u8; 32]>) -> Result<(), WalError>;
-  fn upsert_client_request_pending(&mut self, ns: &NamespaceId, origin: &ReplicaId,
-                                   client_request_id: ClientRequestId,
-                                   request_sha256: [u8; 32],
-                                   txn_id: TxnId, requested_class: DurabilityClass,
-                                   event_ids: &[EventId]) -> Result<(), WalError>;
-  fn finalize_client_request_committed(&mut self, receipt: &DurabilityReceipt) -> Result<(), WalError>;
+  fn upsert_client_request(&mut self, ns: &NamespaceId, origin: &ReplicaId,
+                           client_request_id: ClientRequestId,
+                           request_sha256: [u8; 32],
+                           txn_id: TxnId, event_ids: &[EventId],
+                           created_at_ms: u64) -> Result<(), WalError>;
   fn commit(self: Box<Self>) -> Result<(), WalError>;
   fn rollback(self: Box<Self>) -> Result<(), WalError>;
 }
@@ -1557,8 +1560,15 @@ pub trait WalIndexReader {
                max_bytes: usize) -> Result<Vec<IndexedRangeItem>, WalError>;
   fn lookup_client_request(&self, ns: &NamespaceId, origin: &ReplicaId,
                            client_request_id: ClientRequestId)
-    -> Result<Option<DurabilityReceipt>, WalError>;
+    -> Result<Option<ClientRequestRow>, WalError>;
   fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<u64, WalError>;
+}
+
+pub struct ClientRequestRow {
+  pub request_sha256: [u8; 32],
+  pub txn_id: TxnId,
+  pub event_ids: Vec<EventId>,
+  pub created_at_ms: u64,
 }
 ```
 
@@ -1600,16 +1610,10 @@ CREATE TABLE client_requests (
   namespace TEXT NOT NULL,
   origin_replica_id BLOB NOT NULL,
   client_request_id BLOB NOT NULL,
-  state INTEGER NOT NULL,       -- 0=PENDING, 1=COMMITTED
   created_at_ms INTEGER NOT NULL,
-  updated_at_ms INTEGER NOT NULL,
   request_sha256 BLOB NOT NULL, -- 32 bytes, see idempotency safety refinement
   txn_id BLOB NOT NULL,
-  requested_class INTEGER NOT NULL,
-  durability_proof BLOB,        -- nullable while PENDING
-  achieved_class INTEGER,       -- optional derived cache
-  min_seen BLOB,                -- nullable while PENDING
-  event_ids BLOB NOT NULL,      -- known at PENDING time
+  event_ids BLOB NOT NULL,      -- CBOR-encoded Vec<EventId> (usually len=1 in v0.5)
   PRIMARY KEY (namespace, origin_replica_id, client_request_id)
 );
 
@@ -1666,7 +1670,7 @@ CREATE TABLE replica_liveness (
 
 Notes:
 - UUIDs stored as 16-byte BLOBs.
-- min_seen and event_ids can be CBOR-encoded blobs.
+- event_ids can be CBOR-encoded blobs.
   Under the "one request → one event" rule, event_ids is typically length 1,
   but remains a Vec for forward compatibility.
 - meta should store schema version and store_id for sanity checks.
@@ -1680,12 +1684,8 @@ Startup sanity checks (normative):
     recompute origin_seq from events table (or full WAL scan if events table missing).
 - If any check fails, rebuild the index from WAL segments before allowing appends.
 
-Pending receipt reconciliation (normative):
-- On store open after WAL replay, scan client_requests WHERE state=0 (PENDING) and:
-  - validate referenced event_ids exist in events table (or can be found via WAL scan)
-  - compute whether events are applied and what min_seen should be
-  - update to COMMITTED with deterministic proof fields where possible
-  - if events are missing/corrupt, leave PENDING for operator review via admin.doctor
+Pending receipt reconciliation:
+- Removed in v0.5. There is no PENDING/COMMITTED state machine.
 
 ### 6.3 Semantics
 
@@ -1710,7 +1710,7 @@ SQLite PRAGMA choices (normative):
 - Add explicit `index_durability_mode = cache | durable` (store-local setting).
   - cache (default): `synchronous = NORMAL`. SQLite is treated as rebuildable cache.
     Correctness and client durability promises derive from WAL segments + replay.
-  - durable (opt-in): `synchronous = FULL`. Stronger persistence for receipts/index,
+  - durable (opt-in): `synchronous = FULL`. Stronger persistence for idempotency mapping/index,
     at a cost in tail latency.
   In both modes, open-time index catch-up + origin_seq recompute is mandatory.
 - `cache_size = -16000` (16 MiB cache) or configurable.
@@ -1720,11 +1720,11 @@ SQLite PRAGMA choices (normative):
 
 SQLite bloat control (recommended):
 - Set `auto_vacuum = INCREMENTAL` at DB creation time (must be set before tables exist).
-- After receipt GC, run bounded `PRAGMA incremental_vacuum(N)` where N is derived from
+- After idempotency mapping GC, run bounded `PRAGMA incremental_vacuum(N)` where N is derived from
   MAX_BACKGROUND_IO_BYTES_PER_SEC to prevent WAL/index files from growing forever.
 - Periodically run `PRAGMA wal_checkpoint(TRUNCATE)` (for wal.sqlite's own -wal file)
   in the background, also bounded by MAX_BACKGROUND_IO_BYTES_PER_SEC.
-- Suggested frequency: after every N receipt GC operations OR every M minutes, whichever
+- Suggested frequency: after every N idempotency mapping GC operations OR every M minutes, whichever
   comes first (defaults: N=1000, M=60).
 
 Schema migration policy (normative):
@@ -1742,9 +1742,9 @@ Local append ordering:
 1) Allocate origin_seq inside a SQLite write transaction.
 2) Write WAL record bytes to the active segment.
 3) If durability >= LocalFsync: fsync the segment file (and fsync directory only on new segment creation).
-4) Record event offsets + sha + prev_sha in SQLite (same transaction) and COMMIT.
+4) Record event offsets + sha + prev_sha AND idempotency mapping in SQLite (same transaction) and COMMIT.
 5) Apply event to in-memory state.
-6) Update applied watermark (in memory) and persist watermarks + receipt finalization in SQLite.
+6) Update applied watermark (in memory) and persist watermarks in SQLite.
 7) Only after step (6) may a success response be returned.
 
 Failure handling:
@@ -1753,8 +1753,9 @@ Failure handling:
   This is expected in `index_durability_mode=cache`. Startup MUST catch up/rebuild the index
   from WAL before accepting writes to avoid origin_seq reuse and to restore idempotency lookups.
 - If failure occurs after step (4) but before step (5): restart replay MUST apply the event.
-- If failure occurs after step (5) but before step (6): event is applied in memory but receipt may be missing.
-  Startup reconciliation MUST finalize receipts and watermarks deterministically.
+- If failure occurs after step (5) but before step (6): event is applied in memory but
+  SQLite watermark persistence may lag. On restart, replay recomputes applied state,
+  and the index catch-up restores idempotency mapping from WAL record headers.
 
 Serve-traffic gate:
 - The daemon MUST NOT accept mutation requests until WAL verification + index catch-up + replay complete,
@@ -1778,9 +1779,9 @@ pub struct StoreRuntime {
   watermarks_applied: WatermarkMap,
   watermarks_durable: WatermarkMap,
   /// Fast chain heads: last durable sha per (ns, origin). Used for prev_sha fill
-  /// and for gap validation without decoding envelope bytes.
+  /// and for gap validation without decoding EventBody bytes.
   head_sha: BTreeMap<NamespaceId, BTreeMap<ReplicaId, [u8; 32]>>,
-  gc: GcRuntime, // retention enforcement + WAL pruning + receipt GC
+  gc: GcRuntime, // retention enforcement + WAL pruning (deferred) + idempotency mapping GC
   gap_buffer: GapBufferByNsOrigin,
   peer_acks: PeerAckTable,
   broadcaster: EventBroadcaster,
@@ -1844,11 +1845,11 @@ Replace or augment current resolve_remote():
 
 Define EventBroadcaster as BOTH:
 1) a bounded pub/sub mechanism for new events, and
-2) a bounded in-memory hot-cache of canonical EventEnvelope bytes.
+2) a bounded in-memory hot-cache of canonical EventBody bytes.
 
 Requirements:
 - On successful WAL append (local or remote), StoreRuntime MUST publish:
-  - EventId, sha, prev_sha, namespace, and canonical envelope bytes (Bytes).
+  - EventId, sha, prev_sha, namespace, and canonical EventBody bytes (Bytes).
 - The broadcaster MUST enforce backpressure:
   - bounded channels (by bytes/events),
   - slow subscribers MAY be dropped with ERROR(code="subscriber_lagged").
@@ -1880,8 +1881,8 @@ MutationEngine responsibilities:
   - request.actor_id if present (and permitted by IPC policy),
   - else daemon default actor id.
 - Mint txn_id and stamps using daemon clock.
-- Mint stamps using per-ActorId HLC state and populate EventEnvelope.hlc_max.
-- Build exactly one EventEnvelope (kind=TxnV1) per client mutation request.
+- Mint stamps using per-ActorId HLC state and populate EventBody.hlc_max.
+- Build exactly one EventBody (kind=TxnV1) per client mutation request.
   If the request would exceed MAX_WAL_RECORD_BYTES, return an explicit error
   instructing the client to split the operation into multiple requests.
 - Enforce content-level limits before encoding:
@@ -1893,9 +1894,9 @@ MutationEngine responsibilities:
 ### 8.2 Event sequencing and idempotency
 
 - origin_seq allocated at WAL append, not in memory.
-- If client_request_id exists in WAL index, return prior receipt without new events.
+- If client_request_id exists in WAL index, return a reconstructed prior receipt without new events.
 - MutationEngine MUST compute request_sha256 from a canonicalized mutation request representation
-  (retry-stable; excludes durability wait knobs) and pass it to WAL append so it is persisted in:
+  (retry-stable; excludes durability wait targets and wait_timeout_ms) and pass it to WAL append so it is persisted in:
   - SQLite client_requests.request_sha256
   - WAL record header (has_request_sha256)
 
@@ -1931,17 +1932,18 @@ Replication uses framed CBOR messages (same framing as WAL).
 ### 9.1 Modules
 
 - frame.rs: length + crc32c framing (shared with WAL format)
-- proto.rs: typed message schemas (HELLO, WELCOME, EVENTS, ACK, WANT, ERROR, SNAPSHOT_*)
+- proto.rs: typed message schemas (HELLO, WELCOME, EVENTS, ACK, WANT, ERROR)
 - session.rs: per-connection state machine
 - manager.rs: outbound peers, reconnect/backoff, event fanout
 - server.rs: listener and accept loop
-- snapshot.rs: snapshot request/response handling
+- snapshot.rs: deferred in v0.5 (snapshot bootstrap reintroduced later)
 
 ### 9.2 Message envelope
 
 CBOR map `{ v, type, body }` with `minicbor`.
-Event payloads SHOULD embed canonical EventEnvelope bytes (see EventBytes/EventFrameV1);
-decoding into EventEnvelope structs is required only for apply and validation.
+Event payloads SHOULD embed canonical EventBody bytes (see EventBytes/EventFrameV1);
+sha256/prev_sha256 live in the frame header, not inside the payload.
+Decoding into EventBody structs is required only for apply and validation.
 Hash verification remains mandatory.
 
 ### 9.3 Handshake and protocol negotiation
@@ -1960,7 +1962,7 @@ HELLO body:
 - seen_durable_heads? (per requested namespace) // sha256 at seen_durable for origins present
 - seen_applied? (per requested namespace) // optional; helps peers reason about read lag
 - seen_applied_heads? (per requested namespace) // sha256 at seen_applied (optional)
-- capabilities (supports_snapshots, supports_live_stream, supports_compression)
+- capabilities (supports_snapshots (v0.5: false), supports_live_stream, supports_compression)
 
 WELCOME body:
 - protocol_version (negotiated)
@@ -1989,7 +1991,7 @@ EventFrameV1:
 - eid: EventId
 - sha256: bytes(32)
 - prev_sha256?: bytes(32)  (omitted for seq==1)
-- bytes: bytes  (canonical CBOR EventEnvelope bytes, including sha256/prev_sha256)
+- bytes: bytes  (canonical CBOR EventBody bytes, excluding sha256/prev_sha256)
 
 Rules:
 - Sender MAY batch.
@@ -1997,7 +1999,8 @@ Rules:
   increasing origin_seq order.
 - Receiver MUST validate:
   - store_id/store_epoch match
-  - bytes are canonical EventEnvelope CBOR (3.4) and sha256 verifies
+  - EventId fields (namespace/origin_replica_id/origin_seq) match the decoded EventBody
+  - bytes decode as EventBody within bounds (3.4) and sha256(bytes) matches frame sha256
   - if prev_sha256 present, it MUST match the receiver's current head sha for that
     (namespace, origin_replica_id) before buffering/appending
   - if event_id already exists, sha256 matches prior observed sha256
@@ -2022,7 +2025,7 @@ Body:
 - applied_heads?: { namespace -> { origin_replica_id -> bytes(32) } }
 
 Rules:
-- durable advances only after WAL fsync or snapshot/checkpoint that guarantees replay.
+- durable advances only after WAL fsync; checkpoint import may advance durable watermarks for bootstrap.
 - applied advances only after apply_event.
 - Both vectors monotonic per (namespace, origin).
 - ACKs may be standalone or piggybacked.
@@ -2033,7 +2036,7 @@ Head-hash rule (normative):
 - If a peer reports the same seq but a different head sha for a (namespace, origin),
   this indicates divergence/corruption. The receiver MUST:
   - stop streaming EVENTS for that origin,
-  - request SNAPSHOT_REQUIRED (or close with ERROR(code="diverged")).
+  - close with ERROR(code="diverged") or ERROR(code="bootstrap_required").
 
 ### 9.6 WANT
 
@@ -2043,52 +2046,21 @@ Body:
 Rules:
 - Respond with EVENTS until satisfied.
 - Must use WAL index to avoid O(total WAL) scans.
-- If WAL cannot serve the requested range (pruned or missing), sender MUST respond with
-  SNAPSHOT_REQUIRED (new) and MUST NOT silently stall.
+If WAL cannot serve the requested range, the sender MUST respond with an explicit error
+in v0.5:
 
-SNAPSHOT_REQUIRED body (new):
-- namespaces
-- reason: "range_pruned" | "range_missing" | "over_limit"
-- suggested_included: { namespace -> { origin_replica_id -> u64 } }  // best-known durable included
-- suggested_included_heads: { namespace -> { origin_replica_id -> sha256_hex } }  // chain anchors
-- max_snapshot_bytes (sender limit)
+- ERROR(code="bootstrap_required", retryable=false)
 
-### 9.7 Snapshot messages (recommended; normative for anchors and for WANT range gaps)
+Reason: v0.5 defers replication snapshot bootstrap. The receiver is expected to bootstrap
+from a checkpoint (Git checkpoint lane or local checkpoint cache) and then retry replication.
+The ERROR details SHOULD include namespaces and best-known included watermarks when available.
 
-SNAPSHOT_REQUEST body:
-- namespaces
-- min_included? (watermarks)
-- resume_from_chunk? (default 0)
+### 9.7 (Deferred in v0.5) Snapshot messages
 
-SNAPSHOT_BEGIN body:
-- snapshot_id
-- namespaces
-- included (watermarks)
-- encoding: "checkpoint_tar_zstd_v1"
-- chunk_size_bytes (default 1 MiB)
-- total_chunks
-- sha256 (hash of full snapshot byte stream)
-
-SNAPSHOT_CHUNK body:
-- snapshot_id
-- chunk_index
-- bytes
-
-SNAPSHOT_END body:
-- snapshot_id
-
-Rules:
-- Hash must be verified before applying snapshot.
-- Resumability rule (normative):
-  - If resume_from_chunk is supported, the sender MUST materialize the full snapshot
-    byte stream once (temp file under store_dir/snap/) and stream chunks from that file.
-  - The sender MUST NOT regenerate a new tar/zstd stream for the same snapshot_id.
-  - If the temp artifact is missing/expired, the sender MUST respond with
-    ERROR(code="snapshot_expired") and require restart from chunk 0.
-- Resource limits (normative):
-  - The sender MUST enforce MAX_SNAPSHOT_BYTES before announcing total_chunks.
-  - The receiver MUST enforce MAX_SNAPSHOT_BYTES and reject early (before allocation)
-    if total_chunks * chunk_size_bytes exceeds limit.
+Deferred in v0.5. Snapshot bootstrap over replication is reintroduced only after:
+- WAL pruning exists (so ranges can truly be missing),
+- checkpoint cache import/export is battle-tested,
+- resource accounting and resume semantics are implemented and tested.
 
 ### 9.8 Gap handling and flow control
 
@@ -2140,13 +2112,13 @@ Replicate only namespaces where policy requires it:
 ### 9.10 Error handling (explicit)
 
 - Store id mismatch: close connection with ERROR(code="wrong_store").
-- Store epoch mismatch: reject and require snapshot/bootstrap; do not merge state.
+- Store epoch mismatch: reject and require checkpoint bootstrap; do not merge state.
 - Equivocation: same EventId with different sha is protocol corruption; terminate session.
 
 Error payload and retry metadata (normative):
 - All error codes MUST be defined in REALTIME_ERRORS.md.
 - ERROR frames MUST set retryable=true only when the peer can retry safely without
-  human intervention (e.g., overloaded, temporary network, snapshot_expired).
+  human intervention (e.g., overloaded, temporary network).
 - For retryable errors, ERROR SHOULD include retry_after_ms to avoid thundering herds.
 
 ---
@@ -2159,7 +2131,6 @@ Add a DurabilityCoordinator to track pending txns and completion conditions.
 
 - LocalFsync: complete after WAL fsync + apply.
 - ReplicatedFsync(k): wait for durable ACKs from k eligible replicas.
-- GitCheckpointed: wait for a pushed checkpoint that includes events.
 
 ### 10.2 Replica selection for k
 
@@ -2179,16 +2150,11 @@ Ephemeral containers:
 - Must submit mutations to durable replica.
 - Must not be counted as durable copies.
 
-### 10.4 Optional Git durable copy
+### 10.4 Git checkpoints in v0.5
 
-If durable_copy_via_git=true:
-- Git checkpoint push may count as one durable copy if:
-  - namespace persist_to_git=true
-  - coordinator is primary checkpoint writer
-  - push succeeds and ref advanced
-  - checkpoint meta.included covers events
-- Must record local inclusion proof mapping txn_id (or event range) to commit id
-  and included watermarks to avoid double counting on retries.
+Git checkpoints exist in v0.5 as a deterministic checkpoint lane for bootstrap and
+recovery. v0.5 does not support "wait until checkpointed" as a durability class.
+Checkpoint status is exposed via admin.status and checkpoint cache metadata.
 
 ### 10.5 Receipt and retry semantics
 
@@ -2201,31 +2167,15 @@ If durable_copy_via_git=true:
 ## 11) Local subscriptions (IPC streaming)
 
 Add Subscribe IPC request:
-- streams EventEnvelope objects (canonical bytes optional)
+- streams EventBody objects (canonical bytes optional) plus header sha/prev metadata
 - supports require_min_seen (wait or return retryable error)
 - separate from materialized query responses (views remain the query path)
 
 ---
 
-## 12) Snapshot bootstrap (realtime)
+## 12) (Deferred in v0.5) Snapshot bootstrap (realtime)
 
-Use checkpoint layout for realtime snapshots:
-- Build checkpoint tree in temp dir (shared builder).
-- Package as tar + zstd.
-- Send SNAPSHOT_BEGIN with hash and chunk count.
-- Stream SNAPSHOT_CHUNK frames.
-- Verify hash, extract, import, merge, advance watermarks.
-- Keep the snapshot artifact until completion (SNAPSHOT_END) or TTL expiry so resume works.
-
-Deterministic snapshot artifact (recommended, correctness-preserving):
-- The sender SHOULD reuse a cached deterministic tar.zst produced at checkpoint export time.
-- Deterministic tar requirements:
-  - files enumerated in UTF-8 path byte order ascending,
-  - mtime = 0 for all entries,
-  - uid/gid = 0, uname/gname empty,
-  - stable permission bits (e.g., 0644 for files, 0755 for dirs),
-  - no PAX time fields.
-- The snapshot sha256 in SNAPSHOT_BEGIN SHOULD equal the cached artifact hash.
+Deferred in v0.5. Bootstrap uses checkpoints (Git lane or local cache).
 
 ---
 
@@ -2311,9 +2261,8 @@ meta.json fields:
 - policy_hash  // sha256 over canonical policy representation (namespaces.toml after validation)
 - roster_hash? // sha256 over canonical replicas.toml if present (else omitted)
 - included: { namespace -> { origin_replica_id -> u64 } }
-- included_heads: { namespace -> { origin_replica_id -> sha256_hex } }
-  // sha256 at the included watermark for chain continuity after WAL pruning.
-  // Required for namespaces where WAL pruning is enabled.
+- included_heads?: { namespace -> { origin_replica_id -> sha256_hex } }
+  // Optional in v0.5. Becomes required once WAL pruning is enabled.
 - content_hash (sha256 of canonical meta preimage bytes; see algorithm below)
 - manifest_hash (sha256 of manifest.json bytes)
 
@@ -2365,7 +2314,7 @@ Rules:
    - Regenerate only dirty shard files since the last exported checkpoint for the group.
    - Reuse previous checkpoint blobs for unchanged shard paths.
    - Determinism rule remains: regenerated shard JSONL lines MUST be sorted as specified.
-3) Snapshot barrier (normative):
+3) Checkpoint snapshot barrier (normative):
    - The coordinator thread MUST capture:
      - included watermarks (durable) for the group
      - a consistent view of the shard contents to be written (full or dirty-only)
@@ -2388,24 +2337,25 @@ Rules:
      - fsync `checkpoint_cache/<group>/` directory after publishes
      - update `checkpoint_cache/<group>/CURRENT` (write tmp + rename) to point to the
        newest verified checkpoint_id
-9) Also materialize a deterministic snapshot artifact (recommended):
-   - Write `<checkpoint_id>.tar.zst` alongside the cached tree.
-   - Record its sha256 in meta.json (optional field `snapshot_hash`).
-   - This artifact is used by SNAPSHOT_* serving to avoid re-tarring/re-compressing.
+9) (Deferred in v0.5) Snapshot artifact:
+   - Snapshot tar/zstd export is deferred with replication snapshot bootstrap.
 
 ### 13.9 Import / merge algorithm (normative)
 
 1) Fetch remote head for each checkpoint group.
-2) Parse checkpoint snapshot.
+2) Parse checkpoint tree (cached or fetched).
 3) Verify manifest_hash and content_hash; reject if mismatch.
-3.1) Verify included_heads is present for any namespace where pruning is enabled; reject if missing.
-3.2) Seed StoreRuntime head_sha for included origins from included_heads where WAL boundary
-     events are not available locally (post-prune replay anchor).
+3.1) If included_heads is present, StoreRuntime MAY seed head_sha from it.
+     v0.5 does not require included_heads because WAL pruning is deferred.
 4) Merge into local state deterministically.
 5) Advance durable watermarks to at least meta.included for included namespaces.
 6) If local state changed and replica is checkpoint writer, export new checkpoint.
 
-### 13.9.1 Import hardening (normative)
+### 13.9.1 Import hardening (normative, deferred for snapshots in v0.5)
+
+Snapshot tar extraction safety applies to replication snapshot bootstrap, which is
+deferred in v0.5. Checkpoint import still uses the same safety principles when
+reading cached checkpoint trees from disk.
 
 Snapshot tar extraction safety:
 - MUST enforce MAX_SNAPSHOT_BYTES on total extracted bytes (not just archive size).
@@ -2469,7 +2419,7 @@ $BD_DATA_DIR/stores/<store_id>/
   replicas.toml
   wal/<namespace>/*.wal
   index/wal.sqlite
-  snap/
+  snap/  # reserved for snapshot bootstrap (deferred in v0.5)
   checkpoint_cache/<group>/<checkpoint_id>/
   checkpoint_cache/<group>/<checkpoint_id>.tar.zst
   checkpoint_cache/<group>/CURRENT
@@ -2504,7 +2454,7 @@ Add configuration for:
 
 Add to all mutation requests:
 - namespace (optional, default "core")
-- durability (optional, default LocalFsync)
+- durability (optional, default LocalFsync; v0.5 supports LocalFsync and ReplicatedFsync(k) only)
 - client_request_id (optional UUID)
 - actor_id (optional, default daemon actor; used for stamps and attribution)
 
@@ -2555,9 +2505,8 @@ Add admin/introspection ops:
                  safe_to_prune_wal: bool,
                  safe_to_rebuild_index: bool }
   - MUST include explicit remediation actions (exact admin ops to run, in order).
-- `admin.gc_now`: triggers retention enforcement + receipt GC for selected namespaces.
-- `admin.prune_wal`: runs WAL pruning evaluation with dry_run option and explicit
-  acknowledgement gates (never prune implicitly via IPC).
+- `admin.gc_now`: deferred in v0.5 (retention enforcement via GC markers is deferred).
+- `admin.prune_wal`: deferred in v0.5 (WAL pruning is deferred).
 - `admin.maintenance_mode`: toggles maintenance/read-only mode:
   - when enabled: reject new mutations/replication ingest with ERROR(code="maintenance_mode"),
     but allow admin/read operations.
@@ -2596,7 +2545,7 @@ Observability requirements (normative):
   namespace authorization decisions.
 - Emit at minimum:
   - counters: wal_append_ok/err, wal_fsync_ok/err, apply_ok/err, repl_events_in/out,
-    checkpoint_export_ok/err, snapshot_send_ok/err, scrub_ok/err, scrub_records_checked
+    checkpoint_export_ok/err, scrub_ok/err, scrub_records_checked
   - gauges: IPC inflight, repl ingest queue bytes/events, checkpoint job queue depth,
     per-peer lag (durable watermark diff)
   - histograms: wal_append_duration, wal_fsync_duration, apply_duration, checkpoint_duration
@@ -2657,10 +2606,10 @@ Initial watermarks:
 ## 18) Testing and validation
 
 Add deterministic tests for:
-- Canonical CBOR hashing stability (bytes identical across runs)
+- Canonical CBOR EventBody hashing stability (bytes identical across runs)
 - WAL framing and tail truncation
 - WAL index rebuild from segments
-- origin_seq allocation and idempotency receipts
+- origin_seq allocation and idempotency mapping/receipts
 - apply idempotence and note collision detection
 - replication ACK/WANT behavior and backpressure
 - checkpoint export/import determinism, manifest and content hashes
@@ -2683,7 +2632,7 @@ Add rolling-upgrade compatibility tests (recommended):
 - checkpoint import compatibility across checkpoint_format_version N-1 -> N
 - replication protocol negotiation matrix:
   - min/max protocol versions
-  - capability mismatches (compression, snapshots)
+  - capability mismatches (compression; snapshots deferred in v0.5)
 
 Upgrade/rollback policy (normative):
 - WAL format changes MUST support reading N-1 records during transition.
@@ -2701,7 +2650,7 @@ Upgrade/rollback policy (normative):
 Add fuzzing + crash safety validation (recommended):
 - cargo-fuzz targets:
   - WAL frame decode (length/crc/tail truncation)
-  - CBOR EventEnvelope decode with bounds (depth, map entries, array entries)
+  - CBOR EventBody decode with bounds (depth, map entries, array entries)
   - replication message decode (HELLO/WELCOME/EVENTS)
 - crash tests (integration):
   - inject SIGKILL during append (after write before fsync, after fsync before index commit, etc)
@@ -2719,12 +2668,12 @@ Add offline fsck tests (recommended):
 ## 19) Recommended phase ordering
 
 1) Core types + StoreState + receipts
-2) Canonical CBOR + EventEnvelope + apply path
+2) Canonical CBOR + EventBody + apply path
 3) Event WAL + SQLite index + replay
 4) Mutation engine (events-first)
 5) Replication subsystem + ACK semantics
 6) Git checkpoint lane
-7) IPC streaming subscriptions + snapshot bootstrap
+7) IPC streaming subscriptions (snapshot bootstrap deferred)
 
 This ordering minimizes scope collapse and keeps the system operable as each layer lands.
 
