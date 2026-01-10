@@ -1,7 +1,7 @@
 //! Model: require_min_seen read gating + timeout semantics.
 //!
 //! Plan alignment:
-//! - Read gating via applied watermarks: REALTIME_PLAN.md §16.1
+//! - Read gating via applied watermarks: REALTIME_PLAN.md read gating semantics
 //!
 //! Reads either return success once applied >= require_min_seen, or wait up to
 //! wait_timeout_ms and return a retryable error with the current watermark.

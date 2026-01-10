@@ -1,16 +1,23 @@
 //! Toy "canonical" codec + hashing for model checking.
 //!
-//! This is **not** CBOR and it does **not** implement unknown-key preservation.
-//! The purpose is to give the Stateright models a deterministic:
-//! - preimage (hashed bytes)
-//! - envelope (wire bytes)
-//! while keeping the state space tiny.
+//! This models the v0.5 rule set:
+//! - hash over raw EventBody bytes
+//! - sha/prev are frame headers (not inside the hashed payload)
+//!
+//! This is **not** CBOR. We use JSON to keep the state space tiny.
 
 use crate::spec::{sha256_bytes, NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreIdentity};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ToyPreimage {
+pub struct ToyEventId {
+    pub namespace: NamespaceId,
+    pub origin: ReplicaId,
+    pub seq: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ToyEventBody {
     pub store: StoreIdentity,
     pub namespace: NamespaceId,
     pub origin: ReplicaId,
@@ -20,63 +27,111 @@ pub struct ToyPreimage {
     pub payload_tag: u8,
 }
 
+impl ToyEventBody {
+    pub fn encode_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("toy body must serialize")
+    }
+
+    pub fn decode_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        serde_json::from_slice(bytes).map_err(|_| "decode_body")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ToyEnvelope {
-    pub pre: ToyPreimage,
+pub struct ToyFrame {
+    pub eid: ToyEventId,
+    /// Declared hash of the EventBody bytes.
+    pub sha: Sha256,
     /// Prev link rule:
     /// - seq==1 => prev MUST be None
     /// - seq>1  => prev MUST be Some
     pub prev: Option<Sha256>,
-    /// Declared hash of canonical preimage.
-    pub sha: Sha256,
+    /// EventBody bytes (toy JSON; locally-authored bytes are canonical).
+    pub body_bytes: Vec<u8>,
 }
 
-impl ToyEnvelope {
-    pub fn compute_sha(pre: &ToyPreimage) -> Sha256 {
-        let pre_bytes = serde_json::to_vec(pre).expect("toy preimage must serialize");
-        sha256_bytes(&pre_bytes)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedFrame {
+    pub body: ToyEventBody,
+    pub sha: Sha256,
+    pub prev: Option<Sha256>,
+    pub body_bytes: Vec<u8>,
+}
+
+impl ToyFrame {
+    pub fn compute_sha(body_bytes: &[u8]) -> Sha256 {
+        sha256_bytes(body_bytes)
     }
 
-    pub fn new(store: StoreIdentity, namespace: NamespaceId, origin: ReplicaId, seq: Seq1, payload_tag: u8, prev: Option<Sha256>) -> Self {
-        let pre = ToyPreimage {
+    pub fn new(
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        payload_tag: u8,
+        prev: Option<Sha256>,
+    ) -> Self {
+        let body = ToyEventBody {
             store,
-            namespace,
+            namespace: namespace.clone(),
             origin,
             seq: seq.as_u64(),
             payload_tag,
         };
-        let sha = Self::compute_sha(&pre);
-        Self { pre, prev, sha }
+        let body_bytes = body.encode_bytes();
+        let sha = Self::compute_sha(&body_bytes);
+        let eid = ToyEventId {
+            namespace,
+            origin,
+            seq: seq.as_u64(),
+        };
+        Self {
+            eid,
+            sha,
+            prev,
+            body_bytes,
+        }
     }
 
-    pub fn encode_envelope_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("toy envelope must serialize")
+    pub fn encode_frame_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("toy frame must serialize")
     }
 
-    pub fn decode_envelope_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        serde_json::from_slice(bytes).map_err(|_| "decode")
+    pub fn decode_frame_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        serde_json::from_slice(bytes).map_err(|_| "decode_frame")
     }
 
     pub fn verify(
         bytes: &[u8],
         expected_store: StoreIdentity,
         expected_prev_head: Option<Sha256>,
-    ) -> Result<Self, &'static str> {
-        let env = Self::decode_envelope_bytes(bytes)?;
+    ) -> Result<VerifiedFrame, &'static str> {
+        let frame = Self::decode_frame_bytes(bytes)?;
+        let body = ToyEventBody::decode_bytes(&frame.body_bytes)?;
 
         // Store gating.
-        if env.pre.store != expected_store {
+        if body.store != expected_store {
             return Err("wrong_store");
         }
 
+        // Cross-check event id fields.
+        let expected_eid = ToyEventId {
+            namespace: body.namespace.clone(),
+            origin: body.origin,
+            seq: body.seq,
+        };
+        if frame.eid != expected_eid {
+            return Err("eid_mismatch");
+        }
+
         // SHA gating.
-        let computed = Self::compute_sha(&env.pre);
-        if computed != env.sha {
+        let computed = Self::compute_sha(&frame.body_bytes);
+        if computed != frame.sha {
             return Err("sha_mismatch");
         }
 
         // Prev-link gating.
-        match (env.pre.seq, env.prev, expected_prev_head) {
+        match (body.seq, frame.prev, expected_prev_head) {
             (1, None, _) => {}
             (1, Some(_), _) => return Err("prev_mismatch"),
             (s, Some(p), Some(head)) if s > 1 && p == head => {}
@@ -85,7 +140,12 @@ impl ToyEnvelope {
             _ => {}
         }
 
-        Ok(env)
+        Ok(VerifiedFrame {
+            body,
+            sha: frame.sha,
+            prev: frame.prev,
+            body_bytes: frame.body_bytes,
+        })
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Plan alignment:
 //! - EVENTS ordering + contiguity rules: REALTIME_PLAN.md §9.4
-//! - ACK monotonicity + applied vs durable: REALTIME_PLAN.md §9.5, §0.12
+//! - ACK monotonicity + applied vs durable: REALTIME_PLAN.md §9.5, §2.3
 //! - WANT semantics + gap buffering: REALTIME_PLAN.md §9.6, §9.8
 //! - Equivocation detection: REALTIME_PLAN.md §9.4
 //!

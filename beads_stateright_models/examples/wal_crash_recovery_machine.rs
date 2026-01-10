@@ -2,7 +2,7 @@
 //!
 //! Plan alignment:
 //! - Crash ordering contract: REALTIME_PLAN.md §6.5
-//! - Receipt semantics: REALTIME_PLAN.md §0.11
+//! - Receipt semantics: REALTIME_PLAN.md §2.6
 //!
 //! This model encodes the append -> fsync -> index -> apply -> receipt -> reply
 //! pipeline and allows a crash at each cut point, followed by recovery.

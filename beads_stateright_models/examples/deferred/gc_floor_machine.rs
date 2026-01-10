@@ -1,11 +1,14 @@
-//! Model: GC floor enforcement (NamespaceGcMarker) and contiguity safety.
+//! Model (deferred in v0.5): GC floor enforcement (NamespaceGcMarker) and contiguity safety.
 //!
 //! Plan alignment:
-//! - GC markers + floor rule: REALTIME_PLAN.md §2.4
+//! - GC markers + floor rule: REALTIME_PLAN.md §2.4 (deferred in v0.5)
 //! - Contiguity / ACK semantics: REALTIME_PLAN.md §9.4
 //!
 //! Events with event_time_ms <= gc_floor are ignored as state mutations but
 //! must still advance contiguity and ACK.
+//!
+//! This example is kept for future work and is not part of the v0.5 runtime
+//! plan; it lives under examples/deferred.
 
 use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::collections::{BTreeMap, BTreeSet};

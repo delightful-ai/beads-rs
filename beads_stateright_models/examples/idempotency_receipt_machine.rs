@@ -1,13 +1,13 @@
-//! Model: Idempotency + receipts with crash cut points.
+//! Model: Idempotency mapping + receipts with crash cut points.
 //!
 //! Plan alignment:
-//! - Receipt + retry semantics: REALTIME_PLAN.md §0.11
-//! - Event sequencing + idempotency: REALTIME_PLAN.md §8.2
+//! - request_sha256 mapping + retry semantics: REALTIME_PLAN.md §6.2, §8.2
 //! - Crash-consistency ordering: REALTIME_PLAN.md §6.5
 //!
 //! This model keeps a single client_request_id and exercises retry behavior
-//! across crash cut points. It tracks WAL persistence, receipt state, and
-//! ensures retries never mint new txn_id/stamps once a durable record exists.
+//! across crash cut points. It tracks WAL persistence, a durable idempotency
+//! mapping entry, and ensures retries never mint new txn_id/stamps once a
+//! durable record exists.
 
 use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::time::Duration;
@@ -32,13 +32,6 @@ struct RecordId {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum ReceiptState {
-    None,
-    Pending(Record),
-    Committed(Record),
-}
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum Response {
     Ok { txn_id: u8, stamp: u8 },
     Retryable { txn_id: u8, stamp: u8 },
@@ -49,7 +42,7 @@ enum Response {
 struct State {
     wal: Option<Record>,
     wal_fsynced: bool,
-    receipt: ReceiptState,
+    idempotency_entry: Option<Record>,
     applied: bool,
     crashed: bool,
     last_request: Option<Digest>,
@@ -66,7 +59,6 @@ enum Action {
     Fsync,
     IndexCommit,
     Apply,
-    FinalizeReceipt,
     Reply,
     Crash,
     Restart,
@@ -83,15 +75,12 @@ fn record_id(record: Record) -> RecordId {
 }
 
 fn current_record(state: &State) -> Option<Record> {
-    match state.receipt {
-        ReceiptState::Pending(record) | ReceiptState::Committed(record) => Some(record),
-        ReceiptState::None => state.wal,
-    }
+    state.idempotency_entry.or(state.wal)
 }
 
 fn durable_record(state: &State) -> Option<RecordId> {
     let record = current_record(state)?;
-    if state.wal_fsynced || !matches!(state.receipt, ReceiptState::None) {
+    if state.wal_fsynced || state.idempotency_entry.is_some() {
         Some(record_id(record))
     } else {
         None
@@ -119,7 +108,7 @@ impl Model for IdempotencyModel {
         vec![State {
             wal: None,
             wal_fsynced: false,
-            receipt: ReceiptState::None,
+            idempotency_entry: None,
             applied: false,
             crashed: false,
             last_request: None,
@@ -144,16 +133,13 @@ impl Model for IdempotencyModel {
         if state.wal.is_some() && !state.wal_fsynced {
             actions.push(Action::Fsync);
         }
-        if state.wal_fsynced && matches!(state.receipt, ReceiptState::None) {
+        if state.wal_fsynced && state.idempotency_entry.is_none() {
             actions.push(Action::IndexCommit);
         }
-        if matches!(state.receipt, ReceiptState::Pending(_)) && !state.applied {
+        if state.wal.is_some() && !state.applied {
             actions.push(Action::Apply);
         }
-        if matches!(state.receipt, ReceiptState::Pending(_)) && state.applied {
-            actions.push(Action::FinalizeReceipt);
-        }
-        if matches!(state.receipt, ReceiptState::Committed(_)) {
+        if state.applied && current_record(state).is_some() {
             actions.push(Action::Reply);
         }
     }
@@ -174,21 +160,19 @@ impl Model for IdempotencyModel {
                         return Some(next);
                     }
 
-                    match next.receipt {
-                        ReceiptState::Committed(_) => {
-                            next.last_response = Some(Response::Ok {
-                                txn_id: record.txn_id,
-                                stamp: record.stamp,
-                            });
+                    let response = if next.wal_fsynced && next.applied {
+                        Response::Ok {
+                            txn_id: record.txn_id,
+                            stamp: record.stamp,
                         }
-                        ReceiptState::Pending(_) | ReceiptState::None => {
-                            next.last_response = Some(Response::Retryable {
-                                txn_id: record.txn_id,
-                                stamp: record.stamp,
-                            });
+                    } else {
+                        Response::Retryable {
+                            txn_id: record.txn_id,
+                            stamp: record.stamp,
                         }
-                    }
+                    };
 
+                    next.last_response = Some(response);
                     track_durable_record(&mut next);
                     return Some(next);
                 }
@@ -211,28 +195,23 @@ impl Model for IdempotencyModel {
             Action::IndexCommit => {
                 if next.wal_fsynced {
                     if let Some(record) = next.wal {
-                        next.receipt = ReceiptState::Pending(record);
+                        next.idempotency_entry = Some(record);
                     }
                 }
             }
             Action::Apply => {
-                if matches!(next.receipt, ReceiptState::Pending(_)) {
+                if next.wal.is_some() {
                     next.applied = true;
                 }
             }
-            Action::FinalizeReceipt => {
-                if let ReceiptState::Pending(record) = next.receipt {
-                    if next.applied {
-                        next.receipt = ReceiptState::Committed(record);
-                    }
-                }
-            }
             Action::Reply => {
-                if let ReceiptState::Committed(record) = next.receipt {
-                    next.last_response = Some(Response::Ok {
-                        txn_id: record.txn_id,
-                        stamp: record.stamp,
-                    });
+                if next.applied {
+                    if let Some(record) = current_record(&next) {
+                        next.last_response = Some(Response::Ok {
+                            txn_id: record.txn_id,
+                            stamp: record.stamp,
+                        });
+                    }
                 }
             }
             Action::Crash => {
@@ -243,7 +222,7 @@ impl Model for IdempotencyModel {
 
                 if !next.wal_fsynced {
                     next.wal = None;
-                    next.receipt = ReceiptState::None;
+                    next.idempotency_entry = None;
                 }
                 if next.wal.is_none() {
                     next.wal_fsynced = false;
@@ -256,9 +235,9 @@ impl Model for IdempotencyModel {
                     next.last_response = None;
                     next.applied = false;
 
-                    if next.wal_fsynced && matches!(next.receipt, ReceiptState::None) {
+                    if next.wal_fsynced && next.idempotency_entry.is_none() {
                         if let Some(record) = next.wal {
-                            next.receipt = ReceiptState::Pending(record);
+                            next.idempotency_entry = Some(record);
                         }
                     }
                 }

@@ -2,7 +2,7 @@
 //!
 //! Plan alignment:
 //! - Checkpoint export/import semantics: REALTIME_PLAN.md §13
-//! - Included_heads continuity: REALTIME_PLAN.md §0.12.1
+//! - Included_heads continuity: REALTIME_PLAN.md §2.3
 //!
 //! This model abstracts checkpoint content to (included, included_head, epoch)
 //! and focuses on truthful inclusion, import advancement, multi-writer retries,

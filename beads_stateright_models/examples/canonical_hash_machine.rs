@@ -5,9 +5,10 @@
 //! - Hash-chain continuity: REALTIME_PLAN.md §2.3
 //! - Out-of-order buffering / contiguity: REALTIME_PLAN.md §9.4
 //!
-//! This model rejects non-canonical or sha-mismatched events, enforces
-//! prev continuity when applying, and buffers out-of-order events until gaps fill
-//! (prev is validated on drain once contiguity is restored).
+//! This model can reject non-canonical or sha-mismatched events (when canonical
+//! enforcement is enabled), enforces prev continuity when applying, and buffers
+//! out-of-order events until gaps fill (prev is validated on drain once contiguity
+//! is restored).
 
 use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::collections::BTreeMap;
@@ -66,7 +67,9 @@ enum Action {
 }
 
 #[derive(Clone, Debug)]
-struct CanonicalHashModel;
+struct CanonicalHashModel {
+    enforce_canonical: bool,
+}
 
 fn event_hash_for(seq: u8, case: EventCase) -> u8 {
     match case {
@@ -155,7 +158,7 @@ impl Model for CanonicalHashModel {
                     });
                 };
 
-                if !store_ok || !canonical || !sha_ok {
+                if !store_ok || !sha_ok || (self.enforce_canonical && !canonical) {
                     next.errored = true;
                     record_last(LastEffectKind::Rejected, false);
                     return Some(next);
@@ -222,9 +225,14 @@ impl Model for CanonicalHashModel {
 
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
-            Property::always("canonical-only acceptance", |_, s: &State| {
+            Property::always("canonical enforcement when enabled", |m: &CanonicalHashModel, s: &State| {
+                if !m.enforce_canonical {
+                    return true;
+                }
                 match s.last_event.as_ref() {
-                    Some(last) if matches!(last.kind, LastEffectKind::Applied | LastEffectKind::Buffered) => {
+                    Some(last)
+                        if matches!(last.kind, LastEffectKind::Applied | LastEffectKind::Buffered) =>
+                    {
                         last.canonical && last.sha_ok && last.store_ok
                     }
                     _ => true,
@@ -258,7 +266,9 @@ fn main() -> Result<(), pico_args::Error> {
                 .opt_free_from_str()?
                 .unwrap_or("localhost:3000".to_string());
             println!("Exploring canonical hash/prev state space on {address}.");
-            CanonicalHashModel
+            CanonicalHashModel {
+                enforce_canonical: true,
+            }
                 .checker()
                 .threads(num_cpus::get())
                 .timeout(Duration::from_secs(60))
@@ -266,7 +276,9 @@ fn main() -> Result<(), pico_args::Error> {
         }
         Some("check") | None => {
             println!("Model checking canonical hash/prev rules.");
-            CanonicalHashModel
+            CanonicalHashModel {
+                enforce_canonical: true,
+            }
                 .checker()
                 .threads(num_cpus::get())
                 .timeout(Duration::from_secs(60))

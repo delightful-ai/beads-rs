@@ -1,19 +1,17 @@
-//! Model 6: Hash(preimage) + prev-link continuity verification.
+//! Model 6: Hash(EventBody bytes) + prev-link continuity verification.
 //!
-//! This is a *toy* stand-in for the "canonical CBOR + sha256 + prev_sha" rules.
+//! This is a *toy* stand-in for the v0.5 "hash body bytes + header prev_sha" rules.
 //! It models these checks:
 //! - store identity must match
-//! - declared sha must equal sha(preimage)
+//! - declared sha must equal sha(body_bytes)
 //! - seq=1 must have prev=None
 //! - seq>1 must have prev==expected_prev_head
 //!
-//! **Note:** your current types file verifies prev *before* gap-buffering.
-//! That means an out-of-order delivery (seq=2 arriving before seq=1) is forced to fail.
-//! The spec text you pasted earlier implied buffering out-of-order should be allowed.
-//! This model is a nice place to decide which behavior you actually want.
+//! **Note:** this model verifies prev against the current head; gap buffering is
+//! modeled elsewhere.
 
 use beads_stateright_models::spec::{NamespaceId, ReplicaId, Seq1, Sha256, StoreEpoch, StoreIdentity, StoreId};
-use beads_stateright_models::toy_codec::ToyEnvelope;
+use beads_stateright_models::toy_codec::ToyFrame;
 use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -71,8 +69,8 @@ impl HashPrevModel {
         assert!(seq >= 1);
         let mut prev: Option<Sha256> = None;
         for s in 1..=seq {
-            let env = ToyEnvelope::new(self.store, self.ns.clone(), self.origin, seq1(s), s, prev);
-            prev = Some(env.sha);
+            let frame = ToyFrame::new(self.store, self.ns.clone(), self.origin, seq1(s), s, prev);
+            prev = Some(frame.sha);
         }
         prev.unwrap()
     }
@@ -91,9 +89,9 @@ impl HashPrevModel {
             _ => self.store,
         };
 
-        // Start from an internally-consistent envelope (honest sender).
+        // Start from an internally-consistent frame (honest sender).
         let prev = self.true_prev_for(seq);
-        let mut env = ToyEnvelope::new(store, self.ns.clone(), self.origin, seq1(seq), seq, prev);
+        let mut frame = ToyFrame::new(store, self.ns.clone(), self.origin, seq1(seq), seq, prev);
 
         match kind {
             CorruptKind::Valid | CorruptKind::WrongStore => {
@@ -101,17 +99,17 @@ impl HashPrevModel {
             }
             CorruptKind::WrongPrev => {
                 // Flip prev without changing sha (sha excludes prev in this spec).
-                env.prev = Some(Sha256([0xAA; 32]));
+                frame.prev = Some(Sha256([0xAA; 32]));
             }
             CorruptKind::WrongSha => {
-                // Flip sha without changing preimage.
-                let mut b = env.sha.0;
+                // Flip sha without changing body bytes.
+                let mut b = frame.sha.0;
                 b[0] ^= 0x01;
-                env.sha = Sha256(b);
+                frame.sha = Sha256(b);
             }
         }
 
-        env.encode_envelope_bytes()
+        frame.encode_frame_bytes()
     }
 }
 
@@ -153,11 +151,11 @@ impl Model for HashPrevModel {
         let expected_next = action.seq == next.durable + 1;
         let bytes = self.build_bytes(action.seq, action.kind.clone());
 
-        let res = ToyEnvelope::verify(&bytes, self.store, next.head);
+        let res = ToyFrame::verify(&bytes, self.store, next.head);
 
         match res {
             Ok(verified) => {
-                next.durable = verified.pre.seq as u8;
+                next.durable = verified.body.seq as u8;
                 next.head = Some(verified.sha);
                 next.last = Some(Obs {
                     kind: action.kind,

@@ -1,9 +1,9 @@
 //! Model: Durability coordination + ReplicatedFsync(k) quorum semantics.
 //!
 //! Plan alignment:
-//! - Durability coordination + classes: REALTIME_PLAN.md §10.1-§10.5
-//! - Applied vs durable watermarks: REALTIME_PLAN.md §0.12
-//! - Timeout + receipt semantics: REALTIME_PLAN.md §0.11
+//! - Durability coordination + classes: REALTIME_PLAN.md §2.6, §10
+//! - Applied vs durable watermarks: REALTIME_PLAN.md §2.3
+//! - Timeout + receipt semantics: REALTIME_PLAN.md §2.6
 //!
 //! This model keeps a single in-flight client write and explicitly tracks
 //! per-event persistence (fsync) so "durable" is derived from contiguous
