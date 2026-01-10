@@ -2,7 +2,9 @@
 
 ## Version Control
 
-We use `jj` for our version control so we can easily put changes together. As you make chunks of changes, please jj describe your changes so they're tracked.
+We use `jj` for our version control so we can easily put changes together.
+
+The core workflow: jj new, jj describe ur changes after you're done, then jj new again. Run jj help when you need to.
 
 ## Issue Tracking
 
@@ -10,14 +12,18 @@ We use `jj` for our version control so we can easily put changes together. As yo
 
 A bead is a **promise**: you WILL get to this, just not now. When you're in the middle of something and notice tech debt, bugs, slop, or follow-on work that's out of scope—file a bead. Capture enough context that anyone (including future-you) can pick it up cold. Then keep going.
 
-```bash
-bd ready              # What can I work on?
-bd create "..."       # Promise to handle this later
-bd claim <id>         # I'm on it
-bd close <id>         # Done
-```
+Run `bd prime` for full workflow--but the core workflow is as follows:
 
-Run `bd prime` for full workflow.
+```
+bd ready
+bd show "the bead ur gonna work on"
+bd claim
+jj new
+# implement fully incl. adding tests
+jj describe # IMPORTANT: make sure to reference the bead in the commit message! and leave a detailed, thorough message for future archeology
+jj new
+```
+and the cycle repeats.
 
 ### Follow-up Beads
 
