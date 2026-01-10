@@ -16,28 +16,28 @@ const MAX_SEQ: u8 = 4;
 const MAX_BUFFER_EVENTS: usize = 3;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct State {
+pub struct State {
     // Session view.
-    session_durable: u8,
-    buffered: BTreeSet<u8>,
-    pending_ingest: Option<Vec<u8>>,
-    pending_ack: Option<u8>,
-    last_want_from: Option<u8>,
+    pub session_durable: u8,
+    pub buffered: BTreeSet<u8>,
+    pub pending_ingest: Option<Vec<u8>>,
+    pub pending_ack: Option<u8>,
+    pub last_want_from: Option<u8>,
 
     // Coordinator truth.
-    coord_durable: u8,
-    coord_log: BTreeSet<u8>,
+    pub coord_durable: u8,
+    pub coord_log: BTreeSet<u8>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-enum Action {
+pub enum Action {
     DeliverEvent(u8),
     CoordinatorIngest,
     DeliverAck,
 }
 
 #[derive(Clone, Debug)]
-struct SessionCoordinator;
+pub struct SessionCoordinator;
 
 impl Model for SessionCoordinator {
     type State = State;
@@ -140,6 +140,17 @@ impl Model for SessionCoordinator {
                 let ack = next.pending_ack.take().unwrap();
                 // Session updates its durable watermark only on coordinator ACK.
                 next.session_durable = next.session_durable.max(ack);
+                next.buffered.retain(|&seq| seq > next.session_durable);
+
+                // Drop any stale in-flight batch that the ACK already covered.
+                if next
+                    .pending_ingest
+                    .as_ref()
+                    .and_then(|batch| batch.first().copied())
+                    .is_some_and(|first| first <= next.session_durable)
+                {
+                    next.pending_ingest = None;
+                }
 
                 // Opportunistic flush: if the next expected is already buffered, schedule
                 // another ingest immediately.
