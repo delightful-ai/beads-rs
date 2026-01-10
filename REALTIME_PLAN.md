@@ -2001,9 +2001,14 @@ Rules:
   - store_id/store_epoch match
   - EventId fields (namespace/origin_replica_id/origin_seq) match the decoded EventBody
   - bytes decode as EventBody within bounds (3.4) and sha256(bytes) matches frame sha256
-  - if prev_sha256 present, it MUST match the receiver's current head sha for that
-    (namespace, origin_replica_id) before buffering/appending
   - if event_id already exists, sha256 matches prior observed sha256
+  - prev_sha256 validation:
+    - if origin_seq == durable_seen + 1 (contiguous), prev_sha256 MUST match the
+      receiver's current head sha for that (namespace, origin_replica_id) before append/apply
+      (seq==1 => prev_sha256 omitted).
+    - if origin_seq > durable_seen + 1, receiver MAY buffer even if prev_sha256
+      cannot be validated yet; if the predecessor hash is already known (durable or
+      buffered seq-1), receiver SHOULD validate early and treat mismatch as corruption.
 - Receiver applies idempotently, buffers gaps, and advances seen_map only when
   contiguous.
 
@@ -2011,8 +2016,9 @@ Ingestion ordering rule (clarified, normative):
 - Receiver MUST NOT append to WAL unless the event is contiguous for that
   (namespace, origin_replica_id): origin_seq == durable_seen + 1.
 - If origin_seq > durable_seen + 1, receiver MUST buffer (bounded) and issue WANT.
-- Only after missing prefix arrives and prev_sha256 continuity can be verified
-  may buffered events be appended and applied in order.
+- Buffered events MUST NOT be appended until they become contiguous and prev_sha256
+  continuity is verified; when draining a buffered suffix, validate prev_sha256
+  against the newly advanced head for each event.
 - Remote ingest MUST call EventWal::ingest_remote_bytes (not append_local) so
   origin_seq is preserved and canonical bytes are persisted unchanged.
 

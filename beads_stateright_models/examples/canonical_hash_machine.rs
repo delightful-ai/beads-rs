@@ -1,12 +1,13 @@
-//! Model: Canonical hash/prev gating with out-of-order buffering.
+//! Model: Canonical body-hash/prev gating with out-of-order buffering.
 //!
 //! Plan alignment:
-//! - Canonical CBOR + unknown key preservation: REALTIME_PLAN.md §0.6, §0.6.1
-//! - Hash-chain continuity: REALTIME_PLAN.md §0.12.1
+//! - Canonical EventBody encoding + hashing: REALTIME_PLAN.md §0.6
+//! - Hash-chain continuity: REALTIME_PLAN.md §2.3
 //! - Out-of-order buffering / contiguity: REALTIME_PLAN.md §9.4
 //!
-//! This model rejects non-canonical or unknown-key-dropping events, enforces
-//! prev continuity when applying, and buffers out-of-order events until gaps fill.
+//! This model rejects non-canonical or sha-mismatched events, enforces
+//! prev continuity when applying, and buffers out-of-order events until gaps fill
+//! (prev is validated on drain once contiguity is restored).
 
 use stateright::{report::WriteReporter, Checker, Model, Property};
 use std::collections::BTreeMap;
@@ -18,7 +19,7 @@ const MAX_SEQ: u8 = 3;
 enum EventCase {
     Good,
     NonCanonical,
-    UnknownKeysDropped,
+    ShaMismatch,
     PrevMismatch,
     WrongStore,
     Equivocation,
@@ -44,7 +45,7 @@ struct LastEvent {
     seq: u8,
     seen_before: u8,
     canonical: bool,
-    unknown_keys_ok: bool,
+    sha_ok: bool,
     store_ok: bool,
     prev_ok: bool,
 }
@@ -104,7 +105,7 @@ impl Model for CanonicalHashModel {
             });
             actions.push(Action::Deliver {
                 seq,
-                case: EventCase::UnknownKeysDropped,
+                case: EventCase::ShaMismatch,
             });
             actions.push(Action::Deliver {
                 seq,
@@ -133,13 +134,13 @@ impl Model for CanonicalHashModel {
             Action::Deliver { seq, case } => {
                 let seen_before = next.seen;
                 let canonical = !matches!(case, EventCase::NonCanonical);
-                let unknown_keys_ok = !matches!(case, EventCase::UnknownKeysDropped);
+                let sha_ok = !matches!(case, EventCase::ShaMismatch);
                 let store_ok = !matches!(case, EventCase::WrongStore);
                 let hash = event_hash_for(seq, case);
                 let prev_hash = if matches!(case, EventCase::PrevMismatch) {
-                    next.head_hash.saturating_add(1)
+                    seq.saturating_add(1)
                 } else {
-                    next.head_hash
+                    seq.saturating_sub(1)
                 };
 
                 let mut record_last = |kind: LastEffectKind, prev_ok: bool| {
@@ -148,13 +149,13 @@ impl Model for CanonicalHashModel {
                         seq,
                         seen_before,
                         canonical,
-                        unknown_keys_ok,
+                        sha_ok,
                         store_ok,
                         prev_ok,
                     });
                 };
 
-                if !store_ok || !canonical || !unknown_keys_ok {
+                if !store_ok || !canonical || !sha_ok {
                     next.errored = true;
                     record_last(LastEffectKind::Rejected, false);
                     return Some(next);
@@ -224,15 +225,7 @@ impl Model for CanonicalHashModel {
             Property::always("canonical-only acceptance", |_, s: &State| {
                 match s.last_event.as_ref() {
                     Some(last) if matches!(last.kind, LastEffectKind::Applied | LastEffectKind::Buffered) => {
-                        last.canonical && last.unknown_keys_ok && last.store_ok
-                    }
-                    _ => true,
-                }
-            }),
-            Property::always("unknown keys preserved for hash validity", |_, s: &State| {
-                match s.last_event.as_ref() {
-                    Some(last) if matches!(last.kind, LastEffectKind::Applied | LastEffectKind::Buffered) => {
-                        last.unknown_keys_ok
+                        last.canonical && last.sha_ok && last.store_ok
                     }
                     _ => true,
                 }
