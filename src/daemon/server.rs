@@ -8,15 +8,16 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam::channel::{Receiver, Sender};
 
 use super::core::Daemon;
 use super::git_worker::{GitOp, GitResult};
-use super::ipc::{ErrorPayload, Request, Response, decode_request, encode_response};
+use super::ipc::{Request, Response, decode_request_with_limits, encode_response};
 use super::remote::RemoteUrl;
-use crate::core::ErrorCode;
+use crate::core::Limits;
 
 /// Message sent from socket handlers to state thread.
 pub struct RequestMessage {
@@ -179,12 +180,17 @@ fn flush_sync_waiters(daemon: &Daemon, waiters: &mut HashMap<RemoteUrl, Vec<Send
 /// Run the socket acceptor.
 ///
 /// Accepts connections and spawns a handler thread for each.
-pub fn run_socket_thread(listener: UnixListener, req_tx: Sender<RequestMessage>) {
+pub fn run_socket_thread(
+    listener: UnixListener,
+    req_tx: Sender<RequestMessage>,
+    limits: Arc<Limits>,
+) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let req_tx = req_tx.clone();
-                std::thread::spawn(move || handle_client(stream, req_tx));
+                let limits = Arc::clone(&limits);
+                std::thread::spawn(move || handle_client(stream, req_tx, limits));
             }
             Err(e) => {
                 tracing::error!("accept error: {}", e);
@@ -196,7 +202,11 @@ pub fn run_socket_thread(listener: UnixListener, req_tx: Sender<RequestMessage>)
 /// Handle a single client connection.
 ///
 /// Reads requests, sends to state thread, waits for response, writes back.
-pub(super) fn handle_client(stream: UnixStream, req_tx: Sender<RequestMessage>) {
+pub(super) fn handle_client(
+    stream: UnixStream,
+    req_tx: Sender<RequestMessage>,
+    limits: Arc<Limits>,
+) {
     let reader = match stream.try_clone() {
         Ok(r) => r,
         Err(e) => {
@@ -219,14 +229,10 @@ pub(super) fn handle_client(stream: UnixStream, req_tx: Sender<RequestMessage>) 
         }
 
         // Parse request
-        let request = match decode_request(&line) {
+        let request = match decode_request_with_limits(&line, &limits) {
             Ok(r) => r,
             Err(e) => {
-                let resp = Response::err(ErrorPayload::new(
-                    ErrorCode::ParseError,
-                    e.to_string(),
-                    false,
-                ));
+                let resp = Response::err(e);
                 let bytes = match encode_response(&resp) {
                     Ok(b) => b,
                     Err(e) => {

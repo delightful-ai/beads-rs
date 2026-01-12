@@ -229,9 +229,7 @@ impl BeadPatch {
         if let Patch::Set(status) = &self.status {
             match status.as_str() {
                 "open" => fields.workflow = Lww::new(Workflow::Open, stamp.clone()),
-                "in_progress" => {
-                    fields.workflow = Lww::new(Workflow::InProgress, stamp.clone())
-                }
+                "in_progress" => fields.workflow = Lww::new(Workflow::InProgress, stamp.clone()),
                 "closed" => {
                     let closure = Closure::new(None, None);
                     fields.workflow = Lww::new(Workflow::Closed(closure), stamp.clone());
@@ -293,6 +291,16 @@ pub enum OpError {
     #[error("bead is deleted: {0}")]
     BeadDeleted(BeadId),
 
+    #[error("note exceeds max bytes {max_bytes} (got {got_bytes})")]
+    NoteTooLarge { max_bytes: usize, got_bytes: usize },
+
+    #[error("labels exceed max {max_labels} (got {got_labels})")]
+    LabelsTooMany {
+        max_labels: usize,
+        got_labels: usize,
+        bead_id: Option<BeadId>,
+    },
+
     #[error(transparent)]
     Wal(#[from] WalError),
 
@@ -334,7 +342,12 @@ impl OpError {
             OpError::RepoNotInitialized(_) => ErrorCode::RepoNotInitialized,
             OpError::Sync(_) => ErrorCode::SyncFailed,
             OpError::BeadDeleted(_) => ErrorCode::BeadDeleted,
-            OpError::Wal(_) => ErrorCode::WalError,
+            OpError::NoteTooLarge { .. } => ErrorCode::NoteTooLarge,
+            OpError::LabelsTooMany { .. } => ErrorCode::LabelsTooMany,
+            OpError::Wal(err) => match err {
+                WalError::TooLarge { .. } => ErrorCode::WalRecordTooLarge,
+                _ => ErrorCode::WalError,
+            },
             OpError::WalMerge { .. } => ErrorCode::WalMergeConflict,
             OpError::NotClaimedByYou => ErrorCode::NotClaimedByYou,
             OpError::DepNotFound => ErrorCode::DepNotFound,
@@ -349,7 +362,9 @@ impl OpError {
             OpError::Sync(e) => e.transience(),
             OpError::Wal(e) => match e {
                 WalError::Io(_) => Transience::Retryable,
-                WalError::Json(_) | WalError::VersionMismatch { .. } => Transience::Permanent,
+                WalError::Json(_)
+                | WalError::VersionMismatch { .. }
+                | WalError::TooLarge { .. } => Transience::Permanent,
             },
             OpError::WalMerge { .. } => Transience::Permanent,
             OpError::AlreadyClaimed { .. } => Transience::Retryable,
@@ -362,6 +377,8 @@ impl OpError {
             | OpError::NoRemote(_)
             | OpError::RepoNotInitialized(_)
             | OpError::BeadDeleted(_)
+            | OpError::NoteTooLarge { .. }
+            | OpError::LabelsTooMany { .. }
             | OpError::NotClaimedByYou
             | OpError::DepNotFound => Transience::Permanent,
             OpError::LoadTimeout { .. } => Transience::Retryable,

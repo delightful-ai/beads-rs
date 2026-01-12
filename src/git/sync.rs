@@ -1176,12 +1176,12 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use tempfile::TempDir;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepEdge, DepKey, DepKind,
         Lww, Priority, Workflow,
     };
+    use proptest::prelude::*;
+    use tempfile::TempDir;
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
         Stamp::new(WriteStamp::new(wall_ms, 0), ActorId::new(actor).unwrap())

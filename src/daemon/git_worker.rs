@@ -256,8 +256,7 @@ impl GitWorker {
                 state,
                 actor,
             } => {
-                let span =
-                    tracing::info_span!("sync", remote = %remote, repo = %repo.display());
+                let span = tracing::info_span!("sync", remote = %remote, repo = %repo.display());
                 let _guard = span.enter();
                 let started = Instant::now();
                 let result = self.sync(&repo, &state, &actor);
@@ -306,10 +305,8 @@ fn build_load_result(inputs: LoadResultInputs) -> Result<LoadResult, SyncError> 
         divergence,
         force_push,
     } = inputs;
-    let merged =
-        CanonicalState::join(&local_state, &remote_state).map_err(|errs| SyncError::MergeConflict {
-            errors: errs,
-        })?;
+    let merged = CanonicalState::join(&local_state, &remote_state)
+        .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
 
     let root_slug = local_slug.or(remote_slug);
 

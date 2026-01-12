@@ -21,7 +21,7 @@ use super::ops::{BeadPatch, OpError, OpResult};
 use super::query::{Filters, QueryResult};
 use crate::core::error::details as error_details;
 pub use crate::core::{ErrorCode, ErrorPayload};
-use crate::core::{BeadType, DepKind, InvalidId, Priority};
+use crate::core::{BeadType, DepKind, InvalidId, Limits, Priority};
 use crate::error::{Effect, Transience};
 
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
@@ -442,10 +442,41 @@ impl From<OpError> for ErrorPayload {
                 ErrorPayload::new(ErrorCode::BeadDeleted, message, retryable)
                     .with_details(error_details::BeadDeletedDetails { id })
             }
-            OpError::Wal(e) => ErrorPayload::new(ErrorCode::WalError, message, retryable)
-                .with_details(error_details::WalErrorDetails {
-                    message: e.to_string(),
-                }),
+            OpError::NoteTooLarge {
+                max_bytes,
+                got_bytes,
+            } => ErrorPayload::new(ErrorCode::NoteTooLarge, message, retryable).with_details(
+                error_details::NoteTooLargeDetails {
+                    max_note_bytes: max_bytes as u64,
+                    got_bytes: got_bytes as u64,
+                },
+            ),
+            OpError::LabelsTooMany {
+                max_labels,
+                got_labels,
+                bead_id,
+            } => ErrorPayload::new(ErrorCode::LabelsTooMany, message, retryable).with_details(
+                error_details::LabelsTooManyDetails {
+                    max_labels_per_bead: max_labels as u64,
+                    got_labels: got_labels as u64,
+                    bead_id: bead_id.map(|id| id.as_str().to_string()),
+                },
+            ),
+            OpError::Wal(e) => match &e {
+                crate::daemon::wal::WalError::TooLarge {
+                    max_bytes,
+                    got_bytes,
+                } => ErrorPayload::new(ErrorCode::WalRecordTooLarge, message, retryable)
+                    .with_details(error_details::WalRecordTooLargeDetails {
+                        max_wal_record_bytes: *max_bytes as u64,
+                        estimated_bytes: *got_bytes as u64,
+                    }),
+                _ => ErrorPayload::new(ErrorCode::WalError, message, retryable).with_details(
+                    error_details::WalErrorDetails {
+                        message: e.to_string(),
+                    },
+                ),
+            },
             OpError::WalMerge { errors } => {
                 let errors = errors.into_iter().map(|err| err.to_string()).collect();
                 ErrorPayload::new(ErrorCode::WalMergeConflict, message, retryable).with_details(
@@ -491,6 +522,14 @@ impl From<IpcError> for ErrorPayload {
             }
             IpcError::DaemonVersionMismatch { .. } => {
                 ErrorPayload::new(ErrorCode::DaemonVersionMismatch, message, retryable)
+            }
+            IpcError::FrameTooLarge { max_bytes, got_bytes } => {
+                ErrorPayload::new(ErrorCode::FrameTooLarge, message, retryable).with_details(
+                    error_details::FrameTooLargeDetails {
+                        max_frame_bytes: max_bytes as u64,
+                        got_bytes: got_bytes as u64,
+                    },
+                )
             }
         }
     }
@@ -587,6 +626,9 @@ pub enum IpcError {
         /// If set, the mismatch was detected via a parse failure.
         parse_error: Option<String>,
     },
+
+    #[error("frame too large: max {max_bytes} bytes, got {got_bytes} bytes")]
+    FrameTooLarge { max_bytes: usize, got_bytes: usize },
 }
 
 impl IpcError {
@@ -598,6 +640,7 @@ impl IpcError {
             IpcError::Disconnected => ErrorCode::Disconnected,
             IpcError::DaemonUnavailable(_) => ErrorCode::DaemonUnavailable,
             IpcError::DaemonVersionMismatch { .. } => ErrorCode::DaemonVersionMismatch,
+            IpcError::FrameTooLarge { .. } => ErrorCode::FrameTooLarge,
         }
     }
 
@@ -608,7 +651,9 @@ impl IpcError {
                 Transience::Retryable
             }
             IpcError::DaemonVersionMismatch { .. } => Transience::Retryable,
-            IpcError::Parse(_) | IpcError::InvalidId(_) => Transience::Permanent,
+            IpcError::Parse(_)
+            | IpcError::InvalidId(_)
+            | IpcError::FrameTooLarge { .. } => Transience::Permanent,
         }
     }
 
@@ -620,6 +665,7 @@ impl IpcError {
                 Effect::None
             }
             IpcError::DaemonVersionMismatch { .. } => Effect::None,
+            IpcError::FrameTooLarge { .. } => Effect::None,
         }
     }
 }
@@ -635,9 +681,21 @@ pub fn encode_response(resp: &Response) -> Result<Vec<u8>, IpcError> {
     Ok(bytes)
 }
 
-/// Decode a request from a line.
-pub fn decode_request(line: &str) -> Result<Request, IpcError> {
+/// Decode a request from a line, enforcing limits.
+pub fn decode_request_with_limits(line: &str, limits: &Limits) -> Result<Request, IpcError> {
+    let got_bytes = line.len();
+    if got_bytes > limits.max_frame_bytes {
+        return Err(IpcError::FrameTooLarge {
+            max_bytes: limits.max_frame_bytes,
+            got_bytes,
+        });
+    }
     Ok(serde_json::from_str(line)?)
+}
+
+/// Decode a request from a line using default limits.
+pub fn decode_request(line: &str) -> Result<Request, IpcError> {
+    decode_request_with_limits(line, &Limits::default())
 }
 
 /// Send a response over a stream.
@@ -652,7 +710,7 @@ pub fn read_requests(stream: UnixStream) -> impl Iterator<Item = Result<Request,
     let reader = BufReader::new(stream);
     reader.lines().map(|line| {
         let line = line?;
-        decode_request(&line)
+        decode_request_with_limits(&line, &Limits::default())
     })
 }
 
@@ -1288,6 +1346,16 @@ mod tests {
         // This is the error type that would be converted to DaemonVersionMismatch
         let err = result.unwrap_err();
         assert!(err.to_string().contains("did not match"));
+    }
+
+    #[test]
+    fn decode_request_rejects_oversize_frames() {
+        let limits = Limits {
+            max_frame_bytes: 1,
+            ..Limits::default()
+        };
+        let err = decode_request_with_limits(r#"{"op":"ping"}"#, &limits).unwrap_err();
+        assert!(matches!(err, IpcError::FrameTooLarge { .. }));
     }
 
     // Regression tests: verify all ResponsePayload variants roundtrip through Response

@@ -177,7 +177,9 @@ impl NamespacePolicy {
         Self {
             persist_to_git: false,
             replicate_mode: ReplicateMode::None,
-            retention: RetentionPolicy::Ttl { ttl_ms: Self::DAY_MS },
+            retention: RetentionPolicy::Ttl {
+                ttl_ms: Self::DAY_MS,
+            },
             ready_eligible: false,
             visibility: NamespaceVisibility::Normal,
             gc_authority: GcAuthority::None,

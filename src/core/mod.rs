@@ -21,6 +21,7 @@ pub mod durability;
 pub mod domain;
 pub mod error;
 pub mod identity;
+pub mod limits;
 pub mod meta;
 pub mod namespace;
 pub mod store_meta;
@@ -48,6 +49,7 @@ pub use identity::{
     ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, NoteId, ReplicaId,
     SegmentId, StoreEpoch, StoreId, StoreIdentity, TxnId,
 };
+pub use limits::Limits;
 pub use meta::{FormatVersion, Meta};
 pub use namespace::{
     CheckpointGroup, GcAuthority, NamespaceId, NamespacePolicy, NamespaceVisibility, ReplicateMode,

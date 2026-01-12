@@ -351,8 +351,7 @@ pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
 }
 
 fn parse_utf8(bytes: &[u8]) -> Result<&str, WireError> {
-    std::str::from_utf8(bytes)
-        .map_err(|e| WireError::InvalidValue(format!("utf-8 error: {e}")))
+    std::str::from_utf8(bytes).map_err(|e| WireError::InvalidValue(format!("utf-8 error: {e}")))
 }
 
 // =============================================================================

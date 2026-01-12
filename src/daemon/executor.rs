@@ -17,8 +17,8 @@ use super::ipc::{Response, ResponsePayload};
 use super::ops::{BeadPatch, MapLiveError, OpError, OpResult};
 use crate::core::{
     Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge, DepKey,
-    DepKind, DepLife, DepSpec, Label, Labels, Lww, Note, NoteId, NoteLog, Priority, Tombstone,
-    WallClock, Workflow,
+    DepKind, DepLife, DepSpec, Label, Labels, Limits, Lww, Note, NoteId, NoteLog, Priority,
+    Tombstone, WallClock, Workflow,
 };
 
 impl Daemon {
@@ -105,6 +105,9 @@ impl Daemon {
                 }
             };
             label_set.insert(label);
+        }
+        if let Err(err) = enforce_label_limit(&label_set, self.limits(), None) {
+            return Response::err(err);
         }
 
         let design = design.and_then(|s| {
@@ -320,6 +323,7 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        let limits = self.limits().clone();
 
         let result = self.apply_wal_mutation(&remote, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
@@ -327,6 +331,7 @@ impl Daemon {
             for label in parsed {
                 labels.insert(label);
             }
+            enforce_label_limit(&labels, &limits, Some(id.clone()))?;
             bead.fields.labels = Lww::new(labels, stamp.clone());
             Ok(())
         });
@@ -713,6 +718,9 @@ impl Daemon {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = enforce_note_limit(&content, self.limits()) {
+            return Response::err(err);
+        }
 
         // Check bead existence (scope to drop borrow)
         {
@@ -904,6 +912,32 @@ fn parse_label_list(labels: Vec<String>) -> Result<Vec<Label>, OpError> {
         parsed.push(label);
     }
     Ok(parsed)
+}
+
+fn enforce_label_limit(
+    labels: &Labels,
+    limits: &Limits,
+    bead_id: Option<BeadId>,
+) -> Result<(), OpError> {
+    if labels.len() > limits.max_labels_per_bead {
+        return Err(OpError::LabelsTooMany {
+            max_labels: limits.max_labels_per_bead,
+            got_labels: labels.len(),
+            bead_id,
+        });
+    }
+    Ok(())
+}
+
+fn enforce_note_limit(content: &str, limits: &Limits) -> Result<(), OpError> {
+    let got_bytes = content.len();
+    if got_bytes > limits.max_note_bytes {
+        return Err(OpError::NoteTooLarge {
+            max_bytes: limits.max_note_bytes,
+            got_bytes,
+        });
+    }
+    Ok(())
 }
 
 fn next_child_id(state: &crate::core::CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
@@ -1255,5 +1289,47 @@ mod tests {
         });
 
         assert_eq!(generated.as_str(), "uniq");
+    }
+
+    #[test]
+    fn enforce_label_limit_rejects_overage() {
+        let limits = Limits {
+            max_labels_per_bead: 1,
+            ..Limits::default()
+        };
+        let mut labels = Labels::new();
+        labels.insert(Label::parse("alpha").unwrap());
+        labels.insert(Label::parse("beta").unwrap());
+
+        let bead_id = BeadId::parse("test-1").unwrap();
+        let err = enforce_label_limit(&labels, &limits, Some(bead_id.clone())).unwrap_err();
+        match err {
+            OpError::LabelsTooMany {
+                max_labels,
+                got_labels,
+                bead_id: Some(id),
+            } => {
+                assert_eq!(max_labels, 1);
+                assert_eq!(got_labels, 2);
+                assert_eq!(id, bead_id);
+            }
+            other => panic!("expected LabelsTooMany, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_note_limit_rejects_overage() {
+        let limits = Limits {
+            max_note_bytes: 2,
+            ..Limits::default()
+        };
+        let err = enforce_note_limit("hey", &limits).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::NoteTooLarge {
+                max_bytes: 2,
+                got_bytes: 3
+            }
+        ));
     }
 }

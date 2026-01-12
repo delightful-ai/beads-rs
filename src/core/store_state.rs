@@ -25,9 +25,7 @@ impl StoreState {
     }
 
     pub fn ensure_namespace(&mut self, namespace: NamespaceId) -> &mut CanonicalState {
-        self.namespaces
-            .entry(namespace)
-            .or_default()
+        self.namespaces.entry(namespace).or_default()
     }
 
     pub fn namespaces(&self) -> impl Iterator<Item = (&NamespaceId, &CanonicalState)> {

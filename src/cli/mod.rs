@@ -1027,7 +1027,11 @@ pub(super) fn apply_common_filters(
     filters.priority = priority;
     filters.bead_type = bead_type;
     filters.assignee = assignee.map(crate::core::ActorId::new).transpose()?;
-    filters.labels = if labels.is_empty() { None } else { Some(labels) };
+    filters.labels = if labels.is_empty() {
+        None
+    } else {
+        Some(labels)
+    };
     Ok(())
 }
 

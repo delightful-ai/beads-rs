@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::Limits;
 use crate::daemon::OpError;
 use crate::{Error, Result};
 
@@ -12,11 +13,15 @@ use crate::{Error, Result};
 #[serde(default)]
 pub struct Config {
     pub auto_upgrade: bool,
+    pub limits: Limits,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { auto_upgrade: true }
+        Self {
+            auto_upgrade: true,
+            limits: Limits::default(),
+        }
     }
 }
 
@@ -99,6 +104,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let cfg = Config {
             auto_upgrade: false,
+            limits: Limits::default(),
         };
         write_config(&path, &cfg).expect("write config");
         let loaded = {

@@ -40,7 +40,7 @@ impl LoadedRemote {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, BeadId, CanonicalState, CoreError, ErrorCode, Stamp, WallClock, WriteStamp,
+    ActorId, BeadId, CanonicalState, CoreError, ErrorCode, Limits, Stamp, WallClock, WriteStamp,
 };
 use crate::git::SyncError;
 use crate::git::collision::{detect_collisions, resolve_collisions};
@@ -73,11 +73,19 @@ pub struct Daemon {
 
     /// Go-compatibility export context.
     export_ctx: Option<ExportContext>,
+
+    /// Realtime safety limits.
+    limits: Limits,
 }
 
 impl Daemon {
     /// Create a new daemon.
     pub fn new(actor: ActorId, wal: Wal) -> Self {
+        Self::new_with_limits(actor, wal, Limits::default())
+    }
+
+    /// Create a new daemon with custom limits.
+    pub fn new_with_limits(actor: ActorId, wal: Wal, limits: Limits) -> Self {
         // Initialize Go-compat export context (best effort - don't fail daemon startup)
         let export_ctx = match ExportContext::new() {
             Ok(ctx) => Some(ctx),
@@ -95,6 +103,7 @@ impl Daemon {
             scheduler: SyncScheduler::new(),
             wal,
             export_ctx,
+            limits,
         }
     }
 
@@ -111,6 +120,11 @@ impl Daemon {
     /// Get the clock (for creating stamps).
     pub fn clock(&self) -> &Clock {
         &self.clock
+    }
+
+    /// Get the safety limits.
+    pub fn limits(&self) -> &Limits {
+        &self.limits
     }
 
     /// Get mutable clock.
@@ -753,7 +767,8 @@ impl Daemon {
             sequence,
             self.clock.wall_ms(),
         );
-        self.wal.write(proof.remote(), &entry)?;
+        self.wal
+            .write_with_limits(proof.remote(), &entry, self.limits())?;
 
         let repo_state = self.repo_state_mut(proof)?;
         repo_state.state = next_state;
@@ -1095,11 +1110,9 @@ impl Daemon {
                     Ok(Err(e)) => {
                         Response::err(error_payload(ErrorCode::InitFailed, &e.to_string(), false))
                     }
-                    Err(_) => Response::err(error_payload(
-                        ErrorCode::Internal,
-                        "git thread died",
-                        false,
-                    )),
+                    Err(_) => {
+                        Response::err(error_payload(ErrorCode::Internal, "git thread died", false))
+                    }
                 }
             }
 

@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::remote::RemoteUrl;
-use crate::core::{Bead, BeadId, CanonicalState, DepEdge, DepKey, Tombstone, TombstoneKey};
+use crate::core::{Bead, BeadId, CanonicalState, DepEdge, DepKey, Limits, Tombstone, TombstoneKey};
 
 /// WAL format version.
 const WAL_VERSION: u32 = 1;
@@ -148,6 +148,9 @@ pub enum WalError {
 
     #[error("WAL version mismatch: expected {expected}, got {got}")]
     VersionMismatch { expected: u32, got: u32 },
+
+    #[error("WAL record too large: max {max_bytes} bytes, got {got_bytes} bytes")]
+    TooLarge { max_bytes: usize, got_bytes: usize },
 }
 
 /// Write-Ahead Log manager.
@@ -270,11 +273,27 @@ impl Wal {
     ///
     /// Uses write-to-temp + fsync + rename for crash safety.
     pub fn write(&self, remote: &RemoteUrl, entry: &WalEntry) -> Result<(), WalError> {
+        self.write_with_limits(remote, entry, &Limits::default())
+    }
+
+    /// Write state to WAL atomically with limit enforcement.
+    pub fn write_with_limits(
+        &self,
+        remote: &RemoteUrl,
+        entry: &WalEntry,
+        limits: &Limits,
+    ) -> Result<(), WalError> {
         let tmp_path = self.tmp_path(remote);
         let wal_path = self.wal_path(remote);
 
         // Serialize to JSON
         let data = serde_json::to_vec(entry)?;
+        if data.len() > limits.max_wal_record_bytes {
+            return Err(WalError::TooLarge {
+                max_bytes: limits.max_wal_record_bytes,
+                got_bytes: data.len(),
+            });
+        }
 
         // Write to temp file
         let mut file = File::create(&tmp_path)?;
@@ -394,8 +413,8 @@ fn copy_then_remove(src: &Path, dest: &Path) -> Result<(), WalError> {
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Lww, Priority,
-        Stamp, Workflow, WriteStamp,
+        ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Limits, Lww,
+        Priority, Stamp, Workflow, WriteStamp,
     };
     use serde::Serialize;
     use std::collections::BTreeMap;
@@ -425,6 +444,22 @@ mod tests {
         assert_eq!(loaded.root_slug, Some("test-slug".into()));
         assert_eq!(loaded.sequence, 42);
         assert_eq!(loaded.written_at_ms, 1234567890);
+    }
+
+    #[test]
+    fn write_rejects_oversize_entry() {
+        let tmp = TempDir::new().unwrap();
+        let wal = Wal::new(tmp.path()).unwrap();
+        let remote = test_remote();
+
+        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
+        let limits = Limits {
+            max_wal_record_bytes: 1,
+            ..Limits::default()
+        };
+
+        let err = wal.write_with_limits(&remote, &entry, &limits).unwrap_err();
+        assert!(matches!(err, WalError::TooLarge { .. }));
     }
 
     fn make_bead(id: &str, stamp: &Stamp) -> Bead {

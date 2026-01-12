@@ -540,7 +540,7 @@ pub mod details {
     use uuid::Uuid;
 
     use super::super::{
-        Applied, ActorId, BeadId, ClientRequestId, NamespaceId, ReplicaId, SegmentId, StoreId,
+        ActorId, Applied, BeadId, ClientRequestId, NamespaceId, ReplicaId, SegmentId, StoreId,
         Watermarks,
     };
 
@@ -1114,7 +1114,10 @@ mod tests {
     fn unknown_error_code_decodes() {
         let json = r#"{"code":"new_error_code","message":"msg","retryable":false}"#;
         let parsed: ErrorPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.code, ErrorCode::Unknown("new_error_code".to_string()));
+        assert_eq!(
+            parsed.code,
+            ErrorCode::Unknown("new_error_code".to_string())
+        );
 
         let json2 = serde_json::to_string(&parsed).unwrap();
         assert!(json2.contains("new_error_code"));

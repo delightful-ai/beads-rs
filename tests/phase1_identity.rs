@@ -100,6 +100,5 @@ fn lock_file_enforces_exclusive_create() {
         .expect_err("second lock create fails");
     assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 
-    temp.force_release_lock("store.lock")
-        .expect("release lock");
+    temp.force_release_lock("store.lock").expect("release lock");
 }

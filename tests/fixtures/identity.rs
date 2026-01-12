@@ -48,5 +48,13 @@ pub fn valid_namespaces() -> Vec<&'static str> {
 }
 
 pub fn invalid_namespaces() -> Vec<&'static str> {
-    vec!["", "Core", "1core", "_core", "core-1", "core name", "core/name"]
+    vec![
+        "",
+        "Core",
+        "1core",
+        "_core",
+        "core-1",
+        "core name",
+        "core/name",
+    ]
 }

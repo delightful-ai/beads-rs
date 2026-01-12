@@ -9,11 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::Result;
 use crate::core::ActorId;
 use crate::daemon::IpcError;
+use crate::daemon::Request;
 use crate::daemon::ipc::ensure_socket_dir;
 use crate::daemon::server::{RequestMessage, handle_client};
 use crate::daemon::wal::{Wal, default_wal_base_dir};
 use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop, run_state_loop};
-use crate::daemon::Request;
 
 /// Run the daemon in the current process.
 ///
@@ -81,6 +81,10 @@ pub fn run_daemon() -> Result<()> {
         .unwrap_or(default_actor);
     let actor = ActorId::new(actor_raw)?;
 
+    // Load config (limits, upgrade policy, etc).
+    let config = crate::config::load_or_init();
+    let limits = Arc::new(config.limits.clone());
+
     // Create WAL for mutation durability.
     let wal_base_dir = default_wal_base_dir();
     let wal = Wal::new(&wal_base_dir).map_err(|e| match e {
@@ -92,7 +96,7 @@ pub fn run_daemon() -> Result<()> {
     wal.cleanup_stale().ok(); // Clean up any stale .tmp files from crashes
 
     // Create daemon core and git worker.
-    let daemon = Daemon::new(actor, wal);
+    let daemon = Daemon::new_with_limits(actor, wal, (*limits).clone());
     let git_worker = GitWorker::new(git_result_tx);
 
     // Spawn state thread.
@@ -118,9 +122,10 @@ pub fn run_daemon() -> Result<()> {
         match listener.accept() {
             Ok((stream, _)) => {
                 let req_tx = req_tx.clone();
+                let limits = Arc::clone(&limits);
                 std::thread::spawn(move || {
                     let _ = stream.set_nonblocking(false);
-                    handle_client(stream, req_tx);
+                    handle_client(stream, req_tx, limits);
                 });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
