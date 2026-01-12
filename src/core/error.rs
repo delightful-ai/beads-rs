@@ -21,6 +21,8 @@ pub enum InvalidId {
     Branch { raw: String, reason: String },
     #[error("content hash `{raw}` is invalid: {reason}")]
     ContentHash { raw: String, reason: String },
+    #[error("namespace id `{raw}` is invalid: {reason}")]
+    Namespace { raw: String, reason: String },
     #[error("store id `{raw}` is invalid: {reason}")]
     StoreId { raw: String, reason: String },
     #[error("replica id `{raw}` is invalid: {reason}")]

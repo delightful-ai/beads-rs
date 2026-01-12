@@ -21,7 +21,9 @@ pub mod domain;
 pub mod error;
 pub mod identity;
 pub mod meta;
+pub mod namespace;
 pub mod store_meta;
+pub mod store_state;
 pub mod state;
 pub mod stores;
 pub mod time;
@@ -41,7 +43,12 @@ pub use identity::{
     SegmentId, StoreEpoch, StoreId, StoreIdentity, TxnId,
 };
 pub use meta::{FormatVersion, Meta};
+pub use namespace::{
+    CheckpointGroup, GcAuthority, NamespaceId, NamespacePolicy, NamespaceVisibility, ReplicateMode,
+    RetentionPolicy, TtlBasis,
+};
 pub use store_meta::{StoreMeta, StoreMetaVersions};
+pub use store_state::StoreState;
 pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use stores::{DepStore, TombstoneStore};
 pub use time::{Stamp, WallClock, WriteStamp};
