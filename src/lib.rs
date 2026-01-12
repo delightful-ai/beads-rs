@@ -19,10 +19,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 // Re-export core types at crate root for convenience
 pub use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, ClientRequestId,
-    CheckpointGroup, Closure, DepEdge, DepKey, DepKind, GcAuthority, Labels, Lww, NamespaceId,
-    NamespacePolicy, NamespaceVisibility, Note, NoteId, NoteLog, Priority, ReplicaId,
-    ReplicateMode, RetentionPolicy, SegmentId, Stamp, StoreEpoch, StoreId, StoreIdentity,
-    StoreMeta, StoreMetaVersions, StoreState, Tombstone, TtlBasis, TxnId, WallClock, Workflow,
-    WriteStamp,
+    ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
+    ClientRequestId, CheckpointGroup, Closure, DepEdge, DepKey, DepKind, Durable, DurabilityClass,
+    DurabilityOutcome, DurabilityProofV1, GcAuthority, HeadStatus, Labels, LocalFsyncProof, Lww,
+    NamespaceId, NamespacePolicy, NamespaceVisibility, Note, NoteId, NoteLog, Priority,
+    ReplicaId, ReplicateMode, ReplicatedProof, RetentionPolicy, SegmentId, Seq0, Seq1, Stamp,
+    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Tombstone,
+    TtlBasis, TxnId, WallClock, Watermark, WatermarkError, Watermarks, Workflow, WriteStamp,
 };

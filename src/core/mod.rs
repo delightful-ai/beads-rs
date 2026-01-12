@@ -17,6 +17,7 @@ pub mod collections;
 pub mod composite;
 pub mod crdt;
 pub mod dep;
+pub mod durability;
 pub mod domain;
 pub mod error;
 pub mod identity;
@@ -28,12 +29,16 @@ pub mod state;
 pub mod stores;
 pub mod time;
 pub mod tombstone;
+pub mod watermark;
 
 pub use bead::{Bead, BeadCore, BeadFields};
 pub use collections::{Label, Labels, NoteLog};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
 pub use dep::{DepEdge, DepKey, DepLife, DepSpec};
+pub use durability::{
+    DurabilityClass, DurabilityOutcome, DurabilityProofV1, LocalFsyncProof, ReplicatedProof,
+};
 pub use domain::{BeadType, DepKind, Priority};
 pub use error::{
     CollisionError, CoreError, InvalidDependency, InvalidId, InvalidLabel, RangeError,
@@ -53,3 +58,4 @@ pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use stores::{DepStore, TombstoneStore};
 pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};
+pub use watermark::{Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, Watermarks};
