@@ -20,7 +20,9 @@ impl TempStoreDir {
         let data_dir = temp.path().join("data");
         std::fs::create_dir_all(&data_dir)?;
         let prev_data_dir = std::env::var_os("BD_DATA_DIR");
-        std::env::set_var("BD_DATA_DIR", &data_dir);
+        unsafe {
+            std::env::set_var("BD_DATA_DIR", &data_dir);
+        }
 
         Ok(Self {
             _lock: lock,
@@ -65,9 +67,13 @@ impl TempStoreDir {
 impl Drop for TempStoreDir {
     fn drop(&mut self) {
         if let Some(prev) = self.prev_data_dir.take() {
-            std::env::set_var("BD_DATA_DIR", prev);
+            unsafe {
+                std::env::set_var("BD_DATA_DIR", prev);
+            }
         } else {
-            std::env::remove_var("BD_DATA_DIR");
+            unsafe {
+                std::env::remove_var("BD_DATA_DIR");
+            }
         }
     }
 }
