@@ -44,6 +44,7 @@ ureq = { version = "2", default-features = true }
 tempfile = "3"
 bytes = "1"
 minicbor = { version = "0.24", features = ["std"] }
+rusqlite = "0.31"
 
 [features]
 default = ["cli"]
