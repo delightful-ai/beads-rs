@@ -11,11 +11,11 @@ use thiserror::Error;
 
 use crate::core::{EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
 
+use super::EventWalError;
 use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use super::index::{SegmentRow, WalIndex, WalIndexError, WatermarkRow};
 use super::record::Record;
-use super::segment::{SegmentHeader, SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC};
-use super::EventWalError;
+use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplayStats {
@@ -28,6 +28,21 @@ pub struct ReplayStats {
 pub enum ReplayMode {
     Rebuild,
     CatchUp,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum WalReplayCorruption {
+    #[error("invalid frame header (magic {magic:#x}, length {length})")]
+    InvalidFrameHeader { magic: u32, length: u32 },
+    #[error("frame length {length} exceeds max record bytes {max_record_bytes}")]
+    FrameTooLarge {
+        length: u32,
+        max_record_bytes: usize,
+    },
+    #[error("frame length {frame_len} exceeds u32::MAX")]
+    FrameLenOverflow { frame_len: u64 },
+    #[error("frame crc mismatch (expected {expected}, got {actual})")]
+    CrcMismatch { expected: u32, actual: u32 },
 }
 
 #[derive(Debug, Error)]
@@ -52,10 +67,22 @@ pub enum WalReplayError {
     },
     #[error("segment header mismatch at {path:?}: {reason}")]
     SegmentHeaderMismatch { path: PathBuf, reason: String },
+    #[error(
+        "mid-file WAL corruption at {path:?} offset {offset}: {reason}. Run `bd store fsck` to repair."
+    )]
+    MidFileCorruption {
+        path: PathBuf,
+        offset: u64,
+        reason: WalReplayCorruption,
+    },
     #[error("index error: {0}")]
     Index(#[from] WalIndexError),
     #[error("index offset invalid for {path:?}: offset {offset} > len {len}")]
-    IndexOffsetInvalid { path: PathBuf, offset: u64, len: u64 },
+    IndexOffsetInvalid {
+        path: PathBuf,
+        offset: u64,
+        len: u64,
+    },
     #[error("non-contiguous seq for {namespace} {origin}: expected {expected}, got {got}")]
     NonContiguousSeq {
         namespace: String,
@@ -214,22 +241,16 @@ fn replay_index(
                     seq,
                 });
             }
-            let next_seq = state
-                .max_seq
-                .checked_add(1)
-                .ok_or_else(|| WalReplayError::OriginSeqOverflow {
-                    namespace: namespace.to_string(),
-                    origin,
-                })?;
+            let next_seq =
+                state
+                    .max_seq
+                    .checked_add(1)
+                    .ok_or_else(|| WalReplayError::OriginSeqOverflow {
+                        namespace: namespace.to_string(),
+                        origin,
+                    })?;
 
-            txn.update_watermark(
-                &namespace,
-                &origin,
-                seq,
-                seq,
-                head,
-                head,
-            )?;
+            txn.update_watermark(&namespace, &origin, seq, seq, head, head)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
         }
     }
@@ -248,12 +269,13 @@ fn index_record(
     frame_len: u32,
 ) -> Result<(), WalReplayError> {
     let header = &record.header;
-    let origin_seq = Seq1::from_u64(header.origin_seq).ok_or_else(|| WalReplayError::NonContiguousSeq {
-        namespace: namespace.to_string(),
-        origin: header.origin_replica_id,
-        expected: 1,
-        got: header.origin_seq,
-    })?;
+    let origin_seq =
+        Seq1::from_u64(header.origin_seq).ok_or_else(|| WalReplayError::NonContiguousSeq {
+            namespace: namespace.to_string(),
+            origin: header.origin_replica_id,
+            expected: 1,
+            got: header.origin_seq,
+        })?;
     let event_id = EventId::new(header.origin_replica_id, namespace.clone(), origin_seq);
 
     tracker.observe_record(
@@ -303,7 +325,7 @@ fn list_namespaces(wal_dir: &Path) -> Result<Vec<NamespaceId>, WalReplayError> {
             return Err(WalReplayError::Io {
                 path: wal_dir.to_path_buf(),
                 source: err,
-            })
+            });
         }
     };
 
@@ -320,8 +342,8 @@ fn list_namespaces(wal_dir: &Path) -> Result<Vec<NamespaceId>, WalReplayError> {
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        let namespace = NamespaceId::parse(name)
-            .map_err(|err| WalReplayError::SegmentHeaderMismatch {
+        let namespace =
+            NamespaceId::parse(name).map_err(|err| WalReplayError::SegmentHeaderMismatch {
                 path,
                 reason: err.to_string(),
             })?;
@@ -339,7 +361,7 @@ fn list_segments(dir: &Path) -> Result<Vec<SegmentDescriptor<Unverified>>, WalRe
             return Err(WalReplayError::Io {
                 path: dir.to_path_buf(),
                 source: err,
-            })
+            });
         }
     };
 
@@ -350,10 +372,7 @@ fn list_segments(dir: &Path) -> Result<Vec<SegmentDescriptor<Unverified>>, WalRe
             source,
         })?;
         let path = entry.path();
-        if path
-            .extension()
-            .is_none_or(|ext| ext != "wal")
-        {
+        if path.extension().is_none_or(|ext| ext != "wal") {
             continue;
         }
         segments.push(SegmentDescriptor::load(path)?);
@@ -395,7 +414,10 @@ impl SegmentDescriptor<Unverified> {
     fn load(path: PathBuf) -> Result<Self, WalReplayError> {
         let (header, header_len) = read_segment_header(&path)?;
         let file_len = fs::metadata(&path)
-            .map_err(|source| WalReplayError::Io { path: path.clone(), source })?
+            .map_err(|source| WalReplayError::Io {
+                path: path.clone(),
+                source,
+            })?
             .len();
         if header_len > file_len {
             return Err(WalReplayError::SegmentHeaderMismatch {
@@ -443,8 +465,7 @@ impl SegmentDescriptor<Unverified> {
                 path: self.path.clone(),
                 reason: format!(
                     "namespace mismatch (expected {}, got {})",
-                    namespace,
-                    header.namespace
+                    namespace, header.namespace
                 ),
             });
         }
@@ -522,17 +543,30 @@ where
         let expected_crc = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
 
         let frame_len = FRAME_HEADER_LEN as u64 + length as u64;
-        if magic != FRAME_MAGIC || length == 0 || length as usize > max_record_bytes {
+        if frame_len > remaining {
             truncated = true;
             break;
+        }
+
+        let mid_file = |reason| {
+            Err(WalReplayError::MidFileCorruption {
+                path: segment.path.clone(),
+                offset,
+                reason,
+            })
+        };
+
+        if magic != FRAME_MAGIC || length == 0 {
+            return mid_file(WalReplayCorruption::InvalidFrameHeader { magic, length });
+        }
+        if length as usize > max_record_bytes {
+            return mid_file(WalReplayCorruption::FrameTooLarge {
+                length,
+                max_record_bytes,
+            });
         }
         if frame_len > u32::MAX as u64 {
-            truncated = true;
-            break;
-        }
-        if remaining < frame_len {
-            truncated = true;
-            break;
+            return mid_file(WalReplayCorruption::FrameLenOverflow { frame_len });
         }
 
         let mut body = vec![0u8; length as usize];
@@ -545,15 +579,20 @@ where
 
         let actual_crc = crc32c(&body);
         if actual_crc != expected_crc {
-            truncated = true;
-            break;
+            if offset.saturating_add(frame_len) == segment.file_len {
+                truncated = true;
+                break;
+            }
+            return mid_file(WalReplayCorruption::CrcMismatch {
+                expected: expected_crc,
+                actual: actual_crc,
+            });
         }
 
-        let record = Record::decode_body(&body)
-            .map_err(|source| WalReplayError::RecordDecode {
-                path: segment.path.clone(),
-                source,
-            })?;
+        let record = Record::decode_body(&body).map_err(|source| WalReplayError::RecordDecode {
+            path: segment.path.clone(),
+            source,
+        })?;
         on_record(offset, &record, frame_len as u32)?;
 
         records += 1;
@@ -584,19 +623,21 @@ fn truncate_tail(file: &mut std::fs::File, path: &Path, len: u64) -> Result<(), 
 }
 
 fn read_segment_header(path: &Path) -> Result<(SegmentHeader, u64), WalReplayError> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
+    let mut file =
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|source| WalReplayError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+    let mut prefix = [0u8; SEGMENT_HEADER_PREFIX_LEN];
+    file.read_exact(&mut prefix)
         .map_err(|source| WalReplayError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-
-    let mut prefix = [0u8; SEGMENT_HEADER_PREFIX_LEN];
-    file.read_exact(&mut prefix).map_err(|source| WalReplayError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
 
     if &prefix[..SEGMENT_MAGIC.len()] != SEGMENT_MAGIC {
         return Err(WalReplayError::SegmentHeaderMismatch {
@@ -640,10 +681,11 @@ fn read_segment_header(path: &Path) -> Result<(SegmentHeader, u64), WalReplayErr
             source,
         })?;
 
-    let header = SegmentHeader::decode(&header_bytes).map_err(|source| WalReplayError::SegmentHeader {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let header =
+        SegmentHeader::decode(&header_bytes).map_err(|source| WalReplayError::SegmentHeader {
+            path: path.to_path_buf(),
+            source,
+        })?;
     Ok((header, header_len as u64))
 }
 
@@ -669,11 +711,14 @@ impl ReplayTracker {
                 }
                 None
             } else {
-                Some(row.durable_head_sha.ok_or_else(|| WalReplayError::MissingHead {
-                    namespace: row.namespace.to_string(),
-                    origin: row.origin,
-                    seq: row.durable_seq,
-                })?)
+                Some(
+                    row.durable_head_sha
+                        .ok_or_else(|| WalReplayError::MissingHead {
+                            namespace: row.namespace.to_string(),
+                            origin: row.origin,
+                            seq: row.durable_seq,
+                        })?,
+                )
             };
 
             let state = OriginReplayState {
