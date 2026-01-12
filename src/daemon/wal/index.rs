@@ -47,6 +47,10 @@ pub enum WalIndexError {
         namespace: String,
         origin: ReplicaId,
     },
+    #[error("segment row decode failed: {0}")]
+    SegmentRowDecode(String),
+    #[error("watermark row decode failed: {0}")]
+    WatermarkRowDecode(String),
 }
 
 pub trait WalIndex: Send + Sync {
@@ -64,6 +68,12 @@ pub trait WalIndexTxn {
         ns: &NamespaceId,
         origin: &ReplicaId,
     ) -> Result<u64, WalIndexError>;
+    fn set_next_origin_seq(
+        &mut self,
+        ns: &NamespaceId,
+        origin: &ReplicaId,
+        next_seq: u64,
+    ) -> Result<(), WalIndexError>;
     #[allow(clippy::too_many_arguments)]
     fn record_event(
         &mut self,
@@ -88,6 +98,7 @@ pub trait WalIndexTxn {
         applied_head_sha: Option<[u8; 32]>,
         durable_head_sha: Option<[u8; 32]>,
     ) -> Result<(), WalIndexError>;
+    fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError>;
     #[allow(clippy::too_many_arguments)]
     fn upsert_client_request(
         &mut self,
@@ -109,6 +120,8 @@ pub trait WalIndexReader {
         ns: &NamespaceId,
         eid: &EventId,
     ) -> Result<Option<[u8; 32]>, WalIndexError>;
+    fn list_segments(&self, ns: &NamespaceId) -> Result<Vec<SegmentRow>, WalIndexError>;
+    fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError>;
     fn iter_from(
         &self,
         ns: &NamespaceId,
@@ -144,6 +157,27 @@ pub struct IndexedRangeItem {
     pub event_time_ms: u64,
     pub txn_id: TxnId,
     pub client_request_id: Option<ClientRequestId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentRow {
+    pub namespace: NamespaceId,
+    pub segment_id: SegmentId,
+    pub segment_path: PathBuf,
+    pub created_at_ms: u64,
+    pub last_indexed_offset: u64,
+    pub sealed: bool,
+    pub final_len: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatermarkRow {
+    pub namespace: NamespaceId,
+    pub origin: ReplicaId,
+    pub applied_seq: u64,
+    pub durable_seq: u64,
+    pub applied_head_sha: Option<[u8; 32]>,
+    pub durable_head_sha: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +298,22 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         Ok(next)
     }
 
+    fn set_next_origin_seq(
+        &mut self,
+        ns: &NamespaceId,
+        origin: &ReplicaId,
+        next_seq: u64,
+    ) -> Result<(), WalIndexError> {
+        let namespace = ns.as_str();
+        let origin_blob = uuid_blob(origin.as_uuid());
+        self.conn.execute(
+            "INSERT INTO origin_seq (namespace, origin_replica_id, next_seq) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET next_seq = excluded.next_seq",
+            params![namespace, origin_blob, next_seq as i64],
+        )?;
+        Ok(())
+    }
+
     fn record_event(
         &mut self,
         ns: &NamespaceId,
@@ -337,6 +387,34 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 durable as i64,
                 applied_blob,
                 durable_blob,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError> {
+        let namespace = segment.namespace.as_str();
+        let segment_blob = uuid_blob(segment.segment_id.as_uuid());
+        let path_str = segment.segment_path.to_string_lossy();
+        let sealed = if segment.sealed { 1 } else { 0 };
+        let final_len = segment.final_len.map(|value| value as i64);
+        self.conn.execute(
+            "INSERT INTO segments (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(namespace, segment_id) DO UPDATE SET \
+               segment_path = excluded.segment_path, \
+               created_at_ms = excluded.created_at_ms, \
+               last_indexed_offset = excluded.last_indexed_offset, \
+               sealed = excluded.sealed, \
+               final_len = excluded.final_len",
+            params![
+                namespace,
+                segment_blob,
+                path_str.as_ref(),
+                segment.created_at_ms as i64,
+                segment.last_indexed_offset as i64,
+                sealed,
+                final_len,
             ],
         )?;
         Ok(())
@@ -435,6 +513,101 @@ impl WalIndexReader for SqliteWalIndexReader {
                 )
                 .optional()?;
             row.map(blob_32).transpose()
+        })
+    }
+
+    fn list_segments(&self, ns: &NamespaceId) -> Result<Vec<SegmentRow>, WalIndexError> {
+        self.with_conn(|conn| {
+            let namespace = ns.as_str();
+            let mut stmt = conn.prepare(
+                "SELECT segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len \
+                 FROM segments WHERE namespace = ?1 ORDER BY created_at_ms ASC, segment_id ASC",
+            )?;
+            let mut rows = stmt.query(params![namespace])?;
+            let mut segments = Vec::new();
+            while let Some(row) = rows.next()? {
+                let segment_id: Vec<u8> = row.get(0)?;
+                let segment_path: String = row.get(1)?;
+                let created_at_ms: i64 = row.get(2)?;
+                let last_indexed_offset: i64 = row.get(3)?;
+                let sealed: i64 = row.get(4)?;
+                let final_len: Option<i64> = row.get(5)?;
+
+                let created_at_ms = u64::try_from(created_at_ms).map_err(|_| {
+                    WalIndexError::SegmentRowDecode("created_at_ms out of range".to_string())
+                })?;
+                let last_indexed_offset = u64::try_from(last_indexed_offset).map_err(|_| {
+                    WalIndexError::SegmentRowDecode("last_indexed_offset out of range".to_string())
+                })?;
+                let final_len = match final_len {
+                    Some(value) => Some(u64::try_from(value).map_err(|_| {
+                        WalIndexError::SegmentRowDecode("final_len out of range".to_string())
+                    })?),
+                    None => None,
+                };
+
+                let segment_uuid = blob_uuid(segment_id)
+                    .map_err(|err| WalIndexError::SegmentRowDecode(err.to_string()))?;
+
+                segments.push(SegmentRow {
+                    namespace: ns.clone(),
+                    segment_id: SegmentId::new(segment_uuid),
+                    segment_path: PathBuf::from(segment_path),
+                    created_at_ms,
+                    last_indexed_offset,
+                    sealed: sealed != 0,
+                    final_len,
+                });
+            }
+            Ok(segments)
+        })
+    }
+
+    fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha \
+                 FROM watermarks",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut watermarks = Vec::new();
+            while let Some(row) = rows.next()? {
+                let namespace: String = row.get(0)?;
+                let origin_blob: Vec<u8> = row.get(1)?;
+                let applied_seq: i64 = row.get(2)?;
+                let durable_seq: i64 = row.get(3)?;
+                let applied_head_sha: Option<Vec<u8>> = row.get(4)?;
+                let durable_head_sha: Option<Vec<u8>> = row.get(5)?;
+
+                let namespace = NamespaceId::parse(&namespace)
+                    .map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))?;
+                let origin_uuid = blob_uuid(origin_blob)
+                    .map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))?;
+                let applied_seq = u64::try_from(applied_seq).map_err(|_| {
+                    WalIndexError::WatermarkRowDecode("applied_seq out of range".to_string())
+                })?;
+                let durable_seq = u64::try_from(durable_seq).map_err(|_| {
+                    WalIndexError::WatermarkRowDecode("durable_seq out of range".to_string())
+                })?;
+                let applied_head_sha = applied_head_sha
+                    .map(blob_32)
+                    .transpose()
+                    .map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))?;
+                let durable_head_sha = durable_head_sha
+                    .map(blob_32)
+                    .transpose()
+                    .map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))?;
+
+                watermarks.push(WatermarkRow {
+                    namespace,
+                    origin: ReplicaId::new(origin_uuid),
+                    applied_seq,
+                    durable_seq,
+                    applied_head_sha,
+                    durable_head_sha,
+                });
+            }
+            Ok(watermarks)
         })
     }
 

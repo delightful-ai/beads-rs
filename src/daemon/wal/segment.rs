@@ -14,8 +14,9 @@ use super::frame::encode_frame;
 use super::record::Record;
 use super::{EventWalError, EventWalResult};
 
-const SEGMENT_MAGIC: &[u8; 5] = b"BDWAL";
-const WAL_FORMAT_VERSION: u32 = 2;
+pub(crate) const SEGMENT_MAGIC: &[u8; 5] = b"BDWAL";
+pub(crate) const WAL_FORMAT_VERSION: u32 = 2;
+pub(crate) const SEGMENT_HEADER_PREFIX_LEN: usize = SEGMENT_MAGIC.len() + 8;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SegmentConfig {

@@ -7,8 +7,8 @@ use crc32c::crc32c;
 use super::{EventWalError, EventWalResult};
 use crate::daemon::wal::record::Record;
 
-const FRAME_MAGIC: u32 = 0x4244_5232; // "BDR2"
-const FRAME_HEADER_LEN: usize = 12;
+pub(crate) const FRAME_MAGIC: u32 = 0x4244_5232; // "BDR2"
+pub(crate) const FRAME_HEADER_LEN: usize = 12;
 
 pub struct FrameReader<R> {
     reader: R,

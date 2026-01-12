@@ -389,6 +389,7 @@ impl Daemon {
                 Arc::clone(&self.wal),
                 WallClock::now().0,
                 env!("CARGO_PKG_VERSION"),
+                self.limits(),
             )?;
             self.stores.insert(store_id, runtime);
 
@@ -470,6 +471,7 @@ impl Daemon {
                 Arc::clone(&self.wal),
                 WallClock::now().0,
                 env!("CARGO_PKG_VERSION"),
+                self.limits(),
             )?;
             self.stores.insert(store_id, runtime);
 
@@ -1554,7 +1556,7 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use crate::core::{
         Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Labels, Lww, Priority,
@@ -1573,8 +1575,6 @@ mod tests {
         RemoteUrl("example.com/test/repo".into())
     }
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     struct TempStoreDir {
         _lock: std::sync::MutexGuard<'static, ()>,
         _temp: TempDir,
@@ -1583,7 +1583,7 @@ mod tests {
 
     impl TempStoreDir {
         fn new() -> Self {
-            let lock = ENV_LOCK.lock().expect("BD_DATA_DIR env lock poisoned");
+            let lock = crate::paths::lock_data_dir_for_tests();
             let temp = TempDir::new().unwrap();
             let data_dir = temp.path().join("data");
             std::fs::create_dir_all(&data_dir).unwrap();
@@ -1621,6 +1621,7 @@ mod tests {
             Arc::clone(&daemon.wal),
             WallClock::now().0,
             env!("CARGO_PKG_VERSION"),
+            daemon.limits(),
         )
         .unwrap();
         daemon.remote_to_store_id.insert(remote.clone(), store_id);

@@ -64,6 +64,13 @@ fn parse_response_payload(bytes: &[u8]) -> beads_rs::daemon::ipc::ResponsePayloa
     serde_json::from_slice(bytes).expect("parse response payload")
 }
 
+fn store_id_from_remote_path(remote: &Path) -> beads_rs::StoreId {
+    let remote_str = remote.to_str().expect("remote path");
+    let normalized = beads_rs::daemon::remote::normalize_url(remote_str);
+    let store_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, normalized.as_bytes());
+    beads_rs::StoreId::new(store_uuid)
+}
+
 /// Test fixture: working repo + bare remote.
 struct TestRepo {
     work_dir: TempDir,
@@ -3615,6 +3622,14 @@ fn test_crash_recovery_replays_wal() {
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid as i32), Signal::SIGKILL).expect("failed to SIGKILL daemon");
     std::thread::sleep(Duration::from_millis(100));
+
+    let store_id = store_id_from_remote_path(repo.remote_dir.path());
+    let store_id_arg = store_id.to_string();
+    let unlock_out = bd_with_runtime(repo.path(), runtime_dir.path())
+        .args(["store", "unlock", "--store-id", store_id_arg.as_str()])
+        .output()
+        .expect("run bd store unlock");
+    assert!(unlock_out.status.success());
 
     let list_out = bd_with_runtime(repo.path(), runtime_dir.path())
         .args(["list", "--json"])

@@ -7,16 +7,18 @@ use thiserror::Error;
 pub mod frame;
 pub mod index;
 pub mod record;
+pub mod replay;
 pub mod segment;
 
 pub use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError, default_wal_base_dir};
 
 pub use frame::{FrameReader, FrameWriter};
 pub use index::{
-    ClientRequestRow, IndexDurabilityMode, IndexedRangeItem, SqliteWalIndex, WalIndex,
-    WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter,
+    ClientRequestRow, IndexDurabilityMode, IndexedRangeItem, SegmentRow, SqliteWalIndex,
+    WalIndex, WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
 };
 pub use record::{Record, RecordFlags, RecordHeader};
+pub use replay::{ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index};
 pub use segment::{AppendOutcome, SegmentConfig, SegmentHeader, SegmentWriter};
 
 pub type EventWalResult<T> = Result<T, EventWalError>;

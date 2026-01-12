@@ -17,7 +17,7 @@ use crate::core::{
 };
 use crate::daemon::store_lock::StoreLockError;
 use crate::daemon::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::WalError;
+use crate::daemon::wal::{WalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
 
@@ -436,6 +436,8 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
         }
         StoreRuntimeError::MetaParse { .. } => ErrorCode::Corruption,
         StoreRuntimeError::MetaMismatch { .. } => ErrorCode::WrongStore,
+        StoreRuntimeError::WalIndex(err) => wal_index_error_code(err),
+        StoreRuntimeError::WalReplay(err) => wal_replay_error_code(err),
     }
 }
 
@@ -480,6 +482,84 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
                 Transience::Retryable
             }
         }
+        StoreRuntimeError::WalIndex(err) => wal_index_transience(err),
+        StoreRuntimeError::WalReplay(err) => wal_replay_transience(err),
+    }
+}
+
+fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
+    match err {
+        WalIndexError::SchemaVersionMismatch { .. } => ErrorCode::IndexRebuildRequired,
+        WalIndexError::MetaMismatch { key, .. } => match *key {
+            "store_id" => ErrorCode::WrongStore,
+            "store_epoch" => ErrorCode::StoreEpochMismatch,
+            _ => ErrorCode::IndexCorrupt,
+        },
+        WalIndexError::MetaMissing { .. }
+        | WalIndexError::EventIdDecode(_)
+        | WalIndexError::SegmentRowDecode(_)
+        | WalIndexError::WatermarkRowDecode(_)
+        | WalIndexError::CborDecode(_)
+        | WalIndexError::CborEncode(_)
+        | WalIndexError::OriginSeqOverflow { .. } => ErrorCode::IndexCorrupt,
+        WalIndexError::Sqlite(_) => ErrorCode::IndexCorrupt,
+        WalIndexError::Io { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::IoError
+            }
+        }
+    }
+}
+
+fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
+    match err {
+        WalReplayError::Io { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::IoError
+            }
+        }
+        WalReplayError::SegmentHeader { .. } | WalReplayError::SegmentHeaderMismatch { .. } => {
+            ErrorCode::SegmentHeaderMismatch
+        }
+        WalReplayError::RecordDecode { .. }
+        | WalReplayError::MissingHead { .. }
+        | WalReplayError::UnexpectedHead { .. } => ErrorCode::WalCorrupt,
+        WalReplayError::NonContiguousSeq { .. } => ErrorCode::GapDetected,
+        WalReplayError::PrevShaMismatch { .. } => ErrorCode::PrevShaMismatch,
+        WalReplayError::IndexOffsetInvalid { .. } | WalReplayError::OriginSeqOverflow { .. } => {
+            ErrorCode::IndexCorrupt
+        }
+        WalReplayError::Index(err) => wal_index_error_code(err),
+    }
+}
+
+fn wal_index_transience(err: &WalIndexError) -> Transience {
+    match err {
+        WalIndexError::Io { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                Transience::Permanent
+            } else {
+                Transience::Retryable
+            }
+        }
+        _ => Transience::Permanent,
+    }
+}
+
+fn wal_replay_transience(err: &WalReplayError) -> Transience {
+    match err {
+        WalReplayError::Io { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                Transience::Permanent
+            } else {
+                Transience::Retryable
+            }
+        }
+        _ => Transience::Permanent,
     }
 }
 

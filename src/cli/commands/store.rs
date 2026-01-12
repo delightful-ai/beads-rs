@@ -325,11 +325,8 @@ fn store_lock_error(err: StoreLockError) -> Error {
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::sync::Mutex;
     use tempfile::TempDir;
     use uuid::Uuid;
-
-    static TEST_DIR_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn unlock_decision_stale_pid_removes() {
@@ -412,7 +409,7 @@ mod tests {
     where
         F: FnOnce(&TempDir),
     {
-        let _guard = TEST_DIR_LOCK.lock().expect("test dir lock poisoned");
+        let _guard = paths::lock_data_dir_for_tests();
         let temp = TempDir::new().unwrap();
         paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
         f(&temp);
