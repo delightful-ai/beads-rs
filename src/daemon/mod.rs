@@ -23,6 +23,7 @@ pub mod server;
 pub mod store_lock;
 pub mod store_runtime;
 pub mod wal;
+mod wal_legacy_snapshot;
 
 pub use core::{Daemon, LoadedStore};
 
