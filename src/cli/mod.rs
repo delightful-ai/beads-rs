@@ -746,6 +746,8 @@ pub enum EpicCmd {
 pub enum StoreCmd {
     /// Unlock a store lock file.
     Unlock(StoreUnlockArgs),
+    /// Offline WAL verification and repair.
+    Fsck(StoreFsckArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -818,6 +820,17 @@ pub struct StoreUnlockArgs {
     /// Force unlock even if a daemon appears to be running.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct StoreFsckArgs {
+    /// Store ID to check.
+    #[arg(long = "store-id", alias = "id", value_name = "STORE_ID")]
+    pub store_id: String,
+
+    /// Apply safe repairs (tail truncation, quarantine, wal.sqlite rebuild).
+    #[arg(long)]
+    pub repair: bool,
 }
 
 #[derive(Args, Debug)]

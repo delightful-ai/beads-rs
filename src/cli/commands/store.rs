@@ -7,11 +7,12 @@ use crate::core::StoreId;
 use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request_no_autostart};
 use crate::daemon::store_lock::{StoreLockError, StoreLockMeta, read_lock_meta, remove_lock_file};
 use crate::daemon::store_runtime::StoreRuntimeError;
+use crate::daemon::wal::fsck::{FsckOptions, FsckReport, FsckStatus, fsck_store};
 use crate::daemon::{OpError, QueryResult};
 use crate::paths;
 use crate::{Error, Result};
 
-use super::super::{StoreCmd, StoreUnlockArgs};
+use super::super::{StoreCmd, StoreFsckArgs, StoreUnlockArgs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,6 +117,7 @@ struct StoreUnlockReport {
 pub(crate) fn handle(json: bool, cmd: StoreCmd) -> Result<()> {
     match cmd {
         StoreCmd::Unlock(args) => handle_unlock(json, args),
+        StoreCmd::Fsck(args) => handle_fsck(json, args),
     }
 }
 
@@ -131,6 +133,20 @@ fn handle_unlock(json: bool, args: StoreUnlockArgs) -> Result<()> {
             reason: format!("lock appears active ({})", reason.as_str()),
         }));
     }
+    Ok(())
+}
+
+fn handle_fsck(json: bool, args: StoreFsckArgs) -> Result<()> {
+    let store_id = StoreId::parse_str(&args.store_id)?;
+    let config = crate::config::load_or_init();
+    let options = FsckOptions::new(args.repair, config.limits);
+    let report = fsck_store(store_id, options).map_err(|err| {
+        Error::Op(OpError::InvalidRequest {
+            field: Some("store-id".into()),
+            reason: err.to_string(),
+        })
+    })?;
+    write_fsck_report(&report, json)?;
     Ok(())
 }
 
@@ -284,6 +300,22 @@ fn write_report(report: &StoreUnlockReport, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn write_fsck_report(report: &FsckReport, json: bool) -> Result<()> {
+    let output = if json {
+        serde_json::to_string_pretty(report).map_err(crate::daemon::IpcError::from)?
+    } else {
+        render_fsck_human(report)
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = writeln!(stdout, "{output}")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(crate::daemon::IpcError::from(e).into());
+    }
+    Ok(())
+}
+
 fn render_human(report: &StoreUnlockReport) -> String {
     let mut out = String::new();
     out.push_str("Store lock:\n");
@@ -314,6 +346,85 @@ fn render_human(report: &StoreUnlockReport) -> String {
         out.push_str(&format!("  daemon_pid: {}\n", daemon_pid));
     }
     out.push_str(&format!("  action: {}\n", report.result.describe()));
+    out
+}
+
+fn render_fsck_human(report: &FsckReport) -> String {
+    let mut out = String::new();
+    out.push_str("Store fsck:\n");
+    out.push_str(&format!("  store_id: {}\n", report.store_id));
+    out.push_str(&format!("  checked_at_ms: {}\n", report.checked_at_ms));
+    out.push_str(&format!(
+        "  stats: namespaces={} segments={} records={}\n",
+        report.stats.namespaces, report.stats.segments, report.stats.records
+    ));
+    out.push_str(&format!(
+        "  summary: risk={:?} safe_to_accept_writes={}\n",
+        report.summary.risk, report.summary.safe_to_accept_writes
+    ));
+
+    if !report.repairs.is_empty() {
+        out.push_str("  repairs:\n");
+        for repair in &report.repairs {
+            let path = repair
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "none".to_string());
+            out.push_str(&format!(
+                "    - {:?}: {} ({path})\n",
+                repair.kind, repair.detail
+            ));
+        }
+    }
+
+    out.push_str("  checks:\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "    - {:?}: {:?} (severity={:?}, issues={})\n",
+            check.id,
+            check.status,
+            check.severity,
+            check.evidence.len()
+        ));
+        if check.status != FsckStatus::Pass {
+            for evidence in &check.evidence {
+                let path = evidence
+                    .path
+                    .as_ref()
+                    .map(|p| format!(" path={}", p.display()))
+                    .unwrap_or_default();
+                let namespace = evidence
+                    .namespace
+                    .as_ref()
+                    .map(|ns| format!(" namespace={}", ns.as_str()))
+                    .unwrap_or_default();
+                let origin = evidence
+                    .origin
+                    .as_ref()
+                    .map(|id| format!(" origin={id}"))
+                    .unwrap_or_default();
+                let seq = evidence
+                    .seq
+                    .map(|seq| format!(" seq={seq}"))
+                    .unwrap_or_default();
+                let offset = evidence
+                    .offset
+                    .map(|offset| format!(" offset={offset}"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "      * {:?}: {}{path}{namespace}{origin}{seq}{offset}\n",
+                    evidence.code, evidence.message
+                ));
+            }
+            if !check.suggested_actions.is_empty() {
+                out.push_str("      actions:\n");
+                for action in &check.suggested_actions {
+                    out.push_str(&format!("        - {action}\n"));
+                }
+            }
+        }
+    }
     out
 }
 

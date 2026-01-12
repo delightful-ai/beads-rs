@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 pub mod frame;
+pub mod fsck;
 pub mod index;
 pub mod record;
 pub mod replay;
