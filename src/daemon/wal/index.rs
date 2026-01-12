@@ -802,7 +802,7 @@ fn blob_32(blob: Vec<u8>) -> Result<[u8; 32], WalIndexError> {
     Ok(bytes)
 }
 
-fn encode_event_ids(event_ids: &[EventId]) -> Result<Vec<u8>, WalIndexError> {
+pub(crate) fn encode_event_ids(event_ids: &[EventId]) -> Result<Vec<u8>, WalIndexError> {
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
     enc.array(event_ids.len() as u64)?;

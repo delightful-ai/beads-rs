@@ -20,6 +20,7 @@ pub(super) mod setup;
 pub(super) mod show;
 pub(super) mod stale;
 pub(super) mod status;
+pub(super) mod store;
 pub(super) mod sync;
 pub(super) mod unclaim;
 pub(super) mod update;

@@ -132,6 +132,19 @@ pub fn read_lock_meta(store_id: StoreId) -> Result<Option<StoreLockMeta>, StoreL
     }
 }
 
+pub fn remove_lock_file(store_id: StoreId) -> Result<bool, StoreLockError> {
+    let path = paths::store_lock_path(store_id);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
+        Ok(_) => {
+            fs::remove_file(&path)?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(StoreLockError::Io(err)),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StoreLockError {
     #[error("store lock already held for {store_id} at {path:?}")]
@@ -178,7 +191,9 @@ fn ensure_dir(path: &Path) -> Result<(), StoreLockError> {
 }
 
 fn reject_symlink(path: &Path) -> Result<(), StoreLockError> {
-    if let Ok(meta) = fs::symlink_metadata(path) && meta.file_type().is_symlink() {
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
         return Err(StoreLockError::Symlink {
             path: path.to_path_buf(),
         });
@@ -227,7 +242,10 @@ fn open_new_lock_file(path: &Path) -> Result<fs::File, StoreLockError> {
 
 fn open_existing_lock_file(path: &Path) -> Result<fs::File, StoreLockError> {
     reject_symlink(path)?;
-    Ok(fs::OpenOptions::new().write(true).truncate(true).open(path)?)
+    Ok(fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)?)
 }
 
 fn set_dir_permissions(path: &Path, mode: u32) -> Result<(), StoreLockError> {

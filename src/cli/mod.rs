@@ -108,6 +108,12 @@ pub enum Commands {
     /// Wait for debounced sync flush to complete.
     Sync,
 
+    /// Store operations.
+    Store {
+        #[command(subcommand)]
+        cmd: StoreCmd,
+    },
+
     /// Upgrade bd to the latest version.
     Upgrade(UpgradeArgs),
 
@@ -737,6 +743,12 @@ pub enum EpicCmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum StoreCmd {
+    /// Unlock a store lock file.
+    Unlock(StoreUnlockArgs),
+}
+
+#[derive(Subcommand, Debug)]
 pub enum SetupCmd {
     /// Setup Claude Code integration (hooks for SessionStart/PreCompact).
     Claude(SetupClaudeArgs),
@@ -795,6 +807,17 @@ pub struct EpicCloseEligibleArgs {
     /// Preview what would be closed without writing.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct StoreUnlockArgs {
+    /// Store ID to unlock.
+    #[arg(long = "store-id", alias = "id", value_name = "STORE_ID")]
+    pub store_id: String,
+
+    /// Force unlock even if a daemon appears to be running.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -899,6 +922,8 @@ pub fn run(cli: Cli) -> Result<()> {
         },
         // Onboard doesn't require an initialized beads repo
         Commands::Onboard(args) => commands::onboard::handle(args.output.as_deref()),
+        // Store operations are global (no repo required).
+        Commands::Store { cmd } => commands::store::handle(cli.json, cmd),
         Commands::Upgrade(args) => commands::upgrade::handle(cli.json, args.background),
         cmd => {
             let repo = resolve_repo(cli.repo)?;
@@ -937,6 +962,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 | Commands::Prime
                 | Commands::Setup { .. }
                 | Commands::Onboard(_)
+                | Commands::Store { .. }
                 | Commands::Upgrade(_) => Ok(()),
             }
         }
