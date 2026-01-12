@@ -1,9 +1,10 @@
 //! WAL record header encoding/decoding (v0.5 framing).
 
 use bytes::Bytes;
+use thiserror::Error;
 use uuid::Uuid;
 
-use crate::core::{ClientRequestId, ReplicaId, TxnId};
+use crate::core::{ClientRequestId, EventBody, ReplicaId, TxnId};
 
 use super::{EventWalError, EventWalResult};
 
@@ -70,6 +71,23 @@ pub struct RecordHeader {
     pub request_sha256: Option<[u8; 32]>,
     pub sha256: [u8; 32],
     pub prev_sha256: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum RecordHeaderMismatch {
+    #[error("origin_replica_id mismatch (header {header}, body {body})")]
+    OriginReplicaId { header: ReplicaId, body: ReplicaId },
+    #[error("origin_seq mismatch (header {header}, body {body})")]
+    OriginSeq { header: u64, body: u64 },
+    #[error("event_time_ms mismatch (header {header}, body {body})")]
+    EventTimeMs { header: u64, body: u64 },
+    #[error("txn_id mismatch (header {header}, body {body})")]
+    TxnId { header: TxnId, body: TxnId },
+    #[error("client_request_id mismatch (header {header:?}, body {body:?})")]
+    ClientRequestId {
+        header: Option<ClientRequestId>,
+        body: Option<ClientRequestId>,
+    },
 }
 
 impl RecordHeader {
@@ -201,6 +219,43 @@ impl RecordHeader {
             header_len,
         ))
     }
+}
+
+pub fn validate_header_matches_body(
+    header: &RecordHeader,
+    body: &EventBody,
+) -> Result<(), RecordHeaderMismatch> {
+    if header.origin_replica_id != body.origin_replica_id {
+        return Err(RecordHeaderMismatch::OriginReplicaId {
+            header: header.origin_replica_id,
+            body: body.origin_replica_id,
+        });
+    }
+    if header.origin_seq != body.origin_seq.get() {
+        return Err(RecordHeaderMismatch::OriginSeq {
+            header: header.origin_seq,
+            body: body.origin_seq.get(),
+        });
+    }
+    if header.event_time_ms != body.event_time_ms {
+        return Err(RecordHeaderMismatch::EventTimeMs {
+            header: header.event_time_ms,
+            body: body.event_time_ms,
+        });
+    }
+    if header.txn_id != body.txn_id {
+        return Err(RecordHeaderMismatch::TxnId {
+            header: header.txn_id,
+            body: body.txn_id,
+        });
+    }
+    if header.client_request_id != body.client_request_id {
+        return Err(RecordHeaderMismatch::ClientRequestId {
+            header: header.client_request_id,
+            body: body.client_request_id,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

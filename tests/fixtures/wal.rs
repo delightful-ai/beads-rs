@@ -9,8 +9,8 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use beads_rs::core::{
-    ClientRequestId, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
-    StoreMetaVersions, TxnId,
+    ClientRequestId, EventBody, EventKindV1, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId,
+    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
@@ -146,32 +146,107 @@ impl SegmentFixture {
     }
 }
 
-pub fn sample_record(seed: u8) -> Record {
-    let payload = Bytes::from(vec![seed; 16]);
+fn event_body_bytes(
+    meta: &StoreMeta,
+    namespace: &NamespaceId,
+    origin: ReplicaId,
+    origin_seq: u64,
+    event_time_ms: u64,
+    txn_id: TxnId,
+    client_request_id: Option<ClientRequestId>,
+) -> Bytes {
+    let body = EventBody {
+        envelope_v: 1,
+        store: StoreIdentity::new(meta.store_id(), meta.store_epoch()),
+        namespace: namespace.clone(),
+        origin_replica_id: origin,
+        origin_seq: Seq1::from_u64(origin_seq).expect("valid seq1"),
+        event_time_ms,
+        txn_id,
+        client_request_id,
+        kind: EventKindV1::TxnV1,
+        delta: TxnDeltaV1::new(),
+        hlc_max: None,
+    };
+    let bytes = encode_event_body_canonical(&body).expect("encode event body");
+    Bytes::copy_from_slice(bytes.as_ref())
+}
+
+pub fn record_for_seq(
+    meta: &StoreMeta,
+    namespace: &NamespaceId,
+    origin: ReplicaId,
+    seq: u64,
+    prev_sha: Option<[u8; 32]>,
+) -> Record {
+    let event_time_ms = 1_700_000_000_000 + seq;
+    let txn_id = TxnId::new(Uuid::from_bytes([seq as u8; 16]));
+    let payload = event_body_bytes(meta, namespace, origin, seq, event_time_ms, txn_id, None);
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
-        origin_replica_id: ReplicaId::new(Uuid::from_bytes([seed; 16])),
-        origin_seq: seed as u64 + 1,
-        event_time_ms: 1_700_000_000_000 + seed as u64,
-        txn_id: TxnId::new(Uuid::from_bytes([seed.wrapping_add(1); 16])),
-        client_request_id: Some(ClientRequestId::new(Uuid::from_bytes(
-            [seed.wrapping_add(2); 16],
-        ))),
-        request_sha256: Some([seed.wrapping_add(3); 32]),
+        origin_replica_id: origin,
+        origin_seq: seq,
+        event_time_ms,
+        txn_id,
+        client_request_id: None,
+        request_sha256: None,
         sha256: sha,
-        prev_sha256: Some([seed.wrapping_add(4); 32]),
+        prev_sha256: prev_sha,
     };
     Record { header, payload }
 }
 
-pub fn simple_record(seed: u8) -> Record {
-    let payload = Bytes::from(vec![seed; 8]);
+pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Record {
+    let origin = ReplicaId::new(Uuid::from_bytes([seed; 16]));
+    let origin_seq = seed as u64 + 1;
+    let event_time_ms = 1_700_000_000_000 + seed as u64;
+    let txn_id = TxnId::new(Uuid::from_bytes([seed.wrapping_add(1); 16]));
+    let client_request_id = Some(ClientRequestId::new(Uuid::from_bytes(
+        [seed.wrapping_add(2); 16],
+    )));
+    let payload = event_body_bytes(
+        meta,
+        namespace,
+        origin,
+        origin_seq,
+        event_time_ms,
+        txn_id,
+        client_request_id,
+    );
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
-        origin_replica_id: ReplicaId::new(Uuid::from_bytes([seed; 16])),
-        origin_seq: seed as u64 + 1,
-        event_time_ms: 1_700_000_000_000 + seed as u64,
-        txn_id: TxnId::new(Uuid::from_bytes([seed; 16])),
+        origin_replica_id: origin,
+        origin_seq,
+        event_time_ms,
+        txn_id,
+        client_request_id,
+        request_sha256: Some([seed.wrapping_add(3); 32]),
+        sha256: sha,
+        prev_sha256: None,
+    };
+    Record { header, payload }
+}
+
+pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Record {
+    let origin = ReplicaId::new(Uuid::from_bytes([seed; 16]));
+    let origin_seq = seed as u64 + 1;
+    let event_time_ms = 1_700_000_000_000 + seed as u64;
+    let txn_id = TxnId::new(Uuid::from_bytes([seed; 16]));
+    let payload = event_body_bytes(
+        meta,
+        namespace,
+        origin,
+        origin_seq,
+        event_time_ms,
+        txn_id,
+        None,
+    );
+    let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
+    let header = RecordHeader {
+        origin_replica_id: origin,
+        origin_seq,
+        event_time_ms,
+        txn_id,
         client_request_id: None,
         request_sha256: None,
         sha256: sha,
@@ -189,7 +264,7 @@ pub fn valid_segment(
     namespace: &NamespaceId,
     now_ms: u64,
 ) -> EventWalResult<SegmentFixture> {
-    let record = sample_record(1);
+    let record = sample_record(temp.meta(), namespace, 1);
     temp.write_segment(namespace, now_ms, &[record])
 }
 
@@ -228,7 +303,7 @@ mod tests {
     fn temp_wal_dir_writes_segment() {
         let temp = TempWalDir::new();
         let namespace = NamespaceId::core();
-        let record = sample_record(1);
+        let record = sample_record(temp.meta(), &namespace, 1);
         let fixture = temp
             .write_segment(&namespace, 1_700_000_000_000, &[record])
             .expect("write segment");

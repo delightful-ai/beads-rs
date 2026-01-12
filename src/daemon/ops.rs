@@ -530,6 +530,8 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
             ErrorCode::SegmentHeaderMismatch
         }
         WalReplayError::RecordDecode { .. }
+        | WalReplayError::EventBodyDecode { .. }
+        | WalReplayError::RecordHeaderMismatch { .. }
         | WalReplayError::MissingHead { .. }
         | WalReplayError::UnexpectedHead { .. }
         | WalReplayError::MidFileCorruption { .. } => ErrorCode::WalCorrupt,

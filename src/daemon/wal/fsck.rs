@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::sha256_bytes;
-use crate::core::{Limits, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreMeta};
+use crate::core::{
+    Limits, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreMeta, decode_event_body, sha256_bytes,
+};
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
-use crate::daemon::wal::record::Record;
+use crate::daemon::wal::record::{Record, validate_header_matches_body};
 use crate::daemon::wal::{
     EventWalError, IndexDurabilityMode, SegmentHeader, SqliteWalIndex, WalIndex, WalIndexError,
     WalReplayError, rebuild_index,
@@ -133,6 +134,7 @@ pub enum FsckEvidenceCode {
     FrameCrcMismatch,
     FrameTruncated,
     RecordDecodeInvalid,
+    RecordHeaderMismatch,
     RecordShaMismatch,
     PrevShaMismatch,
     NonContiguousSeq,
@@ -242,6 +244,7 @@ pub fn fsck_store_dir(
             let result = scan_segment(
                 &segment,
                 max_record_bytes,
+                &options.limits,
                 &mut tracker,
                 &mut builder,
                 options.repair,
@@ -311,6 +314,7 @@ struct SegmentScanResult {
 fn scan_segment(
     segment: &SegmentInfo,
     max_record_bytes: usize,
+    limits: &Limits,
     tracker: &mut FsckTracker,
     builder: &mut FsckReportBuilder,
     repair: bool,
@@ -511,6 +515,66 @@ fn scan_segment(
                 break;
             }
         };
+
+        let (_, event_body) = match decode_event_body(record.payload.as_ref(), limits) {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                builder.record_issue(
+                    FsckCheckId::SegmentFrames,
+                    FsckStatus::Fail,
+                    FsckSeverity::High,
+                    FsckEvidence {
+                        code: FsckEvidenceCode::RecordDecodeInvalid,
+                        message: format!("event body decode failed: {err}"),
+                        path: Some(segment.path.clone()),
+                        namespace: Some(segment.namespace.clone()),
+                        origin: Some(record.header.origin_replica_id),
+                        seq: Some(record.header.origin_seq),
+                        offset: Some(offset),
+                    },
+                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                );
+                if repair {
+                    drop(file);
+                    let quarantined_path = quarantine_segment(&segment.path)?;
+                    builder.repairs.push(FsckRepair {
+                        kind: FsckRepairKind::QuarantineSegment,
+                        path: Some(quarantined_path),
+                        detail: "quarantined segment with undecodable event body".to_string(),
+                    });
+                    quarantined = true;
+                }
+                break;
+            }
+        };
+        if let Err(err) = validate_header_matches_body(&record.header, &event_body) {
+            builder.record_issue(
+                FsckCheckId::RecordHashes,
+                FsckStatus::Fail,
+                FsckSeverity::High,
+                FsckEvidence {
+                    code: FsckEvidenceCode::RecordHeaderMismatch,
+                    message: format!("record header mismatch: {err}"),
+                    path: Some(segment.path.clone()),
+                    namespace: Some(segment.namespace.clone()),
+                    origin: Some(record.header.origin_replica_id),
+                    seq: Some(record.header.origin_seq),
+                    offset: Some(offset),
+                },
+                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+            );
+            if repair {
+                drop(file);
+                let quarantined_path = quarantine_segment(&segment.path)?;
+                builder.repairs.push(FsckRepair {
+                    kind: FsckRepairKind::QuarantineSegment,
+                    path: Some(quarantined_path),
+                    detail: "quarantined segment with header/body mismatch".to_string(),
+                });
+                quarantined = true;
+            }
+            break;
+        }
 
         let expected_sha = sha256_bytes(record.payload.as_ref()).0;
         if expected_sha != record.header.sha256 {

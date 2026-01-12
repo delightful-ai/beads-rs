@@ -15,10 +15,10 @@ pub use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError, default_wa
 
 pub use frame::{FrameReader, FrameWriter};
 pub use index::{
-    ClientRequestRow, IndexDurabilityMode, IndexedRangeItem, SegmentRow, SqliteWalIndex,
-    WalIndex, WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
+    ClientRequestRow, IndexDurabilityMode, IndexedRangeItem, SegmentRow, SqliteWalIndex, WalIndex,
+    WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
 };
-pub use record::{Record, RecordFlags, RecordHeader};
+pub use record::{Record, RecordFlags, RecordHeader, RecordHeaderMismatch};
 pub use replay::{ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index};
 pub use segment::{AppendOutcome, SegmentConfig, SegmentHeader, SegmentWriter};
 

@@ -6,9 +6,10 @@ use std::fs;
 use std::io::{Seek, SeekFrom};
 
 use beads_rs::daemon::wal::{FrameReader, WalReplayError, rebuild_index};
-use beads_rs::{Limits, NamespaceId};
+use beads_rs::{Limits, NamespaceId, ReplicaId};
+use uuid::Uuid;
 
-use fixtures::wal::{TempWalDir, sample_record};
+use fixtures::wal::{TempWalDir, record_for_seq, sample_record};
 use fixtures::wal_corrupt::{corrupt_frame_body, truncated_segment};
 
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -17,7 +18,7 @@ const MAX_RECORD_BYTES: usize = 1024 * 1024;
 fn phase3_wal_framing_roundtrips_records() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
-    let record = sample_record(1);
+    let record = sample_record(temp.meta(), &namespace, 1);
     let fixture = temp
         .write_segment(&namespace, 1_700_000_000_000, &[record.clone()])
         .expect("write segment");
@@ -54,8 +55,8 @@ fn phase3_wal_tail_truncation_repairs_partial_record() {
 fn phase3_wal_mid_file_corruption_fails_fast() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
-    let record_a = sample_record(1);
-    let record_b = sample_record(2);
+    let record_a = sample_record(temp.meta(), &namespace, 1);
+    let record_b = sample_record(temp.meta(), &namespace, 2);
     let segment = temp
         .write_segment(&namespace, 1_700_000_000_000, &[record_a, record_b])
         .expect("write segment");
@@ -70,4 +71,21 @@ fn phase3_wal_mid_file_corruption_fails_fast() {
 
     let meta = fs::metadata(&segment.path).expect("segment metadata");
     assert_eq!(meta.len(), original_len);
+}
+
+#[test]
+fn phase3_wal_replay_rejects_header_mismatch() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([42u8; 16]));
+    let mut record = record_for_seq(temp.meta(), &namespace, origin, 1, None);
+    record.header.origin_seq = 2;
+    temp.write_segment(&namespace, 1_700_000_000_000, &[record])
+        .expect("write segment");
+    let index = temp.open_index().expect("open wal index");
+    let limits = Limits::default();
+
+    let err = rebuild_index(temp.store_dir(), temp.meta(), &index, &limits)
+        .expect_err("header mismatch should error");
+    assert!(matches!(err, WalReplayError::RecordHeaderMismatch { .. }));
 }

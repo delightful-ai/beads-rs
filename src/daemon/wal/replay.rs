@@ -9,12 +9,14 @@ use std::path::{Path, PathBuf};
 use crc32c::crc32c;
 use thiserror::Error;
 
-use crate::core::{EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
+use crate::core::{
+    DecodeError, EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreMeta, decode_event_body,
+};
 
 use super::EventWalError;
 use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use super::index::{SegmentRow, WalIndex, WalIndexError, WatermarkRow};
-use super::record::Record;
+use super::record::{Record, RecordHeaderMismatch, validate_header_matches_body};
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -65,6 +67,13 @@ pub enum WalReplayError {
         #[source]
         source: EventWalError,
     },
+    #[error("event body decode failed at {path:?} offset {offset}: {source}")]
+    EventBodyDecode {
+        path: PathBuf,
+        offset: u64,
+        #[source]
+        source: DecodeError,
+    },
     #[error("segment header mismatch at {path:?}: {reason}")]
     SegmentHeaderMismatch { path: PathBuf, reason: String },
     #[error(
@@ -112,6 +121,13 @@ pub enum WalReplayError {
     OriginSeqOverflow {
         namespace: String,
         origin: ReplicaId,
+    },
+    #[error("record header mismatch at {path:?} offset {offset}: {source}")]
+    RecordHeaderMismatch {
+        path: PathBuf,
+        offset: u64,
+        #[source]
+        source: RecordHeaderMismatch,
     },
 }
 
@@ -193,6 +209,7 @@ fn replay_index(
                 &segment,
                 start_offset,
                 max_record_bytes,
+                limits,
                 true,
                 |offset, record, frame_len| {
                     index_record(
@@ -499,6 +516,7 @@ fn scan_segment<F>(
     segment: &SegmentDescriptor<Verified>,
     start_offset: u64,
     max_record_bytes: usize,
+    limits: &Limits,
     repair_tail: bool,
     mut on_record: F,
 ) -> Result<SegmentScanOutcome, WalReplayError>
@@ -592,6 +610,21 @@ where
         let record = Record::decode_body(&body).map_err(|source| WalReplayError::RecordDecode {
             path: segment.path.clone(),
             source,
+        })?;
+        let (_, event_body) =
+            decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
+                WalReplayError::EventBodyDecode {
+                    path: segment.path.clone(),
+                    offset,
+                    source,
+                }
+            })?;
+        validate_header_matches_body(&record.header, &event_body).map_err(|source| {
+            WalReplayError::RecordHeaderMismatch {
+                path: segment.path.clone(),
+                offset,
+                source,
+            }
         })?;
         on_record(offset, &record, frame_len as u32)?;
 
