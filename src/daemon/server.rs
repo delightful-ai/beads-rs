@@ -88,14 +88,17 @@ pub fn run_state_loop(
                             let remotes_to_sync: Vec<RemoteUrl> = daemon
                                 .repos()
                                 .filter(|(_, s)| s.dirty && !s.sync_in_progress)
-                                .map(|(r, _)| r.clone())
+                                .filter_map(|(store_id, _)| {
+                                    daemon.primary_remote_for_store(store_id).cloned()
+                                })
                                 .collect();
                             for remote in remotes_to_sync {
                                 daemon.maybe_start_sync(&remote, &git_tx);
                             }
 
                             // Wait for in-flight syncs
-                            let mut pending = daemon.repos()
+                            let mut pending = daemon
+                                .repos()
                                 .filter(|(_, s)| s.sync_in_progress)
                                 .count();
 

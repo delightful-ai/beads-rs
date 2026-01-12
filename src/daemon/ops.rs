@@ -15,6 +15,8 @@ use crate::core::{
     ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, DurabilityClass, DurabilityReceipt,
     ErrorCode, Label, Labels, Lww, Priority, ReplicaId, Stamp, WallClock, Workflow,
 };
+use crate::daemon::store_lock::StoreLockError;
+use crate::daemon::store_runtime::StoreRuntimeError;
 use crate::daemon::wal::WalError;
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
@@ -276,6 +278,12 @@ pub enum OpError {
     #[error("validation failed for field {field}: {reason}")]
     ValidationFailed { field: String, reason: String },
 
+    #[error("invalid request: {reason}")]
+    InvalidRequest {
+        field: Option<String>,
+        reason: String,
+    },
+
     #[error("not a git repo: {0}")]
     NotAGitRepo(PathBuf),
 
@@ -284,6 +292,9 @@ pub enum OpError {
 
     #[error("repo not initialized: {0}")]
     RepoNotInitialized(PathBuf),
+
+    #[error(transparent)]
+    StoreRuntime(#[from] StoreRuntimeError),
 
     #[error(transparent)]
     Sync(#[from] SyncError),
@@ -345,9 +356,11 @@ impl OpError {
             OpError::CasMismatch { .. } => ErrorCode::CasMismatch,
             OpError::InvalidTransition { .. } => ErrorCode::InvalidTransition,
             OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
+            OpError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             OpError::NotAGitRepo(_) => ErrorCode::NotAGitRepo,
             OpError::NoRemote(_) => ErrorCode::NoRemote,
             OpError::RepoNotInitialized(_) => ErrorCode::RepoNotInitialized,
+            OpError::StoreRuntime(err) => store_runtime_error_code(err),
             OpError::Sync(_) => ErrorCode::SyncFailed,
             OpError::BeadDeleted(_) => ErrorCode::BeadDeleted,
             OpError::NoteTooLarge { .. } => ErrorCode::NoteTooLarge,
@@ -382,6 +395,7 @@ impl OpError {
             | OpError::CasMismatch { .. }
             | OpError::InvalidTransition { .. }
             | OpError::ValidationFailed { .. }
+            | OpError::InvalidRequest { .. }
             | OpError::NotAGitRepo(_)
             | OpError::NoRemote(_)
             | OpError::RepoNotInitialized(_)
@@ -390,6 +404,7 @@ impl OpError {
             | OpError::LabelsTooMany { .. }
             | OpError::NotClaimedByYou
             | OpError::DepNotFound => Transience::Permanent,
+            OpError::StoreRuntime(err) => store_runtime_transience(err),
             OpError::DurabilityTimeout { .. } => Transience::Retryable,
             OpError::LoadTimeout { .. } => Transience::Retryable,
             OpError::Internal(_) => Transience::Retryable,
@@ -402,7 +417,68 @@ impl OpError {
             OpError::Sync(e) => e.effect(),
             OpError::Wal(_) | OpError::WalMerge { .. } => Effect::None,
             OpError::DurabilityTimeout { .. } => Effect::Some,
+            OpError::StoreRuntime(_) => Effect::None,
             _ => Effect::None,
+        }
+    }
+}
+
+fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
+    match err {
+        StoreRuntimeError::Lock(lock_err) => store_lock_error_code(lock_err),
+        StoreRuntimeError::MetaSymlink { .. } => ErrorCode::PathSymlinkRejected,
+        StoreRuntimeError::MetaRead { source, .. } | StoreRuntimeError::MetaWrite { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::InternalError
+            }
+        }
+        StoreRuntimeError::MetaParse { .. } => ErrorCode::Corruption,
+        StoreRuntimeError::MetaMismatch { .. } => ErrorCode::WrongStore,
+    }
+}
+
+fn store_lock_error_code(err: &StoreLockError) -> ErrorCode {
+    match err {
+        StoreLockError::Held { .. } => ErrorCode::LockHeld,
+        StoreLockError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
+        StoreLockError::MetadataCorrupt { .. } => ErrorCode::Corruption,
+        StoreLockError::Io(source) => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::InternalError
+            }
+        }
+    }
+}
+
+fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
+    match err {
+        StoreRuntimeError::Lock(lock_err) => match lock_err {
+            StoreLockError::Held { .. } => Transience::Retryable,
+            StoreLockError::Symlink { .. } | StoreLockError::MetadataCorrupt { .. } => {
+                Transience::Permanent
+            }
+            StoreLockError::Io(source) => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+        },
+        StoreRuntimeError::MetaSymlink { .. } => Transience::Permanent,
+        StoreRuntimeError::MetaParse { .. } | StoreRuntimeError::MetaMismatch { .. } => {
+            Transience::Permanent
+        }
+        StoreRuntimeError::MetaRead { source, .. } | StoreRuntimeError::MetaWrite { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                Transience::Permanent
+            } else {
+                Transience::Retryable
+            }
         }
     }
 }

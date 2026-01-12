@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 use crate::core::{NamespaceId, StoreId};
 
 /// Base directory for persistent data (WAL, exports, caches).
@@ -9,6 +12,11 @@ use crate::core::{NamespaceId, StoreId};
 /// Uses `BD_DATA_DIR` if set, otherwise `$XDG_DATA_HOME/beads-rs` or
 /// `~/.local/share/beads-rs`.
 pub(crate) fn data_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_data_dir_override() {
+        return dir;
+    }
+
     if let Ok(dir) = std::env::var("BD_DATA_DIR")
         && !dir.trim().is_empty()
     {
@@ -27,6 +35,23 @@ pub(crate) fn data_dir() -> PathBuf {
         })
         .join("beads-rs")
 }
+
+#[cfg(test)]
+pub(crate) fn set_data_dir_for_tests(path: Option<PathBuf>) {
+    let lock = TEST_DATA_DIR.get_or_init(|| Mutex::new(None));
+    *lock.lock().expect("test data dir lock poisoned") = path;
+}
+
+#[cfg(test)]
+fn test_data_dir_override() -> Option<PathBuf> {
+    let lock = TEST_DATA_DIR.get_or_init(|| Mutex::new(None));
+    lock.lock()
+        .expect("test data dir lock poisoned")
+        .clone()
+}
+
+#[cfg(test)]
+static TEST_DATA_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 /// Base directory for store data.
 pub fn stores_dir() -> PathBuf {

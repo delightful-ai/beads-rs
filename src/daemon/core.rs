@@ -4,11 +4,17 @@
 //! The serialization point for all mutations - runs on a single thread.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::Sender;
-use git2::Repository;
+use git2::{ErrorCode as GitErrorCode, Repository};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
 
 use super::Clock;
 use super::git_worker::{GitOp, LoadResult};
@@ -20,6 +26,7 @@ use super::repo::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
 };
 use super::scheduler::SyncScheduler;
+use super::store_runtime::StoreRuntime;
 use super::wal::{Wal, WalEntry};
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
@@ -30,17 +37,90 @@ use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
 /// This type signals that a repo should exist in the daemon's state; accessors
 /// still return Internal if the invariant is violated.
 #[derive(Debug, Clone)]
-pub struct LoadedRemote(RemoteUrl);
+pub struct LoadedStore {
+    store_id: StoreId,
+    remote: RemoteUrl,
+}
 
-impl LoadedRemote {
-    /// Get the underlying remote URL.
-    pub fn remote(&self) -> &RemoteUrl {
-        &self.0
+impl LoadedStore {
+    /// Get the store identity.
+    pub fn store_id(&self) -> StoreId {
+        self.store_id
     }
+
+    /// Get the legacy remote URL.
+    pub fn remote(&self) -> &RemoteUrl {
+        &self.remote
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreIdSource {
+    EnvOverride,
+    PathCache,
+    PathMap,
+    GitMeta,
+    GitRefs,
+    RemoteFallback,
+}
+
+impl StoreIdSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            StoreIdSource::EnvOverride => "env_override",
+            StoreIdSource::PathCache => "path_cache",
+            StoreIdSource::PathMap => "path_map",
+            StoreIdSource::GitMeta => "git_meta",
+            StoreIdSource::GitRefs => "git_refs",
+            StoreIdSource::RemoteFallback => "remote_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedStore {
+    store_id: StoreId,
+    remote: RemoteUrl,
+}
+
+#[derive(Debug, Error)]
+enum StoreDiscoveryError {
+    #[error("store_meta.json missing in refs/beads/meta")]
+    MetaMissing,
+    #[error("store_meta.json parse failed: {source}")]
+    MetaParse {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to read refs/beads/meta: {source}")]
+    MetaRef {
+        #[source]
+        source: git2::Error,
+    },
+    #[error("failed to list refs/beads/*: {source}")]
+    RefList {
+        #[source]
+        source: git2::Error,
+    },
+    #[error("multiple store ids discovered: {ids:?}")]
+    MultipleStoreIds { ids: Vec<StoreId> },
+}
+
+#[derive(Debug, Deserialize)]
+struct StoreMetaRef {
+    store_id: StoreId,
+    #[allow(dead_code)]
+    store_epoch: StoreEpoch,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StorePathMap {
+    entries: BTreeMap<String, StoreId>,
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, BeadId, CanonicalState, CoreError, ErrorCode, Limits, Stamp, WallClock, WriteStamp,
+    ActorId, BeadId, CanonicalState, CoreError, ErrorCode, Limits, Stamp, StoreEpoch, StoreId,
+    StoreIdentity, WallClock, WriteStamp,
 };
 use crate::git::SyncError;
 use crate::git::collision::{detect_collisions, resolve_collisions};
@@ -53,10 +133,16 @@ const LOAD_TIMEOUT_SECS: u64 = 30;
 ///
 /// Owns all state and coordinates between IPC, state mutations, and git sync.
 pub struct Daemon {
-    /// Per-remote state, keyed by normalized remote URL.
-    repos: BTreeMap<RemoteUrl, RepoState>,
+    /// Per-store runtime, keyed by StoreId.
+    stores: BTreeMap<StoreId, StoreRuntime>,
 
-    /// Cache of repo path → remote URL.
+    /// Cache of repo path → store id.
+    path_to_store_id: HashMap<PathBuf, StoreId>,
+
+    /// Cache of remote URL → store id.
+    remote_to_store_id: HashMap<RemoteUrl, StoreId>,
+
+    /// Cache of repo path → remote URL (legacy).
     path_to_remote: HashMap<PathBuf, RemoteUrl>,
 
     /// HLC clock for generating timestamps.
@@ -69,7 +155,7 @@ pub struct Daemon {
     scheduler: SyncScheduler,
 
     /// Write-ahead log for mutation durability.
-    wal: Wal,
+    wal: Arc<Wal>,
 
     /// Go-compatibility export context.
     export_ctx: Option<ExportContext>,
@@ -96,12 +182,14 @@ impl Daemon {
         };
 
         Daemon {
-            repos: BTreeMap::new(),
+            stores: BTreeMap::new(),
+            path_to_store_id: HashMap::new(),
+            remote_to_store_id: HashMap::new(),
             path_to_remote: HashMap::new(),
             clock: Clock::new(),
             actor,
             scheduler: SyncScheduler::new(),
-            wal,
+            wal: Arc::new(wal),
             export_ctx,
             limits,
         }
@@ -138,26 +226,42 @@ impl Daemon {
     }
 
     /// Get repo state. Returns Internal if invariant is violated.
-    pub(crate) fn repo_state(&self, proof: &LoadedRemote) -> Result<&RepoState, OpError> {
-        self.repos
-            .get(proof.remote())
-            .ok_or(OpError::Internal("loaded repo missing from state"))
+    pub(crate) fn repo_state(&self, proof: &LoadedStore) -> Result<&RepoState, OpError> {
+        self.stores
+            .get(&proof.store_id)
+            .map(|store| &store.repo_state)
+            .ok_or(OpError::Internal("loaded store missing from state"))
     }
 
     /// Get mutable repo state. Returns Internal if invariant is violated.
     pub(crate) fn repo_state_mut(
         &mut self,
-        proof: &LoadedRemote,
+        proof: &LoadedStore,
     ) -> Result<&mut RepoState, OpError> {
-        self.repos
-            .get_mut(proof.remote())
-            .ok_or(OpError::Internal("loaded repo missing from state"))
+        self.stores
+            .get_mut(&proof.store_id)
+            .map(|store| &mut store.repo_state)
+            .ok_or(OpError::Internal("loaded store missing from state"))
     }
 
     /// Get repo state by raw remote URL (for internal sync waiters, etc.).
     /// Returns None if not loaded.
     pub(crate) fn repo_state_by_url(&self, remote: &RemoteUrl) -> Option<&RepoState> {
-        self.repos.get(remote)
+        self.remote_to_store_id
+            .get(remote)
+            .and_then(|store_id| self.stores.get(store_id))
+            .map(|store| &store.repo_state)
+    }
+
+    pub(crate) fn store_identity(&self, proof: &LoadedStore) -> Result<StoreIdentity, OpError> {
+        self.stores
+            .get(&proof.store_id)
+            .map(|store| store.meta.identity)
+            .ok_or(OpError::Internal("loaded store missing from state"))
+    }
+
+    pub(crate) fn primary_remote_for_store(&self, store_id: &StoreId) -> Option<&RemoteUrl> {
+        self.stores.get(store_id).map(|store| &store.primary_remote)
     }
 
     /// Resolve a repo path to a normalized remote URL.
@@ -190,6 +294,81 @@ impl Daemon {
         Ok(remote)
     }
 
+    fn resolve_store(&mut self, repo_path: &Path) -> Result<ResolvedStore, OpError> {
+        let remote = self.resolve_remote(repo_path)?;
+        let (store_id, source) = self.resolve_store_id(repo_path, &remote)?;
+
+        self.path_to_store_id
+            .insert(repo_path.to_owned(), store_id);
+        self.remote_to_store_id
+            .insert(remote.clone(), store_id);
+
+        if let Err(err) = persist_store_id_mapping(repo_path, store_id) {
+            tracing::warn!(
+                "failed to persist store id mapping for {:?}: {}",
+                repo_path,
+                err
+            );
+        }
+
+        tracing::info!(
+            store_id = %store_id,
+            source = %source.as_str(),
+            repo = %repo_path.display(),
+            remote = %remote,
+            "store identity resolved"
+        );
+
+        Ok(ResolvedStore { store_id, remote })
+    }
+
+    fn resolve_store_id(
+        &mut self,
+        repo_path: &Path,
+        remote: &RemoteUrl,
+    ) -> Result<(StoreId, StoreIdSource), OpError> {
+        if let Ok(raw) = std::env::var("BD_STORE_ID")
+            && !raw.trim().is_empty()
+        {
+            let store_id = StoreId::parse_str(raw.trim()).map_err(|e| OpError::InvalidRequest {
+                field: Some("store_id".into()),
+                reason: e.to_string(),
+            })?;
+            return Ok((store_id, StoreIdSource::EnvOverride));
+        }
+
+        if let Some(store_id) = self.path_to_store_id.get(repo_path).copied() {
+            return Ok((store_id, StoreIdSource::PathCache));
+        }
+
+        if let Some(store_id) = load_store_id_for_path(repo_path) {
+            return Ok((store_id, StoreIdSource::PathMap));
+        }
+
+        let repo =
+            Repository::open(repo_path).map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
+
+        if let Some(store_id) =
+            read_store_id_from_git_meta(&repo).map_err(|err| OpError::InvalidRequest {
+                field: Some("store_id".into()),
+                reason: err.to_string(),
+            })?
+        {
+            return Ok((store_id, StoreIdSource::GitMeta));
+        }
+
+        if let Some(store_id) =
+            discover_store_id_from_refs(&repo).map_err(|err| OpError::InvalidRequest {
+                field: Some("store_id".into()),
+                reason: err.to_string(),
+            })?
+        {
+            return Ok((store_id, StoreIdSource::GitRefs));
+        }
+
+        Ok((store_id_from_remote(remote), StoreIdSource::RemoteFallback))
+    }
+
     /// Ensure repo is loaded using cached refs, without blocking on network fetch.
     ///
     /// If no local refs exist, this will attempt a one-time fetch with a bounded timeout.
@@ -197,11 +376,22 @@ impl Daemon {
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedRemote, OpError> {
-        let remote = self.resolve_remote(repo)?;
+    ) -> Result<LoadedStore, OpError> {
+        let resolved = self.resolve_store(repo)?;
+        let store_id = resolved.store_id;
+        let remote = resolved.remote;
         self.path_to_remote.insert(repo.to_owned(), remote.clone());
 
-        if !self.repos.contains_key(&remote) {
+        if !self.stores.contains_key(&store_id) {
+            let runtime = StoreRuntime::open(
+                store_id,
+                remote.clone(),
+                Arc::clone(&self.wal),
+                WallClock::now().0,
+                env!("CARGO_PKG_VERSION"),
+            )?;
+            self.stores.insert(store_id, runtime);
+
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
             git_tx
                 .send(GitOp::LoadLocal {
@@ -212,7 +402,7 @@ impl Daemon {
 
             match respond_rx.recv() {
                 Ok(Ok(loaded)) => {
-                    self.apply_loaded_repo_state(&remote, repo, loaded)?;
+                    self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
                 }
                 Ok(Err(SyncError::NoLocalRef(_))) => {
                     // No cached refs; attempt a bounded fetch to discover remote state.
@@ -227,7 +417,7 @@ impl Daemon {
 
                     match fetch_rx.recv_timeout(timeout) {
                         Ok(Ok(loaded)) => {
-                            self.apply_loaded_repo_state(&remote, repo, loaded)?;
+                            self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
                         }
                         Ok(Err(SyncError::NoLocalRef(_))) => {
                             return Err(OpError::RepoNotInitialized(repo.to_owned()));
@@ -248,27 +438,41 @@ impl Daemon {
                 Ok(Err(e)) => return Err(OpError::Sync(e)),
                 Err(_) => return Err(OpError::Internal("git thread died")),
             }
-        } else if let Some(repo_state) = self.repos.get_mut(&remote) {
-            repo_state.register_path(repo.to_owned());
-            self.export_go_compat(&remote);
+        } else if let Some(store) = self.stores.get_mut(&store_id) {
+            store.repo_state.register_path(repo.to_owned());
+            if store.primary_remote != remote {
+                store.primary_remote = remote.clone();
+            }
+            self.export_go_compat(store_id, &remote);
         }
 
-        Ok(LoadedRemote(remote))
+        Ok(LoadedStore { store_id, remote })
     }
 
     /// Ensure repo is loaded, fetching from git if needed.
     ///
     /// This is a blocking operation - sends Load to git thread and waits with a bounded
-    /// timeout for the initial fetch. Returns a `LoadedRemote` proof for state access.
+    /// timeout for the initial fetch. Returns a `LoadedStore` proof for state access.
     pub fn ensure_repo_loaded_strict(
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedRemote, OpError> {
-        let remote = self.resolve_remote(repo)?;
+    ) -> Result<LoadedStore, OpError> {
+        let resolved = self.resolve_store(repo)?;
+        let store_id = resolved.store_id;
+        let remote = resolved.remote;
         self.path_to_remote.insert(repo.to_owned(), remote.clone());
 
-        if !self.repos.contains_key(&remote) {
+        if !self.stores.contains_key(&store_id) {
+            let runtime = StoreRuntime::open(
+                store_id,
+                remote.clone(),
+                Arc::clone(&self.wal),
+                WallClock::now().0,
+                env!("CARGO_PKG_VERSION"),
+            )?;
+            self.stores.insert(store_id, runtime);
+
             // Blocking load from git (fetches remote first in GitWorker).
             let timeout = load_timeout();
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
@@ -281,7 +485,7 @@ impl Daemon {
 
             match respond_rx.recv_timeout(timeout) {
                 Ok(Ok(loaded)) => {
-                    self.apply_loaded_repo_state(&remote, repo, loaded)?;
+                    self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
                 }
                 Ok(Err(SyncError::NoLocalRef(_))) => {
                     return Err(OpError::RepoNotInitialized(repo.to_owned()));
@@ -300,18 +504,22 @@ impl Daemon {
                     return Err(OpError::Internal("git thread died"));
                 }
             }
-        } else if let Some(repo_state) = self.repos.get_mut(&remote) {
-            repo_state.register_path(repo.to_owned());
+        } else if let Some(store) = self.stores.get_mut(&store_id) {
+            store.repo_state.register_path(repo.to_owned());
+            if store.primary_remote != remote {
+                store.primary_remote = remote.clone();
+            }
 
             // Update symlinks for newly registered clone path
-            self.export_go_compat(&remote);
+            self.export_go_compat(store_id, &remote);
         }
 
-        Ok(LoadedRemote(remote))
+        Ok(LoadedStore { store_id, remote })
     }
 
     fn apply_loaded_repo_state(
         &mut self,
+        store_id: StoreId,
         remote: &RemoteUrl,
         repo: &Path,
         loaded: LoadResult,
@@ -393,10 +601,17 @@ impl Daemon {
             self.scheduler.schedule(remote.clone());
         }
 
-        self.repos.insert(remote.clone(), repo_state);
+        let store = self
+            .stores
+            .get_mut(&store_id)
+            .ok_or(OpError::Internal("loaded store missing from state"))?;
+        store.repo_state = repo_state;
+        if store.primary_remote != *remote {
+            store.primary_remote = remote.clone();
+        }
 
         // Initial Go-compat export for newly loaded repo
-        self.export_go_compat(remote);
+        self.export_go_compat(store_id, remote);
         Ok(())
     }
 
@@ -407,12 +622,12 @@ impl Daemon {
     /// This is non-blocking - it returns cached state immediately and applies
     /// fresh state when the background load completes.
     ///
-    /// Returns a `LoadedRemote` proof that can be used for infallible state access.
+    /// Returns a `LoadedStore` proof that can be used for infallible state access.
     pub fn ensure_repo_fresh(
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedRemote, OpError> {
+    ) -> Result<LoadedStore, OpError> {
         let loaded = self.ensure_repo_loaded(repo, git_tx)?;
 
         let repo_state = self.repo_state(&loaded)?;
@@ -454,8 +669,12 @@ impl Daemon {
         remote: &RemoteUrl,
         result: Result<super::git_worker::LoadResult, SyncError>,
     ) {
-        let repo_state = match self.repos.get_mut(remote) {
-            Some(s) => s,
+        let store_id = match self.remote_to_store_id.get(remote).copied() {
+            Some(id) => id,
+            None => return,
+        };
+        let repo_state = match self.stores.get_mut(&store_id) {
+            Some(store) => &mut store.repo_state,
             None => return,
         };
 
@@ -524,11 +743,11 @@ impl Daemon {
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedRemote, OpError> {
-        let remote = self.resolve_remote(repo)?;
+    ) -> Result<LoadedStore, OpError> {
+        let resolved = self.resolve_store(repo)?;
 
         // Remove cached state so ensure_repo_loaded will do a fresh load
-        self.repos.remove(&remote);
+        self.stores.remove(&resolved.store_id);
 
         // Now load fresh from git
         self.ensure_repo_loaded_strict(repo, git_tx)
@@ -540,8 +759,12 @@ impl Daemon {
     /// - Repo is dirty
     /// - Not already syncing
     pub fn maybe_start_sync(&mut self, remote: &RemoteUrl, git_tx: &Sender<GitOp>) {
-        let repo_state = match self.repos.get_mut(remote) {
-            Some(s) => s,
+        let store_id = match self.remote_to_store_id.get(remote).copied() {
+            Some(id) => id,
+            None => return,
+        };
+        let repo_state = match self.stores.get_mut(&store_id) {
+            Some(store) => &mut store.repo_state,
             None => return,
         };
 
@@ -568,7 +791,7 @@ impl Daemon {
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedRemote, OpError> {
+    ) -> Result<LoadedStore, OpError> {
         let loaded = self.ensure_repo_loaded(repo, git_tx)?;
         self.maybe_start_sync(loaded.remote(), git_tx);
         Ok(loaded)
@@ -580,6 +803,10 @@ impl Daemon {
     pub fn complete_sync(&mut self, remote: &RemoteUrl, result: Result<SyncOutcome, SyncError>) {
         let mut backoff_ms = None;
         let mut sync_succeeded = false;
+        let store_id = match self.remote_to_store_id.get(remote).copied() {
+            Some(id) => id,
+            None => return,
+        };
 
         match result {
             Ok(outcome) => {
@@ -596,8 +823,8 @@ impl Daemon {
                     }
                 };
 
-                let repo_state = match self.repos.get_mut(remote) {
-                    Some(s) => s,
+                let repo_state = match self.stores.get_mut(&store_id) {
+                    Some(store) => &mut store.repo_state,
                     None => return,
                 };
 
@@ -679,8 +906,8 @@ impl Daemon {
             }
             Err(e) => {
                 tracing::error!("sync failed for {:?}: {:?}", remote, e);
-                let repo_state = match self.repos.get_mut(remote) {
-                    Some(s) => s,
+                let repo_state = match self.stores.get_mut(&store_id) {
+                    Some(store) => &mut store.repo_state,
                     None => return,
                 };
                 repo_state.fail_sync();
@@ -695,21 +922,22 @@ impl Daemon {
 
         // Export Go-compatible JSONL after successful sync
         if sync_succeeded {
-            self.export_go_compat(remote);
+            self.export_go_compat(store_id, remote);
         }
     }
 
     /// Export state to Go-compatible JSONL format.
     ///
     /// Called after successful sync to keep .beads/issues.jsonl in sync.
-    fn export_go_compat(&self, remote: &RemoteUrl) {
+    fn export_go_compat(&self, store_id: StoreId, remote: &RemoteUrl) {
         let Some(ref ctx) = self.export_ctx else {
             return;
         };
 
-        let Some(repo_state) = self.repos.get(remote) else {
+        let Some(store) = self.stores.get(&store_id) else {
             return;
         };
+        let repo_state = &store.repo_state;
 
         // Export to canonical location
         let export_path = match export_jsonl(&repo_state.state, ctx, remote.as_str()) {
@@ -732,7 +960,7 @@ impl Daemon {
     /// the in-memory state is left unchanged and the error is returned.
     pub(crate) fn apply_wal_mutation<R>(
         &mut self,
-        proof: &LoadedRemote,
+        proof: &LoadedStore,
         f: impl FnOnce(&mut CanonicalState, Stamp) -> Result<R, OpError>,
     ) -> Result<R, OpError> {
         let (mut next_state, root_slug, sequence, last_seen_stamp) = {
@@ -792,14 +1020,16 @@ impl Daemon {
         }
     }
 
-    /// Get iterator over all repos.
-    pub fn repos(&self) -> impl Iterator<Item = (&RemoteUrl, &RepoState)> {
-        self.repos.iter()
+    /// Get iterator over all stores.
+    pub fn repos(&self) -> impl Iterator<Item = (&StoreId, &RepoState)> {
+        self.stores.iter().map(|(id, store)| (id, &store.repo_state))
     }
 
-    /// Get mutable iterator over all repos.
-    pub fn repos_mut(&mut self) -> impl Iterator<Item = (&RemoteUrl, &mut RepoState)> {
-        self.repos.iter_mut()
+    /// Get mutable iterator over all stores.
+    pub fn repos_mut(&mut self) -> impl Iterator<Item = (&StoreId, &mut RepoState)> {
+        self.stores
+            .iter_mut()
+            .map(|(id, store)| (id, &mut store.repo_state))
     }
 
     /// Handle a request from IPC.
@@ -1148,6 +1378,155 @@ fn load_timeout() -> Duration {
     Duration::from_secs(override_secs.unwrap_or(LOAD_TIMEOUT_SECS))
 }
 
+fn store_path_map_path() -> PathBuf {
+    crate::paths::data_dir().join("store_paths.json")
+}
+
+fn load_store_id_for_path(repo_path: &Path) -> Option<StoreId> {
+    let path = store_path_map_path();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                tracing::warn!("store path map read failed {:?}: {}", path, err);
+            }
+            return None;
+        }
+    };
+
+    let map: StorePathMap = match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(err) => {
+            tracing::warn!("store path map parse failed {:?}: {}", path, err);
+            return None;
+        }
+    };
+
+    let key = repo_path.display().to_string();
+    map.entries.get(&key).copied()
+}
+
+fn persist_store_id_mapping(repo_path: &Path, store_id: StoreId) -> io::Result<()> {
+    let path = store_path_map_path();
+    let mut map = read_store_path_map();
+    let key = repo_path.display().to_string();
+    map.entries.insert(key, store_id);
+    write_store_path_map(&path, &map)
+}
+
+fn read_store_path_map() -> StorePathMap {
+    let path = store_path_map_path();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return StorePathMap::default(),
+        Err(err) => {
+            tracing::warn!("store path map read failed {:?}: {}", path, err);
+            return StorePathMap::default();
+        }
+    };
+
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(err) => {
+            tracing::warn!("store path map parse failed {:?}: {}", path, err);
+            StorePathMap::default()
+        }
+    }
+}
+
+fn write_store_path_map(path: &Path, map: &StorePathMap) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let bytes = serde_json::to_vec(map)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    fs::write(path, bytes)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
+}
+
+fn read_store_id_from_git_meta(
+    repo: &Repository,
+) -> Result<Option<StoreId>, StoreDiscoveryError> {
+    let reference = match repo.find_reference("refs/beads/meta") {
+        Ok(reference) => reference,
+        Err(err) if err.code() == GitErrorCode::NotFound => return Ok(None),
+        Err(err) => return Err(StoreDiscoveryError::MetaRef { source: err }),
+    };
+
+    let commit = reference
+        .peel_to_commit()
+        .map_err(|err| StoreDiscoveryError::MetaRef { source: err })?;
+    let tree = commit
+        .tree()
+        .map_err(|err| StoreDiscoveryError::MetaRef { source: err })?;
+    let entry = tree.get_name("store_meta.json").ok_or(StoreDiscoveryError::MetaMissing)?;
+    let blob = repo
+        .find_blob(entry.id())
+        .map_err(|err| StoreDiscoveryError::MetaRef { source: err })?;
+    let meta: StoreMetaRef =
+        serde_json::from_slice(blob.content()).map_err(|source| StoreDiscoveryError::MetaParse {
+            source,
+        })?;
+    Ok(Some(meta.store_id))
+}
+
+fn discover_store_id_from_refs(
+    repo: &Repository,
+) -> Result<Option<StoreId>, StoreDiscoveryError> {
+    let mut ids = std::collections::BTreeSet::new();
+    let refs = repo
+        .references_glob("refs/beads/*")
+        .map_err(|source| StoreDiscoveryError::RefList { source })?;
+
+    for reference in refs {
+        let reference = reference.map_err(|source| StoreDiscoveryError::RefList { source })?;
+        let Some(name) = reference.name() else {
+            continue;
+        };
+        if name == "refs/beads/meta" {
+            continue;
+        }
+        let Some(rest) = name.strip_prefix("refs/beads/") else {
+            continue;
+        };
+        let store_id_raw = rest.split('/').next().unwrap_or_default();
+        if store_id_raw.is_empty() {
+            continue;
+        }
+        match StoreId::parse_str(store_id_raw) {
+            Ok(id) => {
+                ids.insert(id);
+            }
+            Err(_) => {
+                tracing::warn!("ignoring invalid store id ref {}", name);
+            }
+        }
+    }
+
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    if ids.len() > 1 {
+        return Err(StoreDiscoveryError::MultipleStoreIds {
+            ids: ids.into_iter().collect(),
+        });
+    }
+    Ok(ids.into_iter().next())
+}
+
+fn store_id_from_remote(remote: &RemoteUrl) -> StoreId {
+    let store_uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, remote.as_str().as_bytes());
+    StoreId::new(store_uuid)
+}
+
 const CLOCK_SKEW_WARN_MS: u64 = 5 * 60 * 1000;
 
 fn detect_clock_skew(now_ms: u64, reference_ms: u64) -> Option<ClockSkewRecord> {
@@ -1174,11 +1553,15 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
     use crate::core::{
         Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Labels, Lww, Priority,
         Stamp, WallClock, Workflow, WriteStamp,
     };
     use crate::daemon::git_worker::LoadResult;
+    use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::Wal;
     use tempfile::TempDir;
 
@@ -1190,10 +1573,59 @@ mod tests {
         RemoteUrl("example.com/test/repo".into())
     }
 
-    fn test_wal() -> (TempDir, Wal) {
-        let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TempStoreDir {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp: TempDir,
+        data_dir: PathBuf,
+    }
+
+    impl TempStoreDir {
+        fn new() -> Self {
+            let lock = ENV_LOCK.lock().expect("BD_DATA_DIR env lock poisoned");
+            let temp = TempDir::new().unwrap();
+            let data_dir = temp.path().join("data");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            crate::paths::set_data_dir_for_tests(Some(data_dir.clone()));
+
+            Self {
+                _lock: lock,
+                _temp: temp,
+                data_dir,
+            }
+        }
+
+        fn data_dir(&self) -> &Path {
+            &self.data_dir
+        }
+    }
+
+    impl Drop for TempStoreDir {
+        fn drop(&mut self) {
+            crate::paths::set_data_dir_for_tests(None);
+        }
+    }
+
+    fn test_wal() -> (TempStoreDir, Wal) {
+        let tmp = TempStoreDir::new();
+        let wal = Wal::new(tmp.data_dir()).unwrap();
         (tmp, wal)
+    }
+
+    fn insert_store(daemon: &mut Daemon, remote: &RemoteUrl) -> StoreId {
+        let store_id = store_id_from_remote(remote);
+        let runtime = StoreRuntime::open(
+            store_id,
+            remote.clone(),
+            Arc::clone(&daemon.wal),
+            WallClock::now().0,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .unwrap();
+        daemon.remote_to_store_id.insert(remote.clone(), store_id);
+        daemon.stores.insert(store_id, runtime);
+        store_id
     }
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
@@ -1228,11 +1660,12 @@ mod tests {
         let (_tmp, wal) = test_wal();
         let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
 
         // Manually insert a repo in refresh_in_progress state
         let mut repo_state = RepoState::new();
         repo_state.refresh_in_progress = true;
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         // Complete refresh with success
         let result = Ok(LoadResult {
@@ -1246,7 +1679,7 @@ mod tests {
         });
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = daemon.repos.get(&remote).unwrap();
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
         assert!(!repo_state.refresh_in_progress);
         assert!(repo_state.last_refresh.is_some());
     }
@@ -1256,16 +1689,17 @@ mod tests {
         let (_tmp, wal) = test_wal();
         let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
 
         let mut repo_state = RepoState::new();
         repo_state.refresh_in_progress = true;
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         // Complete refresh with error
         let result = Err(SyncError::NoLocalRef("/test".to_string()));
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = daemon.repos.get(&remote).unwrap();
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
         assert!(!repo_state.refresh_in_progress);
         // last_refresh should NOT be updated on error
         assert!(repo_state.last_refresh.is_none());
@@ -1276,11 +1710,12 @@ mod tests {
         let (_tmp, wal) = test_wal();
         let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
 
         let mut repo_state = RepoState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = false; // Clean state
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         // Create fresh state with some content
         let fresh_state = CanonicalState::new();
@@ -1295,7 +1730,7 @@ mod tests {
         });
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = daemon.repos.get(&remote).unwrap();
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
         assert_eq!(repo_state.root_slug, Some("fresh-slug".to_string()));
     }
 
@@ -1304,12 +1739,13 @@ mod tests {
         let (_tmp, wal) = test_wal();
         let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
 
         let mut repo_state = RepoState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = true; // Dirty - mutations happened during refresh
         repo_state.root_slug = Some("original-slug".to_string());
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         // Try to apply refresh
         let result = Ok(LoadResult {
@@ -1323,7 +1759,7 @@ mod tests {
         });
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = daemon.repos.get(&remote).unwrap();
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
         // Should keep original slug since dirty
         assert_eq!(repo_state.root_slug, Some("original-slug".to_string()));
         // But last_refresh should still be updated
@@ -1335,11 +1771,12 @@ mod tests {
         let (_tmp, wal) = test_wal();
         let mut daemon = Daemon::new(test_actor(), wal);
         let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
 
         let mut repo_state = RepoState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = false;
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         // Refresh shows local has changes remote doesn't
         let result = Ok(LoadResult {
@@ -1353,7 +1790,7 @@ mod tests {
         });
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = daemon.repos.get(&remote).unwrap();
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
         // Should mark dirty to trigger sync
         assert!(repo_state.dirty);
         // And scheduler should have it pending
@@ -1378,7 +1815,7 @@ mod tests {
         });
         daemon.complete_refresh(&unknown, result);
         // Just verify no panic and daemon is still valid
-        assert!(daemon.repos.is_empty());
+        assert!(daemon.stores.is_empty());
     }
 
     #[test]
@@ -1394,13 +1831,14 @@ mod tests {
         assert!(wal.exists(&remote));
 
         // Create daemon with WAL, recreating from same dir
-        let wal = Wal::new(tmp.path()).unwrap();
+        let wal = Wal::new(tmp.data_dir()).unwrap();
         let mut daemon = Daemon::new(test_actor(), wal);
+        let store_id = insert_store(&mut daemon, &remote);
 
         // Insert a clean repo state
         let mut repo_state = RepoState::new();
         repo_state.dirty = false;
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         // Complete sync with success
         let outcome = SyncOutcome {
@@ -1428,13 +1866,14 @@ mod tests {
         assert!(wal.exists(&remote));
 
         // Create daemon with WAL
-        let wal = Wal::new(tmp.path()).unwrap();
+        let wal = Wal::new(tmp.data_dir()).unwrap();
         let mut daemon = Daemon::new(test_actor(), wal);
+        let store_id = insert_store(&mut daemon, &remote);
 
         // Insert a DIRTY repo state (mutations happened during sync)
         let mut repo_state = RepoState::new();
         repo_state.dirty = true;
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         // Complete sync with success
         let outcome = SyncOutcome {
@@ -1462,12 +1901,13 @@ mod tests {
         assert!(wal.exists(&remote));
 
         // Create daemon with WAL
-        let wal = Wal::new(tmp.path()).unwrap();
+        let wal = Wal::new(tmp.data_dir()).unwrap();
         let mut daemon = Daemon::new(test_actor(), wal);
+        let store_id = insert_store(&mut daemon, &remote);
 
         // Insert repo state
         let repo_state = RepoState::new();
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         // Complete sync with failure
         daemon.complete_sync(&remote, Err(SyncError::NonFastForward));
@@ -1482,13 +1922,16 @@ mod tests {
         let remote = test_remote();
 
         // Remove WAL directory to force write failure.
-        let wal_dir = tmp.path().join("wal");
+        let wal_dir = tmp.data_dir().join("wal");
         std::fs::remove_dir_all(&wal_dir).unwrap();
 
         let mut daemon = Daemon::new(test_actor(), wal);
-        daemon.repos.insert(remote.clone(), RepoState::new());
+        let store_id = insert_store(&mut daemon, &remote);
 
-        let proof = LoadedRemote(remote.clone());
+        let proof = LoadedStore {
+            store_id,
+            remote: remote.clone(),
+        };
         let result = daemon.apply_wal_mutation(&proof, |state, stamp| {
             let bead = make_bead("bd-abc", stamp.at.wall_ms, stamp.by.as_str());
             state.insert_live(bead);
@@ -1496,7 +1939,7 @@ mod tests {
         });
 
         assert!(matches!(result, Err(OpError::Wal(_))));
-        let repo_state = daemon.repos.get(&remote).unwrap();
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
         assert_eq!(repo_state.state.live_count(), 0);
         assert_eq!(repo_state.wal_sequence, 0);
     }
@@ -1506,13 +1949,17 @@ mod tests {
         let (_tmp, wal) = test_wal();
         let remote = test_remote();
         let mut daemon = Daemon::new(test_actor(), wal);
+        let store_id = insert_store(&mut daemon, &remote);
 
         let future_stamp = WriteStamp::new(WallClock::now().0 + 60_000, 0);
         let mut repo_state = RepoState::new();
         repo_state.last_seen_stamp = Some(future_stamp.clone());
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
-        let proof = LoadedRemote(remote.clone());
+        let proof = LoadedStore {
+            store_id,
+            remote: remote.clone(),
+        };
         let result = daemon.apply_wal_mutation(&proof, |state, stamp| {
             let bead = make_bead("bd-abc", stamp.at.wall_ms, stamp.by.as_str());
             state.insert_live(bead);
@@ -1528,6 +1975,7 @@ mod tests {
         let (_tmp, wal) = test_wal();
         let remote = test_remote();
         let mut daemon = Daemon::new(test_actor(), wal);
+        let store_id = insert_store(&mut daemon, &remote);
 
         let winner = make_bead("bd-abc", 1000, "alice");
         let loser = make_bead("bd-abc", 2000, "bob");
@@ -1542,7 +1990,7 @@ mod tests {
         repo_state.state = local_state;
         repo_state.dirty = true;
         repo_state.sync_in_progress = true;
-        daemon.repos.insert(remote.clone(), repo_state);
+        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
         let outcome = SyncOutcome {
             last_seen_stamp: synced_state.max_write_stamp(),
@@ -1552,7 +2000,7 @@ mod tests {
         };
         daemon.complete_sync(&remote, Ok(outcome));
 
-        let repo_state = daemon.repos.get(&remote).unwrap();
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
         assert_eq!(repo_state.state.live_count(), 2);
 
         let id = BeadId::parse("bd-abc").unwrap();

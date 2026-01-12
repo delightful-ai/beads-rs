@@ -12,16 +12,14 @@ use std::path::Path;
 use crossbeam::channel::Sender;
 use uuid::Uuid;
 
-use super::core::Daemon;
+use super::core::{Daemon, LoadedStore};
 use super::git_worker::GitOp;
 use super::ipc::{OpResponse, Response, ResponsePayload};
 use super::ops::{BeadPatch, MapLiveError, OpError, OpResult};
-use super::remote::RemoteUrl;
 use crate::core::{
     Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge, DepKey,
     DepKind, DepLife, DepSpec, DurabilityReceipt, Label, Labels, Limits, Lww, Note, NoteId,
-    NoteLog, Priority, StoreEpoch, StoreId, StoreIdentity, Tombstone, TxnId, WallClock, Workflow,
-    WriteStamp,
+    NoteLog, Priority, StoreIdentity, Tombstone, TxnId, WallClock, Workflow, WriteStamp,
 };
 
 impl Daemon {
@@ -251,7 +249,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(id) => self.op_response(remote.remote(), OpResult::Created { id }),
+            Ok(id) => self.op_response(&remote, OpResult::Created { id }),
             Err(e) => Response::err(e),
         }
     }
@@ -305,7 +303,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(()) => self.op_response(remote.remote(), OpResult::Updated { id: id.clone() }),
+            Ok(()) => self.op_response(&remote, OpResult::Updated { id: id.clone() }),
             Err(e) => Response::err(e),
         }
     }
@@ -341,7 +339,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(()) => self.op_response(remote.remote(), OpResult::Updated { id: id.clone() }),
+            Ok(()) => self.op_response(&remote, OpResult::Updated { id: id.clone() }),
             Err(e) => Response::err(e),
         }
     }
@@ -375,7 +373,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(()) => self.op_response(remote.remote(), OpResult::Updated { id: id.clone() }),
+            Ok(()) => self.op_response(&remote, OpResult::Updated { id: id.clone() }),
             Err(e) => Response::err(e),
         }
     }
@@ -418,7 +416,7 @@ impl Daemon {
                     }
                     if existing.len() == 1 && existing[0] == *desired {
                         return self
-                            .op_response(remote.remote(), OpResult::Updated { id: id.clone() });
+                            .op_response(&remote, OpResult::Updated { id: id.clone() });
                     }
                     if would_create_cycle(&repo_state.state, id, desired, DepKind::Parent) {
                         return Response::err(OpError::ValidationFailed {
@@ -433,7 +431,7 @@ impl Daemon {
                 None => {
                     if existing.is_empty() {
                         return self
-                            .op_response(remote.remote(), OpResult::Updated { id: id.clone() });
+                            .op_response(&remote, OpResult::Updated { id: id.clone() });
                     }
                 }
             }
@@ -470,7 +468,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(()) => self.op_response(remote.remote(), OpResult::Updated { id: id.clone() }),
+            Ok(()) => self.op_response(&remote, OpResult::Updated { id: id.clone() }),
             Err(e) => Response::err(e),
         }
     }
@@ -517,7 +515,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(()) => self.op_response(remote.remote(), OpResult::Closed { id: id.clone() }),
+            Ok(()) => self.op_response(&remote, OpResult::Closed { id: id.clone() }),
             Err(e) => Response::err(e),
         }
     }
@@ -557,7 +555,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(()) => self.op_response(remote.remote(), OpResult::Reopened { id: id.clone() }),
+            Ok(()) => self.op_response(&remote, OpResult::Reopened { id: id.clone() }),
             Err(e) => Response::err(e),
         }
     }
@@ -594,7 +592,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(()) => self.op_response(remote.remote(), OpResult::Deleted { id: id.clone() }),
+            Ok(()) => self.op_response(&remote, OpResult::Deleted { id: id.clone() }),
             Err(e) => Response::err(e),
         }
     }
@@ -659,7 +657,7 @@ impl Daemon {
 
         match result {
             Ok(()) => self.op_response(
-                remote.remote(),
+                &remote,
                 OpResult::DepAdded {
                     from: from.clone(),
                     to: to.clone(),
@@ -703,7 +701,7 @@ impl Daemon {
 
         match result {
             Ok(()) => self.op_response(
-                remote.remote(),
+                &remote,
                 OpResult::DepRemoved {
                     from: from.clone(),
                     to: to.clone(),
@@ -751,7 +749,7 @@ impl Daemon {
 
         match result {
             Ok(note_id) => self.op_response(
-                remote.remote(),
+                &remote,
                 OpResult::NoteAdded {
                     bead_id: id.clone(),
                     note_id: note_id.as_str().to_string(),
@@ -808,7 +806,7 @@ impl Daemon {
 
         match result {
             Ok(expires) => self.op_response(
-                remote.remote(),
+                &remote,
                 OpResult::Claimed {
                     id: id.clone(),
                     expires,
@@ -856,7 +854,7 @@ impl Daemon {
         });
 
         match result {
-            Ok(()) => self.op_response(remote.remote(), OpResult::Unclaimed { id: id.clone() }),
+            Ok(()) => self.op_response(&remote, OpResult::Unclaimed { id: id.clone() }),
             Err(e) => Response::err(e),
         }
     }
@@ -907,7 +905,7 @@ impl Daemon {
 
         match result {
             Ok(expires) => self.op_response(
-                remote.remote(),
+                &remote,
                 OpResult::ClaimExtended {
                     id: id.clone(),
                     expires,
@@ -917,19 +915,27 @@ impl Daemon {
         }
     }
 
-    fn op_response(&self, remote: &RemoteUrl, result: OpResult) -> Response {
-        let receipt = self.build_receipt(remote);
-        Response::ok(ResponsePayload::Op(OpResponse::new(result, receipt)))
+    fn op_response(&self, proof: &LoadedStore, result: OpResult) -> Response {
+        match self.build_receipt(proof) {
+            Ok(receipt) => Response::ok(ResponsePayload::Op(OpResponse::new(result, receipt))),
+            Err(e) => Response::err(e),
+        }
     }
 
-    fn build_receipt(&self, remote: &RemoteUrl) -> DurabilityReceipt {
-        let store = store_identity_for_remote(remote);
+    fn build_receipt(&self, proof: &LoadedStore) -> Result<DurabilityReceipt, OpError> {
+        let store = self.store_identity(proof)?;
         let stamp = self
-            .repo_state_by_url(remote)
-            .and_then(|state| state.last_seen_stamp.clone())
+            .repo_state(proof)?
+            .last_seen_stamp
+            .clone()
             .unwrap_or_else(|| WriteStamp::new(self.clock().wall_ms(), 0));
         let txn_id = txn_id_for_stamp(&store, &stamp);
-        DurabilityReceipt::local_fsync_defaults(store, txn_id, Vec::new(), stamp.wall_ms)
+        Ok(DurabilityReceipt::local_fsync_defaults(
+            store,
+            txn_id,
+            Vec::new(),
+            stamp.wall_ms,
+        ))
     }
 }
 
@@ -969,11 +975,6 @@ fn enforce_note_limit(content: &str, limits: &Limits) -> Result<(), OpError> {
         });
     }
     Ok(())
-}
-
-fn store_identity_for_remote(remote: &RemoteUrl) -> StoreIdentity {
-    let store_uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, remote.as_str().as_bytes());
-    StoreIdentity::new(StoreId::new(store_uuid), StoreEpoch::ZERO)
 }
 
 fn txn_id_for_stamp(store: &StoreIdentity, stamp: &WriteStamp) -> TxnId {
