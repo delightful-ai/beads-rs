@@ -26,5 +26,7 @@ pub use crate::core::{
     NamespacePolicy, NamespaceVisibility, Note, NoteId, NoteLog, Priority, ReceiptMergeError,
     ReplicaId, ReplicateMode, ReplicatedProof, RetentionPolicy, SegmentId, Seq0, Seq1, Stamp,
     StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Tombstone,
-    TtlBasis, TxnId, WallClock, Watermark, WatermarkError, Watermarks, Workflow, WriteStamp,
+    TtlBasis, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpKey, TxnOpV1, WallClock, Watermark,
+    WatermarkError, Watermarks, WireBeadFull, WireBeadPatch, WireFieldStamp, WireNoteV1,
+    WirePatch, WireStamp, Workflow, WorkflowStatus, WriteStamp,
 };

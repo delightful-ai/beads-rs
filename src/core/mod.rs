@@ -31,6 +31,7 @@ pub mod stores;
 pub mod time;
 pub mod tombstone;
 pub mod watermark;
+pub mod wire_bead;
 
 pub use bead::{Bead, BeadCore, BeadFields};
 pub use collections::{Label, Labels, NoteLog};
@@ -64,4 +65,8 @@ pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};
 pub use watermark::{
     Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, Watermarks,
+};
+pub use wire_bead::{
+    NoteAppendV1, NotesPatch, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull,
+    WireBeadPatch, WireFieldStamp, WireNoteV1, WirePatch, WireStamp, WorkflowStatus,
 };
