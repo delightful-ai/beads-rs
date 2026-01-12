@@ -1,12 +1,11 @@
 #![allow(dead_code)]
 
+use beads_rs::core::{Label, NoteAppendV1, NotesPatch};
 use beads_rs::{
     ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, Labels,
-    NamespaceId, NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity,
-    TxnDeltaV1, TxnId, TxnOpV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,
-    WorkflowStatus,
+    NamespaceId, NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1,
+    TxnId, TxnOpV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp, WorkflowStatus,
 };
-use beads_rs::core::{Label, NoteAppendV1, NotesPatch};
 use uuid::Uuid;
 
 pub fn actor_id(seed: u8) -> ActorId {
@@ -24,8 +23,7 @@ pub fn note_id(seed: u8) -> NoteId {
 pub fn sample_labels(seed: u8) -> Labels {
     let mut labels = Labels::new();
     let primary = Label::parse(format!("label-{seed:02x}")).expect("valid label fixture");
-    let secondary =
-        Label::parse(format!("label-{seed:02x}-b")).expect("valid label fixture");
+    let secondary = Label::parse(format!("label-{seed:02x}-b")).expect("valid label fixture");
     labels.insert(primary);
     labels.insert(secondary);
     labels
@@ -81,7 +79,10 @@ pub fn sample_delta(seed: u8) -> TxnDeltaV1 {
 }
 
 pub fn event_body_with_delta(seed: u8, delta: TxnDeltaV1) -> EventBody {
-    let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([seed; 16])), StoreEpoch::new(1));
+    let store = StoreIdentity::new(
+        StoreId::new(Uuid::from_bytes([seed; 16])),
+        StoreEpoch::new(1),
+    );
     let origin_replica_id = ReplicaId::new(Uuid::from_bytes([seed.wrapping_add(1); 16]));
     let txn_id = TxnId::new(Uuid::from_bytes([seed.wrapping_add(2); 16]));
     let client_request_id = ClientRequestId::new(Uuid::from_bytes([seed.wrapping_add(3); 16]));

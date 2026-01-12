@@ -64,28 +64,76 @@ This repo does not currently run a coverage job in CI.
 
 ## Version Control
 
-We use `jj` for our version control so we can easily put changes together.
+We use `jj` (jujutsu), not git directly. jj has different mental model—internalize it.
 
-The core workflow: jj new, jj describe ur changes after you're done, then jj new again. Run jj help when you need to.
+### Why jj
+
+- No staging area. Working copy IS the commit.
+- `jj describe` is retroactive labeling, not "committing"
+- Rewrites are trivial (`jj squash`, `jj rebase`, etc.)
+- You can reorganize history later, so capture progress NOW
+
+### JJ Rhythm
+
+**Commits are checkpoints, not milestones.**
+
+The loop:
+```
+jj new                              # start fresh change
+# edit: one logical thing
+jj describe "bd-xyz: what you did"  # label it
+# repeat
+```
+
+That's it. This loop runs 3-20 times per bead. A bead spanning 1 commit means you batched too much.
+
+**Heuristics:**
+- ~50 lines edited without `jj describe`? Too much. Describe and `jj new`.
+- Touched 2+ unrelated things? Should've been 2 commits.
+- About to context-switch (run tests, check something, take a break)? Describe first.
+
+**Every commit message includes the bead ID** you're working on. Not just the "last" one—there is no last one until the bead is Finished.
+
+Think: ctrl+s for semantic progress. You save files constantly; same energy for commits.
+
+### Fixing mistakes
+
+Batched too much? `jj split` to break it apart.
+Wrong message? `jj describe` again (overwrites).
+Need to reorganize? `jj squash`, `jj rebase -r`, etc.
+
+jj makes history malleable. Capture first, organize later.
 
 ## Issue Tracking
 
 **bd** is infrastructure for you, the agent. It's your external memory.
 
-A bead is a **promise**: you WILL get to this, just not now. When you're in the middle of something and notice tech debt, bugs, slop, or follow-on work that's out of scope—file a bead. Capture enough context that anyone (including future-you) can pick it up cold. Then keep going.
+A bead is a **promise**: you WILL get to this, just not now. [... keep existing content ...]
 
-Run `bd prime` for full workflow--but the core workflow is as follows:
+### The Core Workflow
 
-```
-bd ready
-bd show "the bead ur gonna work on"
-bd claim
+```bash
+bd ready                    # see what's next
+bd show bd-xyz              # understand it
+bd claim bd-xyz             # you own it now
+jj new                      # start first change
+
+# --- this loop runs MANY times per bead ---
+# edit: one coherent thing (add fn, fix bug, write test)
+jj describe "bd-xyz: added validation for Foo"
 jj new
-# implement fully incl. adding tests
-jj describe # IMPORTANT: make sure to reference the bead in the commit message! and leave a detailed, thorough message for future archeology
+# edit: next coherent thing  
+jj describe "bd-xyz: tests for Foo validation"
 jj new
+# edit: ... 
+# ---
+
+bd finish bd-xyz            # bead done, all acceptance criteria met
+bd ready                    # next bead
 ```
-and the cycle repeats.
+
+The jj loop is INSIDE the bead loop. Many commits per bead is correct.
+
 
 ### Follow-up Beads
 

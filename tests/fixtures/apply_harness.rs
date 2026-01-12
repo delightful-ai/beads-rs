@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use beads_rs::{apply_event, ApplyOutcome, Bead, BeadId, CanonicalState, EventBody, NoteId, NoteKey};
+use beads_rs::{
+    ApplyOutcome, Bead, BeadId, CanonicalState, EventBody, NoteId, NoteKey, apply_event,
+};
 
 pub struct ApplyHarness {
     state: CanonicalState,

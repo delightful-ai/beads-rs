@@ -42,7 +42,10 @@ pub fn corrupt_frame_body(segment: &SegmentFixture, frame_index: usize) -> std::
     flip_byte_at(&segment.path, offset)
 }
 
-pub fn truncate_frame_mid_body(segment: &SegmentFixture, frame_index: usize) -> std::io::Result<()> {
+pub fn truncate_frame_mid_body(
+    segment: &SegmentFixture,
+    frame_index: usize,
+) -> std::io::Result<()> {
     let offset = segment.frame_offset(frame_index);
     let frame_len = segment.frame_len(frame_index) as u64;
     let truncate_at = offset.saturating_add(frame_len.saturating_sub(1));

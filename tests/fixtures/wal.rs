@@ -45,7 +45,12 @@ impl TempWalDir {
         let replica_id = ReplicaId::new(Uuid::from_bytes([seed.wrapping_add(1); 16]));
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(0));
         let versions = StoreMetaVersions::new(1, WAL_FORMAT_VERSION, 1, 1, 1);
-        let meta = StoreMeta::new(identity, replica_id, versions, 1_700_000_000_000 + seed as u64);
+        let meta = StoreMeta::new(
+            identity,
+            replica_id,
+            versions,
+            1_700_000_000_000 + seed as u64,
+        );
 
         Self {
             _temp: temp,
@@ -79,8 +84,11 @@ impl TempWalDir {
         namespace: &NamespaceId,
         now_ms: u64,
     ) -> EventWalResult<SegmentWriter> {
-        let config =
-            SegmentConfig::new(DEFAULT_MAX_RECORD_BYTES, DEFAULT_SEGMENT_MAX_BYTES, DEFAULT_SEGMENT_MAX_AGE_MS);
+        let config = SegmentConfig::new(
+            DEFAULT_MAX_RECORD_BYTES,
+            DEFAULT_SEGMENT_MAX_BYTES,
+            DEFAULT_SEGMENT_MAX_AGE_MS,
+        );
         SegmentWriter::open(&self.store_dir, &self.meta, namespace, now_ms, config)
     }
 
@@ -146,7 +154,9 @@ pub fn sample_record(seed: u8) -> Record {
         origin_seq: seed as u64 + 1,
         event_time_ms: 1_700_000_000_000 + seed as u64,
         txn_id: TxnId::new(Uuid::from_bytes([seed.wrapping_add(1); 16])),
-        client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([seed.wrapping_add(2); 16]))),
+        client_request_id: Some(ClientRequestId::new(Uuid::from_bytes(
+            [seed.wrapping_add(2); 16],
+        ))),
         request_sha256: Some([seed.wrapping_add(3); 32]),
         sha256: sha,
         prev_sha256: Some([seed.wrapping_add(4); 32]),
@@ -201,10 +211,11 @@ fn read_segment_header(path: &Path) -> EventWalResult<(SegmentHeader, usize)> {
             source,
         })?;
     let mut buf = vec![0u8; header_len];
-    file.read_exact(&mut buf).map_err(|source| EventWalError::Io {
-        path: Some(path.to_path_buf()),
-        source,
-    })?;
+    file.read_exact(&mut buf)
+        .map_err(|source| EventWalError::Io {
+            path: Some(path.to_path_buf()),
+            source,
+        })?;
     let header = SegmentHeader::decode(&buf)?;
     Ok((header, header_len))
 }
