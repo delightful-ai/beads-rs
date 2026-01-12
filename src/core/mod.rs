@@ -21,6 +21,7 @@ pub mod domain;
 pub mod durability;
 pub mod event;
 pub mod apply;
+pub mod json_canon;
 pub mod error;
 pub mod identity;
 pub mod limits;
@@ -40,6 +41,7 @@ pub use collections::{Label, Labels, NoteLog};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
 pub use apply::{apply_event, ApplyError, ApplyOutcome, NoteKey};
+pub use json_canon::{to_canon_json_bytes, CanonJsonError};
 pub use dep::{DepEdge, DepKey, DepLife, DepSpec};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
