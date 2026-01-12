@@ -48,7 +48,12 @@ fn namespace_id_validation_accepts_and_rejects() {
 fn store_meta_roundtrip_persists_identity() {
     let temp = TempStoreDir::new().expect("temp store dir");
     let meta = store_meta(1, 1_726_000_000_000);
-    let path = temp.data_dir().join("store_meta.json");
+    let path = temp
+        .data_dir()
+        .join("stores")
+        .join(meta.store_id().to_string())
+        .join("meta.json");
+    fs::create_dir_all(path.parent().expect("meta dir")).expect("create store dir");
     write_store_meta(&path, &meta).expect("write store meta");
 
     let reloaded = read_store_meta(&path).expect("read store meta");
@@ -60,7 +65,12 @@ fn store_meta_roundtrip_persists_identity() {
 fn store_identity_survives_reopen() {
     let temp = TempStoreDir::new().expect("temp store dir");
     let meta = store_meta(42, 1_726_000_000_001);
-    let path = temp.data_dir().join("store_meta.json");
+    let path = temp
+        .data_dir()
+        .join("stores")
+        .join(meta.store_id().to_string())
+        .join("meta.json");
+    fs::create_dir_all(path.parent().expect("meta dir")).expect("create store dir");
     write_store_meta(&path, &meta).expect("write store meta");
 
     let reopened = read_store_meta(&path).expect("read store meta");
@@ -84,7 +94,13 @@ fn store_discovery_normalizes_remote_url() {
 #[test]
 fn lock_file_enforces_exclusive_create() {
     let temp = TempStoreDir::new().expect("temp store dir");
-    let lock_path = temp.data_dir().join("store.lock");
+    let store_id = store_id(9);
+    let lock_path = temp
+        .data_dir()
+        .join("stores")
+        .join(store_id.to_string())
+        .join("store.lock");
+    fs::create_dir_all(lock_path.parent().expect("lock dir")).expect("create store dir");
 
     let first = fs::OpenOptions::new()
         .write(true)
@@ -100,5 +116,8 @@ fn lock_file_enforces_exclusive_create() {
         .expect_err("second lock create fails");
     assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 
-    temp.force_release_lock("store.lock").expect("release lock");
+    let rel = std::path::Path::new("stores")
+        .join(store_id.to_string())
+        .join("store.lock");
+    temp.force_release_lock(rel).expect("release lock");
 }

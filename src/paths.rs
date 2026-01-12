@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::core::{NamespaceId, StoreId};
+
 /// Base directory for persistent data (WAL, exports, caches).
 ///
 /// Uses `BD_DATA_DIR` if set, otherwise `$XDG_DATA_HOME/beads-rs` or
@@ -24,6 +26,56 @@ pub(crate) fn data_dir() -> PathBuf {
                 .join("share")
         })
         .join("beads-rs")
+}
+
+/// Base directory for store data.
+pub fn stores_dir() -> PathBuf {
+    data_dir().join("stores")
+}
+
+/// Store root directory for a specific store.
+pub fn store_dir(store_id: StoreId) -> PathBuf {
+    stores_dir().join(store_id.to_string())
+}
+
+/// Store metadata path (meta.json).
+pub fn store_meta_path(store_id: StoreId) -> PathBuf {
+    store_dir(store_id).join("meta.json")
+}
+
+/// Store lock file path.
+pub fn store_lock_path(store_id: StoreId) -> PathBuf {
+    store_dir(store_id).join("store.lock")
+}
+
+/// Namespace policy path for a store (namespaces.toml).
+pub fn namespaces_path(store_id: StoreId) -> PathBuf {
+    store_dir(store_id).join("namespaces.toml")
+}
+
+/// Replica roster path for a store (replicas.toml).
+pub fn replicas_path(store_id: StoreId) -> PathBuf {
+    store_dir(store_id).join("replicas.toml")
+}
+
+/// Root WAL directory for a store.
+pub fn wal_dir(store_id: StoreId) -> PathBuf {
+    store_dir(store_id).join("wal")
+}
+
+/// Namespace WAL directory for a store.
+pub fn wal_namespace_dir(store_id: StoreId, namespace: &NamespaceId) -> PathBuf {
+    wal_dir(store_id).join(namespace.as_str())
+}
+
+/// WAL index path for a store.
+pub fn wal_index_path(store_id: StoreId) -> PathBuf {
+    store_dir(store_id).join("index").join("wal.sqlite")
+}
+
+/// Checkpoint cache root directory for a store.
+pub fn checkpoint_cache_dir(store_id: StoreId) -> PathBuf {
+    store_dir(store_id).join("checkpoint_cache")
 }
 
 /// Base directory for configuration files.
