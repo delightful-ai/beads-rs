@@ -88,11 +88,26 @@ impl DaemonFixture {
             .join("daemon.meta.json")
     }
 
+    fn store_id(&self) -> beads_rs::StoreId {
+        let remote_str = self.remote_dir.path().to_str().expect("remote path");
+        let normalized = beads_rs::daemon::remote::normalize_url(remote_str);
+        let store_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, normalized.as_bytes());
+        beads_rs::StoreId::new(store_uuid)
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        let dir = self.runtime_dir.path().join("data");
+        fs::create_dir_all(&dir).expect("create test data dir");
+        dir
+    }
+
     fn bd(&self) -> Command {
+        let data_dir = self.data_dir();
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.repo_dir.path());
         cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
         cmd.env("BD_WAL_DIR", self.runtime_dir.path());
+        cmd.env("BD_DATA_DIR", &data_dir);
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd
     }
@@ -114,12 +129,26 @@ impl DaemonFixture {
         self.bd().arg("init").assert().success();
     }
 
+    fn unlock_store(&self) {
+        let store_id = self.store_id().to_string();
+        self.bd()
+            .args(["store", "unlock", "--store-id", store_id.as_str()])
+            .assert()
+            .success();
+    }
+
     fn kill_daemon_forcefully(&self) {
         use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
         if let Some(pid) = self.daemon_pid() {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-            std::thread::sleep(Duration::from_millis(100));
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if !Self::process_alive(pid) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
         }
     }
 
@@ -160,6 +189,7 @@ fn test_stale_socket_recovery() {
         fixture.socket_path().exists(),
         "socket file should still exist after SIGKILL"
     );
+    fixture.unlock_store();
 
     // Make a request - should detect stale socket and restart
     fixture.bd().args(["status"]).assert().success();
@@ -192,6 +222,7 @@ fn test_version_mismatch_triggers_restart() {
     // Make a request - daemon should still work since meta file doesn't affect running daemon
     // But if we restart, it should come back with correct version
     fixture.kill_daemon_forcefully();
+    fixture.unlock_store();
     fixture.bd().args(["status"]).assert().success();
 
     // Verify daemon was restarted with correct version
@@ -217,6 +248,7 @@ fn test_no_orphaned_daemons() {
         let pid = fixture.daemon_pid().expect("daemon should be running");
         seen_pids.push(pid);
         fixture.kill_daemon_forcefully();
+        fixture.unlock_store();
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -249,24 +281,28 @@ fn test_concurrent_restart_safety() {
     // Initialize first
     fixture.start_daemon();
     fixture.kill_daemon_forcefully();
+    fixture.unlock_store();
 
     // Spawn multiple CLI commands simultaneously
     let n_clients = 5;
     let barrier = Arc::new(Barrier::new(n_clients));
     let runtime_path = fixture.runtime_dir.path().to_path_buf();
     let repo_path = fixture.repo_dir.path().to_path_buf();
+    let data_path = fixture.data_dir();
 
     let handles: Vec<_> = (0..n_clients)
         .map(|_| {
             let barrier = barrier.clone();
             let runtime_path = runtime_path.clone();
             let repo_path = repo_path.clone();
+            let data_path = data_path.clone();
             std::thread::spawn(move || {
                 barrier.wait(); // Start all at once
                 let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
                 cmd.current_dir(&repo_path);
                 cmd.env("XDG_RUNTIME_DIR", &runtime_path);
                 cmd.env("BD_WAL_DIR", &runtime_path);
+                cmd.env("BD_DATA_DIR", &data_path);
                 cmd.env("BD_NO_AUTO_UPGRADE", "1");
                 cmd.args(["status"]).assert().success();
             })
@@ -294,6 +330,7 @@ fn test_thundering_herd_single_daemon() {
     let barrier = Arc::new(Barrier::new(n_clients));
     let runtime_path = fixture.runtime_dir.path().to_path_buf();
     let repo_path = fixture.repo_dir.path().to_path_buf();
+    let data_path = fixture.data_dir();
 
     // All clients try to start at once
     let handles: Vec<_> = (0..n_clients)
@@ -301,12 +338,14 @@ fn test_thundering_herd_single_daemon() {
             let barrier = barrier.clone();
             let runtime_path = runtime_path.clone();
             let repo_path = repo_path.clone();
+            let data_path = data_path.clone();
             std::thread::spawn(move || {
                 barrier.wait();
                 let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
                 cmd.current_dir(&repo_path);
                 cmd.env("XDG_RUNTIME_DIR", &runtime_path);
                 cmd.env("BD_WAL_DIR", &runtime_path);
+                cmd.env("BD_DATA_DIR", &data_path);
                 cmd.env("BD_NO_AUTO_UPGRADE", "1");
                 cmd.arg("init").assert().success();
             })

@@ -19,6 +19,12 @@ fn test_runtime_dir() -> &'static std::path::Path {
     })
 }
 
+fn data_dir_for_runtime(runtime_dir: &std::path::Path) -> std::path::PathBuf {
+    let dir = runtime_dir.join("data");
+    fs::create_dir_all(&dir).expect("failed to create test data dir");
+    dir
+}
+
 /// Test fixture: working repo + bare remote.
 struct TestRepo {
     work_dir: TempDir,
@@ -80,6 +86,7 @@ impl TestRepo {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.path());
         cmd.env("XDG_RUNTIME_DIR", test_runtime_dir());
+        cmd.env("BD_DATA_DIR", data_dir_for_runtime(test_runtime_dir()));
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd
     }

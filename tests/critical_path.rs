@@ -22,11 +22,19 @@ fn test_runtime_dir() -> &'static std::path::Path {
     })
 }
 
+fn data_dir_for_runtime(runtime_dir: &Path) -> PathBuf {
+    let dir = runtime_dir.join("data");
+    fs::create_dir_all(&dir).expect("failed to create test data dir");
+    dir
+}
+
 fn bd_with_runtime(repo: &Path, runtime_dir: &Path) -> Command {
+    let data_dir = data_dir_for_runtime(runtime_dir);
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
     cmd.current_dir(repo);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("BD_WAL_DIR", runtime_dir);
+    cmd.env("BD_DATA_DIR", &data_dir);
     cmd.env("BD_NO_AUTO_UPGRADE", "1");
     cmd
 }
@@ -131,12 +139,7 @@ impl TestRepo {
     }
 
     fn bd(&self) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        cmd.current_dir(self.path());
-        cmd.env("XDG_RUNTIME_DIR", test_runtime_dir());
-        cmd.env("BD_WAL_DIR", test_runtime_dir());
-        cmd.env("BD_NO_AUTO_UPGRADE", "1");
-        cmd
+        bd_with_runtime(self.path(), test_runtime_dir())
     }
 }
 
@@ -2670,11 +2673,7 @@ fn test_init_fails_without_origin_remote() {
         .output()
         .expect("failed to configure git name");
 
-    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-    cmd.current_dir(work_dir.path());
-    cmd.env("XDG_RUNTIME_DIR", runtime_dir.path());
-    cmd.env("BD_WAL_DIR", runtime_dir.path());
-    cmd.env("BD_NO_AUTO_UPGRADE", "1");
+    let mut cmd = bd_with_runtime(work_dir.path(), runtime_dir.path());
     cmd.arg("init").assert().failure();
 
     // Best-effort: shut down the daemon started for this test.
