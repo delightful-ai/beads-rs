@@ -14,8 +14,9 @@ use crossbeam::channel::{Receiver, Sender};
 
 use super::core::Daemon;
 use super::git_worker::{GitOp, GitResult};
-use super::ipc::{Request, Response, decode_request, encode_response};
+use super::ipc::{ErrorPayload, Request, Response, decode_request, encode_response};
 use super::remote::RemoteUrl;
+use crate::core::ErrorCode;
 
 /// Message sent from socket handlers to state thread.
 pub struct RequestMessage {
@@ -221,11 +222,11 @@ pub(super) fn handle_client(stream: UnixStream, req_tx: Sender<RequestMessage>) 
         let request = match decode_request(&line) {
             Ok(r) => r,
             Err(e) => {
-                let resp = Response::err(super::ipc::ErrorPayload {
-                    code: "parse_error".into(),
-                    message: e.to_string(),
-                    details: None,
-                });
+                let resp = Response::err(ErrorPayload::new(
+                    ErrorCode::ParseError,
+                    e.to_string(),
+                    false,
+                ));
                 let bytes = match encode_response(&resp) {
                     Ok(b) => b,
                     Err(e) => {

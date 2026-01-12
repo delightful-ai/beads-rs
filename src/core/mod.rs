@@ -41,7 +41,8 @@ pub use durability::{
 };
 pub use domain::{BeadType, DepKind, Priority};
 pub use error::{
-    CollisionError, CoreError, InvalidDependency, InvalidId, InvalidLabel, RangeError,
+    CollisionError, CoreError, ErrorCode, ErrorPayload, InvalidDependency, InvalidId, InvalidLabel,
+    RangeError,
 };
 pub use identity::{
     ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, NoteId, ReplicaId,

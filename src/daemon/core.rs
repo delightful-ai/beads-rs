@@ -12,7 +12,7 @@ use git2::Repository;
 
 use super::Clock;
 use super::git_worker::{GitOp, LoadResult};
-use super::ipc::{ErrorPayload, Request, Response, ResponsePayload};
+use super::ipc::{ErrorPayload, IpcError, Request, Response, ResponsePayload};
 use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
@@ -39,7 +39,9 @@ impl LoadedRemote {
     }
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
-use crate::core::{ActorId, BeadId, CanonicalState, Stamp, WallClock, WriteStamp};
+use crate::core::{
+    ActorId, BeadId, CanonicalState, CoreError, ErrorCode, Stamp, WallClock, WriteStamp,
+};
 use crate::git::SyncError;
 use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::sync::SyncOutcome;
@@ -832,7 +834,7 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_update(&repo, &id, patch, cas, git_tx)
             }
@@ -840,7 +842,7 @@ impl Daemon {
             Request::AddLabels { repo, id, labels } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_add_labels(&repo, &id, labels, git_tx)
             }
@@ -848,7 +850,7 @@ impl Daemon {
             Request::RemoveLabels { repo, id, labels } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_remove_labels(&repo, &id, labels, git_tx)
             }
@@ -856,13 +858,13 @@ impl Daemon {
             Request::SetParent { repo, id, parent } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 let parent = match parent {
                     Some(raw) => match BeadId::parse(&raw) {
                         Ok(parent) => Some(parent),
                         Err(e) => {
-                            return Response::err(error_payload("invalid_id", &e.to_string()));
+                            return Response::err(invalid_id_payload(e));
                         }
                     },
                     None => None,
@@ -878,7 +880,7 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_close(&repo, &id, reason, on_branch, git_tx)
             }
@@ -886,7 +888,7 @@ impl Daemon {
             Request::Reopen { repo, id } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_reopen(&repo, &id, git_tx)
             }
@@ -894,7 +896,7 @@ impl Daemon {
             Request::Delete { repo, id, reason } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_delete(&repo, &id, reason, git_tx)
             }
@@ -907,11 +909,11 @@ impl Daemon {
             } => {
                 let from = match BeadId::parse(&from) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 let to = match BeadId::parse(&to) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_add_dep(&repo, &from, &to, kind, git_tx)
             }
@@ -924,11 +926,11 @@ impl Daemon {
             } => {
                 let from = match BeadId::parse(&from) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 let to = match BeadId::parse(&to) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_remove_dep(&repo, &from, &to, kind, git_tx)
             }
@@ -936,7 +938,7 @@ impl Daemon {
             Request::AddNote { repo, id, content } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_add_note(&repo, &id, content, git_tx)
             }
@@ -948,7 +950,7 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_claim(&repo, &id, lease_secs, git_tx)
             }
@@ -956,7 +958,7 @@ impl Daemon {
             Request::Unclaim { repo, id } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_unclaim(&repo, &id, git_tx)
             }
@@ -968,7 +970,7 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.apply_extend_claim(&repo, &id, lease_secs, git_tx)
             }
@@ -977,7 +979,7 @@ impl Daemon {
             Request::Show { repo, id } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.query_show(&repo, &id, git_tx)
             }
@@ -989,7 +991,7 @@ impl Daemon {
             Request::DepTree { repo, id } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.query_dep_tree(&repo, &id, git_tx)
             }
@@ -997,7 +999,7 @@ impl Daemon {
             Request::Deps { repo, id } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.query_deps(&repo, &id, git_tx)
             }
@@ -1005,7 +1007,7 @@ impl Daemon {
             Request::Notes { repo, id } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(error_payload("invalid_id", &e.to_string())),
+                    Err(e) => return Response::err(invalid_id_payload(e)),
                 };
                 self.query_notes(&repo, &id, git_tx)
             }
@@ -1030,7 +1032,7 @@ impl Daemon {
                     Some(s) => Some(match BeadId::parse(&s) {
                         Ok(id) => id,
                         Err(e) => {
-                            return Response::err(error_payload("invalid_id", &e.to_string()));
+                            return Response::err(invalid_id_payload(e));
                         }
                     }),
                     None => None,
@@ -1078,7 +1080,11 @@ impl Daemon {
                     })
                     .is_err()
                 {
-                    return Response::err(error_payload("internal", "git thread not responding"));
+                    return Response::err(error_payload(
+                        ErrorCode::Internal,
+                        "git thread not responding",
+                        false,
+                    ));
                 }
 
                 match respond_rx.recv() {
@@ -1086,8 +1092,14 @@ impl Daemon {
                         Ok(_) => Response::ok(ResponsePayload::initialized()),
                         Err(e) => Response::err(e),
                     },
-                    Ok(Err(e)) => Response::err(error_payload("init_failed", &e.to_string())),
-                    Err(_) => Response::err(error_payload("internal", "git thread died")),
+                    Ok(Err(e)) => {
+                        Response::err(error_payload(ErrorCode::InitFailed, &e.to_string(), false))
+                    }
+                    Err(_) => Response::err(error_payload(
+                        ErrorCode::Internal,
+                        "git thread died",
+                        false,
+                    )),
                 }
             }
 
@@ -1104,11 +1116,14 @@ impl Daemon {
     }
 }
 
-fn error_payload(code: &str, message: &str) -> ErrorPayload {
-    ErrorPayload {
-        code: code.to_string(),
-        message: message.to_string(),
-        details: None,
+fn error_payload(code: ErrorCode, message: &str, retryable: bool) -> ErrorPayload {
+    ErrorPayload::new(code, message, retryable)
+}
+
+fn invalid_id_payload(err: CoreError) -> ErrorPayload {
+    match err {
+        CoreError::InvalidId(id) => IpcError::from(id).into(),
+        other => ErrorPayload::new(ErrorCode::InternalError, other.to_string(), false),
     }
 }
 

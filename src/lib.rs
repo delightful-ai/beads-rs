@@ -21,9 +21,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub use crate::core::{
     ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
     ClientRequestId, CheckpointGroup, Closure, DepEdge, DepKey, DepKind, Durable, DurabilityClass,
-    DurabilityOutcome, DurabilityProofV1, GcAuthority, HeadStatus, Labels, LocalFsyncProof, Lww,
-    NamespaceId, NamespacePolicy, NamespaceVisibility, Note, NoteId, NoteLog, Priority,
-    ReplicaId, ReplicateMode, ReplicatedProof, RetentionPolicy, SegmentId, Seq0, Seq1, Stamp,
-    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Tombstone,
-    TtlBasis, TxnId, WallClock, Watermark, WatermarkError, Watermarks, Workflow, WriteStamp,
+    DurabilityOutcome, DurabilityProofV1, ErrorCode, ErrorPayload, GcAuthority, HeadStatus, Labels,
+    LocalFsyncProof, Lww, NamespaceId, NamespacePolicy, NamespaceVisibility, Note, NoteId, NoteLog,
+    Priority, ReplicaId, ReplicateMode, ReplicatedProof, RetentionPolicy, SegmentId, Seq0, Seq1,
+    Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState,
+    Tombstone, TtlBasis, TxnId, WallClock, Watermark, WatermarkError, Watermarks, Workflow,
+    WriteStamp,
 };

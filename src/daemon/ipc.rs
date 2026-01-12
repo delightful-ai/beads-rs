@@ -19,6 +19,8 @@ use thiserror::Error;
 
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::query::{Filters, QueryResult};
+use crate::core::error::details as error_details;
+pub use crate::core::{ErrorCode, ErrorPayload};
 use crate::core::{BeadType, DepKind, InvalidId, Priority};
 use crate::error::{Effect, Transience};
 
@@ -379,40 +381,178 @@ enum ShuttingDownTag {
     ShuttingDown,
 }
 
-/// Error response payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorPayload {
-    pub code: String,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
-}
-
 impl From<OpError> for ErrorPayload {
     fn from(e: OpError) -> Self {
-        let details = serde_json::json!({
-            "retryable": e.transience().is_retryable(),
-            "effect": e.effect().as_str(),
-        });
-        ErrorPayload {
-            code: e.code().to_string(),
-            message: e.to_string(),
-            details: Some(details),
+        let message = e.to_string();
+        let retryable = e.transience().is_retryable();
+        match e {
+            OpError::NotFound(id) => ErrorPayload::new(ErrorCode::NotFound, message, retryable)
+                .with_details(error_details::NotFoundDetails { id }),
+            OpError::AlreadyExists(id) => {
+                ErrorPayload::new(ErrorCode::AlreadyExists, message, retryable)
+                    .with_details(error_details::AlreadyExistsDetails { id })
+            }
+            OpError::AlreadyClaimed { by, expires } => {
+                let expires_at_ms = expires.map(|value| value.0);
+                ErrorPayload::new(ErrorCode::AlreadyClaimed, message, retryable).with_details(
+                    error_details::AlreadyClaimedDetails {
+                        by,
+                        expires_at_ms,
+                    },
+                )
+            }
+            OpError::CasMismatch { expected, actual } => {
+                ErrorPayload::new(ErrorCode::CasMismatch, message, retryable).with_details(
+                    error_details::CasMismatchDetails { expected, actual },
+                )
+            }
+            OpError::InvalidTransition { from, to } => {
+                ErrorPayload::new(ErrorCode::InvalidTransition, message, retryable).with_details(
+                    error_details::InvalidTransitionDetails { from, to },
+                )
+            }
+            OpError::ValidationFailed { field, reason } => {
+                ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
+                    error_details::ValidationFailedDetails { field, reason },
+                )
+            }
+            OpError::NotAGitRepo(path) => {
+                ErrorPayload::new(ErrorCode::NotAGitRepo, message, retryable).with_details(
+                    error_details::PathDetails {
+                        path: path.display().to_string(),
+                    },
+                )
+            }
+            OpError::NoRemote(path) => {
+                ErrorPayload::new(ErrorCode::NoRemote, message, retryable).with_details(
+                    error_details::PathDetails {
+                        path: path.display().to_string(),
+                    },
+                )
+            }
+            OpError::RepoNotInitialized(path) => {
+                ErrorPayload::new(ErrorCode::RepoNotInitialized, message, retryable).with_details(
+                    error_details::PathDetails {
+                        path: path.display().to_string(),
+                    },
+                )
+            }
+            OpError::Sync(_) => ErrorPayload::new(ErrorCode::SyncFailed, message, retryable),
+            OpError::BeadDeleted(id) => {
+                ErrorPayload::new(ErrorCode::BeadDeleted, message, retryable)
+                    .with_details(error_details::BeadDeletedDetails { id })
+            }
+            OpError::Wal(e) => ErrorPayload::new(ErrorCode::WalError, message, retryable)
+                .with_details(error_details::WalErrorDetails {
+                    message: e.to_string(),
+                }),
+            OpError::WalMerge { errors } => {
+                let errors = errors.into_iter().map(|err| err.to_string()).collect();
+                ErrorPayload::new(ErrorCode::WalMergeConflict, message, retryable).with_details(
+                    error_details::WalMergeConflictDetails { errors },
+                )
+            }
+            OpError::NotClaimedByYou => ErrorPayload::new(ErrorCode::NotClaimedByYou, message, retryable),
+            OpError::DepNotFound => ErrorPayload::new(ErrorCode::DepNotFound, message, retryable),
+            OpError::LoadTimeout {
+                repo,
+                timeout_secs,
+                remote,
+            } => ErrorPayload::new(ErrorCode::LoadTimeout, message, retryable).with_details(
+                error_details::LoadTimeoutDetails {
+                    repo: repo.display().to_string(),
+                    timeout_secs,
+                    remote,
+                },
+            ),
+            OpError::Internal(_) => ErrorPayload::new(ErrorCode::Internal, message, retryable),
         }
     }
 }
 
 impl From<IpcError> for ErrorPayload {
     fn from(e: IpcError) -> Self {
-        let details = serde_json::json!({
-            "retryable": e.transience().is_retryable(),
-            "effect": e.effect().as_str(),
-        });
-        ErrorPayload {
-            code: e.code().to_string(),
-            message: e.to_string(),
-            details: Some(details),
+        let message = e.to_string();
+        let retryable = e.transience().is_retryable();
+        match e {
+            IpcError::Parse(err) => ErrorPayload::new(ErrorCode::ParseError, message, retryable)
+                .with_details(error_details::MalformedPayloadDetails {
+                    parser: error_details::ParserKind::Json,
+                    reason: Some(err.to_string()),
+                }),
+            IpcError::Io(_) => ErrorPayload::new(ErrorCode::IoError, message, retryable),
+            IpcError::InvalidId(err) => {
+                ErrorPayload::new(ErrorCode::InvalidId, message, retryable)
+                    .with_details(invalid_id_details(&err))
+            }
+            IpcError::Disconnected => ErrorPayload::new(ErrorCode::Disconnected, message, retryable),
+            IpcError::DaemonUnavailable(_) => {
+                ErrorPayload::new(ErrorCode::DaemonUnavailable, message, retryable)
+            }
+            IpcError::DaemonVersionMismatch { .. } => {
+                ErrorPayload::new(ErrorCode::DaemonVersionMismatch, message, retryable)
+            }
         }
+    }
+}
+
+fn invalid_id_details(err: &InvalidId) -> error_details::InvalidIdDetails {
+    match err {
+        InvalidId::Bead { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::Bead,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::Actor { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::Actor,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::Note { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::Note,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::Branch { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::Branch,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::ContentHash { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::ContentHash,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::Namespace { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::Namespace,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::StoreId { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::StoreId,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::ReplicaId { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::ReplicaId,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::TxnId { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::TxnId,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::ClientRequestId { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::ClientRequestId,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
+        InvalidId::SegmentId { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::SegmentId,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
     }
 }
 
@@ -450,14 +590,14 @@ pub enum IpcError {
 }
 
 impl IpcError {
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> ErrorCode {
         match self {
-            IpcError::Parse(_) => "parse_error",
-            IpcError::Io(_) => "io_error",
-            IpcError::InvalidId(_) => "invalid_id",
-            IpcError::Disconnected => "disconnected",
-            IpcError::DaemonUnavailable(_) => "daemon_unavailable",
-            IpcError::DaemonVersionMismatch { .. } => "daemon_version_mismatch",
+            IpcError::Parse(_) => ErrorCode::ParseError,
+            IpcError::Io(_) => ErrorCode::IoError,
+            IpcError::InvalidId(_) => ErrorCode::InvalidId,
+            IpcError::Disconnected => ErrorCode::Disconnected,
+            IpcError::DaemonUnavailable(_) => ErrorCode::DaemonUnavailable,
+            IpcError::DaemonVersionMismatch { .. } => ErrorCode::DaemonVersionMismatch,
         }
     }
 
@@ -1088,11 +1228,11 @@ mod tests {
 
     #[test]
     fn response_err() {
-        let resp = Response::err(ErrorPayload {
-            code: "not_found".to_string(),
-            message: "bead not found".to_string(),
-            details: None,
-        });
+        let resp = Response::err(ErrorPayload::new(
+            ErrorCode::NotFound,
+            "bead not found",
+            false,
+        ));
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"err\""));
         assert!(json.contains("not_found"));
@@ -1123,7 +1263,7 @@ mod tests {
             parse_error: Some("data did not match any variant".into()),
         };
         // Error should indicate version mismatch
-        assert_eq!(err.code(), "daemon_version_mismatch");
+        assert_eq!(err.code(), ErrorCode::DaemonVersionMismatch);
         // The error message should be actionable
         assert!(err.to_string().contains("restart the daemon"));
     }
@@ -1214,11 +1354,10 @@ mod tests {
 
         #[test]
         fn error_response() {
-            let resp = Response::err(ErrorPayload {
-                code: "test_error".into(),
-                message: "Something went wrong".into(),
-                details: Some(serde_json::json!({"key": "value"})),
-            });
+            let resp = Response::err(
+                ErrorPayload::new(ErrorCode::Unknown("test_error".into()), "Something went wrong", false)
+                    .with_details(serde_json::json!({"key": "value"})),
+            );
             roundtrip_response(resp);
         }
     }

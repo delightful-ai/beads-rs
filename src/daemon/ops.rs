@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, Label, Labels, Lww, Priority, Stamp,
-    WallClock, Workflow,
+    ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, ErrorCode, Label, Labels, Lww,
+    Priority, Stamp, WallClock, Workflow,
 };
 use crate::daemon::wal::WalError;
 use crate::error::{Effect, Transience};
@@ -321,25 +321,25 @@ Check SSH auth (ssh-add -l) or run `git fetch origin refs/heads/beads/store:refs
 
 impl OpError {
     /// Get the error code for IPC responses.
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> ErrorCode {
         match self {
-            OpError::NotFound(_) => "not_found",
-            OpError::AlreadyExists(_) => "already_exists",
-            OpError::AlreadyClaimed { .. } => "already_claimed",
-            OpError::CasMismatch { .. } => "cas_mismatch",
-            OpError::InvalidTransition { .. } => "invalid_transition",
-            OpError::ValidationFailed { .. } => "validation_failed",
-            OpError::NotAGitRepo(_) => "not_a_git_repo",
-            OpError::NoRemote(_) => "no_remote",
-            OpError::RepoNotInitialized(_) => "repo_not_initialized",
-            OpError::Sync(_) => "sync_failed",
-            OpError::BeadDeleted(_) => "bead_deleted",
-            OpError::Wal(_) => "wal_error",
-            OpError::WalMerge { .. } => "wal_merge_conflict",
-            OpError::NotClaimedByYou => "not_claimed_by_you",
-            OpError::DepNotFound => "dep_not_found",
-            OpError::LoadTimeout { .. } => "load_timeout",
-            OpError::Internal(_) => "internal",
+            OpError::NotFound(_) => ErrorCode::NotFound,
+            OpError::AlreadyExists(_) => ErrorCode::AlreadyExists,
+            OpError::AlreadyClaimed { .. } => ErrorCode::AlreadyClaimed,
+            OpError::CasMismatch { .. } => ErrorCode::CasMismatch,
+            OpError::InvalidTransition { .. } => ErrorCode::InvalidTransition,
+            OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
+            OpError::NotAGitRepo(_) => ErrorCode::NotAGitRepo,
+            OpError::NoRemote(_) => ErrorCode::NoRemote,
+            OpError::RepoNotInitialized(_) => ErrorCode::RepoNotInitialized,
+            OpError::Sync(_) => ErrorCode::SyncFailed,
+            OpError::BeadDeleted(_) => ErrorCode::BeadDeleted,
+            OpError::Wal(_) => ErrorCode::WalError,
+            OpError::WalMerge { .. } => ErrorCode::WalMergeConflict,
+            OpError::NotClaimedByYou => ErrorCode::NotClaimedByYou,
+            OpError::DepNotFound => ErrorCode::DepNotFound,
+            OpError::LoadTimeout { .. } => ErrorCode::LoadTimeout,
+            OpError::Internal(_) => ErrorCode::Internal,
         }
     }
 

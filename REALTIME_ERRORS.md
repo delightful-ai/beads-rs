@@ -509,3 +509,38 @@ When you add a new error condition, you should:
 2. add a new code here with retryability + required details keys.
 
 If you tell me what your current IPC error payload looks like (fields + existing codes), I can map this registry directly onto your structs/enums so it drops in cleanly without churn.
+
+---
+
+## Legacy IPC / CLI error codes (beads v0.x)
+
+These codes are retained for compatibility with the current CLI/IPC surface.
+They are not part of the realtime replication protocol, but remain stable until
+the legacy endpoints are retired.
+
+| Code | Retryable | Meaning |
+|------|-----------|---------|
+| `not_found` | no | requested bead does not exist |
+| `already_exists` | no | attempted to create a bead that already exists |
+| `already_claimed` | yes | bead is already claimed by another actor |
+| `cas_mismatch` | no | compare-and-set precondition failed |
+| `invalid_transition` | no | workflow transition is invalid |
+| `validation_failed` | no | field validation failed |
+| `not_a_git_repo` | no | path is not a git repository |
+| `no_remote` | no | repo has no configured remote |
+| `repo_not_initialized` | no | beads ref not initialized in repo |
+| `sync_failed` | maybe | git sync failed |
+| `bead_deleted` | no | bead is tombstoned |
+| `wal_error` | maybe | WAL persistence failed |
+| `wal_merge_conflict` | no | merge conflict during WAL apply |
+| `not_claimed_by_you` | no | unclaim attempted by non-claimer |
+| `dep_not_found` | no | dependency edge not found |
+| `load_timeout` | yes | initial fetch timed out |
+| `internal` | maybe | legacy internal error |
+| `parse_error` | no | legacy IPC parse error |
+| `io_error` | yes | legacy IPC I/O error |
+| `invalid_id` | no | identifier failed validation |
+| `disconnected` | yes | client disconnected |
+| `daemon_unavailable` | yes | daemon not reachable |
+| `daemon_version_mismatch` | yes | client/server protocol mismatch |
+| `init_failed` | maybe | initialization failed |
