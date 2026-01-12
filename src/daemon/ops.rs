@@ -427,7 +427,8 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
     match err {
         StoreRuntimeError::Lock(lock_err) => store_lock_error_code(lock_err),
         StoreRuntimeError::MetaSymlink { .. } => ErrorCode::PathSymlinkRejected,
-        StoreRuntimeError::MetaRead { source, .. } | StoreRuntimeError::MetaWrite { source, .. } => {
+        StoreRuntimeError::MetaRead { source, .. }
+        | StoreRuntimeError::MetaWrite { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ErrorCode::PermissionDenied
             } else {
@@ -438,6 +439,7 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
         StoreRuntimeError::MetaMismatch { .. } => ErrorCode::WrongStore,
         StoreRuntimeError::WalIndex(err) => wal_index_error_code(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_error_code(err),
+        StoreRuntimeError::WatermarkInvalid { .. } => ErrorCode::IndexCorrupt,
     }
 }
 
@@ -475,7 +477,8 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
         StoreRuntimeError::MetaParse { .. } | StoreRuntimeError::MetaMismatch { .. } => {
             Transience::Permanent
         }
-        StoreRuntimeError::MetaRead { source, .. } | StoreRuntimeError::MetaWrite { source, .. } => {
+        StoreRuntimeError::MetaRead { source, .. }
+        | StoreRuntimeError::MetaWrite { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 Transience::Permanent
             } else {
@@ -484,6 +487,7 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
         }
         StoreRuntimeError::WalIndex(err) => wal_index_transience(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_transience(err),
+        StoreRuntimeError::WatermarkInvalid { .. } => Transience::Permanent,
     }
 }
 

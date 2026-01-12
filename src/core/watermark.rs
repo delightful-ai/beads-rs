@@ -184,14 +184,14 @@ pub enum WatermarkError {
 fn validate_head(seq: Seq0, head: HeadStatus) -> Result<(), WatermarkError> {
     if seq.get() == 0 {
         return match head {
-            HeadStatus::Known(_) => Err(WatermarkError::UnexpectedHead { seq }),
-            _ => Ok(()),
+            HeadStatus::Genesis => Ok(()),
+            _ => Err(WatermarkError::UnexpectedHead { seq }),
         };
     }
 
     match head {
-        HeadStatus::Known(_) => Ok(()),
-        _ => Err(WatermarkError::MissingHead { seq }),
+        HeadStatus::Genesis => Err(WatermarkError::MissingHead { seq }),
+        _ => Ok(()),
     }
 }
 
@@ -305,9 +305,9 @@ mod tests {
     }
 
     #[test]
-    fn watermark_rejects_missing_head_for_nonzero_seq() {
+    fn watermark_rejects_genesis_for_nonzero_seq() {
         let seq = Seq0::new(1);
-        let err = Watermark::<Applied>::new(seq, HeadStatus::Unknown).unwrap_err();
+        let err = Watermark::<Applied>::new(seq, HeadStatus::Genesis).unwrap_err();
         assert_eq!(err, WatermarkError::MissingHead { seq });
     }
 
@@ -316,6 +316,20 @@ mod tests {
         let seq = Seq0::ZERO;
         let err = Watermark::<Applied>::new(seq, HeadStatus::Known([1u8; 32])).unwrap_err();
         assert_eq!(err, WatermarkError::UnexpectedHead { seq });
+    }
+
+    #[test]
+    fn watermark_rejects_unknown_at_genesis() {
+        let seq = Seq0::ZERO;
+        let err = Watermark::<Applied>::new(seq, HeadStatus::Unknown).unwrap_err();
+        assert_eq!(err, WatermarkError::UnexpectedHead { seq });
+    }
+
+    #[test]
+    fn watermark_allows_unknown_for_nonzero_seq() {
+        let seq = Seq0::new(2);
+        let watermark = Watermark::<Applied>::new(seq, HeadStatus::Unknown).expect("watermark");
+        assert!(matches!(watermark.head(), HeadStatus::Unknown));
     }
 
     #[test]

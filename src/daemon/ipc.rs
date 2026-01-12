@@ -21,10 +21,10 @@ use super::ops::{BeadPatch, OpError, OpResult};
 use super::query::{Filters, QueryResult};
 use super::store_lock::StoreLockError;
 use super::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::{WalIndexError, WalReplayError};
 use crate::core::error::details as error_details;
 use crate::core::{BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, Priority};
 pub use crate::core::{ErrorCode, ErrorPayload};
+use crate::daemon::wal::{WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
@@ -536,24 +536,22 @@ fn store_runtime_error_payload(
 ) -> ErrorPayload {
     match err {
         StoreRuntimeError::Lock(lock_err) => store_lock_error_payload(lock_err, message, retryable),
-        StoreRuntimeError::MetaSymlink { path } => ErrorPayload::new(
-            ErrorCode::PathSymlinkRejected,
-            message,
-            retryable,
-        )
-        .with_details(error_details::PathSymlinkRejectedDetails {
-            path: path.display().to_string(),
-        }),
-        StoreRuntimeError::MetaRead { path, source } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                ErrorCode::PermissionDenied,
-                message,
-                retryable,
+        StoreRuntimeError::MetaSymlink { path } => {
+            ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable).with_details(
+                error_details::PathSymlinkRejectedDetails {
+                    path: path.display().to_string(),
+                },
             )
-            .with_details(error_details::PermissionDeniedDetails {
-                path: path.display().to_string(),
-                operation: error_details::PermissionOperation::Read,
-            }),
+        }
+        StoreRuntimeError::MetaRead { path, source } => match source.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(
+                    error_details::PermissionDeniedDetails {
+                        path: path.display().to_string(),
+                        operation: error_details::PermissionOperation::Read,
+                    },
+                )
+            }
             _ => ErrorPayload::new(ErrorCode::InternalError, message, retryable),
         },
         StoreRuntimeError::MetaParse { source, .. } => {
@@ -563,27 +561,35 @@ fn store_runtime_error_payload(
                 },
             )
         }
-        StoreRuntimeError::MetaMismatch { expected, got } => ErrorPayload::new(
-            ErrorCode::WrongStore,
-            message,
-            retryable,
-        )
-        .with_details(error_details::WrongStoreDetails {
-            expected_store_id: expected,
-            got_store_id: got,
-        }),
-        StoreRuntimeError::MetaWrite { path, source } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                ErrorCode::PermissionDenied,
-                message,
-                retryable,
+        StoreRuntimeError::MetaMismatch { expected, got } => {
+            ErrorPayload::new(ErrorCode::WrongStore, message, retryable).with_details(
+                error_details::WrongStoreDetails {
+                    expected_store_id: expected,
+                    got_store_id: got,
+                },
             )
-            .with_details(error_details::PermissionDeniedDetails {
-                path: path.display().to_string(),
-                operation: error_details::PermissionOperation::Write,
-            }),
+        }
+        StoreRuntimeError::MetaWrite { path, source } => match source.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(
+                    error_details::PermissionDeniedDetails {
+                        path: path.display().to_string(),
+                        operation: error_details::PermissionOperation::Write,
+                    },
+                )
+            }
             _ => ErrorPayload::new(ErrorCode::InternalError, message, retryable),
         },
+        StoreRuntimeError::WatermarkInvalid {
+            kind,
+            namespace,
+            origin,
+            source,
+        } => ErrorPayload::new(ErrorCode::IndexCorrupt, message, retryable).with_details(
+            error_details::IndexCorruptDetails {
+                reason: format!("{kind} watermark for {namespace} {origin}: {source}"),
+            },
+        ),
         StoreRuntimeError::WalIndex(err) => {
             ErrorPayload::new(wal_index_error_code(&err), message, retryable)
         }
@@ -643,15 +649,9 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
     }
 }
 
-fn store_lock_error_payload(
-    err: StoreLockError,
-    message: String,
-    retryable: bool,
-) -> ErrorPayload {
+fn store_lock_error_payload(err: StoreLockError, message: String, retryable: bool) -> ErrorPayload {
     match err {
-        StoreLockError::Held {
-            store_id, meta, ..
-        } => {
+        StoreLockError::Held { store_id, meta, .. } => {
             let (holder_pid, holder_replica_id, started_at_ms, daemon_version) = meta
                 .as_deref()
                 .map(|meta| {
@@ -673,14 +673,13 @@ fn store_lock_error_payload(
                 },
             )
         }
-        StoreLockError::Symlink { path } => ErrorPayload::new(
-            ErrorCode::PathSymlinkRejected,
-            message,
-            retryable,
-        )
-        .with_details(error_details::PathSymlinkRejectedDetails {
-            path: path.display().to_string(),
-        }),
+        StoreLockError::Symlink { path } => {
+            ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable).with_details(
+                error_details::PathSymlinkRejectedDetails {
+                    path: path.display().to_string(),
+                },
+            )
+        }
         StoreLockError::MetadataCorrupt { source, .. } => {
             ErrorPayload::new(ErrorCode::Corruption, message, retryable).with_details(
                 error_details::CorruptionDetails {

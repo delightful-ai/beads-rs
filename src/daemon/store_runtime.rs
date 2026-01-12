@@ -11,15 +11,15 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::{
-    Applied, Durable, Limits, NamespaceId, NamespacePolicy, ReplicaId, StoreEpoch, StoreId,
-    StoreIdentity, StoreMeta, StoreMetaVersions, Watermarks,
+    Applied, Durable, HeadStatus, Limits, NamespaceId, NamespacePolicy, ReplicaId, Seq0,
+    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks,
 };
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repo::RepoState;
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
 use crate::daemon::wal::{
-    IndexDurabilityMode, SqliteWalIndex, Wal, WalIndexError, WalReplayError, catch_up_index,
-    rebuild_index,
+    IndexDurabilityMode, SqliteWalIndex, Wal, WalIndex, WalIndexError, WalReplayError,
+    catch_up_index, rebuild_index,
 };
 use crate::paths;
 
@@ -35,9 +35,7 @@ pub struct StoreRuntime {
     #[allow(dead_code)]
     pub(crate) policies: BTreeMap<NamespaceId, NamespacePolicy>,
     pub(crate) repo_state: RepoState,
-    #[allow(dead_code)]
     pub(crate) watermarks_applied: Watermarks<Applied>,
-    #[allow(dead_code)]
     pub(crate) watermarks_durable: Watermarks<Durable>,
     #[allow(dead_code)]
     pub(crate) wal: Arc<Wal>,
@@ -104,17 +102,45 @@ impl StoreRuntime {
             }
         }
 
+        let (watermarks_applied, watermarks_durable) = load_watermarks(&wal_index)?;
+
         Ok(Self {
             primary_remote,
             meta,
             policies: default_policies(),
             repo_state: RepoState::new(),
-            watermarks_applied: Watermarks::default(),
-            watermarks_durable: Watermarks::default(),
+            watermarks_applied,
+            watermarks_durable,
             wal,
             wal_index: Arc::new(wal_index),
             lock,
         })
+    }
+
+    pub fn applied_head_sha(
+        &self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+    ) -> Option<[u8; 32]> {
+        head_status_to_sha(
+            self.watermarks_applied
+                .get(namespace, origin)
+                .copied()
+                .map(|watermark| watermark.head()),
+        )
+    }
+
+    pub fn durable_head_sha(
+        &self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+    ) -> Option<[u8; 32]> {
+        head_status_to_sha(
+            self.watermarks_durable
+                .get(namespace, origin)
+                .copied()
+                .map(|watermark| watermark.head()),
+        )
     }
 }
 
@@ -148,6 +174,14 @@ pub enum StoreRuntimeError {
     WalIndex(#[from] WalIndexError),
     #[error(transparent)]
     WalReplay(#[from] WalReplayError),
+    #[error("invalid {kind} watermark for {namespace} {origin}: {source}")]
+    WatermarkInvalid {
+        kind: &'static str,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        #[source]
+        source: WatermarkError,
+    },
 }
 
 fn open_wal_index(
@@ -196,6 +230,89 @@ fn default_policies() -> BTreeMap<NamespaceId, NamespacePolicy> {
     policies
 }
 
+fn load_watermarks(
+    index: &SqliteWalIndex,
+) -> Result<(Watermarks<Applied>, Watermarks<Durable>), StoreRuntimeError> {
+    let rows = index.reader().load_watermarks()?;
+    let mut applied = Watermarks::<Applied>::new();
+    let mut durable = Watermarks::<Durable>::new();
+
+    for row in rows {
+        let namespace = row.namespace;
+        let origin = row.origin;
+
+        let applied_head =
+            head_status_from_row(row.applied_seq, row.applied_head_sha).map_err(|source| {
+                StoreRuntimeError::WatermarkInvalid {
+                    kind: "applied",
+                    namespace: namespace.clone(),
+                    origin,
+                    source,
+                }
+            })?;
+        applied
+            .observe_at_least(
+                &namespace,
+                &origin,
+                Seq0::new(row.applied_seq),
+                applied_head,
+            )
+            .map_err(|source| StoreRuntimeError::WatermarkInvalid {
+                kind: "applied",
+                namespace: namespace.clone(),
+                origin,
+                source,
+            })?;
+
+        let durable_head =
+            head_status_from_row(row.durable_seq, row.durable_head_sha).map_err(|source| {
+                StoreRuntimeError::WatermarkInvalid {
+                    kind: "durable",
+                    namespace: namespace.clone(),
+                    origin,
+                    source,
+                }
+            })?;
+        durable
+            .observe_at_least(
+                &namespace,
+                &origin,
+                Seq0::new(row.durable_seq),
+                durable_head,
+            )
+            .map_err(|source| StoreRuntimeError::WatermarkInvalid {
+                kind: "durable",
+                namespace: namespace.clone(),
+                origin,
+                source,
+            })?;
+    }
+
+    Ok((applied, durable))
+}
+
+fn head_status_from_row(seq: u64, head: Option<[u8; 32]>) -> Result<HeadStatus, WatermarkError> {
+    let seq0 = Seq0::new(seq);
+    if seq == 0 {
+        return match head {
+            None => Ok(HeadStatus::Genesis),
+            Some(_) => Err(WatermarkError::UnexpectedHead { seq: seq0 }),
+        };
+    }
+
+    match head {
+        Some(sha) => Ok(HeadStatus::Known(sha)),
+        None => Err(WatermarkError::MissingHead { seq: seq0 }),
+    }
+}
+
+fn head_status_to_sha(head: Option<HeadStatus>) -> Option<[u8; 32]> {
+    match head {
+        Some(HeadStatus::Known(sha)) => Some(sha),
+        _ => None,
+    }
+}
+
 fn read_store_meta_optional(path: &Path) -> Result<Option<StoreMeta>, StoreRuntimeError> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -209,7 +326,7 @@ fn read_store_meta_optional(path: &Path) -> Result<Option<StoreMeta>, StoreRunti
             return Err(StoreRuntimeError::MetaRead {
                 path: Box::new(path.to_path_buf()),
                 source: err,
-            })
+            });
         }
     }
 
@@ -257,6 +374,137 @@ fn ensure_file_permissions(path: &Path) -> Result<(), StoreRuntimeError> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::TempDir;
+
+    use crate::daemon::remote::RemoteUrl;
+    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, Wal, WalIndex};
+    use crate::paths;
+    use std::sync::Arc;
+
+    struct DataDirGuard;
+
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            paths::set_data_dir_for_tests(None);
+        }
+    }
+
+    fn write_meta_for(store_id: StoreId, replica_id: ReplicaId, now_ms: u64) -> StoreMeta {
+        let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let versions = StoreMetaVersions::new(
+            STORE_FORMAT_VERSION,
+            WAL_FORMAT_VERSION,
+            CHECKPOINT_FORMAT_VERSION,
+            REPLICATION_PROTOCOL_VERSION,
+            INDEX_SCHEMA_VERSION,
+        );
+        let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
+        write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
+        meta
+    }
+
+    #[test]
+    fn phase3_head_sha_loads_from_index() {
+        let _lock = paths::lock_data_dir_for_tests();
+        let temp = TempDir::new().expect("temp dir");
+        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
+        let _guard = DataDirGuard;
+
+        let store_id = StoreId::new(Uuid::from_bytes([10u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
+        let now_ms = 1_700_000_000_000;
+        let meta = write_meta_for(store_id, replica_id, now_ms);
+        let index = SqliteWalIndex::open(
+            &paths::store_dir(store_id),
+            &meta,
+            IndexDurabilityMode::Cache,
+        )
+        .expect("open wal index");
+
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
+        let head = [7u8; 32];
+        let mut txn = index.writer().begin_txn().expect("begin txn");
+        txn.update_watermark(&namespace, &origin, 2, 2, Some(head), Some(head))
+            .expect("update watermark");
+        txn.commit().expect("commit watermark");
+
+        let wal = Wal::new(temp.path()).expect("wal");
+        let runtime = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            Arc::new(wal),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+        )
+        .expect("open runtime");
+
+        let applied = runtime
+            .watermarks_applied
+            .get(&namespace, &origin)
+            .copied()
+            .expect("applied watermark");
+        assert_eq!(applied.seq().get(), 2);
+        assert!(matches!(applied.head(), HeadStatus::Known(sha) if sha == head));
+
+        let durable = runtime
+            .watermarks_durable
+            .get(&namespace, &origin)
+            .copied()
+            .expect("durable watermark");
+        assert_eq!(durable.seq().get(), 2);
+        assert!(matches!(durable.head(), HeadStatus::Known(sha) if sha == head));
+        assert_eq!(runtime.durable_head_sha(&namespace, &origin), Some(head));
+        assert_eq!(runtime.applied_head_sha(&namespace, &origin), Some(head));
+    }
+
+    #[test]
+    fn phase3_head_sha_rejects_missing_head() {
+        let _lock = paths::lock_data_dir_for_tests();
+        let temp = TempDir::new().expect("temp dir");
+        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
+        let _guard = DataDirGuard;
+
+        let store_id = StoreId::new(Uuid::from_bytes([20u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([21u8; 16]));
+        let now_ms = 1_700_000_000_000;
+        let meta = write_meta_for(store_id, replica_id, now_ms);
+        let index = SqliteWalIndex::open(
+            &paths::store_dir(store_id),
+            &meta,
+            IndexDurabilityMode::Cache,
+        )
+        .expect("open wal index");
+
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
+        let mut txn = index.writer().begin_txn().expect("begin txn");
+        txn.update_watermark(&namespace, &origin, 1, 0, None, None)
+            .expect("update watermark");
+        txn.commit().expect("commit watermark");
+
+        let wal = Wal::new(temp.path()).expect("wal");
+        let result = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            Arc::new(wal),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(StoreRuntimeError::WatermarkInvalid { .. })
+        ));
+    }
 }
 
 fn new_replica_id() -> ReplicaId {
