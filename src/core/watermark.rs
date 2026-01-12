@@ -232,7 +232,7 @@ impl<K> Watermarks<K> {
             });
         }
 
-        let updated = Watermark::new(next.prev_seq0(), HeadStatus::Known(head))?;
+        let updated = Watermark::new(Seq0::new(next.get()), HeadStatus::Known(head))?;
         *self.entry_mut(namespace, origin) = updated;
         Ok(())
     }
