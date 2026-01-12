@@ -7,6 +7,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::error::{CoreError, InvalidId};
 
@@ -57,6 +58,316 @@ impl TryFrom<String> for ActorId {
 
 impl From<ActorId> for String {
     fn from(id: ActorId) -> String {
+        id.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StoreId(Uuid);
+
+impl StoreId {
+    pub fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, CoreError> {
+        parse_uuid_id(s, |raw, reason| InvalidId::StoreId { raw, reason }).map(Self)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for StoreId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StoreId({})", self.0)
+    }
+}
+
+impl fmt::Display for StoreId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for StoreId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        StoreId::parse_str(&s)
+    }
+}
+
+impl From<Uuid> for StoreId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<StoreId> for Uuid {
+    fn from(id: StoreId) -> Uuid {
+        id.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StoreEpoch(u64);
+
+impl StoreEpoch {
+    pub const ZERO: StoreEpoch = StoreEpoch(0);
+
+    pub fn new(epoch: u64) -> Self {
+        Self(epoch)
+    }
+
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Debug for StoreEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StoreEpoch({})", self.0)
+    }
+}
+
+impl fmt::Display for StoreEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u64> for StoreEpoch {
+    fn from(epoch: u64) -> Self {
+        Self(epoch)
+    }
+}
+
+impl From<StoreEpoch> for u64 {
+    fn from(epoch: StoreEpoch) -> u64 {
+        epoch.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StoreIdentity {
+    pub store_id: StoreId,
+    pub store_epoch: StoreEpoch,
+}
+
+impl StoreIdentity {
+    pub fn new(store_id: StoreId, store_epoch: StoreEpoch) -> Self {
+        Self {
+            store_id,
+            store_epoch,
+        }
+    }
+}
+
+impl fmt::Debug for StoreIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "StoreIdentity({}, {})",
+            self.store_id, self.store_epoch
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReplicaId(Uuid);
+
+impl ReplicaId {
+    pub fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, CoreError> {
+        parse_uuid_id(s, |raw, reason| InvalidId::ReplicaId { raw, reason }).map(Self)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for ReplicaId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ReplicaId({})", self.0)
+    }
+}
+
+impl fmt::Display for ReplicaId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for ReplicaId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        ReplicaId::parse_str(&s)
+    }
+}
+
+impl From<Uuid> for ReplicaId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<ReplicaId> for Uuid {
+    fn from(id: ReplicaId) -> Uuid {
+        id.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TxnId(Uuid);
+
+impl TxnId {
+    pub fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, CoreError> {
+        parse_uuid_id(s, |raw, reason| InvalidId::TxnId { raw, reason }).map(Self)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for TxnId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TxnId({})", self.0)
+    }
+}
+
+impl fmt::Display for TxnId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for TxnId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        TxnId::parse_str(&s)
+    }
+}
+
+impl From<Uuid> for TxnId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<TxnId> for Uuid {
+    fn from(id: TxnId) -> Uuid {
+        id.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ClientRequestId(Uuid);
+
+impl ClientRequestId {
+    pub fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, CoreError> {
+        parse_uuid_id(s, |raw, reason| InvalidId::ClientRequestId { raw, reason }).map(Self)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for ClientRequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ClientRequestId({})", self.0)
+    }
+}
+
+impl fmt::Display for ClientRequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for ClientRequestId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        ClientRequestId::parse_str(&s)
+    }
+}
+
+impl From<Uuid> for ClientRequestId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<ClientRequestId> for Uuid {
+    fn from(id: ClientRequestId) -> Uuid {
+        id.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SegmentId(Uuid);
+
+impl SegmentId {
+    pub fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, CoreError> {
+        parse_uuid_id(s, |raw, reason| InvalidId::SegmentId { raw, reason }).map(Self)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for SegmentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SegmentId({})", self.0)
+    }
+}
+
+impl fmt::Display for SegmentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for SegmentId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        SegmentId::parse_str(&s)
+    }
+}
+
+impl From<Uuid> for SegmentId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<SegmentId> for Uuid {
+    fn from(id: SegmentId) -> Uuid {
         id.0
     }
 }
@@ -498,9 +809,30 @@ impl From<BranchName> for String {
     }
 }
 
+fn parse_uuid_id<F>(raw: &str, invalid: F) -> Result<Uuid, CoreError>
+where
+    F: FnOnce(String, String) -> InvalidId,
+{
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(invalid(raw.to_string(), "empty".into()).into());
+    }
+    Uuid::parse_str(trimmed).map_err(|err| invalid(raw.to_string(), err.to_string()).into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::de::DeserializeOwned;
+
+    fn roundtrip<T>(value: &T)
+    where
+        T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        let parsed: T = serde_json::from_str(&json).unwrap();
+        assert_eq!(value, &parsed);
+    }
 
     #[test]
     fn branch_name_parse_valid() {
@@ -627,5 +959,48 @@ mod tests {
         let json = serde_json::to_string(&note).unwrap();
         let back: NoteId = serde_json::from_str(&json).unwrap();
         assert_eq!(note, back);
+    }
+
+    #[test]
+    fn store_id_serde_roundtrip() {
+        let id = StoreId::new(Uuid::from_bytes([1u8; 16]));
+        roundtrip(&id);
+    }
+
+    #[test]
+    fn store_epoch_serde_roundtrip() {
+        let epoch = StoreEpoch::new(42);
+        roundtrip(&epoch);
+    }
+
+    #[test]
+    fn store_identity_serde_roundtrip() {
+        let id = StoreId::new(Uuid::from_bytes([2u8; 16]));
+        let identity = StoreIdentity::new(id, StoreEpoch::new(7));
+        roundtrip(&identity);
+    }
+
+    #[test]
+    fn replica_id_serde_roundtrip() {
+        let id = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+        roundtrip(&id);
+    }
+
+    #[test]
+    fn txn_id_serde_roundtrip() {
+        let id = TxnId::new(Uuid::from_bytes([4u8; 16]));
+        roundtrip(&id);
+    }
+
+    #[test]
+    fn client_request_id_serde_roundtrip() {
+        let id = ClientRequestId::new(Uuid::from_bytes([5u8; 16]));
+        roundtrip(&id);
+    }
+
+    #[test]
+    fn segment_id_serde_roundtrip() {
+        let id = SegmentId::new(Uuid::from_bytes([6u8; 16]));
+        roundtrip(&id);
     }
 }

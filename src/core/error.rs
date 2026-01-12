@@ -21,6 +21,16 @@ pub enum InvalidId {
     Branch { raw: String, reason: String },
     #[error("content hash `{raw}` is invalid: {reason}")]
     ContentHash { raw: String, reason: String },
+    #[error("store id `{raw}` is invalid: {reason}")]
+    StoreId { raw: String, reason: String },
+    #[error("replica id `{raw}` is invalid: {reason}")]
+    ReplicaId { raw: String, reason: String },
+    #[error("txn id `{raw}` is invalid: {reason}")]
+    TxnId { raw: String, reason: String },
+    #[error("client request id `{raw}` is invalid: {reason}")]
+    ClientRequestId { raw: String, reason: String },
+    #[error("segment id `{raw}` is invalid: {reason}")]
+    SegmentId { raw: String, reason: String },
 }
 
 /// Invalid label string.

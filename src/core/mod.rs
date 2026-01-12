@@ -21,6 +21,7 @@ pub mod domain;
 pub mod error;
 pub mod identity;
 pub mod meta;
+pub mod store_meta;
 pub mod state;
 pub mod stores;
 pub mod time;
@@ -35,8 +36,12 @@ pub use domain::{BeadType, DepKind, Priority};
 pub use error::{
     CollisionError, CoreError, InvalidDependency, InvalidId, InvalidLabel, RangeError,
 };
-pub use identity::{ActorId, BeadId, BeadSlug, BranchName, ContentHash, NoteId};
+pub use identity::{
+    ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, NoteId, ReplicaId,
+    SegmentId, StoreEpoch, StoreId, StoreIdentity, TxnId,
+};
 pub use meta::{FormatVersion, Meta};
+pub use store_meta::StoreMeta;
 pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use stores::{DepStore, TombstoneStore};
 pub use time::{Stamp, WallClock, WriteStamp};
