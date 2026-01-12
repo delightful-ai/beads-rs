@@ -18,7 +18,7 @@ use super::dep::{DepEdge, DepKey};
 use super::domain::DepKind;
 use super::error::CoreError;
 use super::identity::BeadId;
-use super::time::WallClock;
+use super::time::{Stamp, WallClock};
 use super::tombstone::{Tombstone, TombstoneKey};
 
 /// Derived indexes for efficient dependency lookups.
@@ -121,6 +121,11 @@ impl CanonicalState {
 
     pub fn get_tombstone(&self, id: &BeadId) -> Option<&Tombstone> {
         self.tombstones.get(&TombstoneKey::global(id.clone()))
+    }
+
+    pub fn has_lineage_tombstone(&self, id: &BeadId, lineage: &Stamp) -> bool {
+        self.tombstones
+            .contains_key(&TombstoneKey::lineage(id.clone(), lineage.clone()))
     }
 
     pub fn contains(&self, id: &BeadId) -> bool {
@@ -254,6 +259,11 @@ impl CanonicalState {
         } else {
             self.tombstones.insert(key, tombstone);
         }
+    }
+
+    /// Remove a global deletion tombstone.
+    pub fn remove_global_tombstone(&mut self, id: &BeadId) -> Option<Tombstone> {
+        self.tombstones.remove(&TombstoneKey::global(id.clone()))
     }
 
     /// Insert or update a dependency edge.

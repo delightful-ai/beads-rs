@@ -20,6 +20,7 @@ pub mod dep;
 pub mod domain;
 pub mod durability;
 pub mod event;
+pub mod apply;
 pub mod error;
 pub mod identity;
 pub mod limits;
@@ -38,6 +39,7 @@ pub use bead::{Bead, BeadCore, BeadFields};
 pub use collections::{Label, Labels, NoteLog};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
+pub use apply::{apply_event, ApplyError, ApplyOutcome, NoteKey};
 pub use dep::{DepEdge, DepKey, DepLife, DepSpec};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
