@@ -182,6 +182,14 @@ impl WorkflowStatus {
         }
     }
 
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkflowStatus::Open => "open",
+            WorkflowStatus::InProgress => "in_progress",
+            WorkflowStatus::Closed => "closed",
+        }
+    }
+
     pub fn into_workflow(
         self,
         closed_reason: Option<String>,

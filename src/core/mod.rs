@@ -19,6 +19,7 @@ pub mod crdt;
 pub mod dep;
 pub mod domain;
 pub mod durability;
+pub mod event;
 pub mod error;
 pub mod identity;
 pub mod limits;
@@ -42,6 +43,10 @@ pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
     DurabilityClass, DurabilityOutcome, DurabilityProofV1, DurabilityReceipt, LocalFsyncProof,
     ReceiptMergeError, ReplicatedProof,
+};
+pub use event::{
+    decode_event_body, encode_event_body_canonical, hash_event_body, sha256_bytes, Canonical,
+    DecodeError, EncodeError, EventBody, EventBytes, EventKindV1, HlcMax, Opaque, Sha256,
 };
 pub use error::{
     CollisionError, CoreError, ErrorCode, ErrorPayload, InvalidDependency, InvalidId, InvalidLabel,

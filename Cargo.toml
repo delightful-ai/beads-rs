@@ -41,6 +41,8 @@ tar = "0.4"
 toml = "0.8"
 ureq = { version = "2", default-features = true }
 tempfile = "3"
+bytes = "1"
+minicbor = { version = "0.24", features = ["std"] }
 
 [features]
 default = ["cli"]
