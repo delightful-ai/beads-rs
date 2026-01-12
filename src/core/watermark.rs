@@ -320,4 +320,20 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, WatermarkError::NonContiguous { .. }));
     }
+
+    #[test]
+    fn advance_contiguous_sets_seq0_to_seq1() {
+        let mut watermarks = Watermarks::<Applied>::new();
+        let ns = NamespaceId::parse("core").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let next = Seq1::from_u64(1).unwrap();
+
+        watermarks
+            .advance_contiguous(&ns, &origin, next, [3u8; 32])
+            .unwrap();
+
+        let watermark = watermarks.get(&ns, &origin).expect("watermark");
+        assert_eq!(watermark.seq().get(), next.get());
+        assert!(matches!(watermark.head(), HeadStatus::Known(_)));
+    }
 }
