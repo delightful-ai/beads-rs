@@ -138,6 +138,7 @@ pub enum FsckEvidenceCode {
     RecordShaMismatch,
     PrevShaMismatch,
     NonContiguousSeq,
+    SealedSegmentLenMismatch,
     IndexOffsetOutOfBounds,
     IndexMissingSegment,
     IndexBehindWal,
@@ -975,7 +976,7 @@ fn check_index_offsets(
     segments_by_id: &BTreeMap<crate::core::SegmentId, SegmentInfo>,
     builder: &mut FsckReportBuilder,
 ) {
-    let index_path = paths::wal_index_path(meta.store_id());
+    let index_path = store_dir.join("index").join("wal.sqlite");
     if !index_path.exists() {
         return;
     }
@@ -1053,6 +1054,48 @@ fn check_index_offsets(
                             },
                             Some("rebuild wal.sqlite from WAL segments"),
                         );
+                    }
+
+                    if row.sealed {
+                        let Some(final_len) = row.final_len else {
+                            builder.record_issue(
+                                FsckCheckId::IndexOffsets,
+                                FsckStatus::Fail,
+                                FsckSeverity::High,
+                                FsckEvidence {
+                                    code: FsckEvidenceCode::SealedSegmentLenMismatch,
+                                    message: "wal.sqlite sealed segment missing final_len"
+                                        .to_string(),
+                                    path: Some(full_path.clone()),
+                                    namespace: Some(namespace.clone()),
+                                    origin: None,
+                                    seq: None,
+                                    offset: None,
+                                },
+                                Some("rebuild wal.sqlite from WAL segments"),
+                            );
+                            continue;
+                        };
+                        if final_len != segment.file_len {
+                            builder.record_issue(
+                                FsckCheckId::IndexOffsets,
+                                FsckStatus::Fail,
+                                FsckSeverity::High,
+                                FsckEvidence {
+                                    code: FsckEvidenceCode::SealedSegmentLenMismatch,
+                                    message: format!(
+                                        "sealed segment length mismatch (expected {final_len}, got {})",
+                                        segment.file_len
+                                    ),
+                                    path: Some(full_path.clone()),
+                                    namespace: Some(namespace.clone()),
+                                    origin: None,
+                                    seq: None,
+                                    offset: None,
+                                },
+                                Some("rebuild wal.sqlite from WAL segments"),
+                            );
+                        }
                     }
 
                     if row.last_indexed_offset > segment.file_len {

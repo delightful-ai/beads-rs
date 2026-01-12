@@ -534,6 +534,8 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
         | WalReplayError::RecordHeaderMismatch { .. }
         | WalReplayError::MissingHead { .. }
         | WalReplayError::UnexpectedHead { .. }
+        | WalReplayError::SealedSegmentFinalLenMissing { .. }
+        | WalReplayError::SealedSegmentLenMismatch { .. }
         | WalReplayError::MidFileCorruption { .. } => ErrorCode::WalCorrupt,
         WalReplayError::NonContiguousSeq { .. } => ErrorCode::GapDetected,
         WalReplayError::PrevShaMismatch { .. } => ErrorCode::PrevShaMismatch,

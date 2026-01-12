@@ -6,10 +6,10 @@ use std::fs;
 
 use uuid::Uuid;
 
-use beads_rs::daemon::wal::Record;
 use beads_rs::daemon::wal::fsck::{
     FsckCheckId, FsckEvidenceCode, FsckOptions, FsckRepairKind, FsckStatus, fsck_store_dir,
 };
+use beads_rs::daemon::wal::{Record, WalIndex, rebuild_index};
 use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
 
 use fixtures::wal::{TempWalDir, record_for_seq};
@@ -134,6 +134,61 @@ fn phase3_fsck_reports_header_mismatch() {
             .evidence
             .iter()
             .any(|e| e.code == FsckEvidenceCode::RecordHeaderMismatch)
+    );
+}
+
+#[test]
+fn phase3_fsck_reports_sealed_len_mismatch() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
+    let record1 = record_for_seq(temp.meta(), &namespace, origin, 1, None);
+    let record2 = record_for_seq(
+        temp.meta(),
+        &namespace,
+        origin,
+        2,
+        Some(record1.header.sha256),
+    );
+    let segment1 = temp
+        .write_segment(&namespace, 1_700_000_000_000, &[record1])
+        .expect("write segment");
+    temp.write_segment(&namespace, 1_700_000_000_001, &[record2])
+        .expect("write segment");
+    let index = temp.open_index().expect("open wal index");
+    let limits = Limits::default();
+
+    rebuild_index(temp.store_dir(), temp.meta(), &index, &limits).expect("rebuild index");
+
+    let rows = index.reader().list_segments(&namespace).expect("segments");
+    let mut sealed = rows
+        .iter()
+        .find(|row| row.segment_id == segment1.header.segment_id)
+        .expect("segment1 row")
+        .clone();
+    let final_len = sealed.final_len.expect("sealed final_len");
+    sealed.final_len = Some(final_len.saturating_add(1));
+    let mut txn = index.writer().begin_txn().expect("begin txn");
+    txn.upsert_segment(&sealed).expect("upsert segment");
+    txn.commit().expect("commit");
+
+    let report = fsck_store_dir(
+        temp.store_dir(),
+        temp.meta(),
+        FsckOptions::new(false, Limits::default()),
+    )
+    .expect("fsck store dir");
+
+    let offsets_check = report
+        .checks
+        .iter()
+        .find(|check| check.id == FsckCheckId::IndexOffsets)
+        .expect("index offsets check");
+    assert!(
+        offsets_check
+            .evidence
+            .iter()
+            .any(|e| e.code == FsckEvidenceCode::SealedSegmentLenMismatch)
     );
 }
 

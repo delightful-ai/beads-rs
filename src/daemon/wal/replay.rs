@@ -92,6 +92,16 @@ pub enum WalReplayError {
         offset: u64,
         len: u64,
     },
+    #[error("sealed segment missing final_len at {path:?}. Run `bd store fsck` to repair.")]
+    SealedSegmentFinalLenMissing { path: PathBuf },
+    #[error(
+        "sealed segment length mismatch at {path:?}: expected {expected}, got {actual}. Run `bd store fsck` to repair."
+    )]
+    SealedSegmentLenMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
     #[error("non-contiguous seq for {namespace} {origin}: expected {expected}, got {got}")]
     NonContiguousSeq {
         namespace: String,
@@ -171,6 +181,7 @@ fn replay_index(
         let segments = list_segments(&wal_dir.join(namespace.as_str()))?;
         let mut segments = verify_segments(segments, meta, &namespace)?;
         segments.sort_by_key(|segment| (segment.header.created_at_ms, segment.header.segment_id));
+        let last_segment_id = segments.last().map(|segment| segment.header.segment_id);
 
         let mut existing = BTreeMap::new();
         if mode == ReplayMode::CatchUp {
@@ -180,6 +191,7 @@ fn replay_index(
         }
 
         for segment in segments {
+            let is_last = Some(segment.header.segment_id) == last_segment_id;
             stats.segments_scanned += 1;
             let start_offset = match mode {
                 ReplayMode::Rebuild => segment.header_len,
@@ -202,6 +214,25 @@ fn replay_index(
                     offset: start_offset,
                     len: segment.file_len,
                 });
+            }
+
+            if mode == ReplayMode::CatchUp
+                && let Some(row) = existing
+                    .get(&segment.header.segment_id)
+                    .filter(|row| row.sealed)
+            {
+                let final_len =
+                    row.final_len
+                        .ok_or_else(|| WalReplayError::SealedSegmentFinalLenMissing {
+                            path: segment.path.clone(),
+                        })?;
+                if segment.file_len != final_len {
+                    return Err(WalReplayError::SealedSegmentLenMismatch {
+                        path: segment.path.clone(),
+                        expected: final_len,
+                        actual: segment.file_len,
+                    });
+                }
             }
 
             let mut txn = index.writer().begin_txn()?;
@@ -228,14 +259,16 @@ fn replay_index(
                 stats.segments_truncated += 1;
             }
 
+            let sealed = !is_last;
+            let final_len = sealed.then_some(scan.last_indexed_offset);
             let segment_row = SegmentRow {
                 namespace: namespace.clone(),
                 segment_id: segment.header.segment_id,
                 segment_path: segment_rel_path(store_dir, &segment.path),
                 created_at_ms: segment.header.created_at_ms,
                 last_indexed_offset: scan.last_indexed_offset,
-                sealed: false,
-                final_len: None,
+                sealed,
+                final_len,
             };
             txn.upsert_segment(&segment_row)?;
             txn.commit()?;
