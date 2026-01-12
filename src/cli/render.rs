@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 /// Render a daemon response for human output.
 pub fn render_human(payload: &ResponsePayload) -> String {
     match payload {
-        ResponsePayload::Op(op) => render_op(op),
+        ResponsePayload::Op(op) => render_op(&op.result),
         ResponsePayload::Query(q) => render_query(q),
         ResponsePayload::Synced(_) => "synced".into(),
         ResponsePayload::Refreshed(_) => "refreshed".into(),

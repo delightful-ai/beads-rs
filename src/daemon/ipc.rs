@@ -20,8 +20,8 @@ use thiserror::Error;
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::query::{Filters, QueryResult};
 use crate::core::error::details as error_details;
+use crate::core::{BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, Priority};
 pub use crate::core::{ErrorCode, ErrorPayload};
-use crate::core::{BeadType, DepKind, InvalidId, Limits, Priority};
 use crate::error::{Effect, Transience};
 
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
@@ -285,11 +285,24 @@ impl Response {
 /// use wrapper structs with a `result` field to avoid serializing as `null`,
 /// which would be ambiguous during deserialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpResponse {
+    #[serde(flatten)]
+    pub result: OpResult,
+    pub receipt: DurabilityReceipt,
+}
+
+impl OpResponse {
+    pub fn new(result: OpResult, receipt: DurabilityReceipt) -> Self {
+        Self { result, receipt }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 #[allow(clippy::large_enum_variant)]
 pub enum ResponsePayload {
     /// Mutation result.
-    Op(OpResult),
+    Op(OpResponse),
 
     /// Query result.
     Query(QueryResult),
@@ -394,27 +407,20 @@ impl From<OpError> for ErrorPayload {
             }
             OpError::AlreadyClaimed { by, expires } => {
                 let expires_at_ms = expires.map(|value| value.0);
-                ErrorPayload::new(ErrorCode::AlreadyClaimed, message, retryable).with_details(
-                    error_details::AlreadyClaimedDetails {
-                        by,
-                        expires_at_ms,
-                    },
-                )
+                ErrorPayload::new(ErrorCode::AlreadyClaimed, message, retryable)
+                    .with_details(error_details::AlreadyClaimedDetails { by, expires_at_ms })
             }
             OpError::CasMismatch { expected, actual } => {
-                ErrorPayload::new(ErrorCode::CasMismatch, message, retryable).with_details(
-                    error_details::CasMismatchDetails { expected, actual },
-                )
+                ErrorPayload::new(ErrorCode::CasMismatch, message, retryable)
+                    .with_details(error_details::CasMismatchDetails { expected, actual })
             }
             OpError::InvalidTransition { from, to } => {
-                ErrorPayload::new(ErrorCode::InvalidTransition, message, retryable).with_details(
-                    error_details::InvalidTransitionDetails { from, to },
-                )
+                ErrorPayload::new(ErrorCode::InvalidTransition, message, retryable)
+                    .with_details(error_details::InvalidTransitionDetails { from, to })
             }
             OpError::ValidationFailed { field, reason } => {
-                ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
-                    error_details::ValidationFailedDetails { field, reason },
-                )
+                ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable)
+                    .with_details(error_details::ValidationFailedDetails { field, reason })
             }
             OpError::NotAGitRepo(path) => {
                 ErrorPayload::new(ErrorCode::NotAGitRepo, message, retryable).with_details(
@@ -423,13 +429,10 @@ impl From<OpError> for ErrorPayload {
                     },
                 )
             }
-            OpError::NoRemote(path) => {
-                ErrorPayload::new(ErrorCode::NoRemote, message, retryable).with_details(
-                    error_details::PathDetails {
-                        path: path.display().to_string(),
-                    },
-                )
-            }
+            OpError::NoRemote(path) => ErrorPayload::new(ErrorCode::NoRemote, message, retryable)
+                .with_details(error_details::PathDetails {
+                    path: path.display().to_string(),
+                }),
             OpError::RepoNotInitialized(path) => {
                 ErrorPayload::new(ErrorCode::RepoNotInitialized, message, retryable).with_details(
                     error_details::PathDetails {
@@ -462,6 +465,18 @@ impl From<OpError> for ErrorPayload {
                     bead_id: bead_id.map(|id| id.as_str().to_string()),
                 },
             ),
+            OpError::DurabilityTimeout {
+                requested,
+                waited_ms,
+                pending_replica_ids,
+                receipt,
+            } => ErrorPayload::new(ErrorCode::DurabilityTimeout, message, retryable)
+                .with_details(error_details::DurabilityTimeoutDetails {
+                    requested,
+                    waited_ms,
+                    pending_replica_ids,
+                })
+                .with_receipt(receipt),
             OpError::Wal(e) => match &e {
                 crate::daemon::wal::WalError::TooLarge {
                     max_bytes,
@@ -479,11 +494,12 @@ impl From<OpError> for ErrorPayload {
             },
             OpError::WalMerge { errors } => {
                 let errors = errors.into_iter().map(|err| err.to_string()).collect();
-                ErrorPayload::new(ErrorCode::WalMergeConflict, message, retryable).with_details(
-                    error_details::WalMergeConflictDetails { errors },
-                )
+                ErrorPayload::new(ErrorCode::WalMergeConflict, message, retryable)
+                    .with_details(error_details::WalMergeConflictDetails { errors })
             }
-            OpError::NotClaimedByYou => ErrorPayload::new(ErrorCode::NotClaimedByYou, message, retryable),
+            OpError::NotClaimedByYou => {
+                ErrorPayload::new(ErrorCode::NotClaimedByYou, message, retryable)
+            }
             OpError::DepNotFound => ErrorPayload::new(ErrorCode::DepNotFound, message, retryable),
             OpError::LoadTimeout {
                 repo,
@@ -512,25 +528,26 @@ impl From<IpcError> for ErrorPayload {
                     reason: Some(err.to_string()),
                 }),
             IpcError::Io(_) => ErrorPayload::new(ErrorCode::IoError, message, retryable),
-            IpcError::InvalidId(err) => {
-                ErrorPayload::new(ErrorCode::InvalidId, message, retryable)
-                    .with_details(invalid_id_details(&err))
+            IpcError::InvalidId(err) => ErrorPayload::new(ErrorCode::InvalidId, message, retryable)
+                .with_details(invalid_id_details(&err)),
+            IpcError::Disconnected => {
+                ErrorPayload::new(ErrorCode::Disconnected, message, retryable)
             }
-            IpcError::Disconnected => ErrorPayload::new(ErrorCode::Disconnected, message, retryable),
             IpcError::DaemonUnavailable(_) => {
                 ErrorPayload::new(ErrorCode::DaemonUnavailable, message, retryable)
             }
             IpcError::DaemonVersionMismatch { .. } => {
                 ErrorPayload::new(ErrorCode::DaemonVersionMismatch, message, retryable)
             }
-            IpcError::FrameTooLarge { max_bytes, got_bytes } => {
-                ErrorPayload::new(ErrorCode::FrameTooLarge, message, retryable).with_details(
-                    error_details::FrameTooLargeDetails {
-                        max_frame_bytes: max_bytes as u64,
-                        got_bytes: got_bytes as u64,
-                    },
-                )
-            }
+            IpcError::FrameTooLarge {
+                max_bytes,
+                got_bytes,
+            } => ErrorPayload::new(ErrorCode::FrameTooLarge, message, retryable).with_details(
+                error_details::FrameTooLargeDetails {
+                    max_frame_bytes: max_bytes as u64,
+                    got_bytes: got_bytes as u64,
+                },
+            ),
         }
     }
 }
@@ -651,9 +668,9 @@ impl IpcError {
                 Transience::Retryable
             }
             IpcError::DaemonVersionMismatch { .. } => Transience::Retryable,
-            IpcError::Parse(_)
-            | IpcError::InvalidId(_)
-            | IpcError::FrameTooLarge { .. } => Transience::Permanent,
+            IpcError::Parse(_) | IpcError::InvalidId(_) | IpcError::FrameTooLarge { .. } => {
+                Transience::Permanent
+            }
         }
     }
 
@@ -1212,6 +1229,10 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{
+        DurabilityClass, DurabilityReceipt, StoreEpoch, StoreId, StoreIdentity, TxnId,
+    };
+    use uuid::Uuid;
 
     #[test]
     fn request_roundtrip() {
@@ -1358,10 +1379,40 @@ mod tests {
         assert!(matches!(err, IpcError::FrameTooLarge { .. }));
     }
 
+    #[test]
+    fn durability_timeout_includes_receipt() {
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([4u8; 16])), StoreEpoch::ZERO);
+        let txn_id = TxnId::new(Uuid::from_bytes([5u8; 16]));
+        let receipt = DurabilityReceipt::local_fsync_defaults(store, txn_id, Vec::new(), 123);
+
+        let err = OpError::DurabilityTimeout {
+            requested: DurabilityClass::LocalFsync,
+            waited_ms: 500,
+            pending_replica_ids: None,
+            receipt: Box::new(receipt.clone()),
+        };
+
+        let payload: ErrorPayload = err.into();
+        assert_eq!(payload.code, ErrorCode::DurabilityTimeout);
+        let parsed: DurabilityReceipt = payload
+            .receipt_as()
+            .expect("receipt decode")
+            .expect("receipt");
+        assert_eq!(parsed, receipt);
+    }
+
     // Regression tests: verify all ResponsePayload variants roundtrip through Response
     mod response_roundtrip {
         use super::*;
-        use crate::core::BeadId;
+        use crate::core::{BeadId, DurabilityReceipt, StoreEpoch, StoreId, StoreIdentity, TxnId};
+        use uuid::Uuid;
+
+        fn sample_receipt() -> DurabilityReceipt {
+            let store =
+                StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), StoreEpoch::ZERO);
+            let txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
+            DurabilityReceipt::local_fsync_defaults(store, txn_id, Vec::new(), 1_726_000_000_000)
+        }
 
         fn roundtrip_response(resp: Response) {
             let json = serde_json::to_string(&resp).unwrap();
@@ -1374,17 +1425,25 @@ mod tests {
 
         #[test]
         fn op_created() {
-            let resp = Response::ok(ResponsePayload::Op(OpResult::Created {
-                id: BeadId::parse("bd-abc").unwrap(),
-            }));
+            let receipt = sample_receipt();
+            let resp = Response::ok(ResponsePayload::Op(OpResponse::new(
+                OpResult::Created {
+                    id: BeadId::parse("bd-abc").unwrap(),
+                },
+                receipt,
+            )));
             roundtrip_response(resp);
         }
 
         #[test]
         fn op_updated() {
-            let resp = Response::ok(ResponsePayload::Op(OpResult::Updated {
-                id: BeadId::parse("bd-abc").unwrap(),
-            }));
+            let receipt = sample_receipt();
+            let resp = Response::ok(ResponsePayload::Op(OpResponse::new(
+                OpResult::Updated {
+                    id: BeadId::parse("bd-abc").unwrap(),
+                },
+                receipt,
+            )));
             roundtrip_response(resp);
         }
 
@@ -1422,9 +1481,15 @@ mod tests {
 
         #[test]
         fn error_response() {
+            let receipt = sample_receipt();
             let resp = Response::err(
-                ErrorPayload::new(ErrorCode::Unknown("test_error".into()), "Something went wrong", false)
-                    .with_details(serde_json::json!({"key": "value"})),
+                ErrorPayload::new(
+                    ErrorCode::Unknown("test_error".into()),
+                    "Something went wrong",
+                    false,
+                )
+                .with_details(serde_json::json!({"key": "value"}))
+                .with_receipt(receipt),
             );
             roundtrip_response(resp);
         }

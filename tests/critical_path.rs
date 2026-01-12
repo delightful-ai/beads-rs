@@ -3592,7 +3592,10 @@ fn test_crash_recovery_replays_wal() {
     assert!(output.status.success());
     let payload = parse_response_payload(&output.stdout);
     let id = match payload {
-        ResponsePayload::Op(OpResult::Created { id }) => id,
+        ResponsePayload::Op(op) => match op.result {
+            OpResult::Created { id } => id,
+            other => panic!("unexpected create op result: {other:?}"),
+        },
         ResponsePayload::Query(QueryResult::Issue(issue)) => {
             beads_rs::core::BeadId::parse(&issue.id)
                 .unwrap_or_else(|e| panic!("invalid issue id in create response: {e}"))

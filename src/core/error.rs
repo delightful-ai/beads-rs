@@ -540,8 +540,8 @@ pub mod details {
     use uuid::Uuid;
 
     use super::super::{
-        ActorId, Applied, BeadId, ClientRequestId, NamespaceId, ReplicaId, SegmentId, StoreId,
-        Watermarks,
+        ActorId, Applied, BeadId, ClientRequestId, DurabilityClass, NamespaceId, ReplicaId,
+        SegmentId, StoreId, Watermarks,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -758,9 +758,7 @@ pub mod details {
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct DurabilityUnavailableDetails {
-        pub requested: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub k: Option<u32>,
+        pub requested: DurabilityClass,
         pub eligible_total: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub eligible_replica_ids: Option<Vec<ReplicaId>>,
@@ -768,7 +766,7 @@ pub mod details {
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct DurabilityTimeoutDetails {
-        pub requested: String,
+        pub requested: DurabilityClass,
         pub waited_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub pending_replica_ids: Option<Vec<ReplicaId>>,

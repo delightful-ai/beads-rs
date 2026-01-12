@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::core::DurabilityReceipt;
+
 use crate::core::{
     Bead, Claim, DepEdge as CoreDepEdge, DepKey as CoreDepKey, Tombstone as CoreTombstone,
     WallClock, Workflow, WriteStamp,

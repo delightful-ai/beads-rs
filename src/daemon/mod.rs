@@ -27,8 +27,8 @@ pub use core::{Daemon, LoadedRemote};
 pub use clock::Clock;
 pub use git_worker::{GitOp, GitResult, GitWorker, SyncResult, run_git_loop};
 pub use ipc::{
-    ErrorPayload, IpcError, Request, Response, ResponsePayload, decode_request, encode_response,
-    socket_path,
+    ErrorPayload, IpcError, OpResponse, Request, Response, ResponsePayload, decode_request,
+    encode_response, socket_path,
 };
 pub use ops::{BeadPatch, OpError, OpResult, Patch};
 pub use query::{Filters, Query, QueryResult, SortField};

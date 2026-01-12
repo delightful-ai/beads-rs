@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, ErrorCode, Label, Labels, Lww,
-    Priority, Stamp, WallClock, Workflow,
+    ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, DurabilityClass, DurabilityReceipt,
+    ErrorCode, Label, Labels, Lww, Priority, ReplicaId, Stamp, WallClock, Workflow,
 };
 use crate::daemon::wal::WalError;
 use crate::error::{Effect, Transience};
@@ -301,6 +301,14 @@ pub enum OpError {
         bead_id: Option<BeadId>,
     },
 
+    #[error("durability timeout after {waited_ms}ms for {requested}")]
+    DurabilityTimeout {
+        requested: DurabilityClass,
+        waited_ms: u64,
+        pending_replica_ids: Option<Vec<ReplicaId>>,
+        receipt: Box<DurabilityReceipt>,
+    },
+
     #[error(transparent)]
     Wal(#[from] WalError),
 
@@ -344,6 +352,7 @@ impl OpError {
             OpError::BeadDeleted(_) => ErrorCode::BeadDeleted,
             OpError::NoteTooLarge { .. } => ErrorCode::NoteTooLarge,
             OpError::LabelsTooMany { .. } => ErrorCode::LabelsTooMany,
+            OpError::DurabilityTimeout { .. } => ErrorCode::DurabilityTimeout,
             OpError::Wal(err) => match err {
                 WalError::TooLarge { .. } => ErrorCode::WalRecordTooLarge,
                 _ => ErrorCode::WalError,
@@ -381,6 +390,7 @@ impl OpError {
             | OpError::LabelsTooMany { .. }
             | OpError::NotClaimedByYou
             | OpError::DepNotFound => Transience::Permanent,
+            OpError::DurabilityTimeout { .. } => Transience::Retryable,
             OpError::LoadTimeout { .. } => Transience::Retryable,
             OpError::Internal(_) => Transience::Retryable,
         }
@@ -391,6 +401,7 @@ impl OpError {
         match self {
             OpError::Sync(e) => e.effect(),
             OpError::Wal(_) | OpError::WalMerge { .. } => Effect::None,
+            OpError::DurabilityTimeout { .. } => Effect::Some,
             _ => Effect::None,
         }
     }

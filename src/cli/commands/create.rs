@@ -68,8 +68,14 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     };
 
     let created_payload = send(&req)?;
-    let created_id = match created_payload {
-        ResponsePayload::Op(OpResult::Created { ref id }) => id.as_str().to_string(),
+    let created_id = match &created_payload {
+        ResponsePayload::Op(op) => match &op.result {
+            OpResult::Created { id } => id.as_str().to_string(),
+            _ => {
+                print_ok(&created_payload, ctx.json)?;
+                return Ok(());
+            }
+        },
         _ => {
             print_ok(&created_payload, ctx.json)?;
             return Ok(());
@@ -160,8 +166,19 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
         let resp = send_request(&req)?;
         let created_id = match resp {
             Response::Ok {
-                ok: ResponsePayload::Op(OpResult::Created { id }),
-            } => id.as_str().to_string(),
+                ok: ResponsePayload::Op(op),
+            } => match op.result {
+                OpResult::Created { id } => id.as_str().to_string(),
+                _ => {
+                    failed.push(t.title.clone());
+                    tracing::warn!(
+                        "warning: unexpected response creating {:?}: {:?}",
+                        t.title,
+                        op.result
+                    );
+                    continue;
+                }
+            },
             Response::Ok { ok } => {
                 // Unexpected ok payload; treat as failure for bulk mode.
                 failed.push(t.title.clone());

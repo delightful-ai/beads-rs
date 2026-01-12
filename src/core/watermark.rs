@@ -268,6 +268,15 @@ impl<K> Watermarks<K> {
         Ok(())
     }
 
+    pub fn merge_at_least(&mut self, other: &Watermarks<K>) -> Result<(), WatermarkError> {
+        for (namespace, origins) in &other.inner {
+            for (origin, watermark) in origins {
+                self.observe_at_least(namespace, origin, watermark.seq(), watermark.head())?;
+            }
+        }
+        Ok(())
+    }
+
     fn entry_mut(&mut self, namespace: &NamespaceId, origin: &ReplicaId) -> &mut Watermark<K> {
         self.inner
             .entry(namespace.clone())

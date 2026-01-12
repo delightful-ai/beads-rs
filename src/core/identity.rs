@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::error::{CoreError, InvalidId};
+use super::{NamespaceId, Seq1};
 
 /// Actor identifier - non-empty string.
 ///
@@ -168,11 +169,7 @@ impl StoreIdentity {
 
 impl fmt::Debug for StoreIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "StoreIdentity({}, {})",
-            self.store_id, self.store_epoch
-        )
+        write!(f, "StoreIdentity({}, {})", self.store_id, self.store_epoch)
     }
 }
 
@@ -222,6 +219,23 @@ impl From<Uuid> for ReplicaId {
 impl From<ReplicaId> for Uuid {
     fn from(id: ReplicaId) -> Uuid {
         id.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct EventId {
+    pub origin_replica_id: ReplicaId,
+    pub namespace: NamespaceId,
+    pub origin_seq: Seq1,
+}
+
+impl EventId {
+    pub fn new(origin_replica_id: ReplicaId, namespace: NamespaceId, origin_seq: Seq1) -> Self {
+        Self {
+            origin_replica_id,
+            namespace,
+            origin_seq,
+        }
     }
 }
 
