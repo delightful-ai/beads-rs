@@ -728,7 +728,7 @@ impl Daemon {
         let actor = self.actor().clone();
         let result = self.apply_wal_mutation(&remote, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
-            let note_id = generate_unique_note_id(&bead.notes, || NoteId::generate());
+            let note_id = generate_unique_note_id(&bead.notes, NoteId::generate);
             let note = Note::new(note_id.clone(), content, actor, stamp.at);
             bead.notes.insert(note);
             Ok(note_id)

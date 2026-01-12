@@ -41,7 +41,7 @@ pub use identity::{
     SegmentId, StoreEpoch, StoreId, StoreIdentity, TxnId,
 };
 pub use meta::{FormatVersion, Meta};
-pub use store_meta::StoreMeta;
+pub use store_meta::{StoreMeta, StoreMetaVersions};
 pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use stores::{DepStore, TombstoneStore};
 pub use time::{Stamp, WallClock, WriteStamp};

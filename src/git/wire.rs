@@ -342,7 +342,7 @@ pub struct ParsedMeta {
 /// Parse meta.json bytes.
 pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
     let content = parse_utf8(bytes)?;
-    let meta: WireMeta = serde_json::from_str(&content)?;
+    let meta: WireMeta = serde_json::from_str(content)?;
     Ok(ParsedMeta {
         format_version: meta.format_version,
         root_slug: meta.root_slug,

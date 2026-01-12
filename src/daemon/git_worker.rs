@@ -144,7 +144,7 @@ impl GitWorker {
         let force_push = fetched.phase.force_push.clone();
 
         // Step 3: CRDT merge - both local and remote are authoritative
-        build_load_result(
+        build_load_result(LoadResultInputs {
             local_state,
             local_slug,
             local_meta_stamp,
@@ -154,7 +154,7 @@ impl GitWorker {
             fetch_error,
             divergence,
             force_push,
-        )
+        })
     }
 
     /// Load state using only local refs (no network).
@@ -197,17 +197,17 @@ impl GitWorker {
             }
         };
 
-        build_load_result(
+        build_load_result(LoadResultInputs {
             local_state,
             local_slug,
             local_meta_stamp,
             remote_state,
             remote_slug,
             remote_meta_stamp,
-            None,
-            None,
-            None,
-        )
+            fetch_error: None,
+            divergence: None,
+            force_push: None,
+        })
     }
 
     /// Sync local state to remote.
@@ -282,7 +282,7 @@ impl GitWorker {
     }
 }
 
-fn build_load_result(
+struct LoadResultInputs {
     local_state: CanonicalState,
     local_slug: Option<String>,
     local_meta_stamp: Option<WriteStamp>,
@@ -292,7 +292,20 @@ fn build_load_result(
     fetch_error: Option<String>,
     divergence: Option<DivergenceInfo>,
     force_push: Option<crate::git::sync::ForcePushInfo>,
-) -> Result<LoadResult, SyncError> {
+}
+
+fn build_load_result(inputs: LoadResultInputs) -> Result<LoadResult, SyncError> {
+    let LoadResultInputs {
+        local_state,
+        local_slug,
+        local_meta_stamp,
+        remote_state,
+        remote_slug,
+        remote_meta_stamp,
+        fetch_error,
+        divergence,
+        force_push,
+    } = inputs;
     let merged =
         CanonicalState::join(&local_state, &remote_state).map_err(|errs| SyncError::MergeConflict {
             errors: errs,

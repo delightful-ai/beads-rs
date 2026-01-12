@@ -21,6 +21,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub use crate::core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, ClientRequestId,
     Closure, DepEdge, DepKey, DepKind, Labels, Lww, Note, NoteId, NoteLog, Priority, ReplicaId,
-    SegmentId, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, Tombstone, TxnId, WallClock,
-    Workflow, WriteStamp,
+    SegmentId, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, Tombstone,
+    TxnId, WallClock, Workflow, WriteStamp,
 };
