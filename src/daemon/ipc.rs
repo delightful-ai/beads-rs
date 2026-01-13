@@ -833,6 +833,7 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
         },
         WalIndexError::MetaMissing { .. }
         | WalIndexError::EventIdDecode(_)
+        | WalIndexError::HlcRowDecode(_)
         | WalIndexError::SegmentRowDecode(_)
         | WalIndexError::WatermarkRowDecode(_)
         | WalIndexError::CborDecode(_)

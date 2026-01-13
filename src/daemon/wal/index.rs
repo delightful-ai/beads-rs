@@ -9,7 +9,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::{
-    ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq1, StoreMeta, TxnId,
+    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq1, StoreMeta, TxnId,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = 1;
@@ -55,6 +55,8 @@ pub enum WalIndexError {
         existing_sha256: [u8; 32],
         new_sha256: [u8; 32],
     },
+    #[error("hlc row decode failed: {0}")]
+    HlcRowDecode(String),
     #[error("segment row decode failed: {0}")]
     SegmentRowDecode(String),
     #[error("watermark row decode failed: {0}")]
@@ -106,6 +108,7 @@ pub trait WalIndexTxn {
         applied_head_sha: Option<[u8; 32]>,
         durable_head_sha: Option<[u8; 32]>,
     ) -> Result<(), WalIndexError>;
+    fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalIndexError>;
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError>;
     #[allow(clippy::too_many_arguments)]
     fn upsert_client_request(
@@ -130,6 +133,7 @@ pub trait WalIndexReader {
     ) -> Result<Option<[u8; 32]>, WalIndexError>;
     fn list_segments(&self, ns: &NamespaceId) -> Result<Vec<SegmentRow>, WalIndexError>;
     fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError>;
+    fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError>;
     fn iter_from(
         &self,
         ns: &NamespaceId,
@@ -186,6 +190,13 @@ pub struct WatermarkRow {
     pub durable_seq: u64,
     pub applied_head_sha: Option<[u8; 32]>,
     pub durable_head_sha: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HlcRow {
+    pub actor_id: ActorId,
+    pub last_physical_ms: u64,
+    pub last_logical: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -427,6 +438,21 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         Ok(())
     }
 
+    fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalIndexError> {
+        let last_physical_ms = i64::try_from(hlc.last_physical_ms).map_err(|_| {
+            WalIndexError::HlcRowDecode("last_physical_ms out of range".to_string())
+        })?;
+        let last_logical = i64::from(hlc.last_logical);
+        self.conn.execute(
+            "INSERT INTO hlc (actor_id, last_physical_ms, last_logical) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(actor_id) DO UPDATE SET \
+               last_physical_ms = excluded.last_physical_ms, \
+               last_logical = excluded.last_logical",
+            params![hlc.actor_id.as_str(), last_physical_ms, last_logical],
+        )?;
+        Ok(())
+    }
+
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError> {
         let namespace = segment.namespace.as_str();
         let segment_blob = uuid_blob(segment.segment_id.as_uuid());
@@ -643,6 +669,36 @@ impl WalIndexReader for SqliteWalIndexReader {
                 });
             }
             Ok(watermarks)
+        })
+    }
+
+    fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError> {
+        self.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT actor_id, last_physical_ms, last_logical FROM hlc")?;
+            let mut rows = stmt.query([])?;
+            let mut hlc_rows = Vec::new();
+            while let Some(row) = rows.next()? {
+                let actor_id: String = row.get(0)?;
+                let last_physical_ms: i64 = row.get(1)?;
+                let last_logical: i64 = row.get(2)?;
+
+                let actor_id = ActorId::new(actor_id)
+                    .map_err(|err| WalIndexError::HlcRowDecode(err.to_string()))?;
+                let last_physical_ms = u64::try_from(last_physical_ms).map_err(|_| {
+                    WalIndexError::HlcRowDecode("last_physical_ms out of range".to_string())
+                })?;
+                let last_logical = u32::try_from(last_logical).map_err(|_| {
+                    WalIndexError::HlcRowDecode("last_logical out of range".to_string())
+                })?;
+
+                hlc_rows.push(HlcRow {
+                    actor_id,
+                    last_physical_ms,
+                    last_logical,
+                });
+            }
+            Ok(hlc_rows)
         })
     }
 
