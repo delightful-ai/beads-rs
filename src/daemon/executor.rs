@@ -15,6 +15,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crossbeam::channel::Sender;
 
+use super::broadcast::BroadcastEvent;
 use super::core::{detect_clock_skew, Daemon, NormalizedMutationMeta};
 use super::git_worker::GitOp;
 use super::ipc::{OpResponse, Response, ResponsePayload};
@@ -27,7 +28,7 @@ use super::wal::{
 };
 use crate::core::{
     apply_event, decode_event_body, hash_event_body, BeadId, BeadType, DepKind, DurabilityReceipt,
-    EventBody, EventId, HeadStatus, Limits, NoteId, Priority, Seq1, WallClock, Watermark,
+    EventBody, EventId, HeadStatus, Limits, NoteId, Priority, Seq1, Sha256, WallClock, Watermark,
     WatermarkError, WriteStamp, TxnDeltaV1, TxnOpV1, WirePatch,
 };
 use crate::paths;
@@ -175,7 +176,8 @@ impl Daemon {
             request.clone(),
         )?;
 
-        let sha = hash_event_body(&draft.event_bytes).0;
+        let sha = hash_event_body(&draft.event_bytes);
+        let sha_bytes = sha.0;
         let request_sha256 = draft.client_request_id.map(|_| draft.request_sha256);
 
         let record = Record {
@@ -186,7 +188,7 @@ impl Daemon {
                 txn_id: draft.event_body.txn_id,
                 client_request_id: draft.event_body.client_request_id,
                 request_sha256,
-                sha256: sha,
+                sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
             payload: Bytes::copy_from_slice(draft.event_bytes.as_ref()),
@@ -212,13 +214,20 @@ impl Daemon {
             final_len: Some(last_indexed_offset),
         };
 
+        let broadcast_prev = prev_sha.map(Sha256);
         let event_id = EventId::new(origin_replica_id, namespace.clone(), origin_seq);
+        let broadcast_event = BroadcastEvent::new(
+            event_id.clone(),
+            sha,
+            broadcast_prev,
+            draft.event_bytes.clone(),
+        );
         let event_ids = vec![event_id];
         txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
         txn.record_event(
             &namespace,
             &event_ids[0],
-            sha,
+            sha_bytes,
             prev_sha,
             append.segment_id,
             append.offset,
@@ -271,10 +280,13 @@ impl Daemon {
             store_runtime.repo_state.last_clock_skew =
                 detect_clock_skew(now_wall_ms, write_stamp.wall_ms);
             store_runtime.repo_state.mark_dirty();
+            if let Err(err) = store_runtime.broadcaster.publish(broadcast_event.clone()) {
+                tracing::warn!("event broadcast failed: {err}");
+            }
 
             store_runtime
                 .watermarks_applied
-                .advance_contiguous(&namespace, &origin_replica_id, origin_seq, sha)
+                .advance_contiguous(&namespace, &origin_replica_id, origin_seq, sha_bytes)
                 .map_err(|err| {
                     OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
                         kind: "applied",
@@ -285,7 +297,7 @@ impl Daemon {
                 })?;
             store_runtime
                 .watermarks_durable
-                .advance_contiguous(&namespace, &origin_replica_id, origin_seq, sha)
+                .advance_contiguous(&namespace, &origin_replica_id, origin_seq, sha_bytes)
                 .map_err(|err| {
                     OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
                         kind: "durable",
