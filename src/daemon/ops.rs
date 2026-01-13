@@ -18,7 +18,7 @@ use crate::core::{
 };
 use crate::daemon::store_lock::StoreLockError;
 use crate::daemon::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::{WalError, WalIndexError, WalReplayError};
+use crate::daemon::wal::{EventWalError, WalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
 
@@ -577,9 +577,8 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
                 ErrorCode::IoError
             }
         }
-        WalReplayError::SegmentHeader { .. } | WalReplayError::SegmentHeaderMismatch { .. } => {
-            ErrorCode::SegmentHeaderMismatch
-        }
+        WalReplayError::SegmentHeader { source, .. } => wal_segment_header_error_code(source),
+        WalReplayError::SegmentHeaderMismatch { .. } => ErrorCode::SegmentHeaderMismatch,
         WalReplayError::RecordShaMismatch(_) => ErrorCode::HashMismatch,
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
@@ -595,6 +594,13 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
             ErrorCode::IndexCorrupt
         }
         WalReplayError::Index(err) => wal_index_error_code(err),
+    }
+}
+
+fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
+    match source {
+        EventWalError::SegmentHeaderUnsupportedVersion { .. } => ErrorCode::WalFormatUnsupported,
+        _ => ErrorCode::WalCorrupt,
     }
 }
 
