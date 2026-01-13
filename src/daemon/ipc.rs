@@ -26,7 +26,7 @@ use crate::core::{
     Applied, BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, Priority, Watermarks,
 };
 pub use crate::core::{ErrorCode, ErrorPayload};
-use crate::daemon::wal::{WalIndexError, WalReplayError};
+use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
@@ -780,6 +780,18 @@ fn wal_replay_error_payload(err: WalReplayError, message: String, retryable: boo
                 },
             )
         }
+        WalReplayError::SegmentHeader {
+            source: EventWalError::SegmentHeaderUnsupportedVersion { got, supported },
+            ..
+        } => ErrorPayload::new(ErrorCode::WalFormatUnsupported, message, retryable).with_details(
+            error_details::WalFormatUnsupportedDetails {
+                wal_format_version: *got,
+                supported: vec![*supported],
+            },
+        ),
+        WalReplayError::SegmentHeader { .. } => {
+            ErrorPayload::new(wal_replay_error_code(&err), message, retryable)
+        }
         _ => ErrorPayload::new(wal_replay_error_code(&err), message, retryable),
     }
 }
@@ -819,9 +831,8 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
                 ErrorCode::IoError
             }
         }
-        WalReplayError::SegmentHeader { .. } | WalReplayError::SegmentHeaderMismatch { .. } => {
-            ErrorCode::SegmentHeaderMismatch
-        }
+        WalReplayError::SegmentHeader { source, .. } => wal_segment_header_error_code(source),
+        WalReplayError::SegmentHeaderMismatch { .. } => ErrorCode::SegmentHeaderMismatch,
         WalReplayError::RecordShaMismatch(_) => ErrorCode::HashMismatch,
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
@@ -837,6 +848,13 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
             ErrorCode::IndexCorrupt
         }
         WalReplayError::Index(err) => wal_index_error_code(err),
+    }
+}
+
+fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
+    match source {
+        EventWalError::SegmentHeaderUnsupportedVersion { .. } => ErrorCode::WalFormatUnsupported,
+        _ => ErrorCode::WalCorrupt,
     }
 }
 
@@ -1599,7 +1617,7 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::wal::RecordShaMismatchInfo;
+    use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo};
     use crate::core::{
         DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, StoreEpoch, StoreId,
         StoreIdentity, TxnId,
@@ -1742,6 +1760,47 @@ mod tests {
         assert_eq!(details.eid.origin_seq, 7);
         assert_eq!(details.expected_sha256, hex::encode([3u8; 32]));
         assert_eq!(details.got_sha256, hex::encode([4u8; 32]));
+    }
+
+    #[test]
+    fn wal_replay_format_unsupported_includes_details() {
+        let err = WalReplayError::SegmentHeader {
+            path: PathBuf::from("/tmp/segment.wal"),
+            source: EventWalError::SegmentHeaderUnsupportedVersion {
+                got: 3,
+                supported: 2,
+            },
+        };
+
+        let payload = store_runtime_error_payload(
+            StoreRuntimeError::WalReplay(err),
+            "boom".to_string(),
+            false,
+        );
+
+        assert_eq!(payload.code, ErrorCode::WalFormatUnsupported);
+        let details = payload
+            .details_as::<error_details::WalFormatUnsupportedDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.wal_format_version, 3);
+        assert_eq!(details.supported, vec![2]);
+    }
+
+    #[test]
+    fn wal_replay_header_decode_is_corrupt() {
+        let err = WalReplayError::SegmentHeader {
+            path: PathBuf::from("/tmp/segment.wal"),
+            source: EventWalError::SegmentHeaderMagicMismatch { got: [0u8; 5] },
+        };
+
+        let payload = store_runtime_error_payload(
+            StoreRuntimeError::WalReplay(err),
+            "boom".to_string(),
+            false,
+        );
+
+        assert_eq!(payload.code, ErrorCode::WalCorrupt);
     }
 
     #[test]
