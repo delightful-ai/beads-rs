@@ -10,6 +10,7 @@ pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
         id: id.clone(),
         reason: args.reason.clone(),
         on_branch: None,
+        meta: ctx.mutation_meta(),
     };
     let ok = send(&req)?;
     if ctx.json {

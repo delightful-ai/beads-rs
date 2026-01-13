@@ -10,6 +10,7 @@ pub(crate) fn handle(ctx: &Ctx, args: StaleArgs) -> Result<()> {
         days: args.days,
         status: args.status.clone(),
         limit: Some(args.limit),
+        read: ctx.read_consistency(),
     };
     let ok = send(&req)?;
     if ctx.json {

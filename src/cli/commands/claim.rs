@@ -8,6 +8,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ClaimArgs) -> Result<()> {
         repo: ctx.repo.clone(),
         id,
         lease_secs: args.lease_secs,
+        meta: ctx.mutation_meta(),
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

@@ -9,6 +9,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let req = Request::Show {
         repo: ctx.repo.clone(),
         id,
+        read: ctx.read_consistency(),
     };
     let ok = send(&req)?;
 
@@ -18,6 +19,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             let deps_payload = send(&Request::Deps {
                 repo: ctx.repo.clone(),
                 id: view.id.clone(),
+                read: ctx.read_consistency(),
             })?;
             let (incoming_edges, outgoing_edges) = match deps_payload {
                 ResponsePayload::Query(QueryResult::Deps { incoming, outgoing }) => {
@@ -37,6 +39,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             let notes_payload = send(&Request::Notes {
                 repo: ctx.repo.clone(),
                 id: view.id.clone(),
+                read: ctx.read_consistency(),
             })?;
             let notes = match notes_payload {
                 ResponsePayload::Query(QueryResult::Notes(n)) => n,

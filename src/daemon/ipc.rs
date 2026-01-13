@@ -22,7 +22,9 @@ use super::query::{Filters, QueryResult};
 use super::store_lock::StoreLockError;
 use super::store_runtime::StoreRuntimeError;
 use crate::core::error::details as error_details;
-use crate::core::{BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, Priority};
+use crate::core::{
+    Applied, BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, Priority, Watermarks,
+};
 pub use crate::core::{ErrorCode, ErrorPayload};
 use crate::daemon::wal::{WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
@@ -32,6 +34,28 @@ pub const IPC_PROTOCOL_VERSION: u32 = 1;
 // =============================================================================
 // Request - All IPC requests
 // =============================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MutationMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReadConsistency {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_min_seen: Option<Watermarks<Applied>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_timeout_ms: Option<u64>,
+}
 
 /// IPC request (mutation or query).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +89,8 @@ pub enum Request {
         labels: Vec<String>,
         #[serde(default)]
         dependencies: Vec<String>,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Update an existing bead.
@@ -74,6 +100,8 @@ pub enum Request {
         patch: BeadPatch,
         #[serde(default)]
         cas: Option<String>,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Add labels to a bead.
@@ -81,6 +109,8 @@ pub enum Request {
         repo: PathBuf,
         id: String,
         labels: Vec<String>,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Remove labels from a bead.
@@ -88,6 +118,8 @@ pub enum Request {
         repo: PathBuf,
         id: String,
         labels: Vec<String>,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Set or clear a parent relationship.
@@ -96,6 +128,8 @@ pub enum Request {
         id: String,
         #[serde(default)]
         parent: Option<String>,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Close a bead.
@@ -106,10 +140,17 @@ pub enum Request {
         reason: Option<String>,
         #[serde(default)]
         on_branch: Option<String>,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Reopen a closed bead.
-    Reopen { repo: PathBuf, id: String },
+    Reopen {
+        repo: PathBuf,
+        id: String,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
+    },
 
     /// Delete a bead (soft delete).
     Delete {
@@ -117,6 +158,8 @@ pub enum Request {
         id: String,
         #[serde(default)]
         reason: Option<String>,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Add a dependency.
@@ -125,6 +168,8 @@ pub enum Request {
         from: String,
         to: String,
         kind: DepKind,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Remove a dependency.
@@ -133,6 +178,8 @@ pub enum Request {
         from: String,
         to: String,
         kind: DepKind,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Add a note.
@@ -140,6 +187,8 @@ pub enum Request {
         repo: PathBuf,
         id: String,
         content: String,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Claim a bead.
@@ -148,27 +197,43 @@ pub enum Request {
         id: String,
         #[serde(default = "default_lease_secs")]
         lease_secs: u64,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     /// Release a claim.
-    Unclaim { repo: PathBuf, id: String },
+    Unclaim {
+        repo: PathBuf,
+        id: String,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
+    },
 
     /// Extend a claim.
     ExtendClaim {
         repo: PathBuf,
         id: String,
         lease_secs: u64,
+        #[serde(default, flatten)]
+        meta: MutationMeta,
     },
 
     // === Queries ===
     /// Get a single bead.
-    Show { repo: PathBuf, id: String },
+    Show {
+        repo: PathBuf,
+        id: String,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
 
     /// List beads.
     List {
         repo: PathBuf,
         #[serde(default)]
         filters: Filters,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
     },
 
     /// Get ready beads.
@@ -176,19 +241,40 @@ pub enum Request {
         repo: PathBuf,
         #[serde(default)]
         limit: Option<usize>,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
     },
 
     /// Get dependency tree.
-    DepTree { repo: PathBuf, id: String },
+    DepTree {
+        repo: PathBuf,
+        id: String,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
 
     /// Get dependencies.
-    Deps { repo: PathBuf, id: String },
+    Deps {
+        repo: PathBuf,
+        id: String,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
 
     /// Get notes.
-    Notes { repo: PathBuf, id: String },
+    Notes {
+        repo: PathBuf,
+        id: String,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
 
     /// Get blocked issues.
-    Blocked { repo: PathBuf },
+    Blocked {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
 
     /// Get stale issues.
     Stale {
@@ -199,6 +285,8 @@ pub enum Request {
         status: Option<String>,
         #[serde(default)]
         limit: Option<usize>,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
     },
 
     /// Count issues matching filters.
@@ -208,6 +296,8 @@ pub enum Request {
         filters: Filters,
         #[serde(default)]
         group_by: Option<String>,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
     },
 
     /// Show deleted (tombstoned) issues.
@@ -217,6 +307,8 @@ pub enum Request {
         since_ms: Option<u64>,
         #[serde(default)]
         id: Option<String>,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
     },
 
     /// Epic completion status.
@@ -224,6 +316,8 @@ pub enum Request {
         repo: PathBuf,
         #[serde(default)]
         eligible_only: bool,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
     },
 
     // === Control ===
@@ -241,10 +335,18 @@ pub enum Request {
     Init { repo: PathBuf },
 
     /// Get sync status.
-    Status { repo: PathBuf },
+    Status {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
 
     /// Validate state.
-    Validate { repo: PathBuf },
+    Validate {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
 
     /// Ping (health check).
     Ping,
@@ -480,13 +582,12 @@ impl From<OpError> for ErrorPayload {
                 requested,
                 eligible_total,
                 eligible_replica_ids,
-            } => ErrorPayload::new(ErrorCode::DurabilityUnavailable, message, retryable).with_details(
-                error_details::DurabilityUnavailableDetails {
+            } => ErrorPayload::new(ErrorCode::DurabilityUnavailable, message, retryable)
+                .with_details(error_details::DurabilityUnavailableDetails {
                     requested,
                     eligible_total,
                     eligible_replica_ids,
-                },
-            ),
+                }),
             OpError::DurabilityTimeout {
                 requested,
                 waited_ms,
@@ -526,9 +627,8 @@ impl From<OpError> for ErrorPayload {
                 )
             }
             OpError::NamespaceUnknown { namespace } => {
-                ErrorPayload::new(ErrorCode::NamespaceUnknown, message, retryable).with_details(
-                    error_details::NamespaceUnknownDetails { namespace },
-                )
+                ErrorPayload::new(ErrorCode::NamespaceUnknown, message, retryable)
+                    .with_details(error_details::NamespaceUnknownDetails { namespace })
             }
             OpError::Wal(e) => match &e {
                 crate::daemon::wal::WalError::TooLarge {
@@ -1477,6 +1577,7 @@ mod tests {
             estimated_minutes: None,
             labels: Vec::new(),
             dependencies: Vec::new(),
+            meta: MutationMeta::default(),
         };
 
         let json = serde_json::to_string(&req).unwrap();

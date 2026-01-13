@@ -67,6 +67,7 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     let req = Request::List {
         repo: ctx.repo.clone(),
         filters,
+        read: ctx.read_consistency(),
     };
     let ok = send(&req)?;
 
@@ -91,6 +92,7 @@ pub(crate) fn handle_search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     let req = Request::List {
         repo: ctx.repo.clone(),
         filters,
+        read: ctx.read_consistency(),
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

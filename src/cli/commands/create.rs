@@ -65,6 +65,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
         estimated_minutes: args.estimate,
         labels,
         dependencies,
+        meta: ctx.mutation_meta(),
     };
 
     let created_payload = send(&req)?;
@@ -160,6 +161,7 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
             estimated_minutes: None,
             labels: t.labels.clone(),
             dependencies,
+            meta: ctx.mutation_meta(),
         };
 
         // Best-effort: keep going on per-issue failures.

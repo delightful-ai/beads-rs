@@ -18,6 +18,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
             let req = Request::EpicStatus {
                 repo: ctx.repo.clone(),
                 eligible_only: args.eligible_only,
+                read: ctx.read_consistency(),
             };
             let ok = send(&req)?;
             if ctx.json {
@@ -35,6 +36,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
             let req = Request::EpicStatus {
                 repo: ctx.repo.clone(),
                 eligible_only: true,
+                read: ctx.read_consistency(),
             };
             let ok = send(&req)?;
             let statuses = match ok {
@@ -79,6 +81,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
                     id: epic_id.clone(),
                     reason: Some("All children completed".into()),
                     on_branch: None,
+                    meta: ctx.mutation_meta(),
                 };
                 let _ = send(&req)?;
                 closed.push(epic_id);

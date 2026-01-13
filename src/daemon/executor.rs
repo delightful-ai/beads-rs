@@ -17,8 +17,8 @@ use super::git_worker::GitOp;
 use super::ipc::{OpResponse, Response, ResponsePayload};
 use super::ops::{BeadPatch, MapLiveError, OpError, OpResult};
 use crate::core::{
-    Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge, DepKey,
-    DepKind, DepLife, DepSpec, DurabilityReceipt, Label, Labels, Limits, Lww, Note, NoteId,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge,
+    DepKey, DepKind, DepLife, DepSpec, DurabilityReceipt, Label, Labels, Limits, Lww, Note, NoteId,
     NoteLog, Priority, StoreIdentity, Tombstone, TxnId, WallClock, Workflow, WriteStamp,
 };
 
@@ -28,6 +28,7 @@ impl Daemon {
     pub fn apply_create(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         requested_id: Option<String>,
         parent: Option<String>,
         title: String,
@@ -75,7 +76,7 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        let actor = self.actor().clone();
+        let actor = actor.clone();
         let remote_url = remote.remote().clone();
         let root_slug = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state.root_slug.clone(),
@@ -125,7 +126,7 @@ impl Daemon {
         });
 
         let desc_str = description.unwrap_or_default();
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
             // Determine ID.
             let (id, parent_id) = match (requested_id, parent) {
                 (Some(raw), None) => {
@@ -258,6 +259,7 @@ impl Daemon {
     pub fn apply_update(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         patch: BeadPatch,
         cas: Option<String>,
@@ -293,7 +295,7 @@ impl Daemon {
             }
         }
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
 
             // Apply patch
@@ -312,6 +314,7 @@ impl Daemon {
     pub fn apply_add_labels(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         labels: Vec<String>,
         _git_tx: &Sender<GitOp>,
@@ -327,7 +330,7 @@ impl Daemon {
         };
         let limits = self.limits().clone();
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
             let mut labels = bead.fields.labels.value.clone();
             for label in parsed {
@@ -348,6 +351,7 @@ impl Daemon {
     pub fn apply_remove_labels(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         labels: Vec<String>,
         _git_tx: &Sender<GitOp>,
@@ -362,7 +366,7 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
             let mut labels = bead.fields.labels.value.clone();
             for label in parsed {
@@ -382,6 +386,7 @@ impl Daemon {
     pub fn apply_set_parent(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         parent: Option<BeadId>,
         _git_tx: &Sender<GitOp>,
@@ -415,8 +420,7 @@ impl Daemon {
                         return Response::err(OpError::NotFound(desired.clone()));
                     }
                     if existing.len() == 1 && existing[0] == *desired {
-                        return self
-                            .op_response(&remote, OpResult::Updated { id: id.clone() });
+                        return self.op_response(&remote, OpResult::Updated { id: id.clone() });
                     }
                     if would_create_cycle(&repo_state.state, id, desired, DepKind::Parent) {
                         return Response::err(OpError::ValidationFailed {
@@ -430,8 +434,7 @@ impl Daemon {
                 }
                 None => {
                     if existing.is_empty() {
-                        return self
-                            .op_response(&remote, OpResult::Updated { id: id.clone() });
+                        return self.op_response(&remote, OpResult::Updated { id: id.clone() });
                     }
                 }
             }
@@ -440,7 +443,7 @@ impl Daemon {
         };
 
         let new_parent = parent.clone();
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             for existing_parent in existing_parents {
                 let key =
                     DepKey::new(id.clone(), existing_parent, DepKind::Parent).map_err(|e| {
@@ -477,6 +480,7 @@ impl Daemon {
     pub fn apply_close(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         reason: Option<String>,
         on_branch: Option<String>,
@@ -507,7 +511,7 @@ impl Daemon {
             }
         }
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
             let closure = Closure::new(reason, on_branch);
             bead.fields.workflow = Lww::new(Workflow::Closed(closure), stamp);
@@ -521,7 +525,13 @@ impl Daemon {
     }
 
     /// Reopen a closed bead.
-    pub fn apply_reopen(&mut self, repo: &Path, id: &BeadId, _git_tx: &Sender<GitOp>) -> Response {
+    pub fn apply_reopen(
+        &mut self,
+        repo: &Path,
+        actor: &ActorId,
+        id: &BeadId,
+        _git_tx: &Sender<GitOp>,
+    ) -> Response {
         let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
@@ -548,7 +558,7 @@ impl Daemon {
             }
         }
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
             bead.fields.workflow = Lww::new(Workflow::Open, stamp);
             Ok(())
@@ -564,6 +574,7 @@ impl Daemon {
     pub fn apply_delete(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         reason: Option<String>,
         _git_tx: &Sender<GitOp>,
@@ -584,7 +595,7 @@ impl Daemon {
             }
         }
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             let tombstone = Tombstone::new(id.clone(), stamp, reason);
             state.remove_live(id);
             state.insert_tombstone(tombstone);
@@ -601,6 +612,7 @@ impl Daemon {
     pub fn apply_add_dep(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         from: &BeadId,
         to: &BeadId,
         kind: DepKind,
@@ -649,7 +661,7 @@ impl Daemon {
             }
         }
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             let edge = DepEdge::new(stamp);
             state.insert_dep(key, edge);
             Ok(())
@@ -671,6 +683,7 @@ impl Daemon {
     pub fn apply_remove_dep(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         from: &BeadId,
         to: &BeadId,
         kind: DepKind,
@@ -692,7 +705,7 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
             let life = Lww::new(DepLife::Deleted, stamp.clone());
             let edge = DepEdge::with_life(stamp, life);
             state.insert_dep(key, edge);
@@ -715,6 +728,7 @@ impl Daemon {
     pub fn apply_add_note(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         content: String,
         _git_tx: &Sender<GitOp>,
@@ -738,11 +752,11 @@ impl Daemon {
             }
         }
 
-        let actor = self.actor().clone();
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let actor = actor.clone();
+        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
             let note_id = generate_unique_note_id(&bead.notes, NoteId::generate);
-            let note = Note::new(note_id.clone(), content, actor, stamp.at);
+            let note = Note::new(note_id.clone(), content, actor.clone(), stamp.at);
             bead.notes.insert(note);
             Ok(note_id)
         });
@@ -763,6 +777,7 @@ impl Daemon {
     pub fn apply_claim(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         lease_secs: u64,
         _git_tx: &Sender<GitOp>,
@@ -773,10 +788,10 @@ impl Daemon {
         };
 
         // Get actor and current time for pre-check
-        let actor = self.actor().clone();
+        let actor = actor.clone();
         let now_ms = self.clock().wall_ms();
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
             let bead = state
                 .get_live_mut(id)
                 .ok_or_else(|| OpError::NotFound(id.clone()))?;
@@ -797,7 +812,8 @@ impl Daemon {
             }
 
             let expires = WallClock(stamp.at.wall_ms + lease_secs * 1000);
-            bead.fields.claim = Lww::new(Claim::claimed(actor, Some(expires)), stamp.clone());
+            bead.fields.claim =
+                Lww::new(Claim::claimed(actor.clone(), Some(expires)), stamp.clone());
             // Claiming also transitions to in_progress
             bead.fields.workflow = Lww::new(Workflow::InProgress, stamp);
 
@@ -817,14 +833,20 @@ impl Daemon {
     }
 
     /// Release a claim.
-    pub fn apply_unclaim(&mut self, repo: &Path, id: &BeadId, _git_tx: &Sender<GitOp>) -> Response {
+    pub fn apply_unclaim(
+        &mut self,
+        repo: &Path,
+        actor: &ActorId,
+        id: &BeadId,
+        _git_tx: &Sender<GitOp>,
+    ) -> Response {
         let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
 
         // Get actor for checks
-        let actor = self.actor().clone();
+        let actor = actor.clone();
 
         // Check bead state and claim ownership (scope to drop borrow)
         {
@@ -845,7 +867,7 @@ impl Daemon {
             }
         }
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
             let bead = state.require_live_mut(id).map_live_err(id)?;
             bead.fields.claim = Lww::new(Claim::Unclaimed, stamp.clone());
             // Unclaiming transitions back to open
@@ -863,6 +885,7 @@ impl Daemon {
     pub fn apply_extend_claim(
         &mut self,
         repo: &Path,
+        actor: &ActorId,
         id: &BeadId,
         lease_secs: u64,
         _git_tx: &Sender<GitOp>,
@@ -873,7 +896,7 @@ impl Daemon {
         };
 
         // Get actor for checks
-        let actor = self.actor().clone();
+        let actor = actor.clone();
 
         // Check bead state and claim ownership (scope to drop borrow)
         {
@@ -896,7 +919,7 @@ impl Daemon {
             }
         }
 
-        let result = self.apply_wal_mutation(&remote, |state, stamp| {
+        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
             let expires = WallClock(stamp.at.wall_ms + lease_secs * 1000);
             let bead = state.require_live_mut(id).map_live_err(id)?;
             bead.fields.claim = Lww::new(Claim::claimed(actor.clone(), Some(expires)), stamp);

@@ -85,6 +85,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             id: id.clone(),
             patch,
             cas: None,
+            meta: ctx.mutation_meta(),
         };
         let _ = send(&req)?;
     }
@@ -94,6 +95,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             repo: ctx.repo.clone(),
             id: id.clone(),
             labels: add_labels,
+            meta: ctx.mutation_meta(),
         };
         let _ = send(&req)?;
     }
@@ -103,6 +105,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             repo: ctx.repo.clone(),
             id: id.clone(),
             labels: remove_labels,
+            meta: ctx.mutation_meta(),
         };
         let _ = send(&req)?;
     }
@@ -113,6 +116,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             repo: ctx.repo.clone(),
             id: id.clone(),
             parent: new_parent,
+            meta: ctx.mutation_meta(),
         };
         let _ = send(&req)?;
     }
@@ -131,6 +135,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
                 from: id.clone(),
                 to,
                 kind,
+                meta: ctx.mutation_meta(),
             })?;
         }
     }
@@ -141,6 +146,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             repo: ctx.repo.clone(),
             id: id.clone(),
             content,
+            meta: ctx.mutation_meta(),
         };
         let _ = send(&note)?;
     }
@@ -151,6 +157,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             let req = Request::Unclaim {
                 repo: ctx.repo.clone(),
                 id: id.clone(),
+                meta: ctx.mutation_meta(),
             };
             let _ = send(&req)?;
         } else {
@@ -166,6 +173,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
                 repo: ctx.repo.clone(),
                 id: id.clone(),
                 lease_secs: 3600,
+                meta: ctx.mutation_meta(),
             };
             let _ = send(&req)?;
         }
@@ -177,6 +185,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             id: id.clone(),
             reason: close_reason,
             on_branch: None,
+            meta: ctx.mutation_meta(),
         };
         let _ = send(&req)?;
     }

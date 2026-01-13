@@ -21,6 +21,7 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
             let req = Request::Notes {
                 repo: ctx.repo.clone(),
                 id,
+                read: ctx.read_consistency(),
             };
             let ok = send(&req)?;
             if ctx.json {
@@ -55,6 +56,7 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
         repo: ctx.repo.clone(),
         id,
         content,
+        meta: ctx.mutation_meta(),
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

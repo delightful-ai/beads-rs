@@ -9,7 +9,7 @@ use crossbeam::channel::Sender;
 
 use super::core::Daemon;
 use super::git_worker::GitOp;
-use super::ipc::{Response, ResponsePayload};
+use super::ipc::{ReadConsistency, Response, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use crate::api::{
@@ -20,11 +20,24 @@ use crate::core::{BeadId, DepKind, DepLife, WallClock};
 
 impl Daemon {
     /// Get a single bead.
-    pub fn query_show(&mut self, repo: &Path, id: &BeadId, git_tx: &Sender<GitOp>) -> Response {
+    pub fn query_show(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -44,12 +57,20 @@ impl Daemon {
         &mut self,
         repo: &Path,
         filters: &Filters,
+        read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -149,12 +170,20 @@ impl Daemon {
         &mut self,
         repo: &Path,
         limit: Option<usize>,
+        read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -212,11 +241,24 @@ impl Daemon {
     }
 
     /// Get dependency tree for a bead.
-    pub fn query_dep_tree(&mut self, repo: &Path, id: &BeadId, git_tx: &Sender<GitOp>) -> Response {
+    pub fn query_dep_tree(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -255,11 +297,24 @@ impl Daemon {
     }
 
     /// Get direct dependencies for a bead.
-    pub fn query_deps(&mut self, repo: &Path, id: &BeadId, git_tx: &Sender<GitOp>) -> Response {
+    pub fn query_deps(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -293,11 +348,24 @@ impl Daemon {
     }
 
     /// Get notes for a bead.
-    pub fn query_notes(&mut self, repo: &Path, id: &BeadId, git_tx: &Sender<GitOp>) -> Response {
+    pub fn query_notes(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -314,11 +382,23 @@ impl Daemon {
     }
 
     /// Get sync status for a repo.
-    pub fn query_status(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+    pub fn query_status(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -424,11 +504,23 @@ impl Daemon {
     }
 
     /// Get blocked issues.
-    pub fn query_blocked(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+    pub fn query_blocked(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -476,12 +568,20 @@ impl Daemon {
         days: u32,
         status: Option<&str>,
         limit: Option<usize>,
+        read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -556,12 +656,20 @@ impl Daemon {
         repo: &Path,
         filters: &Filters,
         group_by: Option<&str>,
+        read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -695,12 +803,20 @@ impl Daemon {
         repo: &Path,
         since_ms: Option<u64>,
         id: Option<&BeadId>,
+        read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -737,12 +853,20 @@ impl Daemon {
         &mut self,
         repo: &Path,
         eligible_only: bool,
+        read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
@@ -753,11 +877,23 @@ impl Daemon {
     }
 
     /// Validate state.
-    pub fn query_validate(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+    pub fn query_validate(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err(e),
         };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
         let repo_state = match self.repo_state(&remote) {
             Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),

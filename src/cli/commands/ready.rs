@@ -8,6 +8,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ReadyArgs) -> Result<()> {
     let req = Request::Ready {
         repo: ctx.repo.clone(),
         limit: args.limit,
+        read: ctx.read_consistency(),
     };
     let ok = send(&req)?;
     if ctx.json {

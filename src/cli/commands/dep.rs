@@ -17,6 +17,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
                 from,
                 to,
                 kind,
+                meta: ctx.mutation_meta(),
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -34,6 +35,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
                 from,
                 to,
                 kind,
+                meta: ctx.mutation_meta(),
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -43,6 +45,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
             let req = Request::DepTree {
                 repo: ctx.repo.clone(),
                 id,
+                read: ctx.read_consistency(),
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)

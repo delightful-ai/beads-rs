@@ -61,6 +61,7 @@ pub(crate) fn handle(ctx: &Ctx, args: CountArgs) -> Result<()> {
         repo: ctx.repo.clone(),
         filters,
         group_by,
+        read: ctx.read_consistency(),
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

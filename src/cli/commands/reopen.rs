@@ -7,6 +7,7 @@ pub(crate) fn handle(ctx: &Ctx, id: String) -> Result<()> {
     let req = Request::Reopen {
         repo: ctx.repo.clone(),
         id,
+        meta: ctx.mutation_meta(),
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

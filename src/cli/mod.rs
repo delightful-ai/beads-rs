@@ -13,7 +13,9 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
 
 use crate::core::{BeadId, BeadType, DepKind, Priority};
-use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
+use crate::daemon::ipc::{
+    MutationMeta, ReadConsistency, Request, Response, ResponsePayload, send_request,
+};
 use crate::daemon::query::{QueryResult, SortField};
 use crate::{Error, Result};
 
@@ -51,6 +53,18 @@ pub struct Cli {
     /// Actor identity (applies when daemon starts).
     #[arg(long, global = true, value_name = "ACTOR")]
     pub actor: Option<String>,
+
+    /// Namespace for mutation and query requests (default: core).
+    #[arg(long, global = true, value_name = "NAMESPACE")]
+    pub namespace: Option<String>,
+
+    /// Durability class for mutation requests (default: local_fsync).
+    #[arg(long, global = true, value_name = "DURABILITY")]
+    pub durability: Option<String>,
+
+    /// Client request id (UUID) for idempotency on retries.
+    #[arg(long, global = true, value_name = "UUID")]
+    pub client_request_id: Option<String>,
 
     /// Errors only.
     #[arg(
@@ -943,6 +957,9 @@ pub fn run(cli: Cli) -> Result<()> {
             let ctx = Ctx {
                 repo,
                 json: cli.json,
+                namespace: cli.namespace.clone(),
+                durability: cli.durability.clone(),
+                client_request_id: cli.client_request_id.clone(),
             };
 
             match cmd {
@@ -990,6 +1007,28 @@ pub fn run(cli: Cli) -> Result<()> {
 struct Ctx {
     repo: PathBuf,
     json: bool,
+    namespace: Option<String>,
+    durability: Option<String>,
+    client_request_id: Option<String>,
+}
+
+impl Ctx {
+    fn mutation_meta(&self) -> MutationMeta {
+        MutationMeta {
+            namespace: self.namespace.clone(),
+            durability: self.durability.clone(),
+            client_request_id: self.client_request_id.clone(),
+            actor_id: None,
+        }
+    }
+
+    fn read_consistency(&self) -> ReadConsistency {
+        ReadConsistency {
+            namespace: self.namespace.clone(),
+            require_min_seen: None,
+            wait_timeout_ms: None,
+        }
+    }
 }
 
 fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
@@ -1123,6 +1162,7 @@ fn fetch_issue(ctx: &Ctx, id: &str) -> Result<crate::api::Issue> {
     let req = Request::Show {
         repo: ctx.repo.clone(),
         id: id.to_string(),
+        read: ctx.read_consistency(),
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),

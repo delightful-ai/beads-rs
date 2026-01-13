@@ -16,6 +16,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
         repo: ctx.repo.clone(),
         since_ms,
         id,
+        read: ctx.read_consistency(),
     };
     let ok = send(&req)?;
     if ctx.json {

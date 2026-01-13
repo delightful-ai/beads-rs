@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,7 +19,9 @@ use uuid::Uuid;
 
 use super::Clock;
 use super::git_worker::{GitOp, LoadResult};
-use super::ipc::{ErrorPayload, IpcError, Request, Response, ResponsePayload};
+use super::ipc::{
+    ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+};
 use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
@@ -119,8 +122,9 @@ struct StorePathMap {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, BeadId, CanonicalState, CoreError, ErrorCode, Limits, Stamp, StoreEpoch, StoreId,
-    StoreIdentity, WallClock, WriteStamp,
+    ActorId, Applied, BeadId, CanonicalState, ClientRequestId, CoreError, DurabilityClass,
+    ErrorCode, Limits, NamespaceId, Stamp, StoreEpoch, StoreId, StoreIdentity, WallClock,
+    Watermarks, WriteStamp,
 };
 use crate::git::SyncError;
 use crate::git::collision::{detect_collisions, resolve_collisions};
@@ -128,6 +132,25 @@ use crate::git::sync::SyncOutcome;
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
 const LOAD_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Clone, Debug)]
+struct NormalizedMutationMeta {
+    #[allow(dead_code)]
+    namespace: NamespaceId,
+    #[allow(dead_code)]
+    durability: DurabilityClass,
+    #[allow(dead_code)]
+    client_request_id: Option<ClientRequestId>,
+    actor_id: ActorId,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NormalizedReadConsistency {
+    #[allow(dead_code)]
+    namespace: NamespaceId,
+    require_min_seen: Option<Watermarks<Applied>>,
+    wait_timeout_ms: u64,
+}
 
 /// The daemon coordinator.
 ///
@@ -244,6 +267,12 @@ impl Daemon {
             .ok_or(OpError::Internal("loaded store missing from state"))
     }
 
+    pub(crate) fn store_runtime(&self, proof: &LoadedStore) -> Result<&StoreRuntime, OpError> {
+        self.stores
+            .get(&proof.store_id)
+            .ok_or(OpError::Internal("loaded store missing from state"))
+    }
+
     /// Get repo state by raw remote URL (for internal sync waiters, etc.).
     /// Returns None if not loaded.
     pub(crate) fn repo_state_by_url(&self, remote: &RemoteUrl) -> Option<&RepoState> {
@@ -298,10 +327,8 @@ impl Daemon {
         let remote = self.resolve_remote(repo_path)?;
         let (store_id, source) = self.resolve_store_id(repo_path, &remote)?;
 
-        self.path_to_store_id
-            .insert(repo_path.to_owned(), store_id);
-        self.remote_to_store_id
-            .insert(remote.clone(), store_id);
+        self.path_to_store_id.insert(repo_path.to_owned(), store_id);
+        self.remote_to_store_id.insert(remote.clone(), store_id);
 
         if let Err(err) = persist_store_id_mapping(repo_path, store_id) {
             tracing::warn!(
@@ -960,9 +987,10 @@ impl Daemon {
     ///
     /// The mutation runs against a cloned state. If the WAL write fails,
     /// the in-memory state is left unchanged and the error is returned.
-    pub(crate) fn apply_wal_mutation<R>(
+    pub(crate) fn apply_wal_mutation_with_actor<R>(
         &mut self,
         proof: &LoadedStore,
+        actor: &ActorId,
         f: impl FnOnce(&mut CanonicalState, Stamp) -> Result<R, OpError>,
     ) -> Result<R, OpError> {
         let (mut next_state, root_slug, sequence, last_seen_stamp) = {
@@ -986,7 +1014,7 @@ impl Daemon {
         let write_stamp = self.clock_mut().tick();
         let stamp = Stamp {
             at: write_stamp.clone(),
-            by: self.actor.clone(),
+            by: actor.clone(),
         };
 
         let result = f(&mut next_state, stamp)?;
@@ -1011,6 +1039,17 @@ impl Daemon {
         Ok(result)
     }
 
+    /// Apply a mutation with WAL durability using the daemon's default actor.
+    #[allow(dead_code)]
+    pub(crate) fn apply_wal_mutation<R>(
+        &mut self,
+        proof: &LoadedStore,
+        f: impl FnOnce(&mut CanonicalState, Stamp) -> Result<R, OpError>,
+    ) -> Result<R, OpError> {
+        let actor = self.actor.clone();
+        self.apply_wal_mutation_with_actor(proof, &actor, f)
+    }
+
     pub fn next_sync_deadline(&mut self) -> Option<Instant> {
         self.scheduler.next_deadline()
     }
@@ -1024,7 +1063,9 @@ impl Daemon {
 
     /// Get iterator over all stores.
     pub fn repos(&self) -> impl Iterator<Item = (&StoreId, &RepoState)> {
-        self.stores.iter().map(|(id, store)| (id, &store.repo_state))
+        self.stores
+            .iter()
+            .map(|(id, store)| (id, &store.repo_state))
     }
 
     /// Get mutable iterator over all stores.
@@ -1032,6 +1073,101 @@ impl Daemon {
         self.stores
             .iter_mut()
             .map(|(id, store)| (id, &mut store.repo_state))
+    }
+
+    fn normalize_mutation_meta(
+        &self,
+        meta: MutationMeta,
+    ) -> Result<NormalizedMutationMeta, OpError> {
+        let namespace = self.normalize_namespace(meta.namespace)?;
+        let durability = parse_durability(meta.durability)?;
+        let client_request_id =
+            match trim_non_empty(meta.client_request_id) {
+                None => None,
+                Some(raw) => Some(ClientRequestId::parse_str(&raw).map_err(|err| {
+                    OpError::InvalidRequest {
+                        field: Some("client_request_id".into()),
+                        reason: err.to_string(),
+                    }
+                })?),
+            };
+        let actor_id = match trim_non_empty(meta.actor_id) {
+            None => self.actor.clone(),
+            Some(raw) => ActorId::new(raw).map_err(|err| OpError::InvalidRequest {
+                field: Some("actor_id".into()),
+                reason: err.to_string(),
+            })?,
+        };
+
+        if !matches!(durability, DurabilityClass::LocalFsync) {
+            return Err(OpError::DurabilityUnavailable {
+                requested: durability,
+                eligible_total: 0,
+                eligible_replica_ids: None,
+            });
+        }
+
+        Ok(NormalizedMutationMeta {
+            namespace,
+            durability,
+            client_request_id,
+            actor_id,
+        })
+    }
+
+    pub(crate) fn normalize_read_consistency(
+        &self,
+        read: ReadConsistency,
+    ) -> Result<NormalizedReadConsistency, OpError> {
+        let namespace = self.normalize_namespace(read.namespace)?;
+        Ok(NormalizedReadConsistency {
+            namespace,
+            require_min_seen: read.require_min_seen,
+            wait_timeout_ms: read.wait_timeout_ms.unwrap_or(0),
+        })
+    }
+
+    pub(crate) fn check_read_gate(
+        &self,
+        proof: &LoadedStore,
+        read: &NormalizedReadConsistency,
+    ) -> Result<(), OpError> {
+        let Some(required) = read.require_min_seen.as_ref() else {
+            return Ok(());
+        };
+        let current = self.store_runtime(proof)?.watermarks_applied.clone();
+        if current.satisfies_at_least(required) {
+            return Ok(());
+        }
+        if read.wait_timeout_ms > 0 {
+            return Err(OpError::RequireMinSeenTimeout {
+                waited_ms: read.wait_timeout_ms,
+                required: required.clone(),
+                current_applied: current,
+            });
+        }
+        Err(OpError::RequireMinSeenUnsatisfied {
+            required: required.clone(),
+            current_applied: current,
+        })
+    }
+
+    fn normalize_namespace(&self, raw: Option<String>) -> Result<NamespaceId, OpError> {
+        let namespace = match trim_non_empty(raw) {
+            None => NamespaceId::core(),
+            Some(value) => {
+                NamespaceId::parse(value.clone()).map_err(|err| OpError::NamespaceInvalid {
+                    namespace: value,
+                    reason: err.to_string(),
+                })?
+            }
+        };
+
+        if namespace != NamespaceId::core() {
+            return Err(OpError::NamespaceUnknown { namespace });
+        }
+
+        Ok(namespace)
     }
 
     /// Handle a request from IPC.
@@ -1055,54 +1191,90 @@ impl Daemon {
                 estimated_minutes,
                 labels,
                 dependencies,
-            } => self.apply_create(
-                &repo,
-                id,
-                parent,
-                title,
-                bead_type,
-                priority,
-                description,
-                design,
-                acceptance_criteria,
-                assignee,
-                external_ref,
-                estimated_minutes,
-                labels,
-                dependencies,
-                git_tx,
-            ),
+                meta,
+            } => {
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_create(
+                    &repo,
+                    &meta.actor_id,
+                    id,
+                    parent,
+                    title,
+                    bead_type,
+                    priority,
+                    description,
+                    design,
+                    acceptance_criteria,
+                    assignee,
+                    external_ref,
+                    estimated_minutes,
+                    labels,
+                    dependencies,
+                    git_tx,
+                )
+            }
 
             Request::Update {
                 repo,
                 id,
                 patch,
                 cas,
+                meta,
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_update(&repo, &id, patch, cas, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_update(&repo, &meta.actor_id, &id, patch, cas, git_tx)
             }
 
-            Request::AddLabels { repo, id, labels } => {
+            Request::AddLabels {
+                repo,
+                id,
+                labels,
+                meta,
+            } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_add_labels(&repo, &id, labels, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_add_labels(&repo, &meta.actor_id, &id, labels, git_tx)
             }
 
-            Request::RemoveLabels { repo, id, labels } => {
+            Request::RemoveLabels {
+                repo,
+                id,
+                labels,
+                meta,
+            } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_remove_labels(&repo, &id, labels, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_remove_labels(&repo, &meta.actor_id, &id, labels, git_tx)
             }
 
-            Request::SetParent { repo, id, parent } => {
+            Request::SetParent {
+                repo,
+                id,
+                parent,
+                meta,
+            } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
@@ -1116,7 +1288,11 @@ impl Daemon {
                     },
                     None => None,
                 };
-                self.apply_set_parent(&repo, &id, parent, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_set_parent(&repo, &meta.actor_id, &id, parent, git_tx)
             }
 
             Request::Close {
@@ -1124,28 +1300,46 @@ impl Daemon {
                 id,
                 reason,
                 on_branch,
+                meta,
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_close(&repo, &id, reason, on_branch, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_close(&repo, &meta.actor_id, &id, reason, on_branch, git_tx)
             }
 
-            Request::Reopen { repo, id } => {
+            Request::Reopen { repo, id, meta } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_reopen(&repo, &id, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_reopen(&repo, &meta.actor_id, &id, git_tx)
             }
 
-            Request::Delete { repo, id, reason } => {
+            Request::Delete {
+                repo,
+                id,
+                reason,
+                meta,
+            } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_delete(&repo, &id, reason, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_delete(&repo, &meta.actor_id, &id, reason, git_tx)
             }
 
             Request::AddDep {
@@ -1153,6 +1347,7 @@ impl Daemon {
                 from,
                 to,
                 kind,
+                meta,
             } => {
                 let from = match BeadId::parse(&from) {
                     Ok(id) => id,
@@ -1162,7 +1357,11 @@ impl Daemon {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_add_dep(&repo, &from, &to, kind, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_add_dep(&repo, &meta.actor_id, &from, &to, kind, git_tx)
             }
 
             Request::RemoveDep {
@@ -1170,6 +1369,7 @@ impl Daemon {
                 from,
                 to,
                 kind,
+                meta,
             } => {
                 let from = match BeadId::parse(&from) {
                     Ok(id) => id,
@@ -1179,102 +1379,140 @@ impl Daemon {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_remove_dep(&repo, &from, &to, kind, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_remove_dep(&repo, &meta.actor_id, &from, &to, kind, git_tx)
             }
 
-            Request::AddNote { repo, id, content } => {
+            Request::AddNote {
+                repo,
+                id,
+                content,
+                meta,
+            } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_add_note(&repo, &id, content, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_add_note(&repo, &meta.actor_id, &id, content, git_tx)
             }
 
             Request::Claim {
                 repo,
                 id,
                 lease_secs,
+                meta,
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_claim(&repo, &id, lease_secs, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_claim(&repo, &meta.actor_id, &id, lease_secs, git_tx)
             }
 
-            Request::Unclaim { repo, id } => {
+            Request::Unclaim { repo, id, meta } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_unclaim(&repo, &id, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_unclaim(&repo, &meta.actor_id, &id, git_tx)
             }
 
             Request::ExtendClaim {
                 repo,
                 id,
                 lease_secs,
+                meta,
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.apply_extend_claim(&repo, &id, lease_secs, git_tx)
+                let meta = match self.normalize_mutation_meta(meta) {
+                    Ok(meta) => meta,
+                    Err(e) => return Response::err(e),
+                };
+                self.apply_extend_claim(&repo, &meta.actor_id, &id, lease_secs, git_tx)
             }
 
             // Queries - delegate to query_executor module
-            Request::Show { repo, id } => {
+            Request::Show { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.query_show(&repo, &id, git_tx)
+                self.query_show(&repo, &id, read, git_tx)
             }
 
-            Request::List { repo, filters } => self.query_list(&repo, &filters, git_tx),
+            Request::List {
+                repo,
+                filters,
+                read,
+            } => self.query_list(&repo, &filters, read, git_tx),
 
-            Request::Ready { repo, limit } => self.query_ready(&repo, limit, git_tx),
+            Request::Ready { repo, limit, read } => self.query_ready(&repo, limit, read, git_tx),
 
-            Request::DepTree { repo, id } => {
+            Request::DepTree { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.query_dep_tree(&repo, &id, git_tx)
+                self.query_dep_tree(&repo, &id, read, git_tx)
             }
 
-            Request::Deps { repo, id } => {
+            Request::Deps { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.query_deps(&repo, &id, git_tx)
+                self.query_deps(&repo, &id, read, git_tx)
             }
 
-            Request::Notes { repo, id } => {
+            Request::Notes { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)),
                 };
-                self.query_notes(&repo, &id, git_tx)
+                self.query_notes(&repo, &id, read, git_tx)
             }
 
-            Request::Blocked { repo } => self.query_blocked(&repo, git_tx),
+            Request::Blocked { repo, read } => self.query_blocked(&repo, read, git_tx),
 
             Request::Stale {
                 repo,
                 days,
                 status,
                 limit,
-            } => self.query_stale(&repo, days, status.as_deref(), limit, git_tx),
+                read,
+            } => self.query_stale(&repo, days, status.as_deref(), limit, read, git_tx),
 
             Request::Count {
                 repo,
                 filters,
                 group_by,
-            } => self.query_count(&repo, &filters, group_by.as_deref(), git_tx),
+                read,
+            } => self.query_count(&repo, &filters, group_by.as_deref(), read, git_tx),
 
-            Request::Deleted { repo, since_ms, id } => {
+            Request::Deleted {
+                repo,
+                since_ms,
+                id,
+                read,
+            } => {
                 let id = match id {
                     Some(s) => Some(match BeadId::parse(&s) {
                         Ok(id) => id,
@@ -1284,17 +1522,18 @@ impl Daemon {
                     }),
                     None => None,
                 };
-                self.query_deleted(&repo, since_ms, id.as_ref(), git_tx)
+                self.query_deleted(&repo, since_ms, id.as_ref(), read, git_tx)
             }
 
             Request::EpicStatus {
                 repo,
                 eligible_only,
-            } => self.query_epic_status(&repo, eligible_only, git_tx),
+                read,
+            } => self.query_epic_status(&repo, eligible_only, read, git_tx),
 
-            Request::Status { repo } => self.query_status(&repo, git_tx),
+            Request::Status { repo, read } => self.query_status(&repo, read, git_tx),
 
-            Request::Validate { repo } => self.query_validate(&repo, git_tx),
+            Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx),
 
             // Control
             Request::Refresh { repo } => {
@@ -1441,8 +1680,8 @@ fn write_store_path_map(path: &Path, map: &StorePathMap) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let bytes = serde_json::to_vec(map)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let bytes =
+        serde_json::to_vec(map).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     fs::write(path, bytes)?;
 
     #[cfg(unix)]
@@ -1454,9 +1693,7 @@ fn write_store_path_map(path: &Path, map: &StorePathMap) -> io::Result<()> {
     Ok(())
 }
 
-fn read_store_id_from_git_meta(
-    repo: &Repository,
-) -> Result<Option<StoreId>, StoreDiscoveryError> {
+fn read_store_id_from_git_meta(repo: &Repository) -> Result<Option<StoreId>, StoreDiscoveryError> {
     let reference = match repo.find_reference("refs/beads/meta") {
         Ok(reference) => reference,
         Err(err) if err.code() == GitErrorCode::NotFound => return Ok(None),
@@ -1469,20 +1706,18 @@ fn read_store_id_from_git_meta(
     let tree = commit
         .tree()
         .map_err(|err| StoreDiscoveryError::MetaRef { source: err })?;
-    let entry = tree.get_name("store_meta.json").ok_or(StoreDiscoveryError::MetaMissing)?;
+    let entry = tree
+        .get_name("store_meta.json")
+        .ok_or(StoreDiscoveryError::MetaMissing)?;
     let blob = repo
         .find_blob(entry.id())
         .map_err(|err| StoreDiscoveryError::MetaRef { source: err })?;
-    let meta: StoreMetaRef =
-        serde_json::from_slice(blob.content()).map_err(|source| StoreDiscoveryError::MetaParse {
-            source,
-        })?;
+    let meta: StoreMetaRef = serde_json::from_slice(blob.content())
+        .map_err(|source| StoreDiscoveryError::MetaParse { source })?;
     Ok(Some(meta.store_id))
 }
 
-fn discover_store_id_from_refs(
-    repo: &Repository,
-) -> Result<Option<StoreId>, StoreDiscoveryError> {
+fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, StoreDiscoveryError> {
     let mut ids = std::collections::BTreeSet::new();
     let refs = repo
         .references_glob("refs/beads/*")
@@ -1552,6 +1787,47 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
     }
 }
 
+fn trim_non_empty(raw: Option<String>) -> Option<String> {
+    raw.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn parse_durability(raw: Option<String>) -> Result<DurabilityClass, OpError> {
+    let Some(raw) = trim_non_empty(raw) else {
+        return Ok(DurabilityClass::LocalFsync);
+    };
+    let value = raw.trim().to_lowercase();
+    if value == "local_fsync" || value == "local-fsync" {
+        return Ok(DurabilityClass::LocalFsync);
+    }
+    if let Some(rest) = value.strip_prefix("replicated_fsync") {
+        let rest = rest.trim();
+        let rest = rest
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .or_else(|| rest.strip_prefix(':'))
+            .or_else(|| rest.strip_prefix('='))
+            .map(str::trim);
+        if let Some(k_raw) = rest {
+            let k = k_raw.parse::<u32>().ok().and_then(NonZeroU32::new);
+            if let Some(k) = k {
+                return Ok(DurabilityClass::ReplicatedFsync { k });
+            }
+        }
+    }
+
+    Err(OpError::InvalidRequest {
+        field: Some("durability".into()),
+        reason: format!("unsupported durability class: {raw}"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1559,8 +1835,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::core::{
-        Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Labels, Lww, Priority,
-        Stamp, WallClock, Workflow, WriteStamp,
+        Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, HeadStatus,
+        Labels, Lww, NamespaceId, Priority, Seq0, Stamp, WallClock, Watermarks, Workflow,
+        WriteStamp,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::store_runtime::StoreRuntime;
@@ -1683,6 +1960,81 @@ mod tests {
         let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
         assert!(!repo_state.refresh_in_progress);
         assert!(repo_state.last_refresh.is_some());
+    }
+
+    #[test]
+    fn read_gate_requires_min_seen() {
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
+        let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
+        let proof = LoadedStore {
+            store_id,
+            remote: remote.clone(),
+        };
+
+        let namespace = NamespaceId::core();
+        let origin = daemon
+            .stores
+            .get(&store_id)
+            .expect("store runtime")
+            .meta
+            .replica_id;
+        let mut required = Watermarks::<Applied>::new();
+        required
+            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .expect("watermark");
+
+        let read = NormalizedReadConsistency {
+            namespace: namespace.clone(),
+            require_min_seen: Some(required.clone()),
+            wait_timeout_ms: 0,
+        };
+        let err = daemon.check_read_gate(&proof, &read).unwrap_err();
+        match err {
+            OpError::RequireMinSeenUnsatisfied {
+                required: got_required,
+                current_applied,
+            } => {
+                assert_eq!(got_required, required);
+                let current_seq = current_applied
+                    .get(&namespace, &origin)
+                    .map(|watermark| watermark.seq().get())
+                    .unwrap_or(0);
+                assert_eq!(current_seq, 0);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let read = NormalizedReadConsistency {
+            namespace: namespace.clone(),
+            require_min_seen: Some(required.clone()),
+            wait_timeout_ms: 50,
+        };
+        let err = daemon.check_read_gate(&proof, &read).unwrap_err();
+        match err {
+            OpError::RequireMinSeenTimeout {
+                waited_ms,
+                required: got_required,
+                ..
+            } => {
+                assert_eq!(waited_ms, 50);
+                assert_eq!(got_required, required);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let runtime = daemon.stores.get_mut(&store_id).expect("store runtime");
+        runtime
+            .watermarks_applied
+            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .expect("watermark");
+        let read = NormalizedReadConsistency {
+            namespace,
+            require_min_seen: Some(required),
+            wait_timeout_ms: 0,
+        };
+        assert!(daemon.check_read_gate(&proof, &read).is_ok());
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
             repo: ctx.repo.clone(),
             id: id.clone(),
             reason: args.reason.clone(),
+            meta: ctx.mutation_meta(),
         };
         let _ = send(&req)?;
 

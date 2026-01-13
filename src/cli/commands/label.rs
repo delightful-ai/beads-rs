@@ -30,6 +30,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                     repo: ctx.repo.clone(),
                     id: id.clone(),
                     labels: vec![label.clone()],
+                    meta: ctx.mutation_meta(),
                 };
                 let _ = send(&req)?;
 
@@ -62,6 +63,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                     repo: ctx.repo.clone(),
                     id: id.clone(),
                     labels: vec![label.clone()],
+                    meta: ctx.mutation_meta(),
                 };
                 let _ = send(&req)?;
 
@@ -104,6 +106,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             let req = Request::List {
                 repo: ctx.repo.clone(),
                 filters: Filters::default(),
+                read: ctx.read_consistency(),
             };
             let ok = send(&req)?;
             let mut counts = std::collections::BTreeMap::<String, usize>::new();
