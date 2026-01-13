@@ -272,3 +272,110 @@ pub enum BroadcastError {
     #[error("broadcaster lock poisoned")]
     LockPoisoned,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use uuid::Uuid;
+
+    use crate::core::{NamespaceId, ReplicaId, Seq1};
+
+    fn event(seq: u64, bytes: usize) -> BroadcastEvent {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
+        let event_id = EventId::new(origin, namespace, Seq1::from_u64(seq).unwrap());
+        let payload = vec![42u8; bytes.max(1)];
+        let bytes = EventBytes::<Canonical>::new(Bytes::from(payload));
+        let sha256 = Sha256([seq as u8; 32]);
+        BroadcastEvent::new(event_id, sha256, None, bytes)
+    }
+
+    #[test]
+    fn delivers_events_in_order() {
+        let broadcaster = EventBroadcaster::new(BroadcasterLimits {
+            max_subscribers: 1,
+            hot_cache_max_events: 8,
+            hot_cache_max_bytes: 1024,
+        });
+        let sub = broadcaster
+            .subscribe(SubscriberLimits::new(8, 1024).unwrap())
+            .unwrap();
+
+        broadcaster.publish(event(1, 4)).unwrap();
+        broadcaster.publish(event(2, 4)).unwrap();
+
+        let first = sub.recv().unwrap();
+        let second = sub.recv().unwrap();
+        assert_eq!(first.event_id.origin_seq, Seq1::from_u64(1).unwrap());
+        assert_eq!(second.event_id.origin_seq, Seq1::from_u64(2).unwrap());
+    }
+
+    #[test]
+    fn subscriber_drops_on_full_queue() {
+        let broadcaster = EventBroadcaster::new(BroadcasterLimits {
+            max_subscribers: 1,
+            hot_cache_max_events: 8,
+            hot_cache_max_bytes: 1024,
+        });
+        let sub = broadcaster
+            .subscribe(SubscriberLimits::new(1, 1024).unwrap())
+            .unwrap();
+
+        broadcaster.publish(event(1, 8)).unwrap();
+        broadcaster.publish(event(2, 8)).unwrap();
+
+        assert_eq!(sub.drop_reason(), Some(DropReason::SubscriberLagged));
+    }
+
+    #[test]
+    fn subscriber_drops_on_byte_limit() {
+        let broadcaster = EventBroadcaster::new(BroadcasterLimits {
+            max_subscribers: 1,
+            hot_cache_max_events: 8,
+            hot_cache_max_bytes: 1024,
+        });
+        let sub = broadcaster
+            .subscribe(SubscriberLimits::new(8, 10).unwrap())
+            .unwrap();
+
+        broadcaster.publish(event(1, 6)).unwrap();
+        broadcaster.publish(event(2, 6)).unwrap();
+
+        assert_eq!(sub.drop_reason(), Some(DropReason::SubscriberLagged));
+    }
+
+    #[test]
+    fn hot_cache_evicts_by_event_count() {
+        let broadcaster = EventBroadcaster::new(BroadcasterLimits {
+            max_subscribers: 1,
+            hot_cache_max_events: 2,
+            hot_cache_max_bytes: 1024,
+        });
+
+        broadcaster.publish(event(1, 1)).unwrap();
+        broadcaster.publish(event(2, 1)).unwrap();
+        broadcaster.publish(event(3, 1)).unwrap();
+
+        let cache = broadcaster.hot_cache().unwrap();
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache[0].event_id.origin_seq, Seq1::from_u64(2).unwrap());
+        assert_eq!(cache[1].event_id.origin_seq, Seq1::from_u64(3).unwrap());
+    }
+
+    #[test]
+    fn hot_cache_evicts_by_bytes() {
+        let broadcaster = EventBroadcaster::new(BroadcasterLimits {
+            max_subscribers: 1,
+            hot_cache_max_events: 8,
+            hot_cache_max_bytes: 5,
+        });
+
+        broadcaster.publish(event(1, 4)).unwrap();
+        broadcaster.publish(event(2, 4)).unwrap();
+
+        let cache = broadcaster.hot_cache().unwrap();
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache[0].event_id.origin_seq, Seq1::from_u64(2).unwrap());
+    }
+}
