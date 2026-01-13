@@ -545,6 +545,7 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
 fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
     match err {
         WalIndexError::SchemaVersionMismatch { .. } => ErrorCode::IndexRebuildRequired,
+        WalIndexError::Equivocation { .. } => ErrorCode::Equivocation,
         WalIndexError::MetaMismatch { key, .. } => match *key {
             "store_id" => ErrorCode::WrongStore,
             "store_epoch" => ErrorCode::StoreEpochMismatch,

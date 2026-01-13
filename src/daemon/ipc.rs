@@ -757,9 +757,7 @@ fn store_runtime_error_payload(
                 reason: format!("{kind} watermark for {namespace} {origin}: {source}"),
             },
         ),
-        StoreRuntimeError::WalIndex(err) => {
-            ErrorPayload::new(wal_index_error_code(&err), message, retryable)
-        }
+        StoreRuntimeError::WalIndex(err) => wal_index_error_payload(&err, message, retryable),
         StoreRuntimeError::WalReplay(err) => wal_replay_error_payload(err, message, retryable),
     }
 }
@@ -792,13 +790,42 @@ fn wal_replay_error_payload(err: WalReplayError, message: String, retryable: boo
         WalReplayError::SegmentHeader { .. } => {
             ErrorPayload::new(wal_replay_error_code(&err), message, retryable)
         }
+        WalReplayError::Index(err) => wal_index_error_payload(err, message, retryable),
         _ => ErrorPayload::new(wal_replay_error_code(&err), message, retryable),
+    }
+}
+
+fn wal_index_error_payload(
+    err: &WalIndexError,
+    message: String,
+    retryable: bool,
+) -> ErrorPayload {
+    match err {
+        WalIndexError::Equivocation {
+            namespace,
+            origin,
+            seq,
+            existing_sha256,
+            new_sha256,
+        } => ErrorPayload::new(ErrorCode::Equivocation, message, retryable).with_details(
+            error_details::EquivocationDetails {
+                eid: error_details::EventIdDetails {
+                    namespace: namespace.clone(),
+                    origin_replica_id: *origin,
+                    origin_seq: *seq,
+                },
+                existing_sha256: hex::encode(existing_sha256),
+                new_sha256: hex::encode(new_sha256),
+            },
+        ),
+        _ => ErrorPayload::new(wal_index_error_code(err), message, retryable),
     }
 }
 
 fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
     match err {
         WalIndexError::SchemaVersionMismatch { .. } => ErrorCode::IndexRebuildRequired,
+        WalIndexError::Equivocation { .. } => ErrorCode::Equivocation,
         WalIndexError::MetaMismatch { key, .. } => match *key {
             "store_id" => ErrorCode::WrongStore,
             "store_epoch" => ErrorCode::StoreEpochMismatch,
