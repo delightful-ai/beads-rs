@@ -1057,8 +1057,13 @@ EventBody fields (spec-aligned; v0.5 hashed payload):
 - store_id, store_epoch, namespace
 - origin_replica_id, origin_seq
 - event_time_ms, txn_id, client_request_id: Option<ClientRequestId>
-- hlc_max: Option<{ actor_id: ActorId, physical_ms: u64, logical: u32 }>
+- hlc_max: HlcMax (required for TxnV1; see HLC max rule below)
 - kind, delta
+
+HlcMax structure:
+- actor_id: ActorId
+- physical_ms: u64
+- logical: u32
 
 Event linkage fields (not inside EventBody in v0.5):
 - sha256: bytes(32) computed as SHA256(event_body_bytes)
@@ -1093,8 +1098,9 @@ Event-time rule:
   and SHOULD equal it.
 
 HLC max rule (normative):
-- For TxnV1 events that mint stamps, `hlc_max` MUST be present and MUST equal the
-  maximum stamp minted in the txn for the effective ActorId.
+- For TxnV1 events, `hlc_max` MUST be present. Events missing hlc_max MUST be rejected
+  at decode time (not at apply time) with a decoding/validation error.
+- `hlc_max` MUST equal the maximum stamp minted in the txn for the effective ActorId.
 - This field exists to support fast, correct HLC recovery after restart or index rebuild.
 
 Hash rules (v0.5):
@@ -1199,18 +1205,65 @@ Recovery requirement (normative):
 We will use `minicbor` directly for hashed payloads. `minicbor_serde` is allowed
 for non-hashed messages only.
 
-### 3.1 Canonical encoding requirements (RFC 8949)
+### 3.1 Canonical encoding requirements (Beads canonical CBOR)
+
+Beads uses a fixed key ordering for deterministic hashing, not RFC 8949 canonical CBOR.
+This is simpler to implement correctly and just as deterministic.
+
+**Base requirements:**
 - Definite-length maps and arrays only.
-- Keys sorted by canonical CBOR ordering:
-  - sort by encoded key length, then by encoded key bytes.
-- No floats in EventBody to avoid canonical float ambiguity.
+- No floats in EventBody.
 - Reject non-canonical integer encodings (non-minimal additional bytes).
-- Reject any CBOR tags in EventBody (simplifies canonical validation and
-  prevents alternate encodings for the same semantic value).
+- Reject any CBOR tags in EventBody.
+- Reject duplicate map keys.
+
+**Fixed key ordering (normative):**
+
+Writers MUST emit map keys in the exact order specified below. Readers MUST NOT
+reject based on key order (for forward compatibility with potential relaxation).
+
+**EventBody map keys (in emission order):**
+```
+1.  "client_request_id"   (optional, skip if None)
+2.  "delta"
+3.  "envelope_v"
+4.  "event_time_ms"
+5.  "hlc_max"             (required for TxnV1)
+6.  "kind"
+7.  "namespace"
+8.  "origin_replica_id"
+9.  "origin_seq"
+10. "store_epoch"
+11. "store_id"
+12. "txn_id"
+```
+
+**TxnDeltaV1 map keys (in emission order):**
+```
+1. "bead_upserts"
+2. "bead_deletes"
+3. "dep_upserts"
+4. "dep_deletes"
+5. "note_appends"
+6. "v"
+```
+
+**NoteAppend entry keys (in emission order):**
+```
+1. "bead_id"
+2. "note"
+```
+
+**HlcMax keys (in emission order):**
+```
+1. "actor_id"
+2. "logical"
+3. "physical_ms"
+```
 
 ### 3.2 Encoding strategy (v0.5)
 - Implement `EventBody::encode_canonical_bytes()` using `minicbor::Encoder`.
-- Precompute a canonical key order for EventBody maps to avoid per-encode sorting.
+- Emit keys in the fixed order specified in §3.1 (no runtime sorting required).
 - Implement:
   - `encode_canonical_body()` -> event_body_bytes
   - `compute_sha256(event_body_bytes)` -> sha256
@@ -1311,39 +1364,71 @@ Directory layout under store dir:
 - `index/wal.sqlite`
 - `snap/` reserved for snapshot bootstrap temp files (deferred in v0.5)
 
-Segment header (raw bytes, little-endian where applicable):
-- magic: 5 bytes = ASCII "BDWAL"
-- wal_format_version: u32_le
-- header_len: u32_le  // total header bytes including header_crc32c
-- store_id: 16 bytes (UUID bytes)
-- store_epoch: u64_le
-- namespace_len: u32_le
-- namespace_bytes: namespace_len bytes (UTF-8)
-- created_at_ms: u64_le
-- segment_id: 16 bytes (UUID bytes) // stable identity for indexing/repair
-- flags: u32_le
-- header_crc32c: u32_le  // crc32c (Castagnoli) of header bytes excluding this field
+#### 5.2.1 Segment header (normative binary layout)
 
-Record framing (wal_format_version = 2):
-- `u32_le record_magic` = ASCII "BDR2" (0x42445232)
-- `u32_le length`  // total bytes of (record_header + payload)
-- `u32_le crc32c`  // Castagnoli over bytes from record_header_v through end of payload
-- record_header_v: u16_le (currently 1)
-- record_header_len: u16_le  // bytes of record header starting at record_header_v
-- flags: u16_le
-- reserved: u16_le  // must be 0 for now; future use
-  - bit0: has_prev_sha
-  - bit1: has_client_request_id
-  - bit2: has_request_sha256   // local-only idempotency digest (see 6.2 + 8.2)
-- origin_replica_id: 16 bytes
-- origin_seq: u64_le
-- event_time_ms: u64_le
-- txn_id: 16 bytes
-- client_request_id: 16 bytes (if flag set)
-- request_sha256: 32 bytes (if flag set)  // sha256 of canonicalized mutation request (retry-stable)
-- sha256: 32 bytes
-- prev_sha256: 32 bytes (if flag set)
-- payload: canonical CBOR bytes of EventBody (does NOT include sha256/prev_sha256)
+All multi-byte integers are little-endian. Magic is raw ASCII bytes.
+
+```
+Offset  Size  Type       Field
+------  ----  ---------  -----
+0       5     ASCII      SEGMENT_MAGIC = "BDWAL"
+5       4     u32_le     WAL_FORMAT_VERSION = 2
+9       4     u32_le     header_len (total header bytes including crc32c)
+13      16    UUID       store_id (raw bytes, not string)
+29      8     u64_le     store_epoch
+37      4     u32_le     namespace_len
+41      var   UTF-8      namespace_bytes (namespace_len bytes)
+41+N    8     u64_le     created_at_ms
+49+N    16    UUID       segment_id (stable identity for indexing/repair)
+65+N    4     u32_le     flags (reserved = 0)
+69+N    4     u32_le     header_crc32c (CRC-32C of bytes 0..(69+N), excludes this field)
+```
+
+Minimum header size (empty namespace): 73 bytes. Typical with "core" (4 bytes): 77 bytes.
+
+#### 5.2.2 Frame format (normative binary layout)
+
+Each record is wrapped in a frame with integrity checking:
+
+```
+Offset  Size  Type       Field
+------  ----  ---------  -----
+0       4     u32_le     FRAME_MAGIC = 0x42445232 ("BDR2")
+4       4     u32_le     length (body bytes only, not frame header)
+8       4     u32_le     crc32c (CRC-32C of body only)
+12      var   bytes      body (record_header + payload)
+```
+
+Frame header is always 12 bytes. Total frame size = 12 + length.
+
+#### 5.2.3 Record header (normative binary layout, version 1)
+
+```
+Offset  Size  Type       Field
+------  ----  ---------  -----
+0       2     u16_le     RECORD_HEADER_VERSION = 1
+2       2     u16_le     header_len (total record header bytes)
+4       2     u16_le     flags (bit field, see below)
+6       2     u16_le     reserved (MUST be 0)
+8       16    UUID       origin_replica_id
+24      8     u64_le     origin_seq
+32      8     u64_le     event_time_ms
+40      16    UUID       txn_id
+56      [16]  UUID       client_request_id (if flags.bit1 set)
+var     [32]  bytes      request_sha256 (if flags.bit2 set)
+var     32    bytes      sha256 (always present)
+var     [32]  bytes      prev_sha256 (if flags.bit0 set)
+```
+
+**Flags bitfield:**
+- bit0: has_prev_sha (prev_sha256 present)
+- bit1: has_client_request_id (client_request_id present)
+- bit2: has_request_sha256 (request_sha256 present, local-only idempotency digest)
+- bits 3-15: reserved (MUST be 0, reject if set)
+
+Base header size: 88 bytes. Maximum with all optional fields: 88 + 16 + 32 + 32 = 168 bytes.
+
+Payload follows immediately after record header: canonical CBOR bytes of EventBody.
 
 Header consistency (normative):
 - record_header fields MUST match the decoded EventBody fields.
@@ -1681,12 +1766,39 @@ CREATE TABLE replica_liveness (
 );
 ```
 
-Notes:
-- UUIDs stored as 16-byte BLOBs.
-- event_ids can be CBOR-encoded blobs.
-  Under the "one request → one event" rule, event_ids is typically length 1,
+**Table status (normative vs rebuildable):**
+
+| Table | Status | Notes |
+|-------|--------|-------|
+| events | Normative, rebuildable | Index of WAL contents; rebuild from segments |
+| watermarks | Normative, rebuildable | Derived from events table during rebuild |
+| client_requests | Normative, rebuildable | Idempotency mapping; rebuild from WAL record headers |
+| origin_seq | Normative, rebuildable | Counter; rebuild as max(origin_seq)+1 from events |
+| meta | Normative, NOT rebuildable | Store identity; fail if mismatch |
+| hlc | Normative, rebuildable | HLC state; rebuild from max(hlc_max) in WAL |
+| segments | Normative, rebuildable | Segment metadata; rebuild from filesystem scan |
+| replica_liveness | Volatile, rebuildable | Observability cache; safe to drop |
+
+**event_ids encoding (normative):**
+
+The `event_ids` column in `client_requests` is CBOR-encoded:
+```
+event_ids := CBOR array of EventId
+EventId := CBOR array(3) [
+  origin_replica_id: bytes(16),  // UUID raw bytes
+  namespace: text,               // UTF-8 string
+  origin_seq: u64                // positive integer
+]
+```
+
+**Note:** `request_sha256` is stored in `client_requests` only, NOT in `events`.
+This is intentional: the request digest is for idempotency checking, not event indexing.
+
+**General encoding notes:**
+- UUIDs stored as 16-byte BLOBs (not string representation).
+- Under the "one request → one event" rule, event_ids is typically length 1,
   but remains a Vec for forward compatibility.
-- meta should store schema version and store_id for sanity checks.
+- meta stores schema version and store_id for sanity checks.
 
 Startup sanity checks (normative):
 - On every store open (even when index exists), the daemon MUST verify:
