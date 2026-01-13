@@ -418,6 +418,9 @@ impl Daemon {
                 env!("CARGO_PKG_VERSION"),
                 self.limits(),
             )?;
+            if let Some(hlc_state) = runtime.hlc_state_for_actor(&self.actor)? {
+                self.clock.receive(&hlc_state);
+            }
             self.stores.insert(store_id, runtime);
 
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
@@ -500,6 +503,9 @@ impl Daemon {
                 env!("CARGO_PKG_VERSION"),
                 self.limits(),
             )?;
+            if let Some(hlc_state) = runtime.hlc_state_for_actor(&self.actor)? {
+                self.clock.receive(&hlc_state);
+            }
             self.stores.insert(store_id, runtime);
 
             // Blocking load from git (fetches remote first in GitWorker).

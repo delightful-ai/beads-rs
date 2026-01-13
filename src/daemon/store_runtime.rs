@@ -11,8 +11,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::{
-    Applied, Durable, HeadStatus, Limits, NamespaceId, NamespacePolicy, ReplicaId, Seq0,
+    ActorId, Applied, Durable, HeadStatus, Limits, NamespaceId, NamespacePolicy, ReplicaId, Seq0,
     StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks,
+    WriteStamp,
 };
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repo::RepoState;
@@ -141,6 +142,17 @@ impl StoreRuntime {
                 .copied()
                 .map(|watermark| watermark.head()),
         )
+    }
+
+    pub fn hlc_state_for_actor(
+        &self,
+        actor: &ActorId,
+    ) -> Result<Option<WriteStamp>, StoreRuntimeError> {
+        let rows = self.wal_index.reader().load_hlc()?;
+        Ok(rows
+            .into_iter()
+            .find(|row| row.actor_id == *actor)
+            .map(|row| WriteStamp::new(row.last_physical_ms, row.last_logical)))
     }
 }
 
