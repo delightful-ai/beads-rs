@@ -29,8 +29,8 @@ use super::wal::{
 use crate::core::{
     apply_event, decode_event_body, hash_event_body, Applied, BeadId, BeadType, DepKind,
     DurabilityReceipt, Durable, EventBody, EventId, HeadStatus, Limits, NoteId, Priority,
-    ReplicaId, Seq1, Sha256, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
-    TxnDeltaV1, TxnOpV1, WirePatch,
+    ReplicaId, Seq1, Sha256, StoreIdentity, WallClock, Watermark, WatermarkError, Watermarks,
+    WriteStamp, TxnDeltaV1, TxnOpV1, WirePatch,
 };
 use crate::paths;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
