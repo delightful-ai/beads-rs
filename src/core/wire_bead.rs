@@ -582,7 +582,7 @@ impl TxnOpV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TxnOpKey {
     BeadUpsert { id: BeadId },
     BeadDelete { id: BeadId, lineage: Option<Stamp> },

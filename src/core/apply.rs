@@ -9,7 +9,7 @@ use super::collections::Labels;
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::{DepEdge, DepKey, DepLife};
-use super::domain::{BeadType, DepKind, Priority};
+use super::domain::{BeadType, Priority};
 use super::event::{EventBody, EventKindV1};
 use super::identity::{ActorId, BeadId, NoteId};
 use super::state::CanonicalState;
@@ -187,12 +187,12 @@ fn apply_bead_delete(
         return Ok(());
     }
 
-    let existing = state.get_tombstone(&id);
+    let tombstone_deleted = tombstone.deleted.clone();
+    let should_mark = state
+        .get_tombstone(&id)
+        .map_or(true, |existing| existing.deleted < tombstone_deleted);
     state.delete(tombstone);
-    if existing.is_none()
-        || existing
-            .is_some_and(|existing| existing.deleted < tombstone.deleted)
-    {
+    if should_mark {
         outcome.changed_beads.insert(id);
     }
     Ok(())
@@ -495,6 +495,7 @@ fn default_fields(stamp: Stamp) -> BeadFields {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::DepKind;
     use crate::core::event::{EventKindV1, HlcMax};
     use crate::core::identity::{
         ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TxnId,
