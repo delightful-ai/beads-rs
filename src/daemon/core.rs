@@ -134,14 +134,11 @@ const REFRESH_TTL: Duration = Duration::from_millis(1000);
 const LOAD_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Clone, Debug)]
-struct NormalizedMutationMeta {
-    #[allow(dead_code)]
-    namespace: NamespaceId,
-    #[allow(dead_code)]
-    durability: DurabilityClass,
-    #[allow(dead_code)]
-    client_request_id: Option<ClientRequestId>,
-    actor_id: ActorId,
+pub(crate) struct NormalizedMutationMeta {
+    pub(crate) namespace: NamespaceId,
+    pub(crate) durability: DurabilityClass,
+    pub(crate) client_request_id: Option<ClientRequestId>,
+    pub(crate) actor_id: ActorId,
 }
 
 #[derive(Clone, Debug)]
@@ -270,6 +267,15 @@ impl Daemon {
     pub(crate) fn store_runtime(&self, proof: &LoadedStore) -> Result<&StoreRuntime, OpError> {
         self.stores
             .get(&proof.store_id)
+            .ok_or(OpError::Internal("loaded store missing from state"))
+    }
+
+    pub(crate) fn store_runtime_mut(
+        &mut self,
+        proof: &LoadedStore,
+    ) -> Result<&mut StoreRuntime, OpError> {
+        self.stores
+            .get_mut(&proof.store_id)
             .ok_or(OpError::Internal("loaded store missing from state"))
     }
 
@@ -1205,7 +1211,7 @@ impl Daemon {
                 };
                 self.apply_create(
                     &repo,
-                    &meta.actor_id,
+                    meta,
                     id,
                     parent,
                     title,
@@ -1238,7 +1244,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_update(&repo, &meta.actor_id, &id, patch, cas, git_tx)
+                self.apply_update(&repo, meta, &id, patch, cas, git_tx)
             }
 
             Request::AddLabels {
@@ -1255,7 +1261,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_add_labels(&repo, &meta.actor_id, &id, labels, git_tx)
+                self.apply_add_labels(&repo, meta, &id, labels, git_tx)
             }
 
             Request::RemoveLabels {
@@ -1272,7 +1278,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_remove_labels(&repo, &meta.actor_id, &id, labels, git_tx)
+                self.apply_remove_labels(&repo, meta, &id, labels, git_tx)
             }
 
             Request::SetParent {
@@ -1298,7 +1304,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_set_parent(&repo, &meta.actor_id, &id, parent, git_tx)
+                self.apply_set_parent(&repo, meta, &id, parent, git_tx)
             }
 
             Request::Close {
@@ -1316,7 +1322,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_close(&repo, &meta.actor_id, &id, reason, on_branch, git_tx)
+                self.apply_close(&repo, meta, &id, reason, on_branch, git_tx)
             }
 
             Request::Reopen { repo, id, meta } => {
@@ -1328,7 +1334,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_reopen(&repo, &meta.actor_id, &id, git_tx)
+                self.apply_reopen(&repo, meta, &id, git_tx)
             }
 
             Request::Delete {
@@ -1345,7 +1351,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_delete(&repo, &meta.actor_id, &id, reason, git_tx)
+                self.apply_delete(&repo, meta, &id, reason, git_tx)
             }
 
             Request::AddDep {
@@ -1367,7 +1373,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_add_dep(&repo, &meta.actor_id, &from, &to, kind, git_tx)
+                self.apply_add_dep(&repo, meta, &from, &to, kind, git_tx)
             }
 
             Request::RemoveDep {
@@ -1389,7 +1395,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_remove_dep(&repo, &meta.actor_id, &from, &to, kind, git_tx)
+                self.apply_remove_dep(&repo, meta, &from, &to, kind, git_tx)
             }
 
             Request::AddNote {
@@ -1406,7 +1412,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_add_note(&repo, &meta.actor_id, &id, content, git_tx)
+                self.apply_add_note(&repo, meta, &id, content, git_tx)
             }
 
             Request::Claim {
@@ -1423,7 +1429,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_claim(&repo, &meta.actor_id, &id, lease_secs, git_tx)
+                self.apply_claim(&repo, meta, &id, lease_secs, git_tx)
             }
 
             Request::Unclaim { repo, id, meta } => {
@@ -1435,7 +1441,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_unclaim(&repo, &meta.actor_id, &id, git_tx)
+                self.apply_unclaim(&repo, meta, &id, git_tx)
             }
 
             Request::ExtendClaim {
@@ -1452,7 +1458,7 @@ impl Daemon {
                     Ok(meta) => meta,
                     Err(e) => return Response::err(e),
                 };
-                self.apply_extend_claim(&repo, &meta.actor_id, &id, lease_secs, git_tx)
+                self.apply_extend_claim(&repo, meta, &id, lease_secs, git_tx)
             }
 
             // Queries - delegate to query_executor module
@@ -1776,7 +1782,7 @@ fn store_id_from_remote(remote: &RemoteUrl) -> StoreId {
 
 const CLOCK_SKEW_WARN_MS: u64 = 5 * 60 * 1000;
 
-fn detect_clock_skew(now_ms: u64, reference_ms: u64) -> Option<ClockSkewRecord> {
+pub(crate) fn detect_clock_skew(now_ms: u64, reference_ms: u64) -> Option<ClockSkewRecord> {
     let delta_ms = now_ms as i64 - reference_ms as i64;
     if delta_ms.unsigned_abs() >= CLOCK_SKEW_WARN_MS {
         Some(ClockSkewRecord {

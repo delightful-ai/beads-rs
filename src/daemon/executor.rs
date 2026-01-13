@@ -7,28 +7,350 @@
 //! 4. Marks dirty and schedules sync
 //! 5. Returns response
 
-use std::path::Path;
+use std::fs::File;
+use std::io::{Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use bytes::Bytes;
 use crossbeam::channel::Sender;
-use uuid::Uuid;
 
-use super::core::{Daemon, LoadedStore};
+use super::core::{detect_clock_skew, Daemon, NormalizedMutationMeta};
 use super::git_worker::GitOp;
 use super::ipc::{OpResponse, Response, ResponsePayload};
-use super::ops::{BeadPatch, MapLiveError, OpError, OpResult};
-use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, Claim, Closure, DepEdge,
-    DepKey, DepKind, DepLife, DepSpec, DurabilityReceipt, Label, Labels, Limits, Lww, Note, NoteId,
-    NoteLog, Priority, StoreIdentity, Tombstone, TxnId, WallClock, Workflow, WriteStamp,
+use super::mutation_engine::{IdContext, MutationContext, MutationEngine, MutationRequest};
+use super::ops::{BeadPatch, OpError, OpResult};
+use super::store_runtime::StoreRuntimeError;
+use super::wal::{
+    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentConfig, SegmentRow,
+    SegmentWriter, WalIndex, WalIndexError, WalReplayError,
 };
+use crate::core::{
+    apply_event, decode_event_body, hash_event_body, BeadId, BeadType, DepKind, DurabilityReceipt,
+    EventBody, EventId, HeadStatus, Limits, NoteId, Priority, Seq1, WallClock, Watermark,
+    WatermarkError, WriteStamp, TxnDeltaV1, TxnOpV1, WirePatch,
+};
+use crate::paths;
+use crate::daemon::wal::frame::FRAME_HEADER_LEN;
 
 impl Daemon {
+    fn apply_mutation_request(
+        &mut self,
+        repo: &Path,
+        meta: NormalizedMutationMeta,
+        request: MutationRequest,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        match self.apply_mutation_request_inner(repo, meta, request, git_tx) {
+            Ok(op) => Response::ok(ResponsePayload::Op(op)),
+            Err(err) => Response::err(err),
+        }
+    }
+
+    fn apply_mutation_request_inner(
+        &mut self,
+        repo: &Path,
+        meta: NormalizedMutationMeta,
+        request: MutationRequest,
+        git_tx: &Sender<GitOp>,
+    ) -> Result<OpResponse, OpError> {
+        let proof = self.ensure_repo_loaded_strict(repo, git_tx)?;
+        let store = self.store_identity(&proof)?;
+        let limits = self.limits().clone();
+        let engine = MutationEngine::new(limits.clone());
+
+        let namespace = meta.namespace;
+        let actor_id = meta.actor_id;
+        let client_request_id = meta.client_request_id;
+        let origin_replica_id = self.store_runtime(&proof)?.meta.replica_id;
+        let wal_index = Arc::clone(&self.store_runtime(&proof)?.wal_index);
+        let store_meta = self.store_runtime(&proof)?.meta.clone();
+        let store_dir = paths::store_dir(proof.store_id());
+
+        let ctx = MutationContext {
+            namespace: namespace.clone(),
+            actor_id,
+            client_request_id,
+        };
+
+        if let Some(client_request_id) = ctx.client_request_id {
+            let request_sha256 = engine.request_sha256_for(&ctx, &request)?;
+            let existing = wal_index
+                .reader()
+                .lookup_client_request(&namespace, &origin_replica_id, client_request_id)
+                .map_err(wal_index_to_op)?;
+            if let Some(row) = existing {
+                if row.request_sha256 != request_sha256 {
+                    return Err(OpError::ClientRequestIdReuseMismatch {
+                        namespace,
+                        client_request_id,
+                        expected_request_sha256: row.request_sha256,
+                        got_request_sha256: request_sha256,
+                    });
+                }
+                let Some(event_id) = row.event_ids.first() else {
+                    return Err(OpError::Internal("idempotency row missing event id"));
+                };
+                let event_body = load_event_body(&store_dir, &wal_index, event_id, &limits)?;
+                let result = op_result_from_delta(&request, &event_body.delta)?;
+                let store_runtime = self.store_runtime(&proof)?;
+                let receipt = DurabilityReceipt::local_fsync(
+                    store,
+                    row.txn_id,
+                    row.event_ids.clone(),
+                    row.created_at_ms,
+                    store_runtime.watermarks_durable.clone(),
+                    store_runtime.watermarks_applied.clone(),
+                );
+                return Ok(OpResponse::new(result, receipt));
+            }
+        }
+
+        let id_ctx = if matches!(request, MutationRequest::Create { .. }) {
+            let repo_state = self.repo_state(&proof)?;
+            Some(IdContext {
+                root_slug: repo_state.root_slug.clone(),
+                remote_url: proof.remote().clone(),
+            })
+        } else {
+            None
+        };
+
+        let durable_watermark = self
+            .store_runtime(&proof)?
+            .watermarks_durable
+            .get(&namespace, &origin_replica_id)
+            .copied()
+            .unwrap_or_else(Watermark::genesis);
+
+        let mut txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
+        let next_seq = txn
+            .next_origin_seq(&namespace, &origin_replica_id)
+            .map_err(wal_index_to_op)?;
+        let origin_seq =
+            Seq1::from_u64(next_seq).ok_or(OpError::Internal("origin_seq must be nonzero"))?;
+        let expected_next = durable_watermark.seq().next();
+        if origin_seq != expected_next {
+            return Err(OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
+                kind: "durable",
+                namespace: namespace.clone(),
+                origin: origin_replica_id,
+                source: WatermarkError::NonContiguous {
+                    expected: expected_next,
+                    got: origin_seq,
+                },
+            }));
+        }
+        let prev_sha = match durable_watermark.head() {
+            HeadStatus::Genesis => None,
+            HeadStatus::Known(sha) => Some(sha),
+            HeadStatus::Unknown => {
+                return Err(OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
+                    kind: "durable",
+                    namespace: namespace.clone(),
+                    origin: origin_replica_id,
+                    source: WatermarkError::MissingHead {
+                        seq: durable_watermark.seq(),
+                    },
+                }));
+            }
+        };
+
+        let draft = {
+            let repo_state = self.repo_state(&proof)?;
+            engine.plan(
+                &repo_state.state,
+                self.clock_mut(),
+                store,
+                origin_replica_id,
+                origin_seq,
+                id_ctx.as_ref(),
+                ctx.clone(),
+                request.clone(),
+            )?
+        };
+
+        let sha = hash_event_body(&draft.event_bytes).0;
+        let request_sha256 = draft.client_request_id.map(|_| draft.request_sha256);
+
+        let record = Record {
+            header: RecordHeader {
+                origin_replica_id,
+                origin_seq: origin_seq.get(),
+                event_time_ms: draft.event_body.event_time_ms,
+                txn_id: draft.event_body.txn_id,
+                client_request_id: draft.event_body.client_request_id,
+                request_sha256,
+                sha256: sha,
+                prev_sha256: prev_sha,
+            },
+            payload: Bytes::copy_from_slice(draft.event_bytes.as_ref()),
+        };
+
+        let now_ms = draft.event_body.event_time_ms;
+        let mut writer = SegmentWriter::open(
+            &store_dir,
+            &store_meta,
+            &namespace,
+            now_ms,
+            SegmentConfig::from_limits(&limits),
+        )?;
+        let append = writer.append(&record, now_ms)?;
+        let last_indexed_offset = append.offset + append.len as u64;
+        let segment_row = SegmentRow {
+            namespace: namespace.clone(),
+            segment_id: append.segment_id,
+            segment_path: segment_rel_path(&store_dir, writer.current_path()),
+            created_at_ms: now_ms,
+            last_indexed_offset,
+            sealed: true,
+            final_len: Some(last_indexed_offset),
+        };
+
+        let event_id = EventId::new(origin_replica_id, namespace.clone(), origin_seq);
+        let event_ids = vec![event_id];
+        txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
+        txn.record_event(
+            &namespace,
+            &event_ids[0],
+            sha,
+            prev_sha,
+            append.segment_id,
+            append.offset,
+            append.len,
+            now_ms,
+            draft.event_body.txn_id,
+            ctx.client_request_id,
+            request_sha256,
+        )
+        .map_err(wal_index_to_op)?;
+        if let Some(client_request_id) = ctx.client_request_id {
+            txn.upsert_client_request(
+                &namespace,
+                &origin_replica_id,
+                client_request_id,
+                draft.request_sha256,
+                draft.event_body.txn_id,
+                &event_ids,
+                now_ms,
+            )
+            .map_err(wal_index_to_op)?;
+        }
+        let hlc_max = draft
+            .event_body
+            .hlc_max
+            .as_ref()
+            .ok_or(OpError::Internal("event missing hlc_max"))?;
+        txn.update_hlc(&HlcRow {
+            actor_id: hlc_max.actor_id.clone(),
+            last_physical_ms: hlc_max.physical_ms,
+            last_logical: hlc_max.logical,
+        })
+        .map_err(wal_index_to_op)?;
+        txn.commit().map_err(wal_index_to_op)?;
+
+        let (
+            durable_watermarks,
+            applied_watermarks,
+            applied_head,
+            durable_head,
+            applied_seq,
+            durable_seq,
+        ) = {
+            let store_runtime = self.store_runtime_mut(&proof)?;
+            apply_event(&mut store_runtime.repo_state.state, &draft.event_body)
+                .map_err(|_| OpError::Internal("apply_event failed"))?;
+            let write_stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
+            let now_wall_ms = WallClock::now().0;
+            store_runtime.repo_state.last_seen_stamp = Some(write_stamp.clone());
+            store_runtime.repo_state.last_clock_skew =
+                detect_clock_skew(now_wall_ms, write_stamp.wall_ms);
+            store_runtime.repo_state.mark_dirty();
+
+            store_runtime
+                .watermarks_applied
+                .advance_contiguous(&namespace, &origin_replica_id, origin_seq, sha)
+                .map_err(|err| {
+                    OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
+                        kind: "applied",
+                        namespace: namespace.clone(),
+                        origin: origin_replica_id,
+                        source: err,
+                    })
+                })?;
+            store_runtime
+                .watermarks_durable
+                .advance_contiguous(&namespace, &origin_replica_id, origin_seq, sha)
+                .map_err(|err| {
+                    OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
+                        kind: "durable",
+                        namespace: namespace.clone(),
+                        origin: origin_replica_id,
+                        source: err,
+                    })
+                })?;
+
+            let applied_head = store_runtime.applied_head_sha(&namespace, &origin_replica_id);
+            let durable_head = store_runtime.durable_head_sha(&namespace, &origin_replica_id);
+            let applied_seq = store_runtime
+                .watermarks_applied
+                .get(&namespace, &origin_replica_id)
+                .copied()
+                .unwrap_or_else(Watermark::genesis)
+                .seq()
+                .get();
+            let durable_seq = store_runtime
+                .watermarks_durable
+                .get(&namespace, &origin_replica_id)
+                .copied()
+                .unwrap_or_else(Watermark::genesis)
+                .seq()
+                .get();
+
+            (
+                store_runtime.watermarks_durable.clone(),
+                store_runtime.watermarks_applied.clone(),
+                applied_head,
+                durable_head,
+                applied_seq,
+                durable_seq,
+            )
+        };
+
+        self.scheduler.schedule(proof.remote().clone());
+
+        let mut watermark_txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
+        watermark_txn
+            .update_watermark(
+                &namespace,
+                &origin_replica_id,
+                applied_seq,
+                durable_seq,
+                applied_head,
+                durable_head,
+            )
+            .map_err(wal_index_to_op)?;
+        watermark_txn.commit().map_err(wal_index_to_op)?;
+
+        let result = op_result_from_delta(&request, &draft.event_body.delta)?;
+        let receipt = DurabilityReceipt::local_fsync(
+            store,
+            draft.event_body.txn_id,
+            event_ids,
+            now_ms,
+            durable_watermarks,
+            applied_watermarks,
+        );
+
+        Ok(OpResponse::new(result, receipt))
+    }
+
     /// Create a new bead.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_create(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         requested_id: Option<String>,
         parent: Option<String>,
         title: String,
@@ -42,1360 +364,552 @@ impl Daemon {
         estimated_minutes: Option<u32>,
         labels: Vec<String>,
         dependencies: Vec<String>,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let requested_id = requested_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        let parent = parent
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        if requested_id.is_some() && parent.is_some() {
-            return Response::err(OpError::ValidationFailed {
-                field: "create".into(),
-                reason: "cannot specify both --id and --parent".into(),
-            });
-        }
-
-        // Validate title is not empty or whitespace-only
-        let title = title.trim().to_string();
-        if title.is_empty() {
-            return Response::err(OpError::ValidationFailed {
-                field: "title".into(),
-                reason: "title cannot be empty".into(),
-            });
-        }
-
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::Create {
+            id: requested_id,
+            parent,
+            title,
+            bead_type,
+            priority,
+            description,
+            design,
+            acceptance_criteria,
+            assignee,
+            external_ref,
+            estimated_minutes,
+            labels,
+            dependencies,
         };
-
-        let actor = actor.clone();
-        let remote_url = remote.remote().clone();
-        let root_slug = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state.root_slug.clone(),
-            Err(e) => return Response::err(e),
-        };
-
-        // Parse dependency specs first (for validation + source_repo inheritance).
-        let parsed_deps = match DepSpec::parse_list(&dependencies) {
-            Ok(v) => v,
-            Err(e) => {
-                return Response::err(OpError::ValidationFailed {
-                    field: "deps".into(),
-                    reason: e.to_string(),
-                });
-            }
-        };
-
-        // Validate + canonicalize labels.
-        let mut label_set = Labels::new();
-        for raw in labels {
-            let label = match crate::core::Label::parse(raw) {
-                Ok(l) => l,
-                Err(e) => {
-                    return Response::err(OpError::ValidationFailed {
-                        field: "labels".into(),
-                        reason: e.to_string(),
-                    });
-                }
-            };
-            label_set.insert(label);
-        }
-        if let Err(err) = enforce_label_limit(&label_set, self.limits(), None) {
-            return Response::err(err);
-        }
-
-        let design = design.and_then(|s| {
-            let t = s.trim().to_string();
-            if t.is_empty() { None } else { Some(t) }
-        });
-        let acceptance_criteria = acceptance_criteria.and_then(|s| {
-            let t = s.trim().to_string();
-            if t.is_empty() { None } else { Some(t) }
-        });
-        let external_ref = external_ref.and_then(|s| {
-            let t = s.trim().to_string();
-            if t.is_empty() { None } else { Some(t) }
-        });
-
-        let desc_str = description.unwrap_or_default();
-        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
-            // Determine ID.
-            let (id, parent_id) = match (requested_id, parent) {
-                (Some(raw), None) => {
-                    let id = BeadId::parse(&raw).map_err(|e| OpError::ValidationFailed {
-                        field: "id".into(),
-                        reason: e.to_string(),
-                    })?;
-                    if state.get_live(&id).is_some() || state.get_tombstone(&id).is_some() {
-                        return Err(OpError::AlreadyExists(id));
-                    }
-                    (id, None)
-                }
-                (None, Some(raw)) => {
-                    let parent_id = BeadId::parse(&raw).map_err(|e| OpError::ValidationFailed {
-                        field: "parent".into(),
-                        reason: e.to_string(),
-                    })?;
-                    let child = next_child_id(state, &parent_id)?;
-                    (child, Some(parent_id))
-                }
-                (None, None) => (
-                    generate_unique_id(
-                        state,
-                        root_slug.as_deref(),
-                        &title,
-                        &desc_str,
-                        &actor,
-                        &stamp.at,
-                        &remote_url,
-                    )?,
-                    None,
-                ),
-                (Some(_), Some(_)) => unreachable!("guarded above"),
-            };
-
-            // Validate dep targets exist (parity with beads-go daemon).
-            for spec in &parsed_deps {
-                if state.get_live(spec.id()).is_none() {
-                    return Err(OpError::NotFound(spec.id().clone()));
-                }
-            }
-
-            // Inherit source_repo from discovered-from parent if present.
-            let mut source_repo_value: Option<String> = None;
-            if let Some(spec) = parsed_deps
-                .iter()
-                .find(|spec| matches!(spec.kind(), DepKind::DiscoveredFrom))
-                && let Some(parent_bead) = state.get_live(spec.id())
-                && let Some(sr) = &parent_bead.fields.source_repo.value
-                && !sr.trim().is_empty()
-            {
-                source_repo_value = Some(sr.clone());
-            }
-
-            // Create claim at creation time if assignee specified (only current actor).
-            let claim_value = match assignee.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                None => Claim::Unclaimed,
-                Some("me") | Some("self") => {
-                    let expires = WallClock(stamp.at.wall_ms + 3600 * 1000);
-                    Claim::claimed(actor.clone(), Some(expires))
-                }
-                Some(raw) => {
-                    if raw != actor.as_str() {
-                        return Err(OpError::ValidationFailed {
-                            field: "assignee".into(),
-                            reason: "cannot assign other actors; run bd as that actor".into(),
-                        });
-                    }
-                    let expires = WallClock(stamp.at.wall_ms + 3600 * 1000);
-                    Claim::claimed(actor.clone(), Some(expires))
-                }
-            };
-
-            // Create bead
-            let core = BeadCore::new(id.clone(), stamp.clone(), None);
-            let fields = BeadFields {
-                title: Lww::new(title, stamp.clone()),
-                description: Lww::new(desc_str, stamp.clone()),
-                design: Lww::new(design, stamp.clone()),
-                acceptance_criteria: Lww::new(acceptance_criteria, stamp.clone()),
-                priority: Lww::new(priority, stamp.clone()),
-                bead_type: Lww::new(bead_type, stamp.clone()),
-                labels: Lww::new(label_set, stamp.clone()),
-                external_ref: Lww::new(external_ref, stamp.clone()),
-                source_repo: Lww::new(source_repo_value, stamp.clone()),
-                estimated_minutes: Lww::new(estimated_minutes, stamp.clone()),
-                workflow: Lww::new(Workflow::Open, stamp.clone()),
-                claim: Lww::new(claim_value, stamp.clone()),
-            };
-            let bead = Bead::new(core, fields);
-
-            // Insert into state
-            state.insert_live(bead);
-
-            // Parent edge (from child -> parent).
-            if let Some(parent_id) = parent_id {
-                if state.get_live(&parent_id).is_none() {
-                    return Err(OpError::NotFound(parent_id));
-                }
-                let key = DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
-                    OpError::ValidationFailed {
-                        field: "parent".into(),
-                        reason: e.reason,
-                    }
-                })?;
-                state.insert_dep(key, DepEdge::new(stamp.clone()));
-            }
-
-            // Dependency edges.
-            for spec in parsed_deps {
-                let key = DepKey::new(id.clone(), spec.id().clone(), spec.kind()).map_err(|e| {
-                    OpError::ValidationFailed {
-                        field: "dependency".into(),
-                        reason: e.reason,
-                    }
-                })?;
-                state.insert_dep(key, DepEdge::new(stamp.clone()));
-            }
-
-            Ok(id)
-        });
-
-        match result {
-            Ok(id) => self.op_response(&remote, OpResult::Created { id }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Update an existing bead.
     pub fn apply_update(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         patch: BeadPatch,
         cas: Option<String>,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        // Validate patch
-        if let Err(e) = patch.validate() {
-            return Response::err(e);
-        }
-
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::Update {
+            id: id.as_str().to_string(),
+            patch,
+            cas,
         };
-
-        // Check bead existence and CAS (scope to drop borrow)
-        {
-            let repo_state = match self.repo_state_mut(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-            let bead = match repo_state.state.require_live(id).map_live_err(id) {
-                Ok(b) => b,
-                Err(e) => return Response::err(e),
-            };
-
-            // CAS check
-            if let Some(expected) = cas {
-                let actual = bead.content_hash().to_hex();
-                if expected != actual {
-                    return Response::err(OpError::CasMismatch { expected, actual });
-                }
-            }
-        }
-
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            let bead = state.require_live_mut(id).map_live_err(id)?;
-
-            // Apply patch
-            patch.apply_to_fields(&mut bead.fields, &stamp)?;
-
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(&remote, OpResult::Updated { id: id.clone() }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Add labels to a bead.
     pub fn apply_add_labels(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         labels: Vec<String>,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let parsed = match parse_label_list(labels) {
-            Ok(v) => v,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::AddLabels {
+            id: id.as_str().to_string(),
+            labels,
         };
-
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
-        };
-        let limits = self.limits().clone();
-
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            let bead = state.require_live_mut(id).map_live_err(id)?;
-            let mut labels = bead.fields.labels.value.clone();
-            for label in parsed {
-                labels.insert(label);
-            }
-            enforce_label_limit(&labels, &limits, Some(id.clone()))?;
-            bead.fields.labels = Lww::new(labels, stamp.clone());
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(&remote, OpResult::Updated { id: id.clone() }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Remove labels from a bead.
     pub fn apply_remove_labels(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         labels: Vec<String>,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let parsed = match parse_label_list(labels) {
-            Ok(v) => v,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::RemoveLabels {
+            id: id.as_str().to_string(),
+            labels,
         };
-
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
-        };
-
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            let bead = state.require_live_mut(id).map_live_err(id)?;
-            let mut labels = bead.fields.labels.value.clone();
-            for label in parsed {
-                labels.remove(label.as_str());
-            }
-            bead.fields.labels = Lww::new(labels, stamp.clone());
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(&remote, OpResult::Updated { id: id.clone() }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Replace the parent relationship for a bead.
     pub fn apply_set_parent(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         parent: Option<BeadId>,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::SetParent {
+            id: id.as_str().to_string(),
+            parent: parent.map(|value| value.as_str().to_string()),
         };
-
-        let existing_parents = {
-            let repo_state = match self.repo_state(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-
-            if repo_state.state.get_live(id).is_none() {
-                return Response::err(OpError::NotFound(id.clone()));
-            }
-
-            let existing: Vec<BeadId> = repo_state
-                .state
-                .deps_from(id)
-                .into_iter()
-                .filter(|(key, _)| key.kind() == DepKind::Parent)
-                .map(|(key, _)| key.to().clone())
-                .collect();
-
-            match &parent {
-                Some(desired) => {
-                    if repo_state.state.get_live(desired).is_none() {
-                        return Response::err(OpError::NotFound(desired.clone()));
-                    }
-                    if existing.len() == 1 && existing[0] == *desired {
-                        return self.op_response(&remote, OpResult::Updated { id: id.clone() });
-                    }
-                    if would_create_cycle(&repo_state.state, id, desired, DepKind::Parent) {
-                        return Response::err(OpError::ValidationFailed {
-                            field: "parent".into(),
-                            reason: format!(
-                                "circular dependency: {} already depends on {} (directly or transitively)",
-                                desired, id
-                            ),
-                        });
-                    }
-                }
-                None => {
-                    if existing.is_empty() {
-                        return self.op_response(&remote, OpResult::Updated { id: id.clone() });
-                    }
-                }
-            }
-
-            existing
-        };
-
-        let new_parent = parent.clone();
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            for existing_parent in existing_parents {
-                let key =
-                    DepKey::new(id.clone(), existing_parent, DepKind::Parent).map_err(|e| {
-                        OpError::ValidationFailed {
-                            field: "parent".into(),
-                            reason: e.reason,
-                        }
-                    })?;
-                let life = Lww::new(DepLife::Deleted, stamp.clone());
-                let edge = DepEdge::with_life(stamp.clone(), life);
-                state.insert_dep(key, edge);
-            }
-
-            if let Some(parent_id) = new_parent {
-                let key = DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
-                    OpError::ValidationFailed {
-                        field: "parent".into(),
-                        reason: e.reason,
-                    }
-                })?;
-                state.insert_dep(key, DepEdge::new(stamp.clone()));
-            }
-
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(&remote, OpResult::Updated { id: id.clone() }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Close a bead.
     pub fn apply_close(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         reason: Option<String>,
         on_branch: Option<String>,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::Close {
+            id: id.as_str().to_string(),
+            reason,
+            on_branch,
         };
-
-        // Check bead state (scope to drop borrow)
-        {
-            let repo_state = match self.repo_state_mut(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-            let bead = match repo_state.state.require_live(id).map_live_err(id) {
-                Ok(b) => b,
-                Err(e) => return Response::err(e),
-            };
-
-            // Check if already closed
-            if bead.fields.workflow.value.is_closed() {
-                return Response::err(OpError::InvalidTransition {
-                    from: "closed".into(),
-                    to: "closed".into(),
-                });
-            }
-        }
-
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            let bead = state.require_live_mut(id).map_live_err(id)?;
-            let closure = Closure::new(reason, on_branch);
-            bead.fields.workflow = Lww::new(Workflow::Closed(closure), stamp);
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(&remote, OpResult::Closed { id: id.clone() }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Reopen a closed bead.
     pub fn apply_reopen(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::Reopen {
+            id: id.as_str().to_string(),
         };
-
-        // Check bead state (scope to drop borrow)
-        {
-            let repo_state = match self.repo_state_mut(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-            let bead = match repo_state.state.require_live(id).map_live_err(id) {
-                Ok(b) => b,
-                Err(e) => return Response::err(e),
-            };
-
-            // Check if actually closed
-            if !bead.fields.workflow.value.is_closed() {
-                let from_status = bead.fields.workflow.value.status().to_string();
-                return Response::err(OpError::InvalidTransition {
-                    from: from_status,
-                    to: "open".into(),
-                });
-            }
-        }
-
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            let bead = state.require_live_mut(id).map_live_err(id)?;
-            bead.fields.workflow = Lww::new(Workflow::Open, stamp);
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(&remote, OpResult::Reopened { id: id.clone() }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Delete a bead (soft delete via tombstone).
     pub fn apply_delete(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         reason: Option<String>,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::Delete {
+            id: id.as_str().to_string(),
+            reason,
         };
-
-        // Check bead existence (scope to drop borrow)
-        {
-            let repo_state = match self.repo_state_mut(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-            if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
-                return Response::err(e);
-            }
-        }
-
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            let tombstone = Tombstone::new(id.clone(), stamp, reason);
-            state.remove_live(id);
-            state.insert_tombstone(tombstone);
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(&remote, OpResult::Deleted { id: id.clone() }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Add a dependency.
     pub fn apply_add_dep(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         from: &BeadId,
         to: &BeadId,
         kind: DepKind,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        // Validate DepKey (rejects self-dependencies)
-        let key = match DepKey::new(from.clone(), to.clone(), kind) {
-            Ok(k) => k,
-            Err(e) => {
-                return Response::err(OpError::ValidationFailed {
-                    field: "dependency".into(),
-                    reason: e.reason,
-                });
-            }
+        let request = MutationRequest::AddDep {
+            from: from.as_str().to_string(),
+            to: to.as_str().to_string(),
+            kind,
         };
-
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
-        };
-
-        // Check both beads exist and detect cycles (scope to drop borrow)
-        {
-            let repo_state = match self.repo_state_mut(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-            if repo_state.state.get_live(from).is_none() {
-                return Response::err(OpError::NotFound(from.clone()));
-            }
-            if repo_state.state.get_live(to).is_none() {
-                return Response::err(OpError::NotFound(to.clone()));
-            }
-
-            // Check for circular dependency: if there's a path from `to` to `from`,
-            // adding `from -> to` would create a cycle.
-            // Only DAG-enforced kinds (Blocks, Parent) reject cycles.
-            if would_create_cycle(&repo_state.state, from, to, kind) {
-                return Response::err(OpError::ValidationFailed {
-                    field: "dependency".into(),
-                    reason: format!(
-                        "circular dependency: {} already depends on {} (directly or transitively)",
-                        to, from
-                    ),
-                });
-            }
-        }
-
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            let edge = DepEdge::new(stamp);
-            state.insert_dep(key, edge);
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(
-                &remote,
-                OpResult::DepAdded {
-                    from: from.clone(),
-                    to: to.clone(),
-                },
-            ),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Remove a dependency (soft delete).
     pub fn apply_remove_dep(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         from: &BeadId,
         to: &BeadId,
         kind: DepKind,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        // Validate DepKey (self-deps can't exist, so can't be removed)
-        let key = match DepKey::new(from.clone(), to.clone(), kind) {
-            Ok(k) => k,
-            Err(e) => {
-                return Response::err(OpError::ValidationFailed {
-                    field: "dependency".into(),
-                    reason: e.reason,
-                });
-            }
+        let request = MutationRequest::RemoveDep {
+            from: from.as_str().to_string(),
+            to: to.as_str().to_string(),
+            kind,
         };
-
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
-        };
-
-        let result = self.apply_wal_mutation_with_actor(&remote, actor, |state, stamp| {
-            let life = Lww::new(DepLife::Deleted, stamp.clone());
-            let edge = DepEdge::with_life(stamp, life);
-            state.insert_dep(key, edge);
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(
-                &remote,
-                OpResult::DepRemoved {
-                    from: from.clone(),
-                    to: to.clone(),
-                },
-            ),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Add a note to a bead.
     pub fn apply_add_note(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         content: String,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::AddNote {
+            id: id.as_str().to_string(),
+            content,
         };
-        if let Err(err) = enforce_note_limit(&content, self.limits()) {
-            return Response::err(err);
-        }
-
-        // Check bead existence (scope to drop borrow)
-        {
-            let repo_state = match self.repo_state_mut(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-            if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
-                return Response::err(e);
-            }
-        }
-
-        let actor = actor.clone();
-        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
-            let bead = state.require_live_mut(id).map_live_err(id)?;
-            let note_id = generate_unique_note_id(&bead.notes, NoteId::generate);
-            let note = Note::new(note_id.clone(), content, actor.clone(), stamp.at);
-            bead.notes.insert(note);
-            Ok(note_id)
-        });
-
-        match result {
-            Ok(note_id) => self.op_response(
-                &remote,
-                OpResult::NoteAdded {
-                    bead_id: id.clone(),
-                    note_id: note_id.as_str().to_string(),
-                },
-            ),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Claim a bead.
     pub fn apply_claim(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         lease_secs: u64,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::Claim {
+            id: id.as_str().to_string(),
+            lease_secs,
         };
-
-        // Get actor and current time for pre-check
-        let actor = actor.clone();
-        let now_ms = self.clock().wall_ms();
-
-        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
-            let bead = state
-                .get_live_mut(id)
-                .ok_or_else(|| OpError::NotFound(id.clone()))?;
-
-            // Check if already claimed (and not expired)
-            if let Claim::Claimed {
-                ref assignee,
-                expires: Some(exp),
-            } = bead.fields.claim.value
-            {
-                let now = WallClock(now_ms);
-                if exp >= now && assignee != &actor {
-                    return Err(OpError::AlreadyClaimed {
-                        by: assignee.clone(),
-                        expires: Some(exp),
-                    });
-                }
-            }
-
-            let expires = WallClock(stamp.at.wall_ms + lease_secs * 1000);
-            bead.fields.claim =
-                Lww::new(Claim::claimed(actor.clone(), Some(expires)), stamp.clone());
-            // Claiming also transitions to in_progress
-            bead.fields.workflow = Lww::new(Workflow::InProgress, stamp);
-
-            Ok(expires)
-        });
-
-        match result {
-            Ok(expires) => self.op_response(
-                &remote,
-                OpResult::Claimed {
-                    id: id.clone(),
-                    expires,
-                },
-            ),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Release a claim.
     pub fn apply_unclaim(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::Unclaim {
+            id: id.as_str().to_string(),
         };
-
-        // Get actor for checks
-        let actor = actor.clone();
-
-        // Check bead state and claim ownership (scope to drop borrow)
-        {
-            let repo_state = match self.repo_state_mut(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-            let bead = match repo_state.state.require_live(id).map_live_err(id) {
-                Ok(b) => b,
-                Err(e) => return Response::err(e),
-            };
-
-            // Check if claimed by this actor
-            if let Claim::Claimed { ref assignee, .. } = bead.fields.claim.value
-                && assignee != &actor
-            {
-                return Response::err(OpError::NotClaimedByYou);
-            }
-        }
-
-        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
-            let bead = state.require_live_mut(id).map_live_err(id)?;
-            bead.fields.claim = Lww::new(Claim::Unclaimed, stamp.clone());
-            // Unclaiming transitions back to open
-            bead.fields.workflow = Lww::new(Workflow::Open, stamp);
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => self.op_response(&remote, OpResult::Unclaimed { id: id.clone() }),
-            Err(e) => Response::err(e),
-        }
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
     /// Extend an existing claim.
     pub fn apply_extend_claim(
         &mut self,
         repo: &Path,
-        actor: &ActorId,
+        meta: NormalizedMutationMeta,
         id: &BeadId,
         lease_secs: u64,
-        _git_tx: &Sender<GitOp>,
+        git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_loaded_strict(repo, _git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err(e),
+        let request = MutationRequest::ExtendClaim {
+            id: id.as_str().to_string(),
+            lease_secs,
         };
-
-        // Get actor for checks
-        let actor = actor.clone();
-
-        // Check bead state and claim ownership (scope to drop borrow)
-        {
-            let repo_state = match self.repo_state_mut(&remote) {
-                Ok(repo_state) => repo_state,
-                Err(e) => return Response::err(e),
-            };
-            let bead = match repo_state.state.require_live(id).map_live_err(id) {
-                Ok(b) => b,
-                Err(e) => return Response::err(e),
-            };
-
-            // Check if claimed by this actor
-            if let Claim::Claimed { ref assignee, .. } = bead.fields.claim.value {
-                if assignee != &actor {
-                    return Response::err(OpError::NotClaimedByYou);
-                }
-            } else {
-                return Response::err(OpError::NotClaimedByYou);
-            }
-        }
-
-        let result = self.apply_wal_mutation_with_actor(&remote, &actor, |state, stamp| {
-            let expires = WallClock(stamp.at.wall_ms + lease_secs * 1000);
-            let bead = state.require_live_mut(id).map_live_err(id)?;
-            bead.fields.claim = Lww::new(Claim::claimed(actor.clone(), Some(expires)), stamp);
-            Ok(expires)
-        });
-
-        match result {
-            Ok(expires) => self.op_response(
-                &remote,
-                OpResult::ClaimExtended {
-                    id: id.clone(),
-                    expires,
-                },
-            ),
-            Err(e) => Response::err(e),
-        }
-    }
-
-    fn op_response(&self, proof: &LoadedStore, result: OpResult) -> Response {
-        match self.build_receipt(proof) {
-            Ok(receipt) => Response::ok(ResponsePayload::Op(OpResponse::new(result, receipt))),
-            Err(e) => Response::err(e),
-        }
-    }
-
-    fn build_receipt(&self, proof: &LoadedStore) -> Result<DurabilityReceipt, OpError> {
-        let store = self.store_identity(proof)?;
-        let stamp = self
-            .repo_state(proof)?
-            .last_seen_stamp
-            .clone()
-            .unwrap_or_else(|| WriteStamp::new(self.clock().wall_ms(), 0));
-        let txn_id = txn_id_for_stamp(&store, &stamp);
-        Ok(DurabilityReceipt::local_fsync_defaults(
-            store,
-            txn_id,
-            Vec::new(),
-            stamp.wall_ms,
-        ))
+        self.apply_mutation_request(repo, meta, request, git_tx)
     }
 }
 
-fn parse_label_list(labels: Vec<String>) -> Result<Vec<Label>, OpError> {
-    let mut parsed = Vec::new();
-    for raw in labels {
-        let label = Label::parse(raw).map_err(|e| OpError::ValidationFailed {
-            field: "labels".into(),
-            reason: e.to_string(),
-        })?;
-        parsed.push(label);
-    }
-    Ok(parsed)
+fn wal_index_to_op(err: WalIndexError) -> OpError {
+    OpError::StoreRuntime(StoreRuntimeError::WalIndex(err))
 }
 
-fn enforce_label_limit(
-    labels: &Labels,
+fn segment_rel_path(store_dir: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(store_dir).unwrap_or(path).to_path_buf()
+}
+
+fn event_wal_error_with_path(err: EventWalError, path: &Path) -> OpError {
+    let err = match err {
+        EventWalError::Io { source, .. } => EventWalError::Io {
+            path: Some(path.to_path_buf()),
+            source,
+        },
+        other => other,
+    };
+    OpError::EventWal(err)
+}
+
+fn load_event_body(
+    store_dir: &Path,
+    wal_index: &Arc<dyn WalIndex>,
+    event_id: &EventId,
     limits: &Limits,
-    bead_id: Option<BeadId>,
-) -> Result<(), OpError> {
-    if labels.len() > limits.max_labels_per_bead {
-        return Err(OpError::LabelsTooMany {
-            max_labels: limits.max_labels_per_bead,
-            got_labels: labels.len(),
-            bead_id,
-        });
-    }
-    Ok(())
-}
+) -> Result<EventBody, OpError> {
+    let reader = wal_index.reader();
+    let from_seq_excl = event_id.origin_seq.get().saturating_sub(1);
+    let max_bytes = limits
+        .max_wal_record_bytes
+        .saturating_add(FRAME_HEADER_LEN);
+    let mut items = reader
+        .iter_from(
+            &event_id.namespace,
+            &event_id.origin_replica_id,
+            from_seq_excl,
+            max_bytes,
+        )
+        .map_err(wal_index_to_op)?;
+    let item = items
+        .into_iter()
+        .find(|item| item.event_id == *event_id)
+        .ok_or(OpError::Internal("wal index missing event for idempotent request"))?;
+    let segments = reader
+        .list_segments(&event_id.namespace)
+        .map_err(wal_index_to_op)?;
+    let segment = segments
+        .into_iter()
+        .find(|segment| segment.segment_id == item.segment_id)
+        .ok_or(OpError::Internal("wal index missing segment for event"))?;
+    let path = if segment.segment_path.is_absolute() {
+        segment.segment_path
+    } else {
+        store_dir.join(&segment.segment_path)
+    };
 
-fn enforce_note_limit(content: &str, limits: &Limits) -> Result<(), OpError> {
-    let got_bytes = content.len();
-    if got_bytes > limits.max_note_bytes {
-        return Err(OpError::NoteTooLarge {
-            max_bytes: limits.max_note_bytes,
-            got_bytes,
-        });
-    }
-    Ok(())
-}
+    let mut file = File::open(&path).map_err(|source| {
+        OpError::EventWal(EventWalError::Io {
+            path: Some(path.clone()),
+            source,
+        })
+    })?;
+    file.seek(SeekFrom::Start(item.offset)).map_err(|source| {
+        OpError::EventWal(EventWalError::Io {
+            path: Some(path.clone()),
+            source,
+        })
+    })?;
 
-fn txn_id_for_stamp(store: &StoreIdentity, stamp: &WriteStamp) -> TxnId {
-    let namespace = store.store_id.as_uuid();
-    let name = format!("{}:{}", stamp.wall_ms, stamp.counter);
-    TxnId::new(Uuid::new_v5(&namespace, name.as_bytes()))
-}
-
-fn next_child_id(state: &crate::core::CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
-    if state.get_live(parent).is_none() {
-        return Err(OpError::NotFound(parent.clone()));
-    }
-
-    let depth = parent.as_str().chars().filter(|c| *c == '.').count();
-    if depth >= 3 {
-        return Err(OpError::ValidationFailed {
-            field: "parent".into(),
-            reason: format!(
-                "maximum hierarchy depth (3) exceeded for parent {}",
-                parent.as_str()
-            ),
-        });
-    }
-
-    let prefix = format!("{}.", parent.as_str());
-    let mut max_child: u32 = 0;
-
-    for id in state
-        .iter_live()
-        .map(|(id, _)| id)
-        .chain(state.iter_tombstones().map(|(k, _)| &k.id))
-    {
-        let Some(rest) = id.as_str().strip_prefix(&prefix) else {
-            continue;
-        };
-        let first = rest.split('.').next().unwrap_or("");
-        if first.is_empty() {
-            continue;
-        }
-        if let Ok(n) = first.parse::<u32>() {
-            max_child = max_child.max(n);
-        }
-    }
-
-    let mut next = max_child + 1;
-    loop {
-        let candidate = BeadId::parse(&format!("{}.{}", parent.as_str(), next)).map_err(|e| {
-            OpError::ValidationFailed {
-                field: "parent".into(),
-                reason: e.to_string(),
-            }
+    let mut reader = FrameReader::new(file, limits.max_wal_record_bytes);
+    let record = reader
+        .read_next()
+        .map_err(|err| event_wal_error_with_path(err, &path))?
+        .ok_or_else(|| {
+            OpError::EventWal(EventWalError::FrameLengthInvalid {
+                reason: "unexpected eof while reading record".to_string(),
+            })
         })?;
 
-        if !state.contains(&candidate) {
-            return Ok(candidate);
+    let (_, event_body) = decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
+        OpError::StoreRuntime(StoreRuntimeError::WalReplay(
+            WalReplayError::EventBodyDecode {
+                path: path.clone(),
+                offset: item.offset,
+                source,
+            },
+        ))
+    })?;
+    Ok(event_body)
+}
+
+fn op_result_from_delta(
+    request: &MutationRequest,
+    delta: &TxnDeltaV1,
+) -> Result<OpResult, OpError> {
+    match request {
+        MutationRequest::Create { .. } => {
+            let id = find_created_id(delta)?;
+            Ok(OpResult::Created { id })
         }
-        next += 1;
+        MutationRequest::Update { id, .. }
+        | MutationRequest::AddLabels { id, .. }
+        | MutationRequest::RemoveLabels { id, .. }
+        | MutationRequest::SetParent { id, .. } => Ok(OpResult::Updated {
+            id: parse_bead_id(id)?,
+        }),
+        MutationRequest::Close { id, .. } => Ok(OpResult::Closed {
+            id: parse_bead_id(id)?,
+        }),
+        MutationRequest::Reopen { id } => Ok(OpResult::Reopened {
+            id: parse_bead_id(id)?,
+        }),
+        MutationRequest::Delete { id, .. } => Ok(OpResult::Deleted {
+            id: parse_bead_id(id)?,
+        }),
+        MutationRequest::AddDep { from, to, .. } => Ok(OpResult::DepAdded {
+            from: parse_bead_id(from)?,
+            to: parse_bead_id(to)?,
+        }),
+        MutationRequest::RemoveDep { from, to, .. } => Ok(OpResult::DepRemoved {
+            from: parse_bead_id(from)?,
+            to: parse_bead_id(to)?,
+        }),
+        MutationRequest::AddNote { id, .. } => {
+            let bead_id = parse_bead_id(id)?;
+            let note_id = find_note_id(delta, &bead_id)?;
+            Ok(OpResult::NoteAdded {
+                bead_id,
+                note_id: note_id.as_str().to_string(),
+            })
+        }
+        MutationRequest::Claim { id, .. } => {
+            let bead_id = parse_bead_id(id)?;
+            let expires = find_claim_expiry(delta, &bead_id)?;
+            Ok(OpResult::Claimed { id: bead_id, expires })
+        }
+        MutationRequest::Unclaim { id } => Ok(OpResult::Unclaimed {
+            id: parse_bead_id(id)?,
+        }),
+        MutationRequest::ExtendClaim { id, .. } => {
+            let bead_id = parse_bead_id(id)?;
+            let expires = find_claim_expiry(delta, &bead_id)?;
+            Ok(OpResult::ClaimExtended {
+                id: bead_id,
+                expires,
+            })
+        }
     }
 }
 
-/// Generate a unique bead ID that doesn't collide with existing ones.
-///
-/// Parity with beads-go:
-/// - Content-hash IDs (SHA256) encoded base36
-/// - Adaptive base length 3→8 based on birthday-paradox threshold
-/// - Progressive extension on collision using a nonce
-fn generate_unique_id(
-    state: &crate::core::CanonicalState,
-    root_slug: Option<&str>,
-    title: &str,
-    description: &str,
-    actor: &crate::core::ActorId,
-    stamp: &crate::core::WriteStamp,
-    remote: &crate::daemon::RemoteUrl,
-) -> Result<BeadId, OpError> {
-    let slug = match root_slug {
-        Some(raw) => BeadSlug::parse(raw).map_err(|e| OpError::ValidationFailed {
-            field: "root_slug".into(),
-            reason: e.to_string(),
-        })?,
-        None => infer_bead_slug(state)?,
-    };
-    let num_top_level = state
-        .iter_live()
-        .filter(|(id, _)| id.is_top_level())
-        .count();
+fn parse_bead_id(raw: &str) -> Result<BeadId, OpError> {
+    BeadId::parse(raw).map_err(|_| OpError::Internal("invalid id after validation"))
+}
 
-    let base_len = compute_adaptive_length(num_top_level);
-
-    for len in base_len..=8 {
-        for nonce in 0..10 {
-            let short = generate_hash_suffix(title, description, actor, stamp, remote, len, nonce);
-            let candidate = BeadId::parse(&format!("{}-{}", slug.as_str(), short))
-                .map_err(|_| OpError::Internal("generated id must be valid"))?;
-            if !state.contains(&candidate) {
-                return Ok(candidate);
+fn find_created_id(delta: &TxnDeltaV1) -> Result<BeadId, OpError> {
+    let mut found: Option<BeadId> = None;
+    for op in delta.iter() {
+        if let TxnOpV1::BeadUpsert(patch) = op {
+            match &found {
+                None => found = Some(patch.id.clone()),
+                Some(existing) if *existing == patch.id => {}
+                Some(_) => {
+                    return Err(OpError::Internal(
+                        "create delta contains multiple bead ids",
+                    ));
+                }
             }
         }
     }
-
-    // Extremely unlikely fallback.
-    Ok(BeadId::generate_with_slug(&slug, 8))
+    found.ok_or(OpError::Internal("create delta missing bead upsert"))
 }
 
-fn compute_adaptive_length(num_issues: usize) -> usize {
-    for len in 3..=8 {
-        if collision_probability(num_issues, len) <= 0.25 {
-            return len;
-        }
-    }
-    8
-}
-
-fn collision_probability(num_issues: usize, id_len: usize) -> f64 {
-    let base = 36.0f64;
-    let total = base.powi(id_len as i32);
-    let n = num_issues as f64;
-    1.0 - (-n * n / (2.0 * total)).exp()
-}
-
-fn generate_hash_suffix(
-    title: &str,
-    description: &str,
-    actor: &crate::core::ActorId,
-    stamp: &crate::core::WriteStamp,
-    remote: &crate::daemon::RemoteUrl,
-    len: usize,
-    nonce: usize,
-) -> String {
-    use sha2::{Digest, Sha256};
-
-    let content = format!(
-        "{}|{}|{}|{}|{}|{}",
-        title,
-        description,
-        actor.as_str(),
-        stamp.wall_ms,
-        stamp.counter,
-        remote.as_str(),
-    );
-    let content = format!("{}|{}", content, nonce);
-    let hash = Sha256::digest(content.as_bytes());
-
-    let num_bytes = match len {
-        3 => 2,
-        4 => 3,
-        5 | 6 => 4,
-        7 | 8 => 5,
-        _ => 3,
-    };
-
-    encode_base36(&hash[..num_bytes], len)
-}
-
-/// Infer slug from existing beads (fallback when root_slug not set).
-fn infer_bead_slug(state: &crate::core::CanonicalState) -> Result<BeadSlug, OpError> {
-    use std::collections::BTreeMap;
-
-    let mut counts: BTreeMap<BeadSlug, usize> = BTreeMap::new();
-    for id in state
-        .iter_live()
-        .map(|(id, _)| id)
-        .chain(state.iter_tombstones().map(|(k, _)| &k.id))
-    {
-        *counts.entry(id.slug_value()).or_default() += 1;
-    }
-    let mut best_slug: Option<BeadSlug> = None;
-    let mut best_count: usize = 0;
-    for (slug, count) in counts {
-        if count > best_count {
-            best_slug = Some(slug);
-            best_count = count;
-        }
-    }
-    if let Some(slug) = best_slug {
-        Ok(slug)
-    } else {
-        BeadSlug::parse("bd").map_err(|_| OpError::Internal("default slug invalid"))
-    }
-}
-
-fn encode_base36(bytes: &[u8], len: usize) -> String {
-    let mut num: u64 = 0;
-    for &b in bytes {
-        num = (num << 8) | b as u64;
-    }
-    let alphabet = b"0123456789abcdefghijklmnopqrstuvwxyz";
-
-    let mut chars = Vec::new();
-    let mut n = num;
-    while n > 0 {
-        let rem = (n % 36) as usize;
-        chars.push(alphabet[rem] as char);
-        n /= 36;
-    }
-    chars.reverse();
-
-    let mut s: String = chars.into_iter().collect();
-    if s.len() < len {
-        s = "0".repeat(len - s.len()) + &s;
-    }
-    if s.len() > len {
-        s = s[s.len() - len..].to_string();
-    }
-    s
-}
-
-/// Check if adding a dependency from `from` to `to` would create a cycle.
-///
-/// Only checks for cycles when the dependency kind requires DAG enforcement
-/// (i.e., `Blocks` and `Parent`). `Related` and `DiscoveredFrom` are
-/// informational links that can form cycles.
-///
-/// Returns true if there's already a path from `to` back to `from` via
-/// DAG-enforced edges.
-fn would_create_cycle(
-    state: &crate::core::CanonicalState,
-    from: &BeadId,
-    to: &BeadId,
-    kind: DepKind,
-) -> bool {
-    use std::collections::HashSet;
-
-    // Only DAG-enforced kinds need cycle checking
-    if !kind.requires_dag() {
-        return false;
-    }
-
-    // BFS from `to` following DAG-enforced deps to see if we can reach `from`
-    let mut visited = HashSet::new();
-    let mut queue = vec![to.clone()];
-
-    while let Some(current) = queue.pop() {
-        if &current == from {
-            return true; // Found a path from `to` to `from`
-        }
-        if visited.contains(&current) {
-            continue;
-        }
-        visited.insert(current.clone());
-
-        // Follow outgoing DAG-enforced deps only
-        for (key, _) in state.deps_from(&current) {
-            if key.kind().requires_dag() && !visited.contains(key.to()) {
-                queue.push(key.to().clone());
+fn find_note_id(delta: &TxnDeltaV1, expected: &BeadId) -> Result<NoteId, OpError> {
+    let mut found: Option<NoteId> = None;
+    for op in delta.iter() {
+        if let TxnOpV1::NoteAppend(append) = op {
+            if &append.bead_id != expected {
+                return Err(OpError::Internal("note append bead id mismatch"));
+            }
+            if found.replace(append.note.id.clone()).is_some() {
+                return Err(OpError::Internal("note append repeated in delta"));
             }
         }
     }
-
-    false
+    found.ok_or(OpError::Internal("note append missing from delta"))
 }
 
-fn generate_unique_note_id<F>(notes: &NoteLog, mut next_id: F) -> NoteId
-where
-    F: FnMut() -> NoteId,
-{
-    let mut note_id = next_id();
-    while notes.contains(&note_id) {
-        note_id = next_id();
+fn find_claim_expiry(delta: &TxnDeltaV1, expected: &BeadId) -> Result<WallClock, OpError> {
+    let mut found: Option<WallClock> = None;
+    for op in delta.iter() {
+        if let TxnOpV1::BeadUpsert(patch) = op {
+            if &patch.id != expected {
+                continue;
+            }
+            if let WirePatch::Set(expires) = patch.assignee_expires {
+                if found.replace(expires).is_some() {
+                    return Err(OpError::Internal("claim expiry repeated in delta"));
+                }
+            }
+        }
     }
-    note_id
+    found.ok_or(OpError::Internal(
+        "claim delta missing assignee_expires",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadType, Claim, Lww, Note, NoteLog, Priority, Stamp,
-        Workflow, WriteStamp,
+        ActorId, NoteAppendV1, NoteId, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp,
     };
 
-    fn make_bead(id: &str, wall_ms: u64, actor: &ActorId) -> Bead {
-        let stamp = Stamp::new(WriteStamp::new(wall_ms, 0), actor.clone());
-        let core = BeadCore::new(BeadId::parse(id).unwrap(), stamp.clone(), None);
-        let fields = BeadFields {
-            title: Lww::new("test".to_string(), stamp.clone()),
-            description: Lww::new(String::new(), stamp.clone()),
-            design: Lww::new(None, stamp.clone()),
-            acceptance_criteria: Lww::new(None, stamp.clone()),
-            priority: Lww::new(Priority::new(2).unwrap(), stamp.clone()),
-            bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Default::default(), stamp.clone()),
-            external_ref: Lww::new(None, stamp.clone()),
-            source_repo: Lww::new(None, stamp.clone()),
-            estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::Open, stamp.clone()),
-            claim: Lww::new(Claim::default(), stamp.clone()),
-        };
-        Bead::new(core, fields)
+    fn bead_id(id: &str) -> BeadId {
+        BeadId::parse(id).unwrap()
+    }
+
+    fn actor_id(id: &str) -> ActorId {
+        ActorId::new(id).unwrap()
     }
 
     #[test]
-    fn generate_unique_id_rejects_invalid_root_slug() {
-        let state = crate::core::CanonicalState::new();
-        let actor = ActorId::new("tester").unwrap();
-        let stamp = WriteStamp::new(1000, 0);
-        let remote = crate::daemon::RemoteUrl("example.com/test".to_string());
-
-        let err = generate_unique_id(
-            &state,
-            Some("bad slug"),
-            "title",
-            "",
-            &actor,
-            &stamp,
-            &remote,
-        )
-        .unwrap_err();
-        match err {
-            OpError::ValidationFailed { field, .. } => assert_eq!(field, "root_slug"),
-            other => panic!("expected validation error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn infer_bead_slug_prefers_most_common() {
-        let actor = ActorId::new("tester").unwrap();
-        let mut state = crate::core::CanonicalState::new();
-        state.insert(make_bead("foo-abc", 1000, &actor)).unwrap();
-        state.insert(make_bead("foo-def", 1100, &actor)).unwrap();
-        state.insert(make_bead("bar-xyz", 1200, &actor)).unwrap();
-
-        let slug = infer_bead_slug(&state).unwrap();
-        assert_eq!(slug.as_str(), "foo");
-    }
-
-    #[test]
-    fn generate_unique_id_uses_root_slug() {
-        let state = crate::core::CanonicalState::new();
-        let actor = ActorId::new("tester").unwrap();
-        let stamp = WriteStamp::new(1000, 0);
-        let remote = crate::daemon::RemoteUrl("example.com/test".to_string());
-
-        let id = generate_unique_id(&state, Some("myrepo"), "title", "", &actor, &stamp, &remote)
+    fn op_result_create_uses_delta_id() {
+        let id = bead_id("bd-123");
+        let patch = WireBeadPatch::new(id.clone());
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
             .unwrap();
-        assert!(id.as_str().starts_with("myrepo-"));
-    }
 
-    #[test]
-    fn generate_unique_note_id_retries_on_collision() {
-        let actor = ActorId::new("tester").unwrap();
-        let stamp = WriteStamp::new(1000, 0);
-        let note_id = NoteId::new("dup").unwrap();
-        let note = Note::new(note_id.clone(), "hi".to_string(), actor, stamp);
-
-        let mut notes = NoteLog::new();
-        notes.insert(note);
-
-        let ids = vec!["dup", "dup", "uniq"];
-        let mut idx = 0usize;
-        let generated = generate_unique_note_id(&notes, || {
-            let id = ids[idx];
-            idx += 1;
-            NoteId::new(id).unwrap()
-        });
-
-        assert_eq!(generated.as_str(), "uniq");
-    }
-
-    #[test]
-    fn enforce_label_limit_rejects_overage() {
-        let limits = Limits {
-            max_labels_per_bead: 1,
-            ..Limits::default()
+        let request = MutationRequest::Create {
+            id: None,
+            parent: None,
+            title: "title".to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::default(),
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
         };
-        let mut labels = Labels::new();
-        labels.insert(Label::parse("alpha").unwrap());
-        labels.insert(Label::parse("beta").unwrap());
 
-        let bead_id = BeadId::parse("test-1").unwrap();
-        let err = enforce_label_limit(&labels, &limits, Some(bead_id.clone())).unwrap_err();
-        match err {
-            OpError::LabelsTooMany {
-                max_labels,
-                got_labels,
-                bead_id: Some(id),
-            } => {
-                assert_eq!(max_labels, 1);
-                assert_eq!(got_labels, 2);
-                assert_eq!(id, bead_id);
-            }
-            other => panic!("expected LabelsTooMany, got {other:?}"),
-        }
+        let result = op_result_from_delta(&request, &delta).unwrap();
+        assert!(matches!(result, OpResult::Created { id: got } if got == id));
     }
 
     #[test]
-    fn enforce_note_limit_rejects_overage() {
-        let limits = Limits {
-            max_note_bytes: 2,
-            ..Limits::default()
+    fn op_result_add_note_uses_note_id() {
+        let expected_bead_id = bead_id("bd-123");
+        let note_id = NoteId::new("note-1").unwrap();
+        let note = WireNoteV1 {
+            id: note_id.clone(),
+            content: "hi".to_string(),
+            author: actor_id("alice"),
+            at: WireStamp(1, 0),
         };
-        let err = enforce_note_limit("hey", &limits).unwrap_err();
-        assert!(matches!(
-            err,
-            OpError::NoteTooLarge {
-                max_bytes: 2,
-                got_bytes: 3
-            }
-        ));
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
+                bead_id: expected_bead_id.clone(),
+                note,
+            }))
+            .unwrap();
+
+        let request = MutationRequest::AddNote {
+            id: expected_bead_id.as_str().to_string(),
+            content: "hi".to_string(),
+        };
+
+        let result = op_result_from_delta(&request, &delta).unwrap();
+        assert!(matches!(result, OpResult::NoteAdded { bead_id, note_id: got }
+            if bead_id == expected_bead_id && got == note_id.as_str()));
+    }
+
+    #[test]
+    fn op_result_claim_requires_expiry() {
+        let bead_id = bead_id("bd-123");
+        let patch = WireBeadPatch::new(bead_id.clone());
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
+            .unwrap();
+
+        let request = MutationRequest::Claim {
+            id: bead_id.as_str().to_string(),
+            lease_secs: 60,
+        };
+
+        let err = op_result_from_delta(&request, &delta).unwrap_err();
+        assert!(matches!(err, OpError::Internal(_)));
+    }
+
+    #[test]
+    fn op_result_claim_reads_expiry() {
+        let bead_id = bead_id("bd-123");
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        let expires = WallClock(1234);
+        patch.assignee_expires = WirePatch::Set(expires);
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
+            .unwrap();
+
+        let request = MutationRequest::Claim {
+            id: bead_id.as_str().to_string(),
+            lease_secs: 60,
+        };
+
+        let result = op_result_from_delta(&request, &delta).unwrap();
+        assert!(matches!(result, OpResult::Claimed { id, expires: got }
+            if id == bead_id && got == expires));
     }
 }
