@@ -11,11 +11,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     ActorId, Applied, BeadFields, BeadId, BeadType, ClientRequestId, Closure, CoreError,
     DurabilityClass, DurabilityReceipt, ErrorCode, Label, Labels, Lww, NamespaceId, Priority,
     ReplicaId, Stamp, WallClock, Watermarks, Workflow,
 };
+use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_lock::StoreLockError;
 use crate::daemon::store_runtime::StoreRuntimeError;
 use crate::daemon::wal::{EventWalError, WalError, WalIndexError, WalReplayError};
@@ -285,6 +287,14 @@ pub enum OpError {
         reason: String,
     },
 
+    #[error("overloaded ({subsystem:?})")]
+    Overloaded {
+        subsystem: OverloadedSubsystem,
+        retry_after_ms: Option<u64>,
+        queue_bytes: Option<u64>,
+        queue_events: Option<u64>,
+    },
+
     #[error("client_request_id reuse mismatch for {client_request_id}")]
     ClientRequestIdReuseMismatch {
         namespace: NamespaceId,
@@ -404,6 +414,7 @@ impl OpError {
             OpError::InvalidTransition { .. } => ErrorCode::InvalidTransition,
             OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
             OpError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
+            OpError::Overloaded { .. } => ErrorCode::Overloaded,
             OpError::ClientRequestIdReuseMismatch { .. } => {
                 ErrorCode::ClientRequestIdReuseMismatch
             }
@@ -454,6 +465,7 @@ impl OpError {
             | OpError::InvalidTransition { .. }
             | OpError::ValidationFailed { .. }
             | OpError::InvalidRequest { .. }
+            | OpError::Overloaded { .. }
             | OpError::ClientRequestIdReuseMismatch { .. }
             | OpError::NotAGitRepo(_)
             | OpError::NoRemote(_)
@@ -487,6 +499,17 @@ impl OpError {
             OpError::DurabilityTimeout { .. } => Effect::Some,
             OpError::StoreRuntime(_) => Effect::None,
             _ => Effect::None,
+        }
+    }
+}
+
+impl From<AdmissionRejection> for OpError {
+    fn from(rejection: AdmissionRejection) -> Self {
+        OpError::Overloaded {
+            subsystem: rejection.subsystem,
+            retry_after_ms: Some(rejection.retry_after_ms),
+            queue_bytes: rejection.queue_bytes,
+            queue_events: rejection.queue_events,
         }
     }
 }

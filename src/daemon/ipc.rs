@@ -543,6 +543,19 @@ impl From<OpError> for ErrorPayload {
                     },
                 )
             }
+            OpError::Overloaded {
+                subsystem,
+                retry_after_ms,
+                queue_bytes,
+                queue_events,
+            } => ErrorPayload::new(ErrorCode::Overloaded, message, retryable).with_details(
+                error_details::OverloadedDetails {
+                    subsystem: Some(subsystem),
+                    retry_after_ms,
+                    queue_bytes,
+                    queue_events,
+                },
+            ),
             OpError::ClientRequestIdReuseMismatch {
                 namespace,
                 client_request_id,
