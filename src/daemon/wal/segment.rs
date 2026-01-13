@@ -113,8 +113,9 @@ impl SegmentHeader {
         let mut offset = SEGMENT_MAGIC.len();
         let wal_format_version = read_u32_le(bytes, &mut offset)?;
         if wal_format_version != WAL_FORMAT_VERSION {
-            return Err(EventWalError::SegmentHeaderInvalid {
-                reason: format!("unsupported wal format version {wal_format_version}"),
+            return Err(EventWalError::SegmentHeaderUnsupportedVersion {
+                got: wal_format_version,
+                supported: WAL_FORMAT_VERSION,
             });
         }
         let header_len = read_u32_le(bytes, &mut offset)? as usize;

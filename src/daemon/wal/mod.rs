@@ -46,6 +46,8 @@ pub enum EventWalError {
     RecordHeaderInvalid { reason: String },
     #[error("segment header invalid: {reason}")]
     SegmentHeaderInvalid { reason: String },
+    #[error("segment header wal format unsupported: got {got}, supported {supported}")]
+    SegmentHeaderUnsupportedVersion { got: u32, supported: u32 },
     #[error("segment header magic mismatch: got {got:?}")]
     SegmentHeaderMagicMismatch { got: [u8; 5] },
     #[error("segment header crc32c mismatch: expected {expected:#x}, got {got:#x}")]
