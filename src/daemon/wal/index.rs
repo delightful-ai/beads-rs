@@ -1254,6 +1254,66 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_index_persists_hlc_state() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let actor = ActorId::new("alice").unwrap();
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.update_hlc(&HlcRow {
+            actor_id: actor.clone(),
+            last_physical_ms: 1_700_000,
+            last_logical: 7,
+        })
+        .unwrap();
+        txn.commit().unwrap();
+
+        let rows = index.reader().load_hlc().unwrap();
+        assert_eq!(
+            rows,
+            vec![HlcRow {
+                actor_id: actor,
+                last_physical_ms: 1_700_000,
+                last_logical: 7,
+            }]
+        );
+    }
+
+    #[test]
+    fn sqlite_index_hlc_upsert_overwrites() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let actor = ActorId::new("alice").unwrap();
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.update_hlc(&HlcRow {
+            actor_id: actor.clone(),
+            last_physical_ms: 1_700_000,
+            last_logical: 7,
+        })
+        .unwrap();
+        txn.update_hlc(&HlcRow {
+            actor_id: actor.clone(),
+            last_physical_ms: 1_800_000,
+            last_logical: 2,
+        })
+        .unwrap();
+        txn.commit().unwrap();
+
+        let rows = index.reader().load_hlc().unwrap();
+        assert_eq!(
+            rows,
+            vec![HlcRow {
+                actor_id: actor,
+                last_physical_ms: 1_800_000,
+                last_logical: 2,
+            }]
+        );
+    }
+
+    #[test]
     fn sqlite_index_record_event_idempotent_on_duplicate_sha() {
         let temp = TempDir::new().unwrap();
         let meta = test_meta();
