@@ -43,6 +43,7 @@ pub struct StoreRuntime {
     pub(crate) watermarks_durable: Watermarks<Durable>,
     pub(crate) broadcaster: EventBroadcaster,
     pub(crate) admission: AdmissionController,
+    #[allow(dead_code)]
     pub(crate) peer_acks: PeerAckTable,
     #[allow(dead_code)]
     pub(crate) wal: Arc<Wal>,
