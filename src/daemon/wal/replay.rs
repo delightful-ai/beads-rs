@@ -12,12 +12,12 @@ use thiserror::Error;
 
 use crate::core::{
     DecodeError, EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreMeta, decode_event_body,
-    sha256_bytes,
+    decode_event_hlc_max, sha256_bytes,
 };
 
 use super::EventWalError;
 use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
-use super::index::{SegmentRow, WalIndex, WalIndexError, WatermarkRow};
+use super::index::{HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow};
 use super::record::{Record, RecordHeaderMismatch, validate_header_matches_body};
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
 
@@ -276,6 +276,7 @@ fn replay_index(
                         offset,
                         record,
                         frame_len,
+                        limits,
                     )
                 },
             )?;
@@ -342,6 +343,7 @@ fn index_record(
     offset: u64,
     record: &Record,
     frame_len: u32,
+    limits: &Limits,
 ) -> Result<(), WalReplayError> {
     let header = &record.header;
     let origin_seq =
@@ -387,6 +389,20 @@ fn index_record(
             &[event_id],
             header.event_time_ms,
         )?;
+    }
+
+    if let Some(hlc_max) = decode_event_hlc_max(record.payload.as_ref(), limits).map_err(|source| {
+        WalReplayError::EventBodyDecode {
+            path: segment.path.clone(),
+            offset,
+            source,
+        }
+    })? {
+        txn.update_hlc(&HlcRow {
+            actor_id: hlc_max.actor_id,
+            last_physical_ms: hlc_max.physical_ms,
+            last_logical: hlc_max.logical,
+        })?;
     }
 
     Ok(())
