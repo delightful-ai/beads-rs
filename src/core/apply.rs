@@ -190,7 +190,7 @@ fn apply_bead_delete(
     let tombstone_deleted = tombstone.deleted.clone();
     let should_mark = state
         .get_tombstone(&id)
-        .map_or(true, |existing| existing.deleted < tombstone_deleted);
+        .is_none_or(|existing| existing.deleted < tombstone_deleted);
     state.delete(tombstone);
     if should_mark {
         outcome.changed_beads.insert(id);
