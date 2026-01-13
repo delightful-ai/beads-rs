@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::result_large_err)]
 
 pub mod api;
 #[cfg(feature = "cli")]

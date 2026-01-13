@@ -819,8 +819,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        EventBody, EventKindV1, Limits, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId,
-        StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+        ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, Seq1, StoreEpoch,
+        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
         encode_event_body_canonical,
     };
     use crate::daemon::wal::SegmentConfig;
@@ -843,18 +843,23 @@ mod tests {
         namespace: NamespaceId,
         origin: ReplicaId,
     ) -> EventBody {
+        let event_time_ms = 1_700_000_000_100;
         EventBody {
             envelope_v: 1,
             store,
             namespace,
             origin_replica_id: origin,
             origin_seq: Seq1::from_u64(1).expect("seq1"),
-            event_time_ms: 1_700_000_000_100,
+            event_time_ms,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,
             kind: EventKindV1::TxnV1,
             delta: TxnDeltaV1::new(),
-            hlc_max: None,
+            hlc_max: Some(HlcMax {
+                actor_id: ActorId::new("alice".to_string()).unwrap(),
+                physical_ms: event_time_ms,
+                logical: 1,
+            }),
         }
     }
 

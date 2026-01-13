@@ -100,6 +100,12 @@ impl RecordHeader {
     }
 
     pub fn encode(&self) -> EventWalResult<Vec<u8>> {
+        if self.request_sha256.is_some() && self.client_request_id.is_none() {
+            return Err(EventWalError::RecordHeaderInvalid {
+                reason: "request_sha256 requires client_request_id".to_string(),
+            });
+        }
+
         let flags = self.flags();
         let header_len = flags.expected_len();
         let header_len_u16 =
@@ -169,6 +175,11 @@ impl RecordHeader {
             });
         }
         let flags = RecordFlags::from_bits(flags_bits)?;
+        if flags.has_request_sha256 && !flags.has_client_request_id {
+            return Err(EventWalError::RecordHeaderInvalid {
+                reason: "request_sha256 flag set without client_request_id".to_string(),
+            });
+        }
         if header_len < flags.expected_len() {
             return Err(EventWalError::RecordHeaderInvalid {
                 reason: "record header length smaller than flags imply".to_string(),
@@ -345,5 +356,48 @@ mod tests {
         let decoded = Record::decode_body(&body).unwrap();
         assert_eq!(decoded.header, header);
         assert_eq!(decoded.payload, record.payload);
+    }
+
+    #[test]
+    fn record_encode_rejects_request_sha_without_client_request_id() {
+        let header = RecordHeader {
+            origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            origin_seq: 42,
+            event_time_ms: 1_700_000_000_000,
+            txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
+            client_request_id: None,
+            request_sha256: Some([4u8; 32]),
+            sha256: [5u8; 32],
+            prev_sha256: None,
+        };
+        let err = header.encode().unwrap_err();
+        assert!(matches!(
+            err,
+            EventWalError::RecordHeaderInvalid { .. }
+        ));
+    }
+
+    #[test]
+    fn record_decode_rejects_request_sha_without_client_request_id() {
+        let origin = Uuid::from_bytes([1u8; 16]);
+        let txn_id = Uuid::from_bytes([2u8; 16]);
+        let header_len = u16::try_from(RECORD_HEADER_BASE_LEN + 32).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&RECORD_HEADER_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(&(1u16 << 2).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(origin.as_bytes());
+        bytes.extend_from_slice(&42u64.to_le_bytes());
+        bytes.extend_from_slice(&1_700_000_000_000u64.to_le_bytes());
+        bytes.extend_from_slice(txn_id.as_bytes());
+        bytes.extend_from_slice(&[4u8; 32]);
+        bytes.extend_from_slice(&[5u8; 32]);
+
+        let err = RecordHeader::decode(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            EventWalError::RecordHeaderInvalid { .. }
+        ));
     }
 }

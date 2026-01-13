@@ -1425,9 +1425,9 @@ fn reason_string(err: &ProtoDecodeError) -> String {
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadId, ClientRequestId, EventBody, EventKindV1, NamespaceId, NoteAppendV1,
-        ReplicaId, StoreIdentity, TxnDeltaV1, TxnId, WireBeadPatch, WireNoteV1, WireStamp,
-        encode_event_body_canonical, hash_event_body,
+        ActorId, BeadId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId,
+        NoteAppendV1, ReplicaId, StoreIdentity, TxnDeltaV1, TxnId, WireBeadPatch, WireNoteV1,
+        WireStamp, encode_event_body_canonical, hash_event_body,
     };
     use uuid::Uuid;
 
@@ -1472,7 +1472,11 @@ mod tests {
             client_request_id: Some(client_request_id),
             kind: EventKindV1::TxnV1,
             delta,
-            hlc_max: None,
+            hlc_max: Some(HlcMax {
+                actor_id: ActorId::new("alice".to_string()).unwrap(),
+                physical_ms: 123,
+                logical: 1,
+            }),
         }
     }
 

@@ -212,8 +212,8 @@ impl Daemon {
             segment_path: segment_rel_path(&store_dir, writer.current_path()),
             created_at_ms: now_ms,
             last_indexed_offset,
-            sealed: true,
-            final_len: Some(last_indexed_offset),
+            sealed: false,
+            final_len: None,
         };
 
         let broadcast_prev = prev_sha.map(Sha256);

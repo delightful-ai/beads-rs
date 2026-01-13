@@ -9,8 +9,9 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use beads_rs::core::{
-    ClientRequestId, EventBody, EventKindV1, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId,
-    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, encode_event_body_canonical,
+    ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
+    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+    encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
@@ -166,7 +167,11 @@ fn event_body_bytes(
         client_request_id,
         kind: EventKindV1::TxnV1,
         delta: TxnDeltaV1::new(),
-        hlc_max: None,
+        hlc_max: Some(HlcMax {
+            actor_id: ActorId::new("alice".to_string()).unwrap(),
+            physical_ms: event_time_ms,
+            logical: 1,
+        }),
     };
     let bytes = encode_event_body_canonical(&body).expect("encode event body");
     Bytes::copy_from_slice(bytes.as_ref())

@@ -310,6 +310,9 @@ pub fn decode_event_body(
     if dec.datatype().is_ok() {
         return Err(DecodeError::TrailingBytes);
     }
+    if matches!(body.kind, EventKindV1::TxnV1) && body.hlc_max.is_none() {
+        return Err(DecodeError::MissingField("hlc_max"));
+    }
     Ok((
         EventBytes::<Opaque>::new(Bytes::copy_from_slice(bytes)),
         body,
@@ -328,9 +331,14 @@ pub fn decode_event_hlc_max(
     let mut dec = Decoder::new(bytes);
     let map_len = decode_map_len(&mut dec, limits, 0)?;
     let mut hlc_max = None;
+    let mut kind: Option<EventKindV1> = None;
     for _ in 0..map_len {
         let key = decode_text(&mut dec, limits)?;
         match key {
+            "kind" => {
+                let raw = decode_text(&mut dec, limits)?;
+                kind = EventKindV1::parse(raw);
+            }
             "hlc_max" => {
                 hlc_max = Some(decode_hlc_max(&mut dec, limits, 1)?);
             }
@@ -341,6 +349,9 @@ pub fn decode_event_hlc_max(
     }
     if dec.datatype().is_ok() {
         return Err(DecodeError::TrailingBytes);
+    }
+    if matches!(kind, Some(EventKindV1::TxnV1)) && hlc_max.is_none() {
+        return Err(DecodeError::MissingField("hlc_max"));
     }
     Ok(hlc_max)
 }
@@ -624,12 +635,17 @@ fn decode_txn_delta(
     let mut dep_upserts: Vec<WireDepV1> = Vec::new();
     let mut dep_deletes: Vec<WireDepDeleteV1> = Vec::new();
     let mut note_appends: Vec<NoteAppendV1> = Vec::new();
+    let mut ops_total: usize = 0;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
         match key {
             "bead_upserts" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
                 for _ in 0..arr_len {
                     let entry_len = decode_map_len(dec, limits, depth + 2)?;
                     if entry_len != 1 {
@@ -650,24 +666,43 @@ fn decode_txn_delta(
             }
             "bead_deletes" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
                 for _ in 0..arr_len {
                     bead_deletes.push(decode_wire_tombstone(dec, limits, depth + 2)?);
                 }
             }
             "dep_upserts" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
                 for _ in 0..arr_len {
                     dep_upserts.push(decode_wire_dep(dec, limits, depth + 2)?);
                 }
             }
             "dep_deletes" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
                 for _ in 0..arr_len {
                     dep_deletes.push(decode_wire_dep_delete(dec, limits, depth + 2)?);
                 }
             }
             "note_appends" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                if arr_len > limits.max_note_appends_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_note_appends_per_txn"));
+                }
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
                 for _ in 0..arr_len {
                     let entry_len = decode_map_len(dec, limits, depth + 2)?;
                     if entry_len != 2 {
@@ -1099,12 +1134,18 @@ fn decode_wire_note(
         }
     }
 
-    Ok(WireNoteV1 {
+    let note = WireNoteV1 {
         id: id.ok_or(DecodeError::MissingField("id"))?,
         content: content.ok_or(DecodeError::MissingField("content"))?,
         author: author.ok_or(DecodeError::MissingField("author"))?,
         at: at.ok_or(DecodeError::MissingField("at"))?,
-    })
+    };
+
+    if note.content.len() > limits.max_note_bytes {
+        return Err(DecodeError::DecodeLimit("max_note_bytes"));
+    }
+
+    Ok(note)
 }
 
 fn encode_wire_tombstone(
@@ -1990,6 +2031,15 @@ mod tests {
         let encoded = encode_event_body_canonical(&body).unwrap();
         let hlc = decode_event_hlc_max(encoded.as_ref(), &Limits::default()).unwrap();
         assert_eq!(hlc, body.hlc_max);
+    }
+
+    #[test]
+    fn decode_rejects_missing_hlc_max_for_txn() {
+        let mut body = sample_body();
+        body.hlc_max = None;
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let err = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingField("hlc_max")));
     }
 
     #[test]

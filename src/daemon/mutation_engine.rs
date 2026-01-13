@@ -593,10 +593,14 @@ impl MutationEngine {
         let labels = parse_labels(labels)?;
         enforce_label_limit(&labels, &self.limits, None)?;
 
-        let parsed_deps = DepSpec::parse_list(&dependencies).map_err(|e| OpError::ValidationFailed {
+        let mut parsed_deps =
+            DepSpec::parse_list(&dependencies).map_err(|e| OpError::ValidationFailed {
             field: "dependencies".into(),
             reason: e.to_string(),
         })?;
+        sort_dedup_dep_specs(&mut parsed_deps);
+        let canonical_deps: Vec<String> =
+            parsed_deps.iter().map(|spec| spec.to_spec_string()).collect();
 
         let design = normalize_optional_string(design);
         let acceptance_criteria = normalize_optional_string(acceptance_criteria);
@@ -742,7 +746,7 @@ impl MutationEngine {
             external_ref,
             estimated_minutes,
             labels: canonical_labels(&labels),
-            dependencies: canonical_deps(&dependencies)?,
+            dependencies: canonical_deps,
         };
 
         Ok(PlannedDelta { delta, canonical })
@@ -1478,18 +1482,23 @@ fn canonical_labels(labels: &Labels) -> Vec<String> {
         .collect()
 }
 
+fn sort_dedup_dep_specs(specs: &mut Vec<DepSpec>) {
+    specs.sort_by(|a, b| {
+        a.kind()
+            .as_str()
+            .cmp(b.kind().as_str())
+            .then_with(|| a.id().as_str().cmp(b.id().as_str()))
+    });
+    specs.dedup_by(|a, b| a.kind() == b.kind() && a.id() == b.id());
+}
+
 fn canonical_deps(deps: &[String]) -> Result<Vec<String>, OpError> {
     let mut parsed: Vec<DepSpec> =
         DepSpec::parse_list(deps).map_err(|e| OpError::ValidationFailed {
             field: "dependencies".into(),
             reason: e.to_string(),
         })?;
-    parsed.sort_by(|a, b| {
-        a.kind()
-            .as_str()
-            .cmp(b.kind().as_str())
-            .then_with(|| a.id().as_str().cmp(b.id().as_str()))
-    });
+    sort_dedup_dep_specs(&mut parsed);
     Ok(parsed
         .into_iter()
         .map(|spec| spec.to_spec_string())
