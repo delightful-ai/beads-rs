@@ -255,10 +255,10 @@ struct SubscriberState {
 
 impl SubscriberState {
     fn set_drop_reason(&self, reason: DropReason) {
-        if let Ok(mut guard) = self.drop_reason.lock() {
-            if guard.is_none() {
-                *guard = Some(reason);
-            }
+        if let Ok(mut guard) = self.drop_reason.lock()
+            && guard.is_none()
+        {
+            *guard = Some(reason);
         }
     }
 }
