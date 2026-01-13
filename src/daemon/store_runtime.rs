@@ -15,6 +15,7 @@ use crate::core::{
     StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks,
     WriteStamp,
 };
+use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repo::RepoState;
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
@@ -38,6 +39,7 @@ pub struct StoreRuntime {
     pub(crate) repo_state: RepoState,
     pub(crate) watermarks_applied: Watermarks<Applied>,
     pub(crate) watermarks_durable: Watermarks<Durable>,
+    pub(crate) broadcaster: EventBroadcaster,
     #[allow(dead_code)]
     pub(crate) wal: Arc<Wal>,
     #[allow(dead_code)]
@@ -104,6 +106,7 @@ impl StoreRuntime {
         }
 
         let (watermarks_applied, watermarks_durable) = load_watermarks(&wal_index)?;
+        let broadcaster = EventBroadcaster::new(BroadcasterLimits::from_limits(limits));
 
         Ok(Self {
             primary_remote,
@@ -112,6 +115,7 @@ impl StoreRuntime {
             repo_state: RepoState::new(),
             watermarks_applied,
             watermarks_durable,
+            broadcaster,
             wal,
             wal_index: Arc::new(wal_index),
             lock,
