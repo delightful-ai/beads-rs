@@ -387,7 +387,7 @@ fn decode_message_body(
 }
 
 fn encode_hello(enc: &mut Encoder<&mut Vec<u8>>, hello: &Hello) -> Result<(), ProtoEncodeError> {
-    let mut len = 10;
+    let mut len = 11;
     if hello.seen_durable_heads.is_some() {
         len += 1;
     }
