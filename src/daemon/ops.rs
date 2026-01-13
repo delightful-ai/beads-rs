@@ -306,11 +306,20 @@ pub enum OpError {
     #[error("note exceeds max bytes {max_bytes} (got {got_bytes})")]
     NoteTooLarge { max_bytes: usize, got_bytes: usize },
 
+    #[error("transaction exceeds max ops {max_ops} (got {got_ops})")]
+    OpsTooMany { max_ops: usize, got_ops: usize },
+
     #[error("labels exceed max {max_labels} (got {got_labels})")]
     LabelsTooMany {
         max_labels: usize,
         got_labels: usize,
         bead_id: Option<BeadId>,
+    },
+
+    #[error("wal record exceeds max bytes {max_wal_record_bytes} (estimated {estimated_bytes})")]
+    WalRecordTooLarge {
+        max_wal_record_bytes: usize,
+        estimated_bytes: usize,
     },
 
     #[error("durability timeout after {waited_ms}ms for {requested}")]
@@ -391,6 +400,7 @@ impl OpError {
             OpError::Sync(_) => ErrorCode::SyncFailed,
             OpError::BeadDeleted(_) => ErrorCode::BeadDeleted,
             OpError::NoteTooLarge { .. } => ErrorCode::NoteTooLarge,
+            OpError::OpsTooMany { .. } => ErrorCode::OpsTooMany,
             OpError::LabelsTooMany { .. } => ErrorCode::LabelsTooMany,
             OpError::DurabilityTimeout { .. } => ErrorCode::DurabilityTimeout,
             OpError::DurabilityUnavailable { .. } => ErrorCode::DurabilityUnavailable,
@@ -398,6 +408,7 @@ impl OpError {
             OpError::RequireMinSeenUnsatisfied { .. } => ErrorCode::RequireMinSeenUnsatisfied,
             OpError::NamespaceInvalid { .. } => ErrorCode::NamespaceInvalid,
             OpError::NamespaceUnknown { .. } => ErrorCode::NamespaceUnknown,
+            OpError::WalRecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
             OpError::Wal(err) => match err {
                 WalError::TooLarge { .. } => ErrorCode::WalRecordTooLarge,
                 _ => ErrorCode::WalError,
@@ -433,6 +444,8 @@ impl OpError {
             | OpError::RepoNotInitialized(_)
             | OpError::BeadDeleted(_)
             | OpError::NoteTooLarge { .. }
+            | OpError::OpsTooMany { .. }
+            | OpError::WalRecordTooLarge { .. }
             | OpError::LabelsTooMany { .. }
             | OpError::NotClaimedByYou
             | OpError::DepNotFound => Transience::Permanent,

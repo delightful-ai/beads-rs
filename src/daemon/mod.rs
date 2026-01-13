@@ -12,6 +12,7 @@ pub mod core;
 pub mod executor;
 pub mod git_worker;
 pub mod ipc;
+pub mod mutation_engine;
 pub mod ops;
 pub mod query;
 pub mod query_executor;

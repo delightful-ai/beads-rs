@@ -567,6 +567,14 @@ impl From<OpError> for ErrorPayload {
                     got_bytes: got_bytes as u64,
                 },
             ),
+            OpError::OpsTooMany { max_ops, got_ops } => {
+                ErrorPayload::new(ErrorCode::OpsTooMany, message, retryable).with_details(
+                    error_details::OpsTooManyDetails {
+                        max_ops_per_txn: max_ops as u64,
+                        got_ops: got_ops as u64,
+                    },
+                )
+            }
             OpError::LabelsTooMany {
                 max_labels,
                 got_labels,
@@ -576,6 +584,15 @@ impl From<OpError> for ErrorPayload {
                     max_labels_per_bead: max_labels as u64,
                     got_labels: got_labels as u64,
                     bead_id: bead_id.map(|id| id.as_str().to_string()),
+                },
+            ),
+            OpError::WalRecordTooLarge {
+                max_wal_record_bytes,
+                estimated_bytes,
+            } => ErrorPayload::new(ErrorCode::WalRecordTooLarge, message, retryable).with_details(
+                error_details::WalRecordTooLargeDetails {
+                    max_wal_record_bytes: max_wal_record_bytes as u64,
+                    estimated_bytes: estimated_bytes as u64,
                 },
             ),
             OpError::DurabilityUnavailable {
