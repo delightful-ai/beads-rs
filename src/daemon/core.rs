@@ -245,6 +245,10 @@ impl Daemon {
         self.scheduler.deadline_for(remote)
     }
 
+    pub(crate) fn schedule_sync(&mut self, remote: RemoteUrl) {
+        self.scheduler.schedule(remote);
+    }
+
     /// Get repo state. Returns Internal if invariant is violated.
     pub(crate) fn repo_state(&self, proof: &LoadedStore) -> Result<&RepoState, OpError> {
         self.stores

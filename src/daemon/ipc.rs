@@ -691,7 +691,7 @@ impl From<OpError> for ErrorPayload {
                         },
                     )
                 }
-                _ => ErrorPayload::new(event_wal_error_code(e), message, retryable).with_details(
+                _ => ErrorPayload::new(event_wal_error_code(&e), message, retryable).with_details(
                     error_details::WalErrorDetails {
                         message: e.to_string(),
                     },

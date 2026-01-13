@@ -3589,7 +3589,12 @@ fn test_crash_recovery_replays_wal() {
 
     let repo = TestRepo::new();
     let runtime_dir = TempDir::new().expect("failed to create runtime dir");
-    let wal_dir = runtime_dir.path().join("wal");
+    let store_id = store_id_from_remote_path(repo.remote_dir.path());
+    let wal_dir = data_dir_for_runtime(runtime_dir.path())
+        .join("stores")
+        .join(store_id.to_string())
+        .join("wal")
+        .join(beads_rs::core::NamespaceId::core().as_str());
 
     let output = bd_with_runtime(repo.path(), runtime_dir.path())
         .args(["create", "Crash recovery", "--json"])
@@ -3622,7 +3627,6 @@ fn test_crash_recovery_replays_wal() {
     kill(Pid::from_raw(pid as i32), Signal::SIGKILL).expect("failed to SIGKILL daemon");
     std::thread::sleep(Duration::from_millis(100));
 
-    let store_id = store_id_from_remote_path(repo.remote_dir.path());
     let store_id_arg = store_id.to_string();
     let unlock_out = bd_with_runtime(repo.path(), runtime_dir.path())
         .args(["store", "unlock", "--store-id", store_id_arg.as_str()])

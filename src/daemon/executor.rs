@@ -59,9 +59,12 @@ impl Daemon {
         let limits = self.limits().clone();
         let engine = MutationEngine::new(limits.clone());
 
-        let namespace = meta.namespace;
-        let actor_id = meta.actor_id;
-        let client_request_id = meta.client_request_id;
+        let NormalizedMutationMeta {
+            namespace,
+            durability: _durability,
+            client_request_id,
+            actor_id,
+        } = meta;
         let origin_replica_id = self.store_runtime(&proof)?.meta.replica_id;
         let wal_index = Arc::clone(&self.store_runtime(&proof)?.wal_index);
         let store_meta = self.store_runtime(&proof)?.meta.clone();
@@ -91,7 +94,8 @@ impl Daemon {
                 let Some(event_id) = row.event_ids.first() else {
                     return Err(OpError::Internal("idempotency row missing event id"));
                 };
-                let event_body = load_event_body(&store_dir, &wal_index, event_id, &limits)?;
+                let event_body =
+                    load_event_body(&store_dir, wal_index.as_ref(), event_id, &limits)?;
                 let result = op_result_from_delta(&request, &event_body.delta)?;
                 let store_runtime = self.store_runtime(&proof)?;
                 let receipt = DurabilityReceipt::local_fsync(
@@ -156,19 +160,20 @@ impl Daemon {
             }
         };
 
-        let draft = {
+        let state_snapshot = {
             let repo_state = self.repo_state(&proof)?;
-            engine.plan(
-                &repo_state.state,
-                self.clock_mut(),
-                store,
-                origin_replica_id,
-                origin_seq,
-                id_ctx.as_ref(),
-                ctx.clone(),
-                request.clone(),
-            )?
+            repo_state.state.clone()
         };
+        let draft = engine.plan(
+            &state_snapshot,
+            self.clock_mut(),
+            store,
+            origin_replica_id,
+            origin_seq,
+            id_ctx.as_ref(),
+            ctx.clone(),
+            request.clone(),
+        )?;
 
         let sha = hash_event_body(&draft.event_bytes).0;
         let request_sha256 = draft.client_request_id.map(|_| draft.request_sha256);
@@ -317,7 +322,7 @@ impl Daemon {
             )
         };
 
-        self.scheduler.schedule(proof.remote().clone());
+        self.schedule_sync(proof.remote().clone());
 
         let mut watermark_txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
         watermark_txn
@@ -347,7 +352,7 @@ impl Daemon {
 
     /// Create a new bead.
     #[allow(clippy::too_many_arguments)]
-    pub fn apply_create(
+    pub(crate) fn apply_create(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -385,7 +390,7 @@ impl Daemon {
     }
 
     /// Update an existing bead.
-    pub fn apply_update(
+    pub(crate) fn apply_update(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -403,7 +408,7 @@ impl Daemon {
     }
 
     /// Add labels to a bead.
-    pub fn apply_add_labels(
+    pub(crate) fn apply_add_labels(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -419,7 +424,7 @@ impl Daemon {
     }
 
     /// Remove labels from a bead.
-    pub fn apply_remove_labels(
+    pub(crate) fn apply_remove_labels(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -435,7 +440,7 @@ impl Daemon {
     }
 
     /// Replace the parent relationship for a bead.
-    pub fn apply_set_parent(
+    pub(crate) fn apply_set_parent(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -451,7 +456,7 @@ impl Daemon {
     }
 
     /// Close a bead.
-    pub fn apply_close(
+    pub(crate) fn apply_close(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -469,7 +474,7 @@ impl Daemon {
     }
 
     /// Reopen a closed bead.
-    pub fn apply_reopen(
+    pub(crate) fn apply_reopen(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -483,7 +488,7 @@ impl Daemon {
     }
 
     /// Delete a bead (soft delete via tombstone).
-    pub fn apply_delete(
+    pub(crate) fn apply_delete(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -499,7 +504,7 @@ impl Daemon {
     }
 
     /// Add a dependency.
-    pub fn apply_add_dep(
+    pub(crate) fn apply_add_dep(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -517,7 +522,7 @@ impl Daemon {
     }
 
     /// Remove a dependency (soft delete).
-    pub fn apply_remove_dep(
+    pub(crate) fn apply_remove_dep(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -535,7 +540,7 @@ impl Daemon {
     }
 
     /// Add a note to a bead.
-    pub fn apply_add_note(
+    pub(crate) fn apply_add_note(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -551,7 +556,7 @@ impl Daemon {
     }
 
     /// Claim a bead.
-    pub fn apply_claim(
+    pub(crate) fn apply_claim(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -567,7 +572,7 @@ impl Daemon {
     }
 
     /// Release a claim.
-    pub fn apply_unclaim(
+    pub(crate) fn apply_unclaim(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -581,7 +586,7 @@ impl Daemon {
     }
 
     /// Extend an existing claim.
-    pub fn apply_extend_claim(
+    pub(crate) fn apply_extend_claim(
         &mut self,
         repo: &Path,
         meta: NormalizedMutationMeta,
@@ -618,7 +623,7 @@ fn event_wal_error_with_path(err: EventWalError, path: &Path) -> OpError {
 
 fn load_event_body(
     store_dir: &Path,
-    wal_index: &Arc<dyn WalIndex>,
+    wal_index: &dyn WalIndex,
     event_id: &EventId,
     limits: &Limits,
 ) -> Result<EventBody, OpError> {
@@ -627,7 +632,7 @@ fn load_event_body(
     let max_bytes = limits
         .max_wal_record_bytes
         .saturating_add(FRAME_HEADER_LEN);
-    let mut items = reader
+    let items = reader
         .iter_from(
             &event_id.namespace,
             &event_id.origin_replica_id,
@@ -790,10 +795,10 @@ fn find_claim_expiry(delta: &TxnDeltaV1, expected: &BeadId) -> Result<WallClock,
             if &patch.id != expected {
                 continue;
             }
-            if let WirePatch::Set(expires) = patch.assignee_expires {
-                if found.replace(expires).is_some() {
-                    return Err(OpError::Internal("claim expiry repeated in delta"));
-                }
+            if let WirePatch::Set(expires) = patch.assignee_expires
+                && found.replace(expires).is_some()
+            {
+                return Err(OpError::Internal("claim expiry repeated in delta"));
             }
         }
     }

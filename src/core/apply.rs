@@ -143,8 +143,13 @@ fn apply_bead_upsert(
     }
 
     let core = BeadCore::new(id.clone(), created, patch.created_on_branch.clone());
-    let mut bead = super::Bead::new(core, default_fields(event_stamp.clone()));
-    apply_patch_to_bead(&mut bead, patch, event_stamp, outcome)?;
+    let mut bead = super::Bead::new(core, fields_from_patch(patch, event_stamp)?);
+    if let NotesPatch::AtLeast(notes) = &patch.notes {
+        for note in notes {
+            let note = note_to_core(note);
+            apply_note(&mut bead, note, outcome)?;
+        }
+    }
     state
         .insert(bead)
         .map_err(|_| ApplyError::BeadCollision { id: id.clone() })?;
@@ -244,6 +249,86 @@ fn apply_dep_delete(
     state.insert_dep(key.clone(), edge);
     outcome.changed_deps.insert(key);
     Ok(())
+}
+
+fn fields_from_patch(
+    patch: &WireBeadPatch,
+    event_stamp: &Stamp,
+) -> Result<BeadFields, ApplyError> {
+    let mut fields = default_fields(event_stamp.clone());
+
+    if let Some(title) = &patch.title {
+        fields.title = Lww::new(title.clone(), event_stamp.clone());
+    }
+    if let Some(description) = &patch.description {
+        fields.description = Lww::new(description.clone(), event_stamp.clone());
+    }
+    if !patch.design.is_keep() {
+        let existing = fields.design.value.clone();
+        fields.design = Lww::new(
+            apply_patch_option(&patch.design, existing),
+            event_stamp.clone(),
+        );
+    }
+    if !patch.acceptance_criteria.is_keep() {
+        let existing = fields.acceptance_criteria.value.clone();
+        fields.acceptance_criteria = Lww::new(
+            apply_patch_option(&patch.acceptance_criteria, existing),
+            event_stamp.clone(),
+        );
+    }
+    if let Some(priority) = patch.priority {
+        fields.priority = Lww::new(priority, event_stamp.clone());
+    }
+    if let Some(bead_type) = patch.bead_type {
+        fields.bead_type = Lww::new(bead_type, event_stamp.clone());
+    }
+    if let Some(labels) = &patch.labels {
+        fields.labels = Lww::new(labels.clone(), event_stamp.clone());
+    }
+    if !patch.external_ref.is_keep() {
+        let existing = fields.external_ref.value.clone();
+        fields.external_ref = Lww::new(
+            apply_patch_option(&patch.external_ref, existing),
+            event_stamp.clone(),
+        );
+    }
+    if !patch.source_repo.is_keep() {
+        let existing = fields.source_repo.value.clone();
+        fields.source_repo = Lww::new(
+            apply_patch_option(&patch.source_repo, existing),
+            event_stamp.clone(),
+        );
+    }
+    if !patch.estimated_minutes.is_keep() {
+        let existing = fields.estimated_minutes.value;
+        fields.estimated_minutes = Lww::new(
+            apply_patch_option(&patch.estimated_minutes, existing),
+            event_stamp.clone(),
+        );
+    }
+
+    if let Some(status) = patch.status {
+        let workflow_value = build_workflow(
+            status,
+            &patch.closed_reason,
+            &patch.closed_on_branch,
+            &fields.workflow.value,
+        );
+        fields.workflow = Lww::new(workflow_value, event_stamp.clone());
+    }
+
+    if !patch.assignee.is_keep() || !patch.assignee_expires.is_keep() {
+        let claim_value = build_claim(
+            &patch.id,
+            &fields.claim.value,
+            &patch.assignee,
+            &patch.assignee_expires,
+        )?;
+        fields.claim = Lww::new(claim_value, event_stamp.clone());
+    }
+
+    Ok(fields)
 }
 
 fn apply_patch_to_bead(
