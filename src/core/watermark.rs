@@ -277,6 +277,21 @@ impl<K> Watermarks<K> {
         Ok(())
     }
 
+    pub fn satisfies_at_least(&self, required: &Watermarks<K>) -> bool {
+        for (namespace, origins) in &required.inner {
+            for (origin, watermark) in origins {
+                let current = self
+                    .get(namespace, origin)
+                    .copied()
+                    .unwrap_or_else(Watermark::genesis);
+                if current.seq() < watermark.seq() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn entry_mut(&mut self, namespace: &NamespaceId, origin: &ReplicaId) -> &mut Watermark<K> {
         self.inner
             .entry(namespace.clone())

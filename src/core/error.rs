@@ -128,6 +128,8 @@ pub enum ErrorCode {
     MaintenanceMode,
     DurabilityTimeout,
     DurabilityUnavailable,
+    RequireMinSeenTimeout,
+    RequireMinSeenUnsatisfied,
 
     // Replication
     SnapshotRequired,
@@ -235,6 +237,8 @@ impl ErrorCode {
             ErrorCode::MaintenanceMode => "maintenance_mode",
             ErrorCode::DurabilityTimeout => "durability_timeout",
             ErrorCode::DurabilityUnavailable => "durability_unavailable",
+            ErrorCode::RequireMinSeenTimeout => "require_min_seen_timeout",
+            ErrorCode::RequireMinSeenUnsatisfied => "require_min_seen_unsatisfied",
 
             // Replication
             ErrorCode::SnapshotRequired => "snapshot_required",
@@ -342,6 +346,8 @@ impl ErrorCode {
             "maintenance_mode" => ErrorCode::MaintenanceMode,
             "durability_timeout" => ErrorCode::DurabilityTimeout,
             "durability_unavailable" => ErrorCode::DurabilityUnavailable,
+            "require_min_seen_timeout" => ErrorCode::RequireMinSeenTimeout,
+            "require_min_seen_unsatisfied" => ErrorCode::RequireMinSeenUnsatisfied,
 
             // Replication
             "snapshot_required" => ErrorCode::SnapshotRequired,
