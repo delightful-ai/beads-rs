@@ -27,9 +27,10 @@ use super::wal::{
     SegmentWriter, WalIndex, WalIndexError, WalReplayError,
 };
 use crate::core::{
-    apply_event, decode_event_body, hash_event_body, BeadId, BeadType, DepKind, DurabilityReceipt,
-    EventBody, EventId, HeadStatus, Limits, NoteId, Priority, Seq1, Sha256, WallClock, Watermark,
-    WatermarkError, WriteStamp, TxnDeltaV1, TxnOpV1, WirePatch,
+    apply_event, decode_event_body, hash_event_body, Applied, BeadId, BeadType, DepKind,
+    DurabilityReceipt, Durable, EventBody, EventId, HeadStatus, Limits, NoteId, Priority,
+    ReplicaId, Seq1, Sha256, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
+    TxnDeltaV1, TxnOpV1, WirePatch,
 };
 use crate::paths;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
@@ -79,37 +80,21 @@ impl Daemon {
             client_request_id,
         };
 
-        if let Some(client_request_id) = ctx.client_request_id {
-            let request_sha256 = engine.request_sha256_for(&ctx, &request)?;
-            let existing = wal_index
-                .reader()
-                .lookup_client_request(&namespace, &origin_replica_id, client_request_id)
-                .map_err(wal_index_to_op)?;
-            if let Some(row) = existing {
-                if row.request_sha256 != request_sha256 {
-                    return Err(OpError::ClientRequestIdReuseMismatch {
-                        namespace,
-                        client_request_id,
-                        expected_request_sha256: Box::new(row.request_sha256),
-                        got_request_sha256: Box::new(request_sha256),
-                    });
-                }
-                let Some(event_id) = row.event_ids.first() else {
-                    return Err(OpError::Internal("idempotency row missing event id"));
-                };
-                let event_body =
-                    load_event_body(&store_dir, wal_index.as_ref(), event_id, &limits)?;
-                let result = op_result_from_delta(&request, &event_body.delta)?;
-                let store_runtime = self.store_runtime(&proof)?;
-                let receipt = DurabilityReceipt::local_fsync(
-                    store,
-                    row.txn_id,
-                    row.event_ids.clone(),
-                    row.created_at_ms,
-                    store_runtime.watermarks_durable.clone(),
-                    store_runtime.watermarks_applied.clone(),
-                );
-                return Ok(OpResponse::new(result, receipt));
+        if ctx.client_request_id.is_some() {
+            let store_runtime = self.store_runtime(&proof)?;
+            if let Some(response) = try_reuse_idempotent_response(
+                &engine,
+                &ctx,
+                &request,
+                wal_index.as_ref(),
+                &store_dir,
+                store,
+                origin_replica_id,
+                store_runtime.watermarks_durable.clone(),
+                store_runtime.watermarks_applied.clone(),
+                &limits,
+            )? {
+                return Ok(response);
             }
         }
 
@@ -635,6 +620,56 @@ fn event_wal_error_with_path(err: EventWalError, path: &Path) -> OpError {
     OpError::from(err)
 }
 
+fn try_reuse_idempotent_response(
+    engine: &MutationEngine,
+    ctx: &MutationContext,
+    request: &MutationRequest,
+    wal_index: &dyn WalIndex,
+    store_dir: &Path,
+    store: StoreIdentity,
+    origin_replica_id: ReplicaId,
+    durable_watermarks: Watermarks<Durable>,
+    applied_watermarks: Watermarks<Applied>,
+    limits: &Limits,
+) -> Result<Option<OpResponse>, OpError> {
+    let Some(client_request_id) = ctx.client_request_id else {
+        return Ok(None);
+    };
+
+    let request_sha256 = engine.request_sha256_for(ctx, request)?;
+    let existing = wal_index
+        .reader()
+        .lookup_client_request(&ctx.namespace, &origin_replica_id, client_request_id)
+        .map_err(wal_index_to_op)?;
+    let Some(row) = existing else {
+        return Ok(None);
+    };
+
+    if row.request_sha256 != request_sha256 {
+        return Err(OpError::ClientRequestIdReuseMismatch {
+            namespace: ctx.namespace.clone(),
+            client_request_id,
+            expected_request_sha256: Box::new(row.request_sha256),
+            got_request_sha256: Box::new(request_sha256),
+        });
+    }
+
+    let Some(event_id) = row.event_ids.first() else {
+        return Err(OpError::Internal("idempotency row missing event id"));
+    };
+    let event_body = load_event_body(store_dir, wal_index, event_id, limits)?;
+    let result = op_result_from_delta(request, &event_body.delta)?;
+    let receipt = DurabilityReceipt::local_fsync(
+        store,
+        row.txn_id,
+        row.event_ids.clone(),
+        row.created_at_ms,
+        durable_watermarks,
+        applied_watermarks,
+    );
+    Ok(Some(OpResponse::new(result, receipt)))
+}
+
 fn load_event_body(
     store_dir: &Path,
     wal_index: &dyn WalIndex,
@@ -824,9 +859,21 @@ fn find_claim_expiry(delta: &TxnDeltaV1, expected: &BeadId) -> Result<WallClock,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{
-        ActorId, NoteAppendV1, NoteId, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp,
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
     };
+
+    use bytes::Bytes;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use crate::core::{
+        ActorId, Bead, BeadCore, BeadFields, CanonicalState, Claim, ClientRequestId, Labels, Lww,
+        NamespaceId, NoteAppendV1, NoteId, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
+        StoreMetaVersions, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
+    };
+    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, rebuild_index};
 
     fn bead_id(id: &str) -> BeadId {
         BeadId::parse(id).unwrap()
@@ -834,6 +881,46 @@ mod tests {
 
     fn actor_id(id: &str) -> ActorId {
         ActorId::new(id).unwrap()
+    }
+
+    fn make_state_with_bead(id: &str, actor: &ActorId) -> CanonicalState {
+        let stamp = Stamp::new(WriteStamp::new(10, 0), actor.clone());
+        let core = BeadCore::new(BeadId::parse(id).unwrap(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("t".to_string(), stamp.clone()),
+            description: Lww::new("d".to_string(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::Open, stamp.clone()),
+            claim: Lww::new(Claim::Unclaimed, stamp),
+        };
+        let bead = Bead::new(core, fields);
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+        state
+    }
+
+    struct FixedTimeSource {
+        now: Arc<AtomicU64>,
+    }
+
+    impl crate::daemon::clock::TimeSource for FixedTimeSource {
+        fn now_ms(&self) -> u64 {
+            self.now.load(Ordering::SeqCst)
+        }
+    }
+
+    fn fixed_clock(now: u64) -> Clock {
+        let source = Box::new(FixedTimeSource {
+            now: Arc::new(AtomicU64::new(now)),
+        });
+        Clock::with_time_source(source)
     }
 
     #[test]
@@ -930,5 +1017,98 @@ mod tests {
         let result = op_result_from_delta(&request, &delta).unwrap();
         assert!(matches!(result, OpResult::Claimed { id, expires: got }
             if id == bead_id && got == expires));
+    }
+
+    #[test]
+    fn idempotent_retry_reuses_wal_mapping() {
+        let temp = TempDir::new().unwrap();
+        let store_dir = temp.path().join("store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+
+        let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::new(0));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+        let versions = StoreMetaVersions::new(1, 2, 1, 1, 1);
+        let meta = StoreMeta::new(store, replica_id, versions, 1_700_000_000_000);
+
+        let index = SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache).unwrap();
+        let limits = Limits::default();
+        let engine = MutationEngine::new(limits.clone());
+        let actor = actor_id("alice");
+        let state = make_state_with_bead("bd-123", &actor);
+
+        let client_request_id = ClientRequestId::new(Uuid::from_bytes([3u8; 16]));
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: Some(client_request_id),
+        };
+        let request = MutationRequest::AddLabels {
+            id: "bd-123".into(),
+            labels: vec!["alpha".into()],
+        };
+
+        let origin_seq = Seq1::new(std::num::NonZeroU64::new(1).unwrap());
+        let mut clock = fixed_clock(1_700_000_000_000);
+        let draft = engine
+            .plan(
+                &state,
+                &mut clock,
+                store,
+                replica_id,
+                origin_seq,
+                None,
+                ctx.clone(),
+                request.clone(),
+            )
+            .unwrap();
+
+        let sha = hash_event_body(&draft.event_bytes).0;
+        let record = Record {
+            header: RecordHeader {
+                origin_replica_id: replica_id,
+                origin_seq: origin_seq.get(),
+                event_time_ms: draft.event_body.event_time_ms,
+                txn_id: draft.event_body.txn_id,
+                client_request_id: draft.event_body.client_request_id,
+                request_sha256: Some(draft.request_sha256),
+                sha256: sha,
+                prev_sha256: None,
+            },
+            payload: Bytes::copy_from_slice(draft.event_bytes.as_ref()),
+        };
+
+        let mut writer = SegmentWriter::open(
+            &store_dir,
+            &meta,
+            &ctx.namespace,
+            draft.event_body.event_time_ms,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+        writer.append(&record, draft.event_body.event_time_ms).unwrap();
+
+        rebuild_index(&store_dir, &meta, &index, &limits).unwrap();
+
+        let response = try_reuse_idempotent_response(
+            &engine,
+            &ctx,
+            &request,
+            &index,
+            &store_dir,
+            store,
+            replica_id,
+            Watermarks::new(),
+            Watermarks::new(),
+            &limits,
+        )
+        .unwrap()
+        .expect("expected idempotent response");
+
+        assert_eq!(response.receipt.txn_id, draft.event_body.txn_id);
+        assert_eq!(
+            response.receipt.event_ids,
+            vec![EventId::new(replica_id, ctx.namespace.clone(), origin_seq)]
+        );
     }
 }
