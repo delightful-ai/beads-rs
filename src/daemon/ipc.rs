@@ -1644,7 +1644,7 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo};
+    use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo, WalIndexError};
     use crate::core::{
         DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, StoreEpoch, StoreId,
         StoreIdentity, TxnId,
@@ -1828,6 +1828,36 @@ mod tests {
         );
 
         assert_eq!(payload.code, ErrorCode::WalCorrupt);
+    }
+
+    #[test]
+    fn wal_index_equivocation_includes_details() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let err = WalIndexError::Equivocation {
+            namespace: namespace.clone(),
+            origin,
+            seq: 7,
+            existing_sha256: [1u8; 32],
+            new_sha256: [2u8; 32],
+        };
+
+        let payload = store_runtime_error_payload(
+            StoreRuntimeError::WalIndex(err),
+            "boom".to_string(),
+            false,
+        );
+
+        assert_eq!(payload.code, ErrorCode::Equivocation);
+        let details = payload
+            .details_as::<error_details::EquivocationDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.eid.namespace, namespace);
+        assert_eq!(details.eid.origin_replica_id, origin);
+        assert_eq!(details.eid.origin_seq, 7);
+        assert_eq!(details.existing_sha256, hex::encode([1u8; 32]));
+        assert_eq!(details.new_sha256, hex::encode([2u8; 32]));
     }
 
     #[test]

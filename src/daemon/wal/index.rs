@@ -1197,6 +1197,120 @@ mod tests {
         assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), 1);
     }
 
+    #[test]
+    fn sqlite_index_record_event_idempotent_on_duplicate_sha() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let mut txn = index.writer().begin_txn().unwrap();
+        let seq = txn.next_origin_seq(&ns, &origin).unwrap();
+        let origin_seq = Seq1::from_u64(seq).unwrap();
+        let event_id = EventId::new(origin, ns.clone(), origin_seq);
+        let txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
+        let sha = [9u8; 32];
+        let segment_id = SegmentId::new(Uuid::from_bytes([4u8; 16]));
+
+        txn.record_event(
+            &ns,
+            &event_id,
+            sha,
+            None,
+            segment_id,
+            128,
+            64,
+            1_700_000,
+            txn_id,
+            None,
+            None,
+        )
+        .unwrap();
+        txn.record_event(
+            &ns,
+            &event_id,
+            sha,
+            None,
+            segment_id,
+            128,
+            64,
+            1_700_000,
+            txn_id,
+            None,
+            None,
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        let reader = index.reader();
+        assert_eq!(reader.lookup_event_sha(&ns, &event_id).unwrap(), Some(sha));
+    }
+
+    #[test]
+    fn sqlite_index_record_event_equivocation_errors() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let mut txn = index.writer().begin_txn().unwrap();
+        let seq = txn.next_origin_seq(&ns, &origin).unwrap();
+        let origin_seq = Seq1::from_u64(seq).unwrap();
+        let event_id = EventId::new(origin, ns.clone(), origin_seq);
+        let txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
+        let segment_id = SegmentId::new(Uuid::from_bytes([4u8; 16]));
+        let sha = [9u8; 32];
+        let other_sha = [8u8; 32];
+
+        txn.record_event(
+            &ns,
+            &event_id,
+            sha,
+            None,
+            segment_id,
+            128,
+            64,
+            1_700_000,
+            txn_id,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = txn
+            .record_event(
+                &ns,
+                &event_id,
+                other_sha,
+                None,
+                segment_id,
+                128,
+                64,
+                1_700_000,
+                txn_id,
+                None,
+                None,
+            )
+            .unwrap_err();
+
+        match err {
+            WalIndexError::Equivocation {
+                namespace,
+                origin,
+                seq,
+                existing_sha256,
+                new_sha256,
+            } => {
+                assert_eq!(namespace, ns);
+                assert_eq!(origin, meta.replica_id);
+                assert_eq!(seq, origin_seq.get());
+                assert_eq!(existing_sha256, sha);
+                assert_eq!(new_sha256, other_sha);
+            }
+            other => panic!("expected equivocation, got {other:?}"),
+        }
+    }
+
     fn index_exists(conn: &Connection, name: &str) -> bool {
         let count: i64 = conn
             .query_row(
