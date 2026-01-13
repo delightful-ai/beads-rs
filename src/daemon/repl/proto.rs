@@ -234,7 +234,7 @@ impl ProtoDecodeError {
                     reason: Some(format!("unknown message type {raw}")),
                 }),
             ),
-            ProtoDecodeError::DecodeLimit(reason)
+            ProtoDecodeError::DecodeLimit(_)
             | ProtoDecodeError::IndefiniteLength
             | ProtoDecodeError::TrailingBytes
             | ProtoDecodeError::Cbor(_) => Some(
