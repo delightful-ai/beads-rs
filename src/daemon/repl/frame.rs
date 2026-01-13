@@ -184,4 +184,14 @@ mod tests {
         assert_eq!(details.max_frame_bytes, 5);
         assert_eq!(details.got_bytes, 10);
     }
+
+    #[test]
+    fn frame_reader_rejects_oversize_frame() {
+        let payload = vec![0u8; 10];
+        let frame = encode_frame(&payload, 1024).unwrap();
+
+        let mut reader = FrameReader::new(Cursor::new(frame), 5);
+        let err = reader.read_next().unwrap_err();
+        assert!(matches!(err, FrameError::FrameTooLarge { .. }));
+    }
 }
