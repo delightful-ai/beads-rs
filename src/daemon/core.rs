@@ -4,8 +4,8 @@
 //! The serialization point for all mutations - runs on a single thread.
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Seek, SeekFrom};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,8 +29,10 @@ use super::repo::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
 };
 use super::scheduler::SyncScheduler;
-use super::store_runtime::StoreRuntime;
-use super::wal::{Wal, WalEntry};
+use super::store_runtime::{StoreRuntime, StoreRuntimeError};
+use super::wal::{
+    EventWalError, FrameReader, Wal, WalEntry, WalIndex, WalIndexError, WalReplayError,
+};
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
 
@@ -122,9 +124,9 @@ struct StorePathMap {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, Applied, BeadId, CanonicalState, ClientRequestId, CoreError, DurabilityClass,
-    ErrorCode, Limits, NamespaceId, Stamp, StoreEpoch, StoreId, StoreIdentity, WallClock,
-    Watermarks, WriteStamp,
+    apply_event, decode_event_body, ActorId, Applied, BeadId, CanonicalState, ClientRequestId,
+    CoreError, DurabilityClass, ErrorCode, EventBody, Limits, NamespaceId, SegmentId, Stamp,
+    StoreEpoch, StoreId, StoreIdentity, WallClock, Watermarks, WriteStamp,
 };
 use crate::git::SyncError;
 use crate::git::collision::{detect_collisions, resolve_collisions};
@@ -612,6 +614,17 @@ impl Daemon {
             Err(e) => {
                 return Err(OpError::Wal(e));
             }
+        }
+
+        let replayed_event_wal = {
+            let store = self
+                .stores
+                .get(&store_id)
+                .ok_or(OpError::Internal("loaded store missing from state"))?;
+            replay_event_wal(store_id, store.wal_index.as_ref(), &mut state, self.limits())?
+        };
+        if replayed_event_wal {
+            needs_sync = true;
         }
 
         last_seen_stamp = max_write_stamp(last_seen_stamp, state.max_write_stamp());
@@ -1805,6 +1818,147 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
         (None, Some(b)) => Some(b),
         (None, None) => None,
     }
+}
+
+fn replay_event_wal(
+    store_id: StoreId,
+    wal_index: &dyn WalIndex,
+    state: &mut CanonicalState,
+    limits: &Limits,
+) -> Result<bool, StoreRuntimeError> {
+    let store_dir = crate::paths::store_dir(store_id);
+    let rows = wal_index.reader().load_watermarks()?;
+    if rows.is_empty() {
+        return Ok(false);
+    }
+
+    let mut segment_cache: HashMap<NamespaceId, HashMap<SegmentId, PathBuf>> = HashMap::new();
+    let mut applied_any = false;
+
+    for row in rows {
+        if row.applied_seq == 0 {
+            continue;
+        }
+        if !segment_cache.contains_key(&row.namespace) {
+            let segments = segment_paths_for_namespace(&store_dir, wal_index, &row.namespace)?;
+            segment_cache.insert(row.namespace.clone(), segments);
+        }
+        let segments = segment_cache.get(&row.namespace).ok_or_else(|| {
+            StoreRuntimeError::WalIndex(WalIndexError::SegmentRowDecode(
+                "segment cache missing".to_string(),
+            ))
+        })?;
+
+        let mut from_seq_excl = 0u64;
+        while from_seq_excl < row.applied_seq {
+            let items = wal_index.reader().iter_from(
+                &row.namespace,
+                &row.origin,
+                from_seq_excl,
+                limits.max_event_batch_bytes,
+            )?;
+            if items.is_empty() {
+                return Err(StoreRuntimeError::WalReplay(WalReplayError::NonContiguousSeq {
+                    namespace: row.namespace.as_str().to_string(),
+                    origin: row.origin,
+                    expected: from_seq_excl + 1,
+                    got: 0,
+                }));
+            }
+            for item in items {
+                let seq = item.event_id.origin_seq.get();
+                if seq > row.applied_seq {
+                    from_seq_excl = row.applied_seq;
+                    break;
+                }
+                let segment_path = segments.get(&item.segment_id).ok_or_else(|| {
+                    StoreRuntimeError::WalIndex(WalIndexError::SegmentRowDecode(format!(
+                        "missing segment {} for {}",
+                        item.segment_id,
+                        row.namespace.as_str(),
+                    )))
+                })?;
+                let event_body = load_event_body_at(segment_path, item.offset, limits)?;
+                apply_event(state, &event_body).map_err(|err| {
+                    StoreRuntimeError::WalReplay(WalReplayError::RecordDecode {
+                        path: segment_path.clone(),
+                        source: EventWalError::RecordHeaderInvalid {
+                            reason: format!("apply_event failed: {err}"),
+                        },
+                    })
+                })?;
+                from_seq_excl = seq;
+                applied_any = true;
+            }
+        }
+    }
+
+    Ok(applied_any)
+}
+
+fn segment_paths_for_namespace(
+    store_dir: &Path,
+    wal_index: &dyn WalIndex,
+    namespace: &NamespaceId,
+) -> Result<HashMap<SegmentId, PathBuf>, StoreRuntimeError> {
+    let segments = wal_index.reader().list_segments(namespace)?;
+    let mut map = HashMap::new();
+    for segment in segments {
+        let path = if segment.segment_path.is_absolute() {
+            segment.segment_path
+        } else {
+            store_dir.join(&segment.segment_path)
+        };
+        map.insert(segment.segment_id, path);
+    }
+    Ok(map)
+}
+
+fn load_event_body_at(
+    path: &Path,
+    offset: u64,
+    limits: &Limits,
+) -> Result<EventBody, StoreRuntimeError> {
+    let mut file = File::open(path).map_err(|source| {
+        StoreRuntimeError::WalReplay(WalReplayError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    })?;
+    file.seek(SeekFrom::Start(offset)).map_err(|source| {
+        StoreRuntimeError::WalReplay(WalReplayError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    })?;
+
+    let mut reader = FrameReader::new(file, limits.max_wal_record_bytes);
+    let record = reader
+        .read_next()
+        .map_err(|source| {
+            StoreRuntimeError::WalReplay(WalReplayError::RecordDecode {
+                path: path.to_path_buf(),
+                source,
+            })
+        })?
+        .ok_or_else(|| {
+            StoreRuntimeError::WalReplay(WalReplayError::RecordDecode {
+                path: path.to_path_buf(),
+                source: EventWalError::FrameLengthInvalid {
+                    reason: "unexpected eof while reading record".to_string(),
+                },
+            })
+        })?;
+
+    let (_, event_body) =
+        decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
+            StoreRuntimeError::WalReplay(WalReplayError::EventBodyDecode {
+                path: path.to_path_buf(),
+                offset,
+                source,
+            })
+        })?;
+    Ok(event_body)
 }
 
 fn trim_non_empty(raw: Option<String>) -> Option<String> {
