@@ -51,9 +51,7 @@ pub(crate) fn lock_data_dir_for_tests() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 fn test_data_dir_override() -> Option<PathBuf> {
     let lock = TEST_DATA_DIR.get_or_init(|| Mutex::new(None));
-    lock.lock()
-        .expect("test data dir lock poisoned")
-        .clone()
+    lock.lock().expect("test data dir lock poisoned").clone()
 }
 
 #[cfg(test)]

@@ -177,9 +177,7 @@ pub fn decode_event_body(
     bytes: &[u8],
     limits: &Limits,
 ) -> Result<(EventBytes<Opaque>, EventBody), DecodeError> {
-    let max_bytes = limits
-        .max_wal_record_bytes
-        .min(limits.max_frame_bytes);
+    let max_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
     if bytes.len() > max_bytes {
         return Err(DecodeError::DecodeLimit("max_wal_record_bytes"));
     }
@@ -189,7 +187,10 @@ pub fn decode_event_body(
     if dec.datatype().is_ok() {
         return Err(DecodeError::TrailingBytes);
     }
-    Ok((EventBytes::<Opaque>::new(Bytes::copy_from_slice(bytes)), body))
+    Ok((
+        EventBytes::<Opaque>::new(Bytes::copy_from_slice(bytes)),
+        body,
+    ))
 }
 
 fn encode_event_body_map(
@@ -290,9 +291,10 @@ fn decode_event_body_map(
             }
             "kind" => {
                 let raw = decode_text(dec, limits)?;
-                kind = Some(EventKindV1::parse(raw).ok_or_else(|| {
-                    DecodeError::UnsupportedKind(raw.to_string())
-                })?);
+                kind = Some(
+                    EventKindV1::parse(raw)
+                        .ok_or_else(|| DecodeError::UnsupportedKind(raw.to_string()))?,
+                );
             }
             "namespace" => {
                 let raw = decode_text(dec, limits)?;
@@ -304,10 +306,13 @@ fn decode_event_body_map(
             }
             "origin_seq" => {
                 let value = dec.u64()?;
-                origin_seq = Some(Seq1::from_u64(value).ok_or_else(|| DecodeError::InvalidField {
-                    field: "origin_seq",
-                    reason: "must be nonzero".into(),
-                })?);
+                origin_seq =
+                    Some(
+                        Seq1::from_u64(value).ok_or_else(|| DecodeError::InvalidField {
+                            field: "origin_seq",
+                            reason: "must be nonzero".into(),
+                        })?,
+                    );
             }
             "store_epoch" => {
                 store_epoch = Some(dec.u64()?);
@@ -363,7 +368,10 @@ fn decode_event_body_map(
     })
 }
 
-fn encode_txn_delta(enc: &mut Encoder<&mut Vec<u8>>, delta: &TxnDeltaV1) -> Result<(), EncodeError> {
+fn encode_txn_delta(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    delta: &TxnDeltaV1,
+) -> Result<(), EncodeError> {
     let mut bead_upserts: Vec<&WireBeadPatch> = Vec::new();
     let mut note_appends: Vec<&NoteAppendV1> = Vec::new();
 
@@ -756,14 +764,12 @@ fn decode_wire_bead_patch(
                     field: "priority",
                     reason: format!("value {val} out of range for u8"),
                 })?;
-                patch.priority = Some(
-                    super::domain::Priority::new(narrowed).map_err(|e| {
-                        DecodeError::InvalidField {
-                            field: "priority",
-                            reason: e.to_string(),
-                        }
-                    })?,
-                );
+                patch.priority = Some(super::domain::Priority::new(narrowed).map_err(|e| {
+                    DecodeError::InvalidField {
+                        field: "priority",
+                        reason: e.to_string(),
+                    }
+                })?);
             }
             "source_repo" => {
                 patch.source_repo = decode_wire_patch_str(dec, limits)?;
@@ -778,7 +784,7 @@ fn decode_wire_bead_patch(
                         return Err(DecodeError::InvalidField {
                             field: "status",
                             reason: format!("unknown status {raw}"),
-                        })
+                        });
                     }
                 });
             }
@@ -797,7 +803,7 @@ fn decode_wire_bead_patch(
                         return Err(DecodeError::InvalidField {
                             field: "type",
                             reason: format!("unknown bead type {raw}"),
-                        })
+                        });
                     }
                 });
             }
@@ -969,7 +975,10 @@ fn encode_wire_patch_actor(
     }
 }
 
-fn decode_wire_patch_str(dec: &mut Decoder, limits: &Limits) -> Result<WirePatch<String>, DecodeError> {
+fn decode_wire_patch_str(
+    dec: &mut Decoder,
+    limits: &Limits,
+) -> Result<WirePatch<String>, DecodeError> {
     match dec.datatype()? {
         Type::Null => {
             dec.null()?;
@@ -984,7 +993,10 @@ fn decode_wire_patch_str(dec: &mut Decoder, limits: &Limits) -> Result<WirePatch
     }
 }
 
-fn decode_wire_patch_u32(dec: &mut Decoder, _limits: &Limits) -> Result<WirePatch<u32>, DecodeError> {
+fn decode_wire_patch_u32(
+    dec: &mut Decoder,
+    _limits: &Limits,
+) -> Result<WirePatch<u32>, DecodeError> {
     match dec.datatype()? {
         Type::Null => {
             dec.null()?;
@@ -1007,7 +1019,10 @@ fn decode_wire_patch_wallclock(
     }
 }
 
-fn decode_wire_patch_actor(dec: &mut Decoder, limits: &Limits) -> Result<WirePatch<ActorId>, DecodeError> {
+fn decode_wire_patch_actor(
+    dec: &mut Decoder,
+    limits: &Limits,
+) -> Result<WirePatch<ActorId>, DecodeError> {
     match dec.datatype()? {
         Type::Null => {
             dec.null()?;
@@ -1036,11 +1051,7 @@ fn encode_hlc_max(enc: &mut Encoder<&mut Vec<u8>>, hlc: &HlcMax) -> Result<(), E
     Ok(())
 }
 
-fn decode_hlc_max(
-    dec: &mut Decoder,
-    limits: &Limits,
-    depth: usize,
-) -> Result<HlcMax, DecodeError> {
+fn decode_hlc_max(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<HlcMax, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut actor_id = None;
     let mut logical = None;
@@ -1075,11 +1086,7 @@ fn decode_hlc_max(
     })
 }
 
-fn decode_map_len(
-    dec: &mut Decoder,
-    limits: &Limits,
-    depth: usize,
-) -> Result<usize, DecodeError> {
+fn decode_map_len(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<usize, DecodeError> {
     ensure_depth(depth, limits)?;
     let len = dec.map()?;
     let Some(len) = len else {
@@ -1200,9 +1207,7 @@ mod tests {
         patch.title = Some("title".to_string());
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .unwrap();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
 
         EventBody {
             envelope_v: 1,

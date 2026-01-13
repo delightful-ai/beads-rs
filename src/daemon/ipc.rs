@@ -476,6 +476,17 @@ impl From<OpError> for ErrorPayload {
                     bead_id: bead_id.map(|id| id.as_str().to_string()),
                 },
             ),
+            OpError::DurabilityUnavailable {
+                requested,
+                eligible_total,
+                eligible_replica_ids,
+            } => ErrorPayload::new(ErrorCode::DurabilityUnavailable, message, retryable).with_details(
+                error_details::DurabilityUnavailableDetails {
+                    requested,
+                    eligible_total,
+                    eligible_replica_ids,
+                },
+            ),
             OpError::DurabilityTimeout {
                 requested,
                 waited_ms,
@@ -488,6 +499,37 @@ impl From<OpError> for ErrorPayload {
                     pending_replica_ids,
                 })
                 .with_receipt(receipt),
+            OpError::RequireMinSeenTimeout {
+                waited_ms,
+                required,
+                current_applied,
+            } => ErrorPayload::new(ErrorCode::RequireMinSeenTimeout, message, retryable)
+                .with_details(error_details::RequireMinSeenTimeoutDetails {
+                    waited_ms,
+                    required,
+                    current_applied,
+                }),
+            OpError::RequireMinSeenUnsatisfied {
+                required,
+                current_applied,
+            } => ErrorPayload::new(ErrorCode::RequireMinSeenUnsatisfied, message, retryable)
+                .with_details(error_details::RequireMinSeenUnsatisfiedDetails {
+                    required,
+                    current_applied,
+                }),
+            OpError::NamespaceInvalid { namespace, .. } => {
+                ErrorPayload::new(ErrorCode::NamespaceInvalid, message, retryable).with_details(
+                    error_details::NamespaceInvalidDetails {
+                        namespace,
+                        pattern: "[a-z][a-z0-9_]{0,31}".to_string(),
+                    },
+                )
+            }
+            OpError::NamespaceUnknown { namespace } => {
+                ErrorPayload::new(ErrorCode::NamespaceUnknown, message, retryable).with_details(
+                    error_details::NamespaceUnknownDetails { namespace },
+                )
+            }
             OpError::Wal(e) => match &e {
                 crate::daemon::wal::WalError::TooLarge {
                     max_bytes,

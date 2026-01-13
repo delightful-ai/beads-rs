@@ -79,15 +79,9 @@ fn event_stamp(body: &EventBody) -> Result<Stamp, ApplyError> {
     ))
 }
 
-fn creation_stamp(
-    patch: &WireBeadPatch,
-    event_stamp: &Stamp,
-) -> Result<Stamp, ApplyError> {
+fn creation_stamp(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<Stamp, ApplyError> {
     match (patch.created_at, patch.created_by.as_ref()) {
-        (Some(at), Some(by)) => Ok(Stamp::new(
-            WriteStamp::new(at.0, at.1),
-            by.clone(),
-        )),
+        (Some(at), Some(by)) => Ok(Stamp::new(WriteStamp::new(at.0, at.1), by.clone())),
         (None, None) => Ok(event_stamp.clone()),
         _ => Err(ApplyError::MissingCreationStamp {
             id: patch.id.clone(),
@@ -135,7 +129,9 @@ fn apply_bead_upsert(
     let core = BeadCore::new(id.clone(), created, patch.created_on_branch.clone());
     let mut bead = super::Bead::new(core, default_fields(event_stamp.clone()));
     apply_patch_to_bead(&mut bead, patch, event_stamp, outcome)?;
-    state.insert(bead).map_err(|_| ApplyError::BeadCollision { id: id.clone() })?;
+    state
+        .insert(bead)
+        .map_err(|_| ApplyError::BeadCollision { id: id.clone() })?;
     outcome.changed_beads.insert(id);
     Ok(())
 }
@@ -209,8 +205,12 @@ fn apply_patch_to_bead(
     }
 
     if let Some(status) = patch.status {
-        let workflow_value =
-            build_workflow(status, &patch.closed_reason, &patch.closed_on_branch, &bead.fields.workflow.value);
+        let workflow_value = build_workflow(
+            status,
+            &patch.closed_reason,
+            &patch.closed_on_branch,
+            &bead.fields.workflow.value,
+        );
         changed |= update_lww(&mut bead.fields.workflow, workflow_value, event_stamp);
     }
 
@@ -390,8 +390,8 @@ mod tests {
         ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TxnId,
     };
     use crate::core::namespace::NamespaceId;
-    use crate::core::{Seq1, TxnDeltaV1};
     use crate::core::wire_bead::WireStamp;
+    use crate::core::{Seq1, TxnDeltaV1};
     use uuid::Uuid;
 
     fn actor_id(actor: &str) -> ActorId {
@@ -399,7 +399,10 @@ mod tests {
     }
 
     fn sample_event(note_content: &str) -> EventBody {
-        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), StoreEpoch::new(1));
+        let store = StoreIdentity::new(
+            StoreId::new(Uuid::from_bytes([1u8; 16])),
+            StoreEpoch::new(1),
+        );
         let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let txn_id = TxnId::new(Uuid::from_bytes([3u8; 16]));
         let client_request_id = ClientRequestId::new(Uuid::from_bytes([4u8; 16]));
@@ -417,9 +420,7 @@ mod tests {
         };
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .unwrap();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         delta
             .insert(TxnOpV1::NoteAppend(super::super::wire_bead::NoteAppendV1 {
                 bead_id: BeadId::parse("bd-apply1").unwrap(),
@@ -451,7 +452,11 @@ mod tests {
         let mut state = CanonicalState::new();
         let event = sample_event("note");
         let outcome1 = apply_event(&mut state, &event).unwrap();
-        assert!(outcome1.changed_beads.contains(&BeadId::parse("bd-apply1").unwrap()));
+        assert!(
+            outcome1
+                .changed_beads
+                .contains(&BeadId::parse("bd-apply1").unwrap())
+        );
 
         let outcome2 = apply_event(&mut state, &event).unwrap();
         assert!(outcome2.changed_beads.is_empty());
@@ -474,7 +479,11 @@ mod tests {
         let mut state = CanonicalState::new();
         let event = sample_event("note");
         let outcome = apply_event(&mut state, &event).unwrap();
-        assert!(outcome.changed_beads.contains(&BeadId::parse("bd-apply1").unwrap()));
+        assert!(
+            outcome
+                .changed_beads
+                .contains(&BeadId::parse("bd-apply1").unwrap())
+        );
         assert_eq!(outcome.changed_notes.len(), 1);
     }
 }

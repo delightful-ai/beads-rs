@@ -2,14 +2,14 @@
 
 mod fixtures;
 
-use beads_rs::{
-    apply_event, ApplyError, ActorId, CanonicalState, EventBody, HlcMax, TxnDeltaV1, TxnOpV1,
-    WireBeadPatch, WireNoteV1, WireStamp,
-};
 use beads_rs::core::NoteAppendV1;
+use beads_rs::{
+    ActorId, ApplyError, CanonicalState, EventBody, HlcMax, TxnDeltaV1, TxnOpV1, WireBeadPatch,
+    WireNoteV1, WireStamp, apply_event,
+};
 
 use fixtures::apply_harness::{
-    assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note, ApplyHarness,
+    ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
 };
 use fixtures::event_body::{actor_id, bead_id, event_body_with_delta, note_id, sample_event_body};
 
@@ -92,8 +92,16 @@ fn lww_merge_ordering_is_deterministic() {
     apply_event(&mut state_b, &event_b).expect("apply event b");
     apply_event(&mut state_b, &event_a).expect("apply event a");
 
-    let title_a = state_a.get_live(&bead_id).expect("bead").title().to_string();
-    let title_b = state_b.get_live(&bead_id).expect("bead").title().to_string();
+    let title_a = state_a
+        .get_live(&bead_id)
+        .expect("bead")
+        .title()
+        .to_string();
+    let title_b = state_b
+        .get_live(&bead_id)
+        .expect("bead")
+        .title()
+        .to_string();
     assert_eq!(title_a, title_b);
     assert_eq!(title_a, "title-b");
 }

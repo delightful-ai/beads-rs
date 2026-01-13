@@ -12,6 +12,7 @@
 //! - bead: BeadCore, BeadFields, Bead (Layer 8)
 //! - state: CanonicalState (Layer 9)
 
+pub mod apply;
 pub mod bead;
 pub mod collections;
 pub mod composite;
@@ -19,11 +20,10 @@ pub mod crdt;
 pub mod dep;
 pub mod domain;
 pub mod durability;
-pub mod event;
-pub mod apply;
-pub mod json_canon;
 pub mod error;
+pub mod event;
 pub mod identity;
+pub mod json_canon;
 pub mod limits;
 pub mod meta;
 pub mod namespace;
@@ -36,30 +36,30 @@ pub mod tombstone;
 pub mod watermark;
 pub mod wire_bead;
 
+pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
 pub use bead::{Bead, BeadCore, BeadFields};
 pub use collections::{Label, Labels, NoteLog};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
-pub use apply::{apply_event, ApplyError, ApplyOutcome, NoteKey};
-pub use json_canon::{to_canon_json_bytes, CanonJsonError};
 pub use dep::{DepEdge, DepKey, DepLife, DepSpec};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
     DurabilityClass, DurabilityOutcome, DurabilityProofV1, DurabilityReceipt, LocalFsyncProof,
     ReceiptMergeError, ReplicatedProof,
 };
-pub use event::{
-    decode_event_body, encode_event_body_canonical, hash_event_body, sha256_bytes, Canonical,
-    DecodeError, EncodeError, EventBody, EventBytes, EventKindV1, HlcMax, Opaque, Sha256,
-};
 pub use error::{
     CollisionError, CoreError, ErrorCode, ErrorPayload, InvalidDependency, InvalidId, InvalidLabel,
     RangeError,
+};
+pub use event::{
+    Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventKindV1, HlcMax, Opaque,
+    Sha256, decode_event_body, encode_event_body_canonical, hash_event_body, sha256_bytes,
 };
 pub use identity::{
     ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, EventId, NoteId,
     ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, TxnId,
 };
+pub use json_canon::{CanonJsonError, to_canon_json_bytes};
 pub use limits::Limits;
 pub use meta::{FormatVersion, Meta};
 pub use namespace::{

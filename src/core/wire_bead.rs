@@ -10,6 +10,7 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use super::Bead;
 use super::bead::{BeadCore, BeadFields};
 use super::collections::Labels;
 use super::composite::{Claim, Closure, Note, Workflow};
@@ -17,7 +18,6 @@ use super::crdt::Lww;
 use super::domain::{BeadType, Priority};
 use super::identity::{ActorId, BeadId, NoteId};
 use super::time::{Stamp, WallClock, WriteStamp};
-use super::Bead;
 
 /// Wire stamp encoded as [wall_ms, counter].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +80,12 @@ impl From<Note> for WireNoteV1 {
 
 impl From<WireNoteV1> for Note {
     fn from(note: WireNoteV1) -> Self {
-        Note::new(note.id, note.content, note.author, WriteStamp::from(note.at))
+        Note::new(
+            note.id,
+            note.content,
+            note.author,
+            WriteStamp::from(note.at),
+        )
     }
 }
 
@@ -198,7 +203,9 @@ impl WorkflowStatus {
         match self {
             WorkflowStatus::Open => Workflow::Open,
             WorkflowStatus::InProgress => Workflow::InProgress,
-            WorkflowStatus::Closed => Workflow::Closed(Closure::new(closed_reason, closed_on_branch)),
+            WorkflowStatus::Closed => {
+                Workflow::Closed(Closure::new(closed_reason, closed_on_branch))
+            }
         }
     }
 }
@@ -387,7 +394,10 @@ impl From<WireBeadFull> for Bead {
             title: Lww::new(wire.title, field_stamp("title")),
             description: Lww::new(wire.description, field_stamp("description")),
             design: Lww::new(wire.design, field_stamp("design")),
-            acceptance_criteria: Lww::new(wire.acceptance_criteria, field_stamp("acceptance_criteria")),
+            acceptance_criteria: Lww::new(
+                wire.acceptance_criteria,
+                field_stamp("acceptance_criteria"),
+            ),
             priority: Lww::new(wire.priority, field_stamp("priority")),
             bead_type: Lww::new(wire.bead_type, field_stamp("type")),
             labels: Lww::new(wire.labels, field_stamp("labels")),
@@ -497,7 +507,9 @@ pub enum TxnOpV1 {
 impl TxnOpV1 {
     pub fn key(&self) -> TxnOpKey {
         match self {
-            TxnOpV1::BeadUpsert(upsert) => TxnOpKey::BeadUpsert { id: upsert.id.clone() },
+            TxnOpV1::BeadUpsert(upsert) => TxnOpKey::BeadUpsert {
+                id: upsert.id.clone(),
+            },
             TxnOpV1::NoteAppend(append) => TxnOpKey::NoteAppend {
                 bead_id: append.bead_id.clone(),
                 note_id: append.note.id.clone(),
@@ -752,13 +764,11 @@ mod tests {
                 at: WireStamp(1, 1),
             },
         };
+        delta.insert(TxnOpV1::NoteAppend(append)).unwrap();
         delta
-            .insert(TxnOpV1::NoteAppend(append))
-            .unwrap();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(
-                bead_id("bd-order"),
-            ))))
+            .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(bead_id(
+                "bd-order",
+            )))))
             .unwrap();
 
         let mut iter = delta.iter();
@@ -770,9 +780,9 @@ mod tests {
     fn txn_delta_roundtrip() {
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(
-                bead_id("bd-rt"),
-            ))))
+            .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(bead_id(
+                "bd-rt",
+            )))))
             .unwrap();
         delta
             .insert(TxnOpV1::NoteAppend(NoteAppendV1 {

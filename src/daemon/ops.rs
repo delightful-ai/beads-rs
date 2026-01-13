@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    ActorId, BeadFields, BeadId, BeadType, Closure, CoreError, DurabilityClass, DurabilityReceipt,
-    ErrorCode, Label, Labels, Lww, Priority, ReplicaId, Stamp, WallClock, Workflow,
+    ActorId, Applied, BeadFields, BeadId, BeadType, Closure, CoreError, DurabilityClass,
+    DurabilityReceipt, ErrorCode, Label, Labels, Lww, NamespaceId, Priority, ReplicaId, Stamp,
+    WallClock, Watermarks, Workflow,
 };
 use crate::daemon::store_lock::StoreLockError;
 use crate::daemon::store_runtime::StoreRuntimeError;
@@ -320,6 +321,32 @@ pub enum OpError {
         receipt: Box<DurabilityReceipt>,
     },
 
+    #[error("durability unavailable for {requested} (eligible={eligible_total})")]
+    DurabilityUnavailable {
+        requested: DurabilityClass,
+        eligible_total: u32,
+        eligible_replica_ids: Option<Vec<ReplicaId>>,
+    },
+
+    #[error("require_min_seen not satisfied within {waited_ms}ms")]
+    RequireMinSeenTimeout {
+        waited_ms: u64,
+        required: Watermarks<Applied>,
+        current_applied: Watermarks<Applied>,
+    },
+
+    #[error("require_min_seen not currently satisfied")]
+    RequireMinSeenUnsatisfied {
+        required: Watermarks<Applied>,
+        current_applied: Watermarks<Applied>,
+    },
+
+    #[error("namespace invalid: {namespace} ({reason})")]
+    NamespaceInvalid { namespace: String, reason: String },
+
+    #[error("namespace unknown: {namespace}")]
+    NamespaceUnknown { namespace: NamespaceId },
+
     #[error(transparent)]
     Wal(#[from] WalError),
 
@@ -366,6 +393,11 @@ impl OpError {
             OpError::NoteTooLarge { .. } => ErrorCode::NoteTooLarge,
             OpError::LabelsTooMany { .. } => ErrorCode::LabelsTooMany,
             OpError::DurabilityTimeout { .. } => ErrorCode::DurabilityTimeout,
+            OpError::DurabilityUnavailable { .. } => ErrorCode::DurabilityUnavailable,
+            OpError::RequireMinSeenTimeout { .. } => ErrorCode::RequireMinSeenTimeout,
+            OpError::RequireMinSeenUnsatisfied { .. } => ErrorCode::RequireMinSeenUnsatisfied,
+            OpError::NamespaceInvalid { .. } => ErrorCode::NamespaceInvalid,
+            OpError::NamespaceUnknown { .. } => ErrorCode::NamespaceUnknown,
             OpError::Wal(err) => match err {
                 WalError::TooLarge { .. } => ErrorCode::WalRecordTooLarge,
                 _ => ErrorCode::WalError,
@@ -406,6 +438,12 @@ impl OpError {
             | OpError::DepNotFound => Transience::Permanent,
             OpError::StoreRuntime(err) => store_runtime_transience(err),
             OpError::DurabilityTimeout { .. } => Transience::Retryable,
+            OpError::DurabilityUnavailable { .. } => Transience::Permanent,
+            OpError::RequireMinSeenTimeout { .. } => Transience::Retryable,
+            OpError::RequireMinSeenUnsatisfied { .. } => Transience::Retryable,
+            OpError::NamespaceInvalid { .. } | OpError::NamespaceUnknown { .. } => {
+                Transience::Permanent
+            }
             OpError::LoadTimeout { .. } => Transience::Retryable,
             OpError::Internal(_) => Transience::Retryable,
         }

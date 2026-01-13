@@ -5,7 +5,7 @@ use std::fs;
 use fixtures::store_dir::TempStoreDir;
 use uuid::Uuid;
 
-use beads_rs::daemon::store_lock::{read_lock_meta, StoreLock, StoreLockError};
+use beads_rs::daemon::store_lock::{StoreLock, StoreLockError, read_lock_meta};
 use beads_rs::{NamespaceId, ReplicaId, StoreId};
 
 #[test]
@@ -16,7 +16,10 @@ fn store_paths_live_under_bd_data_dir() {
 
     let store_root = temp.data_dir().join("stores").join(store_id.to_string());
 
-    assert_eq!(beads_rs::paths::stores_dir(), temp.data_dir().join("stores"));
+    assert_eq!(
+        beads_rs::paths::stores_dir(),
+        temp.data_dir().join("stores")
+    );
     assert_eq!(beads_rs::paths::store_dir(store_id), store_root);
     assert_eq!(
         beads_rs::paths::store_meta_path(store_id),

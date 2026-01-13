@@ -2,10 +2,10 @@
 
 mod fixtures;
 
-use beads_rs::{decode_event_body, encode_event_body_canonical, DecodeError, Limits};
+use beads_rs::{DecodeError, Limits, decode_event_body, encode_event_body_canonical};
 
 use fixtures::cbor::{
-    golden_event_body, sha256_hex, GOLDEN_EVENT_BODY_CBOR, GOLDEN_EVENT_BODY_SHA256_HEX,
+    GOLDEN_EVENT_BODY_CBOR, GOLDEN_EVENT_BODY_SHA256_HEX, golden_event_body, sha256_hex,
 };
 
 #[test]

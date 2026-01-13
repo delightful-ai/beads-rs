@@ -1,10 +1,10 @@
 //! Canonical JSON encoder for checkpoint hashing.
 
+use serde::Serialize;
 use serde::ser::{
     SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
     SerializeTupleStruct, SerializeTupleVariant, Serializer,
 };
-use serde::Serialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -348,9 +348,7 @@ fn canon_value(value: Value) -> Value {
             }
             Value::Object(canon)
         }
-        Value::Array(values) => {
-            Value::Array(values.into_iter().map(canon_value).collect())
-        }
+        Value::Array(values) => Value::Array(values.into_iter().map(canon_value).collect()),
         other => other,
     }
 }
