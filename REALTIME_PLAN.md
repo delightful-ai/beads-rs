@@ -417,6 +417,9 @@ Modules impacted:
 What must be true to proceed safely:
 - Lock the notes rule now: `bead_upsert` deltas SHOULD omit notes, and if present
   are interpreted as set-union only (never truncation). This affects apply and storage.
+- Lock dep delete semantics now: `dep_delete` is an idempotent LWW tombstone (no
+  dep_not_found in apply/replay). DAG enforcement (Blocks/Parent cycles) is a
+  mutation-planning check only; cross-namespace deps are rejected in planning.
 
 ### 0.8 Deterministic apply semantics
 
@@ -1075,8 +1078,8 @@ DeltaV1:
 TxnDeltaV1 contains operation lists (all intra-namespace):
 - bead_upserts: Vec<WireBeadPatch>
 - bead_deletes: Vec<{ id, deleted_at, deleted_by, ... }>
-- dep_upserts: Vec<{ from, to, kind, live_at, live_by, ... }>
-- dep_deletes: Vec<{ from, to, kind, dead_at, dead_by, ... }>
+- dep_upserts: Vec<{ from, to, kind, created_at, created_by, deleted_at?, deleted_by? }>
+- dep_deletes: Vec<{ from, to, kind, deleted_at, deleted_by }>
 - note_appends: Vec<{ note_id, bead_id, content, author, at }>
 
 Limits (normative):
@@ -1104,6 +1107,9 @@ Delta guidance:
 - TxnDeltaV1 `bead_upserts` should omit notes; notes replicate via `note_appends`.
 - A `bead_upsert` that includes notes is interpreted as "at least these notes exist"
   (set-union), never truncation.
+- Locally-authored dep ops MUST include explicit stamps (created_at/created_by and
+  deleted_at/deleted_by), typically equal to the event stamp, so canonical CBOR
+  bytes are deterministic and replay/replication are stable.
 - `note_append` carries note id, content, author, stamp.
 - `bead_delete` includes deletion stamp and lineage fields if present.
 - `dep_upsert` and `dep_delete` include from/to/kind and life stamps.
@@ -1256,6 +1262,11 @@ ApplyOutcome should include:
 - derived_dirty_shards (optional helper): the set of checkpoint shard ids (00..ff)
   affected by this event for beads/tombstones/deps in the namespace
 
+Dep shard dirtiness (normative):
+- For dep_upsert/dep_delete, ApplyOutcome.changed_deps MUST include the DepKey so
+  checkpoint export can mark the correct deps shard as dirty using:
+  dep_key_bytes = from "\0" to "\0" kind (UTF-8) and shard = sha256(dep_key_bytes)[0].
+
 ### 4.2 Merge rules (explicit, idempotent)
 
 - bead_upsert:
@@ -1267,6 +1278,8 @@ ApplyOutcome should include:
 - dep_upsert / dep_delete:
   - Treat as LWW on DepLife.
   - Deletions should carry a delete stamp.
+  - dep_delete is idempotent and MUST NOT error if the edge does not exist.
+  - delete-before-create is valid and MUST converge (tombstone wins until newer upsert).
 - note_append:
   - Insert note if id not present.
   - If same id exists with different content, treat as corruption.
@@ -1889,6 +1902,10 @@ MutationEngine responsibilities:
   - reject note_appends with content > MAX_NOTE_BYTES,
   - reject txns with total ops > MAX_OPS_PER_TXN,
   - enforce per-bead label count and other bounded fields.
+- Validate dep ops (local-only):
+  - require from/to beads exist,
+  - enforce DAG for Blocks/Parent (reject cycles),
+  - reject cross-namespace deps.
 - Support client_request_id idempotency.
 
 ### 8.2 Event sequencing and idempotency
@@ -1910,6 +1927,10 @@ MutationEngine responsibilities:
 6) Update query indexes and in-memory derived indexes.
 7) Notify subscribers (if enabled).
 8) Trigger replication and checkpoint scheduling.
+
+Note: dep_delete remains idempotent in the event path. Any strict "dep_not_found"
+behavior is a CLI/planner preflight only and MUST NOT be enforced during replay
+or replication.
 
 ### 8.4 Write stamp generation (explicit)
 
@@ -2617,6 +2638,9 @@ Add deterministic tests for:
 - WAL index rebuild from segments
 - origin_seq allocation and idempotency mapping/receipts
 - apply idempotence and note collision detection
+- dep_upsert/dep_delete CBOR encode/decode and delete-before-create convergence
+- dep_delete idempotence across replay
+- DAG enforcement for Blocks/Parent in mutation planning
 - replication ACK/WANT behavior and backpressure
 - checkpoint export/import determinism, manifest and content hashes
 - store discovery order and identity persistence
