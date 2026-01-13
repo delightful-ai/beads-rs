@@ -760,9 +760,31 @@ fn store_runtime_error_payload(
         StoreRuntimeError::WalIndex(err) => {
             ErrorPayload::new(wal_index_error_code(&err), message, retryable)
         }
-        StoreRuntimeError::WalReplay(err) => {
-            ErrorPayload::new(wal_replay_error_code(&err), message, retryable)
-        }
+        StoreRuntimeError::WalReplay(err) => wal_replay_error_payload(err, message, retryable),
+    }
+}
+
+fn wal_replay_error_payload(err: WalReplayError, message: String, retryable: bool) -> ErrorPayload {
+    match &err {
+        WalReplayError::RecordShaMismatch {
+            namespace,
+            origin,
+            seq,
+            expected,
+            got,
+            ..
+        } => ErrorPayload::new(ErrorCode::HashMismatch, message, retryable).with_details(
+            error_details::HashMismatchDetails {
+                eid: error_details::EventIdDetails {
+                    namespace: namespace.clone(),
+                    origin_replica_id: *origin,
+                    origin_seq: *seq,
+                },
+                expected_sha256: hex::encode(expected),
+                got_sha256: hex::encode(got),
+            },
+        ),
+        _ => ErrorPayload::new(wal_replay_error_code(&err), message, retryable),
     }
 }
 
@@ -804,6 +826,7 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
         WalReplayError::SegmentHeader { .. } | WalReplayError::SegmentHeaderMismatch { .. } => {
             ErrorCode::SegmentHeaderMismatch
         }
+        WalReplayError::RecordShaMismatch { .. } => ErrorCode::HashMismatch,
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
         | WalReplayError::RecordHeaderMismatch { .. }
@@ -1580,9 +1603,7 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{
-        DurabilityClass, DurabilityReceipt, StoreEpoch, StoreId, StoreIdentity, TxnId,
-    };
+    use crate::core::{DurabilityClass, DurabilityReceipt, StoreEpoch, StoreId, StoreIdentity, TxnId};
     use uuid::Uuid;
 
     #[test]

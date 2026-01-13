@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::core::{
     DecodeError, EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreMeta, decode_event_body,
+    sha256_bytes,
 };
 
 use super::EventWalError;
@@ -138,6 +139,18 @@ pub enum WalReplayError {
         offset: u64,
         #[source]
         source: RecordHeaderMismatch,
+    },
+    #[error(
+        "record sha256 mismatch for {namespace} {origin} seq {seq} at {path:?} offset {offset}"
+    )]
+    RecordShaMismatch {
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        expected: [u8; 32],
+        got: [u8; 32],
+        path: PathBuf,
+        offset: u64,
     },
 }
 
@@ -659,6 +672,18 @@ where
                 source,
             }
         })?;
+        let expected_sha = sha256_bytes(record.payload.as_ref()).0;
+        if expected_sha != record.header.sha256 {
+            return Err(WalReplayError::RecordShaMismatch {
+                namespace: segment.header.namespace.clone(),
+                origin: record.header.origin_replica_id,
+                seq: record.header.origin_seq,
+                expected: expected_sha,
+                got: record.header.sha256,
+                path: segment.path.clone(),
+                offset,
+            });
+        }
         on_record(offset, &record, frame_len as u32)?;
 
         records += 1;
