@@ -15,7 +15,7 @@ use super::bead::{BeadCore, BeadFields};
 use super::collections::Labels;
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
-use super::domain::{BeadType, Priority};
+use super::domain::{BeadType, DepKind, Priority};
 use super::identity::{ActorId, BeadId, NoteId};
 use super::time::{Stamp, WallClock, WriteStamp};
 
@@ -492,6 +492,53 @@ impl WireBeadPatch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireTombstoneV1 {
+    pub id: BeadId,
+    pub deleted_at: WireStamp,
+    pub deleted_by: ActorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_created_at: Option<WireStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_created_by: Option<ActorId>,
+}
+
+impl WireTombstoneV1 {
+    pub fn deleted_stamp(&self) -> Stamp {
+        Stamp::new(WriteStamp::from(self.deleted_at), self.deleted_by.clone())
+    }
+
+    pub fn lineage_stamp(&self) -> Option<Stamp> {
+        let at = self.lineage_created_at?;
+        let by = self.lineage_created_by.clone()?;
+        Some(Stamp::new(WriteStamp::from(at), by))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepV1 {
+    pub from: BeadId,
+    pub to: BeadId,
+    pub kind: DepKind,
+    pub created_at: WireStamp,
+    pub created_by: ActorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<WireStamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_by: Option<ActorId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepDeleteV1 {
+    pub from: BeadId,
+    pub to: BeadId,
+    pub kind: DepKind,
+    pub deleted_at: WireStamp,
+    pub deleted_by: ActorId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteAppendV1 {
     pub bead_id: BeadId,
     pub note: WireNoteV1,
@@ -501,6 +548,9 @@ pub struct NoteAppendV1 {
 #[serde(tag = "op", content = "data", rename_all = "snake_case")]
 pub enum TxnOpV1 {
     BeadUpsert(Box<WireBeadPatch>),
+    BeadDelete(WireTombstoneV1),
+    DepUpsert(WireDepV1),
+    DepDelete(WireDepDeleteV1),
     NoteAppend(NoteAppendV1),
 }
 
@@ -509,6 +559,20 @@ impl TxnOpV1 {
         match self {
             TxnOpV1::BeadUpsert(upsert) => TxnOpKey::BeadUpsert {
                 id: upsert.id.clone(),
+            },
+            TxnOpV1::BeadDelete(delete) => TxnOpKey::BeadDelete {
+                id: delete.id.clone(),
+                lineage: delete.lineage_stamp(),
+            },
+            TxnOpV1::DepUpsert(dep) => TxnOpKey::DepUpsert {
+                from: dep.from.clone(),
+                to: dep.to.clone(),
+                kind: dep.kind,
+            },
+            TxnOpV1::DepDelete(dep) => TxnOpKey::DepDelete {
+                from: dep.from.clone(),
+                to: dep.to.clone(),
+                kind: dep.kind,
             },
             TxnOpV1::NoteAppend(append) => TxnOpKey::NoteAppend {
                 bead_id: append.bead_id.clone(),
@@ -521,6 +585,17 @@ impl TxnOpV1 {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TxnOpKey {
     BeadUpsert { id: BeadId },
+    BeadDelete { id: BeadId, lineage: Option<Stamp> },
+    DepUpsert {
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+    },
+    DepDelete {
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+    },
     NoteAppend { bead_id: BeadId, note_id: NoteId },
 }
 
@@ -528,6 +603,9 @@ impl TxnOpKey {
     pub fn kind(&self) -> &'static str {
         match self {
             TxnOpKey::BeadUpsert { .. } => "bead_upsert",
+            TxnOpKey::BeadDelete { .. } => "bead_delete",
+            TxnOpKey::DepUpsert { .. } => "dep_upsert",
+            TxnOpKey::DepDelete { .. } => "dep_delete",
             TxnOpKey::NoteAppend { .. } => "note_append",
         }
     }
@@ -535,6 +613,28 @@ impl TxnOpKey {
     pub fn describe(&self) -> String {
         match self {
             TxnOpKey::BeadUpsert { id } => format!("bead_upsert:{}", id.as_str()),
+            TxnOpKey::BeadDelete { id, lineage } => match lineage {
+                Some(stamp) => format!(
+                    "bead_delete:{}:{}:{}:{}",
+                    id.as_str(),
+                    stamp.at.wall_ms,
+                    stamp.at.counter,
+                    stamp.by.as_str()
+                ),
+                None => format!("bead_delete:{}", id.as_str()),
+            },
+            TxnOpKey::DepUpsert { from, to, kind } => format!(
+                "dep_upsert:{}:{}:{}",
+                from.as_str(),
+                to.as_str(),
+                kind.as_str()
+            ),
+            TxnOpKey::DepDelete { from, to, kind } => format!(
+                "dep_delete:{}:{}:{}",
+                from.as_str(),
+                to.as_str(),
+                kind.as_str()
+            ),
             TxnOpKey::NoteAppend { bead_id, note_id } => {
                 format!("note_append:{}:{}", bead_id.as_str(), note_id.as_str())
             }
@@ -578,11 +678,23 @@ impl TxnDeltaV1 {
 
     pub fn from_parts(
         bead_upserts: Vec<WireBeadPatch>,
+        bead_deletes: Vec<WireTombstoneV1>,
+        dep_upserts: Vec<WireDepV1>,
+        dep_deletes: Vec<WireDepDeleteV1>,
         note_appends: Vec<NoteAppendV1>,
     ) -> Result<Self, TxnDeltaError> {
         let mut delta = TxnDeltaV1::new();
         for up in bead_upserts {
             delta.insert(TxnOpV1::BeadUpsert(Box::new(up)))?;
+        }
+        for delete in bead_deletes {
+            delta.insert(TxnOpV1::BeadDelete(delete))?;
+        }
+        for dep in dep_upserts {
+            delta.insert(TxnOpV1::DepUpsert(dep))?;
+        }
+        for dep in dep_deletes {
+            delta.insert(TxnOpV1::DepDelete(dep))?;
         }
         for na in note_appends {
             delta.insert(TxnOpV1::NoteAppend(na))?;
@@ -755,6 +867,30 @@ mod tests {
     #[test]
     fn txn_delta_orders_ops_canonically() {
         let mut delta = TxnDeltaV1::new();
+        let delete = WireTombstoneV1 {
+            id: bead_id("bd-order"),
+            deleted_at: WireStamp(5, 1),
+            deleted_by: actor_id("alice"),
+            reason: None,
+            lineage_created_at: None,
+            lineage_created_by: None,
+        };
+        let dep_upsert = WireDepV1 {
+            from: bead_id("bd-order"),
+            to: bead_id("bd-up"),
+            kind: DepKind::Blocks,
+            created_at: WireStamp(3, 1),
+            created_by: actor_id("bob"),
+            deleted_at: None,
+            deleted_by: None,
+        };
+        let dep_delete = WireDepDeleteV1 {
+            from: bead_id("bd-order"),
+            to: bead_id("bd-down"),
+            kind: DepKind::Related,
+            deleted_at: WireStamp(4, 2),
+            deleted_by: actor_id("carol"),
+        };
         let append = NoteAppendV1 {
             bead_id: bead_id("bd-order"),
             note: WireNoteV1 {
@@ -765,6 +901,9 @@ mod tests {
             },
         };
         delta.insert(TxnOpV1::NoteAppend(append)).unwrap();
+        delta.insert(TxnOpV1::DepDelete(dep_delete)).unwrap();
+        delta.insert(TxnOpV1::BeadDelete(delete)).unwrap();
+        delta.insert(TxnOpV1::DepUpsert(dep_upsert)).unwrap();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(bead_id(
                 "bd-order",
@@ -773,6 +912,9 @@ mod tests {
 
         let mut iter = delta.iter();
         assert!(matches!(iter.next(), Some(TxnOpV1::BeadUpsert(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::BeadDelete(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::DepUpsert(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::DepDelete(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::NoteAppend(_))));
     }
 
@@ -783,6 +925,36 @@ mod tests {
             .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(bead_id(
                 "bd-rt",
             )))))
+            .unwrap();
+        delta
+            .insert(TxnOpV1::BeadDelete(WireTombstoneV1 {
+                id: bead_id("bd-rt-delete"),
+                deleted_at: WireStamp(3, 0),
+                deleted_by: actor_id("alice"),
+                reason: Some("cleanup".to_string()),
+                lineage_created_at: None,
+                lineage_created_by: None,
+            }))
+            .unwrap();
+        delta
+            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                from: bead_id("bd-rt"),
+                to: bead_id("bd-rt-dep"),
+                kind: DepKind::Blocks,
+                created_at: WireStamp(4, 0),
+                created_by: actor_id("alice"),
+                deleted_at: None,
+                deleted_by: None,
+            }))
+            .unwrap();
+        delta
+            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+                from: bead_id("bd-rt"),
+                to: bead_id("bd-rt-dep2"),
+                kind: DepKind::Related,
+                deleted_at: WireStamp(5, 1),
+                deleted_by: actor_id("bob"),
+            }))
             .unwrap();
         delta
             .insert(TxnOpV1::NoteAppend(NoteAppendV1 {

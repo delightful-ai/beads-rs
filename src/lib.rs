@@ -30,8 +30,8 @@ pub use crate::core::{
     ReplicatedProof, RetentionPolicy, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
     StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Tombstone, TtlBasis, TxnDeltaError,
     TxnDeltaV1, TxnId, TxnOpKey, TxnOpV1, VerifiedEvent, VerifiedEventAny, WallClock, Watermark,
-    WatermarkError, Watermarks, WireBeadFull, WireBeadPatch, WireFieldStamp, WireNoteV1, WirePatch,
-    WireStamp, Workflow, WorkflowStatus, WriteStamp, apply_event, decode_event_body,
-    encode_event_body_canonical, hash_event_body, sha256_bytes, to_canon_json_bytes,
-    validate_event_body_limits, verify_event_frame,
+    WatermarkError, Watermarks, WireBeadFull, WireBeadPatch, WireDepDeleteV1, WireDepV1,
+    WireFieldStamp, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, Workflow, WorkflowStatus,
+    WriteStamp, apply_event, decode_event_body, encode_event_body_canonical, hash_event_body,
+    sha256_bytes, to_canon_json_bytes, validate_event_body_limits, verify_event_frame,
 };
