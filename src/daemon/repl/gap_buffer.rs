@@ -266,7 +266,7 @@ mod tests {
 
     fn event_bytes(len: usize) -> EventBytes<crate::core::Opaque> {
         let payload = vec![1u8; len.max(1)];
-        EventBytes::new(Bytes::from(payload))
+        EventBytes::<crate::core::Opaque>::new(Bytes::from(payload))
     }
 
     fn contiguous_event(seq: u64) -> VerifiedEventAny {
