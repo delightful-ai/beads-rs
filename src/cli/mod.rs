@@ -1172,9 +1172,22 @@ fn fetch_issue(ctx: &Ctx, id: &str) -> Result<crate::api::Issue> {
     }
 }
 
-fn fetch_issue_summary(ctx: &Ctx, id: &str) -> Result<crate::api::IssueSummary> {
-    let issue = fetch_issue(ctx, id)?;
-    Ok(crate::api::IssueSummary::from_issue(&issue))
+fn fetch_issue_summaries(
+    ctx: &Ctx,
+    ids: Vec<String>,
+) -> Result<Vec<crate::api::IssueSummary>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let req = Request::ShowMultiple {
+        repo: ctx.repo.clone(),
+        ids,
+        read: ctx.read_consistency(),
+    };
+    match send(&req)? {
+        ResponsePayload::Query(QueryResult::Issues(summaries)) => Ok(summaries),
+        _ => Ok(Vec::new()),
+    }
 }
 
 // =============================================================================

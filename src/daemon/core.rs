@@ -1458,6 +1458,10 @@ impl Daemon {
                 self.query_show(&repo, &id, read, git_tx)
             }
 
+            Request::ShowMultiple { repo, ids, read } => {
+                self.query_show_multiple(&repo, &ids, read, git_tx)
+            }
+
             Request::List {
                 repo,
                 filters,

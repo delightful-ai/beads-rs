@@ -227,6 +227,14 @@ pub enum Request {
         read: ReadConsistency,
     },
 
+    /// Show multiple beads (batch fetch for summaries).
+    ShowMultiple {
+        repo: PathBuf,
+        ids: Vec<String>,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
+
     /// List beads.
     List {
         repo: PathBuf,
@@ -1602,6 +1610,28 @@ mod tests {
 
         match parsed {
             Request::Create { title, .. } => assert_eq!(title, "test"),
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn show_multiple_roundtrip() {
+        let req = Request::ShowMultiple {
+            repo: PathBuf::from("/test"),
+            ids: vec!["bd-abc".to_string(), "bd-xyz".to_string()],
+            read: ReadConsistency::default(),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("show_multiple"));
+        assert!(json.contains("bd-abc"));
+
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Request::ShowMultiple { ids, .. } => {
+                assert_eq!(ids.len(), 2);
+                assert_eq!(ids[0], "bd-abc");
+            }
             _ => panic!("wrong request type"),
         }
     }

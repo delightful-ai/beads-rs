@@ -1,5 +1,5 @@
 use super::super::render;
-use super::super::{Ctx, ShowArgs, fetch_issue_summary, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, ShowArgs, fetch_issue_summaries, normalize_bead_id, print_ok, send};
 use crate::Result;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::QueryResult;
@@ -48,17 +48,11 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
 
             use std::collections::BTreeSet;
 
-            let mut outgoing_ids: BTreeSet<String> = BTreeSet::new();
-            for e in &outgoing_edges {
-                outgoing_ids.insert(e.to.clone());
-            }
-            let mut outgoing_views = Vec::new();
-            for id in outgoing_ids {
-                if let Ok(v) = fetch_issue_summary(ctx, &id) {
-                    outgoing_views.push(v);
-                }
-            }
+            // Collect IDs for outgoing deps
+            let outgoing_ids: BTreeSet<String> =
+                outgoing_edges.iter().map(|e| e.to.clone()).collect();
 
+            // Categorize incoming deps by kind
             let mut blocks_ids: BTreeSet<String> = BTreeSet::new();
             let mut children_ids: BTreeSet<String> = BTreeSet::new();
             let mut related_ids: BTreeSet<String> = BTreeSet::new();
@@ -80,30 +74,13 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
                 }
             }
 
-            let mut blocks = Vec::new();
-            for id in blocks_ids {
-                if let Ok(v) = fetch_issue_summary(ctx, &id) {
-                    blocks.push(v);
-                }
-            }
-            let mut children = Vec::new();
-            for id in children_ids {
-                if let Ok(v) = fetch_issue_summary(ctx, &id) {
-                    children.push(v);
-                }
-            }
-            let mut related = Vec::new();
-            for id in related_ids {
-                if let Ok(v) = fetch_issue_summary(ctx, &id) {
-                    related.push(v);
-                }
-            }
-            let mut discovered = Vec::new();
-            for id in discovered_ids {
-                if let Ok(v) = fetch_issue_summary(ctx, &id) {
-                    discovered.push(v);
-                }
-            }
+            // Batch fetch all summaries in a few calls instead of N individual requests
+            let outgoing_views =
+                fetch_issue_summaries(ctx, outgoing_ids.into_iter().collect())?;
+            let blocks = fetch_issue_summaries(ctx, blocks_ids.into_iter().collect())?;
+            let children = fetch_issue_summaries(ctx, children_ids.into_iter().collect())?;
+            let related = fetch_issue_summaries(ctx, related_ids.into_iter().collect())?;
+            let discovered = fetch_issue_summaries(ctx, discovered_ids.into_iter().collect())?;
 
             let incoming = render::IncomingGroups {
                 children,

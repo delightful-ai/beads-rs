@@ -52,6 +52,44 @@ impl Daemon {
         }
     }
 
+    /// Get multiple beads (batch fetch for summaries).
+    pub fn query_show_multiple(
+        &mut self,
+        repo: &Path,
+        ids: &[String],
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
+        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+            Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
+
+        let mut summaries = Vec::with_capacity(ids.len());
+        for id_str in ids {
+            let id = match BeadId::parse(id_str) {
+                Ok(id) => id,
+                Err(_) => continue, // Skip invalid IDs silently
+            };
+            if let Ok(bead) = repo_state.state.require_live(&id) {
+                summaries.push(IssueSummary::from_bead(bead));
+            }
+        }
+
+        Response::ok(ResponsePayload::Query(QueryResult::Issues(summaries)))
+    }
+
     /// List beads with optional filters.
     pub fn query_list(
         &mut self,
