@@ -8,11 +8,12 @@ use super::clock::Clock;
 use super::ops::{BeadPatch, MapLiveError, OpError, Patch};
 use super::remote::RemoteUrl;
 use crate::core::{
-    ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKind, DepSpec,
-    EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1,
-    NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TxnDeltaError, TxnDeltaV1,
-    TxnId, TxnOpV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp, WorkflowStatus,
-    encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
+    ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKey, DepKind,
+    DepSpec, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId,
+    NoteAppendV1, NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TxnDeltaError,
+    TxnDeltaV1, TxnId, TxnOpV1, WallClock, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1,
+    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
+    sha256_bytes, to_canon_json_bytes,
 };
 
 #[derive(Clone, Debug)]
@@ -176,12 +177,7 @@ impl MutationEngine {
                 self.plan_remove_labels(state, id, labels)?
             }
             MutationRequest::SetParent { id, parent } => {
-                return Err(OpError::InvalidRequest {
-                    field: Some("parent".into()),
-                    reason: format!(
-                        "parent updates are not yet supported in realtime deltas (id={id}, parent={parent:?})"
-                    ),
-                });
+                self.plan_set_parent(state, id, parent, &stamp)?
             }
             MutationRequest::Close {
                 id,
@@ -189,27 +185,12 @@ impl MutationEngine {
                 on_branch,
             } => self.plan_close(state, id, reason, on_branch)?,
             MutationRequest::Reopen { id } => self.plan_reopen(state, id)?,
-            MutationRequest::Delete { id, reason: _ } => {
-                return Err(OpError::InvalidRequest {
-                    field: Some("delete".into()),
-                    reason: format!("delete is not yet supported in realtime deltas (id={id})"),
-                });
-            }
+            MutationRequest::Delete { id, reason } => self.plan_delete(state, &stamp, id, reason)?,
             MutationRequest::AddDep { from, to, kind } => {
-                return Err(OpError::InvalidRequest {
-                    field: Some("dependency".into()),
-                    reason: format!(
-                        "dependency updates are not yet supported in realtime deltas (from={from}, to={to}, kind={kind:?})"
-                    ),
-                });
+                self.plan_add_dep(state, &stamp, from, to, kind)?
             }
             MutationRequest::RemoveDep { from, to, kind } => {
-                return Err(OpError::InvalidRequest {
-                    field: Some("dependency".into()),
-                    reason: format!(
-                        "dependency updates are not yet supported in realtime deltas (from={from}, to={to}, kind={kind:?})"
-                    ),
-                });
+                self.plan_remove_dep(&stamp, from, to, kind)?
             }
             MutationRequest::AddNote { id, content } => {
                 self.plan_add_note(state, &stamp, id, content)?
@@ -284,6 +265,9 @@ impl MutationEngine {
                         }
                     }
                 }
+                TxnOpV1::BeadDelete(_) => {}
+                TxnOpV1::DepUpsert(_) => {}
+                TxnOpV1::DepDelete(_) => {}
                 TxnOpV1::NoteAppend(append) => {
                     note_appends += 1;
                     enforce_note_limit(&append.note.content, &self.limits)?;
@@ -360,14 +344,6 @@ impl MutationEngine {
             });
         }
 
-        if parent.is_some() || !dependencies.is_empty() {
-            return Err(OpError::InvalidRequest {
-                field: Some("dependencies".into()),
-                reason: "dependency and parent operations are not yet supported in realtime deltas"
-                    .into(),
-            });
-        }
-
         let title = title.trim().to_string();
         if title.is_empty() {
             return Err(OpError::ValidationFailed {
@@ -378,6 +354,11 @@ impl MutationEngine {
 
         let labels = parse_labels(labels)?;
         enforce_label_limit(&labels, &self.limits, None)?;
+
+        let parsed_deps = DepSpec::parse_list(&dependencies).map_err(|e| OpError::ValidationFailed {
+            field: "dependencies".into(),
+            reason: e.to_string(),
+        })?;
 
         let design = normalize_optional_string(design);
         let acceptance_criteria = normalize_optional_string(acceptance_criteria);
@@ -390,26 +371,62 @@ impl MutationEngine {
             reason: "id context missing for create".into(),
         })?;
 
-        let id = if let Some(raw) = requested_id.as_ref() {
-            let parsed = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
-                field: "id".into(),
-                reason: e.to_string(),
-            })?;
-            if state.get_live(&parsed).is_some() || state.get_tombstone(&parsed).is_some() {
-                return Err(OpError::AlreadyExists(parsed));
+        let (id, parent_id) = match (requested_id.as_ref(), parent.as_ref()) {
+            (Some(raw), None) => {
+                let parsed = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
+                    field: "id".into(),
+                    reason: e.to_string(),
+                })?;
+                if state.get_live(&parsed).is_some() || state.get_tombstone(&parsed).is_some() {
+                    return Err(OpError::AlreadyExists(parsed));
+                }
+                (parsed, None)
             }
-            parsed
-        } else {
-            generate_unique_id(
-                state,
-                id_ctx.root_slug.as_deref(),
-                &title,
-                &description,
-                &stamp.by,
-                &stamp.at,
-                &id_ctx.remote_url,
-            )?
+            (None, Some(raw)) => {
+                let parent_id = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
+                    field: "parent".into(),
+                    reason: e.to_string(),
+                })?;
+                let child = next_child_id(state, &parent_id)?;
+                (child, Some(parent_id))
+            }
+            (None, None) => (
+                generate_unique_id(
+                    state,
+                    id_ctx.root_slug.as_deref(),
+                    &title,
+                    &description,
+                    &stamp.by,
+                    &stamp.at,
+                    &id_ctx.remote_url,
+                )?,
+                None,
+            ),
+            (Some(_), Some(_)) => unreachable!("guarded above"),
         };
+
+        for spec in &parsed_deps {
+            if state.get_live(spec.id()).is_none() {
+                return Err(OpError::NotFound(spec.id().clone()));
+            }
+            DepKey::new(id.clone(), spec.id().clone(), spec.kind()).map_err(|e| {
+                OpError::ValidationFailed {
+                    field: "dependency".into(),
+                    reason: e.reason,
+                }
+            })?;
+        }
+
+        let mut source_repo_value = None;
+        if let Some(spec) = parsed_deps
+            .iter()
+            .find(|spec| matches!(spec.kind(), DepKind::DiscoveredFrom))
+            && let Some(parent_bead) = state.get_live(spec.id())
+            && let Some(sr) = &parent_bead.fields.source_repo.value
+            && !sr.trim().is_empty()
+        {
+            source_repo_value = Some(sr.clone());
+        }
 
         let assignee = normalize_assignee(assignee, &stamp.by)?;
         let mut patch = WireBeadPatch::new(id.clone());
@@ -429,6 +446,9 @@ impl MutationEngine {
         if let Some(external_ref) = external_ref.clone() {
             patch.external_ref = WirePatch::Set(external_ref);
         }
+        if let Some(source_repo) = source_repo_value.clone() {
+            patch.source_repo = WirePatch::Set(source_repo);
+        }
         if let Some(estimated_minutes) = estimated_minutes {
             patch.estimated_minutes = WirePatch::Set(estimated_minutes);
         }
@@ -442,6 +462,34 @@ impl MutationEngine {
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
             .map_err(delta_error_to_op)?;
+
+        if let Some(parent_id) = parent_id {
+            delta
+                .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                    from: id.clone(),
+                    to: parent_id,
+                    kind: DepKind::Parent,
+                    created_at: WireStamp::from(&stamp.at),
+                    created_by: stamp.by.clone(),
+                    deleted_at: None,
+                    deleted_by: None,
+                }))
+                .map_err(delta_error_to_op)?;
+        }
+
+        for spec in parsed_deps {
+            delta
+                .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                    from: id.clone(),
+                    to: spec.id().clone(),
+                    kind: spec.kind(),
+                    created_at: WireStamp::from(&stamp.at),
+                    created_by: stamp.by.clone(),
+                    deleted_at: None,
+                    deleted_by: None,
+                }))
+                .map_err(delta_error_to_op)?;
+        }
 
         let canonical = CanonicalMutationOp::Create {
             id: requested_id,
@@ -636,6 +684,212 @@ impl MutationEngine {
             .map_err(delta_error_to_op)?;
 
         let canonical = CanonicalMutationOp::Reopen { id };
+
+        Ok(PlannedDelta { delta, canonical })
+    }
+
+    fn plan_delete(
+        &self,
+        state: &CanonicalState,
+        stamp: &Stamp,
+        id: String,
+        reason: Option<String>,
+    ) -> Result<PlannedDelta, OpError> {
+        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
+            field: "id".into(),
+            reason: e.to_string(),
+        })?;
+        state.require_live(&id).map_live_err(&id)?;
+
+        let reason = normalize_optional_string(reason);
+        let tombstone = WireTombstoneV1 {
+            id: id.clone(),
+            deleted_at: WireStamp::from(&stamp.at),
+            deleted_by: stamp.by.clone(),
+            reason: reason.clone(),
+            lineage_created_at: None,
+            lineage_created_by: None,
+        };
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadDelete(tombstone))
+            .map_err(delta_error_to_op)?;
+
+        let canonical = CanonicalMutationOp::Delete { id, reason };
+
+        Ok(PlannedDelta { delta, canonical })
+    }
+
+    fn plan_add_dep(
+        &self,
+        state: &CanonicalState,
+        stamp: &Stamp,
+        from: String,
+        to: String,
+        kind: DepKind,
+    ) -> Result<PlannedDelta, OpError> {
+        let from = BeadId::parse(&from).map_err(|e| OpError::ValidationFailed {
+            field: "from".into(),
+            reason: e.to_string(),
+        })?;
+        let to = BeadId::parse(&to).map_err(|e| OpError::ValidationFailed {
+            field: "to".into(),
+            reason: e.to_string(),
+        })?;
+        DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: e.reason,
+        })?;
+
+        if state.get_live(&from).is_none() {
+            return Err(OpError::NotFound(from));
+        }
+        if state.get_live(&to).is_none() {
+            return Err(OpError::NotFound(to));
+        }
+        if would_create_cycle(state, &from, &to, kind) {
+            return Err(OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: format!(
+                    "circular dependency: {} already depends on {} (directly or transitively)",
+                    to, from
+                ),
+            });
+        }
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                from: from.clone(),
+                to: to.clone(),
+                kind,
+                created_at: WireStamp::from(&stamp.at),
+                created_by: stamp.by.clone(),
+                deleted_at: None,
+                deleted_by: None,
+            }))
+            .map_err(delta_error_to_op)?;
+
+        let canonical = CanonicalMutationOp::AddDep { from, to, kind };
+
+        Ok(PlannedDelta { delta, canonical })
+    }
+
+    fn plan_remove_dep(
+        &self,
+        stamp: &Stamp,
+        from: String,
+        to: String,
+        kind: DepKind,
+    ) -> Result<PlannedDelta, OpError> {
+        let from = BeadId::parse(&from).map_err(|e| OpError::ValidationFailed {
+            field: "from".into(),
+            reason: e.to_string(),
+        })?;
+        let to = BeadId::parse(&to).map_err(|e| OpError::ValidationFailed {
+            field: "to".into(),
+            reason: e.to_string(),
+        })?;
+        DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: e.reason,
+        })?;
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+                from: from.clone(),
+                to: to.clone(),
+                kind,
+                deleted_at: WireStamp::from(&stamp.at),
+                deleted_by: stamp.by.clone(),
+            }))
+            .map_err(delta_error_to_op)?;
+
+        let canonical = CanonicalMutationOp::RemoveDep { from, to, kind };
+
+        Ok(PlannedDelta { delta, canonical })
+    }
+
+    fn plan_set_parent(
+        &self,
+        state: &CanonicalState,
+        id: String,
+        parent: Option<String>,
+        stamp: &Stamp,
+    ) -> Result<PlannedDelta, OpError> {
+        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
+            field: "id".into(),
+            reason: e.to_string(),
+        })?;
+        state.require_live(&id).map_live_err(&id)?;
+
+        let parent = normalize_optional_string(parent);
+        let parent_id = match parent.as_ref() {
+            Some(raw) => {
+                let parent_id = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
+                    field: "parent".into(),
+                    reason: e.to_string(),
+                })?;
+                DepKey::new(id.clone(), parent_id.clone(), DepKind::Parent).map_err(|e| {
+                    OpError::ValidationFailed {
+                        field: "parent".into(),
+                        reason: e.reason,
+                    }
+                })?;
+                if state.get_live(&parent_id).is_none() {
+                    return Err(OpError::NotFound(parent_id));
+                }
+                if would_create_cycle(state, &id, &parent_id, DepKind::Parent) {
+                    return Err(OpError::ValidationFailed {
+                        field: "parent".into(),
+                        reason: format!(
+                            "circular dependency: {} already depends on {} (directly or transitively)",
+                            parent_id, id
+                        ),
+                    });
+                }
+                Some(parent_id)
+            }
+            None => None,
+        };
+
+        let existing_parents: Vec<BeadId> = state
+            .deps_from(&id)
+            .into_iter()
+            .filter(|(key, _)| key.kind() == DepKind::Parent)
+            .map(|(key, _)| key.to().clone())
+            .collect();
+
+        let mut delta = TxnDeltaV1::new();
+        for existing_parent in existing_parents {
+            delta
+                .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+                    from: id.clone(),
+                    to: existing_parent,
+                    kind: DepKind::Parent,
+                    deleted_at: WireStamp::from(&stamp.at),
+                    deleted_by: stamp.by.clone(),
+                }))
+                .map_err(delta_error_to_op)?;
+        }
+
+        if let Some(parent_id) = parent_id.clone() {
+            delta
+                .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                    from: id.clone(),
+                    to: parent_id,
+                    kind: DepKind::Parent,
+                    created_at: WireStamp::from(&stamp.at),
+                    created_by: stamp.by.clone(),
+                    deleted_at: None,
+                    deleted_by: None,
+                }))
+                .map_err(delta_error_to_op)?;
+        }
+
+        let canonical = CanonicalMutationOp::SetParent { id, parent: parent_id };
 
         Ok(PlannedDelta { delta, canonical })
     }
@@ -868,6 +1122,26 @@ enum CanonicalMutationOp {
     Reopen {
         id: BeadId,
     },
+    Delete {
+        id: BeadId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    SetParent {
+        id: BeadId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent: Option<BeadId>,
+    },
+    AddDep {
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+    },
+    RemoveDep {
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+    },
     AddNote {
         id: BeadId,
         content: String,
@@ -982,6 +1256,90 @@ fn canonical_deps(deps: &[String]) -> Result<Vec<String>, OpError> {
         .into_iter()
         .map(|spec| spec.to_spec_string())
         .collect())
+}
+
+fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
+    if state.get_live(parent).is_none() {
+        return Err(OpError::NotFound(parent.clone()));
+    }
+
+    let depth = parent.as_str().chars().filter(|c| *c == '.').count();
+    if depth >= 3 {
+        return Err(OpError::ValidationFailed {
+            field: "parent".into(),
+            reason: format!(
+                "maximum hierarchy depth (3) exceeded for parent {}",
+                parent.as_str()
+            ),
+        });
+    }
+
+    let prefix = format!("{}.", parent.as_str());
+    let mut max_child: u32 = 0;
+
+    for id in state
+        .iter_live()
+        .map(|(id, _)| id)
+        .chain(state.iter_tombstones().map(|(k, _)| &k.id))
+    {
+        let Some(rest) = id.as_str().strip_prefix(&prefix) else {
+            continue;
+        };
+        let first = rest.split('.').next().unwrap_or("");
+        if first.is_empty() {
+            continue;
+        }
+        if let Ok(n) = first.parse::<u32>() {
+            max_child = max_child.max(n);
+        }
+    }
+
+    let mut next = max_child + 1;
+    loop {
+        let candidate = BeadId::parse(&format!("{}.{}", parent.as_str(), next)).map_err(|e| {
+            OpError::ValidationFailed {
+                field: "parent".into(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        if !state.contains(&candidate) {
+            return Ok(candidate);
+        }
+        next += 1;
+    }
+}
+
+fn would_create_cycle(
+    state: &CanonicalState,
+    from: &BeadId,
+    to: &BeadId,
+    kind: DepKind,
+) -> bool {
+    use std::collections::HashSet;
+
+    if !kind.requires_dag() {
+        return false;
+    }
+
+    let mut visited = HashSet::new();
+    let mut queue = vec![to.clone()];
+
+    while let Some(current) = queue.pop() {
+        if &current == from {
+            return true;
+        }
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        for (key, _) in state.deps_from(&current) {
+            if key.kind().requires_dag() && !visited.contains(key.to()) {
+                queue.push(key.to().clone());
+            }
+        }
+    }
+
+    false
 }
 
 fn normalize_patch(
