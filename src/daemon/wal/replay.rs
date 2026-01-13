@@ -335,6 +335,7 @@ fn replay_index(
     Ok(stats)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_record(
     txn: &mut dyn super::index::WalIndexTxn,
     tracker: &mut ReplayTracker,
