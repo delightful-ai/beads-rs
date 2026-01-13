@@ -55,6 +55,16 @@ pub enum WalIndexError {
         existing_sha256: [u8; 32],
         new_sha256: [u8; 32],
     },
+    #[error(
+        "client_request_id reuse mismatch for {namespace} {origin} {client_request_id}"
+    )]
+    ClientRequestIdReuseMismatch {
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        client_request_id: ClientRequestId,
+        expected_request_sha256: [u8; 32],
+        got_request_sha256: [u8; 32],
+    },
     #[error("hlc row decode failed: {0}")]
     HlcRowDecode(String),
     #[error("segment row decode failed: {0}")]
@@ -499,24 +509,46 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let txn_blob = uuid_blob(txn_id.as_uuid());
         let event_ids_blob = encode_event_ids(event_ids)?;
 
-        self.conn.execute(
+        let inserted = self.conn.execute(
             "INSERT INTO client_requests (namespace, origin_replica_id, client_request_id, created_at_ms, request_sha256, txn_id, event_ids) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT(namespace, origin_replica_id, client_request_id) DO UPDATE SET \
-               created_at_ms = excluded.created_at_ms, \
-               request_sha256 = excluded.request_sha256, \
-               txn_id = excluded.txn_id, \
-               event_ids = excluded.event_ids",
+             ON CONFLICT(namespace, origin_replica_id, client_request_id) DO NOTHING",
             params![
                 namespace,
-                origin_blob,
-                client_blob,
+                &origin_blob,
+                &client_blob,
                 created_at_ms as i64,
-                request_blob,
-                txn_blob,
-                event_ids_blob,
+                &request_blob,
+                &txn_blob,
+                &event_ids_blob,
             ],
         )?;
+        if inserted == 0 {
+            let existing = self
+                .conn
+                .query_row(
+                    "SELECT request_sha256 FROM client_requests \
+                     WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
+                    params![namespace, &origin_blob, &client_blob],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            let Some(existing_sha) = existing else {
+                return Err(WalIndexError::EventIdDecode(
+                    "client_request_id conflict without row".to_string(),
+                ));
+            };
+            let existing_sha = blob_32(existing_sha)?;
+            if existing_sha != request_sha256 {
+                return Err(WalIndexError::ClientRequestIdReuseMismatch {
+                    namespace: ns.clone(),
+                    origin: *origin,
+                    client_request_id,
+                    expected_request_sha256: existing_sha,
+                    got_request_sha256: request_sha256,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1251,6 +1283,84 @@ mod tests {
         assert_eq!(req.event_ids, vec![event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
         assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), 1);
+    }
+
+    #[test]
+    fn sqlite_index_preserves_client_request_mapping_on_conflict() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let client_request_id = ClientRequestId::new(Uuid::from_bytes([3u8; 16]));
+        let first_txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
+        let second_txn_id = TxnId::new(Uuid::from_bytes([4u8; 16]));
+        let first_event_id = EventId::new(origin, ns.clone(), Seq1::from_u64(1).unwrap());
+        let second_event_id = EventId::new(origin, ns.clone(), Seq1::from_u64(2).unwrap());
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.upsert_client_request(
+            &ns,
+            &origin,
+            client_request_id,
+            [7u8; 32],
+            first_txn_id,
+            &[first_event_id.clone()],
+            1_700_000,
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.upsert_client_request(
+            &ns,
+            &origin,
+            client_request_id,
+            [7u8; 32],
+            second_txn_id,
+            &[second_event_id.clone()],
+            1_800_000,
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        let reader = index.reader();
+        let req = reader
+            .lookup_client_request(&ns, &origin, client_request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.request_sha256, [7u8; 32]);
+        assert_eq!(req.txn_id, first_txn_id);
+        assert_eq!(req.event_ids, vec![first_event_id.clone()]);
+        assert_eq!(req.created_at_ms, 1_700_000);
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        let err = txn
+            .upsert_client_request(
+                &ns,
+                &origin,
+                client_request_id,
+                [9u8; 32],
+                second_txn_id,
+                &[second_event_id],
+                1_900_000,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::ClientRequestIdReuseMismatch { .. }
+        ));
+        txn.rollback().unwrap();
+
+        let reader = index.reader();
+        let req = reader
+            .lookup_client_request(&ns, &origin, client_request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.request_sha256, [7u8; 32]);
+        assert_eq!(req.txn_id, first_txn_id);
+        assert_eq!(req.event_ids, vec![first_event_id]);
+        assert_eq!(req.created_at_ms, 1_700_000);
     }
 
     #[test]

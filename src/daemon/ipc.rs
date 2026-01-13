@@ -858,6 +858,19 @@ fn wal_index_error_payload(
                 new_sha256: hex::encode(new_sha256),
             },
         ),
+        WalIndexError::ClientRequestIdReuseMismatch {
+            namespace,
+            client_request_id,
+            expected_request_sha256,
+            got_request_sha256,
+            ..
+        } => ErrorPayload::new(ErrorCode::ClientRequestIdReuseMismatch, message, retryable)
+            .with_details(error_details::ClientRequestIdReuseMismatchDetails {
+                namespace: namespace.clone(),
+                client_request_id: *client_request_id,
+                expected_request_sha256: hex::encode(expected_request_sha256),
+                got_request_sha256: hex::encode(got_request_sha256),
+            }),
         _ => ErrorPayload::new(wal_index_error_code(err), message, retryable),
     }
 }
@@ -866,6 +879,9 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
     match err {
         WalIndexError::SchemaVersionMismatch { .. } => ErrorCode::IndexRebuildRequired,
         WalIndexError::Equivocation { .. } => ErrorCode::Equivocation,
+        WalIndexError::ClientRequestIdReuseMismatch { .. } => {
+            ErrorCode::ClientRequestIdReuseMismatch
+        }
         WalIndexError::MetaMismatch { key, .. } => match *key {
             "store_id" => ErrorCode::WrongStore,
             "store_epoch" => ErrorCode::StoreEpochMismatch,
