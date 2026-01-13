@@ -2014,6 +2014,55 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_map_entry_bounds() {
+        let mut limits = Limits::default();
+        limits.max_cbor_map_entries = 1;
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::DecodeLimit("max_cbor_map_entries")
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_array_entry_bounds() {
+        let mut limits = Limits::default();
+        limits.max_cbor_array_entries = 0;
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::DecodeLimit("max_cbor_array_entries")
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_depth_bounds() {
+        let mut limits = Limits::default();
+        limits.max_cbor_depth = 0;
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
+        assert!(matches!(err, DecodeError::DecodeLimit("max_cbor_depth")));
+    }
+
+    #[test]
+    fn decode_rejects_record_size_bounds() {
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let mut limits = Limits::default();
+        limits.max_wal_record_bytes = encoded.as_ref().len() - 1;
+        let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::DecodeLimit("max_wal_record_bytes")
+        ));
+    }
+
+    #[test]
     fn verify_event_frame_defers_prev_when_head_unknown() {
         let limits = Limits::default();
         let first = sample_body_with_seq(1);
