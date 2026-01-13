@@ -239,7 +239,7 @@ mod tests {
 
         assert!(s2 > s1);
         assert_eq!(s2.wall_ms, 1_100);
-        assert_eq!(s2.counter, 1);
+        assert_eq!(s2.counter, s1.counter + 1);
     }
 
     #[test]
