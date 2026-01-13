@@ -1,6 +1,7 @@
 //! WAL segment replay and SQLite index rebuild/catch-up.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::marker::PhantomData;
@@ -140,18 +141,29 @@ pub enum WalReplayError {
         #[source]
         source: RecordHeaderMismatch,
     },
-    #[error(
-        "record sha256 mismatch for {namespace} {origin} seq {seq} at {path:?} offset {offset}"
-    )]
-    RecordShaMismatch {
-        namespace: NamespaceId,
-        origin: ReplicaId,
-        seq: u64,
-        expected: [u8; 32],
-        got: [u8; 32],
-        path: PathBuf,
-        offset: u64,
-    },
+    #[error("{0}")]
+    RecordShaMismatch(Box<RecordShaMismatchInfo>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordShaMismatchInfo {
+    pub namespace: NamespaceId,
+    pub origin: ReplicaId,
+    pub seq: u64,
+    pub expected: [u8; 32],
+    pub got: [u8; 32],
+    pub path: PathBuf,
+    pub offset: u64,
+}
+
+impl fmt::Display for RecordShaMismatchInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "record sha256 mismatch for {} {} seq {} at {:?} offset {}",
+            self.namespace, self.origin, self.seq, self.path, self.offset
+        )
+    }
 }
 
 pub fn rebuild_index(
@@ -674,15 +686,17 @@ where
         })?;
         let expected_sha = sha256_bytes(record.payload.as_ref()).0;
         if expected_sha != record.header.sha256 {
-            return Err(WalReplayError::RecordShaMismatch {
-                namespace: segment.header.namespace.clone(),
-                origin: record.header.origin_replica_id,
-                seq: record.header.origin_seq,
-                expected: expected_sha,
-                got: record.header.sha256,
-                path: segment.path.clone(),
-                offset,
-            });
+            return Err(WalReplayError::RecordShaMismatch(Box::new(
+                RecordShaMismatchInfo {
+                    namespace: segment.header.namespace.clone(),
+                    origin: record.header.origin_replica_id,
+                    seq: record.header.origin_seq,
+                    expected: expected_sha,
+                    got: record.header.sha256,
+                    path: segment.path.clone(),
+                    offset,
+                },
+            )));
         }
         on_record(offset, &record, frame_len as u32)?;
 
@@ -887,19 +901,13 @@ mod tests {
         };
 
         match err {
-            WalReplayError::RecordShaMismatch {
-                namespace: got_namespace,
-                origin: got_origin,
-                seq,
-                expected,
-                got,
-                ..
-            } => {
-                assert_eq!(got_namespace, namespace);
-                assert_eq!(got_origin, origin);
-                assert_eq!(seq, body.origin_seq.get());
-                assert_eq!(expected, expected_sha);
-                assert_eq!(got, bad_sha);
+            WalReplayError::RecordShaMismatch(info) => {
+                let info = info.as_ref();
+                assert_eq!(info.namespace, namespace);
+                assert_eq!(info.origin, origin);
+                assert_eq!(info.seq, body.origin_seq.get());
+                assert_eq!(info.expected, expected_sha);
+                assert_eq!(info.got, bad_sha);
             }
             other => panic!("expected RecordShaMismatch, got {other:?}"),
         }

@@ -580,7 +580,7 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
         WalReplayError::SegmentHeader { .. } | WalReplayError::SegmentHeaderMismatch { .. } => {
             ErrorCode::SegmentHeaderMismatch
         }
-        WalReplayError::RecordShaMismatch { .. } => ErrorCode::HashMismatch,
+        WalReplayError::RecordShaMismatch(_) => ErrorCode::HashMismatch,
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
         | WalReplayError::RecordHeaderMismatch { .. }

@@ -19,7 +19,9 @@ pub use index::{
     WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
 };
 pub use record::{Record, RecordFlags, RecordHeader, RecordHeaderMismatch};
-pub use replay::{ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index};
+pub use replay::{
+    RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
+};
 pub use segment::{AppendOutcome, SegmentConfig, SegmentHeader, SegmentWriter};
 
 pub type EventWalResult<T> = Result<T, EventWalError>;
