@@ -56,6 +56,8 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Result<OpResponse, OpError> {
         let proof = self.ensure_repo_loaded_strict(repo, git_tx)?;
+        let admission = self.store_runtime(&proof)?.admission.clone();
+        let _permit = admission.try_admit_ipc_mutation().map_err(OpError::from)?;
         let store = self.store_identity(&proof)?;
         let limits = self.limits().clone();
         let engine = MutationEngine::new(limits.clone());

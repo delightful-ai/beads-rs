@@ -39,7 +39,7 @@ impl AdmissionRejection {
     pub fn to_error_payload(&self) -> ErrorPayload {
         ErrorPayload::new(ErrorCode::Overloaded, "overloaded", true).with_details(
             OverloadedDetails {
-                subsystem: Some(self.subsystem),
+                subsystem: Some(self.subsystem.clone()),
                 retry_after_ms: Some(self.retry_after_ms),
                 queue_bytes: self.queue_bytes,
                 queue_events: self.queue_events,
@@ -48,6 +48,7 @@ impl AdmissionRejection {
     }
 }
 
+#[derive(Debug)]
 pub struct AdmissionPermit {
     controller: AdmissionController,
     class: AdmissionClass,
