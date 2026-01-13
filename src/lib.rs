@@ -32,6 +32,7 @@ pub use crate::core::{
     TxnDeltaV1, TxnId, TxnOpKey, TxnOpV1, VerifiedEvent, VerifiedEventAny, WallClock, Watermark,
     WatermarkError, Watermarks, WireBeadFull, WireBeadPatch, WireDepDeleteV1, WireDepV1,
     WireFieldStamp, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, Workflow, WorkflowStatus,
-    WriteStamp, apply_event, decode_event_body, encode_event_body_canonical, hash_event_body,
-    sha256_bytes, to_canon_json_bytes, validate_event_body_limits, verify_event_frame,
+    WriteStamp, apply_event, decode_event_body, decode_event_hlc_max, encode_event_body_canonical,
+    hash_event_body, sha256_bytes, to_canon_json_bytes, validate_event_body_limits,
+    verify_event_frame,
 };

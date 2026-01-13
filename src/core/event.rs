@@ -316,6 +316,35 @@ pub fn decode_event_body(
     ))
 }
 
+pub fn decode_event_hlc_max(
+    bytes: &[u8],
+    limits: &Limits,
+) -> Result<Option<HlcMax>, DecodeError> {
+    let max_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+    if bytes.len() > max_bytes {
+        return Err(DecodeError::DecodeLimit("max_wal_record_bytes"));
+    }
+
+    let mut dec = Decoder::new(bytes);
+    let map_len = decode_map_len(&mut dec, limits, 0)?;
+    let mut hlc_max = None;
+    for _ in 0..map_len {
+        let key = decode_text(&mut dec, limits)?;
+        match key {
+            "hlc_max" => {
+                hlc_max = Some(decode_hlc_max(&mut dec, limits, 1)?);
+            }
+            _ => {
+                dec.skip()?;
+            }
+        }
+    }
+    if dec.datatype().is_ok() {
+        return Err(DecodeError::TrailingBytes);
+    }
+    Ok(hlc_max)
+}
+
 fn encode_event_body_map(
     enc: &mut Encoder<&mut Vec<u8>>,
     body: &EventBody,
@@ -1953,6 +1982,14 @@ mod tests {
         let encoded = encode_event_body_canonical(&body).unwrap();
         let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
         assert_eq!(body, decoded);
+    }
+
+    #[test]
+    fn decode_event_hlc_max_extracts() {
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let hlc = decode_event_hlc_max(encoded.as_ref(), &Limits::default()).unwrap();
+        assert_eq!(hlc, body.hlc_max);
     }
 
     #[test]
