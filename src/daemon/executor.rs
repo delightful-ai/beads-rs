@@ -620,6 +620,7 @@ fn event_wal_error_with_path(err: EventWalError, path: &Path) -> OpError {
     OpError::from(err)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_reuse_idempotent_response(
     engine: &MutationEngine,
     ctx: &MutationContext,
