@@ -9,6 +9,7 @@
 
 pub mod clock;
 pub mod core;
+pub mod admission;
 pub mod broadcast;
 pub mod executor;
 pub mod git_worker;
