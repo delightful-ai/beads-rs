@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    ActorId, Applied, BeadFields, BeadId, BeadType, Closure, CoreError, DurabilityClass,
-    DurabilityReceipt, ErrorCode, Label, Labels, Lww, NamespaceId, Priority, ReplicaId, Stamp,
-    WallClock, Watermarks, Workflow,
+    ActorId, Applied, BeadFields, BeadId, BeadType, ClientRequestId, Closure, CoreError,
+    DurabilityClass, DurabilityReceipt, ErrorCode, Label, Labels, Lww, NamespaceId, Priority,
+    ReplicaId, Stamp, WallClock, Watermarks, Workflow,
 };
 use crate::daemon::store_lock::StoreLockError;
 use crate::daemon::store_runtime::StoreRuntimeError;
@@ -285,6 +285,14 @@ pub enum OpError {
         reason: String,
     },
 
+    #[error("client_request_id reuse mismatch for {client_request_id}")]
+    ClientRequestIdReuseMismatch {
+        namespace: NamespaceId,
+        client_request_id: ClientRequestId,
+        expected_request_sha256: [u8; 32],
+        got_request_sha256: [u8; 32],
+    },
+
     #[error("not a git repo: {0}")]
     NotAGitRepo(PathBuf),
 
@@ -359,6 +367,9 @@ pub enum OpError {
     #[error(transparent)]
     Wal(#[from] WalError),
 
+    #[error(transparent)]
+    EventWal(#[from] EventWalError),
+
     #[error("wal merge conflict: {errors:?}")]
     WalMerge { errors: Vec<CoreError> },
 
@@ -393,6 +404,9 @@ impl OpError {
             OpError::InvalidTransition { .. } => ErrorCode::InvalidTransition,
             OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
             OpError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
+            OpError::ClientRequestIdReuseMismatch { .. } => {
+                ErrorCode::ClientRequestIdReuseMismatch
+            }
             OpError::NotAGitRepo(_) => ErrorCode::NotAGitRepo,
             OpError::NoRemote(_) => ErrorCode::NoRemote,
             OpError::RepoNotInitialized(_) => ErrorCode::RepoNotInitialized,
@@ -413,6 +427,7 @@ impl OpError {
                 WalError::TooLarge { .. } => ErrorCode::WalRecordTooLarge,
                 _ => ErrorCode::WalError,
             },
+            OpError::EventWal(err) => event_wal_error_code(err),
             OpError::WalMerge { .. } => ErrorCode::WalMergeConflict,
             OpError::NotClaimedByYou => ErrorCode::NotClaimedByYou,
             OpError::DepNotFound => ErrorCode::DepNotFound,
@@ -439,6 +454,7 @@ impl OpError {
             | OpError::InvalidTransition { .. }
             | OpError::ValidationFailed { .. }
             | OpError::InvalidRequest { .. }
+            | OpError::ClientRequestIdReuseMismatch { .. }
             | OpError::NotAGitRepo(_)
             | OpError::NoRemote(_)
             | OpError::RepoNotInitialized(_)
@@ -459,6 +475,7 @@ impl OpError {
             }
             OpError::LoadTimeout { .. } => Transience::Retryable,
             OpError::Internal(_) => Transience::Retryable,
+            OpError::EventWal(err) => event_wal_transience(err),
         }
     }
 
@@ -466,11 +483,39 @@ impl OpError {
     pub fn effect(&self) -> Effect {
         match self {
             OpError::Sync(e) => e.effect(),
-            OpError::Wal(_) | OpError::WalMerge { .. } => Effect::None,
+            OpError::Wal(_) | OpError::EventWal(_) | OpError::WalMerge { .. } => Effect::None,
             OpError::DurabilityTimeout { .. } => Effect::Some,
             OpError::StoreRuntime(_) => Effect::None,
             _ => Effect::None,
         }
+    }
+}
+
+fn event_wal_error_code(err: &EventWalError) -> ErrorCode {
+    match err {
+        EventWalError::RecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
+        EventWalError::SegmentHeaderUnsupportedVersion { .. } => wal_segment_header_error_code(err),
+        EventWalError::Io { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::IoError
+            }
+        }
+        _ => ErrorCode::WalCorrupt,
+    }
+}
+
+fn event_wal_transience(err: &EventWalError) -> Transience {
+    match err {
+        EventWalError::Io { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                Transience::Permanent
+            } else {
+                Transience::Retryable
+            }
+        }
+        _ => Transience::Permanent,
     }
 }
 

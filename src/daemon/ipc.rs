@@ -543,6 +543,18 @@ impl From<OpError> for ErrorPayload {
                     },
                 )
             }
+            OpError::ClientRequestIdReuseMismatch {
+                namespace,
+                client_request_id,
+                expected_request_sha256,
+                got_request_sha256,
+            } => ErrorPayload::new(ErrorCode::ClientRequestIdReuseMismatch, message, retryable)
+                .with_details(error_details::ClientRequestIdReuseMismatchDetails {
+                    namespace,
+                    client_request_id,
+                    expected_request_sha256: hex::encode(expected_request_sha256),
+                    got_request_sha256: hex::encode(got_request_sha256),
+                }),
             OpError::NotAGitRepo(path) => {
                 ErrorPayload::new(ErrorCode::NotAGitRepo, message, retryable).with_details(
                     error_details::PathDetails {
@@ -665,6 +677,21 @@ impl From<OpError> for ErrorPayload {
                         estimated_bytes: *got_bytes as u64,
                     }),
                 _ => ErrorPayload::new(ErrorCode::WalError, message, retryable).with_details(
+                    error_details::WalErrorDetails {
+                        message: e.to_string(),
+                    },
+                ),
+            },
+            OpError::EventWal(e) => match &e {
+                EventWalError::RecordTooLarge { max_bytes, got_bytes } => {
+                    ErrorPayload::new(ErrorCode::WalRecordTooLarge, message, retryable).with_details(
+                        error_details::WalRecordTooLargeDetails {
+                            max_wal_record_bytes: *max_bytes as u64,
+                            estimated_bytes: *got_bytes as u64,
+                        },
+                    )
+                }
+                _ => ErrorPayload::new(event_wal_error_code(e), message, retryable).with_details(
                     error_details::WalErrorDetails {
                         message: e.to_string(),
                     },
@@ -876,6 +903,21 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
             ErrorCode::IndexCorrupt
         }
         WalReplayError::Index(err) => wal_index_error_code(err),
+    }
+}
+
+fn event_wal_error_code(err: &EventWalError) -> ErrorCode {
+    match err {
+        EventWalError::RecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
+        EventWalError::SegmentHeaderUnsupportedVersion { .. } => wal_segment_header_error_code(err),
+        EventWalError::Io { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::IoError
+            }
+        }
+        _ => ErrorCode::WalCorrupt,
     }
 }
 
