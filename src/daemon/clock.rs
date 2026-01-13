@@ -20,7 +20,7 @@ impl TimeSource for SystemTimeSource {
     }
 }
 
-use crate::core::WriteStamp;
+use crate::core::{Limits, WriteStamp};
 
 /// Hybrid Logical Clock.
 ///
@@ -32,22 +32,46 @@ pub struct Clock {
     wall_ms: u64,
     /// Logical counter for tie-breaking within same wall time.
     counter: u32,
+    /// Max forward drift allowed within a session.
+    max_forward_drift_ms: u64,
     time_source: Box<dyn TimeSource>,
 }
 
 impl Clock {
     /// Create a new clock initialized to current wall time.
     pub fn new() -> Self {
-        Self::with_time_source(Box::new(SystemTimeSource))
+        Self::new_with_max_forward_drift(Limits::default().hlc_max_forward_drift_ms)
+    }
+
+    pub fn new_with_max_forward_drift(max_forward_drift_ms: u64) -> Self {
+        Self::with_time_source_and_max_forward_drift(
+            Box::new(SystemTimeSource),
+            max_forward_drift_ms,
+        )
     }
 
     pub fn with_time_source(time_source: Box<dyn TimeSource>) -> Self {
+        Self::with_time_source_and_max_forward_drift(
+            time_source,
+            Limits::default().hlc_max_forward_drift_ms,
+        )
+    }
+
+    pub fn with_time_source_and_max_forward_drift(
+        time_source: Box<dyn TimeSource>,
+        max_forward_drift_ms: u64,
+    ) -> Self {
         let now = time_source.now_ms();
         Self {
             wall_ms: now,
             counter: 0,
+            max_forward_drift_ms,
             time_source,
         }
+    }
+
+    pub fn state(&self) -> WriteStamp {
+        WriteStamp::new(self.wall_ms, self.counter)
     }
 
     /// Generate a new WriteStamp, advancing the clock.
@@ -59,9 +83,24 @@ impl Clock {
         let now = self.time_source.now_ms();
 
         if now > self.wall_ms {
-            // Wall clock advanced - use new time, reset counter
-            self.wall_ms = now;
-            self.counter = 0;
+            let prev_wall_ms = self.wall_ms;
+            let max_forward = prev_wall_ms.saturating_add(self.max_forward_drift_ms);
+            if now > max_forward {
+                // Clamp large forward jumps within a session.
+                self.wall_ms = max_forward;
+                self.counter += 1;
+                tracing::warn!(
+                    now_ms = now,
+                    last_physical_ms = prev_wall_ms,
+                    clamped_physical_ms = self.wall_ms,
+                    max_forward_drift_ms = self.max_forward_drift_ms,
+                    "clock forward jump clamped"
+                );
+            } else {
+                // Wall clock advanced - use new time, reset counter.
+                self.wall_ms = now;
+                self.counter = 0;
+            }
         } else {
             // Same millisecond or clock went backward - increment counter
             self.counter += 1;
@@ -186,5 +225,36 @@ mod tests {
 
         assert!(s2 > s1);
         assert_eq!(s2.wall_ms, 2_000);
+    }
+
+    #[test]
+    fn forward_jump_clamps_within_session() {
+        let now = Arc::new(AtomicU64::new(1_000));
+        let source = Box::new(TestTimeSource { now: now.clone() });
+        let mut clock = Clock::with_time_source_and_max_forward_drift(source, 100);
+
+        let s1 = clock.tick();
+        now.store(1_500, Ordering::SeqCst);
+        let s2 = clock.tick();
+
+        assert!(s2 > s1);
+        assert_eq!(s2.wall_ms, 1_100);
+        assert_eq!(s2.counter, 1);
+    }
+
+    #[test]
+    fn restart_recovers_without_regression() {
+        let now = Arc::new(AtomicU64::new(1_000));
+        let source = Box::new(TestTimeSource { now: now.clone() });
+        let mut clock = Clock::with_time_source(source);
+        let persisted = clock.tick();
+
+        let now = Arc::new(AtomicU64::new(900));
+        let source = Box::new(TestTimeSource { now: now.clone() });
+        let mut restarted = Clock::with_time_source(source);
+        restarted.receive(&persisted);
+        let after = restarted.tick();
+
+        assert!(after > persisted);
     }
 }

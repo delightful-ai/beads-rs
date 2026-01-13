@@ -209,7 +209,7 @@ impl Daemon {
             path_to_store_id: HashMap::new(),
             remote_to_store_id: HashMap::new(),
             path_to_remote: HashMap::new(),
-            clock: Clock::new(),
+            clock: Clock::new_with_max_forward_drift(limits.hlc_max_forward_drift_ms),
             actor,
             scheduler: SyncScheduler::new(),
             wal: Arc::new(wal),
