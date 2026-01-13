@@ -8,12 +8,17 @@ use super::bead::{BeadCore, BeadFields};
 use super::collections::Labels;
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
-use super::domain::{BeadType, Priority};
+use super::dep::{DepEdge, DepKey, DepLife};
+use super::domain::{BeadType, DepKind, Priority};
 use super::event::{EventBody, EventKindV1};
 use super::identity::{ActorId, BeadId, NoteId};
 use super::state::CanonicalState;
 use super::time::{Stamp, WriteStamp};
-use super::wire_bead::{NotesPatch, TxnOpV1, WireBeadPatch, WireNoteV1, WirePatch};
+use super::tombstone::Tombstone;
+use super::wire_bead::{
+    NotesPatch, TxnOpV1, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch,
+    WireTombstoneV1,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NoteKey {
@@ -44,6 +49,8 @@ pub enum ApplyError {
     MissingBead { id: BeadId },
     #[error("invalid claim patch for {id}: {reason}")]
     InvalidClaimPatch { id: BeadId, reason: String },
+    #[error("invalid dependency: {reason}")]
+    InvalidDependency { reason: String },
 }
 
 pub fn apply_event(
@@ -61,6 +68,15 @@ pub fn apply_event(
         match op {
             TxnOpV1::BeadUpsert(patch) => {
                 apply_bead_upsert(state, patch, &stamp, &mut outcome)?;
+            }
+            TxnOpV1::BeadDelete(delete) => {
+                apply_bead_delete(state, delete, &mut outcome)?;
+            }
+            TxnOpV1::DepUpsert(dep) => {
+                apply_dep_upsert(state, dep, &mut outcome)?;
+            }
+            TxnOpV1::DepDelete(dep) => {
+                apply_dep_delete(state, dep, &mut outcome)?;
             }
             TxnOpV1::NoteAppend(append) => {
                 apply_note_append(state, append.bead_id.clone(), &append.note, &mut outcome)?;
@@ -133,6 +149,100 @@ fn apply_bead_upsert(
         .insert(bead)
         .map_err(|_| ApplyError::BeadCollision { id: id.clone() })?;
     outcome.changed_beads.insert(id);
+    Ok(())
+}
+
+fn apply_bead_delete(
+    state: &mut CanonicalState,
+    delete: &WireTombstoneV1,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let id = delete.id.clone();
+    let tombstone = Tombstone {
+        id: id.clone(),
+        deleted: delete.deleted_stamp(),
+        reason: delete.reason.clone(),
+        lineage: delete.lineage_stamp(),
+    };
+
+    if let Some(lineage) = tombstone.lineage.clone() {
+        let mut removed = false;
+        if let Some(bead) = state.get_live(&id)
+            && bead.core.created() == &lineage
+        {
+            state.remove_live(&id);
+            removed = true;
+        }
+        let had_tombstone = state.has_lineage_tombstone(&id, &lineage);
+        state.insert_tombstone(tombstone);
+        if removed || !had_tombstone {
+            outcome.changed_beads.insert(id);
+        }
+        return Ok(());
+    }
+
+    if let Some(bead) = state.get_live(&id)
+        && bead.updated_stamp() > tombstone.deleted
+    {
+        return Ok(());
+    }
+
+    let existing = state.get_tombstone(&id);
+    state.delete(tombstone);
+    if existing.is_none()
+        || existing
+            .is_some_and(|existing| existing.deleted < tombstone.deleted)
+    {
+        outcome.changed_beads.insert(id);
+    }
+    Ok(())
+}
+
+fn apply_dep_upsert(
+    state: &mut CanonicalState,
+    dep: &WireDepV1,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind).map_err(|e| {
+        ApplyError::InvalidDependency {
+            reason: e.reason,
+        }
+    })?;
+    let created = Stamp::new(WriteStamp::from(dep.created_at), dep.created_by.clone());
+    let edge = match (dep.deleted_at, dep.deleted_by.as_ref()) {
+        (Some(at), Some(by)) => {
+            let deleted = Stamp::new(WriteStamp::from(at), by.clone());
+            let life = Lww::new(DepLife::Deleted, deleted);
+            DepEdge::with_life(created, life)
+        }
+        (None, None) => DepEdge::new(created),
+        _ => {
+            return Err(ApplyError::InvalidDependency {
+                reason: "deleted_at and deleted_by must be set together".into(),
+            })
+        }
+    };
+
+    state.insert_dep(key.clone(), edge);
+    outcome.changed_deps.insert(key);
+    Ok(())
+}
+
+fn apply_dep_delete(
+    state: &mut CanonicalState,
+    dep: &WireDepDeleteV1,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind).map_err(|e| {
+        ApplyError::InvalidDependency {
+            reason: e.reason,
+        }
+    })?;
+    let deleted = Stamp::new(WriteStamp::from(dep.deleted_at), dep.deleted_by.clone());
+    let life = Lww::new(DepLife::Deleted, deleted.clone());
+    let edge = DepEdge::with_life(deleted, life);
+    state.insert_dep(key.clone(), edge);
+    outcome.changed_deps.insert(key);
     Ok(())
 }
 
@@ -447,6 +557,17 @@ mod tests {
         }
     }
 
+    fn event_with_delta(delta: TxnDeltaV1, wall_ms: u64) -> EventBody {
+        let mut event = sample_event("note");
+        event.delta = delta;
+        event.event_time_ms = wall_ms;
+        if let Some(hlc) = &mut event.hlc_max {
+            hlc.physical_ms = wall_ms;
+            hlc.logical = 0;
+        }
+        event
+    }
+
     #[test]
     fn apply_event_is_idempotent() {
         let mut state = CanonicalState::new();
@@ -485,5 +606,93 @@ mod tests {
                 .contains(&BeadId::parse("bd-apply1").unwrap())
         );
         assert_eq!(outcome.changed_notes.len(), 1);
+    }
+
+    #[test]
+    fn dep_delete_before_create_converges() {
+        let mut state = CanonicalState::new();
+        let from = BeadId::parse("bd-from").unwrap();
+        let to = BeadId::parse("bd-to").unwrap();
+        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+                from: from.clone(),
+                to: to.clone(),
+                kind: DepKind::Blocks,
+                deleted_at: WireStamp(10, 0),
+                deleted_by: actor_id("alice"),
+            }))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
+
+        let edge = state.get_dep(&key).unwrap();
+        assert!(edge.is_deleted());
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                from: from.clone(),
+                to: to.clone(),
+                kind: DepKind::Blocks,
+                created_at: WireStamp(5, 0),
+                created_by: actor_id("bob"),
+                deleted_at: None,
+                deleted_by: None,
+            }))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
+
+        let edge = state.get_dep(&key).unwrap();
+        assert!(edge.is_deleted());
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                from: from.clone(),
+                to: to.clone(),
+                kind: DepKind::Blocks,
+                created_at: WireStamp(20, 0),
+                created_by: actor_id("carol"),
+                deleted_at: None,
+                deleted_by: None,
+            }))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();
+
+        let edge = state.get_dep(&key).unwrap();
+        assert!(edge.is_active());
+    }
+
+    #[test]
+    fn bead_delete_ignores_older_than_live() {
+        let mut state = CanonicalState::new();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-delete").unwrap());
+        patch.created_at = Some(WireStamp(20, 0));
+        patch.created_by = Some(actor_id("alice"));
+        patch.title = Some("title".to_string());
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 20)).unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadDelete(WireTombstoneV1 {
+                id: BeadId::parse("bd-delete").unwrap(),
+                deleted_at: WireStamp(10, 0),
+                deleted_by: actor_id("alice"),
+                reason: None,
+                lineage_created_at: None,
+                lineage_created_by: None,
+            }))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 21)).unwrap();
+
+        assert!(state.get_live(&BeadId::parse("bd-delete").unwrap()).is_some());
+        assert!(state.get_tombstone(&BeadId::parse("bd-delete").unwrap()).is_none());
     }
 }
