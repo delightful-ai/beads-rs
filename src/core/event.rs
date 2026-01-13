@@ -1323,17 +1323,17 @@ pub fn validate_event_body_limits(
     for op in delta.iter() {
         match op {
             TxnOpV1::BeadUpsert(patch) => {
-                if let Some(labels) = &patch.labels {
-                    if labels.len() > limits.max_labels_per_bead {
-                        return Err(EventValidationError::TooManyLabels {
-                            count: labels.len(),
-                            max: limits.max_labels_per_bead,
-                        });
-                    }
+                if let Some(labels) = &patch.labels
+                    && labels.len() > limits.max_labels_per_bead
+                {
+                    return Err(EventValidationError::TooManyLabels {
+                        count: labels.len(),
+                        max: limits.max_labels_per_bead,
+                    });
                 }
                 if let NotesPatch::AtLeast(notes) = &patch.notes {
                     for note in notes {
-                        let bytes = note.content.as_bytes().len();
+                        let bytes = note.content.len();
                         if bytes > limits.max_note_bytes {
                             return Err(EventValidationError::NoteTooLarge {
                                 bytes,
@@ -1345,7 +1345,7 @@ pub fn validate_event_body_limits(
             }
             TxnOpV1::NoteAppend(append) => {
                 note_appends += 1;
-                let bytes = append.note.content.as_bytes().len();
+                let bytes = append.note.content.len();
                 if bytes > limits.max_note_bytes {
                     return Err(EventValidationError::NoteTooLarge {
                         bytes,
