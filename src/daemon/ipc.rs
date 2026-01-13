@@ -1603,7 +1603,10 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{DurabilityClass, DurabilityReceipt, StoreEpoch, StoreId, StoreIdentity, TxnId};
+    use crate::core::{
+        DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, StoreEpoch, StoreId,
+        StoreIdentity, TxnId,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -1710,6 +1713,38 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"err\""));
         assert!(json.contains("not_found"));
+    }
+
+    #[test]
+    fn wal_replay_hash_mismatch_includes_details() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
+        let err = WalReplayError::RecordShaMismatch {
+            namespace: namespace.clone(),
+            origin,
+            seq: 7,
+            expected: [3u8; 32],
+            got: [4u8; 32],
+            path: PathBuf::from("/tmp/segment.wal"),
+            offset: 12,
+        };
+
+        let payload = store_runtime_error_payload(
+            StoreRuntimeError::WalReplay(err),
+            "boom".to_string(),
+            false,
+        );
+
+        assert_eq!(payload.code, ErrorCode::HashMismatch);
+        let details = payload
+            .details_as::<error_details::HashMismatchDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.eid.namespace, namespace);
+        assert_eq!(details.eid.origin_replica_id, origin);
+        assert_eq!(details.eid.origin_seq, 7);
+        assert_eq!(details.expected_sha256, hex::encode([3u8; 32]));
+        assert_eq!(details.got_sha256, hex::encode([4u8; 32]));
     }
 
     #[test]

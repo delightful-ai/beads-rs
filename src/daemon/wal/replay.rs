@@ -780,6 +780,132 @@ fn read_segment_header(path: &Path) -> Result<(SegmentHeader, u64), WalReplayErr
     Ok((header, header_len as u64))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use crate::core::{
+        EventBody, EventKindV1, Limits, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId,
+        StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+        encode_event_body_canonical,
+    };
+    use crate::daemon::wal::SegmentConfig;
+    use crate::daemon::wal::record::RecordHeader;
+    use crate::daemon::wal::segment::SegmentWriter;
+
+    fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
+        let identity = StoreIdentity::new(store_id, store_epoch);
+        let versions = StoreMetaVersions::new(1, 2, 3, 4, 5);
+        StoreMeta::new(
+            identity,
+            ReplicaId::new(Uuid::from_bytes([9u8; 16])),
+            versions,
+            1_700_000_000_000,
+        )
+    }
+
+    fn test_event_body(
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+    ) -> EventBody {
+        EventBody {
+            envelope_v: 1,
+            store,
+            namespace,
+            origin_replica_id: origin,
+            origin_seq: Seq1::from_u64(1).expect("seq1"),
+            event_time_ms: 1_700_000_000_100,
+            txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
+            client_request_id: None,
+            kind: EventKindV1::TxnV1,
+            delta: TxnDeltaV1::new(),
+            hlc_max: None,
+        }
+    }
+
+    #[test]
+    fn scan_segment_detects_sha_mismatch() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let namespace = NamespaceId::core();
+        let limits = Limits::default();
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+
+        let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
+        let body = test_event_body(
+            StoreIdentity::new(store_id, store_epoch),
+            namespace.clone(),
+            origin,
+        );
+        let bytes = encode_event_body_canonical(&body).unwrap();
+        let expected_sha = sha256_bytes(bytes.as_ref()).0;
+        let mut bad_sha = expected_sha;
+        bad_sha[0] ^= 0xFF;
+
+        let record = Record {
+            header: RecordHeader {
+                origin_replica_id: origin,
+                origin_seq: body.origin_seq.get(),
+                event_time_ms: body.event_time_ms,
+                txn_id: body.txn_id,
+                client_request_id: body.client_request_id,
+                request_sha256: None,
+                sha256: bad_sha,
+                prev_sha256: None,
+            },
+            payload: Bytes::copy_from_slice(bytes.as_ref()),
+        };
+        writer.append(&record, 10).unwrap();
+
+        let unverified =
+            SegmentDescriptor::<Unverified>::load(writer.current_path().to_path_buf()).unwrap();
+        let verified = unverified.verify(&meta, &namespace).unwrap();
+        let max_record_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+        let err = match scan_segment(
+            &verified,
+            verified.header_len,
+            max_record_bytes,
+            &limits,
+            false,
+            |_offset, _record, _len| Ok(()),
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("expected RecordShaMismatch"),
+        };
+
+        match err {
+            WalReplayError::RecordShaMismatch {
+                namespace: got_namespace,
+                origin: got_origin,
+                seq,
+                expected,
+                got,
+                ..
+            } => {
+                assert_eq!(got_namespace, namespace);
+                assert_eq!(got_origin, origin);
+                assert_eq!(seq, body.origin_seq.get());
+                assert_eq!(expected, expected_sha);
+                assert_eq!(got, bad_sha);
+            }
+            other => panic!("expected RecordShaMismatch, got {other:?}"),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ReplayTracker {
     origins: BTreeMap<NamespaceId, BTreeMap<ReplicaId, OriginReplayState>>,
