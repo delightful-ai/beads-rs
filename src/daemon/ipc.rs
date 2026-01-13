@@ -1009,11 +1009,22 @@ impl From<IpcError> for ErrorPayload {
         let message = e.to_string();
         let retryable = e.transience().is_retryable();
         match e {
-            IpcError::Parse(err) => ErrorPayload::new(ErrorCode::ParseError, message, retryable)
-                .with_details(error_details::MalformedPayloadDetails {
-                    parser: error_details::ParserKind::Json,
-                    reason: Some(err.to_string()),
-                }),
+            IpcError::Parse(err) => {
+                ErrorPayload::new(ErrorCode::MalformedPayload, message, retryable).with_details(
+                    error_details::MalformedPayloadDetails {
+                        parser: error_details::ParserKind::Json,
+                        reason: Some(err.to_string()),
+                    },
+                )
+            }
+            IpcError::InvalidRequest { field, reason } => {
+                ErrorPayload::new(ErrorCode::InvalidRequest, message, retryable).with_details(
+                    error_details::InvalidRequestDetails {
+                        field,
+                        reason: Some(reason),
+                    },
+                )
+            }
             IpcError::Io(_) => ErrorPayload::new(ErrorCode::IoError, message, retryable),
             IpcError::InvalidId(err) => ErrorPayload::new(ErrorCode::InvalidId, message, retryable)
                 .with_details(invalid_id_details(&err)),
@@ -1116,6 +1127,12 @@ pub enum IpcError {
     #[error(transparent)]
     InvalidId(#[from] InvalidId),
 
+    #[error("invalid request: {reason}")]
+    InvalidRequest {
+        field: Option<String>,
+        reason: String,
+    },
+
     #[error("client disconnected")]
     Disconnected,
 
@@ -1138,9 +1155,10 @@ pub enum IpcError {
 impl IpcError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            IpcError::Parse(_) => ErrorCode::ParseError,
+            IpcError::Parse(_) => ErrorCode::MalformedPayload,
             IpcError::Io(_) => ErrorCode::IoError,
             IpcError::InvalidId(_) => ErrorCode::InvalidId,
+            IpcError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             IpcError::Disconnected => ErrorCode::Disconnected,
             IpcError::DaemonUnavailable(_) => ErrorCode::DaemonUnavailable,
             IpcError::DaemonVersionMismatch { .. } => ErrorCode::DaemonVersionMismatch,
@@ -1155,9 +1173,10 @@ impl IpcError {
                 Transience::Retryable
             }
             IpcError::DaemonVersionMismatch { .. } => Transience::Retryable,
-            IpcError::Parse(_) | IpcError::InvalidId(_) | IpcError::FrameTooLarge { .. } => {
-                Transience::Permanent
-            }
+            IpcError::Parse(_)
+            | IpcError::InvalidId(_)
+            | IpcError::InvalidRequest { .. }
+            | IpcError::FrameTooLarge { .. } => Transience::Permanent,
         }
     }
 
@@ -1165,9 +1184,10 @@ impl IpcError {
     pub fn effect(&self) -> Effect {
         match self {
             IpcError::Io(_) | IpcError::Disconnected => Effect::Unknown,
-            IpcError::DaemonUnavailable(_) | IpcError::Parse(_) | IpcError::InvalidId(_) => {
-                Effect::None
-            }
+            IpcError::DaemonUnavailable(_)
+            | IpcError::Parse(_)
+            | IpcError::InvalidId(_)
+            | IpcError::InvalidRequest { .. } => Effect::None,
             IpcError::DaemonVersionMismatch { .. } => Effect::None,
             IpcError::FrameTooLarge { .. } => Effect::None,
         }
@@ -1194,7 +1214,11 @@ pub fn decode_request_with_limits(line: &str, limits: &Limits) -> Result<Request
             got_bytes,
         });
     }
-    Ok(serde_json::from_str(line)?)
+    let value: serde_json::Value = serde_json::from_str(line)?;
+    serde_json::from_value(value).map_err(|err| IpcError::InvalidRequest {
+        field: None,
+        reason: err.to_string(),
+    })
 }
 
 /// Decode a request from a line using default limits.
@@ -1982,6 +2006,32 @@ mod tests {
         // This is the error type that would be converted to DaemonVersionMismatch
         let err = result.unwrap_err();
         assert!(err.to_string().contains("did not match"));
+    }
+
+    #[test]
+    fn decode_request_invalid_json_is_malformed_payload() {
+        let err = decode_request_with_limits("{", &Limits::default()).unwrap_err();
+        let payload: ErrorPayload = err.into();
+        assert_eq!(payload.code, ErrorCode::MalformedPayload);
+        let details = payload
+            .details_as::<error_details::MalformedPayloadDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.parser, error_details::ParserKind::Json);
+        assert!(details.reason.is_some());
+    }
+
+    #[test]
+    fn decode_request_semantic_error_is_invalid_request() {
+        let err = decode_request_with_limits(r#"{"op":"create"}"#, &Limits::default()).unwrap_err();
+        let payload: ErrorPayload = err.into();
+        assert_eq!(payload.code, ErrorCode::InvalidRequest);
+        let details = payload
+            .details_as::<error_details::InvalidRequestDetails>()
+            .unwrap()
+            .expect("details");
+        assert!(details.reason.is_some());
+        assert!(details.field.is_none());
     }
 
     #[test]
