@@ -17,6 +17,7 @@ use crate::core::{
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
+use crate::daemon::repl::PeerAckTable;
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repo::RepoState;
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
@@ -42,6 +43,7 @@ pub struct StoreRuntime {
     pub(crate) watermarks_durable: Watermarks<Durable>,
     pub(crate) broadcaster: EventBroadcaster,
     pub(crate) admission: AdmissionController,
+    pub(crate) peer_acks: PeerAckTable,
     #[allow(dead_code)]
     pub(crate) wal: Arc<Wal>,
     #[allow(dead_code)]
@@ -110,6 +112,7 @@ impl StoreRuntime {
         let (watermarks_applied, watermarks_durable) = load_watermarks(&wal_index)?;
         let broadcaster = EventBroadcaster::new(BroadcasterLimits::from_limits(limits));
         let admission = AdmissionController::new(limits);
+        let peer_acks = PeerAckTable::new();
 
         Ok(Self {
             primary_remote,
@@ -120,6 +123,7 @@ impl StoreRuntime {
             watermarks_durable,
             broadcaster,
             admission,
+            peer_acks,
             wal,
             wal_index: Arc::new(wal_index),
             lock,
