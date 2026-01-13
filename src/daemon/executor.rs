@@ -90,8 +90,8 @@ impl Daemon {
                     return Err(OpError::ClientRequestIdReuseMismatch {
                         namespace,
                         client_request_id,
-                        expected_request_sha256: row.request_sha256,
-                        got_request_sha256: request_sha256,
+                        expected_request_sha256: Box::new(row.request_sha256),
+                        got_request_sha256: Box::new(request_sha256),
                     });
                 }
                 let Some(event_id) = row.event_ids.first() else {
@@ -138,7 +138,7 @@ impl Daemon {
             Seq1::from_u64(next_seq).ok_or(OpError::Internal("origin_seq must be nonzero"))?;
         let expected_next = durable_watermark.seq().next();
         if origin_seq != expected_next {
-            return Err(OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
+            return Err(OpError::from(StoreRuntimeError::WatermarkInvalid {
                 kind: "durable",
                 namespace: namespace.clone(),
                 origin: origin_replica_id,
@@ -152,7 +152,7 @@ impl Daemon {
             HeadStatus::Genesis => None,
             HeadStatus::Known(sha) => Some(sha),
             HeadStatus::Unknown => {
-                return Err(OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
+                return Err(OpError::from(StoreRuntimeError::WatermarkInvalid {
                     kind: "durable",
                     namespace: namespace.clone(),
                     origin: origin_replica_id,
@@ -290,7 +290,7 @@ impl Daemon {
                 .watermarks_applied
                 .advance_contiguous(&namespace, &origin_replica_id, origin_seq, sha_bytes)
                 .map_err(|err| {
-                    OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
+                    OpError::from(StoreRuntimeError::WatermarkInvalid {
                         kind: "applied",
                         namespace: namespace.clone(),
                         origin: origin_replica_id,
@@ -301,7 +301,7 @@ impl Daemon {
                 .watermarks_durable
                 .advance_contiguous(&namespace, &origin_replica_id, origin_seq, sha_bytes)
                 .map_err(|err| {
-                    OpError::StoreRuntime(StoreRuntimeError::WatermarkInvalid {
+                    OpError::from(StoreRuntimeError::WatermarkInvalid {
                         kind: "durable",
                         namespace: namespace.clone(),
                         origin: origin_replica_id,
@@ -617,7 +617,7 @@ impl Daemon {
 }
 
 fn wal_index_to_op(err: WalIndexError) -> OpError {
-    OpError::StoreRuntime(StoreRuntimeError::WalIndex(err))
+    OpError::from(StoreRuntimeError::WalIndex(err))
 }
 
 fn segment_rel_path(store_dir: &Path, path: &Path) -> PathBuf {
@@ -632,7 +632,7 @@ fn event_wal_error_with_path(err: EventWalError, path: &Path) -> OpError {
         },
         other => other,
     };
-    OpError::EventWal(err)
+    OpError::from(err)
 }
 
 fn load_event_body(
@@ -672,13 +672,13 @@ fn load_event_body(
     };
 
     let mut file = File::open(&path).map_err(|source| {
-        OpError::EventWal(EventWalError::Io {
+        OpError::from(EventWalError::Io {
             path: Some(path.clone()),
             source,
         })
     })?;
     file.seek(SeekFrom::Start(item.offset)).map_err(|source| {
-        OpError::EventWal(EventWalError::Io {
+        OpError::from(EventWalError::Io {
             path: Some(path.clone()),
             source,
         })
@@ -689,13 +689,13 @@ fn load_event_body(
         .read_next()
         .map_err(|err| event_wal_error_with_path(err, &path))?
         .ok_or_else(|| {
-            OpError::EventWal(EventWalError::FrameLengthInvalid {
+            OpError::from(EventWalError::FrameLengthInvalid {
                 reason: "unexpected eof while reading record".to_string(),
             })
         })?;
 
     let (_, event_body) = decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
-        OpError::StoreRuntime(StoreRuntimeError::WalReplay(
+        OpError::from(StoreRuntimeError::WalReplay(
             WalReplayError::EventBodyDecode {
                 path: path.clone(),
                 offset: item.offset,

@@ -565,8 +565,8 @@ impl From<OpError> for ErrorPayload {
                 .with_details(error_details::ClientRequestIdReuseMismatchDetails {
                     namespace,
                     client_request_id,
-                    expected_request_sha256: hex::encode(expected_request_sha256),
-                    got_request_sha256: hex::encode(got_request_sha256),
+                    expected_request_sha256: hex::encode(expected_request_sha256.as_ref()),
+                    got_request_sha256: hex::encode(got_request_sha256.as_ref()),
                 }),
             OpError::NotAGitRepo(path) => {
                 ErrorPayload::new(ErrorCode::NotAGitRepo, message, retryable).with_details(
@@ -657,16 +657,16 @@ impl From<OpError> for ErrorPayload {
             } => ErrorPayload::new(ErrorCode::RequireMinSeenTimeout, message, retryable)
                 .with_details(error_details::RequireMinSeenTimeoutDetails {
                     waited_ms,
-                    required,
-                    current_applied,
+                    required: required.as_ref().clone(),
+                    current_applied: current_applied.as_ref().clone(),
                 }),
             OpError::RequireMinSeenUnsatisfied {
                 required,
                 current_applied,
             } => ErrorPayload::new(ErrorCode::RequireMinSeenUnsatisfied, message, retryable)
                 .with_details(error_details::RequireMinSeenUnsatisfiedDetails {
-                    required,
-                    current_applied,
+                    required: required.as_ref().clone(),
+                    current_applied: current_applied.as_ref().clone(),
                 }),
             OpError::NamespaceInvalid { namespace, .. } => {
                 ErrorPayload::new(ErrorCode::NamespaceInvalid, message, retryable).with_details(
@@ -680,7 +680,7 @@ impl From<OpError> for ErrorPayload {
                 ErrorPayload::new(ErrorCode::NamespaceUnknown, message, retryable)
                     .with_details(error_details::NamespaceUnknownDetails { namespace })
             }
-            OpError::Wal(e) => match &e {
+            OpError::Wal(e) => match e.as_ref() {
                 crate::daemon::wal::WalError::TooLarge {
                     max_bytes,
                     got_bytes,
@@ -695,7 +695,7 @@ impl From<OpError> for ErrorPayload {
                     },
                 ),
             },
-            OpError::EventWal(e) => match &e {
+            OpError::EventWal(e) => match e.as_ref() {
                 EventWalError::RecordTooLarge { max_bytes, got_bytes } => {
                     ErrorPayload::new(ErrorCode::WalRecordTooLarge, message, retryable).with_details(
                         error_details::WalRecordTooLargeDetails {
@@ -704,14 +704,15 @@ impl From<OpError> for ErrorPayload {
                         },
                     )
                 }
-                _ => ErrorPayload::new(event_wal_error_code(&e), message, retryable).with_details(
+                _ => ErrorPayload::new(event_wal_error_code(e.as_ref()), message, retryable)
+                    .with_details(
                     error_details::WalErrorDetails {
                         message: e.to_string(),
                     },
                 ),
             },
             OpError::WalMerge { errors } => {
-                let errors = errors.into_iter().map(|err| err.to_string()).collect();
+                let errors = errors.iter().map(|err| err.to_string()).collect();
                 ErrorPayload::new(ErrorCode::WalMergeConflict, message, retryable)
                     .with_details(error_details::WalMergeConflictDetails { errors })
             }
@@ -730,19 +731,23 @@ impl From<OpError> for ErrorPayload {
                     remote,
                 },
             ),
-            OpError::StoreRuntime(err) => store_runtime_error_payload(err, message, retryable),
+            OpError::StoreRuntime(err) => {
+                store_runtime_error_payload(err.as_ref(), message, retryable)
+            }
             OpError::Internal(_) => ErrorPayload::new(ErrorCode::Internal, message, retryable),
         }
     }
 }
 
 fn store_runtime_error_payload(
-    err: StoreRuntimeError,
+    err: &StoreRuntimeError,
     message: String,
     retryable: bool,
 ) -> ErrorPayload {
     match err {
-        StoreRuntimeError::Lock(lock_err) => store_lock_error_payload(lock_err, message, retryable),
+        StoreRuntimeError::Lock(lock_err) => {
+            store_lock_error_payload(lock_err, message, retryable)
+        }
         StoreRuntimeError::MetaSymlink { path } => {
             ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable).with_details(
                 error_details::PathSymlinkRejectedDetails {
@@ -771,8 +776,8 @@ fn store_runtime_error_payload(
         StoreRuntimeError::MetaMismatch { expected, got } => {
             ErrorPayload::new(ErrorCode::WrongStore, message, retryable).with_details(
                 error_details::WrongStoreDetails {
-                    expected_store_id: expected,
-                    got_store_id: got,
+                    expected_store_id: *expected,
+                    got_store_id: *got,
                 },
             )
         }
@@ -797,13 +802,17 @@ fn store_runtime_error_payload(
                 reason: format!("{kind} watermark for {namespace} {origin}: {source}"),
             },
         ),
-        StoreRuntimeError::WalIndex(err) => wal_index_error_payload(&err, message, retryable),
+        StoreRuntimeError::WalIndex(err) => wal_index_error_payload(err, message, retryable),
         StoreRuntimeError::WalReplay(err) => wal_replay_error_payload(err, message, retryable),
     }
 }
 
-fn wal_replay_error_payload(err: WalReplayError, message: String, retryable: bool) -> ErrorPayload {
-    match &err {
+fn wal_replay_error_payload(
+    err: &WalReplayError,
+    message: String,
+    retryable: bool,
+) -> ErrorPayload {
+    match err {
         WalReplayError::RecordShaMismatch(info) => {
             let info = info.as_ref();
             ErrorPayload::new(ErrorCode::HashMismatch, message, retryable).with_details(
@@ -828,10 +837,10 @@ fn wal_replay_error_payload(err: WalReplayError, message: String, retryable: boo
             },
         ),
         WalReplayError::SegmentHeader { .. } => {
-            ErrorPayload::new(wal_replay_error_code(&err), message, retryable)
+            ErrorPayload::new(wal_replay_error_code(err), message, retryable)
         }
         WalReplayError::Index(err) => wal_index_error_payload(err, message, retryable),
-        _ => ErrorPayload::new(wal_replay_error_code(&err), message, retryable),
+        _ => ErrorPayload::new(wal_replay_error_code(err), message, retryable),
     }
 }
 
@@ -957,7 +966,7 @@ fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
     }
 }
 
-fn store_lock_error_payload(err: StoreLockError, message: String, retryable: bool) -> ErrorPayload {
+fn store_lock_error_payload(err: &StoreLockError, message: String, retryable: bool) -> ErrorPayload {
     match err {
         StoreLockError::Held { store_id, meta, .. } => {
             let (holder_pid, holder_replica_id, started_at_ms, daemon_version) = meta
@@ -973,7 +982,7 @@ fn store_lock_error_payload(err: StoreLockError, message: String, retryable: boo
                 .unwrap_or((None, None, None, None));
             ErrorPayload::new(ErrorCode::LockHeld, message, retryable).with_details(
                 error_details::LockHeldDetails {
-                    store_id,
+                    store_id: *store_id,
                     holder_pid,
                     holder_replica_id,
                     started_at_ms,
@@ -1867,11 +1876,8 @@ mod tests {
             offset: 12,
         }));
 
-        let payload = store_runtime_error_payload(
-            StoreRuntimeError::WalReplay(err),
-            "boom".to_string(),
-            false,
-        );
+        let store_err = StoreRuntimeError::WalReplay(err);
+        let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
 
         assert_eq!(payload.code, ErrorCode::HashMismatch);
         let details = payload
@@ -1895,11 +1901,8 @@ mod tests {
             },
         };
 
-        let payload = store_runtime_error_payload(
-            StoreRuntimeError::WalReplay(err),
-            "boom".to_string(),
-            false,
-        );
+        let store_err = StoreRuntimeError::WalReplay(err);
+        let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
 
         assert_eq!(payload.code, ErrorCode::WalFormatUnsupported);
         let details = payload
@@ -1917,11 +1920,8 @@ mod tests {
             source: EventWalError::SegmentHeaderMagicMismatch { got: [0u8; 5] },
         };
 
-        let payload = store_runtime_error_payload(
-            StoreRuntimeError::WalReplay(err),
-            "boom".to_string(),
-            false,
-        );
+        let store_err = StoreRuntimeError::WalReplay(err);
+        let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
 
         assert_eq!(payload.code, ErrorCode::WalCorrupt);
     }
@@ -1938,11 +1938,8 @@ mod tests {
             new_sha256: [2u8; 32],
         };
 
-        let payload = store_runtime_error_payload(
-            StoreRuntimeError::WalIndex(err),
-            "boom".to_string(),
-            false,
-        );
+        let store_err = StoreRuntimeError::WalIndex(err);
+        let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
 
         assert_eq!(payload.code, ErrorCode::Equivocation);
         let details = payload

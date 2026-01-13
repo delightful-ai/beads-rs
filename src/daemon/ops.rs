@@ -299,8 +299,8 @@ pub enum OpError {
     ClientRequestIdReuseMismatch {
         namespace: NamespaceId,
         client_request_id: ClientRequestId,
-        expected_request_sha256: [u8; 32],
-        got_request_sha256: [u8; 32],
+        expected_request_sha256: Box<[u8; 32]>,
+        got_request_sha256: Box<[u8; 32]>,
     },
 
     #[error("not a git repo: {0}")]
@@ -313,10 +313,10 @@ pub enum OpError {
     RepoNotInitialized(PathBuf),
 
     #[error(transparent)]
-    StoreRuntime(#[from] StoreRuntimeError),
+    StoreRuntime(#[from] Box<StoreRuntimeError>),
 
     #[error(transparent)]
-    Sync(#[from] SyncError),
+    Sync(#[from] Box<SyncError>),
 
     #[error("bead is deleted: {0}")]
     BeadDeleted(BeadId),
@@ -358,14 +358,14 @@ pub enum OpError {
     #[error("require_min_seen not satisfied within {waited_ms}ms")]
     RequireMinSeenTimeout {
         waited_ms: u64,
-        required: Watermarks<Applied>,
-        current_applied: Watermarks<Applied>,
+        required: Box<Watermarks<Applied>>,
+        current_applied: Box<Watermarks<Applied>>,
     },
 
     #[error("require_min_seen not currently satisfied")]
     RequireMinSeenUnsatisfied {
-        required: Watermarks<Applied>,
-        current_applied: Watermarks<Applied>,
+        required: Box<Watermarks<Applied>>,
+        current_applied: Box<Watermarks<Applied>>,
     },
 
     #[error("namespace invalid: {namespace} ({reason})")]
@@ -375,13 +375,13 @@ pub enum OpError {
     NamespaceUnknown { namespace: NamespaceId },
 
     #[error(transparent)]
-    Wal(#[from] WalError),
+    Wal(#[from] Box<WalError>),
 
     #[error(transparent)]
-    EventWal(#[from] EventWalError),
+    EventWal(#[from] Box<EventWalError>),
 
     #[error("wal merge conflict: {errors:?}")]
-    WalMerge { errors: Vec<CoreError> },
+    WalMerge { errors: Box<Vec<CoreError>> },
 
     #[error("cannot unclaim - not claimed by you")]
     NotClaimedByYou,
@@ -421,7 +421,7 @@ impl OpError {
             OpError::NotAGitRepo(_) => ErrorCode::NotAGitRepo,
             OpError::NoRemote(_) => ErrorCode::NoRemote,
             OpError::RepoNotInitialized(_) => ErrorCode::RepoNotInitialized,
-            OpError::StoreRuntime(err) => store_runtime_error_code(err),
+            OpError::StoreRuntime(err) => store_runtime_error_code(err.as_ref()),
             OpError::Sync(_) => ErrorCode::SyncFailed,
             OpError::BeadDeleted(_) => ErrorCode::BeadDeleted,
             OpError::NoteTooLarge { .. } => ErrorCode::NoteTooLarge,
@@ -434,11 +434,11 @@ impl OpError {
             OpError::NamespaceInvalid { .. } => ErrorCode::NamespaceInvalid,
             OpError::NamespaceUnknown { .. } => ErrorCode::NamespaceUnknown,
             OpError::WalRecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
-            OpError::Wal(err) => match err {
+            OpError::Wal(err) => match err.as_ref() {
                 WalError::TooLarge { .. } => ErrorCode::WalRecordTooLarge,
                 _ => ErrorCode::WalError,
             },
-            OpError::EventWal(err) => event_wal_error_code(err),
+            OpError::EventWal(err) => event_wal_error_code(err.as_ref()),
             OpError::WalMerge { .. } => ErrorCode::WalMergeConflict,
             OpError::NotClaimedByYou => ErrorCode::NotClaimedByYou,
             OpError::DepNotFound => ErrorCode::DepNotFound,
@@ -451,7 +451,7 @@ impl OpError {
     pub fn transience(&self) -> Transience {
         match self {
             OpError::Sync(e) => e.transience(),
-            OpError::Wal(e) => match e {
+            OpError::Wal(e) => match e.as_ref() {
                 WalError::Io(_) => Transience::Retryable,
                 WalError::Json(_)
                 | WalError::VersionMismatch { .. }
@@ -477,7 +477,7 @@ impl OpError {
             | OpError::LabelsTooMany { .. }
             | OpError::NotClaimedByYou
             | OpError::DepNotFound => Transience::Permanent,
-            OpError::StoreRuntime(err) => store_runtime_transience(err),
+            OpError::StoreRuntime(err) => store_runtime_transience(err.as_ref()),
             OpError::DurabilityTimeout { .. } => Transience::Retryable,
             OpError::DurabilityUnavailable { .. } => Transience::Permanent,
             OpError::RequireMinSeenTimeout { .. } => Transience::Retryable,
@@ -487,7 +487,7 @@ impl OpError {
             }
             OpError::LoadTimeout { .. } => Transience::Retryable,
             OpError::Internal(_) => Transience::Retryable,
-            OpError::EventWal(err) => event_wal_transience(err),
+            OpError::EventWal(err) => event_wal_transience(err.as_ref()),
         }
     }
 
@@ -500,6 +500,30 @@ impl OpError {
             OpError::StoreRuntime(_) => Effect::None,
             _ => Effect::None,
         }
+    }
+}
+
+impl From<StoreRuntimeError> for OpError {
+    fn from(err: StoreRuntimeError) -> Self {
+        OpError::StoreRuntime(Box::new(err))
+    }
+}
+
+impl From<SyncError> for OpError {
+    fn from(err: SyncError) -> Self {
+        OpError::Sync(Box::new(err))
+    }
+}
+
+impl From<WalError> for OpError {
+    fn from(err: WalError) -> Self {
+        OpError::Wal(Box::new(err))
+    }
+}
+
+impl From<EventWalError> for OpError {
+    fn from(err: EventWalError) -> Self {
+        OpError::EventWal(Box::new(err))
     }
 }
 

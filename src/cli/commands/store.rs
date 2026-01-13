@@ -429,7 +429,7 @@ fn render_fsck_human(report: &FsckReport) -> String {
 }
 
 fn store_lock_error(err: StoreLockError) -> Error {
-    Error::Op(OpError::StoreRuntime(StoreRuntimeError::Lock(err)))
+    Error::Op(OpError::from(StoreRuntimeError::Lock(err)))
 }
 
 #[cfg(test)]

@@ -465,7 +465,7 @@ impl Daemon {
                         Ok(Err(SyncError::NoLocalRef(_))) => {
                             return Err(OpError::RepoNotInitialized(repo.to_owned()));
                         }
-                        Ok(Err(e)) => return Err(OpError::Sync(e)),
+                        Ok(Err(e)) => return Err(OpError::from(e)),
                         Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                             return Err(OpError::LoadTimeout {
                                 repo: repo.to_owned(),
@@ -478,7 +478,7 @@ impl Daemon {
                         }
                     }
                 }
-                Ok(Err(e)) => return Err(OpError::Sync(e)),
+                Ok(Err(e)) => return Err(OpError::from(e)),
                 Err(_) => return Err(OpError::Internal("git thread died")),
             }
         } else if let Some(store) = self.stores.get_mut(&store_id) {
@@ -538,7 +538,7 @@ impl Daemon {
                     return Err(OpError::RepoNotInitialized(repo.to_owned()));
                 }
                 Ok(Err(e)) => {
-                    return Err(OpError::Sync(e));
+                    return Err(OpError::from(e));
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                     return Err(OpError::LoadTimeout {
@@ -606,13 +606,15 @@ impl Daemon {
                         needs_sync = true;
                     }
                     Err(errs) => {
-                        return Err(OpError::WalMerge { errors: errs });
+                        return Err(OpError::WalMerge {
+                            errors: Box::new(errs),
+                        });
                     }
                 }
             }
             Ok(None) => {}
             Err(e) => {
-                return Err(OpError::Wal(e));
+                return Err(OpError::from(e));
             }
         }
 
@@ -1171,13 +1173,13 @@ impl Daemon {
         if read.wait_timeout_ms > 0 {
             return Err(OpError::RequireMinSeenTimeout {
                 waited_ms: read.wait_timeout_ms,
-                required: required.clone(),
-                current_applied: current,
+                required: Box::new(required.clone()),
+                current_applied: Box::new(current),
             });
         }
         Err(OpError::RequireMinSeenUnsatisfied {
-            required: required.clone(),
-            current_applied: current,
+            required: Box::new(required.clone()),
+            current_applied: Box::new(current),
         })
     }
 
@@ -2170,8 +2172,9 @@ mod tests {
                 required: got_required,
                 current_applied,
             } => {
-                assert_eq!(got_required, required);
+                assert_eq!(got_required.as_ref(), &required);
                 let current_seq = current_applied
+                    .as_ref()
                     .get(&namespace, &origin)
                     .map(|watermark| watermark.seq().get())
                     .unwrap_or(0);
@@ -2193,7 +2196,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(waited_ms, 50);
-                assert_eq!(got_required, required);
+                assert_eq!(got_required.as_ref(), &required);
             }
             other => panic!("unexpected error: {other:?}"),
         }
