@@ -251,7 +251,7 @@ impl MutationEngine {
         };
 
         let event_bytes = encode_event_body_canonical(&event_body)
-            .map_err(|err| OpError::Internal("event_body encode failed"))?;
+            .map_err(|_| OpError::Internal("event_body encode failed"))?;
         self.enforce_record_size(&event_bytes, client_request_id)?;
 
         Ok(EventDraft {
@@ -466,7 +466,7 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         id: String,
-        mut patch: BeadPatch,
+        patch: BeadPatch,
         cas: Option<String>,
     ) -> Result<PlannedDelta, OpError> {
         patch.validate()?;
@@ -1266,7 +1266,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Bead, BeadCore, BeadFields, Claim, Lww, Stamp, Workflow, WriteStamp};
+    use crate::core::{
+        Bead, BeadCore, BeadFields, Claim, Lww, Stamp, StoreId, Workflow, WriteStamp,
+    };
     use std::num::NonZeroU64;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1406,8 +1408,9 @@ mod tests {
         let seq = Seq1::new(NonZeroU64::new(1).unwrap());
         let state = make_state_with_bead("bd-789", &actor);
 
-        let req = MutationRequest::Reopen {
+        let req = MutationRequest::AddLabels {
             id: "bd-789".into(),
+            labels: vec!["alpha".into()],
         };
 
         let mut clock = fixed_clock(1_000);

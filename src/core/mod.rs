@@ -52,8 +52,11 @@ pub use error::{
     RangeError,
 };
 pub use event::{
-    Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventKindV1, HlcMax, Opaque,
-    Sha256, decode_event_body, encode_event_body_canonical, hash_event_body, sha256_bytes,
+    Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventFrameError, EventFrameV1,
+    EventKindV1, EventShaLookup, EventShaLookupError, EventValidationError, HlcMax, Opaque,
+    PrevDeferred, PrevVerified, Sha256, VerifiedEvent, VerifiedEventAny, decode_event_body,
+    encode_event_body_canonical, hash_event_body, sha256_bytes, validate_event_body_limits,
+    verify_event_frame,
 };
 pub use identity::{
     ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, EventId, NoteId,

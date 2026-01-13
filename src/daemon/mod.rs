@@ -17,6 +17,7 @@ pub mod ops;
 pub mod query;
 pub mod query_executor;
 pub mod remote;
+pub mod repl;
 pub mod repo;
 pub mod run;
 pub mod scheduler;

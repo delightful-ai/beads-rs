@@ -8,7 +8,9 @@ use minicbor::{Decoder, Encoder};
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
 
-use super::identity::{ActorId, ClientRequestId, ReplicaId, StoreId, StoreIdentity, TxnId};
+use super::identity::{
+    ActorId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TxnId,
+};
 use super::limits::Limits;
 use super::namespace::NamespaceId;
 use super::watermark::Seq1;
@@ -136,6 +138,126 @@ pub struct EventBody {
     pub kind: EventKindV1,
     pub delta: TxnDeltaV1,
     pub hlc_max: Option<HlcMax>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventFrameV1 {
+    pub eid: EventId,
+    pub sha256: Sha256,
+    pub prev_sha256: Option<Sha256>,
+    pub bytes: EventBytes<Opaque>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrevVerified {
+    pub prev: Option<Sha256>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrevDeferred {
+    pub prev: Sha256,
+    pub expected_prev_seq: Seq1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedEvent<P> {
+    pub body: EventBody,
+    pub bytes: EventBytes<Opaque>,
+    pub sha256: Sha256,
+    pub prev: P,
+}
+
+impl<P> VerifiedEvent<P> {
+    pub fn seq(&self) -> Seq1 {
+        self.body.origin_seq
+    }
+
+    pub fn bytes_len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifiedEventAny {
+    Contiguous(VerifiedEvent<PrevVerified>),
+    Deferred(VerifiedEvent<PrevDeferred>),
+}
+
+impl VerifiedEventAny {
+    pub fn seq(&self) -> Seq1 {
+        match self {
+            VerifiedEventAny::Contiguous(ev) => ev.seq(),
+            VerifiedEventAny::Deferred(ev) => ev.seq(),
+        }
+    }
+
+    pub fn bytes_len(&self) -> usize {
+        match self {
+            VerifiedEventAny::Contiguous(ev) => ev.bytes_len(),
+            VerifiedEventAny::Deferred(ev) => ev.bytes_len(),
+        }
+    }
+
+    pub fn is_deferred(&self) -> bool {
+        matches!(self, VerifiedEventAny::Deferred(_))
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum EventValidationError {
+    #[error("txn ops {ops} exceeds max {max}")]
+    TooManyOps { ops: usize, max: usize },
+    #[error("note content bytes {bytes} exceeds max {max}")]
+    NoteTooLarge { bytes: usize, max: usize },
+    #[error("labels count {count} exceeds max {max}")]
+    TooManyLabels { count: usize, max: usize },
+    #[error("note_appends count {count} exceeds max {max}")]
+    TooManyNoteAppends { count: usize, max: usize },
+}
+
+#[derive(Debug, Error)]
+#[error("event sha lookup failed: {source}")]
+pub struct EventShaLookupError {
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl EventShaLookupError {
+    pub fn new<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+pub trait EventShaLookup {
+    fn lookup_event_sha(&self, eid: &EventId) -> Result<Option<Sha256>, EventShaLookupError>;
+}
+
+#[derive(Debug, Error)]
+pub enum EventFrameError {
+    #[error("wrong store identity")]
+    WrongStore {
+        expected: StoreIdentity,
+        got: StoreIdentity,
+    },
+    #[error("event id does not match decoded body")]
+    FrameMismatch,
+    #[error("sha256 mismatch")]
+    HashMismatch,
+    #[error("prev_sha256 mismatch")]
+    PrevMismatch,
+    #[error("event validation failed: {0}")]
+    Validation(#[from] EventValidationError),
+    #[error("event body decode failed: {0}")]
+    Decode(#[from] DecodeError),
+    #[error(transparent)]
+    Lookup(#[from] EventShaLookupError),
+    #[error("equivocation detected")]
+    Equivocation,
 }
 
 #[derive(Debug, Error)]
@@ -1184,6 +1306,139 @@ fn bead_id_placeholder() -> super::identity::BeadId {
     super::identity::BeadId::parse("bd-placeholder").unwrap()
 }
 
+pub fn validate_event_body_limits(
+    body: &EventBody,
+    limits: &Limits,
+) -> Result<(), EventValidationError> {
+    let delta = &body.delta;
+    let ops = delta.total_ops();
+    if ops > limits.max_ops_per_txn {
+        return Err(EventValidationError::TooManyOps {
+            ops,
+            max: limits.max_ops_per_txn,
+        });
+    }
+
+    let mut note_appends = 0usize;
+    for op in delta.iter() {
+        match op {
+            TxnOpV1::BeadUpsert(patch) => {
+                if let Some(labels) = &patch.labels {
+                    if labels.len() > limits.max_labels_per_bead {
+                        return Err(EventValidationError::TooManyLabels {
+                            count: labels.len(),
+                            max: limits.max_labels_per_bead,
+                        });
+                    }
+                }
+                if let NotesPatch::AtLeast(notes) = &patch.notes {
+                    for note in notes {
+                        let bytes = note.content.as_bytes().len();
+                        if bytes > limits.max_note_bytes {
+                            return Err(EventValidationError::NoteTooLarge {
+                                bytes,
+                                max: limits.max_note_bytes,
+                            });
+                        }
+                    }
+                }
+            }
+            TxnOpV1::NoteAppend(append) => {
+                note_appends += 1;
+                let bytes = append.note.content.as_bytes().len();
+                if bytes > limits.max_note_bytes {
+                    return Err(EventValidationError::NoteTooLarge {
+                        bytes,
+                        max: limits.max_note_bytes,
+                    });
+                }
+            }
+        }
+    }
+
+    if note_appends > limits.max_note_appends_per_txn {
+        return Err(EventValidationError::TooManyNoteAppends {
+            count: note_appends,
+            max: limits.max_note_appends_per_txn,
+        });
+    }
+
+    Ok(())
+}
+
+pub fn verify_event_frame(
+    frame: &EventFrameV1,
+    limits: &Limits,
+    expected_store: StoreIdentity,
+    expected_prev_head: Option<Sha256>,
+    lookup: &dyn EventShaLookup,
+) -> Result<VerifiedEventAny, EventFrameError> {
+    let (_, body) = decode_event_body(frame.bytes.as_ref(), limits)?;
+
+    if body.store != expected_store {
+        return Err(EventFrameError::WrongStore {
+            expected: expected_store,
+            got: body.store,
+        });
+    }
+
+    if body.origin_replica_id != frame.eid.origin_replica_id
+        || body.namespace != frame.eid.namespace
+        || body.origin_seq != frame.eid.origin_seq
+    {
+        return Err(EventFrameError::FrameMismatch);
+    }
+
+    let computed = hash_event_body(&frame.bytes);
+    if computed != frame.sha256 {
+        return Err(EventFrameError::HashMismatch);
+    }
+
+    validate_event_body_limits(&body, limits)?;
+
+    match lookup.lookup_event_sha(&frame.eid)? {
+        None => {}
+        Some(existing) if existing == frame.sha256 => {}
+        Some(_) => return Err(EventFrameError::Equivocation),
+    }
+
+    let seq = body.origin_seq.get();
+    match (seq, frame.prev_sha256, expected_prev_head) {
+        (1, None, _) => Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
+            body,
+            bytes: frame.bytes.clone(),
+            sha256: frame.sha256,
+            prev: PrevVerified { prev: None },
+        })),
+        (1, Some(_), _) => Err(EventFrameError::PrevMismatch),
+        (s, None, _) if s > 1 => Err(EventFrameError::PrevMismatch),
+        (s, Some(prev), Some(head)) if s > 1 && prev == head => {
+            Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
+                body,
+                bytes: frame.bytes.clone(),
+                sha256: frame.sha256,
+                prev: PrevVerified { prev: Some(prev) },
+            }))
+        }
+        (s, Some(prev), None) if s > 1 => {
+            let expected_prev_seq = body
+                .origin_seq
+                .prev()
+                .expect("seq > 1 must have predecessor");
+            Ok(VerifiedEventAny::Deferred(VerifiedEvent {
+                body,
+                bytes: frame.bytes.clone(),
+                sha256: frame.sha256,
+                prev: PrevDeferred {
+                    prev,
+                    expected_prev_seq,
+                },
+            }))
+        }
+        _ => Err(EventFrameError::PrevMismatch),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,6 +1483,35 @@ mod tests {
         }
     }
 
+    fn sample_body_with_seq(seq: u64) -> EventBody {
+        let mut body = sample_body();
+        body.origin_seq = Seq1::from_u64(seq).unwrap();
+        body
+    }
+
+    fn sample_frame(body: &EventBody, prev_sha256: Option<Sha256>) -> EventFrameV1 {
+        let bytes = encode_event_body_canonical(body).unwrap();
+        let sha256 = hash_event_body(&bytes);
+        EventFrameV1 {
+            eid: EventId::new(
+                body.origin_replica_id,
+                body.namespace.clone(),
+                body.origin_seq,
+            ),
+            sha256,
+            prev_sha256,
+            bytes: bytes.into(),
+        }
+    }
+
+    struct MapLookup(std::collections::BTreeMap<EventId, Sha256>);
+
+    impl EventShaLookup for MapLookup {
+        fn lookup_event_sha(&self, eid: &EventId) -> Result<Option<Sha256>, EventShaLookupError> {
+            Ok(self.0.get(eid).copied())
+        }
+    }
+
     #[test]
     fn canonical_encode_is_stable() {
         let body = sample_body();
@@ -1264,5 +1548,53 @@ mod tests {
             err,
             DecodeError::DecodeLimit("max_cbor_text_string_len")
         ));
+    }
+
+    #[test]
+    fn verify_event_frame_defers_prev_when_head_unknown() {
+        let limits = Limits::default();
+        let first = sample_body_with_seq(1);
+        let first_frame = sample_frame(&first, None);
+        let second = sample_body_with_seq(2);
+        let second_frame = sample_frame(&second, Some(first_frame.sha256));
+        let lookup = MapLookup(std::collections::BTreeMap::new());
+
+        let verified =
+            verify_event_frame(&second_frame, &limits, second.store, None, &lookup).unwrap();
+
+        match verified {
+            VerifiedEventAny::Deferred(ev) => {
+                assert_eq!(ev.prev.prev, first_frame.sha256);
+                assert_eq!(ev.prev.expected_prev_seq, Seq1::from_u64(1).unwrap());
+            }
+            other => panic!("expected deferred, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_event_frame_accepts_contiguous_prev() {
+        let limits = Limits::default();
+        let first = sample_body_with_seq(1);
+        let first_frame = sample_frame(&first, None);
+        let second = sample_body_with_seq(2);
+        let second_frame = sample_frame(&second, Some(first_frame.sha256));
+        let lookup = MapLookup(std::collections::BTreeMap::new());
+
+        let verified = verify_event_frame(
+            &second_frame,
+            &limits,
+            second.store,
+            Some(first_frame.sha256),
+            &lookup,
+        )
+        .unwrap();
+
+        match verified {
+            VerifiedEventAny::Contiguous(ev) => {
+                assert_eq!(ev.prev.prev, Some(first_frame.sha256));
+                assert_eq!(ev.seq(), Seq1::from_u64(2).unwrap());
+            }
+            other => panic!("expected contiguous, got {other:?}"),
+        }
     }
 }
