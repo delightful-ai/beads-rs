@@ -47,6 +47,14 @@ pub enum WalIndexError {
         namespace: String,
         origin: ReplicaId,
     },
+    #[error("equivocation for {namespace} {origin} seq {seq}")]
+    Equivocation {
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        existing_sha256: [u8; 32],
+        new_sha256: [u8; 32],
+    },
     #[error("segment row decode failed: {0}")]
     SegmentRowDecode(String),
     #[error("watermark row decode failed: {0}")]
@@ -338,8 +346,9 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let txn_blob = uuid_blob(txn_id.as_uuid());
         let client_blob = client_request_id.map(|id| uuid_blob(id.as_uuid()));
 
-        self.conn.execute(
-            "INSERT INTO events (namespace, origin_replica_id, origin_seq, sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id) \
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO events \
+             (namespace, origin_replica_id, origin_seq, sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 namespace,
@@ -355,6 +364,32 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 client_blob,
             ],
         )?;
+        if inserted == 0 {
+            let existing: Option<Vec<u8>> = self
+                .conn
+                .query_row(
+                    "SELECT sha FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
+                    params![namespace, origin_blob, eid_seq],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                let existing_sha = blob_32(existing)?;
+                if existing_sha == sha {
+                    return Ok(());
+                }
+                return Err(WalIndexError::Equivocation {
+                    namespace: ns.clone(),
+                    origin: eid.origin_replica_id,
+                    seq: eid.origin_seq.get(),
+                    existing_sha256: existing_sha,
+                    new_sha256: sha,
+                });
+            }
+            return Err(WalIndexError::EventIdDecode(
+                "missing event row after conflict".to_string(),
+            ));
+        }
         Ok(())
     }
 
