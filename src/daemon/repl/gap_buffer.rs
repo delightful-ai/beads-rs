@@ -319,6 +319,34 @@ mod tests {
     }
 
     #[test]
+    fn multiple_gaps_drain_in_order() {
+        let limits = Limits::default();
+        let mut state = state_with_limits(&limits);
+
+        let _ = state.ingest_one(contiguous_event(3), 100);
+        let _ = state.ingest_one(contiguous_event(5), 100);
+
+        let IngestDecision::ForwardContiguousBatch(batch) =
+            state.ingest_one(contiguous_event(1), 101)
+        else {
+            panic!("expected contiguous batch");
+        };
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].seq().get(), 1);
+        state.advance_durable_batch(&batch).unwrap();
+
+        let IngestDecision::ForwardContiguousBatch(batch) =
+            state.ingest_one(contiguous_event(2), 102)
+        else {
+            panic!("expected contiguous batch");
+        };
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].seq().get(), 2);
+        assert_eq!(batch[1].seq().get(), 3);
+        assert_eq!(state.gap.buffered.len(), 1);
+    }
+
+    #[test]
     fn deferred_event_blocks_drain() {
         let limits = Limits::default();
         let mut state = state_with_limits(&limits);
