@@ -697,8 +697,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Canonical, Durable, ErrorPayload, EventId, HeadStatus, NamespacePolicy, Seq0,
-        Seq1, Sha256, Watermark,
+        Applied, Canonical, Durable, ErrorCode, ErrorPayload, EventId, HeadStatus, NamespacePolicy,
+        Seq0, Seq1, Sha256, Watermark,
     };
     use crate::daemon::repl::IngestOutcome;
     use crate::daemon::repl::WatermarkSnapshot;
@@ -1023,8 +1023,15 @@ mod tests {
                 let (stream, _) = listener.accept().expect("accept");
                 let reader_stream = stream.try_clone().expect("clone");
                 let mut reader = FrameReader::new(reader_stream, 1024 * 1024);
+                let mut writer = FrameWriter::new(stream, 1024 * 1024);
                 let _ = reader.read_next();
-                drop(stream);
+                let payload = ErrorPayload::new(ErrorCode::Overloaded, "overloaded", true);
+                let envelope = ReplEnvelope {
+                    version: PROTOCOL_VERSION_V1,
+                    message: ReplMessage::Error(payload),
+                };
+                let bytes = encode_envelope(&envelope).expect("encode");
+                writer.write_frame(&bytes).expect("write");
                 let _ = seen_tx.send(Instant::now());
             }
         });
