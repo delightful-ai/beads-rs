@@ -5,6 +5,7 @@ pub mod gap_buffer;
 pub mod manager;
 pub mod peer_acks;
 pub mod proto;
+pub mod runtime;
 pub mod server;
 pub mod session;
 pub mod store;
@@ -20,6 +21,7 @@ pub use proto::{
     Ack, Capabilities, Events, Hello, ProtoDecodeError, ProtoEncodeError, ReplEnvelope,
     ReplMessage, Want, WatermarkHeads, WatermarkMap, decode_envelope, encode_envelope,
 };
+pub use runtime::{ReplIngestRequest, ReplSessionStore, WalRangeError, WalRangeReader};
 pub use server::{
     ReplicationServer, ReplicationServerConfig, ReplicationServerError, ReplicationServerHandle,
 };
