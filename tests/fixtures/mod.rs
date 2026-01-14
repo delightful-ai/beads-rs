@@ -3,6 +3,7 @@ pub mod cbor;
 pub mod event_body;
 pub mod identity;
 pub mod mutation;
+pub mod receipt;
 pub mod store_dir;
 pub mod wal;
 pub mod wal_corrupt;
