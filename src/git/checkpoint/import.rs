@@ -261,8 +261,8 @@ pub fn import_checkpoint(
                 &shard.namespace,
                 limits,
                 |line, wire| {
-                    let tomb = tombstone_from_wire(&wire, &full_path, line)?;
                     let ns = line.namespace.clone();
+                    let tomb = tombstone_from_wire(&wire, &full_path, line)?;
                     state.ensure_namespace(ns).insert_tombstone(tomb);
                     Ok(())
                 },
@@ -272,8 +272,8 @@ pub fn import_checkpoint(
                 &shard.namespace,
                 limits,
                 |line, wire| {
-                    let (key, edge) = dep_from_wire(&wire, &full_path, line)?;
                     let ns = line.namespace.clone();
+                    let (key, edge) = dep_from_wire(&wire, &full_path, line)?;
                     state.ensure_namespace(ns).insert_dep(key, edge);
                     Ok(())
                 },
