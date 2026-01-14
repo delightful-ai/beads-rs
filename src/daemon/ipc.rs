@@ -30,7 +30,7 @@ pub use crate::core::{ErrorCode, ErrorPayload};
 use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 // =============================================================================
 // Request - All IPC requests
@@ -357,6 +357,13 @@ pub enum Request {
         read: ReadConsistency,
     },
 
+    /// Subscribe to realtime events.
+    Subscribe {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
+
     /// Ping (health check).
     Ping,
 
@@ -432,6 +439,12 @@ pub enum ResponsePayload {
 
     /// Shutdown ack.
     ShuttingDown(ShuttingDownPayload),
+
+    /// Subscription ack.
+    Subscribed(SubscribedPayload),
+
+    /// Streamed event.
+    Event(StreamEventPayload),
 }
 
 impl ResponsePayload {
@@ -453,6 +466,16 @@ impl ResponsePayload {
     /// Create a shutting down payload.
     pub fn shutting_down() -> Self {
         ResponsePayload::ShuttingDown(ShuttingDownPayload::default())
+    }
+
+    /// Create a subscribed payload.
+    pub fn subscribed(info: crate::api::SubscribeInfo) -> Self {
+        ResponsePayload::Subscribed(SubscribedPayload { subscribed: info })
+    }
+
+    /// Create a stream event payload.
+    pub fn event(event: crate::api::StreamEvent) -> Self {
+        ResponsePayload::Event(StreamEventPayload { event })
     }
 }
 
@@ -506,6 +529,18 @@ enum ShuttingDownTag {
     #[default]
     #[serde(rename = "shutting_down")]
     ShuttingDown,
+}
+
+/// Payload for subscription acknowledgement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribedPayload {
+    pub subscribed: crate::api::SubscribeInfo,
+}
+
+/// Payload for streamed events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamEventPayload {
+    pub event: crate::api::StreamEvent,
 }
 
 impl From<OpError> for ErrorPayload {
@@ -1948,6 +1983,30 @@ mod tests {
     }
 
     #[test]
+    fn subscribe_roundtrip() {
+        let req = Request::Subscribe {
+            repo: PathBuf::from("/test"),
+            read: ReadConsistency {
+                namespace: Some("core".to_string()),
+                require_min_seen: None,
+                wait_timeout_ms: Some(50),
+            },
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("subscribe"));
+
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Request::Subscribe { read, .. } => {
+                assert_eq!(read.namespace.as_deref(), Some("core"));
+                assert_eq!(read.wait_timeout_ms, Some(50));
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
     fn response_ok() {
         let resp = Response::ok(ResponsePayload::synced());
         let json = serde_json::to_string(&resp).unwrap();
@@ -2277,7 +2336,11 @@ mod tests {
     // Regression tests: verify all ResponsePayload variants roundtrip through Response
     mod response_roundtrip {
         use super::*;
-        use crate::core::{BeadId, DurabilityReceipt, StoreEpoch, StoreId, StoreIdentity, TxnId};
+        use crate::core::{
+            ActorId, Applied, BeadId, DurabilityReceipt, EventId, EventKindV1, HlcMax,
+            NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId,
+            Watermarks,
+        };
         use uuid::Uuid;
 
         fn sample_receipt() -> DurabilityReceipt {
@@ -2350,6 +2413,50 @@ mod tests {
         #[test]
         fn shutting_down() {
             roundtrip_response(Response::ok(ResponsePayload::shutting_down()));
+        }
+
+        #[test]
+        fn subscribed() {
+            let info = crate::api::SubscribeInfo {
+                namespace: NamespaceId::core(),
+                watermarks_applied: Watermarks::<Applied>::new(),
+            };
+            let resp = Response::ok(ResponsePayload::subscribed(info));
+            roundtrip_response(resp);
+        }
+
+        #[test]
+        fn stream_event() {
+            let store =
+                StoreIdentity::new(StoreId::new(Uuid::from_bytes([9u8; 16])), StoreEpoch::ZERO);
+            let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+            let seq = Seq1::from_u64(1).unwrap();
+            let body = crate::core::EventBody {
+                envelope_v: 1,
+                store,
+                namespace: NamespaceId::core(),
+                origin_replica_id: origin,
+                origin_seq: seq,
+                event_time_ms: 123,
+                txn_id: TxnId::new(Uuid::from_bytes([3u8; 16])),
+                client_request_id: None,
+                kind: EventKindV1::TxnV1,
+                delta: TxnDeltaV1::new(),
+                hlc_max: Some(HlcMax {
+                    actor_id: ActorId::new("tester").unwrap(),
+                    physical_ms: 123,
+                    logical: 0,
+                }),
+            };
+            let event = crate::api::StreamEvent {
+                event_id: EventId::new(origin, NamespaceId::core(), seq),
+                sha256: hex::encode([1u8; 32]),
+                prev_sha256: None,
+                body: crate::api::EventBody::from(&body),
+                body_bytes_hex: Some("00".to_string()),
+            };
+            let resp = Response::ok(ResponsePayload::event(event));
+            roundtrip_response(resp);
         }
 
         #[test]
