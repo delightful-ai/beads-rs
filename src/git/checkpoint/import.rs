@@ -428,8 +428,8 @@ fn parse_json_line<T: DeserializeOwned>(
     path: &Path,
     line_no: u64,
 ) -> Result<T, CheckpointImportError> {
-    let value: Value =
-        serde_json::from_slice(line).map_err(|source| CheckpointImportError::JsonLine {
+    let value: Value = serde_json::from_slice(line).map_err(|source| {
+        CheckpointImportError::JsonLine {
             path: path.to_path_buf(),
             line: line_no,
             source,
