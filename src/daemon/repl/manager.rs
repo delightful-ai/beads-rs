@@ -460,7 +460,7 @@ fn run_reader_loop(
 }
 
 fn run_event_forwarder(
-    mut subscription: EventSubscription,
+    subscription: EventSubscription,
     event_tx: Sender<BroadcastEvent>,
     shutdown: Arc<AtomicBool>,
 ) {
@@ -591,7 +591,7 @@ fn update_peer_ack(
     peer_acks: &Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
     peer: ReplicaId,
     ack: &Ack,
-) -> Result<(), crate::daemon::repl::PeerAckError> {
+) -> Result<(), Box<crate::daemon::repl::PeerAckError>> {
     let now_ms = now_ms();
     let mut table = peer_acks.lock().expect("peer ack lock poisoned");
     table.update_peer(

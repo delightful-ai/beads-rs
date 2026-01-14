@@ -7,9 +7,16 @@ use crate::core::{
     EventId, EventShaLookupError, NamespaceId, PrevVerified, ReplicaId, Sha256, VerifiedEvent,
 };
 
-#[derive(Clone)]
 pub struct SharedSessionStore<S> {
     inner: Arc<Mutex<S>>,
+}
+
+impl<S> Clone for SharedSessionStore<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl<S> SharedSessionStore<S> {
