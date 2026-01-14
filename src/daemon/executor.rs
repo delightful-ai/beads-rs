@@ -731,13 +731,13 @@ fn load_event_body(
         })?;
 
     let (_, event_body) = decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
-        OpError::from(StoreRuntimeError::WalReplay(
+        OpError::from(StoreRuntimeError::WalReplay(Box::new(
             WalReplayError::EventBodyDecode {
                 path: path.clone(),
                 offset: item.offset,
                 source,
             },
-        ))
+        )))
     })?;
     Ok(event_body)
 }

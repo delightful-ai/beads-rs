@@ -1860,12 +1860,14 @@ fn replay_event_wal(
                 limits.max_event_batch_bytes,
             )?;
             if items.is_empty() {
-                return Err(StoreRuntimeError::WalReplay(WalReplayError::NonContiguousSeq {
-                    namespace: row.namespace.as_str().to_string(),
-                    origin: row.origin,
-                    expected: from_seq_excl + 1,
-                    got: 0,
-                }));
+                return Err(StoreRuntimeError::WalReplay(Box::new(
+                    WalReplayError::NonContiguousSeq {
+                        namespace: row.namespace.as_str().to_string(),
+                        origin: row.origin,
+                        expected: from_seq_excl + 1,
+                        got: 0,
+                    },
+                )));
             }
             for item in items {
                 let seq = item.event_id.origin_seq.get();
@@ -1882,12 +1884,12 @@ fn replay_event_wal(
                 })?;
                 let event_body = load_event_body_at(segment_path, item.offset, limits)?;
                 apply_event(state, &event_body).map_err(|err| {
-                    StoreRuntimeError::WalReplay(WalReplayError::RecordDecode {
+                    StoreRuntimeError::WalReplay(Box::new(WalReplayError::RecordDecode {
                         path: segment_path.clone(),
                         source: EventWalError::RecordHeaderInvalid {
                             reason: format!("apply_event failed: {err}"),
                         },
-                    })
+                    }))
                 })?;
                 from_seq_excl = seq;
                 applied_any = true;
@@ -1922,43 +1924,43 @@ fn load_event_body_at(
     limits: &Limits,
 ) -> Result<EventBody, StoreRuntimeError> {
     let mut file = File::open(path).map_err(|source| {
-        StoreRuntimeError::WalReplay(WalReplayError::Io {
+        StoreRuntimeError::WalReplay(Box::new(WalReplayError::Io {
             path: path.to_path_buf(),
             source,
-        })
+        }))
     })?;
     file.seek(SeekFrom::Start(offset)).map_err(|source| {
-        StoreRuntimeError::WalReplay(WalReplayError::Io {
+        StoreRuntimeError::WalReplay(Box::new(WalReplayError::Io {
             path: path.to_path_buf(),
             source,
-        })
+        }))
     })?;
 
     let mut reader = FrameReader::new(file, limits.max_wal_record_bytes);
     let record = reader
         .read_next()
         .map_err(|source| {
-            StoreRuntimeError::WalReplay(WalReplayError::RecordDecode {
+            StoreRuntimeError::WalReplay(Box::new(WalReplayError::RecordDecode {
                 path: path.to_path_buf(),
                 source,
-            })
+            }))
         })?
         .ok_or_else(|| {
-            StoreRuntimeError::WalReplay(WalReplayError::RecordDecode {
+            StoreRuntimeError::WalReplay(Box::new(WalReplayError::RecordDecode {
                 path: path.to_path_buf(),
                 source: EventWalError::FrameLengthInvalid {
                     reason: "unexpected eof while reading record".to_string(),
                 },
-            })
+            }))
         })?;
 
     let (_, event_body) =
         decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
-            StoreRuntimeError::WalReplay(WalReplayError::EventBodyDecode {
+            StoreRuntimeError::WalReplay(Box::new(WalReplayError::EventBodyDecode {
                 path: path.to_path_buf(),
                 offset,
                 source,
-            })
+            }))
         })?;
     Ok(event_body)
 }

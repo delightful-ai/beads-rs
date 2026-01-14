@@ -2022,7 +2022,7 @@ mod tests {
             offset: 12,
         }));
 
-        let store_err = StoreRuntimeError::WalReplay(err);
+        let store_err = StoreRuntimeError::WalReplay(Box::new(err));
         let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
 
         assert_eq!(payload.code, ErrorCode::HashMismatch);
@@ -2047,7 +2047,7 @@ mod tests {
             },
         };
 
-        let store_err = StoreRuntimeError::WalReplay(err);
+        let store_err = StoreRuntimeError::WalReplay(Box::new(err));
         let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
 
         assert_eq!(payload.code, ErrorCode::WalFormatUnsupported);
@@ -2066,7 +2066,7 @@ mod tests {
             source: EventWalError::SegmentHeaderMagicMismatch { got: [0u8; 5] },
         };
 
-        let store_err = StoreRuntimeError::WalReplay(err);
+        let store_err = StoreRuntimeError::WalReplay(Box::new(err));
         let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
 
         assert_eq!(payload.code, ErrorCode::WalCorrupt);
@@ -2135,7 +2135,7 @@ mod tests {
             head_seq: 1,
         };
 
-        let store_err = StoreRuntimeError::WalReplay(err);
+        let store_err = StoreRuntimeError::WalReplay(Box::new(err));
         let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
 
         assert_eq!(payload.code, ErrorCode::PrevShaMismatch);

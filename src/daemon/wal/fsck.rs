@@ -63,11 +63,17 @@ pub enum FsckError {
         source: std::io::Error,
     },
     #[error(transparent)]
-    WalReplay(#[from] WalReplayError),
+    WalReplay(#[from] Box<WalReplayError>),
     #[error(transparent)]
     WalIndex(#[from] WalIndexError),
     #[error("event wal error: {0}")]
     EventWal(#[from] EventWalError),
+}
+
+impl From<WalReplayError> for FsckError {
+    fn from(err: WalReplayError) -> Self {
+        FsckError::WalReplay(Box::new(err))
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

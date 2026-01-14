@@ -106,7 +106,7 @@ impl StoreRuntime {
                         SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache)?;
                     rebuild_index(&store_dir, &meta, &wal_index, limits)?;
                 }
-                err => return Err(StoreRuntimeError::WalReplay(err)),
+                err => return Err(StoreRuntimeError::WalReplay(Box::new(err))),
             }
         }
 
@@ -198,7 +198,7 @@ pub enum StoreRuntimeError {
     #[error(transparent)]
     WalIndex(#[from] WalIndexError),
     #[error(transparent)]
-    WalReplay(#[from] WalReplayError),
+    WalReplay(#[from] Box<WalReplayError>),
     #[error("invalid {kind} watermark for {namespace} {origin}: {source}")]
     WatermarkInvalid {
         kind: &'static str,
@@ -207,6 +207,12 @@ pub enum StoreRuntimeError {
         #[source]
         source: WatermarkError,
     },
+}
+
+impl From<WalReplayError> for StoreRuntimeError {
+    fn from(err: WalReplayError) -> Self {
+        StoreRuntimeError::WalReplay(Box::new(err))
+    }
 }
 
 fn open_wal_index(
