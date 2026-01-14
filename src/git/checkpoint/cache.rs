@@ -103,8 +103,8 @@ impl CheckpointCache {
             return Ok(None);
         }
 
-        let current_raw = fs::read_to_string(&current_path)
-            .map_err(|source| io_err(&current_path, source))?;
+        let current_raw =
+            fs::read_to_string(&current_path).map_err(|source| io_err(&current_path, source))?;
         let current_id = current_raw.trim();
         if current_id.is_empty() {
             return Err(CheckpointCacheError::InvalidEntry {
@@ -211,7 +211,8 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), CheckpointCacheError> {
     }
 
     let mut file = File::create(path).map_err(|source| io_err(path, source))?;
-    file.write_all(bytes).map_err(|source| io_err(path, source))?;
+    file.write_all(bytes)
+        .map_err(|source| io_err(path, source))?;
     file.sync_all().map_err(|source| io_err(path, source))?;
 
     Ok(())
@@ -226,7 +227,8 @@ fn write_current(group_dir: &Path, checkpoint_id: &str) -> Result<(), Checkpoint
         .map_err(|source| io_err(&tmp_path, source))?;
     file.write_all(b"\n")
         .map_err(|source| io_err(&tmp_path, source))?;
-    file.sync_all().map_err(|source| io_err(&tmp_path, source))?;
+    file.sync_all()
+        .map_err(|source| io_err(&tmp_path, source))?;
 
     fs::rename(&tmp_path, &final_path).map_err(|source| io_err(&final_path, source))?;
     fsync_dir(group_dir)?;
@@ -326,4 +328,194 @@ struct CacheEntry {
     id: String,
     path: PathBuf,
     created_at_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use crate::core::bead::{BeadCore, BeadFields};
+    use crate::core::collections::Labels;
+    use crate::core::composite::{Claim, Workflow};
+    use crate::core::crdt::Lww;
+    use crate::core::domain::{BeadType, Priority};
+    use crate::core::identity::BeadId;
+    use crate::core::time::{Stamp, WriteStamp};
+    use crate::core::{
+        ActorId, CanonicalState, ContentHash, Durable, HeadStatus, NamespaceId, ReplicaId, Seq0,
+        StoreEpoch, StoreId, Watermarks,
+    };
+    use crate::git::checkpoint::{
+        CheckpointExportInput, CheckpointSnapshotInput, build_snapshot, export_checkpoint,
+    };
+    use crate::paths;
+
+    struct DataDirGuard;
+
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            paths::set_data_dir_for_tests(None);
+        }
+    }
+
+    fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
+        Stamp::new(
+            WriteStamp::new(wall_ms, counter),
+            ActorId::new(actor).expect("actor id"),
+        )
+    }
+
+    fn make_bead(id: &BeadId, stamp: &Stamp) -> crate::core::Bead {
+        let core = BeadCore::new(id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        crate::core::Bead::new(core, fields)
+    }
+
+    fn build_export(store_id: StoreId, created_at_ms: u64) -> CheckpointExport {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
+        let stamp = make_stamp(1, 0, "author");
+        let bead_id = BeadId::parse("beads-rs-0001").unwrap();
+
+        let bead = make_bead(&bead_id, &stamp);
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let mut watermarks = Watermarks::<Durable>::new();
+        watermarks
+            .observe_at_least(
+                &namespace,
+                &origin,
+                Seq0::new(1),
+                HeadStatus::Known([1u8; 32]),
+            )
+            .unwrap();
+
+        let snapshot = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![namespace.clone()],
+            store_id,
+            store_epoch: StoreEpoch::new(0),
+            created_at_ms,
+            created_by_replica_id: origin,
+            policy_hash: ContentHash::from_bytes([9u8; 32]),
+            roster_hash: None,
+            state: &state,
+            watermarks_durable: &watermarks,
+        })
+        .expect("snapshot");
+
+        export_checkpoint(CheckpointExportInput {
+            snapshot: &snapshot,
+            previous: None,
+        })
+        .expect("export")
+    }
+
+    fn list_checkpoint_dirs(group_dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(entries) = fs::read_dir(group_dir) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if !file_type.is_dir() {
+                        continue;
+                    }
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name == CURRENT_FILE || name == TMP_DIR {
+                    continue;
+                }
+                out.push(name.to_string());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cache_publish_updates_current_and_loads() {
+        let _lock = paths::lock_data_dir_for_tests();
+        let temp = TempDir::new().expect("temp dir");
+        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
+        let _guard = DataDirGuard;
+
+        let store_id = StoreId::new(Uuid::from_bytes([9u8; 16]));
+        let export = build_export(store_id, 1_700_000_000_000);
+
+        let cache = CheckpointCache::new(store_id, export.meta.checkpoint_group.clone());
+        let entry = cache.publish(&export).expect("publish");
+
+        let current_path = cache.group_dir().join(CURRENT_FILE);
+        let current = fs::read_to_string(&current_path).expect("read current");
+        assert_eq!(current.trim(), entry.checkpoint_id.to_hex());
+        assert!(entry.dir.is_dir());
+
+        let tmp_path = cache
+            .group_dir()
+            .join(TMP_DIR)
+            .join(entry.checkpoint_id.to_hex());
+        assert!(!tmp_path.exists());
+
+        let loaded = cache
+            .load_current()
+            .expect("load current")
+            .expect("current entry");
+        assert_eq!(loaded.checkpoint_id, entry.checkpoint_id);
+        assert_eq!(loaded.meta, entry.meta);
+        assert_eq!(loaded.manifest, entry.manifest);
+    }
+
+    #[test]
+    fn cache_prunes_old_entries() {
+        let _lock = paths::lock_data_dir_for_tests();
+        let temp = TempDir::new().expect("temp dir");
+        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
+        let _guard = DataDirGuard;
+
+        let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
+        let cache = CheckpointCache::new(store_id, "core").with_keep_last(2);
+
+        let first = cache.publish(&build_export(store_id, 10)).unwrap();
+        let second = cache.publish(&build_export(store_id, 20)).unwrap();
+        let third = cache.publish(&build_export(store_id, 30)).unwrap();
+
+        let dirs = list_checkpoint_dirs(&cache.group_dir());
+        assert_eq!(dirs.len(), 2);
+        assert!(!dirs.contains(&first.checkpoint_id.to_hex()));
+        assert!(dirs.contains(&second.checkpoint_id.to_hex()));
+        assert!(dirs.contains(&third.checkpoint_id.to_hex()));
+    }
+
+    #[test]
+    fn load_current_errors_on_missing_entry() {
+        let _lock = paths::lock_data_dir_for_tests();
+        let temp = TempDir::new().expect("temp dir");
+        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
+        let _guard = DataDirGuard;
+
+        let store_id = StoreId::new(Uuid::from_bytes([5u8; 16]));
+        let cache = CheckpointCache::new(store_id, "core");
+        let group_dir = cache.group_dir();
+        fs::create_dir_all(&group_dir).expect("create group dir");
+        let bogus_id = ContentHash::from_bytes([8u8; 32]).to_hex();
+        fs::write(group_dir.join(CURRENT_FILE), format!("{}\n", bogus_id)).expect("write current");
+
+        let err = cache.load_current().unwrap_err();
+        assert!(matches!(err, CheckpointCacheError::InvalidEntry { .. }));
+    }
 }
