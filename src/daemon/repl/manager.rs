@@ -682,8 +682,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Durable, ErrorPayload, EventId, HeadStatus, NamespacePolicy, Seq0, Seq1, Sha256,
-        Watermark,
+        Applied, Canonical, Durable, ErrorPayload, EventId, HeadStatus, NamespacePolicy, Seq0,
+        Seq1, Sha256, Watermark,
     };
     use crate::daemon::repl::IngestOutcome;
     use crate::daemon::repl::WatermarkSnapshot;
@@ -717,11 +717,9 @@ mod tests {
             _now_ms: u64,
         ) -> Result<IngestOutcome, Box<ErrorPayload>> {
             let Some(last) = batch.last() else {
-                let genesis = Watermark::genesis();
-                return Ok(IngestOutcome {
-                    durable: genesis,
-                    applied: genesis,
-                });
+                let durable = Watermark::<Durable>::genesis();
+                let applied = Watermark::<Applied>::genesis();
+                return Ok(IngestOutcome { durable, applied });
             };
             let seq = Seq0::new(last.seq().get());
             let head = HeadStatus::Known(last.sha256.0);
@@ -934,13 +932,13 @@ mod tests {
             ),
             Sha256([1u8; 32]),
             None,
-            EventBytes::new(Bytes::from_static(b"core")),
+            EventBytes::<Canonical>::new(Bytes::from_static(b"core")),
         );
         let tmp_event = BroadcastEvent::new(
             EventId::new(local_replica, tmp.clone(), Seq1::from_u64(2).unwrap()),
             Sha256([2u8; 32]),
             None,
-            EventBytes::new(Bytes::from_static(b"tmp")),
+            EventBytes::<Canonical>::new(Bytes::from_static(b"tmp")),
         );
 
         broadcaster.publish(core_event).unwrap();
