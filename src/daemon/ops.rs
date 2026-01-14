@@ -711,10 +711,11 @@ fn wal_index_transience(err: &WalIndexError) -> Transience {
                 Transience::Retryable
             }
         }
-        WalIndexError::MetaMismatch { key, .. } => match *key {
-            "store_id" | "store_epoch" => Transience::Permanent,
-            _ => Transience::Retryable,
-        },
+        WalIndexError::MetaMismatch {
+            key: "store_id" | "store_epoch",
+            ..
+        } => Transience::Permanent,
+        WalIndexError::MetaMismatch { .. } => Transience::Retryable,
         WalIndexError::Equivocation { .. }
         | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
         _ => Transience::Retryable,
