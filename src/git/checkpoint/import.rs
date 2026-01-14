@@ -226,8 +226,8 @@ pub fn import_checkpoint(
             });
         }
 
-        let shard = parse_shard_path(rel_path)
-            .ok_or_else(|| CheckpointImportError::UnexpectedFile {
+        let shard =
+            parse_shard_path(rel_path).ok_or_else(|| CheckpointImportError::UnexpectedFile {
                 path: rel_path.clone(),
             })?;
         if !allowed_namespaces.contains(&shard.namespace) {
@@ -404,10 +404,7 @@ where
         }
 
         let namespace = namespace.clone();
-        let ctx = JsonlLineContext {
-            line_no,
-            namespace,
-        };
+        let ctx = JsonlLineContext { line_no, namespace };
         on_item(ctx, value)?;
     }
 
@@ -426,13 +423,12 @@ fn parse_json_line<T: DeserializeOwned>(
     path: &Path,
     line_no: u64,
 ) -> Result<T, CheckpointImportError> {
-    let value: Value = serde_json::from_slice(line).map_err(|source| {
-        CheckpointImportError::JsonLine {
+    let value: Value =
+        serde_json::from_slice(line).map_err(|source| CheckpointImportError::JsonLine {
             path: path.to_path_buf(),
             line: line_no,
             source,
-        }
-    })?;
+        })?;
     let depth = json_depth(&value);
     if depth > limits.max_cbor_depth {
         return Err(CheckpointImportError::JsonDepthExceeded {
@@ -816,12 +812,8 @@ mod tests {
 
         let merged_a = merge_store_states(&left, &right).unwrap();
         let merged_b = merge_store_states(&right, &left).unwrap();
-        let merged_a_state = merged_a
-            .get(&NamespaceId::core())
-            .expect("merged a state");
-        let merged_b_state = merged_b
-            .get(&NamespaceId::core())
-            .expect("merged b state");
+        let merged_a_state = merged_a.get(&NamespaceId::core()).expect("merged a state");
+        let merged_b_state = merged_b.get(&NamespaceId::core()).expect("merged b state");
         assert_eq!(
             state_fingerprint(merged_a_state),
             state_fingerprint(merged_b_state)

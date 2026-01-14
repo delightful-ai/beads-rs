@@ -122,6 +122,9 @@ pub enum Commands {
     /// Wait for debounced sync flush to complete.
     Sync,
 
+    /// Subscribe to realtime events.
+    Subscribe(SubscribeArgs),
+
     /// Store operations.
     Store {
         #[command(subcommand)]
@@ -574,6 +577,17 @@ pub struct DeletedArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct SubscribeArgs {
+    /// Require applied watermarks before streaming (JSON).
+    #[arg(long = "require-min-seen", value_name = "JSON")]
+    pub require_min_seen: Option<String>,
+
+    /// Optional wait timeout for require-min-seen (ms).
+    #[arg(long = "wait-timeout-ms", value_name = "MS")]
+    pub wait_timeout_ms: Option<u64>,
+}
+
+#[derive(Args, Debug)]
 pub struct UpdateArgs {
     pub id: String,
 
@@ -974,6 +988,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 Commands::Count(args) => commands::count::handle(&ctx, args),
                 Commands::Deleted(args) => commands::deleted::handle(&ctx, args),
                 Commands::Sync => commands::sync::handle(&ctx),
+                Commands::Subscribe(args) => commands::subscribe::handle(&ctx, args),
                 Commands::Update(args) => commands::update::handle(&ctx, args),
                 Commands::Close(args) => commands::close::handle(&ctx, args),
                 Commands::Reopen { id } => commands::reopen::handle(&ctx, id),

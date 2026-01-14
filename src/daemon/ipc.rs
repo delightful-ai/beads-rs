@@ -1776,6 +1776,7 @@ pub fn send_request_no_autostart(req: &Request) -> Result<Response, IpcError> {
 
 /// Stream responses for a subscribe request.
 pub struct SubscriptionStream {
+    _writer: UnixStream,
     reader: BufReader<UnixStream>,
 }
 
@@ -1842,7 +1843,10 @@ pub fn subscribe_stream(req: &Request) -> Result<SubscriptionStream, IpcError> {
         }
 
         write_req_line(&mut writer, req)?;
-        return Ok(SubscriptionStream { reader });
+        return Ok(SubscriptionStream {
+            _writer: writer,
+            reader,
+        });
     }
 
     Err(IpcError::DaemonUnavailable(
