@@ -4,14 +4,11 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::sync::Mutex;
-
 use assert_cmd::Command;
 use tempfile::TempDir;
 
+use super::env_guard;
 use super::daemon_runtime::shutdown_daemon;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub struct RealtimeFixture {
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -25,7 +22,7 @@ pub struct RealtimeFixture {
 
 impl RealtimeFixture {
     pub fn new() -> Self {
-        let lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let lock = env_guard::lock_env();
         let runtime_dir = TempDir::new().expect("create runtime dir");
         let repo_dir = TempDir::new().expect("create repo dir");
         let remote_dir = TempDir::new().expect("create remote dir");

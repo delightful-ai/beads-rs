@@ -2,11 +2,9 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-
 use tempfile::TempDir;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use super::env_guard;
 
 pub struct TempStoreDir {
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -17,7 +15,7 @@ pub struct TempStoreDir {
 
 impl TempStoreDir {
     pub fn new() -> std::io::Result<Self> {
-        let lock = ENV_LOCK.lock().expect("BD_DATA_DIR env lock poisoned");
+        let lock = env_guard::lock_env();
         let temp = TempDir::new()?;
         let data_dir = temp.path().join("data");
         std::fs::create_dir_all(&data_dir)?;
