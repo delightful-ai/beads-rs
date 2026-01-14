@@ -23,8 +23,8 @@ use crate::daemon::broadcast::{
 use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, Session, SessionAction,
-    SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore, decode_envelope,
-    encode_envelope,
+    SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore, WalRangeReader,
+    decode_envelope, encode_envelope,
 };
 
 #[derive(Clone, Debug)]
@@ -45,6 +45,7 @@ pub struct ReplicationManagerConfig {
     pub policies: BTreeMap<NamespaceId, NamespacePolicy>,
     pub roster: Option<ReplicaRoster>,
     pub peers: Vec<PeerConfig>,
+    pub wal_reader: Option<WalRangeReader>,
     pub limits: crate::core::Limits,
     pub backoff: BackoffPolicy,
 }
@@ -66,6 +67,7 @@ pub struct ReplicationManager<S> {
     policies: BTreeMap<NamespaceId, NamespacePolicy>,
     roster: Option<ReplicaRoster>,
     peers: Vec<PeerConfig>,
+    wal_reader: Option<WalRangeReader>,
     limits: crate::core::Limits,
     backoff: BackoffPolicy,
 }
@@ -99,6 +101,7 @@ where
             policies: config.policies,
             roster: config.roster,
             peers: config.peers,
+            wal_reader: config.wal_reader,
             limits: config.limits,
             backoff: config.backoff,
         }
@@ -119,6 +122,7 @@ where
                 admission: self.admission.clone(),
                 broadcaster: self.broadcaster.clone(),
                 peer_acks: Arc::clone(&self.peer_acks),
+                wal_reader: self.wal_reader.clone(),
                 limits: self.limits.clone(),
                 backoff: self.backoff,
                 shutdown: Arc::clone(&shutdown),
@@ -185,6 +189,7 @@ struct PeerRuntime<S> {
     admission: AdmissionController,
     broadcaster: EventBroadcaster,
     peer_acks: Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
+    wal_reader: Option<WalRangeReader>,
     limits: crate::core::Limits,
     backoff: BackoffPolicy,
     shutdown: Arc<AtomicBool>,
@@ -357,6 +362,7 @@ where
                                     &session,
                                     want,
                                     &broadcaster,
+                                    runtime.wal_reader.as_ref(),
                                     &limits,
                                 ) {
                                     tracing::warn!("peer want handling failed: {err}");
@@ -605,6 +611,7 @@ fn handle_want(
     session: &Session,
     want: &Want,
     broadcaster: &EventBroadcaster,
+    wal_reader: Option<&WalRangeReader>,
     limits: &crate::core::Limits,
 ) -> Result<(), PeerError> {
     if want.want.is_empty() {
@@ -632,8 +639,47 @@ fn handle_want(
         }
         if event.event_id.origin_seq.get() == want_seq.saturating_add(1) {
             started.insert(key.clone());
+            frames.push(broadcast_to_frame(event));
+        } else if started.contains(&key) {
+            frames.push(broadcast_to_frame(event));
         }
-        frames.push(broadcast_to_frame(event));
+    }
+
+    if started.len() != needed.len() {
+        let missing = needed
+            .iter()
+            .filter(|(key, _)| !started.contains(*key))
+            .map(|(key, seq)| (key.clone(), *seq))
+            .collect::<Vec<_>>();
+
+        if let Some(wal_reader) = wal_reader {
+            for (key, want_seq) in missing {
+                let (namespace, origin) = key.clone();
+                match wal_reader.read_range(
+                    &namespace,
+                    &origin,
+                    want_seq,
+                    limits.max_event_batch_bytes,
+                ) {
+                    Ok(wal_frames) => {
+                        if let Some(first) = wal_frames.first()
+                            && first.eid.origin_seq.get() == want_seq.saturating_add(1)
+                        {
+                            started.insert(key);
+                            frames.extend(wal_frames);
+                        }
+                    }
+                    Err(err @ crate::daemon::repl::WalRangeError::MissingRange { .. }) => {
+                        let _ = err;
+                    }
+                    Err(err) => {
+                        let payload = err.as_error_payload();
+                        send_payload(writer, session, ReplMessage::Error(payload))?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
 
     if started.len() != needed.len() {
@@ -873,6 +919,7 @@ mod tests {
             policies: test_policy(),
             roster: None,
             peers: vec![test_peer_config(peer_replica, addr)],
+            wal_reader: None,
             limits: test_limits(),
             backoff: BackoffPolicy {
                 base: Duration::from_millis(5),
@@ -928,6 +975,7 @@ mod tests {
             policies,
             roster: None,
             peers: vec![test_peer_config(peer_replica, addr)],
+            wal_reader: None,
             limits: test_limits(),
             backoff: BackoffPolicy {
                 base: Duration::from_millis(5),
@@ -1001,6 +1049,7 @@ mod tests {
             policies: test_policy(),
             roster: None,
             peers: vec![test_peer_config(peer_replica, addr)],
+            wal_reader: None,
             limits: test_limits(),
             backoff: BackoffPolicy {
                 base: Duration::from_millis(20),
