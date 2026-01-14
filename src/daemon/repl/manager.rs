@@ -984,6 +984,7 @@ mod tests {
     #[test]
     fn reconnects_after_disconnect() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
         let addr = listener.local_addr().unwrap().to_string();
         let local_store = StoreIdentity::new(
             crate::core::StoreId::new(Uuid::from_bytes([8u8; 16])),
@@ -1018,11 +1019,41 @@ mod tests {
 
         let handle = manager.start();
         let start = Instant::now();
-        let (first, _) = listener.accept().expect("accept 1");
-        drop(first);
-        let (second, _) = listener.accept().expect("accept 2");
-        drop(second);
-        assert!(start.elapsed() >= Duration::from_millis(20));
+        let deadline = Duration::from_secs(1);
+
+        let first_at = loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    drop(stream);
+                    break Instant::now();
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if start.elapsed() > deadline {
+                        panic!("timeout waiting for first connection");
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("accept 1 failed: {err}"),
+            }
+        };
+
+        let second_at = loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    drop(stream);
+                    break Instant::now();
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if first_at.elapsed() > deadline {
+                        panic!("timeout waiting for second connection");
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("accept 2 failed: {err}"),
+            }
+        };
+
+        assert!(second_at.duration_since(first_at) >= Duration::from_millis(20));
         handle.shutdown();
     }
 }
