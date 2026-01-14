@@ -14,6 +14,7 @@ use crate::core::{
     verify_event_frame,
 };
 use crate::daemon::admission::AdmissionController;
+use crate::daemon::metrics;
 
 use super::gap_buffer::{GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
@@ -347,6 +348,7 @@ impl Session {
             .map(|frame| frame.bytes.len() as u64)
             .sum();
         let event_count = events.events.len() as u64;
+        metrics::repl_events_in(event_count as usize);
         let permit = match self
             .admission
             .try_admit_repl_ingest(total_bytes, event_count)

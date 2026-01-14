@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use crossbeam::channel::Sender;
@@ -28,6 +28,7 @@ use super::wal::{
     EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentConfig, SegmentRow,
     SegmentWriter, WalIndex, WalIndexError, WalReplayError,
 };
+use crate::daemon::metrics;
 use crate::core::{
     Applied, BeadId, BeadType, DepKind, DurabilityClass, DurabilityReceipt, Durable, EventBody,
     EventId, HeadStatus, Limits, NoteId, Priority, ReplicaId, Seq1, Sha256, StoreIdentity,
@@ -216,7 +217,21 @@ impl Daemon {
             now_ms,
             SegmentConfig::from_limits(&limits),
         )?;
-        let append = writer.append(&record, now_ms)?;
+        let append_start = Instant::now();
+        let append = match writer.append(&record, now_ms) {
+            Ok(append) => {
+                let elapsed = append_start.elapsed();
+                metrics::wal_append_ok(elapsed);
+                metrics::wal_fsync_ok(elapsed);
+                append
+            }
+            Err(err) => {
+                let elapsed = append_start.elapsed();
+                metrics::wal_append_err(elapsed);
+                metrics::wal_fsync_err(elapsed);
+                return Err(err.into());
+            }
+        };
         let last_indexed_offset = append.offset + append.len as u64;
         let segment_row = SegmentRow {
             namespace: namespace.clone(),
@@ -286,8 +301,12 @@ impl Daemon {
             durable_seq,
         ) = {
             let store_runtime = self.store_runtime_mut(&proof)?;
-            apply_event(&mut store_runtime.repo_state.state, &draft.event_body)
-                .map_err(|_| OpError::Internal("apply_event failed"))?;
+            let apply_start = Instant::now();
+            if let Err(err) = apply_event(&mut store_runtime.repo_state.state, &draft.event_body) {
+                metrics::apply_err(apply_start.elapsed());
+                return Err(OpError::Internal(format!("apply_event failed: {err}")));
+            }
+            metrics::apply_ok(apply_start.elapsed());
             let write_stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
             let now_wall_ms = WallClock::now().0;
             store_runtime.repo_state.last_seen_stamp = Some(write_stamp.clone());

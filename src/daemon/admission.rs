@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::core::error::details::{OverloadedDetails, OverloadedSubsystem};
 use crate::core::{ErrorCode, ErrorPayload, Limits};
+use crate::daemon::metrics;
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 100;
 
@@ -69,8 +70,10 @@ impl AdmissionController {
     pub fn try_admit_ipc_mutation(&self) -> Result<AdmissionPermit, AdmissionRejection> {
         let limit = self.inner.limits.max_ipc_inflight_mutations;
         let next = self.inner.ipc_inflight.fetch_add(1, Ordering::AcqRel) + 1;
+        metrics::set_ipc_inflight(next);
         if next > limit {
             self.inner.ipc_inflight.fetch_sub(1, Ordering::AcqRel);
+            metrics::set_ipc_inflight(next.saturating_sub(1));
             return Err(AdmissionRejection {
                 subsystem: OverloadedSubsystem::Ipc,
                 retry_after_ms: DEFAULT_RETRY_AFTER_MS,
@@ -102,6 +105,8 @@ impl AdmissionController {
             .repl_ingest_events
             .fetch_add(events, Ordering::AcqRel)
             .saturating_add(events);
+        metrics::set_repl_queue_bytes(next_bytes);
+        metrics::set_repl_queue_events(next_events);
 
         if next_bytes > max_bytes || next_events > max_events {
             self.inner
@@ -110,6 +115,8 @@ impl AdmissionController {
             self.inner
                 .repl_ingest_events
                 .fetch_sub(events, Ordering::AcqRel);
+            metrics::set_repl_queue_bytes(next_bytes.saturating_sub(bytes));
+            metrics::set_repl_queue_events(next_events.saturating_sub(events));
             return Err(AdmissionRejection {
                 subsystem: OverloadedSubsystem::Repl,
                 retry_after_ms: DEFAULT_RETRY_AFTER_MS,
@@ -129,6 +136,7 @@ impl AdmissionController {
             AdmissionClass::IpcMutation => {
                 let prev = self.inner.ipc_inflight.fetch_sub(1, Ordering::AcqRel);
                 debug_assert!(prev > 0, "ipc inflight underflow");
+                metrics::set_ipc_inflight(prev.saturating_sub(1));
             }
             AdmissionClass::ReplIngest { bytes, events } => {
                 let prev_bytes = self
@@ -141,6 +149,8 @@ impl AdmissionController {
                     .fetch_sub(events, Ordering::AcqRel);
                 debug_assert!(prev_bytes >= bytes, "repl ingest bytes underflow");
                 debug_assert!(prev_events >= events, "repl ingest events underflow");
+                metrics::set_repl_queue_bytes(prev_bytes.saturating_sub(bytes));
+                metrics::set_repl_queue_events(prev_events.saturating_sub(events));
             }
         }
     }

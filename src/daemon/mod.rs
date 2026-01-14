@@ -16,6 +16,7 @@ pub mod durability_coordinator;
 pub mod executor;
 pub mod git_worker;
 pub mod ipc;
+pub mod metrics;
 pub mod migration;
 pub mod mutation_engine;
 pub mod ops;

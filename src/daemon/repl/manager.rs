@@ -20,6 +20,7 @@ use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
     BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
 };
+use crate::daemon::metrics;
 use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, Session, SessionAction,
