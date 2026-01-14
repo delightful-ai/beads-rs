@@ -2863,34 +2863,27 @@ mod tests {
     }
 
     struct TempStoreDir {
-        _lock: std::sync::MutexGuard<'static, ()>,
         _temp: TempDir,
         data_dir: PathBuf,
+        _override: crate::paths::DataDirOverride,
     }
 
     impl TempStoreDir {
         fn new() -> Self {
-            let lock = crate::paths::lock_data_dir_for_tests();
             let temp = TempDir::new().unwrap();
             let data_dir = temp.path().join("data");
             std::fs::create_dir_all(&data_dir).unwrap();
-            crate::paths::set_data_dir_for_tests(Some(data_dir.clone()));
+            let override_guard = crate::paths::override_data_dir_for_tests(Some(data_dir.clone()));
 
             Self {
-                _lock: lock,
                 _temp: temp,
                 data_dir,
+                _override: override_guard,
             }
         }
 
         fn data_dir(&self) -> &Path {
             &self.data_dir
-        }
-    }
-
-    impl Drop for TempStoreDir {
-        fn drop(&mut self) {
-            crate::paths::set_data_dir_for_tests(None);
         }
     }
 

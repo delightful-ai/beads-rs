@@ -76,12 +76,14 @@ thread_local! {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn set_data_dir_for_tests(path: Option<PathBuf>) {
     let lock = TEST_DATA_DIR.get_or_init(|| Mutex::new(None));
     *lock.lock().expect("test data dir lock poisoned") = path;
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn lock_data_dir_for_tests() -> std::sync::MutexGuard<'static, ()> {
     let lock = TEST_DATA_DIR_LOCK.get_or_init(|| Mutex::new(()));
     lock.lock().expect("test data dir lock poisoned")
@@ -97,6 +99,7 @@ fn test_data_dir_override() -> Option<PathBuf> {
 static TEST_DATA_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 #[cfg(test)]
+#[allow(dead_code)]
 static TEST_DATA_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Base directory for store data.

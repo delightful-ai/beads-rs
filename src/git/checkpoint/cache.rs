@@ -352,14 +352,6 @@ mod tests {
     };
     use crate::paths;
 
-    struct DataDirGuard;
-
-    impl Drop for DataDirGuard {
-        fn drop(&mut self) {
-            paths::set_data_dir_for_tests(None);
-        }
-    }
-
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
             WriteStamp::new(wall_ms, counter),
@@ -449,10 +441,8 @@ mod tests {
 
     #[test]
     fn cache_publish_updates_current_and_loads() {
-        let _lock = paths::lock_data_dir_for_tests();
         let temp = TempDir::new().expect("temp dir");
-        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
-        let _guard = DataDirGuard;
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([9u8; 16]));
         let export = build_export(store_id, 1_700_000_000_000);
@@ -482,10 +472,8 @@ mod tests {
 
     #[test]
     fn cache_prunes_old_entries() {
-        let _lock = paths::lock_data_dir_for_tests();
         let temp = TempDir::new().expect("temp dir");
-        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
-        let _guard = DataDirGuard;
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
         let cache = CheckpointCache::new(store_id, "core").with_keep_last(2);
@@ -503,10 +491,8 @@ mod tests {
 
     #[test]
     fn load_current_errors_on_missing_entry() {
-        let _lock = paths::lock_data_dir_for_tests();
         let temp = TempDir::new().expect("temp dir");
-        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
-        let _guard = DataDirGuard;
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([5u8; 16]));
         let cache = CheckpointCache::new(store_id, "core");

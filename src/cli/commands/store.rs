@@ -523,11 +523,9 @@ mod tests {
     where
         F: FnOnce(&TempDir),
     {
-        let _guard = paths::lock_data_dir_for_tests();
         let temp = TempDir::new().unwrap();
-        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
         f(&temp);
-        paths::set_data_dir_for_tests(None);
     }
 
     fn write_lock_meta(path: &Path, meta: &StoreLockMeta) {

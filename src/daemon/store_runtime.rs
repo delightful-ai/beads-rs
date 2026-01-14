@@ -520,14 +520,6 @@ mod tests {
     use crate::paths;
     use std::sync::Arc;
 
-    struct DataDirGuard;
-
-    impl Drop for DataDirGuard {
-        fn drop(&mut self) {
-            paths::set_data_dir_for_tests(None);
-        }
-    }
-
     fn write_meta_for(store_id: StoreId, replica_id: ReplicaId, now_ms: u64) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
         let versions = StoreMetaVersions::new(
@@ -544,10 +536,8 @@ mod tests {
 
     #[test]
     fn phase3_head_sha_loads_from_index() {
-        let _lock = paths::lock_data_dir_for_tests();
         let temp = TempDir::new().expect("temp dir");
-        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
-        let _guard = DataDirGuard;
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([10u8; 16]));
         let replica_id = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
@@ -601,10 +591,8 @@ mod tests {
 
     #[test]
     fn phase3_head_sha_rejects_missing_head() {
-        let _lock = paths::lock_data_dir_for_tests();
         let temp = TempDir::new().expect("temp dir");
-        paths::set_data_dir_for_tests(Some(temp.path().to_path_buf()));
-        let _guard = DataDirGuard;
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([20u8; 16]));
         let replica_id = ReplicaId::new(Uuid::from_bytes([21u8; 16]));
