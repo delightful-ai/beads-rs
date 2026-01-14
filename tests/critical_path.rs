@@ -101,6 +101,7 @@ struct TestRepo {
     remote_dir: TempDir,
     runtime_dir: TempDir,
     data_dir: PathBuf,
+    store_id: beads_rs::StoreId,
 }
 
 impl TestRepo {
@@ -147,12 +148,14 @@ impl TestRepo {
 
         let runtime_dir = TempDir::new().expect("failed to create runtime dir");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
+        let store_id = beads_rs::StoreId::new(uuid::Uuid::new_v4());
 
         Self {
             work_dir,
             remote_dir,
             runtime_dir,
             data_dir,
+            store_id,
         }
     }
 
@@ -161,7 +164,9 @@ impl TestRepo {
     }
 
     fn bd(&self) -> Command {
-        bd_with_runtime(self.path(), self.runtime_dir.path(), &self.data_dir)
+        let mut cmd = bd_with_runtime(self.path(), self.runtime_dir.path(), &self.data_dir);
+        cmd.env("BD_STORE_ID", self.store_id.to_string());
+        cmd
     }
 }
 
