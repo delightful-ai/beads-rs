@@ -9,6 +9,7 @@ pub mod ipc_stream;
 pub mod load_gen;
 pub mod mutation;
 pub mod receipt;
+pub mod realtime;
 pub mod repl_frames;
 pub mod repl_peer;
 pub mod repl_transport;
