@@ -282,7 +282,8 @@ fn run_outbound_session<S>(
 where
     S: SessionStore + Send + 'static,
 {
-    stream.set_nodelay(true)?;
+    let mut shutdown_stream = stream;
+    shutdown_stream.set_nodelay(true)?;
 
     let mut store = runtime.store.clone();
     let admission = runtime.admission.clone();
@@ -293,9 +294,10 @@ where
     let local_store = runtime.local_store;
     let local_replica_id = runtime.local_replica_id;
 
-    let reader_stream = stream.try_clone()?;
+    let reader_stream = shutdown_stream.try_clone()?;
+    let writer_stream = shutdown_stream.try_clone()?;
     let mut reader = FrameReader::new(reader_stream, limits.max_frame_bytes);
-    let mut writer = FrameWriter::new(stream, limits.max_frame_bytes);
+    let mut writer = FrameWriter::new(writer_stream, limits.max_frame_bytes);
 
     let (inbound_tx, inbound_rx) = crossbeam::channel::unbounded::<InboundMessage>();
     let reader_shutdown = shutdown.clone();
@@ -324,12 +326,14 @@ where
     let offered_set: BTreeSet<NamespaceId> = plan.offered_namespaces.iter().cloned().collect();
     let mut streaming = false;
     let mut sent_hot_cache = false;
+    let mut pending_events: Vec<BroadcastEvent> = Vec::new();
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
 
+        let tick = crossbeam::channel::after(Duration::from_millis(50));
         crossbeam::select! {
             recv(inbound_rx) -> msg => {
                 let msg = match msg {
@@ -378,6 +382,7 @@ where
                 };
 
                 if !streaming {
+                    pending_events.push(event);
                     continue;
                 }
                 if !offered_set.contains(&event.namespace) {
@@ -386,10 +391,19 @@ where
                 let frame = broadcast_to_frame(&event);
                 send_events(&mut writer, &session, vec![frame], &limits)?;
             }
+            recv(tick) -> _ => {}
         }
 
         if !streaming && session.phase() == SessionPhase::Streaming {
             streaming = true;
+        }
+        if streaming && !pending_events.is_empty() {
+            let frames = pending_events
+                .drain(..)
+                .filter(|event| offered_set.contains(&event.namespace))
+                .map(broadcast_to_frame)
+                .collect::<Vec<_>>();
+            send_events(&mut writer, &session, frames, &limits)?;
         }
         if streaming && !sent_hot_cache {
             send_hot_cache(&mut writer, &session, &broadcaster, &offered_set, &limits)?;
@@ -397,6 +411,7 @@ where
         }
     }
 
+    let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
     let _ = reader_handle.join();
     let _ = event_handle.join();
 
