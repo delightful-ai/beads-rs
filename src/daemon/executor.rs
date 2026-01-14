@@ -325,7 +325,8 @@ impl Daemon {
             let apply_start = Instant::now();
             if let Err(err) = apply_event(&mut store_runtime.repo_state.state, &draft.event_body) {
                 metrics::apply_err(apply_start.elapsed());
-                return Err(OpError::Internal(format!("apply_event failed: {err}")));
+                tracing::error!(error = ?err, "apply_event failed");
+                return Err(OpError::Internal("apply_event failed"));
             }
             metrics::apply_ok(apply_start.elapsed());
             let write_stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
