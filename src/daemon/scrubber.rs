@@ -15,6 +15,7 @@ use crate::daemon::store_runtime::StoreRuntime;
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use crate::daemon::wal::record::{Record, validate_header_matches_body};
 use crate::daemon::wal::segment::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
+use crate::daemon::wal::{WalIndex, WalIndexReader};
 use crate::git::checkpoint::CheckpointCache;
 use crate::paths;
 
@@ -54,7 +55,7 @@ struct SegmentInfo {
     segment_id: SegmentId,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct SegmentHandle {
     file: File,
     len: u64,
