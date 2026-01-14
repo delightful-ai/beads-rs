@@ -795,6 +795,8 @@ pub enum AdminCmd {
     /// Run admin scrub now checks.
     #[command(name = "scrub")]
     Scrub(AdminScrubArgs),
+    /// Show admin fingerprint for divergence detection.
+    Fingerprint(AdminFingerprintArgs),
     /// Toggle maintenance mode.
     Maintenance {
         #[command(subcommand)]
@@ -828,6 +830,16 @@ pub struct AdminScrubArgs {
     /// Verify checkpoint cache entries.
     #[arg(long)]
     pub verify_checkpoint_cache: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminFingerprintArgs {
+    /// Sample N shard indices per namespace.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=256))]
+    pub sample: Option<u16>,
+    /// Sampling nonce (auto-generated if omitted).
+    #[arg(long, requires = "sample")]
+    pub nonce: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

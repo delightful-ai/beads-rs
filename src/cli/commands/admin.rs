@@ -1,6 +1,8 @@
 use super::super::{AdminCmd, AdminMaintenanceCmd, Ctx, print_ok, send};
+use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
 use crate::Result;
 use crate::daemon::ipc::Request;
+use uuid::Uuid;
 
 pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
     match cmd {
@@ -36,6 +38,28 @@ pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
                 read: ctx.read_consistency(),
                 max_records_per_namespace: Some(args.max_records),
                 verify_checkpoint_cache: args.verify_checkpoint_cache,
+            };
+            let ok = send(&req)?;
+            print_ok(&ok, ctx.json)
+        }
+        AdminCmd::Fingerprint(args) => {
+            let (mode, sample) = match args.sample {
+                Some(shard_count) => {
+                    let nonce = args
+                        .nonce
+                        .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    (
+                        AdminFingerprintMode::Sample,
+                        Some(AdminFingerprintSample { shard_count, nonce }),
+                    )
+                }
+                None => (AdminFingerprintMode::Full, None),
+            };
+            let req = Request::AdminFingerprint {
+                repo: ctx.repo.clone(),
+                read: ctx.read_consistency(),
+                mode,
+                sample,
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
