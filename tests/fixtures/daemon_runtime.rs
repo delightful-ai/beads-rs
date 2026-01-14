@@ -57,13 +57,7 @@ fn daemon_pid(runtime_dir: &Path) -> Option<u32> {
 }
 
 fn wait_for_socket_removal(socket: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !socket.exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    let _ = poll_until(timeout, || !socket.exists());
 }
 
 fn terminate_process(pid: u32, timeout: Duration) {
@@ -79,17 +73,27 @@ fn terminate_process(pid: u32, timeout: Duration) {
 }
 
 fn wait_for_exit(pid: u32, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !process_alive(pid) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    let _ = poll_until(timeout, || !process_alive(pid));
 }
 
 fn process_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid as i32), None).is_ok()
+}
+
+fn poll_until<F>(timeout: Duration, mut condition: F) -> bool
+where
+    F: FnMut() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    let mut backoff = Duration::from_millis(5);
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(backoff);
+        backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(50));
+    }
+    condition()
 }
