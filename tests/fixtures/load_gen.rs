@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use beads_rs::daemon::ipc::{IpcError, MutationMeta, Request, Response, send_request, send_request_no_autostart};
+use beads_rs::daemon::ipc::{
+    IpcError, MutationMeta, Request, Response, send_request, send_request_no_autostart,
+};
 use beads_rs::{BeadType, Priority};
 
 #[derive(Debug, Error)]

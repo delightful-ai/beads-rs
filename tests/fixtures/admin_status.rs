@@ -5,10 +5,12 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use beads_rs::api::AdminStatusOutput;
-use beads_rs::daemon::ipc::{IpcError, ReadConsistency, Request, Response, ResponsePayload, send_request_no_autostart};
-use beads_rs::daemon::query::QueryResult;
 use beads_rs::Watermarks;
+use beads_rs::api::AdminStatusOutput;
+use beads_rs::daemon::ipc::{
+    IpcError, ReadConsistency, Request, Response, ResponsePayload, send_request_no_autostart,
+};
+use beads_rs::daemon::query::QueryResult;
 
 #[derive(Debug, Error)]
 pub enum StatusError {

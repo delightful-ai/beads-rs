@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use beads_rs::NamespaceId;
 use beads_rs::api::{StreamEvent, SubscribeInfo};
 use beads_rs::daemon::ipc::{
     IpcError, ReadConsistency, Request, Response, ResponsePayload, SubscriptionStream,
     subscribe_stream,
 };
-use beads_rs::{NamespaceId};
 
 #[derive(Debug)]
 pub enum StreamMessage {
@@ -130,8 +130,11 @@ mod tests {
     #[test]
     fn fixtures_ipc_stream_parses_event() {
         let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
-        let event_id =
-            EventId::new(origin, NamespaceId::core(), Seq1::from_u64(1).expect("seq1"));
+        let event_id = EventId::new(
+            origin,
+            NamespaceId::core(),
+            Seq1::from_u64(1).expect("seq1"),
+        );
         let body = EventBody {
             envelope_v: 1,
             store: StoreIdentity::new(

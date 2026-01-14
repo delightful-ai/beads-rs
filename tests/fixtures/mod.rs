@@ -1,9 +1,12 @@
+pub mod admin_status;
 pub mod apply_harness;
 pub mod cbor;
 pub mod checkpoint;
 pub mod checkpoint_diff;
 pub mod event_body;
 pub mod identity;
+pub mod ipc_stream;
+pub mod load_gen;
 pub mod mutation;
 pub mod receipt;
 pub mod repl_frames;
