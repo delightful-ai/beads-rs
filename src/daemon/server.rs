@@ -23,8 +23,12 @@ use super::ipc::{
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
+use super::repl::{WalRangeError, WalRangeReader};
 use crate::core::error::details as error_details;
-use crate::core::{ErrorCode, ErrorPayload, Limits, NamespaceId, decode_event_body};
+use crate::core::{
+    Applied, ErrorCode, ErrorPayload, EventFrameV1, EventId, Limits, NamespaceId, ReplicaId,
+    Sha256, Watermark, Watermarks, decode_event_body,
+};
 
 /// Message sent from socket handlers to state thread.
 pub enum ServerReply {
@@ -37,6 +41,8 @@ pub struct SubscribeReply {
     pub namespace: NamespaceId,
     pub subscription: EventSubscription,
     pub hot_cache: Vec<BroadcastEvent>,
+    pub backfill: Vec<EventFrameV1>,
+    pub backfill_end: HashMap<ReplicaId, u64>,
 }
 
 pub struct RequestMessage {
@@ -149,9 +155,29 @@ pub fn run_state_loop(
                                 }
                             };
                             let namespace = read.namespace().clone();
+                            let watermarks_applied = store_runtime.watermarks_applied.clone();
+                            let wal_reader = WalRangeReader::new(
+                                store_runtime.meta.store_id(),
+                                store_runtime.wal_index.clone(),
+                                daemon.limits().clone(),
+                            );
+                            let backfill = match build_backfill_plan(
+                                read.require_min_seen(),
+                                &namespace,
+                                &watermarks_applied,
+                                &wal_reader,
+                                daemon.limits(),
+                            ) {
+                                Ok(plan) => plan,
+                                Err(err) => {
+                                    let _ =
+                                        respond.send(ServerReply::Response(Response::err(err)));
+                                    continue;
+                                }
+                            };
                             let info = crate::api::SubscribeInfo {
                                 namespace: namespace.clone(),
-                                watermarks_applied: store_runtime.watermarks_applied.clone(),
+                                watermarks_applied,
                             };
                             let ack = Response::ok(ResponsePayload::subscribed(info));
                             let _ = respond.send(ServerReply::Subscribe(SubscribeReply {
@@ -159,6 +185,8 @@ pub fn run_state_loop(
                                 namespace,
                                 subscription,
                                 hot_cache,
+                                backfill: backfill.frames,
+                                backfill_end: backfill.last_seq,
                             }));
                             continue;
                         }
@@ -409,9 +437,19 @@ pub(super) fn handle_client(
 fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &Limits) {
     let namespace = reply.namespace;
     let subscriber_limits = subscriber_limits(limits);
+    let backfill_end = reply.backfill_end;
+
+    for frame in reply.backfill {
+        if !send_stream_frame(writer, frame, limits) {
+            return;
+        }
+    }
 
     for event in reply.hot_cache {
         if event.namespace != namespace {
+            continue;
+        }
+        if should_skip_backfill(&backfill_end, &event) {
             continue;
         }
         if !send_stream_event(writer, event, limits) {
@@ -424,6 +462,9 @@ fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &
         match subscription.recv() {
             Ok(event) => {
                 if event.namespace != namespace {
+                    continue;
+                }
+                if should_skip_backfill(&backfill_end, &event) {
                     continue;
                 }
                 if !send_stream_event(writer, event, limits) {
@@ -459,7 +500,42 @@ fn send_stream_event(writer: &mut UnixStream, event: BroadcastEvent, limits: &Li
 }
 
 fn stream_event_response(event: BroadcastEvent, limits: &Limits) -> Response {
-    let (_, body) = match decode_event_body(event.bytes.as_ref(), limits) {
+    stream_event_response_from_parts(
+        event.event_id,
+        event.sha256,
+        event.prev_sha256,
+        event.bytes.as_ref(),
+        limits,
+    )
+}
+
+fn send_stream_frame(writer: &mut UnixStream, frame: EventFrameV1, limits: &Limits) -> bool {
+    let response = stream_frame_response(&frame, limits);
+    let should_continue = !matches!(response, Response::Err { .. });
+    if send_response(writer, &response).is_err() {
+        return false;
+    }
+    should_continue
+}
+
+fn stream_frame_response(frame: &EventFrameV1, limits: &Limits) -> Response {
+    stream_event_response_from_parts(
+        frame.eid.clone(),
+        frame.sha256,
+        frame.prev_sha256,
+        frame.bytes.as_ref(),
+        limits,
+    )
+}
+
+fn stream_event_response_from_parts(
+    event_id: EventId,
+    sha256: Sha256,
+    prev_sha256: Option<Sha256>,
+    bytes: &[u8],
+    limits: &Limits,
+) -> Response {
+    let (_, body) = match decode_event_body(bytes, limits) {
         Ok(body) => body,
         Err(err) => {
             return Response::err(
@@ -472,14 +548,22 @@ fn stream_event_response(event: BroadcastEvent, limits: &Limits) -> Response {
     };
 
     let stream_event = crate::api::StreamEvent {
-        event_id: event.event_id,
-        sha256: hex::encode(event.sha256.as_bytes()),
-        prev_sha256: event.prev_sha256.map(|prev| hex::encode(prev.as_bytes())),
+        event_id,
+        sha256: hex::encode(sha256.as_bytes()),
+        prev_sha256: prev_sha256.map(|prev| hex::encode(prev.as_bytes())),
         body: crate::api::EventBody::from(&body),
-        body_bytes_hex: Some(hex::encode(event.bytes.as_ref())),
+        body_bytes_hex: Some(hex::encode(bytes)),
     };
 
     Response::ok(ResponsePayload::event(stream_event))
+}
+
+fn should_skip_backfill(backfill_end: &HashMap<ReplicaId, u64>, event: &BroadcastEvent) -> bool {
+    let origin = event.event_id.origin_replica_id;
+    let seq = event.event_id.origin_seq.get();
+    backfill_end
+        .get(&origin)
+        .is_some_and(|backfill_seq| seq <= *backfill_seq)
 }
 
 fn subscriber_limits(limits: &Limits) -> SubscriberLimits {
@@ -503,13 +587,307 @@ fn broadcast_error_to_op(err: BroadcastError) -> OpError {
     }
 }
 
+#[derive(Debug, Default)]
+struct BackfillPlan {
+    frames: Vec<EventFrameV1>,
+    last_seq: HashMap<ReplicaId, u64>,
+}
+
+trait WalRangeRead {
+    fn read_range(
+        &self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+        from_seq_excl: u64,
+        max_bytes: usize,
+    ) -> Result<Vec<EventFrameV1>, WalRangeError>;
+}
+
+impl WalRangeRead for WalRangeReader {
+    fn read_range(
+        &self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+        from_seq_excl: u64,
+        max_bytes: usize,
+    ) -> Result<Vec<EventFrameV1>, WalRangeError> {
+        WalRangeReader::read_range(self, namespace, origin, from_seq_excl, max_bytes)
+    }
+}
+
+fn build_backfill_plan<R: WalRangeRead>(
+    required: Option<&Watermarks<Applied>>,
+    namespace: &NamespaceId,
+    applied: &Watermarks<Applied>,
+    wal_reader: &R,
+    limits: &Limits,
+) -> Result<BackfillPlan, ErrorPayload> {
+    let Some(required) = required else {
+        return Ok(BackfillPlan::default());
+    };
+
+    let mut plan = BackfillPlan::default();
+    for (origin, required_mark) in required.origins(namespace) {
+        let required_seq = required_mark.seq().get();
+        let current_seq = applied
+            .get(namespace, origin)
+            .copied()
+            .unwrap_or_else(Watermark::genesis)
+            .seq()
+            .get();
+        debug_assert!(
+            current_seq >= required_seq,
+            "read gate should ensure applied >= required"
+        );
+
+        plan.last_seq.insert(*origin, current_seq);
+        if current_seq <= required_seq {
+            continue;
+        }
+
+        let mut from_seq_excl = required_seq;
+        while from_seq_excl < current_seq {
+            let frames = wal_reader
+                .read_range(
+                    namespace,
+                    origin,
+                    from_seq_excl,
+                    limits.max_event_batch_bytes,
+                )
+                .map_err(wal_range_error_payload)?;
+            let Some(last) = frames.last() else {
+                return Err(wal_range_error_payload(WalRangeError::MissingRange {
+                    namespace: namespace.clone(),
+                    origin: *origin,
+                    from_seq_excl,
+                }));
+            };
+            from_seq_excl = last.eid.origin_seq.get();
+            plan.frames.extend(frames);
+        }
+    }
+
+    Ok(plan)
+}
+
+fn wal_range_error_payload(err: WalRangeError) -> ErrorPayload {
+    match err {
+        WalRangeError::MissingRange { namespace, .. } => {
+            ErrorPayload::new(ErrorCode::BootstrapRequired, "bootstrap required", false)
+                .with_details(error_details::BootstrapRequiredDetails {
+                    namespaces: vec![namespace],
+                    reason: error_details::SnapshotRangeReason::RangeMissing,
+                })
+        }
+        other => other.as_error_payload(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use std::cell::RefCell;
     use uuid::Uuid;
 
-    use crate::core::{Canonical, EventBytes, EventId, ReplicaId, Seq1, Sha256};
+    use crate::core::{
+        Applied, Canonical, EventBytes, EventFrameV1, EventId, HeadStatus, Opaque, Seq0, Seq1,
+        Sha256, Watermarks,
+    };
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ReadCall {
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        from_seq_excl: u64,
+        max_bytes: usize,
+    }
+
+    #[derive(Default)]
+    struct FakeWalReader {
+        responses: RefCell<HashMap<(ReplicaId, u64), Result<Vec<EventFrameV1>, WalRangeError>>>,
+        calls: RefCell<Vec<ReadCall>>,
+    }
+
+    impl FakeWalReader {
+        fn with_response(
+            self,
+            origin: ReplicaId,
+            from_seq_excl: u64,
+            response: Result<Vec<EventFrameV1>, WalRangeError>,
+        ) -> Self {
+            self.responses
+                .borrow_mut()
+                .insert((origin, from_seq_excl), response);
+            self
+        }
+
+        fn calls(&self) -> Vec<ReadCall> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl WalRangeRead for FakeWalReader {
+        fn read_range(
+            &self,
+            namespace: &NamespaceId,
+            origin: &ReplicaId,
+            from_seq_excl: u64,
+            max_bytes: usize,
+        ) -> Result<Vec<EventFrameV1>, WalRangeError> {
+            self.calls.borrow_mut().push(ReadCall {
+                namespace: namespace.clone(),
+                origin: *origin,
+                from_seq_excl,
+                max_bytes,
+            });
+            self.responses
+                .borrow_mut()
+                .remove(&(*origin, from_seq_excl))
+                .expect("missing wal reader response")
+        }
+    }
+
+    fn frame(origin: ReplicaId, namespace: NamespaceId, seq: u64) -> EventFrameV1 {
+        EventFrameV1 {
+            eid: EventId::new(origin, namespace, Seq1::from_u64(seq).unwrap()),
+            sha256: Sha256([seq as u8; 32]),
+            prev_sha256: None,
+            bytes: EventBytes::<Opaque>::new(Bytes::from(vec![seq as u8])),
+        }
+    }
+
+    fn watermark(seq: u64) -> Watermark<Applied> {
+        Watermark::new(Seq0::new(seq), HeadStatus::Unknown).expect("watermark")
+    }
+
+    #[test]
+    fn backfill_plan_reads_ranges_and_tracks_last_seq() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
+
+        let mut required = Watermarks::<Applied>::new();
+        required
+            .observe_at_least(&namespace, &origin, watermark(2).seq(), HeadStatus::Unknown)
+            .unwrap();
+        let mut applied = Watermarks::<Applied>::new();
+        applied
+            .observe_at_least(&namespace, &origin, watermark(4).seq(), HeadStatus::Unknown)
+            .unwrap();
+
+        let frame3 = frame(origin, namespace.clone(), 3);
+        let frame4 = frame(origin, namespace.clone(), 4);
+        let reader = FakeWalReader::default()
+            .with_response(origin, 2, Ok(vec![frame3.clone()]))
+            .with_response(origin, 3, Ok(vec![frame4.clone()]));
+        let limits = Limits::default();
+
+        let plan =
+            build_backfill_plan(Some(&required), &namespace, &applied, &reader, &limits).unwrap();
+
+        assert_eq!(plan.frames, vec![frame3, frame4]);
+        assert_eq!(plan.last_seq.get(&origin), Some(&4));
+
+        let calls = reader.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls,
+            vec![
+                ReadCall {
+                    namespace: namespace.clone(),
+                    origin,
+                    from_seq_excl: 2,
+                    max_bytes: limits.max_event_batch_bytes,
+                },
+                ReadCall {
+                    namespace: namespace.clone(),
+                    origin,
+                    from_seq_excl: 3,
+                    max_bytes: limits.max_event_batch_bytes,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn backfill_missing_range_is_bootstrap_required() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+
+        let mut required = Watermarks::<Applied>::new();
+        required
+            .observe_at_least(&namespace, &origin, watermark(1).seq(), HeadStatus::Unknown)
+            .unwrap();
+        let mut applied = Watermarks::<Applied>::new();
+        applied
+            .observe_at_least(&namespace, &origin, watermark(2).seq(), HeadStatus::Unknown)
+            .unwrap();
+
+        let reader = FakeWalReader::default().with_response(
+            origin,
+            1,
+            Err(WalRangeError::MissingRange {
+                namespace: namespace.clone(),
+                origin,
+                from_seq_excl: 1,
+            }),
+        );
+
+        let err = build_backfill_plan(
+            Some(&required),
+            &namespace,
+            &applied,
+            &reader,
+            &Limits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::BootstrapRequired);
+        let details = err
+            .details_as::<error_details::BootstrapRequiredDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.namespaces, vec![namespace]);
+        assert_eq!(
+            details.reason,
+            error_details::SnapshotRangeReason::RangeMissing
+        );
+    }
+
+    #[test]
+    fn backfill_corrupt_range_is_corruption() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
+
+        let mut required = Watermarks::<Applied>::new();
+        required
+            .observe_at_least(&namespace, &origin, watermark(1).seq(), HeadStatus::Unknown)
+            .unwrap();
+        let mut applied = Watermarks::<Applied>::new();
+        applied
+            .observe_at_least(&namespace, &origin, watermark(2).seq(), HeadStatus::Unknown)
+            .unwrap();
+
+        let reader = FakeWalReader::default().with_response(
+            origin,
+            1,
+            Err(WalRangeError::Corrupt {
+                namespace: namespace.clone(),
+                segment_id: None,
+                offset: None,
+                reason: "boom".to_string(),
+            }),
+        );
+
+        let err = build_backfill_plan(
+            Some(&required),
+            &namespace,
+            &applied,
+            &reader,
+            &Limits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Corruption);
+    }
 
     #[test]
     fn stream_event_decode_failure_is_corruption() {
