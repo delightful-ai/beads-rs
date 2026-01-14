@@ -498,7 +498,7 @@ impl Daemon {
         self.path_to_remote.insert(repo.to_owned(), remote.clone());
 
         if !self.stores.contains_key(&store_id) {
-            let runtime = StoreRuntime::open(
+            let open = StoreRuntime::open(
                 store_id,
                 remote.clone(),
                 Arc::clone(&self.wal),
@@ -506,6 +506,7 @@ impl Daemon {
                 env!("CARGO_PKG_VERSION"),
                 self.limits(),
             )?;
+            let runtime = open.runtime;
             if let Some(hlc_state) = runtime.hlc_state_for_actor(&self.actor)? {
                 self.clock.receive(&hlc_state);
             }
@@ -585,7 +586,7 @@ impl Daemon {
         self.path_to_remote.insert(repo.to_owned(), remote.clone());
 
         if !self.stores.contains_key(&store_id) {
-            let runtime = StoreRuntime::open(
+            let open = StoreRuntime::open(
                 store_id,
                 remote.clone(),
                 Arc::clone(&self.wal),
@@ -593,6 +594,7 @@ impl Daemon {
                 env!("CARGO_PKG_VERSION"),
                 self.limits(),
             )?;
+            let runtime = open.runtime;
             if let Some(hlc_state) = runtime.hlc_state_for_actor(&self.actor)? {
                 self.clock.receive(&hlc_state);
             }
@@ -2737,7 +2739,8 @@ mod tests {
             env!("CARGO_PKG_VERSION"),
             daemon.limits(),
         )
-        .unwrap();
+        .unwrap()
+        .runtime;
         daemon.remote_to_store_id.insert(remote.clone(), store_id);
         daemon.stores.insert(store_id, runtime);
         store_id

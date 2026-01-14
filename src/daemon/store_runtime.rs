@@ -53,9 +53,13 @@ pub struct StoreRuntime {
     pub(crate) wal: Arc<Wal>,
     #[allow(dead_code)]
     pub(crate) wal_index: Arc<SqliteWalIndex>,
-    pub(crate) replay_stats: ReplayStats,
     #[allow(dead_code)]
     lock: StoreLock,
+}
+
+pub struct StoreRuntimeOpen {
+    pub runtime: StoreRuntime,
+    pub replay_stats: ReplayStats,
 }
 
 impl StoreRuntime {
@@ -66,7 +70,7 @@ impl StoreRuntime {
         now_ms: u64,
         daemon_version: &str,
         limits: &Limits,
-    ) -> Result<Self, StoreRuntimeError> {
+    ) -> Result<StoreRuntimeOpen, StoreRuntimeError> {
         let meta_path = paths::store_meta_path(store_id);
         let existing = read_store_meta_optional(&meta_path)?;
 
@@ -101,21 +105,20 @@ impl StoreRuntime {
 
         let store_dir = paths::store_dir(store_id);
         let (mut wal_index, needs_rebuild) = open_wal_index(store_id, &store_dir, &meta)?;
-        let mut replay_stats = ReplayStats::default();
-        if needs_rebuild {
-            replay_stats = rebuild_index(&store_dir, &meta, &wal_index, limits)?;
+        let replay_stats = if needs_rebuild {
+            rebuild_index(&store_dir, &meta, &wal_index, limits)?
         } else {
             match catch_up_index(&store_dir, &meta, &wal_index, limits) {
-                Ok(stats) => replay_stats = stats,
+                Ok(stats) => stats,
                 Err(WalReplayError::IndexOffsetInvalid { .. }) => {
                     remove_wal_index_files(store_id)?;
                     wal_index =
                         SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache)?;
-                    replay_stats = rebuild_index(&store_dir, &meta, &wal_index, limits)?;
+                    rebuild_index(&store_dir, &meta, &wal_index, limits)?
                 }
                 Err(err) => return Err(StoreRuntimeError::WalReplay(Box::new(err))),
             }
-        }
+        };
 
         let (watermarks_applied, watermarks_durable) = load_watermarks(&wal_index)?;
         let broadcaster = EventBroadcaster::new(BroadcasterLimits::from_limits(limits));
@@ -142,7 +145,7 @@ impl StoreRuntime {
             });
         }
 
-        Ok(Self {
+        let runtime = Self {
             primary_remote,
             meta,
             policies: default_policies(),
@@ -154,8 +157,12 @@ impl StoreRuntime {
             peer_acks,
             wal,
             wal_index: Arc::new(wal_index),
-            replay_stats,
             lock,
+        };
+
+        Ok(StoreRuntimeOpen {
+            runtime,
+            replay_stats,
         })
     }
 
@@ -525,7 +532,8 @@ mod tests {
             "test",
             &Limits::default(),
         )
-        .expect("open runtime");
+        .expect("open runtime")
+        .runtime;
 
         let applied = runtime
             .watermarks_applied
