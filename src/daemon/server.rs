@@ -170,8 +170,8 @@ pub fn run_state_loop(
                             ) {
                                 Ok(plan) => plan,
                                 Err(err) => {
-                                    let _ =
-                                        respond.send(ServerReply::Response(Response::err(err)));
+                                    let _ = respond
+                                        .send(ServerReply::Response(Response::err(*err)));
                                     continue;
                                 }
                             };
@@ -621,7 +621,7 @@ fn build_backfill_plan<R: WalRangeRead>(
     applied: &Watermarks<Applied>,
     wal_reader: &R,
     limits: &Limits,
-) -> Result<BackfillPlan, ErrorPayload> {
+) -> Result<BackfillPlan, Box<ErrorPayload>> {
     let Some(required) = required else {
         return Ok(BackfillPlan::default());
     };
@@ -670,8 +670,8 @@ fn build_backfill_plan<R: WalRangeRead>(
     Ok(plan)
 }
 
-fn wal_range_error_payload(err: WalRangeError) -> ErrorPayload {
-    match err {
+fn wal_range_error_payload(err: WalRangeError) -> Box<ErrorPayload> {
+    Box::new(match err {
         WalRangeError::MissingRange { namespace, .. } => {
             ErrorPayload::new(ErrorCode::BootstrapRequired, "bootstrap required", false)
                 .with_details(error_details::BootstrapRequiredDetails {
@@ -680,7 +680,7 @@ fn wal_range_error_payload(err: WalRangeError) -> ErrorPayload {
                 })
         }
         other => other.as_error_payload(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -833,7 +833,7 @@ mod tests {
             }),
         );
 
-        let err = build_backfill_plan(
+        let err = *build_backfill_plan(
             Some(&required),
             &namespace,
             &applied,
@@ -878,7 +878,7 @@ mod tests {
             }),
         );
 
-        let err = build_backfill_plan(
+        let err = *build_backfill_plan(
             Some(&required),
             &namespace,
             &applied,
