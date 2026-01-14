@@ -1774,6 +1774,82 @@ pub fn send_request_no_autostart(req: &Request) -> Result<Response, IpcError> {
     send_request_over_stream(stream, req)
 }
 
+/// Stream responses for a subscribe request.
+pub struct SubscriptionStream {
+    reader: BufReader<UnixStream>,
+}
+
+impl SubscriptionStream {
+    pub fn read_response(&mut self) -> Result<Option<Response>, IpcError> {
+        let mut line = String::new();
+        let bytes_read = self.reader.read_line(&mut line)?;
+        if bytes_read == 0 || line.trim().is_empty() {
+            return Ok(None);
+        }
+        let response = serde_json::from_str(&line)?;
+        Ok(Some(response))
+    }
+}
+
+/// Send a subscribe request and return a stream of responses.
+pub fn subscribe_stream(req: &Request) -> Result<SubscriptionStream, IpcError> {
+    if !matches!(req, Request::Subscribe { .. }) {
+        return Err(IpcError::InvalidRequest {
+            field: Some("op".into()),
+            reason: "subscribe_stream expects subscribe request".into(),
+        });
+    }
+
+    const MAX_ATTEMPTS: u32 = 3;
+    let socket = socket_path();
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let stream = match connect_with_autostart(&socket) {
+            Ok(s) => s,
+            Err(e) => {
+                if attempt >= MAX_ATTEMPTS {
+                    return Err(e);
+                }
+                let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
+                std::thread::sleep(backoff);
+                continue;
+            }
+        };
+
+        let mut writer = stream;
+        let reader_stream = writer.try_clone()?;
+        let mut reader = BufReader::new(reader_stream);
+
+        if let Err(err) = verify_daemon_version(&mut writer, &mut reader) {
+            match err {
+                IpcError::DaemonVersionMismatch { daemon, .. } if attempt < MAX_ATTEMPTS => {
+                    tracing::info!(
+                        "daemon version mismatch, restarting (attempt {}/{})",
+                        attempt,
+                        MAX_ATTEMPTS
+                    );
+                    if let Some(info) = daemon {
+                        let _ = kill_daemon_forcefully(info.pid, &socket);
+                    } else {
+                        let _ = try_restart_daemon_by_socket(&socket);
+                    }
+                    let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
+                    std::thread::sleep(backoff);
+                    continue;
+                }
+                _ => return Err(err),
+            }
+        }
+
+        write_req_line(&mut writer, req)?;
+        return Ok(SubscriptionStream { reader });
+    }
+
+    Err(IpcError::DaemonUnavailable(
+        "max retry attempts exceeded".into(),
+    ))
+}
+
 /// Wait for daemon to be ready and responding with expected version.
 ///
 /// Returns Ok if daemon is responsive with matching version, Err on timeout (30s).
