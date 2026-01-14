@@ -268,6 +268,31 @@ pub struct AdminFingerprintShard {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminReloadPoliciesOutput {
+    pub applied: Vec<AdminPolicyDiff>,
+    pub requires_restart: Vec<AdminPolicyDiff>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminPolicyDiff {
+    pub namespace: NamespaceId,
+    pub changes: Vec<AdminPolicyChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminPolicyChange {
+    pub field: String,
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRotateReplicaIdOutput {
+    pub old_replica_id: ReplicaId,
+    pub new_replica_id: ReplicaId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminMaintenanceModeOutput {
     pub enabled: bool,
 }

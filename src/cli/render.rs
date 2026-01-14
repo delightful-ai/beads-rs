@@ -6,9 +6,10 @@
 use crate::api::{
     AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode, AdminFingerprintOutput,
     AdminFingerprintSample, AdminHealthReport, AdminHealthStatus, AdminMaintenanceModeOutput,
-    AdminMetricsOutput, AdminRebuildIndexOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue,
-    CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary, Note,
-    StatusOutput, SyncWarning, Tombstone,
+    AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadPoliciesOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult,
+    DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary, Note, StatusOutput,
+    SyncWarning, Tombstone,
 };
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
@@ -497,6 +498,8 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::AdminDoctor(out) => render_admin_doctor(out),
         QueryResult::AdminScrub(out) => render_admin_scrub(out),
         QueryResult::AdminFingerprint(out) => render_admin_fingerprint(out),
+        QueryResult::AdminReloadPolicies(out) => render_admin_reload_policies(out),
+        QueryResult::AdminRotateReplicaId(out) => render_admin_rotate_replica_id(out),
         QueryResult::AdminMaintenanceMode(out) => render_admin_maintenance(out),
         QueryResult::AdminRebuildIndex(out) => render_admin_rebuild_index(out),
         QueryResult::Validation { warnings } => {
@@ -699,6 +702,48 @@ fn render_admin_fingerprint(out: &AdminFingerprintOutput) -> String {
         }
     }
     out_str.trim_end().into()
+}
+
+fn render_admin_reload_policies(out: &AdminReloadPoliciesOutput) -> String {
+    let mut out_str = String::new();
+    out_str.push_str("Admin Reload Policies\n");
+    out_str.push_str("=====================\n\n");
+    if out.applied.is_empty() {
+        out_str.push_str("applied: (none)\n");
+    } else {
+        out_str.push_str("applied:\n");
+        for diff in &out.applied {
+            out_str.push_str(&format!("  {}:\n", diff.namespace.as_str()));
+            for change in &diff.changes {
+                out_str.push_str(&format!(
+                    "    {}: {} -> {}\n",
+                    change.field, change.before, change.after
+                ));
+            }
+        }
+    }
+    if out.requires_restart.is_empty() {
+        out_str.push_str("\nrequires_restart: (none)\n");
+    } else {
+        out_str.push_str("\nrequires_restart:\n");
+        for diff in &out.requires_restart {
+            out_str.push_str(&format!("  {}:\n", diff.namespace.as_str()));
+            for change in &diff.changes {
+                out_str.push_str(&format!(
+                    "    {}: {} -> {}\n",
+                    change.field, change.before, change.after
+                ));
+            }
+        }
+    }
+    out_str.trim_end().into()
+}
+
+fn render_admin_rotate_replica_id(out: &AdminRotateReplicaIdOutput) -> String {
+    format!(
+        "replica_id rotated: {} -> {}",
+        out.old_replica_id, out.new_replica_id
+    )
 }
 
 fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {

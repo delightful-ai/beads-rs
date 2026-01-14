@@ -1,6 +1,6 @@
 //! Admin / introspection handlers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -9,11 +9,13 @@ use crossbeam::channel::Sender;
 use crate::api::{
     AdminCheckpointGroup, AdminDoctorOutput, AdminFingerprintMode, AdminFingerprintOutput,
     AdminFingerprintSample, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
-    AdminMetricSample, AdminMetricsOutput, AdminRebuildIndexOutput, AdminRebuildIndexStats,
-    AdminRebuildIndexTruncation, AdminReplicationNamespace, AdminReplicationPeer, AdminScrubOutput,
-    AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
+    AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
+    AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
+    AdminReloadPoliciesOutput, AdminReplicationNamespace, AdminReplicationPeer,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalNamespace,
+    AdminWalSegment,
 };
-use crate::core::{NamespaceId, ReplicaId, Watermarks};
+use crate::core::{NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, Watermarks};
 use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_namespaces};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::scrubber::{ScrubOptions, scrub_store};
@@ -316,6 +318,80 @@ impl Daemon {
         )))
     }
 
+    pub fn admin_reload_policies(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => return Response::err(err),
+        };
+        let store_id = proof.store_id();
+        let store = match self.store_runtime_mut(&proof) {
+            Ok(store) => store,
+            Err(err) => return Response::err(err),
+        };
+
+        let path = crate::paths::namespaces_path(store_id);
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                return Response::err(OpError::ValidationFailed {
+                    field: "namespaces".into(),
+                    reason: format!("failed to read {}: {err}", path.display()),
+                });
+            }
+        };
+        let policies = match NamespacePolicies::from_toml_str(&raw) {
+            Ok(policies) => policies,
+            Err(err) => {
+                return Response::err(OpError::ValidationFailed {
+                    field: "namespaces".into(),
+                    reason: format!("policy parse failed: {err}"),
+                });
+            }
+        };
+
+        let reload = diff_policy_reload(&store.policies, &policies.namespaces);
+        store.policies = reload.updated;
+
+        let output = AdminReloadPoliciesOutput {
+            applied: reload.applied,
+            requires_restart: reload.requires_restart,
+        };
+        Response::ok(ResponsePayload::Query(QueryResult::AdminReloadPolicies(
+            output,
+        )))
+    }
+
+    pub fn admin_rotate_replica_id(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => return Response::err(err),
+        };
+        let store_id = proof.store_id();
+        let store = match self.store_runtime_mut(&proof) {
+            Ok(store) => store,
+            Err(err) => return Response::err(err),
+        };
+
+        let (old_replica_id, new_replica_id) = match store.rotate_replica_id() {
+            Ok(ids) => ids,
+            Err(err) => return Response::err(OpError::StoreRuntime(Box::new(err))),
+        };
+        tracing::warn!(
+            store_id = %store_id,
+            old_replica_id = %old_replica_id,
+            new_replica_id = %new_replica_id,
+            "replica_id rotated"
+        );
+
+        let output = AdminRotateReplicaIdOutput {
+            old_replica_id,
+            new_replica_id,
+        };
+        Response::ok(ResponsePayload::Query(QueryResult::AdminRotateReplicaId(
+            output,
+        )))
+    }
+
     pub fn admin_maintenance_mode(
         &mut self,
         repo: &Path,
@@ -561,4 +637,201 @@ fn to_metric_labels(labels: Vec<MetricLabel>) -> Vec<AdminMetricLabel> {
             value: label.value,
         })
         .collect()
+}
+
+struct PolicyReloadSummary {
+    applied: Vec<AdminPolicyDiff>,
+    requires_restart: Vec<AdminPolicyDiff>,
+    updated: BTreeMap<NamespaceId, NamespacePolicy>,
+}
+
+fn diff_policy_reload(
+    current: &BTreeMap<NamespaceId, NamespacePolicy>,
+    desired: &BTreeMap<NamespaceId, NamespacePolicy>,
+) -> PolicyReloadSummary {
+    let mut applied = Vec::new();
+    let mut requires_restart = Vec::new();
+    let mut updated = current.clone();
+
+    let mut namespaces = BTreeSet::new();
+    namespaces.extend(current.keys().cloned());
+    namespaces.extend(desired.keys().cloned());
+
+    for namespace in namespaces {
+        match (current.get(&namespace), desired.get(&namespace)) {
+            (Some(old), Some(new)) => {
+                let mut updated_policy = old.clone();
+                let (safe, restart) = diff_namespace_policy(old, new, &mut updated_policy);
+                if !safe.is_empty() {
+                    applied.push(AdminPolicyDiff {
+                        namespace: namespace.clone(),
+                        changes: safe,
+                    });
+                }
+                if !restart.is_empty() {
+                    requires_restart.push(AdminPolicyDiff {
+                        namespace: namespace.clone(),
+                        changes: restart,
+                    });
+                }
+                updated.insert(namespace.clone(), updated_policy);
+            }
+            (None, Some(_)) => {
+                requires_restart.push(AdminPolicyDiff {
+                    namespace: namespace.clone(),
+                    changes: vec![AdminPolicyChange {
+                        field: "namespace".to_string(),
+                        before: "absent".to_string(),
+                        after: "added".to_string(),
+                    }],
+                });
+            }
+            (Some(_), None) => {
+                requires_restart.push(AdminPolicyDiff {
+                    namespace: namespace.clone(),
+                    changes: vec![AdminPolicyChange {
+                        field: "namespace".to_string(),
+                        before: "present".to_string(),
+                        after: "removed".to_string(),
+                    }],
+                });
+            }
+            (None, None) => {}
+        }
+    }
+
+    PolicyReloadSummary {
+        applied,
+        requires_restart,
+        updated,
+    }
+}
+
+fn diff_namespace_policy(
+    current: &NamespacePolicy,
+    desired: &NamespacePolicy,
+    updated: &mut NamespacePolicy,
+) -> (Vec<AdminPolicyChange>, Vec<AdminPolicyChange>) {
+    let mut safe = Vec::new();
+    let mut restart = Vec::new();
+
+    if current.visibility != desired.visibility {
+        safe.push(policy_change(
+            "visibility",
+            format_visibility(current.visibility),
+            format_visibility(desired.visibility),
+        ));
+        updated.visibility = desired.visibility;
+    }
+
+    if current.ready_eligible != desired.ready_eligible {
+        safe.push(policy_change(
+            "ready_eligible",
+            format_bool(current.ready_eligible),
+            format_bool(desired.ready_eligible),
+        ));
+        updated.ready_eligible = desired.ready_eligible;
+    }
+
+    if current.retention != desired.retention {
+        safe.push(policy_change(
+            "retention",
+            format_retention(current.retention),
+            format_retention(desired.retention),
+        ));
+        updated.retention = desired.retention;
+    }
+
+    if current.ttl_basis != desired.ttl_basis {
+        safe.push(policy_change(
+            "ttl_basis",
+            format_ttl_basis(current.ttl_basis),
+            format_ttl_basis(desired.ttl_basis),
+        ));
+        updated.ttl_basis = desired.ttl_basis;
+    }
+
+    if current.persist_to_git != desired.persist_to_git {
+        restart.push(policy_change(
+            "persist_to_git",
+            format_bool(current.persist_to_git),
+            format_bool(desired.persist_to_git),
+        ));
+    }
+
+    if current.replicate_mode != desired.replicate_mode {
+        restart.push(policy_change(
+            "replicate_mode",
+            format_replicate_mode(current.replicate_mode),
+            format_replicate_mode(desired.replicate_mode),
+        ));
+    }
+
+    if current.gc_authority != desired.gc_authority {
+        restart.push(policy_change(
+            "gc_authority",
+            format_gc_authority(current.gc_authority),
+            format_gc_authority(desired.gc_authority),
+        ));
+    }
+
+    (safe, restart)
+}
+
+fn policy_change(field: &str, before: String, after: String) -> AdminPolicyChange {
+    AdminPolicyChange {
+        field: field.to_string(),
+        before,
+        after,
+    }
+}
+
+fn format_bool(value: bool) -> String {
+    if value {
+        "true".to_string()
+    } else {
+        "false".to_string()
+    }
+}
+
+fn format_visibility(value: crate::core::NamespaceVisibility) -> String {
+    match value {
+        crate::core::NamespaceVisibility::Normal => "normal".to_string(),
+        crate::core::NamespaceVisibility::Pinned => "pinned".to_string(),
+    }
+}
+
+fn format_replicate_mode(value: crate::core::ReplicateMode) -> String {
+    match value {
+        crate::core::ReplicateMode::None => "none".to_string(),
+        crate::core::ReplicateMode::Anchors => "anchors".to_string(),
+        crate::core::ReplicateMode::Peers => "peers".to_string(),
+        crate::core::ReplicateMode::P2p => "p2p".to_string(),
+    }
+}
+
+fn format_retention(value: crate::core::RetentionPolicy) -> String {
+    match value {
+        crate::core::RetentionPolicy::Forever => "forever".to_string(),
+        crate::core::RetentionPolicy::Ttl { ttl_ms } => format!("ttl:{ttl_ms}ms"),
+        crate::core::RetentionPolicy::Size { max_bytes } => format!("size:{max_bytes}bytes"),
+    }
+}
+
+fn format_ttl_basis(value: crate::core::TtlBasis) -> String {
+    match value {
+        crate::core::TtlBasis::LastMutationStamp => "last_mutation_stamp".to_string(),
+        crate::core::TtlBasis::EventTime => "event_time".to_string(),
+        crate::core::TtlBasis::ExplicitField => "explicit_field".to_string(),
+    }
+}
+
+fn format_gc_authority(value: crate::core::GcAuthority) -> String {
+    match value {
+        crate::core::GcAuthority::CheckpointWriter => "checkpoint_writer".to_string(),
+        crate::core::GcAuthority::ExplicitReplica { replica_id } => {
+            format!("explicit_replica:{replica_id}")
+        }
+        crate::core::GcAuthority::None => "none".to_string(),
+    }
 }

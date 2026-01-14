@@ -63,6 +63,20 @@ pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
+        AdminCmd::ReloadPolicies => {
+            let req = Request::AdminReloadPolicies {
+                repo: ctx.repo.clone(),
+            };
+            let ok = send(&req)?;
+            print_ok(&ok, ctx.json)
+        }
+        AdminCmd::RotateReplicaId => {
+            let req = Request::AdminRotateReplicaId {
+                repo: ctx.repo.clone(),
+            };
+            let ok = send(&req)?;
+            print_ok(&ok, ctx.json)
+        }
         AdminCmd::Maintenance { cmd } => {
             let enabled = matches!(cmd, AdminMaintenanceCmd::On);
             let req = Request::AdminMaintenanceMode {

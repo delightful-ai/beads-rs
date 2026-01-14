@@ -2220,6 +2220,10 @@ impl Daemon {
                 sample,
             } => self.admin_fingerprint(&repo, read, mode, sample, git_tx),
 
+            Request::AdminReloadPolicies { repo } => self.admin_reload_policies(&repo, git_tx),
+
+            Request::AdminRotateReplicaId { repo } => self.admin_rotate_replica_id(&repo, git_tx),
+
             Request::AdminMaintenanceMode { repo, enabled } => {
                 self.admin_maintenance_mode(&repo, enabled, git_tx)
             }

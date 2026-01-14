@@ -1,11 +1,14 @@
 //! Phase 7 tests: admin status and metrics IPC ops.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
 use tempfile::TempDir;
+
+use beads_rs::{NamespaceId, NamespacePolicies, NamespacePolicy, ReplicateMode};
 
 struct AdminFixture {
     runtime_dir: TempDir,
@@ -215,6 +218,82 @@ fn admin_scrub_reports_segment_header_failure() {
         .find(|check| check["id"].as_str() == Some("wal_frames"))
         .expect("wal_frames check");
     assert_eq!(wal_frames["status"], "fail");
+}
+
+#[test]
+fn admin_reload_policies_reports_safe_and_restart_changes() {
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("admin reload policies");
+
+    let status_output = fixture
+        .bd()
+        .args(["admin", "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_payload: serde_json::Value =
+        serde_json::from_slice(&status_output).expect("parse status json");
+    let store_id = status_payload["data"]["store_id"]
+        .as_str()
+        .expect("store_id");
+
+    let mut core_policy = NamespacePolicy::core_default();
+    core_policy.ready_eligible = false;
+    core_policy.replicate_mode = ReplicateMode::Anchors;
+    let mut namespaces = BTreeMap::new();
+    namespaces.insert(NamespaceId::core(), core_policy);
+    let policies = NamespacePolicies { namespaces };
+    let toml = toml::to_string(&policies).expect("serialize policies toml");
+    let policy_path = fixture
+        .data_dir()
+        .join("stores")
+        .join(store_id)
+        .join("namespaces.toml");
+    fs::write(&policy_path, toml).expect("write namespaces.toml");
+
+    let output = fixture
+        .bd()
+        .args(["admin", "reload-policies", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
+    assert_eq!(payload["result"], "admin_reload_policies");
+
+    let applied = payload["data"]["applied"]
+        .as_array()
+        .expect("applied array");
+    let requires_restart = payload["data"]["requires_restart"]
+        .as_array()
+        .expect("requires_restart array");
+
+    let applied_core = applied
+        .iter()
+        .find(|diff| diff["namespace"].as_str() == Some("core"))
+        .expect("applied core diff");
+    let applied_changes = applied_core["changes"].as_array().expect("applied changes");
+    assert!(
+        applied_changes
+            .iter()
+            .any(|change| change["field"].as_str() == Some("ready_eligible"))
+    );
+
+    let restart_core = requires_restart
+        .iter()
+        .find(|diff| diff["namespace"].as_str() == Some("core"))
+        .expect("restart core diff");
+    let restart_changes = restart_core["changes"].as_array().expect("restart changes");
+    assert!(
+        restart_changes
+            .iter()
+            .any(|change| change["field"].as_str() == Some("replicate_mode"))
+    );
 }
 
 #[test]

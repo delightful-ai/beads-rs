@@ -797,6 +797,12 @@ pub enum AdminCmd {
     Scrub(AdminScrubArgs),
     /// Show admin fingerprint for divergence detection.
     Fingerprint(AdminFingerprintArgs),
+    /// Reload namespace policies from namespaces.toml.
+    #[command(name = "reload-policies")]
+    ReloadPolicies,
+    /// Rotate the local replica id.
+    #[command(name = "rotate-replica-id")]
+    RotateReplicaId,
     /// Toggle maintenance mode.
     Maintenance {
         #[command(subcommand)]

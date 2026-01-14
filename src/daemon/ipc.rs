@@ -397,6 +397,12 @@ pub enum Request {
         sample: Option<AdminFingerprintSample>,
     },
 
+    /// Admin reload namespace policies.
+    AdminReloadPolicies { repo: PathBuf },
+
+    /// Admin rotate replica id.
+    AdminRotateReplicaId { repo: PathBuf },
+
     /// Admin maintenance mode toggle.
     AdminMaintenanceMode { repo: PathBuf, enabled: bool },
 

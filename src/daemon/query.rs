@@ -13,11 +13,14 @@ use crate::api::{
     AdminDoctorOutput as ApiAdminDoctorOutput, AdminFingerprintOutput as ApiAdminFingerprintOutput,
     AdminMaintenanceModeOutput as ApiAdminMaintenanceModeOutput,
     AdminMetricsOutput as ApiAdminMetricsOutput,
-    AdminRebuildIndexOutput as ApiAdminRebuildIndexOutput, AdminScrubOutput as ApiAdminScrubOutput,
-    AdminStatusOutput as ApiAdminStatusOutput, BlockedIssue as ApiBlockedIssue,
-    CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo, DeletedLookup as ApiDeletedLookup,
-    DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue, IssueSummary, Note as ApiNote,
-    ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput, Tombstone as ApiTombstone,
+    AdminRebuildIndexOutput as ApiAdminRebuildIndexOutput,
+    AdminReloadPoliciesOutput as ApiAdminReloadPoliciesOutput,
+    AdminRotateReplicaIdOutput as ApiAdminRotateReplicaIdOutput,
+    AdminScrubOutput as ApiAdminScrubOutput, AdminStatusOutput as ApiAdminStatusOutput,
+    BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo,
+    DeletedLookup as ApiDeletedLookup, DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue,
+    IssueSummary, Note as ApiNote, ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput,
+    Tombstone as ApiTombstone,
 };
 use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
 
@@ -505,6 +508,12 @@ pub enum QueryResult {
 
     /// Admin fingerprint report.
     AdminFingerprint(ApiAdminFingerprintOutput),
+
+    /// Admin reload policies report.
+    AdminReloadPolicies(ApiAdminReloadPoliciesOutput),
+
+    /// Admin rotate replica id report.
+    AdminRotateReplicaId(ApiAdminRotateReplicaIdOutput),
 
     /// Maintenance mode toggle.
     AdminMaintenanceMode(ApiAdminMaintenanceModeOutput),
