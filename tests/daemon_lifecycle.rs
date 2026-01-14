@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Barrier};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use tempfile::TempDir;
@@ -153,6 +153,17 @@ impl DaemonFixture {
         }
     }
 
+    fn wait_for_cleanup(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !self.socket_path().exists() && !self.meta_path().exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        !self.socket_path().exists() && !self.meta_path().exists()
+    }
+
     fn process_alive(pid: u32) -> bool {
         use nix::sys::signal::kill;
         use nix::unistd::Pid;
@@ -250,7 +261,10 @@ fn test_no_orphaned_daemons() {
         seen_pids.push(pid);
         fixture.kill_daemon_forcefully();
         fixture.unlock_store();
-        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !DaemonFixture::process_alive(pid),
+            "daemon {pid} should be dead after kill"
+        );
     }
 
     // Start one more
@@ -413,8 +427,10 @@ fn test_graceful_shutdown_cleans_up() {
     );
 
     // Socket and meta files should be cleaned up
-    // (Give a moment for cleanup to complete)
-    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        fixture.wait_for_cleanup(Duration::from_secs(2)),
+        "daemon cleanup should remove socket + meta"
+    );
     assert!(
         !fixture.socket_path().exists(),
         "socket should be cleaned up after graceful shutdown"
