@@ -5,7 +5,7 @@ mod fixtures;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use beads_rs::NamespaceId;
 use beads_rs::api::AdminStatusOutput;
@@ -33,9 +33,13 @@ fn phase7_admin_status_monotonic_under_load() {
     let handle = thread::spawn(move || generator.run());
 
     let mut collector = StatusCollector::with_client(repo, client);
-    collector
-        .collect_for(Duration::from_millis(250), Duration::from_millis(25))
-        .expect("collect status");
+    collect_until_load_complete(
+        &mut collector,
+        &handle,
+        Duration::from_secs(3),
+        Duration::from_millis(25),
+        3,
+    );
 
     let report = handle.join().expect("load join");
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
@@ -103,4 +107,29 @@ fn assert_segments_match_files(status: &AdminStatusOutput) {
         }
         assert_eq!(wal.total_bytes, total_bytes);
     }
+}
+
+fn collect_until_load_complete(
+    collector: &mut StatusCollector,
+    handle: &thread::JoinHandle<LoadReport>,
+    timeout: Duration,
+    interval: Duration,
+    min_samples: usize,
+) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        collector.sample().expect("admin status sample");
+        if handle.is_finished() && collector.samples().len() >= min_samples {
+            break;
+        }
+        thread::sleep(interval);
+    }
+    assert!(
+        handle.is_finished(),
+        "load generator did not finish within {timeout:?}"
+    );
+    assert!(
+        collector.samples().len() >= min_samples,
+        "expected at least {min_samples} status samples"
+    );
 }
