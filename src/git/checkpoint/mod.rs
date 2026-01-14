@@ -8,7 +8,7 @@ pub mod manifest;
 pub mod meta;
 pub mod types;
 
-pub use export::{CheckpointSnapshotError, build_snapshot, policy_hash};
+pub use export::{CheckpointSnapshotError, CheckpointSnapshotInput, build_snapshot, policy_hash};
 pub use import::{CheckpointImport, CheckpointImportError, import_checkpoint, merge_store_states};
 pub use layout::{
     CheckpointFileKind, CheckpointShardPath, DEPS_DIR, MANIFEST_FILE, META_FILE, NAMESPACES_DIR,

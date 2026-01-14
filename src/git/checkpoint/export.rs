@@ -35,18 +35,34 @@ pub fn policy_hash(
     Ok(ContentHash::from_bytes(sha256_bytes(&bytes).0))
 }
 
+pub struct CheckpointSnapshotInput<'a> {
+    pub checkpoint_group: String,
+    pub namespaces: Vec<NamespaceId>,
+    pub store_id: StoreId,
+    pub store_epoch: StoreEpoch,
+    pub created_at_ms: u64,
+    pub created_by_replica_id: ReplicaId,
+    pub policy_hash: ContentHash,
+    pub roster_hash: Option<ContentHash>,
+    pub state: &'a CanonicalState,
+    pub watermarks_durable: &'a Watermarks<Durable>,
+}
+
 pub fn build_snapshot(
-    checkpoint_group: String,
-    mut namespaces: Vec<NamespaceId>,
-    store_id: StoreId,
-    store_epoch: StoreEpoch,
-    created_at_ms: u64,
-    created_by_replica_id: ReplicaId,
-    policy_hash: ContentHash,
-    roster_hash: Option<ContentHash>,
-    state: &CanonicalState,
-    watermarks_durable: &Watermarks<Durable>,
+    input: CheckpointSnapshotInput<'_>,
 ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
+    let CheckpointSnapshotInput {
+        checkpoint_group,
+        mut namespaces,
+        store_id,
+        store_epoch,
+        created_at_ms,
+        created_by_replica_id,
+        policy_hash,
+        roster_hash,
+        state,
+        watermarks_durable,
+    } = input;
     namespaces.sort();
     namespaces.dedup();
 
@@ -270,18 +286,18 @@ mod tests {
             )
             .unwrap();
 
-        let snapshot = build_snapshot(
-            "core".to_string(),
-            vec![namespace.clone()],
-            StoreId::new(Uuid::from_bytes([4u8; 16])),
-            StoreEpoch::new(0),
-            1_700_000_000_000,
-            origin,
-            ContentHash::from_bytes([9u8; 32]),
-            None,
-            &state,
-            &watermarks,
-        )
+        let snapshot = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![namespace.clone()],
+            store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
+            store_epoch: StoreEpoch::new(0),
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: ContentHash::from_bytes([9u8; 32]),
+            roster_hash: None,
+            state: &state,
+            watermarks_durable: &watermarks,
+        })
         .unwrap();
 
         assert_eq!(

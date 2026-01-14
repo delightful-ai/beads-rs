@@ -26,7 +26,8 @@ use crate::daemon::wal::{
     catch_up_index, rebuild_index,
 };
 use crate::git::checkpoint::{
-    CheckpointSnapshot, CheckpointSnapshotError, build_snapshot, policy_hash,
+    CheckpointSnapshot, CheckpointSnapshotError, CheckpointSnapshotInput, build_snapshot,
+    policy_hash,
 };
 use crate::paths;
 
@@ -179,18 +180,18 @@ impl StoreRuntime {
     ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
         let policy_hash = policy_hash(&self.policies)?;
         let roster_hash = None;
-        build_snapshot(
-            checkpoint_group.to_string(),
-            namespaces.to_vec(),
-            self.meta.store_id(),
-            self.meta.store_epoch(),
+        build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: checkpoint_group.to_string(),
+            namespaces: namespaces.to_vec(),
+            store_id: self.meta.store_id(),
+            store_epoch: self.meta.store_epoch(),
             created_at_ms,
-            self.meta.replica_id,
+            created_by_replica_id: self.meta.replica_id,
             policy_hash,
             roster_hash,
-            &self.repo_state.state,
-            &self.watermarks_durable,
-        )
+            state: &self.repo_state.state,
+            watermarks_durable: &self.watermarks_durable,
+        })
     }
 }
 
