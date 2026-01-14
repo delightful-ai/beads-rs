@@ -295,6 +295,9 @@ pub enum OpError {
         queue_events: Option<u64>,
     },
 
+    #[error("maintenance mode enabled")]
+    MaintenanceMode { reason: Option<String> },
+
     #[error("client_request_id reuse mismatch for {client_request_id}")]
     ClientRequestIdReuseMismatch {
         namespace: NamespaceId,
@@ -415,6 +418,7 @@ impl OpError {
             OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
             OpError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             OpError::Overloaded { .. } => ErrorCode::Overloaded,
+            OpError::MaintenanceMode { .. } => ErrorCode::MaintenanceMode,
             OpError::ClientRequestIdReuseMismatch { .. } => ErrorCode::ClientRequestIdReuseMismatch,
             OpError::NotAGitRepo(_) => ErrorCode::NotAGitRepo,
             OpError::NoRemote(_) => ErrorCode::NoRemote,
@@ -457,6 +461,7 @@ impl OpError {
             },
             OpError::WalMerge { .. } => Transience::Permanent,
             OpError::AlreadyClaimed { .. } => Transience::Retryable,
+            OpError::MaintenanceMode { .. } => Transience::Retryable,
             OpError::NotFound(_)
             | OpError::AlreadyExists(_)
             | OpError::CasMismatch { .. }

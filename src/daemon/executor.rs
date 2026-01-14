@@ -70,6 +70,11 @@ impl Daemon {
         }
 
         let proof = self.ensure_repo_loaded_strict(repo, git_tx)?;
+        if self.store_runtime(&proof)?.maintenance_mode {
+            return Err(OpError::MaintenanceMode {
+                reason: Some("maintenance mode enabled".into()),
+            });
+        }
         let admission = self.store_runtime(&proof)?.admission.clone();
         let _permit = admission.try_admit_ipc_mutation().map_err(OpError::from)?;
         let store = self.store_identity(&proof)?;

@@ -102,6 +102,32 @@ pub struct AdminMetricsOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminMaintenanceModeOutput {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRebuildIndexOutput {
+    pub stats: AdminRebuildIndexStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRebuildIndexStats {
+    pub segments_scanned: usize,
+    pub records_indexed: usize,
+    pub segments_truncated: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tail_truncations: Vec<AdminRebuildIndexTruncation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRebuildIndexTruncation {
+    pub namespace: NamespaceId,
+    pub segment_id: SegmentId,
+    pub truncated_from_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminMetricSample {
     pub name: String,
     pub value: u64,

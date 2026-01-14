@@ -142,3 +142,59 @@ fn admin_metrics_includes_counters() {
         "expected wal_append_ok or any counters"
     );
 }
+
+#[test]
+fn admin_maintenance_blocks_mutations() {
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("maintenance baseline");
+
+    fixture
+        .bd()
+        .args(["admin", "maintenance", "on"])
+        .assert()
+        .success();
+
+    fixture
+        .bd()
+        .args(["create", "maintenance blocked"])
+        .assert()
+        .failure();
+
+    fixture
+        .bd()
+        .args(["admin", "maintenance", "off"])
+        .assert()
+        .success();
+
+    fixture
+        .bd()
+        .args(["create", "maintenance allowed"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn admin_rebuild_index_requires_maintenance() {
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("rebuild baseline");
+
+    fixture
+        .bd()
+        .args(["admin", "rebuild-index"])
+        .assert()
+        .failure();
+
+    fixture
+        .bd()
+        .args(["admin", "maintenance", "on"])
+        .assert()
+        .success();
+
+    fixture
+        .bd()
+        .args(["admin", "rebuild-index"])
+        .assert()
+        .success();
+}

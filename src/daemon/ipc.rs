@@ -364,6 +364,12 @@ pub enum Request {
         read: ReadConsistency,
     },
 
+    /// Admin maintenance mode toggle.
+    AdminMaintenanceMode { repo: PathBuf, enabled: bool },
+
+    /// Rebuild WAL index from segments.
+    AdminRebuildIndex { repo: PathBuf },
+
     /// Validate state.
     Validate {
         repo: PathBuf,
@@ -606,6 +612,14 @@ impl From<OpError> for ErrorPayload {
                     queue_events,
                 },
             ),
+            OpError::MaintenanceMode { reason } => {
+                ErrorPayload::new(ErrorCode::MaintenanceMode, message, retryable).with_details(
+                    error_details::MaintenanceModeDetails {
+                        reason,
+                        until_ms: None,
+                    },
+                )
+            }
             OpError::ClientRequestIdReuseMismatch {
                 namespace,
                 client_request_id,

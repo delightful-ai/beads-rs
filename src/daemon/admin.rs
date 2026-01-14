@@ -7,14 +7,15 @@ use std::path::Path;
 use crossbeam::channel::Sender;
 
 use crate::api::{
-    AdminCheckpointGroup, AdminMetricHistogram, AdminMetricLabel, AdminMetricSample,
-    AdminMetricsOutput, AdminReplicationNamespace, AdminReplicationPeer, AdminStatusOutput,
-    AdminWalNamespace, AdminWalSegment,
+    AdminCheckpointGroup, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
+    AdminMetricSample, AdminMetricsOutput, AdminRebuildIndexOutput, AdminRebuildIndexStats,
+    AdminRebuildIndexTruncation, AdminReplicationNamespace, AdminReplicationPeer,
+    AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
 };
 use crate::core::{NamespaceId, ReplicaId, Watermarks};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::{SegmentRow, WalIndex};
+use crate::daemon::wal::{ReplayStats, SegmentRow, WalIndex, rebuild_index};
 
 use super::core::Daemon;
 use super::ipc::ReadConsistency;
@@ -87,6 +88,66 @@ impl Daemon {
         let snapshot = crate::daemon::metrics::snapshot();
         let output = build_metrics_output(snapshot);
         Response::ok(ResponsePayload::Query(QueryResult::AdminMetrics(output)))
+    }
+
+    pub fn admin_maintenance_mode(
+        &mut self,
+        repo: &Path,
+        enabled: bool,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => return Response::err(err),
+        };
+        let store = match self.store_runtime_mut(&proof) {
+            Ok(store) => store,
+            Err(err) => return Response::err(err),
+        };
+
+        store.maintenance_mode = enabled;
+        let output = AdminMaintenanceModeOutput { enabled };
+        Response::ok(ResponsePayload::Query(QueryResult::AdminMaintenanceMode(
+            output,
+        )))
+    }
+
+    pub fn admin_rebuild_index(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => return Response::err(err),
+        };
+        let store = match self.store_runtime_mut(&proof) {
+            Ok(store) => store,
+            Err(err) => return Response::err(err),
+        };
+        if !store.maintenance_mode {
+            return Response::err(OpError::MaintenanceMode {
+                reason: Some("maintenance mode required".into()),
+            });
+        }
+
+        let store_dir = crate::paths::store_dir(proof.store_id());
+        let stats = match rebuild_index(
+            &store_dir,
+            &store.meta,
+            store.wal_index.as_ref(),
+            self.limits(),
+        ) {
+            Ok(stats) => stats,
+            Err(err) => {
+                return Response::err(OpError::StoreRuntime(Box::new(StoreRuntimeError::from(
+                    err,
+                ))));
+            }
+        };
+
+        let output = AdminRebuildIndexOutput {
+            stats: rebuild_stats(stats),
+        };
+        Response::ok(ResponsePayload::Query(QueryResult::AdminRebuildIndex(
+            output,
+        )))
     }
 }
 
@@ -207,6 +268,23 @@ fn build_checkpoint_status(
             last_checkpoint_wall_ms: snapshot.last_checkpoint_wall_ms,
         })
         .collect()
+}
+
+fn rebuild_stats(stats: ReplayStats) -> AdminRebuildIndexStats {
+    AdminRebuildIndexStats {
+        segments_scanned: stats.segments_scanned,
+        records_indexed: stats.records_indexed,
+        segments_truncated: stats.segments_truncated,
+        tail_truncations: stats
+            .tail_truncations
+            .into_iter()
+            .map(|truncation| AdminRebuildIndexTruncation {
+                namespace: truncation.namespace,
+                segment_id: truncation.segment_id,
+                truncated_from_offset: truncation.truncated_from_offset,
+            })
+            .collect(),
+    }
 }
 
 fn seq_for<K>(watermarks: &Watermarks<K>, namespace: &NamespaceId, origin: &ReplicaId) -> u64 {

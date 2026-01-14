@@ -47,6 +47,7 @@ pub struct StoreRuntime {
     pub(crate) watermarks_durable: Watermarks<Durable>,
     pub(crate) broadcaster: EventBroadcaster,
     pub(crate) admission: AdmissionController,
+    pub(crate) maintenance_mode: bool,
     #[allow(dead_code)]
     pub(crate) peer_acks: Arc<Mutex<PeerAckTable>>,
     #[allow(dead_code)]
@@ -151,6 +152,7 @@ impl StoreRuntime {
             watermarks_durable,
             broadcaster,
             admission,
+            maintenance_mode: false,
             peer_acks,
             wal,
             wal_index: Arc::new(wal_index),

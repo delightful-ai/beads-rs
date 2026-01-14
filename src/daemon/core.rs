@@ -904,6 +904,18 @@ impl Daemon {
             let _ = request.respond.send(Err(Box::new(payload)));
             return;
         }
+        if let Some(store) = self.stores.get(&request.store_id)
+            && store.maintenance_mode
+        {
+            let payload =
+                ErrorPayload::new(ErrorCode::MaintenanceMode, "maintenance mode enabled", true)
+                    .with_details(error_details::MaintenanceModeDetails {
+                        reason: Some("maintenance mode enabled".into()),
+                        until_ms: None,
+                    });
+            let _ = request.respond.send(Err(Box::new(payload)));
+            return;
+        }
         let outcome = self.ingest_remote_batch(
             request.store_id,
             request.namespace,
@@ -2174,6 +2186,12 @@ impl Daemon {
             Request::AdminStatus { repo, read } => self.admin_status(&repo, read, git_tx),
 
             Request::AdminMetrics { repo, read } => self.admin_metrics(&repo, read, git_tx),
+
+            Request::AdminMaintenanceMode { repo, enabled } => {
+                self.admin_maintenance_mode(&repo, enabled, git_tx)
+            }
+
+            Request::AdminRebuildIndex { repo } => self.admin_rebuild_index(&repo, git_tx),
 
             Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx),
 

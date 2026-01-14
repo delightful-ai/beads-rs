@@ -10,11 +10,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
-    AdminMetricsOutput as ApiAdminMetricsOutput, AdminStatusOutput as ApiAdminStatusOutput,
-    BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo,
-    DeletedLookup as ApiDeletedLookup, DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue,
-    IssueSummary, Note as ApiNote, ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput,
-    Tombstone as ApiTombstone,
+    AdminMaintenanceModeOutput as ApiAdminMaintenanceModeOutput,
+    AdminMetricsOutput as ApiAdminMetricsOutput,
+    AdminRebuildIndexOutput as ApiAdminRebuildIndexOutput,
+    AdminStatusOutput as ApiAdminStatusOutput, BlockedIssue as ApiBlockedIssue,
+    CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo, DeletedLookup as ApiDeletedLookup,
+    DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue, IssueSummary, Note as ApiNote,
+    ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput, Tombstone as ApiTombstone,
 };
 use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
 
@@ -493,6 +495,12 @@ pub enum QueryResult {
 
     /// Admin metrics snapshot.
     AdminMetrics(ApiAdminMetricsOutput),
+
+    /// Maintenance mode toggle.
+    AdminMaintenanceMode(ApiAdminMaintenanceModeOutput),
+
+    /// Rebuild index outcome.
+    AdminRebuildIndex(ApiAdminRebuildIndexOutput),
 }
 
 // NOTE: daemon IPC uses the canonical `crate::api` schemas for issues/notes/deps.

@@ -790,6 +790,22 @@ pub enum AdminCmd {
     Status,
     /// Show admin metrics snapshot.
     Metrics,
+    /// Toggle maintenance mode.
+    Maintenance {
+        #[command(subcommand)]
+        cmd: AdminMaintenanceCmd,
+    },
+    /// Rebuild WAL index from segments.
+    #[command(name = "rebuild-index")]
+    RebuildIndex,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminMaintenanceCmd {
+    /// Enable maintenance mode.
+    On,
+    /// Disable maintenance mode.
+    Off,
 }
 
 #[derive(Subcommand, Debug)]

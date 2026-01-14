@@ -4,8 +4,9 @@
 //! This module is pure formatting; handlers gather any extra data needed.
 
 use crate::api::{
-    AdminMetricsOutput, AdminStatusOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup,
-    DepEdge, EpicStatus, Issue, IssueSummary, Note, StatusOutput, SyncWarning, Tombstone,
+    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput, AdminStatusOutput,
+    BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
+    Note, StatusOutput, SyncWarning, Tombstone,
 };
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
@@ -491,6 +492,8 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::DaemonInfo(info) => render_daemon_info(info),
         QueryResult::AdminStatus(status) => render_admin_status(status),
         QueryResult::AdminMetrics(metrics) => render_admin_metrics(metrics),
+        QueryResult::AdminMaintenanceMode(out) => render_admin_maintenance(out),
+        QueryResult::AdminRebuildIndex(out) => render_admin_rebuild_index(out),
         QueryResult::Validation { warnings } => {
             if warnings.is_empty() {
                 "ok".into()
@@ -631,6 +634,38 @@ fn render_admin_metrics(metrics: &AdminMetricsOutput) -> String {
         }
     }
 
+    out.trim_end().into()
+}
+
+fn render_admin_maintenance(out: &AdminMaintenanceModeOutput) -> String {
+    if out.enabled {
+        "maintenance mode enabled".to_string()
+    } else {
+        "maintenance mode disabled".to_string()
+    }
+}
+
+fn render_admin_rebuild_index(out: &AdminRebuildIndexOutput) -> String {
+    let stats = &out.stats;
+    let mut out = String::new();
+    out.push_str("rebuild index complete\n");
+    out.push_str(&format!("segments_scanned: {}\n", stats.segments_scanned));
+    out.push_str(&format!("records_indexed: {}\n", stats.records_indexed));
+    out.push_str(&format!(
+        "segments_truncated: {}\n",
+        stats.segments_truncated
+    ));
+    if !stats.tail_truncations.is_empty() {
+        out.push_str("tail_truncations:\n");
+        for truncation in &stats.tail_truncations {
+            out.push_str(&format!(
+                "  {} {} @{}\n",
+                truncation.namespace.as_str(),
+                truncation.segment_id,
+                truncation.truncated_from_offset
+            ));
+        }
+    }
     out.trim_end().into()
 }
 
