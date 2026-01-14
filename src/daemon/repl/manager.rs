@@ -771,12 +771,20 @@ mod tests {
                 let reader_stream = stream.try_clone().expect("clone");
                 let mut reader = FrameReader::new(reader_stream, 1024 * 1024);
                 let mut writer = FrameWriter::new(stream, 1024 * 1024);
-                if let Ok(Some(bytes)) = reader.read_next() {
+                let mut welcome_sent = false;
+                loop {
+                    let Some(bytes) = match reader.read_next() {
+                        Ok(Some(bytes)) => Some(bytes),
+                        Ok(None) => None,
+                        Err(_) => None,
+                    } else {
+                        break;
+                    };
                     let envelope =
                         decode_envelope(&bytes, &crate::core::Limits::default()).expect("decode");
                     tx.send(envelope.message.clone()).expect("send");
 
-                    if respond_with_welcome {
+                    if respond_with_welcome && !welcome_sent {
                         if let ReplMessage::Hello(hello) = envelope.message {
                             let mut config = SessionConfig::new(
                                 local_store,
@@ -806,6 +814,7 @@ mod tests {
                                     writer.write_frame(&bytes).expect("write");
                                 }
                             }
+                            welcome_sent = true;
                         }
                     }
                 }
