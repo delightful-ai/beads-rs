@@ -766,3 +766,261 @@ fn role_allows_policy(role: ReplicaRole, mode: ReplicateMode) -> bool {
 fn now_ms() -> u64 {
     crate::core::WallClock::now().0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpStream;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    use crate::core::{
+        Applied, Durable, EventId, HeadStatus, NamespacePolicy, Seq0, Seq1, Sha256, StoreEpoch,
+        StoreId, Watermark,
+    };
+    use crate::daemon::broadcast::BroadcasterLimits;
+    use crate::daemon::repl::proto::{Capabilities, Hello, WatermarkHeads, WatermarkMap};
+    use crate::daemon::repl::{IngestOutcome, WatermarkSnapshot};
+
+    #[derive(Default)]
+    struct TestStore;
+
+    impl SessionStore for TestStore {
+        fn watermark_snapshot(&self, _namespaces: &[NamespaceId]) -> WatermarkSnapshot {
+            WatermarkSnapshot {
+                durable: WatermarkMap::new(),
+                durable_heads: WatermarkHeads::new(),
+                applied: WatermarkMap::new(),
+                applied_heads: WatermarkHeads::new(),
+            }
+        }
+
+        fn lookup_event_sha(
+            &self,
+            _eid: &EventId,
+        ) -> Result<Option<Sha256>, crate::core::EventShaLookupError> {
+            Ok(None)
+        }
+
+        fn ingest_remote_batch(
+            &mut self,
+            _namespace: &NamespaceId,
+            _origin: &ReplicaId,
+            batch: &[crate::core::VerifiedEvent<crate::core::PrevVerified>],
+            _now_ms: u64,
+        ) -> Result<IngestOutcome, Box<ErrorPayload>> {
+            let Some(last) = batch.last() else {
+                let durable = Watermark::<Durable>::genesis();
+                let applied = Watermark::<Applied>::genesis();
+                return Ok(IngestOutcome { durable, applied });
+            };
+            let seq = Seq0::new(last.seq().get());
+            let head = HeadStatus::Known(last.sha256.0);
+            let watermark = Watermark::<Durable>::new(seq, head).expect("watermark");
+            let applied = Watermark::<Applied>::new(seq, head).expect("watermark");
+            Ok(IngestOutcome {
+                durable: watermark,
+                applied,
+            })
+        }
+    }
+
+    fn test_limits() -> Limits {
+        Limits::default()
+    }
+
+    fn test_policies() -> BTreeMap<NamespaceId, NamespacePolicy> {
+        let mut policies = BTreeMap::new();
+        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        policies
+    }
+
+    fn test_identity() -> StoreIdentity {
+        let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
+        let epoch = StoreEpoch::new(1);
+        StoreIdentity::new(store_id, epoch)
+    }
+
+    fn test_broadcaster(limits: &Limits) -> EventBroadcaster {
+        EventBroadcaster::new(BroadcasterLimits::from_limits(limits))
+    }
+
+    fn build_hello(identity: StoreIdentity, replica_id: ReplicaId, limits: &Limits) -> ReplMessage {
+        ReplMessage::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: replica_id,
+            hello_nonce: 1,
+            max_frame_bytes: limits.max_frame_bytes as u32,
+            requested_namespaces: vec![NamespaceId::core()],
+            offered_namespaces: vec![NamespaceId::core()],
+            seen_durable: WatermarkMap::new(),
+            seen_durable_heads: None,
+            seen_applied: Some(WatermarkMap::new()),
+            seen_applied_heads: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        })
+    }
+
+    fn send_message(writer: &mut FrameWriter<TcpStream>, message: ReplMessage) {
+        let envelope = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message,
+        };
+        let bytes = encode_envelope(&envelope).expect("encode");
+        writer.write_frame(&bytes).expect("write");
+    }
+
+    fn read_message(reader: &mut FrameReader<TcpStream>, limits: &Limits) -> ReplMessage {
+        let bytes = reader.read_next().expect("read").expect("frame");
+        let envelope = decode_envelope(&bytes, limits).expect("decode");
+        envelope.message
+    }
+
+    fn base_config(
+        listen_addr: String,
+        identity: StoreIdentity,
+        local_replica: ReplicaId,
+        limits: Limits,
+    ) -> ReplicationServerConfig {
+        ReplicationServerConfig {
+            listen_addr,
+            local_store: identity,
+            local_replica_id: local_replica,
+            admission: AdmissionController::new(&limits),
+            broadcaster: test_broadcaster(&limits),
+            peer_acks: Arc::new(Mutex::new(PeerAckTable::new())),
+            policies: test_policies(),
+            roster: None,
+            limits,
+            max_connections: NonZeroUsize::new(2),
+        }
+    }
+
+    #[test]
+    fn server_listens_and_spawns_session() {
+        let limits = test_limits();
+        let identity = test_identity();
+        let local_replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+        let config = base_config(
+            "127.0.0.1:0".to_string(),
+            identity,
+            local_replica,
+            limits.clone(),
+        );
+        let server = ReplicationServer::new(SharedSessionStore::new(TestStore::default()), config);
+        let handle = server.start().expect("start");
+
+        let stream = TcpStream::connect(handle.local_addr()).expect("connect");
+        let mut writer =
+            FrameWriter::new(stream.try_clone().expect("clone"), limits.max_frame_bytes);
+        let mut reader = FrameReader::new(stream, limits.max_frame_bytes);
+        let hello = build_hello(
+            identity,
+            ReplicaId::new(Uuid::from_bytes([3u8; 16])),
+            &limits,
+        );
+        send_message(&mut writer, hello);
+
+        match read_message(&mut reader, &limits) {
+            ReplMessage::Welcome(_) => {}
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn connection_limit_enforced() {
+        let limits = test_limits();
+        let identity = test_identity();
+        let local_replica = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        let mut config = base_config(
+            "127.0.0.1:0".to_string(),
+            identity,
+            local_replica,
+            limits.clone(),
+        );
+        config.max_connections = NonZeroUsize::new(1);
+        let server = ReplicationServer::new(SharedSessionStore::new(TestStore::default()), config);
+        let handle = server.start().expect("start");
+
+        let first = TcpStream::connect(handle.local_addr()).expect("connect first");
+        let mut writer =
+            FrameWriter::new(first.try_clone().expect("clone"), limits.max_frame_bytes);
+        let mut reader =
+            FrameReader::new(first.try_clone().expect("clone"), limits.max_frame_bytes);
+        let hello = build_hello(
+            identity,
+            ReplicaId::new(Uuid::from_bytes([5u8; 16])),
+            &limits,
+        );
+        send_message(&mut writer, hello);
+        let response = read_message(&mut reader, &limits);
+        assert!(matches!(response, ReplMessage::Welcome(_)));
+
+        let second = TcpStream::connect(handle.local_addr()).expect("connect second");
+        second
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("timeout");
+        let mut reader = FrameReader::new(second, limits.max_frame_bytes);
+        let response = read_message(&mut reader, &limits);
+        match response {
+            ReplMessage::Error(payload) => assert_eq!(payload.code, ErrorCode::Overloaded),
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        drop(first);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn unknown_replica_rejected_when_roster_present() {
+        let limits = test_limits();
+        let identity = test_identity();
+        let local_replica = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
+        let mut config = base_config(
+            "127.0.0.1:0".to_string(),
+            identity,
+            local_replica,
+            limits.clone(),
+        );
+        let roster_replica = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
+        config.roster = Some(ReplicaRoster {
+            replicas: vec![crate::core::ReplicaEntry {
+                replica_id: roster_replica,
+                name: "alpha".to_string(),
+                role: ReplicaRole::Peer,
+                durability_eligible: false,
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            }],
+        });
+        let server = ReplicationServer::new(SharedSessionStore::new(TestStore::default()), config);
+        let handle = server.start().expect("start");
+
+        let stream = TcpStream::connect(handle.local_addr()).expect("connect");
+        let mut writer =
+            FrameWriter::new(stream.try_clone().expect("clone"), limits.max_frame_bytes);
+        let mut reader = FrameReader::new(stream, limits.max_frame_bytes);
+        let hello = build_hello(
+            identity,
+            ReplicaId::new(Uuid::from_bytes([8u8; 16])),
+            &limits,
+        );
+        send_message(&mut writer, hello);
+        let response = read_message(&mut reader, &limits);
+        match response {
+            ReplMessage::Error(payload) => assert_eq!(payload.code, ErrorCode::UnknownReplica),
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        handle.shutdown();
+    }
+}
