@@ -1,5 +1,6 @@
 //! Checkpoint manifest and metadata types.
 
+pub mod cache;
 pub mod export;
 pub mod import;
 pub mod json_canon;
@@ -13,6 +14,9 @@ pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
 pub use export::{
     CheckpointExport, CheckpointExportError, CheckpointExportInput, CheckpointSnapshotError,
     CheckpointSnapshotInput, build_snapshot, export_checkpoint, policy_hash,
+};
+pub use cache::{
+    CheckpointCache, CheckpointCacheEntry, CheckpointCacheError, DEFAULT_CHECKPOINT_CACHE_KEEP,
 };
 pub use import::{
     CheckpointImport, CheckpointImportError, import_checkpoint, merge_store_states,
