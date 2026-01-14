@@ -99,8 +99,7 @@ fn phase4_request_sha_mismatch_returns_error() {
     txn.commit().expect("commit");
 
     let different_request = mutation::add_labels_request("bd-1", vec!["beta".to_string()]);
-    let mismatched_sha =
-        mutation::request_sha256(&ctx, &different_request).expect("request sha");
+    let mismatched_sha = mutation::request_sha256(&ctx, &different_request).expect("request sha");
     assert_ne!(request_sha, mismatched_sha);
 
     let mut txn = index.writer().begin_txn().expect("begin txn");
