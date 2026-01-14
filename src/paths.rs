@@ -72,7 +72,7 @@ fn thread_local_data_dir_override() -> Option<PathBuf> {
 }
 
 thread_local! {
-    static TEST_DATA_DIR_OVERRIDE: RefCell<Option<PathBuf>> = RefCell::new(None);
+    static TEST_DATA_DIR_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]

@@ -1683,6 +1683,12 @@ impl IpcClient {
     }
 }
 
+impl Default for IpcClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn should_autostart(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
@@ -2093,7 +2099,7 @@ pub fn wait_for_daemon_ready_at(
     let mut backoff = Duration::from_millis(50);
 
     while SystemTime::now() < deadline {
-        match UnixStream::connect(&socket) {
+        match UnixStream::connect(socket) {
             Ok(stream) => {
                 let mut writer = stream;
                 let reader_stream = match writer.try_clone() {
