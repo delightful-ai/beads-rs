@@ -1590,13 +1590,24 @@ pub fn socket_path_for_runtime_dir(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("beads").join("daemon.sock")
 }
 
-/// Read daemon metadata from the meta file.
+/// Read daemon metadata from the meta file in the socket directory.
 /// Returns None if file doesn't exist or is corrupt.
-fn read_daemon_meta() -> Option<crate::api::DaemonInfo> {
-    let dir = ensure_socket_dir().ok()?;
-    let meta_path = dir.join("daemon.meta.json");
+fn read_daemon_meta_at(socket: &Path) -> Option<crate::api::DaemonInfo> {
+    let meta_path = socket.with_file_name("daemon.meta.json");
     let contents = fs::read_to_string(&meta_path).ok()?;
     serde_json::from_str(&contents).ok()
+}
+
+/// Read daemon metadata from the default socket directory.
+fn read_daemon_meta() -> Option<crate::api::DaemonInfo> {
+    let dir = ensure_socket_dir().ok()?;
+    read_daemon_meta_at(&dir.join("daemon.sock"))
+}
+
+fn daemon_pid_alive(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
 fn per_user_tmp_dir() -> PathBuf {
@@ -1845,9 +1856,26 @@ fn read_resp_line_version_check(reader: &mut BufReader<UnixStream>) -> Result<Re
 }
 
 fn verify_daemon_version(
+    socket: &Path,
     writer: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
 ) -> Result<(), IpcError> {
+    if let Some(meta) = read_daemon_meta_at(socket) {
+        if daemon_pid_alive(meta.pid) {
+            if meta.protocol_version == IPC_PROTOCOL_VERSION
+                && meta.version == env!("CARGO_PKG_VERSION")
+            {
+                return Ok(());
+            }
+            return Err(IpcError::DaemonVersionMismatch {
+                daemon: Some(meta),
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_version: IPC_PROTOCOL_VERSION,
+                parse_error: None,
+            });
+        }
+    }
+
     write_req_line(writer, &Request::Ping)?;
     // Use version-check variant that converts parse errors to version mismatch
     let resp = read_resp_line_version_check(reader)?;
@@ -1881,14 +1909,18 @@ fn verify_daemon_version(
     Ok(())
 }
 
-fn send_request_over_stream(stream: UnixStream, req: &Request) -> Result<Response, IpcError> {
+fn send_request_over_stream(
+    stream: UnixStream,
+    socket: &Path,
+    req: &Request,
+) -> Result<Response, IpcError> {
     let mut writer = stream;
     let reader_stream = writer.try_clone()?;
     let mut reader = BufReader::new(reader_stream);
 
     // Verify daemon version/protocol once per connection.
     if !matches!(req, Request::Ping) {
-        verify_daemon_version(&mut writer, &mut reader)?;
+        verify_daemon_version(socket, &mut writer, &mut reader)?;
     }
 
     write_req_line(&mut writer, req)?;
@@ -1915,7 +1947,7 @@ pub fn send_request_at(socket: &PathBuf, req: &Request) -> Result<Response, IpcE
             }
         };
 
-        match send_request_over_stream(stream, req) {
+        match send_request_over_stream(stream, socket, req) {
             Ok(resp) => return Ok(resp),
             Err(IpcError::DaemonVersionMismatch { daemon, .. }) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(
@@ -1962,7 +1994,7 @@ pub fn send_request(req: &Request) -> Result<Response, IpcError> {
 pub fn send_request_no_autostart_at(socket: &PathBuf, req: &Request) -> Result<Response, IpcError> {
     let stream = UnixStream::connect(socket)
         .map_err(|e| IpcError::DaemonUnavailable(format!("daemon not running: {}", e)))?;
-    send_request_over_stream(stream, req)
+    send_request_over_stream(stream, socket, req)
 }
 
 pub fn send_request_no_autostart(req: &Request) -> Result<Response, IpcError> {
@@ -2018,7 +2050,7 @@ pub fn subscribe_stream_at(
         let reader_stream = writer.try_clone()?;
         let mut reader = BufReader::new(reader_stream);
 
-        if let Err(err) = verify_daemon_version(&mut writer, &mut reader) {
+        if let Err(err) = verify_daemon_version(socket, &mut writer, &mut reader) {
             match err {
                 IpcError::DaemonVersionMismatch { daemon, .. } if attempt < MAX_ATTEMPTS => {
                     tracing::info!(
@@ -2068,7 +2100,7 @@ pub fn subscribe_stream_no_autostart_at(
     let mut writer = stream;
     let reader_stream = writer.try_clone()?;
     let mut reader = BufReader::new(reader_stream);
-    verify_daemon_version(&mut writer, &mut reader)?;
+    verify_daemon_version(socket, &mut writer, &mut reader)?;
     write_req_line(&mut writer, req)?;
     Ok(SubscriptionStream {
         _writer: writer,
@@ -2578,6 +2610,47 @@ mod tests {
             parse_error: None,
         };
         assert!(err.transience().is_retryable());
+    }
+
+    #[test]
+    fn version_check_uses_meta_when_matching() {
+        use tempfile::TempDir;
+        let temp = TempDir::new().expect("temp dir");
+        let socket = temp.path().join("daemon.sock");
+        let meta = crate::api::DaemonInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: IPC_PROTOCOL_VERSION,
+            pid: std::process::id(),
+        };
+        let meta_path = socket.with_file_name("daemon.meta.json");
+        std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+        let (stream, _peer) = UnixStream::pair().expect("socket pair");
+        let mut writer = stream;
+        let reader_stream = writer.try_clone().expect("clone stream");
+        let mut reader = BufReader::new(reader_stream);
+        verify_daemon_version(&socket, &mut writer, &mut reader).expect("meta match");
+    }
+
+    #[test]
+    fn version_check_rejects_meta_mismatch() {
+        use tempfile::TempDir;
+        let temp = TempDir::new().expect("temp dir");
+        let socket = temp.path().join("daemon.sock");
+        let meta = crate::api::DaemonInfo {
+            version: "0.0.0-fake".to_string(),
+            protocol_version: IPC_PROTOCOL_VERSION,
+            pid: std::process::id(),
+        };
+        let meta_path = socket.with_file_name("daemon.meta.json");
+        std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+        let (stream, _peer) = UnixStream::pair().expect("socket pair");
+        let mut writer = stream;
+        let reader_stream = writer.try_clone().expect("clone stream");
+        let mut reader = BufReader::new(reader_stream);
+        let err = verify_daemon_version(&socket, &mut writer, &mut reader).unwrap_err();
+        assert!(matches!(err, IpcError::DaemonVersionMismatch { daemon: Some(_), .. }));
     }
 
     #[test]
