@@ -46,6 +46,11 @@ fn phase3_wal_tail_truncation_repairs_partial_record() {
     let stats =
         rebuild_index(temp.store_dir(), temp.meta(), &index, &limits).expect("rebuild index");
     assert_eq!(stats.segments_truncated, 1);
+    assert_eq!(stats.tail_truncations.len(), 1);
+    let truncation = &stats.tail_truncations[0];
+    assert_eq!(truncation.namespace, namespace);
+    assert_eq!(truncation.segment_id, segment.header.segment_id);
+    assert_eq!(truncation.truncated_from_offset, segment.header_len);
 
     let meta = fs::metadata(&segment.path).expect("segment metadata");
     assert_eq!(meta.len(), segment.header_len);

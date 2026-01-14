@@ -11,8 +11,8 @@ use crc32c::crc32c;
 use thiserror::Error;
 
 use crate::core::{
-    DecodeError, EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreMeta, decode_event_body,
-    decode_event_hlc_max, sha256_bytes,
+    DecodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq1, StoreMeta,
+    decode_event_body, decode_event_hlc_max, sha256_bytes,
 };
 
 use super::EventWalError;
@@ -26,6 +26,14 @@ pub struct ReplayStats {
     pub segments_scanned: usize,
     pub records_indexed: usize,
     pub segments_truncated: usize,
+    pub tail_truncations: Vec<TailTruncation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TailTruncation {
+    pub namespace: NamespaceId,
+    pub segment_id: SegmentId,
+    pub truncated_from_offset: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,6 +294,13 @@ fn replay_index(
             stats.records_indexed += scan.records;
             if scan.truncated {
                 stats.segments_truncated += 1;
+                if let Some(offset) = scan.truncated_from_offset {
+                    stats.tail_truncations.push(TailTruncation {
+                        namespace: namespace.clone(),
+                        segment_id: segment.header.segment_id,
+                        truncated_from_offset: offset,
+                    });
+                }
             }
 
             let sealed = !is_last;
@@ -590,6 +605,7 @@ struct SegmentScanOutcome {
     last_indexed_offset: u64,
     records: usize,
     truncated: bool,
+    truncated_from_offset: Option<u64>,
 }
 
 fn scan_segment<F>(
@@ -620,11 +636,13 @@ where
     let mut offset = start_offset;
     let mut records = 0usize;
     let mut truncated = false;
+    let mut truncated_from_offset = None;
 
     while offset < segment.file_len {
         let remaining = segment.file_len - offset;
         if remaining < FRAME_HEADER_LEN as u64 {
             truncated = true;
+            truncated_from_offset = Some(offset);
             break;
         }
 
@@ -643,6 +661,7 @@ where
         let frame_len = FRAME_HEADER_LEN as u64 + length as u64;
         if frame_len > remaining {
             truncated = true;
+            truncated_from_offset = Some(offset);
             break;
         }
 
@@ -679,6 +698,7 @@ where
         if actual_crc != expected_crc {
             if offset.saturating_add(frame_len) == segment.file_len {
                 truncated = true;
+                truncated_from_offset = Some(offset);
                 break;
             }
             return mid_file(WalReplayCorruption::CrcMismatch {
@@ -734,6 +754,7 @@ where
         last_indexed_offset: offset,
         records,
         truncated,
+        truncated_from_offset,
     })
 }
 
