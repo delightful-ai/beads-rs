@@ -27,14 +27,9 @@ pub(crate) fn handle(ctx: &Ctx, args: SubscribeArgs) -> Result<()> {
         return Ok(());
     }
 
-    loop {
-        match stream.read_response()? {
-            Some(response) => {
-                if !handle_response(response, ctx.json)? {
-                    break;
-                }
-            }
-            None => break,
+    while let Some(response) = stream.read_response()? {
+        if !handle_response(response, ctx.json)? {
+            break;
         }
     }
 
