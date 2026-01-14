@@ -8,11 +8,11 @@ use std::path::Path;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+use beads_rs::core::ContentHash;
 use beads_rs::git::checkpoint::{
     CheckpointExport, CheckpointExportInput, CheckpointImportError, CheckpointSnapshotInput,
     IncludedHeads, IncludedWatermarks, export_checkpoint, import_checkpoint,
 };
-use beads_rs::core::ContentHash;
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
     DepKind, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp,
@@ -56,7 +56,7 @@ fn phase6_checkpoint_import_rejects_corrupt_files() {
 
     let (path, _) = fixture.export.files.iter().next().expect("export file");
     let target = temp.path().join(path);
-    corrupt_file(&target).expect("corrupt file");
+    corrupt_jsonl_preserving_syntax(&target).expect("corrupt file");
 
     let err = import_checkpoint(temp.path(), &beads_rs::Limits::default()).unwrap_err();
     match err {
@@ -300,14 +300,52 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
-fn corrupt_file(path: &Path) -> std::io::Result<()> {
+fn corrupt_jsonl_preserving_syntax(path: &Path) -> std::io::Result<()> {
     let mut bytes = std::fs::read(path)?;
     if bytes.is_empty() {
-        bytes.push(0);
-    } else {
-        bytes[0] ^= 0xFF;
+        bytes.push(b'0');
+        return std::fs::write(path, bytes);
+    }
+
+    if replace_bytes(&mut bytes, b"bd-small", b"bd-smoll") {
+        return std::fs::write(path, bytes);
+    }
+
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in bytes.iter_mut() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if *byte == b'\\' {
+            escaped = true;
+            continue;
+        }
+        if *byte == b'"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string && byte.is_ascii_lowercase() {
+            *byte = if *byte == b'a' { b'b' } else { b'a' };
+            break;
+        }
     }
     std::fs::write(path, bytes)
+}
+
+fn replace_bytes(buf: &mut [u8], needle: &[u8], replacement: &[u8]) -> bool {
+    if needle.len() != replacement.len() {
+        return false;
+    }
+    if let Some(pos) = buf
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        buf[pos..pos + needle.len()].copy_from_slice(replacement);
+        return true;
+    }
+    false
 }
 
 fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
