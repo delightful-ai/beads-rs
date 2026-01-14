@@ -1535,7 +1535,7 @@ mod tests {
         let remote_dir = tmp.path().join("remote");
         let local_dir = tmp.path().join("local");
 
-        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let _remote_repo = Repository::init_bare(&remote_dir).unwrap();
         let local_repo = Repository::init(&local_dir).unwrap();
         local_repo
             .remote("origin", remote_dir.to_str().unwrap())
