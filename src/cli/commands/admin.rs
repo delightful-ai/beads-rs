@@ -1,8 +1,7 @@
 use super::super::{AdminCmd, AdminMaintenanceCmd, Ctx, print_ok, send};
-use crate::Result;
 use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
 use crate::daemon::ipc::Request;
-use uuid::Uuid;
+use crate::{Result, WallClock};
 
 pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
     match cmd {
@@ -45,7 +44,9 @@ pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
         AdminCmd::Fingerprint(args) => {
             let (mode, sample) = match args.sample {
                 Some(shard_count) => {
-                    let nonce = args.nonce.unwrap_or_else(|| Uuid::new_v4().to_string());
+                    let nonce = args
+                        .nonce
+                        .unwrap_or_else(|| format!("auto-{}", WallClock::now().0));
                     (
                         AdminFingerprintMode::Sample,
                         Some(AdminFingerprintSample { shard_count, nonce }),
