@@ -11,12 +11,14 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use crossbeam::channel::Sender;
 
 use super::broadcast::BroadcastEvent;
-use super::core::{Daemon, NormalizedMutationMeta, detect_clock_skew};
+use super::core::{Daemon, NormalizedMutationMeta, detect_clock_skew, load_replica_roster};
+use super::durability_coordinator::DurabilityCoordinator;
 use super::git_worker::GitOp;
 use super::ipc::{OpResponse, Response, ResponsePayload};
 use super::mutation_engine::{IdContext, MutationContext, MutationEngine, MutationRequest};
@@ -27,10 +29,10 @@ use super::wal::{
     SegmentWriter, WalIndex, WalIndexError, WalReplayError,
 };
 use crate::core::{
-    Applied, BeadId, BeadType, DepKind, DurabilityReceipt, Durable, EventBody, EventId, HeadStatus,
-    Limits, NoteId, Priority, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnOpV1,
-    WallClock, Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event,
-    decode_event_body, hash_event_body,
+    Applied, BeadId, BeadType, DepKind, DurabilityClass, DurabilityReceipt, Durable, EventBody,
+    EventId, HeadStatus, Limits, NoteId, Priority, ReplicaId, Seq1, Sha256, StoreIdentity,
+    TxnDeltaV1, TxnOpV1, WallClock, Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp,
+    apply_event, decode_event_body, hash_event_body,
 };
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
 use crate::paths;
@@ -65,13 +67,33 @@ impl Daemon {
 
         let NormalizedMutationMeta {
             namespace,
-            durability: _durability,
+            durability,
             client_request_id,
             actor_id,
         } = meta;
-        let origin_replica_id = self.store_runtime(&proof)?.meta.replica_id;
-        let wal_index = Arc::clone(&self.store_runtime(&proof)?.wal_index);
-        let store_meta = self.store_runtime(&proof)?.meta.clone();
+        let (
+            origin_replica_id,
+            wal_index,
+            store_meta,
+            peer_acks,
+            policies,
+            durable_watermarks_snapshot,
+            applied_watermarks_snapshot,
+        ) = {
+            let store_runtime = self.store_runtime(&proof)?;
+            (
+                store_runtime.meta.replica_id,
+                Arc::clone(&store_runtime.wal_index),
+                store_runtime.meta.clone(),
+                store_runtime.peer_acks.clone(),
+                store_runtime.policies.clone(),
+                store_runtime.watermarks_durable.clone(),
+                store_runtime.watermarks_applied.clone(),
+            )
+        };
+        let roster = load_replica_roster(proof.store_id())?;
+        let coordinator = DurabilityCoordinator::new(origin_replica_id, policies, roster, peer_acks);
+        let wait_timeout = Duration::from_millis(limits.dead_ms);
         let store_dir = paths::store_dir(proof.store_id());
 
         let ctx = MutationContext {
@@ -80,9 +102,8 @@ impl Daemon {
             client_request_id,
         };
 
-        if ctx.client_request_id.is_some() {
-            let store_runtime = self.store_runtime(&proof)?;
-            if let Some(response) = try_reuse_idempotent_response(
+        if ctx.client_request_id.is_some()
+            && let Some(response) = try_reuse_idempotent_response(
                 &engine,
                 &ctx,
                 &request,
@@ -90,13 +111,18 @@ impl Daemon {
                 &store_dir,
                 store,
                 origin_replica_id,
-                store_runtime.watermarks_durable.clone(),
-                store_runtime.watermarks_applied.clone(),
+                durable_watermarks_snapshot,
+                applied_watermarks_snapshot,
                 &limits,
-            )? {
-                return Ok(response);
-            }
+                durability,
+                &coordinator,
+                wait_timeout,
+            )?
+        {
+            return Ok(response);
         }
+
+        coordinator.ensure_available(&namespace, durability)?;
 
         let id_ctx = if matches!(request, MutationRequest::Create { .. }) {
             let repo_state = self.repo_state(&proof)?;
@@ -345,6 +371,15 @@ impl Daemon {
             durable_watermarks,
             applied_watermarks,
         );
+
+        let receipt = coordinator.await_durability(
+            &namespace,
+            origin_replica_id,
+            origin_seq,
+            durability,
+            receipt,
+            wait_timeout,
+        )?;
 
         Ok(OpResponse::new(result, receipt))
     }
@@ -632,6 +667,9 @@ fn try_reuse_idempotent_response(
     durable_watermarks: Watermarks<Durable>,
     applied_watermarks: Watermarks<Applied>,
     limits: &Limits,
+    durability: DurabilityClass,
+    coordinator: &DurabilityCoordinator,
+    wait_timeout: Duration,
 ) -> Result<Option<OpResponse>, OpError> {
     let Some(client_request_id) = ctx.client_request_id else {
         return Ok(None);
@@ -668,6 +706,27 @@ fn try_reuse_idempotent_response(
         durable_watermarks,
         applied_watermarks,
     );
+    let mut max_seq = event_id.origin_seq;
+    for eid in &row.event_ids {
+        if eid.origin_replica_id != origin_replica_id || eid.namespace != ctx.namespace {
+            return Err(OpError::Internal(
+                "idempotent request event id mismatch",
+            ));
+        }
+        if eid.origin_seq > max_seq {
+            max_seq = eid.origin_seq;
+        }
+    }
+
+    let receipt = coordinator.await_durability(
+        &ctx.namespace,
+        origin_replica_id,
+        max_seq,
+        durability,
+        receipt,
+        wait_timeout,
+    )?;
+
     Ok(Some(OpResponse::new(result, receipt)))
 }
 
@@ -1089,6 +1148,13 @@ mod tests {
 
         rebuild_index(&store_dir, &meta, &index, &limits).unwrap();
 
+        let coordinator = DurabilityCoordinator::new(
+            replica_id,
+            std::collections::BTreeMap::new(),
+            None,
+            Arc::new(std::sync::Mutex::new(crate::daemon::repl::PeerAckTable::new())),
+        );
+
         let response = try_reuse_idempotent_response(
             &engine,
             &ctx,
@@ -1100,6 +1166,9 @@ mod tests {
             Watermarks::new(),
             Watermarks::new(),
             &limits,
+            DurabilityClass::LocalFsync,
+            &coordinator,
+            Duration::from_millis(0),
         )
         .unwrap()
         .expect("expected idempotent response");

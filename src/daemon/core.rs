@@ -1486,14 +1486,6 @@ impl Daemon {
             })?,
         };
 
-        if !matches!(durability, DurabilityClass::LocalFsync) {
-            return Err(OpError::DurabilityUnavailable {
-                requested: durability,
-                eligible_total: 0,
-                eligible_replica_ids: None,
-            });
-        }
-
         Ok(NormalizedMutationMeta {
             namespace,
             durability,
@@ -2381,7 +2373,7 @@ fn replication_max_connections() -> Option<NonZeroUsize> {
     NonZeroUsize::new(DEFAULT_REPL_MAX_CONNECTIONS)
 }
 
-fn load_replica_roster(store_id: StoreId) -> Result<Option<ReplicaRoster>, OpError> {
+pub(crate) fn load_replica_roster(store_id: StoreId) -> Result<Option<ReplicaRoster>, OpError> {
     let path = paths::replicas_path(store_id);
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,

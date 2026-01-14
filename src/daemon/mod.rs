@@ -11,6 +11,7 @@ pub mod admission;
 pub mod broadcast;
 pub mod clock;
 pub mod core;
+pub mod durability_coordinator;
 pub mod executor;
 pub mod git_worker;
 pub mod ipc;
