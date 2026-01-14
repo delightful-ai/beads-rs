@@ -589,9 +589,11 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, BeadId, BeadType, Labels, NamespaceId, Priority, ReplicaId, StoreEpoch, StoreId,
-        WorkflowStatus,
+        ActorId, BeadId, BeadType, CanonicalState, Labels, NamespaceId, Priority, ReplicaId,
+        StoreEpoch, StoreId, WorkflowStatus,
     };
+    use crate::git::checkpoint::ManifestFile;
+    use crate::git::wire::{serialize_deps, serialize_state, serialize_tombstones};
 
     fn write_file(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
@@ -637,7 +639,7 @@ mod tests {
             description: "d".to_string(),
             design: None,
             acceptance_criteria: None,
-            priority: Priority::P2,
+            priority: Priority::MEDIUM,
             bead_type: BeadType::Task,
             labels: Labels::new(),
             external_ref: None,
@@ -656,6 +658,13 @@ mod tests {
             by: ActorId::new("me").unwrap(),
             v: None,
         }
+    }
+
+    fn state_fingerprint(state: &CanonicalState) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let state_bytes = serialize_state(state).expect("serialize state");
+        let tomb_bytes = serialize_tombstones(state).expect("serialize tombstones");
+        let deps_bytes = serialize_deps(state).expect("serialize deps");
+        (state_bytes, tomb_bytes, deps_bytes)
     }
 
     #[test]
@@ -693,7 +702,7 @@ mod tests {
         let file_bytes = line.len() as u64;
         manifest.files.insert(
             shard_path.to_string(),
-            super::manifest::ManifestFile {
+            ManifestFile {
                 sha256: ContentHash::from_bytes(sha256_bytes(line).0),
                 bytes: file_bytes,
             },
@@ -727,7 +736,7 @@ mod tests {
 
         manifest.files.insert(
             shard_path.to_string(),
-            super::manifest::ManifestFile {
+            ManifestFile {
                 sha256: ContentHash::from_bytes(sha256_bytes(line).0),
                 bytes: line.len() as u64,
             },
@@ -770,7 +779,7 @@ mod tests {
 
         manifest.files.insert(
             shard_path.to_string(),
-            super::manifest::ManifestFile {
+            ManifestFile {
                 sha256: ContentHash::from_bytes(sha256_bytes(&shard_bytes).0),
                 bytes: shard_bytes.len() as u64,
             },
@@ -807,9 +816,15 @@ mod tests {
 
         let merged_a = merge_store_states(&left, &right).unwrap();
         let merged_b = merge_store_states(&right, &left).unwrap();
+        let merged_a_state = merged_a
+            .get(&NamespaceId::core())
+            .expect("merged a state");
+        let merged_b_state = merged_b
+            .get(&NamespaceId::core())
+            .expect("merged b state");
         assert_eq!(
-            merged_a.get(&NamespaceId::core()),
-            merged_b.get(&NamespaceId::core())
+            state_fingerprint(merged_a_state),
+            state_fingerprint(merged_b_state)
         );
     }
 }
