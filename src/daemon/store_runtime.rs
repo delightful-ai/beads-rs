@@ -10,19 +10,20 @@ use rand::RngCore;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
-    ActorId, Applied, Durable, HeadStatus, Limits, NamespaceId, NamespacePolicy, ReplicaId, Seq0,
-    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks,
-    WriteStamp,
+    ActorId, Applied, Durable, ErrorCode, ErrorPayload, HeadStatus, Limits, NamespaceId,
+    NamespacePolicy, ReplicaId, Seq0, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
+    StoreMetaVersions, WatermarkError, Watermarks, WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repl::PeerAckTable;
-use crate::daemon::repo::RepoState;
+use crate::daemon::repo::{RepoState, WalTailTruncatedRecord};
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
 use crate::daemon::wal::{
-    IndexDurabilityMode, SqliteWalIndex, Wal, WalIndex, WalIndexError, WalReplayError,
+    IndexDurabilityMode, ReplayStats, SqliteWalIndex, Wal, WalIndex, WalIndexError, WalReplayError,
     catch_up_index, rebuild_index,
 };
 use crate::git::checkpoint::{
@@ -52,6 +53,7 @@ pub struct StoreRuntime {
     pub(crate) wal: Arc<Wal>,
     #[allow(dead_code)]
     pub(crate) wal_index: Arc<SqliteWalIndex>,
+    pub(crate) replay_stats: ReplayStats,
     #[allow(dead_code)]
     lock: StoreLock,
 }
@@ -99,17 +101,19 @@ impl StoreRuntime {
 
         let store_dir = paths::store_dir(store_id);
         let (mut wal_index, needs_rebuild) = open_wal_index(store_id, &store_dir, &meta)?;
+        let mut replay_stats = ReplayStats::default();
         if needs_rebuild {
-            rebuild_index(&store_dir, &meta, &wal_index, limits)?;
-        } else if let Err(err) = catch_up_index(&store_dir, &meta, &wal_index, limits) {
-            match err {
-                WalReplayError::IndexOffsetInvalid { .. } => {
+            replay_stats = rebuild_index(&store_dir, &meta, &wal_index, limits)?;
+        } else {
+            match catch_up_index(&store_dir, &meta, &wal_index, limits) {
+                Ok(stats) => replay_stats = stats,
+                Err(WalReplayError::IndexOffsetInvalid { .. }) => {
                     remove_wal_index_files(store_id)?;
                     wal_index =
                         SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache)?;
-                    rebuild_index(&store_dir, &meta, &wal_index, limits)?;
+                    replay_stats = rebuild_index(&store_dir, &meta, &wal_index, limits)?;
                 }
-                err => return Err(StoreRuntimeError::WalReplay(Box::new(err))),
+                Err(err) => return Err(StoreRuntimeError::WalReplay(Box::new(err))),
             }
         }
 
@@ -117,12 +121,32 @@ impl StoreRuntime {
         let broadcaster = EventBroadcaster::new(BroadcasterLimits::from_limits(limits));
         let admission = AdmissionController::new(limits);
         let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
+        let mut repo_state = RepoState::new();
+        for truncation in &replay_stats.tail_truncations {
+            let payload = ErrorPayload::new(
+                ErrorCode::WalTailTruncated,
+                "wal tail truncated",
+                true,
+            )
+            .with_details(WalTailTruncatedDetails {
+                namespace: truncation.namespace.clone(),
+                segment_id: Some(truncation.segment_id),
+                truncated_from_offset: truncation.truncated_from_offset,
+            });
+            tracing::warn!(payload = ?payload, "wal tail truncated");
+            repo_state.last_wal_tail_truncated = Some(WalTailTruncatedRecord {
+                namespace: truncation.namespace.clone(),
+                segment_id: Some(truncation.segment_id),
+                truncated_from_offset: truncation.truncated_from_offset,
+                wall_ms: now_ms,
+            });
+        }
 
         Ok(Self {
             primary_remote,
             meta,
             policies: default_policies(),
-            repo_state: RepoState::new(),
+            repo_state,
             watermarks_applied,
             watermarks_durable,
             broadcaster,
@@ -130,6 +154,7 @@ impl StoreRuntime {
             peer_acks,
             wal,
             wal_index: Arc::new(wal_index),
+            replay_stats,
             lock,
         })
     }

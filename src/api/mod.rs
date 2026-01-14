@@ -10,8 +10,8 @@ pub use crate::core::DurabilityReceipt;
 
 use crate::core::{
     ActorId, Applied, Bead, Claim, ClientRequestId, DepEdge as CoreDepEdge, DepKey as CoreDepKey,
-    EventId, HlcMax, NamespaceId, ReplicaId, Seq1, StoreIdentity, Tombstone as CoreTombstone,
-    TxnDeltaV1, TxnId, WallClock, Watermarks, Workflow, WriteStamp,
+    EventId, HlcMax, NamespaceId, ReplicaId, SegmentId, Seq1, StoreIdentity,
+    Tombstone as CoreTombstone, TxnDeltaV1, TxnId, WallClock, Watermarks, Workflow, WriteStamp,
 };
 
 // =============================================================================
@@ -48,6 +48,13 @@ pub enum SyncWarning {
     },
     ClockSkew {
         delta_ms: i64,
+        at_wall_ms: u64,
+    },
+    WalTailTruncated {
+        namespace: NamespaceId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        segment_id: Option<SegmentId>,
+        truncated_from_offset: u64,
         at_wall_ms: u64,
     },
 }

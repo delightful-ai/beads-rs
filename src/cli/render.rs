@@ -598,6 +598,23 @@ fn render_status(out: &StatusOutput) -> String {
                             fmt_wall_ms(*at_wall_ms)
                         ));
                     }
+                    SyncWarning::WalTailTruncated {
+                        namespace,
+                        segment_id,
+                        truncated_from_offset,
+                        at_wall_ms,
+                    } => {
+                        let segment = segment_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        buf.push_str(&format!(
+                            "    wal_tail_truncated: {} segment {} offset {} (at {})\n",
+                            namespace,
+                            segment,
+                            truncated_from_offset,
+                            fmt_wall_ms(*at_wall_ms)
+                        ));
+                    }
                 }
             }
         }

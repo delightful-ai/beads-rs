@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::core::{CanonicalState, WriteStamp};
+use crate::core::{CanonicalState, NamespaceId, SegmentId, WriteStamp};
 
 #[derive(Clone, Debug)]
 pub struct FetchErrorRecord {
@@ -32,6 +32,14 @@ pub struct ForcePushRecord {
 #[derive(Clone, Debug)]
 pub struct ClockSkewRecord {
     pub delta_ms: i64,
+    pub wall_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct WalTailTruncatedRecord {
+    pub namespace: NamespaceId,
+    pub segment_id: Option<SegmentId>,
+    pub truncated_from_offset: u64,
     pub wall_ms: u64,
 }
 
@@ -88,6 +96,9 @@ pub struct RepoState {
 
     /// Last detected clock skew.
     pub last_clock_skew: Option<ClockSkewRecord>,
+
+    /// Last detected WAL tail truncation repair.
+    pub last_wal_tail_truncated: Option<WalTailTruncatedRecord>,
 }
 
 impl RepoState {
@@ -111,6 +122,7 @@ impl RepoState {
             last_divergence: None,
             last_force_push: None,
             last_clock_skew: None,
+            last_wal_tail_truncated: None,
         }
     }
 
@@ -134,6 +146,7 @@ impl RepoState {
             last_divergence: None,
             last_force_push: None,
             last_clock_skew: None,
+            last_wal_tail_truncated: None,
         }
     }
 

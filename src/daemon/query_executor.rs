@@ -510,6 +510,14 @@ impl Daemon {
                 at_wall_ms: skew.wall_ms,
             });
         }
+        if let Some(repair) = &repo_state.last_wal_tail_truncated {
+            warnings.push(SyncWarning::WalTailTruncated {
+                namespace: repair.namespace.clone(),
+                segment_id: repair.segment_id,
+                truncated_from_offset: repair.truncated_from_offset,
+                at_wall_ms: repair.wall_ms,
+            });
+        }
 
         let next_retry = self.next_sync_deadline_for(remote.remote());
         let (next_retry_wall_ms, next_retry_in_ms) = match next_retry {
