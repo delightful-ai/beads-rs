@@ -583,6 +583,14 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
         }
         StoreRuntimeError::MetaParse { .. } => ErrorCode::Corruption,
         StoreRuntimeError::MetaMismatch { .. } => ErrorCode::WrongStore,
+        StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::ValidationFailed
+            }
+        }
+        StoreRuntimeError::NamespacePoliciesParse { .. } => ErrorCode::ValidationFailed,
         StoreRuntimeError::WalIndex(err) => wal_index_error_code(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_error_code(err),
         StoreRuntimeError::WatermarkInvalid { .. } => ErrorCode::IndexCorrupt,
@@ -631,6 +639,14 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
                 Transience::Retryable
             }
         }
+        StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                Transience::Permanent
+            } else {
+                Transience::Retryable
+            }
+        }
+        StoreRuntimeError::NamespacePoliciesParse { .. } => Transience::Permanent,
         StoreRuntimeError::WalIndex(err) => wal_index_transience(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_transience(err),
         StoreRuntimeError::WatermarkInvalid { .. } => Transience::Permanent,

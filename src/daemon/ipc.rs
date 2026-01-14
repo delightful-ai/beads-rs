@@ -891,6 +891,30 @@ fn store_runtime_error_payload(
             }
             _ => ErrorPayload::new(ErrorCode::InternalError, message, retryable),
         },
+        StoreRuntimeError::NamespacePoliciesRead { path, source } => match source.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(
+                    error_details::PermissionDeniedDetails {
+                        path: path.display().to_string(),
+                        operation: error_details::PermissionOperation::Read,
+                    },
+                )
+            }
+            _ => ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
+                error_details::ValidationFailedDetails {
+                    field: "namespaces".to_string(),
+                    reason: format!("failed to read {}: {source}", path.display()),
+                },
+            ),
+        },
+        StoreRuntimeError::NamespacePoliciesParse { source, .. } => {
+            ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
+                error_details::ValidationFailedDetails {
+                    field: "namespaces".to_string(),
+                    reason: source.to_string(),
+                },
+            )
+        }
         StoreRuntimeError::WatermarkInvalid {
             kind,
             namespace,
