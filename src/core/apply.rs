@@ -208,11 +208,8 @@ fn apply_dep_upsert(
     dep: &WireDepV1,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind).map_err(|e| {
-        ApplyError::InvalidDependency {
-            reason: e.reason,
-        }
-    })?;
+    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
+        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
     let created = Stamp::new(WriteStamp::from(dep.created_at), dep.created_by.clone());
     let edge = match (dep.deleted_at, dep.deleted_by.as_ref()) {
         (Some(at), Some(by)) => {
@@ -224,7 +221,7 @@ fn apply_dep_upsert(
         _ => {
             return Err(ApplyError::InvalidDependency {
                 reason: "deleted_at and deleted_by must be set together".into(),
-            })
+            });
         }
     };
 
@@ -238,11 +235,8 @@ fn apply_dep_delete(
     dep: &WireDepDeleteV1,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind).map_err(|e| {
-        ApplyError::InvalidDependency {
-            reason: e.reason,
-        }
-    })?;
+    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
+        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
     let deleted = Stamp::new(WriteStamp::from(dep.deleted_at), dep.deleted_by.clone());
     let life = Lww::new(DepLife::Deleted, deleted.clone());
     let edge = DepEdge::with_life(deleted, life);
@@ -251,10 +245,7 @@ fn apply_dep_delete(
     Ok(())
 }
 
-fn fields_from_patch(
-    patch: &WireBeadPatch,
-    event_stamp: &Stamp,
-) -> Result<BeadFields, ApplyError> {
+fn fields_from_patch(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<BeadFields, ApplyError> {
     let mut fields = default_fields(event_stamp.clone());
 
     if let Some(title) = &patch.title {
@@ -760,9 +751,7 @@ mod tests {
         patch.title = Some("title".to_string());
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .unwrap();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         apply_event(&mut state, &event_with_delta(delta, 20)).unwrap();
 
         let mut delta = TxnDeltaV1::new();
@@ -778,7 +767,15 @@ mod tests {
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 21)).unwrap();
 
-        assert!(state.get_live(&BeadId::parse("bd-delete").unwrap()).is_some());
-        assert!(state.get_tombstone(&BeadId::parse("bd-delete").unwrap()).is_none());
+        assert!(
+            state
+                .get_live(&BeadId::parse("bd-delete").unwrap())
+                .is_some()
+        );
+        assert!(
+            state
+                .get_tombstone(&BeadId::parse("bd-delete").unwrap())
+                .is_none()
+        );
     }
 }

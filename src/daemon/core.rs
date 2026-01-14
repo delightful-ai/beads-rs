@@ -124,9 +124,9 @@ struct StorePathMap {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    apply_event, decode_event_body, ActorId, Applied, BeadId, CanonicalState, ClientRequestId,
-    CoreError, DurabilityClass, ErrorCode, EventBody, Limits, NamespaceId, SegmentId, Stamp,
-    StoreEpoch, StoreId, StoreIdentity, WallClock, Watermarks, WriteStamp,
+    ActorId, Applied, BeadId, CanonicalState, ClientRequestId, CoreError, DurabilityClass,
+    ErrorCode, EventBody, Limits, NamespaceId, SegmentId, Stamp, StoreEpoch, StoreId,
+    StoreIdentity, WallClock, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::collision::{detect_collisions, resolve_collisions};
@@ -623,7 +623,12 @@ impl Daemon {
                 .stores
                 .get(&store_id)
                 .ok_or(OpError::Internal("loaded store missing from state"))?;
-            replay_event_wal(store_id, store.wal_index.as_ref(), &mut state, self.limits())?
+            replay_event_wal(
+                store_id,
+                store.wal_index.as_ref(),
+                &mut state,
+                self.limits(),
+            )?
         };
         if replayed_event_wal {
             needs_sync = true;
@@ -1954,14 +1959,13 @@ fn load_event_body_at(
             }))
         })?;
 
-    let (_, event_body) =
-        decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
-            StoreRuntimeError::WalReplay(Box::new(WalReplayError::EventBodyDecode {
-                path: path.to_path_buf(),
-                offset,
-                source,
-            }))
-        })?;
+    let (_, event_body) = decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
+        StoreRuntimeError::WalReplay(Box::new(WalReplayError::EventBodyDecode {
+            path: path.to_path_buf(),
+            offset,
+            source,
+        }))
+    })?;
     Ok(event_body)
 }
 

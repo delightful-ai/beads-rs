@@ -1172,10 +1172,7 @@ fn fetch_issue(ctx: &Ctx, id: &str) -> Result<crate::api::Issue> {
     }
 }
 
-fn fetch_issue_summaries(
-    ctx: &Ctx,
-    ids: Vec<String>,
-) -> Result<Vec<crate::api::IssueSummary>> {
+fn fetch_issue_summaries(ctx: &Ctx, ids: Vec<String>) -> Result<Vec<crate::api::IssueSummary>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }

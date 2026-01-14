@@ -8,12 +8,12 @@ use super::clock::Clock;
 use super::ops::{BeadPatch, MapLiveError, OpError, Patch};
 use super::remote::RemoteUrl;
 use crate::core::{
-    ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKey, DepKind,
-    DepSpec, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId,
-    NoteAppendV1, NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TxnDeltaError,
-    TxnDeltaV1, TxnId, TxnOpV1, WallClock, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1,
-    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
-    sha256_bytes, to_canon_json_bytes,
+    ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKey, DepKind, DepSpec,
+    EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1,
+    NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TxnDeltaError, TxnDeltaV1,
+    TxnId, TxnOpV1, WallClock, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch,
+    WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical, sha256_bytes,
+    to_canon_json_bytes,
 };
 
 #[derive(Clone, Debug)]
@@ -194,7 +194,9 @@ impl MutationEngine {
                 on_branch,
             } => self.plan_close(state, id, reason, on_branch)?,
             MutationRequest::Reopen { id } => self.plan_reopen(state, id)?,
-            MutationRequest::Delete { id, reason } => self.plan_delete(state, &stamp, id, reason)?,
+            MutationRequest::Delete { id, reason } => {
+                self.plan_delete(state, &stamp, id, reason)?
+            }
             MutationRequest::AddDep { from, to, kind } => {
                 self.plan_add_dep(state, &stamp, from, to, kind)?
             }
@@ -370,10 +372,12 @@ impl MutationEngine {
                     reason: e.to_string(),
                 })?;
                 let parent = match parent {
-                    Some(raw) => Some(BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
-                        field: "parent".into(),
-                        reason: e.to_string(),
-                    })?),
+                    Some(raw) => {
+                        Some(BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
+                            field: "parent".into(),
+                            reason: e.to_string(),
+                        })?)
+                    }
                     None => None,
                 };
                 Ok(CanonicalMutationOp::SetParent { id, parent })
@@ -595,12 +599,14 @@ impl MutationEngine {
 
         let mut parsed_deps =
             DepSpec::parse_list(&dependencies).map_err(|e| OpError::ValidationFailed {
-            field: "dependencies".into(),
-            reason: e.to_string(),
-        })?;
+                field: "dependencies".into(),
+                reason: e.to_string(),
+            })?;
         sort_dedup_dep_specs(&mut parsed_deps);
-        let canonical_deps: Vec<String> =
-            parsed_deps.iter().map(|spec| spec.to_spec_string()).collect();
+        let canonical_deps: Vec<String> = parsed_deps
+            .iter()
+            .map(|spec| spec.to_spec_string())
+            .collect();
 
         let design = normalize_optional_string(design);
         let acceptance_criteria = normalize_optional_string(acceptance_criteria);
@@ -1131,7 +1137,10 @@ impl MutationEngine {
                 .map_err(delta_error_to_op)?;
         }
 
-        let canonical = CanonicalMutationOp::SetParent { id, parent: parent_id };
+        let canonical = CanonicalMutationOp::SetParent {
+            id,
+            parent: parent_id,
+        };
 
         Ok(PlannedDelta { delta, canonical })
     }
@@ -1557,12 +1566,7 @@ fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpEr
     }
 }
 
-fn would_create_cycle(
-    state: &CanonicalState,
-    from: &BeadId,
-    to: &BeadId,
-    kind: DepKind,
-) -> bool {
+fn would_create_cycle(state: &CanonicalState, from: &BeadId, to: &BeadId, kind: DepKind) -> bool {
     use std::collections::HashSet;
 
     if !kind.requires_dag() {

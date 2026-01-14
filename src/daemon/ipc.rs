@@ -697,20 +697,18 @@ impl From<OpError> for ErrorPayload {
                 ),
             },
             OpError::EventWal(e) => match e.as_ref() {
-                EventWalError::RecordTooLarge { max_bytes, got_bytes } => {
-                    ErrorPayload::new(ErrorCode::WalRecordTooLarge, message, retryable).with_details(
-                        error_details::WalRecordTooLargeDetails {
-                            max_wal_record_bytes: *max_bytes as u64,
-                            estimated_bytes: *got_bytes as u64,
-                        },
-                    )
-                }
+                EventWalError::RecordTooLarge {
+                    max_bytes,
+                    got_bytes,
+                } => ErrorPayload::new(ErrorCode::WalRecordTooLarge, message, retryable)
+                    .with_details(error_details::WalRecordTooLargeDetails {
+                        max_wal_record_bytes: *max_bytes as u64,
+                        estimated_bytes: *got_bytes as u64,
+                    }),
                 _ => ErrorPayload::new(event_wal_error_code(e.as_ref()), message, retryable)
-                    .with_details(
-                    error_details::WalErrorDetails {
+                    .with_details(error_details::WalErrorDetails {
                         message: e.to_string(),
-                    },
-                ),
+                    }),
             },
             OpError::WalMerge { errors } => {
                 let errors = errors.iter().map(|err| err.to_string()).collect();
@@ -746,9 +744,7 @@ fn store_runtime_error_payload(
     retryable: bool,
 ) -> ErrorPayload {
     match err {
-        StoreRuntimeError::Lock(lock_err) => {
-            store_lock_error_payload(lock_err, message, retryable)
-        }
+        StoreRuntimeError::Lock(lock_err) => store_lock_error_payload(lock_err, message, retryable),
         StoreRuntimeError::MetaSymlink { path } => {
             ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable).with_details(
                 error_details::PathSymlinkRejectedDetails {
@@ -838,9 +834,7 @@ fn wal_replay_error_payload(
         } => {
             let namespace = match NamespaceId::parse(namespace.clone()) {
                 Ok(ns) => ns,
-                Err(_) => {
-                    return ErrorPayload::new(wal_replay_error_code(err), message, retryable)
-                }
+                Err(_) => return ErrorPayload::new(wal_replay_error_code(err), message, retryable),
             };
             ErrorPayload::new(ErrorCode::PrevShaMismatch, message, retryable).with_details(
                 error_details::PrevShaMismatchDetails {
@@ -863,9 +857,7 @@ fn wal_replay_error_payload(
         } => {
             let namespace = match NamespaceId::parse(namespace.clone()) {
                 Ok(ns) => ns,
-                Err(_) => {
-                    return ErrorPayload::new(wal_replay_error_code(err), message, retryable)
-                }
+                Err(_) => return ErrorPayload::new(wal_replay_error_code(err), message, retryable),
             };
             let durable_seen = expected.saturating_sub(1);
             ErrorPayload::new(ErrorCode::GapDetected, message, retryable).with_details(
@@ -877,8 +869,7 @@ fn wal_replay_error_payload(
                 },
             )
         }
-        WalReplayError::IndexOffsetInvalid { .. }
-        | WalReplayError::OriginSeqOverflow { .. } => {
+        WalReplayError::IndexOffsetInvalid { .. } | WalReplayError::OriginSeqOverflow { .. } => {
             ErrorPayload::new(ErrorCode::IndexCorrupt, message, retryable).with_details(
                 error_details::IndexCorruptDetails {
                     reason: err.to_string(),
@@ -902,20 +893,17 @@ fn wal_replay_error_payload(
     }
 }
 
-fn wal_index_error_payload(
-    err: &WalIndexError,
-    message: String,
-    retryable: bool,
-) -> ErrorPayload {
+fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool) -> ErrorPayload {
     match err {
-        WalIndexError::SchemaVersionMismatch { expected, got } => {
-            ErrorPayload::new(ErrorCode::IndexRebuildRequired, message, retryable).with_details(
-                error_details::IndexRebuildRequiredDetails {
-                    namespace: None,
-                    reason: format!("index schema version mismatch: expected {expected}, got {got}"),
-                },
-            )
-        }
+        WalIndexError::SchemaVersionMismatch { expected, got } => ErrorPayload::new(
+            ErrorCode::IndexRebuildRequired,
+            message,
+            retryable,
+        )
+        .with_details(error_details::IndexRebuildRequiredDetails {
+            namespace: None,
+            reason: format!("index schema version mismatch: expected {expected}, got {got}"),
+        }),
         WalIndexError::Equivocation {
             namespace,
             origin,
@@ -1002,10 +990,13 @@ fn wal_index_error_payload(
         | WalIndexError::CborDecode(_)
         | WalIndexError::CborEncode(_)
         | WalIndexError::OriginSeqOverflow { .. }
-        | WalIndexError::Sqlite(_) => ErrorPayload::new(ErrorCode::IndexCorrupt, message, retryable)
-            .with_details(error_details::IndexCorruptDetails {
-                reason: err.to_string(),
-            }),
+        | WalIndexError::Sqlite(_) => {
+            ErrorPayload::new(ErrorCode::IndexCorrupt, message, retryable).with_details(
+                error_details::IndexCorruptDetails {
+                    reason: err.to_string(),
+                },
+            )
+        }
         _ => ErrorPayload::new(wal_index_error_code(err), message, retryable),
     }
 }
@@ -1092,7 +1083,11 @@ fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
     }
 }
 
-fn store_lock_error_payload(err: &StoreLockError, message: String, retryable: bool) -> ErrorPayload {
+fn store_lock_error_payload(
+    err: &StoreLockError,
+    message: String,
+    retryable: bool,
+) -> ErrorPayload {
     match err {
         StoreLockError::Held { store_id, meta, .. } => {
             let (holder_pid, holder_replica_id, started_at_ms, daemon_version) = meta
@@ -1135,15 +1130,14 @@ fn store_lock_error_payload(err: &StoreLockError, message: String, retryable: bo
             operation,
             source,
         } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                ErrorCode::PermissionDenied,
-                message,
-                retryable,
-            )
-            .with_details(error_details::PermissionDeniedDetails {
-                path: path.display().to_string(),
-                operation: lock_permission_operation(*operation),
-            }),
+            std::io::ErrorKind::PermissionDenied => {
+                ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(
+                    error_details::PermissionDeniedDetails {
+                        path: path.display().to_string(),
+                        operation: lock_permission_operation(*operation),
+                    },
+                )
+            }
             _ => ErrorPayload::new(ErrorCode::InternalError, message, retryable),
         },
     }
@@ -1893,12 +1887,12 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
-    use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo, WalIndexError, WalReplayError};
     use crate::core::{
         DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, StoreEpoch, StoreId,
         StoreIdentity, TxnId,
     };
+    use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
+    use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo, WalIndexError, WalReplayError};
     use std::io;
     use uuid::Uuid;
 
@@ -2167,10 +2161,7 @@ mod tests {
             .unwrap()
             .expect("details");
         assert_eq!(details.path, "/tmp/beads.lock");
-        assert_eq!(
-            details.operation,
-            error_details::PermissionOperation::Write
-        );
+        assert_eq!(details.operation, error_details::PermissionOperation::Write);
     }
 
     #[test]

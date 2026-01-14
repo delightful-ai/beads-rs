@@ -371,10 +371,7 @@ mod tests {
             prev_sha256: None,
         };
         let err = header.encode().unwrap_err();
-        assert!(matches!(
-            err,
-            EventWalError::RecordHeaderInvalid { .. }
-        ));
+        assert!(matches!(err, EventWalError::RecordHeaderInvalid { .. }));
     }
 
     #[test]
@@ -395,9 +392,6 @@ mod tests {
         bytes.extend_from_slice(&[5u8; 32]);
 
         let err = RecordHeader::decode(&bytes).unwrap_err();
-        assert!(matches!(
-            err,
-            EventWalError::RecordHeaderInvalid { .. }
-        ));
+        assert!(matches!(err, EventWalError::RecordHeaderInvalid { .. }));
     }
 }

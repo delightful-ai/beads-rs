@@ -57,9 +57,7 @@ pub enum WalIndexError {
         existing_sha256: [u8; 32],
         new_sha256: [u8; 32],
     },
-    #[error(
-        "client_request_id reuse mismatch for {namespace} {origin} {client_request_id}"
-    )]
+    #[error("client_request_id reuse mismatch for {namespace} {origin} {client_request_id}")]
     ClientRequestIdReuseMismatch {
         namespace: NamespaceId,
         origin: ReplicaId,
@@ -1445,31 +1443,11 @@ mod tests {
         let segment_id = SegmentId::new(Uuid::from_bytes([4u8; 16]));
 
         txn.record_event(
-            &ns,
-            &event_id,
-            sha,
-            None,
-            segment_id,
-            128,
-            64,
-            1_700_000,
-            txn_id,
-            None,
-            None,
+            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None, None,
         )
         .unwrap();
         txn.record_event(
-            &ns,
-            &event_id,
-            sha,
-            None,
-            segment_id,
-            128,
-            64,
-            1_700_000,
-            txn_id,
-            None,
-            None,
+            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None, None,
         )
         .unwrap();
         txn.commit().unwrap();
@@ -1495,33 +1473,13 @@ mod tests {
         let other_sha = [8u8; 32];
 
         txn.record_event(
-            &ns,
-            &event_id,
-            sha,
-            None,
-            segment_id,
-            128,
-            64,
-            1_700_000,
-            txn_id,
-            None,
-            None,
+            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None, None,
         )
         .unwrap();
 
         let err = txn
             .record_event(
-                &ns,
-                &event_id,
-                other_sha,
-                None,
-                segment_id,
-                128,
-                64,
-                1_700_000,
-                txn_id,
-                None,
-                None,
+                &ns, &event_id, other_sha, None, segment_id, 128, 64, 1_700_000, txn_id, None, None,
             )
             .unwrap_err();
 

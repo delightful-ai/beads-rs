@@ -8,12 +8,12 @@ use minicbor::{Decoder, Encoder};
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
 
+use super::domain::DepKind;
 use super::identity::{
     ActorId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TxnId,
 };
 use super::limits::Limits;
 use super::namespace::NamespaceId;
-use super::domain::DepKind;
 use super::watermark::Seq1;
 use super::wire_bead::{
     NoteAppendV1, NotesPatch, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepDeleteV1, WireDepV1,
@@ -319,10 +319,7 @@ pub fn decode_event_body(
     ))
 }
 
-pub fn decode_event_hlc_max(
-    bytes: &[u8],
-    limits: &Limits,
-) -> Result<Option<HlcMax>, DecodeError> {
+pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcMax>, DecodeError> {
     let max_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
     if bytes.len() > max_bytes {
         return Err(DecodeError::DecodeLimit("max_wal_record_bytes"));
@@ -1156,7 +1153,8 @@ fn encode_wire_tombstone(
     if tombstone.reason.is_some() {
         len += 1;
     }
-    let has_lineage = tombstone.lineage_created_at.is_some() || tombstone.lineage_created_by.is_some();
+    let has_lineage =
+        tombstone.lineage_created_at.is_some() || tombstone.lineage_created_by.is_some();
     if has_lineage {
         len += 2;
     }
@@ -1255,10 +1253,7 @@ fn decode_wire_tombstone(
     })
 }
 
-fn encode_wire_dep(
-    enc: &mut Encoder<&mut Vec<u8>>,
-    dep: &WireDepV1,
-) -> Result<(), EncodeError> {
+fn encode_wire_dep(enc: &mut Encoder<&mut Vec<u8>>, dep: &WireDepV1) -> Result<(), EncodeError> {
     let mut len = 5;
     let has_deleted = dep.deleted_at.is_some() || dep.deleted_by.is_some();
     if has_deleted {

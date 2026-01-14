@@ -104,11 +104,7 @@ impl PeerAckTable {
         Self::default()
     }
 
-    pub fn set_eligibility(
-        &mut self,
-        namespace: NamespaceId,
-        eligible: BTreeSet<ReplicaId>,
-    ) {
+    pub fn set_eligibility(&mut self, namespace: NamespaceId, eligible: BTreeSet<ReplicaId>) {
         self.eligible.insert(namespace, eligible);
     }
 
@@ -169,11 +165,7 @@ impl PeerAckTable {
                     .get(namespace, origin)
                     .map(|watermark| watermark.seq())
                     .unwrap_or(Seq0::ZERO);
-                if acked_seq >= seq {
-                    Some(*peer)
-                } else {
-                    None
-                }
+                if acked_seq >= seq { Some(*peer) } else { None }
             })
             .collect()
     }
@@ -338,19 +330,13 @@ mod tests {
         table.set_eligibility(ns.clone(), eligible);
 
         let mut durable = WatermarkMap::new();
-        durable
-            .entry(ns.clone())
-            .or_default()
-            .insert(origin, 3);
+        durable.entry(ns.clone()).or_default().insert(origin, 3);
         table
             .update_peer(peer, &durable, None, None, None, 10)
             .unwrap();
 
         let mut backwards = WatermarkMap::new();
-        backwards
-            .entry(ns.clone())
-            .or_default()
-            .insert(origin, 2);
+        backwards.entry(ns.clone()).or_default().insert(origin, 2);
         let err = table
             .update_peer(peer, &backwards, None, None, None, 12)
             .unwrap_err();
@@ -371,10 +357,7 @@ mod tests {
         table.set_eligibility(ns.clone(), eligible);
 
         let mut durable = WatermarkMap::new();
-        durable
-            .entry(ns.clone())
-            .or_default()
-            .insert(origin, 2);
+        durable.entry(ns.clone()).or_default().insert(origin, 2);
         let mut heads = WatermarkHeads::new();
         heads
             .entry(ns.clone())
@@ -413,28 +396,19 @@ mod tests {
         table.set_eligibility(ns.clone(), eligible);
 
         let mut durable_a = WatermarkMap::new();
-        durable_a
-            .entry(ns.clone())
-            .or_default()
-            .insert(origin, 5);
+        durable_a.entry(ns.clone()).or_default().insert(origin, 5);
         table
             .update_peer(peer_a, &durable_a, None, None, None, 10)
             .unwrap();
 
         let mut durable_b = WatermarkMap::new();
-        durable_b
-            .entry(ns.clone())
-            .or_default()
-            .insert(origin, 4);
+        durable_b.entry(ns.clone()).or_default().insert(origin, 4);
         table
             .update_peer(peer_b, &durable_b, None, None, None, 11)
             .unwrap();
 
         let mut durable_c = WatermarkMap::new();
-        durable_c
-            .entry(ns.clone())
-            .or_default()
-            .insert(origin, 5);
+        durable_c.entry(ns.clone()).or_default().insert(origin, 5);
         table
             .update_peer(peer_c, &durable_c, None, None, None, 12)
             .unwrap();

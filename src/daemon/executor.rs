@@ -16,7 +16,7 @@ use bytes::Bytes;
 use crossbeam::channel::Sender;
 
 use super::broadcast::BroadcastEvent;
-use super::core::{detect_clock_skew, Daemon, NormalizedMutationMeta};
+use super::core::{Daemon, NormalizedMutationMeta, detect_clock_skew};
 use super::git_worker::GitOp;
 use super::ipc::{OpResponse, Response, ResponsePayload};
 use super::mutation_engine::{IdContext, MutationContext, MutationEngine, MutationRequest};
@@ -27,13 +27,13 @@ use super::wal::{
     SegmentWriter, WalIndex, WalIndexError, WalReplayError,
 };
 use crate::core::{
-    apply_event, decode_event_body, hash_event_body, Applied, BeadId, BeadType, DepKind,
-    DurabilityReceipt, Durable, EventBody, EventId, HeadStatus, Limits, NoteId, Priority,
-    ReplicaId, Seq1, Sha256, StoreIdentity, WallClock, Watermark, WatermarkError, Watermarks,
-    WriteStamp, TxnDeltaV1, TxnOpV1, WirePatch,
+    Applied, BeadId, BeadType, DepKind, DurabilityReceipt, Durable, EventBody, EventId, HeadStatus,
+    Limits, NoteId, Priority, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnOpV1,
+    WallClock, Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event,
+    decode_event_body, hash_event_body,
 };
-use crate::paths;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
+use crate::paths;
 
 impl Daemon {
     fn apply_mutation_request(
@@ -679,9 +679,7 @@ fn load_event_body(
 ) -> Result<EventBody, OpError> {
     let reader = wal_index.reader();
     let from_seq_excl = event_id.origin_seq.get().saturating_sub(1);
-    let max_bytes = limits
-        .max_wal_record_bytes
-        .saturating_add(FRAME_HEADER_LEN);
+    let max_bytes = limits.max_wal_record_bytes.saturating_add(FRAME_HEADER_LEN);
     let items = reader
         .iter_from(
             &event_id.namespace,
@@ -693,7 +691,9 @@ fn load_event_body(
     let item = items
         .into_iter()
         .find(|item| item.event_id == *event_id)
-        .ok_or(OpError::Internal("wal index missing event for idempotent request"))?;
+        .ok_or(OpError::Internal(
+            "wal index missing event for idempotent request",
+        ))?;
     let segments = reader
         .list_segments(&event_id.namespace)
         .map_err(wal_index_to_op)?;
@@ -785,7 +785,10 @@ fn op_result_from_delta(
         MutationRequest::Claim { id, .. } => {
             let bead_id = parse_bead_id(id)?;
             let expires = find_claim_expiry(delta, &bead_id)?;
-            Ok(OpResult::Claimed { id: bead_id, expires })
+            Ok(OpResult::Claimed {
+                id: bead_id,
+                expires,
+            })
         }
         MutationRequest::Unclaim { id } => Ok(OpResult::Unclaimed {
             id: parse_bead_id(id)?,
@@ -813,9 +816,7 @@ fn find_created_id(delta: &TxnDeltaV1) -> Result<BeadId, OpError> {
                 None => found = Some(patch.id.clone()),
                 Some(existing) if *existing == patch.id => {}
                 Some(_) => {
-                    return Err(OpError::Internal(
-                        "create delta contains multiple bead ids",
-                    ));
+                    return Err(OpError::Internal("create delta contains multiple bead ids"));
                 }
             }
         }
@@ -852,9 +853,7 @@ fn find_claim_expiry(delta: &TxnDeltaV1, expected: &BeadId) -> Result<WallClock,
             }
         }
     }
-    found.ok_or(OpError::Internal(
-        "claim delta missing assignee_expires",
-    ))
+    found.ok_or(OpError::Internal("claim delta missing assignee_expires"))
 }
 
 #[cfg(test)]
@@ -874,8 +873,8 @@ mod tests {
         NamespaceId, NoteAppendV1, NoteId, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
         StoreMetaVersions, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
-    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, rebuild_index};
     use crate::daemon::Clock;
+    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, rebuild_index};
 
     fn bead_id(id: &str) -> BeadId {
         BeadId::parse(id).unwrap()
@@ -930,9 +929,7 @@ mod tests {
         let id = bead_id("bd-123");
         let patch = WireBeadPatch::new(id.clone());
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .unwrap();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
 
         let request = MutationRequest::Create {
             id: None,
@@ -978,8 +975,10 @@ mod tests {
         };
 
         let result = op_result_from_delta(&request, &delta).unwrap();
-        assert!(matches!(result, OpResult::NoteAdded { bead_id, note_id: got }
-            if bead_id == expected_bead_id && got == note_id.as_str()));
+        assert!(
+            matches!(result, OpResult::NoteAdded { bead_id, note_id: got }
+            if bead_id == expected_bead_id && got == note_id.as_str())
+        );
     }
 
     #[test]
@@ -987,9 +986,7 @@ mod tests {
         let bead_id = bead_id("bd-123");
         let patch = WireBeadPatch::new(bead_id.clone());
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .unwrap();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
 
         let request = MutationRequest::Claim {
             id: bead_id.as_str().to_string(),
@@ -1007,9 +1004,7 @@ mod tests {
         let expires = WallClock(1234);
         patch.assignee_expires = WirePatch::Set(expires);
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .unwrap();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
 
         let request = MutationRequest::Claim {
             id: bead_id.as_str().to_string(),
@@ -1088,7 +1083,9 @@ mod tests {
             SegmentConfig::from_limits(&limits),
         )
         .unwrap();
-        writer.append(&record, draft.event_body.event_time_ms).unwrap();
+        writer
+            .append(&record, draft.event_body.event_time_ms)
+            .unwrap();
 
         rebuild_index(&store_dir, &meta, &index, &limits).unwrap();
 

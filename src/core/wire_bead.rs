@@ -584,8 +584,13 @@ impl TxnOpV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TxnOpKey {
-    BeadUpsert { id: BeadId },
-    BeadDelete { id: BeadId, lineage: Option<Stamp> },
+    BeadUpsert {
+        id: BeadId,
+    },
+    BeadDelete {
+        id: BeadId,
+        lineage: Option<Stamp>,
+    },
     DepUpsert {
         from: BeadId,
         to: BeadId,
@@ -596,7 +601,10 @@ pub enum TxnOpKey {
         to: BeadId,
         kind: DepKind,
     },
-    NoteAppend { bead_id: BeadId, note_id: NoteId },
+    NoteAppend {
+        bead_id: BeadId,
+        note_id: NoteId,
+    },
 }
 
 impl TxnOpKey {

@@ -415,9 +415,7 @@ impl OpError {
             OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
             OpError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             OpError::Overloaded { .. } => ErrorCode::Overloaded,
-            OpError::ClientRequestIdReuseMismatch { .. } => {
-                ErrorCode::ClientRequestIdReuseMismatch
-            }
+            OpError::ClientRequestIdReuseMismatch { .. } => ErrorCode::ClientRequestIdReuseMismatch,
             OpError::NotAGitRepo(_) => ErrorCode::NotAGitRepo,
             OpError::NoRemote(_) => ErrorCode::NoRemote,
             OpError::RepoNotInitialized(_) => ErrorCode::RepoNotInitialized,
@@ -716,8 +714,9 @@ fn wal_index_transience(err: &WalIndexError) -> Transience {
             ..
         } => Transience::Permanent,
         WalIndexError::MetaMismatch { .. } => Transience::Retryable,
-        WalIndexError::Equivocation { .. }
-        | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
+        WalIndexError::Equivocation { .. } | WalIndexError::ClientRequestIdReuseMismatch { .. } => {
+            Transience::Permanent
+        }
         _ => Transience::Retryable,
     }
 }

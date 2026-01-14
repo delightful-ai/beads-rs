@@ -75,8 +75,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             }
 
             // Batch fetch all summaries in a few calls instead of N individual requests
-            let outgoing_views =
-                fetch_issue_summaries(ctx, outgoing_ids.into_iter().collect())?;
+            let outgoing_views = fetch_issue_summaries(ctx, outgoing_ids.into_iter().collect())?;
             let blocks = fetch_issue_summaries(ctx, blocks_ids.into_iter().collect())?;
             let children = fetch_issue_summaries(ctx, children_ids.into_iter().collect())?;
             let related = fetch_issue_summaries(ctx, related_ids.into_iter().collect())?;

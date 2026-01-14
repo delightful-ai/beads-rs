@@ -16,8 +16,8 @@ use crate::daemon::admission::AdmissionController;
 
 use super::gap_buffer::{GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
-    Ack, Capabilities, Events, Hello, ReplMessage, Want, WatermarkHeads, WatermarkMap,
-    PROTOCOL_VERSION_V1,
+    Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplMessage, Want, WatermarkHeads,
+    WatermarkMap,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,10 +104,7 @@ pub struct IngestOutcome {
 pub trait SessionStore {
     fn watermark_snapshot(&self, namespaces: &[NamespaceId]) -> WatermarkSnapshot;
 
-    fn lookup_event_sha(
-        &self,
-        eid: &EventId,
-    ) -> Result<Option<Sha256>, EventShaLookupError>;
+    fn lookup_event_sha(&self, eid: &EventId) -> Result<Option<Sha256>, EventShaLookupError>;
 
     fn ingest_remote_batch(
         &mut self,
@@ -121,9 +118,7 @@ pub trait SessionStore {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionAction {
     Send(ReplMessage),
-    Close {
-        error: Option<ErrorPayload>,
-    },
+    Close { error: Option<ErrorPayload> },
     PeerAck(Ack),
     PeerWant(Want),
     PeerError(ErrorPayload),
@@ -254,11 +249,14 @@ impl Session {
             return self.invalid_request("min_protocol_version exceeds protocol_version");
         }
 
-        let negotiated =
-            match negotiate_version(self.config.protocol, hello.protocol_version, hello.min_protocol_version) {
-                Ok(version) => version,
-                Err(err) => return self.fail(version_incompatible_payload(&err)),
-            };
+        let negotiated = match negotiate_version(
+            self.config.protocol,
+            hello.protocol_version,
+            hello.min_protocol_version,
+        ) {
+            Ok(version) => version,
+            Err(err) => return self.fail(version_incompatible_payload(&err)),
+        };
 
         let accepted_namespaces =
             intersect_namespaces(&self.config.offered_namespaces, &hello.requested_namespaces);
@@ -266,12 +264,7 @@ impl Session {
             intersect_namespaces(&self.config.requested_namespaces, &hello.offered_namespaces);
 
         let snapshot = store.watermark_snapshot(&accepted_namespaces);
-        let welcome = self.build_welcome(
-            negotiated,
-            &hello,
-            snapshot,
-            accepted_namespaces.clone(),
-        );
+        let welcome = self.build_welcome(negotiated, &hello, snapshot, accepted_namespaces.clone());
 
         self.seed_watermarks(store, &incoming_namespaces);
         self.peer = Some(SessionPeer {
@@ -298,9 +291,11 @@ impl Session {
             return self.invalid_request("unexpected WELCOME");
         }
 
-        if let Err(payload) =
-            self.validate_peer_store(welcome.store_id, welcome.store_epoch, welcome.receiver_replica_id)
-        {
+        if let Err(payload) = self.validate_peer_store(
+            welcome.store_id,
+            welcome.store_epoch,
+            welcome.receiver_replica_id,
+        ) {
             return self.fail(*payload);
         }
 
@@ -315,8 +310,10 @@ impl Session {
             }));
         }
 
-        let incoming_namespaces =
-            intersect_namespaces(&self.config.requested_namespaces, &welcome.accepted_namespaces);
+        let incoming_namespaces = intersect_namespaces(
+            &self.config.requested_namespaces,
+            &welcome.accepted_namespaces,
+        );
         self.seed_watermarks(store, &incoming_namespaces);
 
         self.peer = Some(SessionPeer {
@@ -349,7 +346,10 @@ impl Session {
             .map(|frame| frame.bytes.len() as u64)
             .sum();
         let event_count = events.events.len() as u64;
-        let permit = match self.admission.try_admit_repl_ingest(total_bytes, event_count) {
+        let permit = match self
+            .admission
+            .try_admit_repl_ingest(total_bytes, event_count)
+        {
             Ok(permit) => permit,
             Err(err) => return self.fail(err.to_error_payload()),
         };
@@ -363,10 +363,11 @@ impl Session {
             let origin = frame.eid.origin_replica_id;
             let durable = self.durable_for(&namespace, &origin);
 
-            let expected_prev = match self.expected_prev_head(&namespace, &origin, durable, frame.eid.origin_seq) {
-                Ok(prev) => prev,
-                Err(payload) => return self.fail(*payload),
-            };
+            let expected_prev =
+                match self.expected_prev_head(&namespace, &origin, durable, frame.eid.origin_seq) {
+                    Ok(prev) => prev,
+                    Err(payload) => return self.fail(*payload),
+                };
 
             let verified = {
                 let lookup = SessionLookup { store };
@@ -483,7 +484,8 @@ impl Session {
 
     fn seed_watermarks(&mut self, store: &impl SessionStore, namespaces: &[NamespaceId]) {
         let snapshot = store.watermark_snapshot(namespaces);
-        self.durable = watermark_state_from_snapshot(&snapshot.durable, Some(&snapshot.durable_heads));
+        self.durable =
+            watermark_state_from_snapshot(&snapshot.durable, Some(&snapshot.durable_heads));
         self.applied =
             watermark_state_from_snapshot(&snapshot.applied, Some(&snapshot.applied_heads));
     }
@@ -527,10 +529,9 @@ impl Session {
             return Err(Box::new(replica_id_collision_payload(peer_replica_id)));
         }
         if peer_store_id != self.config.local_store.store_id {
-            return Err(wrong_store_payload(
-                self.config.local_store.store_id,
-                peer_store_id,
-            ).into());
+            return Err(
+                wrong_store_payload(self.config.local_store.store_id, peer_store_id).into(),
+            );
         }
         if peer_epoch != self.config.local_store.store_epoch {
             return Err(Box::new(store_epoch_mismatch_payload(
@@ -564,10 +565,7 @@ struct SessionLookup<'a, S> {
 }
 
 impl<S: SessionStore> EventShaLookup for SessionLookup<'_, S> {
-    fn lookup_event_sha(
-        &self,
-        eid: &EventId,
-    ) -> Result<Option<Sha256>, EventShaLookupError> {
+    fn lookup_event_sha(&self, eid: &EventId) -> Result<Option<Sha256>, EventShaLookupError> {
         self.store.lookup_event_sha(eid)
     }
 }
@@ -623,11 +621,7 @@ fn optional_heads(mut heads: WatermarkHeads) -> Option<WatermarkHeads> {
         None
     } else {
         heads.retain(|_, origins| !origins.is_empty());
-        if heads.is_empty() {
-            None
-        } else {
-            Some(heads)
-        }
+        if heads.is_empty() { None } else { Some(heads) }
     }
 }
 
@@ -635,7 +629,7 @@ fn watermark_state_from_snapshot<K>(
     map: &WatermarkMap,
     heads: Option<&WatermarkHeads>,
 ) -> WatermarkState<K> {
-        let mut out: WatermarkState<K> = BTreeMap::new();
+    let mut out: WatermarkState<K> = BTreeMap::new();
     for (namespace, origins) in map {
         let ns_map = out.entry(namespace.clone()).or_default();
         for (origin, seq) in origins {
@@ -658,12 +652,7 @@ fn watermark_state_from_snapshot<K>(
     out
 }
 
-fn insert_want(
-    want: &mut WatermarkMap,
-    namespace: NamespaceId,
-    origin: ReplicaId,
-    from: Seq0,
-) {
+fn insert_want(want: &mut WatermarkMap, namespace: NamespaceId, origin: ReplicaId, from: Seq0) {
     let ns = want.entry(namespace).or_default();
     ns.entry(origin)
         .and_modify(|seq| {
@@ -700,7 +689,11 @@ fn build_ack(
     Some(Ack {
         durable,
         durable_heads,
-        applied: if applied.is_empty() { None } else { Some(applied) },
+        applied: if applied.is_empty() {
+            None
+        } else {
+            Some(applied)
+        },
         applied_heads,
     })
 }
@@ -740,11 +733,12 @@ fn repl_lagged_payload(reason: String, limits: &Limits) -> ErrorPayload {
 }
 
 fn wrong_store_payload(expected: StoreId, got: StoreId) -> ErrorPayload {
-    ErrorPayload::new(ErrorCode::WrongStore, "wrong store id", false)
-        .with_details(WrongStoreDetails {
+    ErrorPayload::new(ErrorCode::WrongStore, "wrong store id", false).with_details(
+        WrongStoreDetails {
             expected_store_id: expected,
             got_store_id: got,
-        })
+        },
+    )
 }
 
 fn store_epoch_mismatch_payload(
@@ -752,12 +746,13 @@ fn store_epoch_mismatch_payload(
     expected: StoreEpoch,
     got: StoreEpoch,
 ) -> ErrorPayload {
-    ErrorPayload::new(ErrorCode::StoreEpochMismatch, "store epoch mismatch", false)
-        .with_details(StoreEpochMismatchDetails {
+    ErrorPayload::new(ErrorCode::StoreEpochMismatch, "store epoch mismatch", false).with_details(
+        StoreEpochMismatchDetails {
             store_id,
             expected_epoch: expected.get(),
             got_epoch: got.get(),
-        })
+        },
+    )
 }
 
 fn replica_id_collision_payload(replica_id: ReplicaId) -> ErrorPayload {
@@ -766,13 +761,17 @@ fn replica_id_collision_payload(replica_id: ReplicaId) -> ErrorPayload {
 }
 
 fn version_incompatible_payload(err: &ProtocolIncompatible) -> ErrorPayload {
-    ErrorPayload::new(ErrorCode::VersionIncompatible, "protocol versions incompatible", false)
-        .with_details(VersionIncompatibleDetails {
-            local_min: err.local_min,
-            local_max: err.local_max,
-            peer_min: err.peer_min,
-            peer_max: err.peer_max,
-        })
+    ErrorPayload::new(
+        ErrorCode::VersionIncompatible,
+        "protocol versions incompatible",
+        false,
+    )
+    .with_details(VersionIncompatibleDetails {
+        local_min: err.local_min,
+        local_max: err.local_max,
+        peer_min: err.peer_min,
+        peer_max: err.peer_max,
+    })
 }
 
 fn invalid_request_payload(reason: impl Into<String>) -> ErrorPayload {
@@ -816,40 +815,36 @@ fn event_frame_error_payload(err: EventFrameError) -> ErrorPayload {
             field: Some("event_id".to_string()),
             reason: Some("event_id does not match decoded body".to_string()),
         }),
-        EventFrameError::HashMismatch => ErrorPayload::new(
-            ErrorCode::Corruption,
-            "event sha256 mismatch",
-            false,
-        )
-        .with_details(CorruptionDetails {
-            reason: "event sha256 mismatch".to_string(),
-        }),
-        EventFrameError::PrevMismatch => ErrorPayload::new(
-            ErrorCode::Corruption,
-            "prev_sha256 mismatch",
-            false,
-        )
-        .with_details(CorruptionDetails {
-            reason: "prev_sha256 mismatch".to_string(),
-        }),
-        EventFrameError::Validation(err) => ErrorPayload::new(
-            ErrorCode::InvalidRequest,
-            err.to_string(),
-            false,
-        )
-        .with_details(InvalidRequestDetails {
-            field: None,
-            reason: Some(err.to_string()),
-        }),
-        EventFrameError::Decode(err) => ErrorPayload::new(
-            ErrorCode::InvalidRequest,
-            err.to_string(),
-            false,
-        )
-        .with_details(InvalidRequestDetails {
-            field: None,
-            reason: Some(err.to_string()),
-        }),
+        EventFrameError::HashMismatch => {
+            ErrorPayload::new(ErrorCode::Corruption, "event sha256 mismatch", false).with_details(
+                CorruptionDetails {
+                    reason: "event sha256 mismatch".to_string(),
+                },
+            )
+        }
+        EventFrameError::PrevMismatch => {
+            ErrorPayload::new(ErrorCode::Corruption, "prev_sha256 mismatch", false).with_details(
+                CorruptionDetails {
+                    reason: "prev_sha256 mismatch".to_string(),
+                },
+            )
+        }
+        EventFrameError::Validation(err) => {
+            ErrorPayload::new(ErrorCode::InvalidRequest, err.to_string(), false).with_details(
+                InvalidRequestDetails {
+                    field: None,
+                    reason: Some(err.to_string()),
+                },
+            )
+        }
+        EventFrameError::Decode(err) => {
+            ErrorPayload::new(ErrorCode::InvalidRequest, err.to_string(), false).with_details(
+                InvalidRequestDetails {
+                    field: None,
+                    reason: Some(err.to_string()),
+                },
+            )
+        }
         EventFrameError::Lookup(err) => internal_error(err.to_string()),
         EventFrameError::Equivocation => {
             ErrorPayload::new(ErrorCode::Equivocation, "equivocation detected", false)
@@ -864,8 +859,8 @@ mod tests {
 
     use crate::core::{
         ActorId, EventBody, EventBytes, EventFrameV1, EventKindV1, HlcMax, NamespaceId, ReplicaId,
-        Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId,
-        encode_event_body_canonical, hash_event_body,
+        Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, encode_event_body_canonical,
+        hash_event_body,
     };
 
     #[derive(Clone, Debug)]
@@ -927,10 +922,7 @@ mod tests {
             self.snapshot_for(namespaces)
         }
 
-        fn lookup_event_sha(
-            &self,
-            eid: &EventId,
-        ) -> Result<Option<Sha256>, EventShaLookupError> {
+        fn lookup_event_sha(&self, eid: &EventId) -> Result<Option<Sha256>, EventShaLookupError> {
             Ok(self.lookup.get(eid).copied())
         }
 
@@ -1042,7 +1034,10 @@ mod tests {
 
         let actions = session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
         assert!(matches!(session.phase(), SessionPhase::Streaming));
-        assert!(matches!(actions.as_slice(), [SessionAction::Send(ReplMessage::Welcome(_))]));
+        assert!(matches!(
+            actions.as_slice(),
+            [SessionAction::Send(ReplMessage::Welcome(_))]
+        ));
         let SessionAction::Send(ReplMessage::Welcome(welcome)) = &actions[0] else {
             panic!("expected welcome");
         };
@@ -1250,7 +1245,10 @@ mod tests {
         session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
 
         let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
-        let wrong_store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([10u8; 16])), StoreEpoch::new(1));
+        let wrong_store = StoreIdentity::new(
+            StoreId::new(Uuid::from_bytes([10u8; 16])),
+            StoreEpoch::new(1),
+        );
         let e1 = make_event(wrong_store, NamespaceId::core(), origin, 1, None);
 
         let actions = session.handle_message(

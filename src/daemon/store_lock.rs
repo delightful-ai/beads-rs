@@ -227,7 +227,7 @@ fn ensure_dir(path: &Path) -> Result<(), StoreLockError> {
                 path: path.to_path_buf(),
                 operation: StoreLockOperation::Read,
                 source: err,
-            })
+            });
         }
     }
     set_dir_permissions(path, 0o700)?;

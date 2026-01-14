@@ -17,8 +17,8 @@ use crate::core::{
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
-use crate::daemon::repl::PeerAckTable;
 use crate::daemon::remote::RemoteUrl;
+use crate::daemon::repl::PeerAckTable;
 use crate::daemon::repo::RepoState;
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
 use crate::daemon::wal::{

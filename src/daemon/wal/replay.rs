@@ -395,13 +395,15 @@ fn index_record(
         )?;
     }
 
-    if let Some(hlc_max) = decode_event_hlc_max(record.payload.as_ref(), limits).map_err(|source| {
-        WalReplayError::EventBodyDecode {
-            path: segment.path.clone(),
-            offset,
-            source,
-        }
-    })? {
+    if let Some(hlc_max) =
+        decode_event_hlc_max(record.payload.as_ref(), limits).map_err(|source| {
+            WalReplayError::EventBodyDecode {
+                path: segment.path.clone(),
+                offset,
+                source,
+            }
+        })?
+    {
         txn.update_hlc(&HlcRow {
             actor_id: hlc_max.actor_id,
             last_physical_ms: hlc_max.physical_ms,

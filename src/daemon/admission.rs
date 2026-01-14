@@ -104,7 +104,9 @@ impl AdmissionController {
             .saturating_add(events);
 
         if next_bytes > max_bytes || next_events > max_events {
-            self.inner.repl_ingest_bytes.fetch_sub(bytes, Ordering::AcqRel);
+            self.inner
+                .repl_ingest_bytes
+                .fetch_sub(bytes, Ordering::AcqRel);
             self.inner
                 .repl_ingest_events
                 .fetch_sub(events, Ordering::AcqRel);

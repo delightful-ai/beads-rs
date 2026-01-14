@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::core::{
-    Durable, HeadStatus, Limits, NamespaceId, ReplicaId, Seq0, Seq1, Watermark, WatermarkError,
-    VerifiedEvent, VerifiedEventAny,
+    Durable, HeadStatus, Limits, NamespaceId, ReplicaId, Seq0, Seq1, VerifiedEvent,
+    VerifiedEventAny, Watermark, WatermarkError,
 };
 
 #[derive(Clone, Debug)]
@@ -408,6 +408,8 @@ mod tests {
         let mut state = state_with_limits(&limits);
 
         let decision = state.ingest_one(contiguous_event(2), 100);
-        assert!(matches!(decision, IngestDecision::Reject { code } if code == "gap_buffer_bytes_overflow"));
+        assert!(
+            matches!(decision, IngestDecision::Reject { code } if code == "gap_buffer_bytes_overflow")
+        );
     }
 }

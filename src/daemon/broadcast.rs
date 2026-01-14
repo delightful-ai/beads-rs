@@ -236,9 +236,7 @@ impl BroadcasterState {
             || self.hot_cache_bytes > self.limits.hot_cache_max_bytes
         {
             if let Some(evicted) = self.hot_cache.pop_front() {
-                self.hot_cache_bytes = self
-                    .hot_cache_bytes
-                    .saturating_sub(evicted.byte_len());
+                self.hot_cache_bytes = self.hot_cache_bytes.saturating_sub(evicted.byte_len());
             } else {
                 break;
             }

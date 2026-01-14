@@ -111,7 +111,10 @@ durability_eligible = true
         let roster = ReplicaRoster::from_toml_str(input).unwrap();
         assert_eq!(roster.replicas.len(), 1);
         let entry = &roster.replicas[0];
-        assert_eq!(entry.replica_id, ReplicaId::new(Uuid::from_bytes([0u8; 16])));
+        assert_eq!(
+            entry.replica_id,
+            ReplicaId::new(Uuid::from_bytes([0u8; 16]))
+        );
         assert_eq!(entry.role, ReplicaRole::Anchor);
         assert!(entry.durability_eligible);
         assert!(entry.allowed_namespaces.is_none());
