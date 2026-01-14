@@ -96,6 +96,7 @@ impl Daemon {
         enabled: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let limits = self.limits().clone();
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err(err),
@@ -128,12 +129,8 @@ impl Daemon {
         }
 
         let store_dir = crate::paths::store_dir(proof.store_id());
-        let stats = match rebuild_index(
-            &store_dir,
-            &store.meta,
-            store.wal_index.as_ref(),
-            self.limits(),
-        ) {
+        let stats = match rebuild_index(&store_dir, &store.meta, store.wal_index.as_ref(), &limits)
+        {
             Ok(stats) => stats,
             Err(err) => {
                 return Response::err(OpError::StoreRuntime(Box::new(StoreRuntimeError::from(
