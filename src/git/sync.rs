@@ -1522,6 +1522,53 @@ mod tests {
         assert!(outcome.divergence.is_some());
     }
 
+    #[test]
+    fn sync_with_retry_respects_max_retries_on_non_fast_forward() {
+        use std::fs;
+
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let _base_oid = write_store_commit(&local_repo, None, "base");
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut push_options = git2::PushOptions::new();
+            remote
+                .push(
+                    &["refs/heads/beads/store:refs/heads/beads/store"],
+                    Some(&mut push_options),
+                )
+                .unwrap();
+        }
+
+        let lock_path = remote_dir.join("refs/heads/beads/store.lock");
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&lock_path, b"lock").unwrap();
+
+        let resolution_stamp = make_stamp(10, "tester");
+        let result = sync_with_retry(
+            &local_repo,
+            &local_dir,
+            &CanonicalState::new(),
+            resolution_stamp,
+            0,
+        );
+
+        match result {
+            Err(SyncError::TooManyRetries(retries)) => assert_eq!(retries, 1),
+            other => panic!("expected TooManyRetries, got {other:?}"),
+        }
+    }
+
     #[cfg(feature = "slow-tests")]
     #[derive(Debug, Clone)]
     enum Relation {
