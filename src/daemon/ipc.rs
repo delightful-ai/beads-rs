@@ -2522,6 +2522,40 @@ mod tests {
         assert_eq!(parsed, receipt);
     }
 
+    #[test]
+    fn namespace_policy_violation_includes_details() {
+        let err = OpError::NamespacePolicyViolation {
+            namespace: NamespaceId::core(),
+            rule: "replicate_mode".to_string(),
+            reason: Some("replicate_mode=none".to_string()),
+        };
+        let payload: ErrorPayload = err.into();
+        assert_eq!(payload.code, ErrorCode::NamespacePolicyViolation);
+        let details = payload
+            .details_as::<error_details::NamespacePolicyViolationDetails>()
+            .expect("details decode")
+            .expect("details");
+        assert_eq!(details.namespace, NamespaceId::core());
+        assert_eq!(details.rule, "replicate_mode");
+        assert_eq!(details.reason.as_deref(), Some("replicate_mode=none"));
+    }
+
+    #[test]
+    fn cross_namespace_dependency_includes_details() {
+        let err = OpError::CrossNamespaceDependency {
+            from_namespace: NamespaceId::core(),
+            to_namespace: NamespaceId::parse("tmp").expect("namespace"),
+        };
+        let payload: ErrorPayload = err.into();
+        assert_eq!(payload.code, ErrorCode::CrossNamespaceDependency);
+        let details = payload
+            .details_as::<error_details::CrossNamespaceDependencyDetails>()
+            .expect("details decode")
+            .expect("details");
+        assert_eq!(details.from_namespace, NamespaceId::core());
+        assert_eq!(details.to_namespace.as_str(), "tmp");
+    }
+
     // Regression tests: verify all ResponsePayload variants roundtrip through Response
     mod response_roundtrip {
         use super::*;

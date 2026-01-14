@@ -141,7 +141,7 @@ use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
     ActorId, Applied, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
     DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, Limits, NamespaceId, PrevVerified,
-    ReplicateMode, ReplicaId, ReplicaRoster, SegmentId, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
+    ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
     StoreIdentity, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
     apply_event, decode_event_body,
 };
@@ -904,53 +904,47 @@ impl Daemon {
             let _ = request.respond.send(Err(Box::new(payload)));
             return;
         }
-        if let Some(payload) = self
-            .stores
-            .get(&request.store_id)
-            .and_then(|store| {
-                if store.maintenance_mode {
-                    Some(
-                        ErrorPayload::new(
-                            ErrorCode::MaintenanceMode,
-                            "maintenance mode enabled",
-                            true,
-                        )
+        if let Some(payload) = self.stores.get(&request.store_id).and_then(|store| {
+            if store.maintenance_mode {
+                Some(
+                    ErrorPayload::new(ErrorCode::MaintenanceMode, "maintenance mode enabled", true)
                         .with_details(error_details::MaintenanceModeDetails {
                             reason: Some("maintenance mode enabled".into()),
                             until_ms: None,
                         }),
-                    )
-                } else if let Some(policy) = store.policies.get(&request.namespace) {
-                    if policy.replicate_mode == ReplicateMode::None {
-                        Some(
-                            ErrorPayload::new(
-                                ErrorCode::NamespacePolicyViolation,
-                                "namespace replication disabled by policy",
-                                false,
-                            )
-                            .with_details(error_details::NamespacePolicyViolationDetails {
+                )
+            } else if let Some(policy) = store.policies.get(&request.namespace) {
+                if policy.replicate_mode == ReplicateMode::None {
+                    Some(
+                        ErrorPayload::new(
+                            ErrorCode::NamespacePolicyViolation,
+                            "namespace replication disabled by policy",
+                            false,
+                        )
+                        .with_details(
+                            error_details::NamespacePolicyViolationDetails {
                                 namespace: request.namespace.clone(),
                                 rule: "replicate_mode".to_string(),
                                 reason: Some("replicate_mode=none".to_string()),
-                            }),
-                        )
-                    } else {
-                        None
-                    }
-                } else {
-                    Some(
-                        ErrorPayload::new(
-                            ErrorCode::NamespaceUnknown,
-                            "namespace not configured",
-                            false,
-                        )
-                        .with_details(error_details::NamespaceUnknownDetails {
-                            namespace: request.namespace.clone(),
-                        }),
+                            },
+                        ),
                     )
+                } else {
+                    None
                 }
-            })
-        {
+            } else {
+                Some(
+                    ErrorPayload::new(
+                        ErrorCode::NamespaceUnknown,
+                        "namespace not configured",
+                        false,
+                    )
+                    .with_details(error_details::NamespaceUnknownDetails {
+                        namespace: request.namespace.clone(),
+                    }),
+                )
+            }
+        }) {
             let _ = request.respond.send(Err(Box::new(payload)));
             return;
         }
