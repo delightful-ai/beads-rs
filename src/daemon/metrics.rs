@@ -385,13 +385,7 @@ fn percentile(sorted: &[u64], percentile: f64) -> Option<u64> {
     if sorted.is_empty() {
         return None;
     }
-    let p = if percentile < 0.0 {
-        0.0
-    } else if percentile > 1.0 {
-        1.0
-    } else {
-        percentile
-    };
+    let p = percentile.clamp(0.0, 1.0);
     let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
     sorted.get(idx).copied()
 }
