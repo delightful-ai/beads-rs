@@ -104,6 +104,14 @@ impl CheckpointScheduler {
         map
     }
 
+    pub fn in_flight_count(&self) -> usize {
+        self.groups.values().filter(|state| state.in_flight).count()
+    }
+
+    pub fn queue_depth(&self) -> usize {
+        self.pending.len() + self.in_flight_count()
+    }
+
     pub fn mark_dirty_for_namespace(
         &mut self,
         store_id: StoreId,

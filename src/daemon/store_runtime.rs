@@ -126,16 +126,13 @@ impl StoreRuntime {
         let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
         let mut repo_state = RepoState::new();
         for truncation in &replay_stats.tail_truncations {
-            let payload = ErrorPayload::new(
-                ErrorCode::WalTailTruncated,
-                "wal tail truncated",
-                true,
-            )
-            .with_details(WalTailTruncatedDetails {
-                namespace: truncation.namespace.clone(),
-                segment_id: Some(truncation.segment_id),
-                truncated_from_offset: truncation.truncated_from_offset,
-            });
+            let payload =
+                ErrorPayload::new(ErrorCode::WalTailTruncated, "wal tail truncated", true)
+                    .with_details(WalTailTruncatedDetails {
+                        namespace: truncation.namespace.clone(),
+                        segment_id: Some(truncation.segment_id),
+                        truncated_from_offset: truncation.truncated_from_offset,
+                    });
             tracing::warn!(payload = ?payload, "wal tail truncated");
             repo_state.last_wal_tail_truncated = Some(WalTailTruncatedRecord {
                 namespace: truncation.namespace.clone(),

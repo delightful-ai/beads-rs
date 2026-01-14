@@ -88,6 +88,10 @@ impl AdmissionController {
         })
     }
 
+    pub fn ipc_inflight(&self) -> usize {
+        self.inner.ipc_inflight.load(Ordering::Acquire)
+    }
+
     pub fn try_admit_repl_ingest(
         &self,
         bytes: u64,

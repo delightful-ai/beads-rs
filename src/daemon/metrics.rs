@@ -63,8 +63,7 @@ impl MetricSink for TracingSink {
     }
 }
 
-static METRIC_SINK: std::sync::OnceLock<RwLock<Arc<dyn MetricSink>>> =
-    std::sync::OnceLock::new();
+static METRIC_SINK: std::sync::OnceLock<RwLock<Arc<dyn MetricSink>>> = std::sync::OnceLock::new();
 
 fn sink() -> Arc<dyn MetricSink> {
     METRIC_SINK
@@ -80,7 +79,11 @@ pub fn set_sink(sink: Arc<dyn MetricSink>) {
 }
 
 fn emit(name: &'static str, value: MetricValue, labels: Vec<MetricLabel>) {
-    sink().record(MetricEvent { name, value, labels });
+    sink().record(MetricEvent {
+        name,
+        value,
+        labels,
+    });
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -143,11 +146,19 @@ pub fn apply_err(duration: Duration) {
 }
 
 pub fn repl_events_in(count: usize) {
-    emit("repl_events_in", MetricValue::Counter(count as u64), Vec::new());
+    emit(
+        "repl_events_in",
+        MetricValue::Counter(count as u64),
+        Vec::new(),
+    );
 }
 
 pub fn repl_events_out(count: usize) {
-    emit("repl_events_out", MetricValue::Counter(count as u64), Vec::new());
+    emit(
+        "repl_events_out",
+        MetricValue::Counter(count as u64),
+        Vec::new(),
+    );
 }
 
 pub fn checkpoint_export_ok(duration: Duration) {
@@ -180,14 +191,48 @@ pub fn set_repl_queue_events(value: u64) {
     emit("repl_queue_events", MetricValue::Gauge(value), Vec::new());
 }
 
-pub fn set_repl_peer_lag(peer: crate::core::ReplicaId, lag_ms: u64) {
+pub fn set_repl_peer_lag(
+    peer: crate::core::ReplicaId,
+    namespace: &crate::core::NamespaceId,
+    lag: u64,
+) {
     emit(
-        "repl_peer_lag_ms",
-        MetricValue::Gauge(lag_ms),
-        vec![MetricLabel {
-            key: "peer",
-            value: peer.to_string(),
-        }],
+        "repl_peer_lag",
+        MetricValue::Gauge(lag),
+        vec![
+            MetricLabel {
+                key: "peer",
+                value: peer.to_string(),
+            },
+            MetricLabel {
+                key: "namespace",
+                value: namespace.to_string(),
+            },
+        ],
+    );
+}
+
+pub fn set_checkpoint_queue_depth(value: usize) {
+    emit(
+        "checkpoint_queue_depth",
+        MetricValue::Gauge(value as u64),
+        Vec::new(),
+    );
+}
+
+pub fn scrub_ok() {
+    emit("scrub_ok", MetricValue::Counter(1), Vec::new());
+}
+
+pub fn scrub_err() {
+    emit("scrub_err", MetricValue::Counter(1), Vec::new());
+}
+
+pub fn scrub_records_checked(count: u64) {
+    emit(
+        "scrub_records_checked",
+        MetricValue::Counter(count),
+        Vec::new(),
     );
 }
 
@@ -215,6 +260,7 @@ mod tests {
         wal_append_ok(Duration::from_millis(12));
         wal_fsync_err(Duration::from_millis(7));
         apply_ok(Duration::from_millis(3));
+        set_checkpoint_queue_depth(4);
 
         let events = sink.events.lock().expect("metrics lock");
         assert!(events.iter().any(|e| e.name == "wal_append_ok"));
@@ -222,5 +268,6 @@ mod tests {
         assert!(events.iter().any(|e| e.name == "wal_fsync_err"));
         assert!(events.iter().any(|e| e.name == "apply_ok"));
         assert!(events.iter().any(|e| e.name == "apply_duration"));
+        assert!(events.iter().any(|e| e.name == "checkpoint_queue_depth"));
     }
 }

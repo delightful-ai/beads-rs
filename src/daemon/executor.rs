@@ -28,13 +28,14 @@ use super::wal::{
     EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentConfig, SegmentRow,
     SegmentWriter, WalIndex, WalIndexError, WalReplayError,
 };
-use crate::daemon::metrics;
+use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     Applied, BeadId, BeadType, DepKind, DurabilityClass, DurabilityReceipt, Durable, EventBody,
     EventId, HeadStatus, Limits, NoteId, Priority, ReplicaId, Seq1, Sha256, StoreIdentity,
     TxnDeltaV1, TxnOpV1, WallClock, Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp,
     apply_event, decode_event_body, hash_event_body,
 };
+use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
 use crate::paths;
 
@@ -59,6 +60,15 @@ impl Daemon {
         request: MutationRequest,
         git_tx: &Sender<GitOp>,
     ) -> Result<OpResponse, OpError> {
+        if self.is_shutting_down() {
+            return Err(OpError::Overloaded {
+                subsystem: OverloadedSubsystem::Ipc,
+                retry_after_ms: Some(100),
+                queue_bytes: None,
+                queue_events: None,
+            });
+        }
+
         let proof = self.ensure_repo_loaded_strict(repo, git_tx)?;
         let admission = self.store_runtime(&proof)?.admission.clone();
         let _permit = admission.try_admit_ipc_mutation().map_err(OpError::from)?;
@@ -190,6 +200,17 @@ impl Daemon {
             ctx.clone(),
             request.clone(),
         )?;
+
+        let span = tracing::info_span!(
+            "mutation",
+            txn_id = %draft.event_body.txn_id,
+            client_request_id = ?ctx.client_request_id,
+            namespace = %namespace,
+            origin_replica_id = %origin_replica_id,
+            origin_seq = origin_seq.get()
+        );
+        let _guard = span.enter();
+        tracing::info!("mutation planned");
 
         let sha = hash_event_body(&draft.event_bytes);
         let sha_bytes = sha.0;
@@ -402,6 +423,7 @@ impl Daemon {
             wait_timeout,
         )?;
 
+        tracing::info!("mutation committed");
         Ok(OpResponse::new(result, receipt))
     }
 
@@ -745,6 +767,16 @@ fn try_reuse_idempotent_response(
         receipt,
         wait_timeout,
     )?;
+
+    tracing::info!(
+        target: "mutation",
+        txn_id = %row.txn_id,
+        client_request_id = %client_request_id,
+        namespace = %ctx.namespace,
+        origin_replica_id = %origin_replica_id,
+        origin_seq = max_seq.get(),
+        "mutation idempotent reuse"
+    );
 
     Ok(Some(OpResponse::new(result, receipt)))
 }

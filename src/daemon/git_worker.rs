@@ -12,6 +12,7 @@ use git2::{ErrorCode, Oid, Repository};
 
 use super::remote::RemoteUrl;
 use crate::core::{ActorId, CanonicalState, Stamp, StoreId, WriteStamp};
+use crate::daemon::metrics;
 use crate::git::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, CheckpointCache, CheckpointExportInput, CheckpointPublishError,
     CheckpointPublishOutcome, CheckpointSnapshot, CheckpointStoreMeta, export_checkpoint,
@@ -331,7 +332,8 @@ impl GitWorker {
                 let _guard = span.enter();
                 let started = Instant::now();
                 let result = self.publish_checkpoint(&repo, &snapshot, &git_ref, checkpoint_groups);
-                let elapsed_ms = started.elapsed().as_millis();
+                let elapsed = started.elapsed();
+                let elapsed_ms = elapsed.as_millis();
                 match &result {
                     Ok(outcome) => tracing::info!(
                         elapsed_ms,
@@ -341,6 +343,10 @@ impl GitWorker {
                     Err(err) => {
                         tracing::warn!(elapsed_ms, error = ?err, "checkpoint publish failed")
                     }
+                }
+                match &result {
+                    Ok(_) => metrics::checkpoint_export_ok(elapsed),
+                    Err(_) => metrics::checkpoint_export_err(elapsed),
                 }
                 let _ =
                     self.result_tx

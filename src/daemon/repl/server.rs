@@ -22,7 +22,8 @@ use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
     BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
 };
-use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want};
+use crate::daemon::metrics;
+use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, PeerAckTable, ReplEnvelope, ReplMessage, Session,
     SessionAction, SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore,
@@ -339,12 +340,14 @@ where
     config.offered_namespaces = eligible;
 
     let peer_replica_id = hello.sender_replica_id;
+    let requested_namespaces = hello.requested_namespaces.clone();
+    let offered_namespaces = hello.offered_namespaces.clone();
     let mut session = Session::new(SessionRole::Inbound, config, limits.clone(), admission);
     let actions = session.handle_message(ReplMessage::Hello(hello), &mut store, now_ms());
 
     for action in actions {
         if let SessionAction::PeerAck(ack) = &action
-            && let Err(err) = update_peer_ack(&peer_acks, peer_replica_id, ack)
+            && let Err(err) = update_peer_ack(&store, &peer_acks, peer_replica_id, ack)
         {
             tracing::warn!("peer ack update failed: {err}");
         }
@@ -381,6 +384,19 @@ where
     {
         accepted_set = peer.accepted_namespaces.iter().cloned().collect();
         live_stream_enabled = peer.live_stream_enabled;
+        tracing::info!(
+            target: "repl",
+            direction = "inbound",
+            peer_replica_id = %peer.replica_id,
+            auth_identity = "none",
+            role = ?role,
+            requested_namespaces = ?requested_namespaces,
+            offered_namespaces = ?offered_namespaces,
+            accepted_namespaces = ?peer.accepted_namespaces,
+            incoming_namespaces = ?peer.incoming_namespaces,
+            live_stream = peer.live_stream_enabled,
+            "replication handshake accepted"
+        );
     }
 
     let (event_rx, event_handle) = if live_stream_enabled {
@@ -417,7 +433,8 @@ where
                         let actions = session.handle_message(msg, &mut store, now_ms());
                         for action in actions {
                             if let SessionAction::PeerAck(ack) = &action
-                                && let Err(err) = update_peer_ack(&peer_acks, peer_replica_id, ack)
+                                && let Err(err) =
+                                    update_peer_ack(&store, &peer_acks, peer_replica_id, ack)
                             {
                                 tracing::warn!("peer ack update failed: {err}");
                             }
@@ -621,6 +638,7 @@ fn send_events(
             && (batch.len() >= limits.max_event_batch_events
                 || batch_bytes.saturating_add(frame_bytes) > limits.max_event_batch_bytes)
         {
+            metrics::repl_events_out(batch.len());
             send_payload(
                 writer,
                 session,
@@ -634,6 +652,7 @@ fn send_events(
     }
 
     if !batch.is_empty() {
+        metrics::repl_events_out(batch.len());
         send_payload(
             writer,
             session,
@@ -670,6 +689,7 @@ fn broadcast_to_frame(event: BroadcastEvent) -> EventFrameV1 {
 }
 
 fn update_peer_ack(
+    store: &impl SessionStore,
     peer_acks: &Arc<Mutex<PeerAckTable>>,
     peer: ReplicaId,
     ack: &Ack,
@@ -684,7 +704,23 @@ fn update_peer_ack(
         ack.applied_heads.as_ref(),
         now_ms,
     )?;
+    let namespaces: Vec<NamespaceId> = ack.durable.keys().cloned().collect();
+    let snapshot = store.watermark_snapshot(&namespaces);
+    emit_peer_lag(peer, &snapshot.durable, &ack.durable);
     Ok(())
+}
+
+fn emit_peer_lag(peer: ReplicaId, local: &WatermarkMap, ack: &WatermarkMap) {
+    for (namespace, origins) in local {
+        let mut max_lag = 0u64;
+        let acked = ack.get(namespace);
+        for (origin, local_seq) in origins {
+            let acked_seq = acked.and_then(|map| map.get(origin)).copied().unwrap_or(0);
+            let lag = local_seq.saturating_sub(acked_seq);
+            max_lag = max_lag.max(lag);
+        }
+        metrics::set_repl_peer_lag(peer, namespace, max_lag);
+    }
 }
 
 fn handle_want(

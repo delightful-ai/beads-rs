@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, Sender};
 
@@ -206,7 +206,9 @@ pub fn run_state_loop(
                         let _ = respond.send(ServerReply::Response(response));
 
                         if is_shutdown {
+                            daemon.begin_shutdown();
                             daemon.shutdown_replication();
+                            daemon.drain_ipc_inflight(Duration::from_millis(daemon.limits().dead_ms));
 
                             // Sync all dirty repos before exiting (avoid double-borrow).
                             let remotes_to_sync: Vec<RemoteUrl> = daemon
@@ -225,10 +227,21 @@ pub fn run_state_loop(
                                 .repos()
                                 .filter(|(_, s)| s.sync_in_progress)
                                 .count();
+                            let shutdown_deadline = Instant::now()
+                                + Duration::from_millis(daemon.limits().dead_ms);
 
                             while pending > 0 {
-                                if let Ok(result) = git_result_rx.recv() {
-                                    match result {
+                                let now = Instant::now();
+                                if now >= shutdown_deadline {
+                                    tracing::warn!(
+                                        pending_syncs = pending,
+                                        "shutdown timed out waiting for syncs"
+                                    );
+                                    break;
+                                }
+
+                                match git_result_rx.recv_timeout(shutdown_deadline - now) {
+                                    Ok(result) => match result {
                                         GitResult::Sync(remote, sync_result) => {
                                             daemon.complete_sync(&remote, sync_result);
                                             pending -= 1;
@@ -240,9 +253,17 @@ pub fn run_state_loop(
                                         GitResult::Checkpoint(store_id, group, result) => {
                                             daemon.complete_checkpoint(store_id, &group, result);
                                         }
+                                    },
+                                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                                        tracing::warn!(
+                                            pending_syncs = pending,
+                                            "shutdown timed out waiting for syncs"
+                                        );
+                                        break;
                                     }
-                                } else {
-                                    break;
+                                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                                        break;
+                                    }
                                 }
                             }
 

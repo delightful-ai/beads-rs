@@ -423,3 +423,64 @@ fn test_graceful_shutdown_cleans_up() {
         "meta file should be cleaned up after graceful shutdown"
     );
 }
+
+#[test]
+fn test_graceful_shutdown_preserves_mutations() {
+    let fixture = DaemonFixture::new();
+
+    fixture.start_daemon();
+
+    let create_output = fixture
+        .bd()
+        .args(["create", "shutdown test", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created: serde_json::Value =
+        serde_json::from_slice(&create_output).expect("parse create response");
+    let id = created["data"]["id"]
+        .as_str()
+        .expect("created id")
+        .to_string();
+    let title = created["data"]["title"]
+        .as_str()
+        .expect("created title")
+        .to_string();
+
+    let pid = fixture.daemon_pid().expect("daemon should be running");
+
+    // Send SIGTERM (graceful shutdown)
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+
+    // Wait for daemon to stop
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !DaemonFixture::process_alive(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(
+        !DaemonFixture::process_alive(pid),
+        "daemon should stop after SIGTERM"
+    );
+
+    // Fetch the issue after restart (auto-starts daemon)
+    let show_output = fixture
+        .bd()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let shown: serde_json::Value =
+        serde_json::from_slice(&show_output).expect("parse show response");
+    assert_eq!(shown["data"]["id"].as_str(), Some(id.as_str()));
+    assert_eq!(shown["data"]["title"].as_str(), Some(title.as_str()));
+}

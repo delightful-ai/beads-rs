@@ -25,6 +25,7 @@ use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
     ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
 };
+use super::metrics;
 use super::migration::MigrationError;
 use super::ops::OpError;
 use super::query::QueryResult;
@@ -217,6 +218,9 @@ pub struct Daemon {
 
     /// Replication runtime handles per store.
     repl_handles: BTreeMap<StoreId, ReplicationHandles>,
+
+    /// Shutdown gate to stop accepting new mutations.
+    shutting_down: bool,
 }
 
 struct ReplicationHandles {
@@ -266,6 +270,7 @@ impl Daemon {
             limits,
             repl_ingest_tx: None,
             repl_handles: BTreeMap::new(),
+            shutting_down: false,
         }
     }
 
@@ -289,6 +294,25 @@ impl Daemon {
         &self.limits
     }
 
+    pub fn begin_shutdown(&mut self) {
+        self.shutting_down = true;
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down
+    }
+
+    pub fn drain_ipc_inflight(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.ipc_inflight_total() == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        tracing::warn!("shutdown timed out waiting for inflight mutations");
+    }
+
     pub(crate) fn set_repl_ingest_tx(&mut self, tx: Sender<ReplIngestRequest>) {
         self.repl_ingest_tx = Some(tx);
     }
@@ -296,6 +320,17 @@ impl Daemon {
     /// Get mutable clock.
     pub fn clock_mut(&mut self) -> &mut Clock {
         &mut self.clock
+    }
+
+    fn ipc_inflight_total(&self) -> usize {
+        self.stores
+            .values()
+            .map(|store| store.admission.ipc_inflight())
+            .sum()
+    }
+
+    fn emit_checkpoint_queue_depth(&self) {
+        metrics::set_checkpoint_queue_depth(self.checkpoint_scheduler.queue_depth());
     }
 
     /// Get the next scheduled sync deadline for a remote, if any.
@@ -315,6 +350,7 @@ impl Daemon {
     ) {
         self.checkpoint_scheduler
             .mark_dirty_for_namespace(store_id, namespace, events);
+        self.emit_checkpoint_queue_depth();
     }
 
     fn register_default_checkpoint_groups(&mut self, store_id: StoreId) -> Result<(), OpError> {
@@ -324,6 +360,7 @@ impl Daemon {
             .ok_or(OpError::Internal("loaded store missing from state"))?;
         let config = CheckpointGroupConfig::core_default(store_id, store.meta.replica_id);
         self.checkpoint_scheduler.register_group(config);
+        self.emit_checkpoint_queue_depth();
         Ok(())
     }
 
@@ -853,6 +890,11 @@ impl Daemon {
     }
 
     pub(crate) fn handle_repl_ingest(&mut self, request: ReplIngestRequest) {
+        if self.shutting_down {
+            let payload = ErrorPayload::new(ErrorCode::MaintenanceMode, "shutting down", true);
+            let _ = request.respond.send(Err(Box::new(payload)));
+            return;
+        }
         let outcome = self.ingest_remote_batch(
             request.store_id,
             request.namespace,
@@ -940,9 +982,23 @@ impl Daemon {
                 payload: Bytes::copy_from_slice(event.bytes.as_ref()),
             };
 
-            let append = writer
-                .append(&record, now_ms)
-                .map_err(|err| Box::new(event_wal_error_payload(&namespace, None, None, err)))?;
+            let append_start = Instant::now();
+            let append = match writer.append(&record, now_ms) {
+                Ok(append) => {
+                    let elapsed = append_start.elapsed();
+                    metrics::wal_append_ok(elapsed);
+                    metrics::wal_fsync_ok(elapsed);
+                    append
+                }
+                Err(err) => {
+                    let elapsed = append_start.elapsed();
+                    metrics::wal_append_err(elapsed);
+                    metrics::wal_fsync_err(elapsed);
+                    return Err(Box::new(event_wal_error_payload(
+                        &namespace, None, None, err,
+                    )));
+                }
+            };
             let last_indexed_offset = append.offset + append.len as u64;
             let segment_row = SegmentRow {
                 namespace: namespace.clone(),
@@ -987,13 +1043,16 @@ impl Daemon {
         let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
             let mut max_stamp = store.repo_state.last_seen_stamp.clone();
             for event in &batch {
-                apply_event(&mut store.repo_state.state, &event.body).map_err(|err| {
-                    Box::new(ErrorPayload::new(
+                let apply_start = Instant::now();
+                if let Err(err) = apply_event(&mut store.repo_state.state, &event.body) {
+                    metrics::apply_err(apply_start.elapsed());
+                    return Err(Box::new(ErrorPayload::new(
                         ErrorCode::Internal,
                         format!("apply_event failed: {err}"),
                         false,
-                    ))
-                })?;
+                    )));
+                }
+                metrics::apply_ok(apply_start.elapsed());
 
                 if let Some(hlc_max) = &event.body.hlc_max {
                     let stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
@@ -1426,6 +1485,7 @@ impl Daemon {
                     .complete_failure(&key, Instant::now());
             }
         }
+        self.emit_checkpoint_queue_depth();
     }
 
     /// Export state to Go-compatible JSONL format.
@@ -1574,6 +1634,7 @@ impl Daemon {
                         "checkpoint store missing"
                     );
                     self.checkpoint_scheduler.complete_failure(key, now);
+                    self.emit_checkpoint_queue_depth();
                     return;
                 }
             };
@@ -1584,6 +1645,7 @@ impl Daemon {
                     "checkpoint repo path missing"
                 );
                 self.checkpoint_scheduler.complete_failure(key, now);
+                self.emit_checkpoint_queue_depth();
                 return;
             };
             let created_at_ms = WallClock::now().0;
@@ -1598,6 +1660,7 @@ impl Daemon {
                             "checkpoint snapshot failed"
                         );
                         self.checkpoint_scheduler.complete_failure(key, now);
+                        self.emit_checkpoint_queue_depth();
                         return;
                     }
                 };
@@ -1616,6 +1679,7 @@ impl Daemon {
             .is_ok()
         {
             self.checkpoint_scheduler.start_in_flight(key, now);
+            self.emit_checkpoint_queue_depth();
         } else {
             tracing::warn!(
                 store_id = %key.store_id,
@@ -1623,6 +1687,7 @@ impl Daemon {
                 "checkpoint git worker not responding"
             );
             self.checkpoint_scheduler.complete_failure(key, now);
+            self.emit_checkpoint_queue_depth();
         }
     }
 
@@ -2162,7 +2227,10 @@ impl Daemon {
                 },
             ))),
 
-            Request::Shutdown => Response::ok(ResponsePayload::shutting_down()),
+            Request::Shutdown => {
+                self.begin_shutdown();
+                Response::ok(ResponsePayload::shutting_down())
+            }
         }
     }
 }
