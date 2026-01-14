@@ -790,6 +790,11 @@ pub enum AdminCmd {
     Status,
     /// Show admin metrics snapshot.
     Metrics,
+    /// Run admin doctor checks.
+    Doctor(AdminDoctorArgs),
+    /// Run admin scrub now checks.
+    #[command(name = "scrub")]
+    Scrub(AdminScrubArgs),
     /// Toggle maintenance mode.
     Maintenance {
         #[command(subcommand)]
@@ -806,6 +811,23 @@ pub enum AdminMaintenanceCmd {
     On,
     /// Disable maintenance mode.
     Off,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminDoctorArgs {
+    /// Max records to sample per namespace.
+    #[arg(long = "max-records", default_value_t = 200)]
+    pub max_records: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminScrubArgs {
+    /// Max records to sample per namespace.
+    #[arg(long = "max-records", default_value_t = 200)]
+    pub max_records: u64,
+    /// Verify checkpoint cache entries.
+    #[arg(long)]
+    pub verify_checkpoint_cache: bool,
 }
 
 #[derive(Subcommand, Debug)]

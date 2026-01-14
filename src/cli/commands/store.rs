@@ -359,8 +359,11 @@ fn render_fsck_human(report: &FsckReport) -> String {
         report.stats.namespaces, report.stats.segments, report.stats.records
     ));
     out.push_str(&format!(
-        "  summary: risk={:?} safe_to_accept_writes={}\n",
-        report.summary.risk, report.summary.safe_to_accept_writes
+        "  summary: risk={:?} safe_to_accept_writes={} safe_to_prune_wal={} safe_to_rebuild_index={}\n",
+        report.summary.risk,
+        report.summary.safe_to_accept_writes,
+        report.summary.safe_to_prune_wal,
+        report.summary.safe_to_rebuild_index
     ));
 
     if !report.repairs.is_empty() {

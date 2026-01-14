@@ -4,9 +4,10 @@
 //! This module is pure formatting; handlers gather any extra data needed.
 
 use crate::api::{
-    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput, AdminStatusOutput,
-    BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
-    Note, StatusOutput, SyncWarning, Tombstone,
+    AdminDoctorOutput, AdminHealthReport, AdminHealthStatus, AdminMaintenanceModeOutput,
+    AdminMetricsOutput, AdminRebuildIndexOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue,
+    CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary, Note,
+    StatusOutput, SyncWarning, Tombstone,
 };
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
@@ -492,6 +493,8 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::DaemonInfo(info) => render_daemon_info(info),
         QueryResult::AdminStatus(status) => render_admin_status(status),
         QueryResult::AdminMetrics(metrics) => render_admin_metrics(metrics),
+        QueryResult::AdminDoctor(out) => render_admin_doctor(out),
+        QueryResult::AdminScrub(out) => render_admin_scrub(out),
         QueryResult::AdminMaintenanceMode(out) => render_admin_maintenance(out),
         QueryResult::AdminRebuildIndex(out) => render_admin_rebuild_index(out),
         QueryResult::Validation { warnings } => {
@@ -637,6 +640,95 @@ fn render_admin_metrics(metrics: &AdminMetricsOutput) -> String {
     out.trim_end().into()
 }
 
+fn render_admin_doctor(out: &AdminDoctorOutput) -> String {
+    render_admin_health("Admin Doctor", &out.report)
+}
+
+fn render_admin_scrub(out: &AdminScrubOutput) -> String {
+    render_admin_health("Admin Scrub", &out.report)
+}
+
+fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
+    let mut out = String::new();
+    out.push_str(title);
+    out.push('\n');
+    out.push_str(&"=".repeat(title.len()));
+    out.push('\n');
+    out.push('\n');
+
+    out.push_str(&format!("checked_at_ms: {}\n", report.checked_at_ms));
+    out.push_str(&format!(
+        "summary: risk={} safe_to_accept_writes={} safe_to_prune_wal={} safe_to_rebuild_index={}\n",
+        health_risk_str(&report.summary.risk),
+        report.summary.safe_to_accept_writes,
+        report.summary.safe_to_prune_wal,
+        report.summary.safe_to_rebuild_index
+    ));
+    out.push_str(&format!(
+        "stats: namespaces={} segments={} records={} index_offsets={} checkpoint_groups={}\n",
+        report.stats.namespaces,
+        report.stats.segments_checked,
+        report.stats.records_checked,
+        report.stats.index_offsets_checked,
+        report.stats.checkpoint_groups_checked
+    ));
+
+    out.push_str("\nchecks:\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "  - {}: {} (severity={}, issues={})\n",
+            health_check_id_str(&check.id),
+            health_status_str(&check.status),
+            health_severity_str(&check.severity),
+            check.evidence.len()
+        ));
+        if check.status != AdminHealthStatus::Pass {
+            for evidence in &check.evidence {
+                let path = evidence
+                    .path
+                    .as_ref()
+                    .map(|p| format!(" path={p}"))
+                    .unwrap_or_default();
+                let namespace = evidence
+                    .namespace
+                    .as_ref()
+                    .map(|ns| format!(" namespace={}", ns.as_str()))
+                    .unwrap_or_default();
+                let origin = evidence
+                    .origin
+                    .as_ref()
+                    .map(|id| format!(" origin={id}"))
+                    .unwrap_or_default();
+                let seq = evidence
+                    .seq
+                    .map(|seq| format!(" seq={seq}"))
+                    .unwrap_or_default();
+                let offset = evidence
+                    .offset
+                    .map(|offset| format!(" offset={offset}"))
+                    .unwrap_or_default();
+                let segment = evidence
+                    .segment_id
+                    .map(|segment| format!(" segment_id={segment}"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "      * {}: {}{path}{namespace}{origin}{seq}{offset}{segment}\n",
+                    health_evidence_code_str(&evidence.code),
+                    evidence.message
+                ));
+            }
+            if !check.suggested_actions.is_empty() {
+                out.push_str("      actions:\n");
+                for action in &check.suggested_actions {
+                    out.push_str(&format!("        - {action}\n"));
+                }
+            }
+        }
+    }
+
+    out.trim_end().into()
+}
+
 fn render_admin_maintenance(out: &AdminMaintenanceModeOutput) -> String {
     if out.enabled {
         "maintenance mode enabled".to_string()
@@ -667,6 +759,58 @@ fn render_admin_rebuild_index(out: &AdminRebuildIndexOutput) -> String {
         }
     }
     out.trim_end().into()
+}
+
+fn health_status_str(status: &AdminHealthStatus) -> &'static str {
+    match status {
+        AdminHealthStatus::Pass => "pass",
+        AdminHealthStatus::Warn => "warn",
+        AdminHealthStatus::Fail => "fail",
+    }
+}
+
+fn health_severity_str(severity: &crate::api::AdminHealthSeverity) -> &'static str {
+    match severity {
+        crate::api::AdminHealthSeverity::Low => "low",
+        crate::api::AdminHealthSeverity::Medium => "medium",
+        crate::api::AdminHealthSeverity::High => "high",
+        crate::api::AdminHealthSeverity::Critical => "critical",
+    }
+}
+
+fn health_risk_str(risk: &crate::api::AdminHealthRisk) -> &'static str {
+    match risk {
+        crate::api::AdminHealthRisk::Low => "low",
+        crate::api::AdminHealthRisk::Medium => "medium",
+        crate::api::AdminHealthRisk::High => "high",
+        crate::api::AdminHealthRisk::Critical => "critical",
+    }
+}
+
+fn health_check_id_str(id: &crate::api::AdminHealthCheckId) -> &'static str {
+    match id {
+        crate::api::AdminHealthCheckId::WalFrames => "wal_frames",
+        crate::api::AdminHealthCheckId::WalHashes => "wal_hashes",
+        crate::api::AdminHealthCheckId::IndexOffsets => "index_offsets",
+        crate::api::AdminHealthCheckId::CheckpointCache => "checkpoint_cache",
+    }
+}
+
+fn health_evidence_code_str(code: &crate::api::AdminHealthEvidenceCode) -> &'static str {
+    match code {
+        crate::api::AdminHealthEvidenceCode::SegmentHeaderInvalid => "segment_header_invalid",
+        crate::api::AdminHealthEvidenceCode::FrameHeaderInvalid => "frame_header_invalid",
+        crate::api::AdminHealthEvidenceCode::FrameTruncated => "frame_truncated",
+        crate::api::AdminHealthEvidenceCode::FrameCrcMismatch => "frame_crc_mismatch",
+        crate::api::AdminHealthEvidenceCode::RecordDecodeInvalid => "record_decode_invalid",
+        crate::api::AdminHealthEvidenceCode::EventBodyDecodeInvalid => "event_body_decode_invalid",
+        crate::api::AdminHealthEvidenceCode::RecordHeaderMismatch => "record_header_mismatch",
+        crate::api::AdminHealthEvidenceCode::RecordShaMismatch => "record_sha_mismatch",
+        crate::api::AdminHealthEvidenceCode::IndexOffsetInvalid => "index_offset_invalid",
+        crate::api::AdminHealthEvidenceCode::IndexSegmentMissing => "index_segment_missing",
+        crate::api::AdminHealthEvidenceCode::IndexOpenFailed => "index_open_failed",
+        crate::api::AdminHealthEvidenceCode::CheckpointCacheInvalid => "checkpoint_cache_invalid",
+    }
 }
 
 fn render_status(out: &StatusOutput) -> String {
