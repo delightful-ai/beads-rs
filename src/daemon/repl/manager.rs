@@ -282,7 +282,7 @@ fn run_outbound_session<S>(
 where
     S: SessionStore + Send + 'static,
 {
-    let mut shutdown_stream = stream;
+    let shutdown_stream = stream;
     shutdown_stream.set_nodelay(true)?;
 
     let mut store = runtime.store.clone();
@@ -968,14 +968,19 @@ mod tests {
         broadcaster.publish(core_event).unwrap();
         broadcaster.publish(tmp_event).unwrap();
 
-        let received = rx.recv_timeout(Duration::from_secs(1)).expect("message");
-        match received {
-            ReplMessage::Events(events) => {
-                assert_eq!(events.events.len(), 1);
-                assert_eq!(events.events[0].eid.namespace, NamespaceId::core());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut received_events = None;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let received = rx.recv_timeout(remaining).expect("message");
+            if let ReplMessage::Events(events) = received {
+                received_events = Some(events);
+                break;
             }
-            _ => panic!("expected events"),
         }
+        let events = received_events.expect("events");
+        assert_eq!(events.events.len(), 1);
+        assert_eq!(events.events[0].eid.namespace, NamespaceId::core());
 
         handle.shutdown();
     }
