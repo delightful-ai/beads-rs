@@ -21,6 +21,13 @@ pub struct StoreLockMeta {
     pub last_heartbeat_ms: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreLockOperation {
+    Read,
+    Write,
+    Fsync,
+}
+
 impl StoreLockMeta {
     pub fn new(
         store_id: StoreId,
@@ -64,7 +71,9 @@ impl StoreLock {
 
         let mut file = match open_new_lock_file(&path) {
             Ok(file) => file,
-            Err(StoreLockError::Io(err)) if err.kind() == io::ErrorKind::AlreadyExists => {
+            Err(StoreLockError::Io { source, .. })
+                if source.kind() == io::ErrorKind::AlreadyExists =>
+            {
                 let (meta, meta_error) = match read_metadata(&path) {
                     Ok(meta) => (Some(meta), None),
                     Err(err) => (None, Some(err.to_string())),
@@ -107,7 +116,11 @@ impl StoreLock {
 
     pub fn release(mut self) -> Result<(), StoreLockError> {
         if !self.released {
-            fs::remove_file(&self.path)?;
+            fs::remove_file(&self.path).map_err(|source| StoreLockError::Io {
+                path: self.path.clone(),
+                operation: StoreLockOperation::Write,
+                source,
+            })?;
             self.released = true;
         }
         Ok(())
@@ -128,7 +141,11 @@ pub fn read_lock_meta(store_id: StoreId) -> Result<Option<StoreLockMeta>, StoreL
         Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
         Ok(_) => Ok(Some(read_metadata(&path)?)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(StoreLockError::Io(err)),
+        Err(err) => Err(StoreLockError::Io {
+            path,
+            operation: StoreLockOperation::Read,
+            source: err,
+        }),
     }
 }
 
@@ -137,11 +154,19 @@ pub fn remove_lock_file(store_id: StoreId) -> Result<bool, StoreLockError> {
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
         Ok(_) => {
-            fs::remove_file(&path)?;
+            fs::remove_file(&path).map_err(|source| StoreLockError::Io {
+                path: path.clone(),
+                operation: StoreLockOperation::Write,
+                source,
+            })?;
             Ok(true)
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(StoreLockError::Io(err)),
+        Err(err) => Err(StoreLockError::Io {
+            path,
+            operation: StoreLockOperation::Read,
+            source: err,
+        }),
     }
 }
 
@@ -162,8 +187,13 @@ pub enum StoreLockError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("io error: {0}")]
-    Io(#[from] io::Error),
+    #[error("io error while {operation:?} {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        operation: StoreLockOperation,
+        #[source]
+        source: io::Error,
+    },
 }
 
 fn ensure_dir(path: &Path) -> Result<(), StoreLockError> {
@@ -175,16 +205,30 @@ fn ensure_dir(path: &Path) -> Result<(), StoreLockError> {
                 });
             }
             if !meta.is_dir() {
-                return Err(StoreLockError::Io(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("expected directory at {:?}", path),
-                )));
+                return Err(StoreLockError::Io {
+                    path: path.to_path_buf(),
+                    operation: StoreLockOperation::Write,
+                    source: io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("expected directory at {:?}", path),
+                    ),
+                });
             }
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(path)?;
+            fs::create_dir_all(path).map_err(|source| StoreLockError::Io {
+                path: path.to_path_buf(),
+                operation: StoreLockOperation::Write,
+                source,
+            })?;
         }
-        Err(err) => return Err(StoreLockError::Io(err)),
+        Err(err) => {
+            return Err(StoreLockError::Io {
+                path: path.to_path_buf(),
+                operation: StoreLockOperation::Read,
+                source: err,
+            })
+        }
     }
     set_dir_permissions(path, 0o700)?;
     Ok(())
@@ -203,7 +247,11 @@ fn reject_symlink(path: &Path) -> Result<(), StoreLockError> {
 
 fn read_metadata(path: &Path) -> Result<StoreLockMeta, StoreLockError> {
     reject_symlink(path)?;
-    let bytes = fs::read(path)?;
+    let bytes = fs::read(path).map_err(|source| StoreLockError::Io {
+        path: path.to_path_buf(),
+        operation: StoreLockOperation::Read,
+        source,
+    })?;
     serde_json::from_slice(&bytes).map_err(|source| StoreLockError::MetadataCorrupt {
         path: path.to_path_buf(),
         source,
@@ -219,7 +267,11 @@ fn write_metadata(
         path: path.to_path_buf(),
         source,
     })?;
-    file.sync_all()?;
+    file.sync_all().map_err(|source| StoreLockError::Io {
+        path: path.to_path_buf(),
+        operation: StoreLockOperation::Fsync,
+        source,
+    })?;
     Ok(())
 }
 
@@ -229,23 +281,37 @@ fn open_new_lock_file(path: &Path) -> Result<fs::File, StoreLockError> {
         use std::os::unix::fs::OpenOptionsExt;
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true).mode(0o600);
-        Ok(options.open(path)?)
+        options.open(path).map_err(|source| StoreLockError::Io {
+            path: path.to_path_buf(),
+            operation: StoreLockOperation::Write,
+            source,
+        })
     }
     #[cfg(not(unix))]
     {
-        Ok(fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(path)?)
+            .open(path)
+            .map_err(|source| StoreLockError::Io {
+                path: path.to_path_buf(),
+                operation: StoreLockOperation::Write,
+                source,
+            })
     }
 }
 
 fn open_existing_lock_file(path: &Path) -> Result<fs::File, StoreLockError> {
     reject_symlink(path)?;
-    Ok(fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .write(true)
         .truncate(true)
-        .open(path)?)
+        .open(path)
+        .map_err(|source| StoreLockError::Io {
+            path: path.to_path_buf(),
+            operation: StoreLockOperation::Write,
+            source,
+        })
 }
 
 fn set_dir_permissions(path: &Path, mode: u32) -> Result<(), StoreLockError> {
@@ -253,7 +319,11 @@ fn set_dir_permissions(path: &Path, mode: u32) -> Result<(), StoreLockError> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perm = fs::Permissions::from_mode(mode);
-        fs::set_permissions(path, perm)?;
+        fs::set_permissions(path, perm).map_err(|source| StoreLockError::Io {
+            path: path.to_path_buf(),
+            operation: StoreLockOperation::Write,
+            source,
+        })?;
     }
     Ok(())
 }
@@ -263,7 +333,11 @@ fn set_file_permissions(path: &Path, mode: u32) -> Result<(), StoreLockError> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perm = fs::Permissions::from_mode(mode);
-        fs::set_permissions(path, perm)?;
+        fs::set_permissions(path, perm).map_err(|source| StoreLockError::Io {
+            path: path.to_path_buf(),
+            operation: StoreLockOperation::Write,
+            source,
+        })?;
     }
     Ok(())
 }

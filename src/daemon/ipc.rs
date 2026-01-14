@@ -19,11 +19,12 @@ use thiserror::Error;
 
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::query::{Filters, QueryResult};
-use super::store_lock::StoreLockError;
+use super::store_lock::{StoreLockError, StoreLockOperation};
 use super::store_runtime::StoreRuntimeError;
 use crate::core::error::details as error_details;
 use crate::core::{
-    Applied, BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, Priority, Watermarks,
+    Applied, BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, NamespaceId, Priority,
+    StoreId, Watermarks,
 };
 pub use crate::core::{ErrorCode, ErrorPayload};
 use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
@@ -827,6 +828,63 @@ fn wal_replay_error_payload(
                 },
             )
         }
+        WalReplayError::PrevShaMismatch {
+            namespace,
+            origin,
+            seq,
+            expected_prev_sha256,
+            got_prev_sha256,
+            head_seq,
+        } => {
+            let namespace = match NamespaceId::parse(namespace.clone()) {
+                Ok(ns) => ns,
+                Err(_) => {
+                    return ErrorPayload::new(wal_replay_error_code(err), message, retryable)
+                }
+            };
+            ErrorPayload::new(ErrorCode::PrevShaMismatch, message, retryable).with_details(
+                error_details::PrevShaMismatchDetails {
+                    eid: error_details::EventIdDetails {
+                        namespace,
+                        origin_replica_id: *origin,
+                        origin_seq: *seq,
+                    },
+                    expected_prev_sha256: hex::encode(expected_prev_sha256),
+                    got_prev_sha256: hex::encode(got_prev_sha256),
+                    head_seq: *head_seq,
+                },
+            )
+        }
+        WalReplayError::NonContiguousSeq {
+            namespace,
+            origin,
+            expected,
+            got,
+        } => {
+            let namespace = match NamespaceId::parse(namespace.clone()) {
+                Ok(ns) => ns,
+                Err(_) => {
+                    return ErrorPayload::new(wal_replay_error_code(err), message, retryable)
+                }
+            };
+            let durable_seen = expected.saturating_sub(1);
+            ErrorPayload::new(ErrorCode::GapDetected, message, retryable).with_details(
+                error_details::GapDetectedDetails {
+                    namespace,
+                    origin_replica_id: *origin,
+                    durable_seen,
+                    got_seq: *got,
+                },
+            )
+        }
+        WalReplayError::IndexOffsetInvalid { .. }
+        | WalReplayError::OriginSeqOverflow { .. } => {
+            ErrorPayload::new(ErrorCode::IndexCorrupt, message, retryable).with_details(
+                error_details::IndexCorruptDetails {
+                    reason: err.to_string(),
+                },
+            )
+        }
         WalReplayError::SegmentHeader {
             source: EventWalError::SegmentHeaderUnsupportedVersion { got, supported },
             ..
@@ -850,6 +908,14 @@ fn wal_index_error_payload(
     retryable: bool,
 ) -> ErrorPayload {
     match err {
+        WalIndexError::SchemaVersionMismatch { expected, got } => {
+            ErrorPayload::new(ErrorCode::IndexRebuildRequired, message, retryable).with_details(
+                error_details::IndexRebuildRequiredDetails {
+                    namespace: None,
+                    reason: format!("index schema version mismatch: expected {expected}, got {got}"),
+                },
+            )
+        }
         WalIndexError::Equivocation {
             namespace,
             origin,
@@ -879,6 +945,66 @@ fn wal_index_error_payload(
                 client_request_id: *client_request_id,
                 expected_request_sha256: hex::encode(expected_request_sha256),
                 got_request_sha256: hex::encode(got_request_sha256),
+            }),
+        WalIndexError::MetaMismatch {
+            key: "store_id",
+            expected,
+            got,
+            ..
+        } => {
+            let expected = StoreId::parse_str(expected).ok();
+            let got = StoreId::parse_str(got).ok();
+            if let (Some(expected), Some(got)) = (expected, got) {
+                ErrorPayload::new(ErrorCode::WrongStore, message, retryable).with_details(
+                    error_details::WrongStoreDetails {
+                        expected_store_id: expected,
+                        got_store_id: got,
+                    },
+                )
+            } else {
+                ErrorPayload::new(ErrorCode::IndexCorrupt, message, retryable).with_details(
+                    error_details::IndexCorruptDetails {
+                        reason: err.to_string(),
+                    },
+                )
+            }
+        }
+        WalIndexError::MetaMismatch {
+            key: "store_epoch",
+            expected,
+            got,
+            store_id,
+        } => {
+            let expected_epoch = expected.parse::<u64>().ok();
+            let got_epoch = got.parse::<u64>().ok();
+            if let (Some(expected_epoch), Some(got_epoch)) = (expected_epoch, got_epoch) {
+                ErrorPayload::new(ErrorCode::StoreEpochMismatch, message, retryable).with_details(
+                    error_details::StoreEpochMismatchDetails {
+                        store_id: *store_id,
+                        expected_epoch,
+                        got_epoch,
+                    },
+                )
+            } else {
+                ErrorPayload::new(ErrorCode::IndexCorrupt, message, retryable).with_details(
+                    error_details::IndexCorruptDetails {
+                        reason: err.to_string(),
+                    },
+                )
+            }
+        }
+        WalIndexError::MetaMismatch { .. }
+        | WalIndexError::MetaMissing { .. }
+        | WalIndexError::EventIdDecode(_)
+        | WalIndexError::HlcRowDecode(_)
+        | WalIndexError::SegmentRowDecode(_)
+        | WalIndexError::WatermarkRowDecode(_)
+        | WalIndexError::CborDecode(_)
+        | WalIndexError::CborEncode(_)
+        | WalIndexError::OriginSeqOverflow { .. }
+        | WalIndexError::Sqlite(_) => ErrorPayload::new(ErrorCode::IndexCorrupt, message, retryable)
+            .with_details(error_details::IndexCorruptDetails {
+                reason: err.to_string(),
             }),
         _ => ErrorPayload::new(wal_index_error_code(err), message, retryable),
     }
@@ -1004,12 +1130,30 @@ fn store_lock_error_payload(err: &StoreLockError, message: String, retryable: bo
                 },
             )
         }
-        StoreLockError::Io(source) => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable)
-            }
+        StoreLockError::Io {
+            path,
+            operation,
+            source,
+        } => match source.kind() {
+            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                ErrorCode::PermissionDenied,
+                message,
+                retryable,
+            )
+            .with_details(error_details::PermissionDeniedDetails {
+                path: path.display().to_string(),
+                operation: lock_permission_operation(*operation),
+            }),
             _ => ErrorPayload::new(ErrorCode::InternalError, message, retryable),
         },
+    }
+}
+
+fn lock_permission_operation(operation: StoreLockOperation) -> error_details::PermissionOperation {
+    match operation {
+        StoreLockOperation::Read => error_details::PermissionOperation::Read,
+        StoreLockOperation::Write => error_details::PermissionOperation::Write,
+        StoreLockOperation::Fsync => error_details::PermissionOperation::Fsync,
     }
 }
 
@@ -1749,11 +1893,13 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo, WalIndexError};
+    use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
+    use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo, WalIndexError, WalReplayError};
     use crate::core::{
         DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, StoreEpoch, StoreId,
         StoreIdentity, TxnId,
     };
+    use std::io;
     use uuid::Uuid;
 
     #[test]
@@ -1951,6 +2097,80 @@ mod tests {
         assert_eq!(details.eid.origin_seq, 7);
         assert_eq!(details.existing_sha256, hex::encode([1u8; 32]));
         assert_eq!(details.new_sha256, hex::encode([2u8; 32]));
+    }
+
+    #[test]
+    fn wal_index_store_epoch_mismatch_includes_details() {
+        let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
+        let err = WalIndexError::MetaMismatch {
+            key: "store_epoch",
+            expected: "1".to_string(),
+            got: "2".to_string(),
+            store_id,
+        };
+
+        let store_err = StoreRuntimeError::WalIndex(err);
+        let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
+
+        assert_eq!(payload.code, ErrorCode::StoreEpochMismatch);
+        let details = payload
+            .details_as::<error_details::StoreEpochMismatchDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.store_id, store_id);
+        assert_eq!(details.expected_epoch, 1);
+        assert_eq!(details.got_epoch, 2);
+    }
+
+    #[test]
+    fn wal_replay_prev_sha_mismatch_includes_details() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
+        let err = WalReplayError::PrevShaMismatch {
+            namespace: namespace.to_string(),
+            origin,
+            seq: 2,
+            expected_prev_sha256: [3u8; 32],
+            got_prev_sha256: [4u8; 32],
+            head_seq: 1,
+        };
+
+        let store_err = StoreRuntimeError::WalReplay(err);
+        let payload = store_runtime_error_payload(&store_err, "boom".to_string(), false);
+
+        assert_eq!(payload.code, ErrorCode::PrevShaMismatch);
+        let details = payload
+            .details_as::<error_details::PrevShaMismatchDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.eid.namespace, namespace);
+        assert_eq!(details.eid.origin_replica_id, origin);
+        assert_eq!(details.eid.origin_seq, 2);
+        assert_eq!(details.expected_prev_sha256, hex::encode([3u8; 32]));
+        assert_eq!(details.got_prev_sha256, hex::encode([4u8; 32]));
+        assert_eq!(details.head_seq, 1);
+    }
+
+    #[test]
+    fn lock_permission_denied_includes_details() {
+        let err = StoreLockError::Io {
+            path: PathBuf::from("/tmp/beads.lock"),
+            operation: StoreLockOperation::Write,
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+
+        let payload = store_lock_error_payload(&err, "boom".to_string(), false);
+
+        assert_eq!(payload.code, ErrorCode::PermissionDenied);
+        let details = payload
+            .details_as::<error_details::PermissionDeniedDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.path, "/tmp/beads.lock");
+        assert_eq!(
+            details.operation,
+            error_details::PermissionOperation::Write
+        );
     }
 
     #[test]

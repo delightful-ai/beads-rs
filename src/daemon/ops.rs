@@ -591,7 +591,7 @@ fn store_lock_error_code(err: &StoreLockError) -> ErrorCode {
         StoreLockError::Held { .. } => ErrorCode::LockHeld,
         StoreLockError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
         StoreLockError::MetadataCorrupt { .. } => ErrorCode::Corruption,
-        StoreLockError::Io(source) => {
+        StoreLockError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ErrorCode::PermissionDenied
             } else {
@@ -608,7 +608,7 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
             StoreLockError::Symlink { .. } | StoreLockError::MetadataCorrupt { .. } => {
                 Transience::Permanent
             }
-            StoreLockError::Io(source) => {
+            StoreLockError::Io { source, .. } => {
                 if source.kind() == std::io::ErrorKind::PermissionDenied {
                     Transience::Permanent
                 } else {

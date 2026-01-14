@@ -116,6 +116,9 @@ pub enum WalReplayError {
         namespace: String,
         origin: ReplicaId,
         seq: u64,
+        expected_prev_sha256: [u8; 32],
+        got_prev_sha256: [u8; 32],
+        head_seq: u64,
     },
     #[error("head sha required for {namespace} {origin} seq {seq}")]
     MissingHead {
@@ -1031,12 +1034,18 @@ impl OriginReplayState {
 
         let expected = self.contiguous_seq + 1;
         if seq == expected {
+            let expected_prev = self.head_sha.unwrap_or([0u8; 32]);
+            let got_prev = prev_sha.unwrap_or([0u8; 32]);
+            let head_seq = self.contiguous_seq;
             if expected == 1 {
                 if prev_sha.is_some() {
                     return Err(WalReplayError::PrevShaMismatch {
                         namespace: namespace.to_string(),
                         origin,
                         seq,
+                        expected_prev_sha256: expected_prev,
+                        got_prev_sha256: got_prev,
+                        head_seq,
                     });
                 }
             } else if prev_sha != self.head_sha {
@@ -1044,6 +1053,9 @@ impl OriginReplayState {
                     namespace: namespace.to_string(),
                     origin,
                     seq,
+                    expected_prev_sha256: expected_prev,
+                    got_prev_sha256: got_prev,
+                    head_seq,
                 });
             }
 

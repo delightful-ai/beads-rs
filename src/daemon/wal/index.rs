@@ -9,7 +9,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::{
-    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq1, StoreMeta, TxnId,
+    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq1, StoreId, StoreMeta,
+    TxnId,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = 1;
@@ -35,6 +36,7 @@ pub enum WalIndexError {
         key: &'static str,
         expected: String,
         got: String,
+        store_id: StoreId,
     },
     #[error("event id encode failed: {0}")]
     CborEncode(#[from] minicbor::encode::Error<std::convert::Infallible>),
@@ -975,6 +977,7 @@ fn validate_meta(conn: &Connection, meta: &StoreMeta) -> Result<(), WalIndexErro
             key: "store_id",
             expected: meta.store_id().to_string(),
             got: stored_id,
+            store_id: meta.store_id(),
         });
     }
 
@@ -984,6 +987,7 @@ fn validate_meta(conn: &Connection, meta: &StoreMeta) -> Result<(), WalIndexErro
             key: "store_epoch",
             expected: meta.store_epoch().get().to_string(),
             got: stored_epoch,
+            store_id: meta.store_id(),
         });
     }
 
@@ -995,6 +999,7 @@ fn validate_meta(conn: &Connection, meta: &StoreMeta) -> Result<(), WalIndexErro
                 key: "index_schema_version",
                 expected: meta.index_schema_version.to_string(),
                 got: schema_version,
+                store_id: meta.store_id(),
             })?;
     if schema_version != meta.index_schema_version {
         return Err(WalIndexError::SchemaVersionMismatch {
@@ -1009,6 +1014,7 @@ fn validate_meta(conn: &Connection, meta: &StoreMeta) -> Result<(), WalIndexErro
             key: "wal_format_version",
             expected: meta.wal_format_version.to_string(),
             got: wal_version,
+            store_id: meta.store_id(),
         });
     }
 
