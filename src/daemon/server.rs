@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,10 +17,11 @@ use crossbeam::channel::{Receiver, Sender};
 use super::broadcast::{
     BroadcastError, BroadcastEvent, DropReason, EventSubscription, SubscriberLimits,
 };
-use super::core::Daemon;
+use super::core::{Daemon, NormalizedReadConsistency, ReadGateStatus};
 use super::git_worker::{GitOp, GitResult};
 use super::ipc::{
-    Request, Response, ResponsePayload, decode_request_with_limits, encode_response, send_response,
+    ReadConsistency, Request, Response, ResponsePayload, decode_request_with_limits, encode_response,
+    send_response,
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
@@ -50,6 +52,25 @@ pub struct RequestMessage {
     pub respond: Sender<ServerReply>,
 }
 
+struct ReadGateRequest {
+    repo: PathBuf,
+    read: ReadConsistency,
+}
+
+struct ReadGateWaiter {
+    request: Request,
+    respond: Sender<ServerReply>,
+    repo: PathBuf,
+    read: NormalizedReadConsistency,
+    started_at: Instant,
+    deadline: Instant,
+}
+
+enum RequestOutcome {
+    Continue,
+    Shutdown,
+}
+
 /// Run the state thread loop.
 ///
 /// This is THE serialization point - all state mutations go through here.
@@ -61,6 +82,7 @@ pub fn run_state_loop(
     git_result_rx: Receiver<GitResult>,
 ) {
     let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<ServerReply>>> = HashMap::new();
+    let mut read_gate_waiters: Vec<ReadGateWaiter> = Vec::new();
     let repl_capacity = daemon.limits().max_repl_ingest_queue_events.max(1);
     let (repl_tx, repl_rx) = crossbeam::channel::bounded(repl_capacity);
     daemon.set_repl_ingest_tx(repl_tx);
@@ -68,12 +90,20 @@ pub fn run_state_loop(
     loop {
         let next_sync = daemon.next_sync_deadline();
         let next_checkpoint = daemon.next_checkpoint_deadline();
-        let next_deadline = match (next_sync, next_checkpoint) {
-            (Some(sync), Some(checkpoint)) => Some(std::cmp::min(sync, checkpoint)),
-            (Some(sync), None) => Some(sync),
-            (None, Some(checkpoint)) => Some(checkpoint),
-            (None, None) => None,
-        };
+        let next_read_gate = read_gate_waiters
+            .iter()
+            .map(|waiter| waiter.deadline)
+            .min();
+        let mut next_deadline = None;
+        for deadline in [next_sync, next_checkpoint, next_read_gate]
+            .into_iter()
+            .flatten()
+        {
+            next_deadline = Some(match next_deadline {
+                Some(current) => std::cmp::min(current, deadline),
+                None => deadline,
+            });
+        }
         let tick = match next_deadline {
             Some(deadline) => {
                 let wait = deadline.saturating_duration_since(Instant::now());
@@ -87,125 +117,69 @@ pub fn run_state_loop(
             recv(req_rx) -> msg => {
                 match msg {
                     Ok(RequestMessage { request, respond }) => {
-                        // Sync barrier: wait until repo is clean.
-                        if let Request::SyncWait { repo } = request {
-                            match daemon.ensure_loaded_and_maybe_start_sync(&repo, &git_tx) {
-                                Ok(loaded) => {
-                                    let repo_state = match daemon.repo_state(&loaded) {
-                                        Ok(repo_state) => repo_state,
-                                        Err(e) => {
-                                            let _ = respond.send(ServerReply::Response(Response::err(e)));
+                        if let Some(read_gate) = read_gate_request(&request) {
+                            let read = match daemon.normalize_read_consistency(read_gate.read) {
+                                Ok(read) => read,
+                                Err(err) => {
+                                    let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                    continue;
+                                }
+                            };
+
+                            if read.require_min_seen().is_some() {
+                                let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
+                                    Ok(remote) => remote,
+                                    Err(err) => {
+                                        let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                        continue;
+                                    }
+                                };
+                                match daemon.read_gate_status(&loaded, &read) {
+                                    Ok(ReadGateStatus::Satisfied) => {}
+                                    Ok(ReadGateStatus::Unsatisfied {
+                                        required,
+                                        current_applied,
+                                    }) => {
+                                        if read.wait_timeout_ms() == 0 {
+                                            let err = OpError::RequireMinSeenUnsatisfied {
+                                                required: Box::new(required),
+                                                current_applied: Box::new(current_applied),
+                                            };
+                                            let _ = respond.send(ServerReply::Response(Response::err(err)));
                                             continue;
                                         }
-                                    };
-                                    let clean = !repo_state.dirty && !repo_state.sync_in_progress;
 
-                                    if clean {
-                                        let _ = respond.send(ServerReply::Response(Response::ok(
-                                            super::ipc::ResponsePayload::synced(),
-                                        )));
-                                    } else {
-                                        sync_waiters.entry(loaded.remote().clone()).or_default().push(respond);
+                                        let started_at = Instant::now();
+                                        let timeout = Duration::from_millis(read.wait_timeout_ms());
+                                        let deadline =
+                                            started_at.checked_add(timeout).unwrap_or(started_at);
+                                        read_gate_waiters.push(ReadGateWaiter {
+                                            request,
+                                            respond,
+                                            repo: read_gate.repo,
+                                            read,
+                                            started_at,
+                                            deadline,
+                                        });
+                                        continue;
+                                    }
+                                    Err(err) => {
+                                        let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                        continue;
                                     }
                                 }
-                                Err(e) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(e)));
-                                }
                             }
-                            continue;
                         }
 
-                        if let Request::Subscribe { repo, read } = request {
-                            let read = match daemon.normalize_read_consistency(read) {
-                                Ok(read) => read,
-                                Err(e) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(e)));
-                                    continue;
-                                }
-                            };
-                            let loaded = match daemon.ensure_repo_fresh(&repo, &git_tx) {
-                                Ok(remote) => remote,
-                                Err(e) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(e)));
-                                    continue;
-                                }
-                            };
-                            if let Err(err) = daemon.check_read_gate(&loaded, &read) {
-                                let _ = respond.send(ServerReply::Response(Response::err(err)));
-                                continue;
-                            }
-                            let store_runtime = match daemon.store_runtime(&loaded) {
-                                Ok(runtime) => runtime,
-                                Err(e) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(e)));
-                                    continue;
-                                }
-                            };
-                            let subscription = match store_runtime
-                                .broadcaster
-                                .subscribe(subscriber_limits(daemon.limits()))
-                            {
-                                Ok(subscription) => subscription,
-                                Err(err) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(
-                                        broadcast_error_to_op(err),
-                                    )));
-                                    continue;
-                                }
-                            };
-                            let hot_cache = match store_runtime.broadcaster.hot_cache() {
-                                Ok(cache) => cache,
-                                Err(err) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(
-                                        broadcast_error_to_op(err),
-                                    )));
-                                    continue;
-                                }
-                            };
-                            let namespace = read.namespace().clone();
-                            let watermarks_applied = store_runtime.watermarks_applied.clone();
-                            let wal_reader = WalRangeReader::new(
-                                store_runtime.meta.store_id(),
-                                store_runtime.wal_index.clone(),
-                                daemon.limits().clone(),
-                            );
-                            let backfill = match build_backfill_plan(
-                                read.require_min_seen(),
-                                &namespace,
-                                &watermarks_applied,
-                                &wal_reader,
-                                daemon.limits(),
-                            ) {
-                                Ok(plan) => plan,
-                                Err(err) => {
-                                    let _ = respond
-                                        .send(ServerReply::Response(Response::err(*err)));
-                                    continue;
-                                }
-                            };
-                            let info = crate::api::SubscribeInfo {
-                                namespace: namespace.clone(),
-                                watermarks_applied,
-                            };
-                            let ack = Response::ok(ResponsePayload::subscribed(info));
-                            let _ = respond.send(ServerReply::Subscribe(SubscribeReply {
-                                ack,
-                                namespace,
-                                subscription,
-                                hot_cache,
-                                backfill: backfill.frames,
-                                backfill_end: backfill.last_seq,
-                            }));
-                            continue;
-                        }
+                        let outcome = process_request_message(
+                            &mut daemon,
+                            request,
+                            respond,
+                            &git_tx,
+                            &mut sync_waiters,
+                        );
 
-                        // Check for shutdown
-                        let is_shutdown = matches!(request, Request::Shutdown);
-
-                        let response = daemon.handle_request(request, &git_tx);
-                        let _ = respond.send(ServerReply::Response(response));
-
-                        if is_shutdown {
+                        if matches!(outcome, RequestOutcome::Shutdown) {
                             daemon.begin_shutdown();
                             daemon.shutdown_replication();
                             daemon.drain_ipc_inflight(Duration::from_millis(daemon.limits().dead_ms));
@@ -275,6 +249,12 @@ pub fn run_state_loop(
                         daemon.fire_due_syncs(&git_tx);
                         daemon.fire_due_checkpoints(&git_tx);
                         flush_sync_waiters(&daemon, &mut sync_waiters);
+                        flush_read_gate_waiters(
+                            &mut daemon,
+                            &mut read_gate_waiters,
+                            &git_tx,
+                            &mut sync_waiters,
+                        );
                     }
                     Err(_) => {
                         // Channel closed - time to exit
@@ -288,6 +268,12 @@ pub fn run_state_loop(
                 daemon.fire_due_syncs(&git_tx);
                 daemon.fire_due_checkpoints(&git_tx);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
+                flush_read_gate_waiters(
+                    &mut daemon,
+                    &mut read_gate_waiters,
+                    &git_tx,
+                    &mut sync_waiters,
+                );
             }
 
             // Replication ingest request
@@ -297,6 +283,12 @@ pub fn run_state_loop(
                     daemon.fire_due_syncs(&git_tx);
                     daemon.fire_due_checkpoints(&git_tx);
                     flush_sync_waiters(&daemon, &mut sync_waiters);
+                    flush_read_gate_waiters(
+                        &mut daemon,
+                        &mut read_gate_waiters,
+                        &git_tx,
+                        &mut sync_waiters,
+                    );
                 }
             }
 
@@ -318,9 +310,292 @@ pub fn run_state_loop(
                 daemon.fire_due_syncs(&git_tx);
                 daemon.fire_due_checkpoints(&git_tx);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
+                flush_read_gate_waiters(
+                    &mut daemon,
+                    &mut read_gate_waiters,
+                    &git_tx,
+                    &mut sync_waiters,
+                );
             }
         }
     }
+}
+
+fn process_request_message(
+    daemon: &mut Daemon,
+    request: Request,
+    respond: Sender<ServerReply>,
+    git_tx: &Sender<GitOp>,
+    sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+) -> RequestOutcome {
+    // Sync barrier: wait until repo is clean.
+    if let Request::SyncWait { repo } = request {
+        match daemon.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
+            Ok(loaded) => {
+                let repo_state = match daemon.repo_state(&loaded) {
+                    Ok(repo_state) => repo_state,
+                    Err(e) => {
+                        let _ = respond.send(ServerReply::Response(Response::err(e)));
+                        return RequestOutcome::Continue;
+                    }
+                };
+                let clean = !repo_state.dirty && !repo_state.sync_in_progress;
+
+                if clean {
+                    let _ = respond.send(ServerReply::Response(Response::ok(
+                        super::ipc::ResponsePayload::synced(),
+                    )));
+                } else {
+                    sync_waiters
+                        .entry(loaded.remote().clone())
+                        .or_default()
+                        .push(respond);
+                }
+            }
+            Err(e) => {
+                let _ = respond.send(ServerReply::Response(Response::err(e)));
+            }
+        }
+        return RequestOutcome::Continue;
+    }
+
+    if let Request::Subscribe { repo, read } = request {
+        let read = match daemon.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => {
+                let _ = respond.send(ServerReply::Response(Response::err(e)));
+                return RequestOutcome::Continue;
+            }
+        };
+        let loaded = match daemon.ensure_repo_fresh(&repo, git_tx) {
+            Ok(remote) => remote,
+            Err(e) => {
+                let _ = respond.send(ServerReply::Response(Response::err(e)));
+                return RequestOutcome::Continue;
+            }
+        };
+        if let Err(err) = daemon.check_read_gate(&loaded, &read) {
+            let _ = respond.send(ServerReply::Response(Response::err(err)));
+            return RequestOutcome::Continue;
+        }
+        let store_runtime = match daemon.store_runtime(&loaded) {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                let _ = respond.send(ServerReply::Response(Response::err(e)));
+                return RequestOutcome::Continue;
+            }
+        };
+        let subscription = match store_runtime
+            .broadcaster
+            .subscribe(subscriber_limits(daemon.limits()))
+        {
+            Ok(subscription) => subscription,
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(
+                    broadcast_error_to_op(err),
+                )));
+                return RequestOutcome::Continue;
+            }
+        };
+        let hot_cache = match store_runtime.broadcaster.hot_cache() {
+            Ok(cache) => cache,
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(
+                    broadcast_error_to_op(err),
+                )));
+                return RequestOutcome::Continue;
+            }
+        };
+        let namespace = read.namespace().clone();
+        let watermarks_applied = store_runtime.watermarks_applied.clone();
+        let wal_reader = WalRangeReader::new(
+            store_runtime.meta.store_id(),
+            store_runtime.wal_index.clone(),
+            daemon.limits().clone(),
+        );
+        let backfill = match build_backfill_plan(
+            read.require_min_seen(),
+            &namespace,
+            &watermarks_applied,
+            &wal_reader,
+            daemon.limits(),
+        ) {
+            Ok(plan) => plan,
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(*err)));
+                return RequestOutcome::Continue;
+            }
+        };
+        let info = crate::api::SubscribeInfo {
+            namespace: namespace.clone(),
+            watermarks_applied,
+        };
+        let ack = Response::ok(ResponsePayload::subscribed(info));
+        let _ = respond.send(ServerReply::Subscribe(SubscribeReply {
+            ack,
+            namespace,
+            subscription,
+            hot_cache,
+            backfill: backfill.frames,
+            backfill_end: backfill.last_seq,
+        }));
+        return RequestOutcome::Continue;
+    }
+
+    let is_shutdown = matches!(request, Request::Shutdown);
+
+    let response = daemon.handle_request(request, git_tx);
+    let _ = respond.send(ServerReply::Response(response));
+
+    if is_shutdown {
+        RequestOutcome::Shutdown
+    } else {
+        RequestOutcome::Continue
+    }
+}
+
+fn read_gate_request(request: &Request) -> Option<ReadGateRequest> {
+    match request {
+        Request::Show { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::ShowMultiple { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::List { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Ready { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::DepTree { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Deps { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Notes { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Blocked { repo, read } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Stale { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Count { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Deleted { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::EpicStatus { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Status { repo, read } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::AdminStatus { repo, read } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::AdminMetrics { repo, read } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::AdminDoctor { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::AdminScrub { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::AdminFingerprint { repo, read, .. } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Validate { repo, read } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        Request::Subscribe { repo, read } => Some(ReadGateRequest {
+            repo: repo.clone(),
+            read: read.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn flush_read_gate_waiters(
+    daemon: &mut Daemon,
+    waiters: &mut Vec<ReadGateWaiter>,
+    git_tx: &Sender<GitOp>,
+    sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+) {
+    if waiters.is_empty() {
+        return;
+    }
+
+    let now = Instant::now();
+    let mut remaining = Vec::new();
+    for waiter in waiters.drain(..) {
+        let loaded = match daemon.ensure_repo_fresh(&waiter.repo, git_tx) {
+            Ok(remote) => remote,
+            Err(err) => {
+                let _ = waiter.respond.send(ServerReply::Response(Response::err(err)));
+                continue;
+            }
+        };
+
+        match daemon.read_gate_status(&loaded, &waiter.read) {
+            Ok(ReadGateStatus::Satisfied) => {
+                let _ = process_request_message(
+                    daemon,
+                    waiter.request,
+                    waiter.respond,
+                    git_tx,
+                    sync_waiters,
+                );
+            }
+            Ok(ReadGateStatus::Unsatisfied {
+                required,
+                current_applied,
+            }) => {
+                if now >= waiter.deadline {
+                    let waited_ms =
+                        (now.duration_since(waiter.started_at).as_millis()).min(u64::MAX as u128)
+                            as u64;
+                    let err = OpError::RequireMinSeenTimeout {
+                        waited_ms,
+                        required: Box::new(required),
+                        current_applied: Box::new(current_applied),
+                    };
+                    let _ = waiter.respond.send(ServerReply::Response(Response::err(err)));
+                    continue;
+                }
+                remaining.push(waiter);
+            }
+            Err(err) => {
+                let _ = waiter.respond.send(ServerReply::Response(Response::err(err)));
+            }
+        }
+    }
+
+    *waiters = remaining;
 }
 
 fn flush_sync_waiters(daemon: &Daemon, waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>) {
@@ -727,12 +1002,52 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use std::cell::RefCell;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::daemon::core::insert_store_for_tests;
+    use crate::daemon::wal::Wal;
     use crate::core::{
-        Applied, Canonical, EventBytes, EventFrameV1, EventId, HeadStatus, Opaque, Seq0, Seq1,
-        Sha256, Watermarks,
+        ActorId, Applied, Canonical, EventBytes, EventFrameV1, EventId, HeadStatus, Opaque, Seq0,
+        Seq1, Sha256, StoreId, Watermarks,
     };
+
+    struct TestEnv {
+        _temp: TempDir,
+        _override: crate::paths::DataDirOverride,
+        repo_path: PathBuf,
+        git_tx: Sender<GitOp>,
+        daemon: Daemon,
+        store_id: StoreId,
+    }
+
+    impl TestEnv {
+        fn new() -> Self {
+            let temp = TempDir::new().unwrap();
+            let data_dir = temp.path().join("data");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let override_guard = crate::paths::override_data_dir_for_tests(Some(data_dir.clone()));
+            let wal = Wal::new(&data_dir).unwrap();
+            let actor = ActorId::new("test@host".to_string()).unwrap();
+            let mut daemon = Daemon::new(actor, wal);
+            let repo_path = temp.path().join("repo");
+            std::fs::create_dir_all(&repo_path).unwrap();
+            let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
+            let remote = RemoteUrl("example.com/test/repo".into());
+            insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+            let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+
+            Self {
+                _temp: temp,
+                _override: override_guard,
+                repo_path,
+                git_tx,
+                daemon,
+                store_id,
+            }
+        }
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ReadCall {
@@ -946,5 +1261,128 @@ mod tests {
             .unwrap()
             .expect("details");
         assert!(!details.reason.is_empty());
+    }
+
+    #[test]
+    fn read_gate_waiter_releases_on_apply() {
+        let mut env = TestEnv::new();
+        let loaded = env
+            .daemon
+            .ensure_repo_fresh(&env.repo_path, &env.git_tx)
+            .unwrap();
+        let origin = env
+            .daemon
+            .store_runtime(&loaded)
+            .unwrap()
+            .meta
+            .replica_id;
+        let namespace = NamespaceId::core();
+
+        let mut required = Watermarks::<Applied>::new();
+        required
+            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .unwrap();
+
+        let read = ReadConsistency {
+            namespace: Some("core".to_string()),
+            require_min_seen: Some(required),
+            wait_timeout_ms: Some(200),
+        };
+        let request = Request::Status {
+            repo: env.repo_path.clone(),
+            read: read.clone(),
+        };
+        let normalized = env.daemon.normalize_read_consistency(read).unwrap();
+        let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+        let started_at = Instant::now();
+        let deadline =
+            started_at + Duration::from_millis(normalized.wait_timeout_ms());
+        let waiter = ReadGateWaiter {
+            request,
+            respond: respond_tx,
+            repo: env.repo_path.clone(),
+            read: normalized,
+            started_at,
+            deadline,
+        };
+
+        let mut waiters = vec![waiter];
+        let mut sync_waiters = HashMap::new();
+        flush_read_gate_waiters(&mut env.daemon, &mut waiters, &env.git_tx, &mut sync_waiters);
+        assert_eq!(waiters.len(), 1);
+        assert!(respond_rx.try_recv().is_err());
+
+        env.daemon
+            .store_runtime_mut(&loaded)
+            .unwrap()
+            .watermarks_applied
+            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .unwrap();
+
+        flush_read_gate_waiters(&mut env.daemon, &mut waiters, &env.git_tx, &mut sync_waiters);
+        assert!(waiters.is_empty());
+
+        let reply = respond_rx.recv().unwrap();
+        let ServerReply::Response(response) = reply else {
+            panic!("expected response");
+        };
+        assert!(matches!(response, Response::Ok { .. }));
+    }
+
+    #[test]
+    fn read_gate_waiter_times_out() {
+        let mut env = TestEnv::new();
+        let loaded = env
+            .daemon
+            .ensure_repo_fresh(&env.repo_path, &env.git_tx)
+            .unwrap();
+        let origin = env
+            .daemon
+            .store_runtime(&loaded)
+            .unwrap()
+            .meta
+            .replica_id;
+        let namespace = NamespaceId::core();
+
+        let mut required = Watermarks::<Applied>::new();
+        required
+            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .unwrap();
+
+        let read = ReadConsistency {
+            namespace: Some("core".to_string()),
+            require_min_seen: Some(required),
+            wait_timeout_ms: Some(10),
+        };
+        let request = Request::Status {
+            repo: env.repo_path.clone(),
+            read: read.clone(),
+        };
+        let normalized = env.daemon.normalize_read_consistency(read).unwrap();
+        let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+        let started_at = Instant::now() - Duration::from_millis(20);
+        let deadline = started_at;
+        let waiter = ReadGateWaiter {
+            request,
+            respond: respond_tx,
+            repo: env.repo_path.clone(),
+            read: normalized,
+            started_at,
+            deadline,
+        };
+
+        let mut waiters = vec![waiter];
+        let mut sync_waiters = HashMap::new();
+        flush_read_gate_waiters(&mut env.daemon, &mut waiters, &env.git_tx, &mut sync_waiters);
+        assert!(waiters.is_empty());
+
+        let reply = respond_rx.recv().unwrap();
+        let ServerReply::Response(response) = reply else {
+            panic!("expected response");
+        };
+        let Response::Err { err } = response else {
+            panic!("expected timeout error");
+        };
+        assert_eq!(err.code, ErrorCode::RequireMinSeenTimeout);
     }
 }
