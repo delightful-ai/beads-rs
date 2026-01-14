@@ -19,14 +19,19 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::Clock;
+use super::broadcast::BroadcastEvent;
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
     ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
 };
-use super::broadcast::BroadcastEvent;
 use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
+use super::repl::{
+    BackoffPolicy, IngestOutcome, ReplIngestRequest, ReplSessionStore, ReplicationManager,
+    ReplicationManagerConfig, ReplicationManagerHandle, ReplicationServer, ReplicationServerConfig,
+    ReplicationServerHandle, SharedSessionStore, WalRangeReader,
+};
 use super::repo::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
 };
@@ -35,11 +40,6 @@ use super::store_runtime::{StoreRuntime, StoreRuntimeError};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentConfig, SegmentRow,
     SegmentWriter, Wal, WalEntry, WalIndex, WalIndexError, WalReplayError,
-};
-use super::repl::{
-    BackoffPolicy, IngestOutcome, ReplIngestRequest, ReplSessionStore, ReplicationManager,
-    ReplicationManagerConfig, ReplicationManagerHandle, ReplicationServer,
-    ReplicationServerConfig, ReplicationServerHandle, SharedSessionStore, WalRangeReader,
 };
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
@@ -136,9 +136,9 @@ use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
     ActorId, Applied, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
     DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, Limits, NamespaceId, PrevVerified,
-    ReplicaId, ReplicaRoster, SegmentId, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
-    StoreIdentity, VerifiedEvent, WallClock,
-    Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
+    ReplicaId, ReplicaRoster, SegmentId, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
+    VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp, apply_event,
+    decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::collision::{detect_collisions, resolve_collisions};
@@ -158,10 +158,15 @@ pub(crate) struct NormalizedMutationMeta {
 
 #[derive(Clone, Debug)]
 pub(crate) struct NormalizedReadConsistency {
-    #[allow(dead_code)]
     namespace: NamespaceId,
     require_min_seen: Option<Watermarks<Applied>>,
     wait_timeout_ms: u64,
+}
+
+impl NormalizedReadConsistency {
+    pub(crate) fn namespace(&self) -> &NamespaceId {
+        &self.namespace
+    }
 }
 
 /// The daemon coordinator.
@@ -741,12 +746,13 @@ impl Daemon {
             .ok_or(OpError::Internal("loaded store missing from state"))?;
 
         let wal_index: Arc<dyn WalIndex> = store.wal_index.clone();
-        let wal_reader = Some(WalRangeReader::new(store_id, wal_index.clone(), self.limits.clone()));
-        let session_store = SharedSessionStore::new(ReplSessionStore::new(
+        let wal_reader = Some(WalRangeReader::new(
             store_id,
-            wal_index,
-            ingest_tx,
+            wal_index.clone(),
+            self.limits.clone(),
         ));
+        let session_store =
+            SharedSessionStore::new(ReplSessionStore::new(store_id, wal_index, ingest_tx));
 
         let roster = load_replica_roster(store_id)?;
         let peers = Vec::new();
@@ -942,46 +948,45 @@ impl Daemon {
         let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
             let mut max_stamp = store.repo_state.last_seen_stamp.clone();
             for event in &batch {
-            apply_event(&mut store.repo_state.state, &event.body).map_err(|err| {
-                Box::new(ErrorPayload::new(
-                    ErrorCode::Internal,
-                    format!("apply_event failed: {err}"),
-                    false,
-                ))
-            })?;
+                apply_event(&mut store.repo_state.state, &event.body).map_err(|err| {
+                    Box::new(ErrorPayload::new(
+                        ErrorCode::Internal,
+                        format!("apply_event failed: {err}"),
+                        false,
+                    ))
+                })?;
 
-            if let Some(hlc_max) = &event.body.hlc_max {
-                let stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
-                max_stamp = max_write_stamp(max_stamp, Some(stamp));
+                if let Some(hlc_max) = &event.body.hlc_max {
+                    let stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
+                    max_stamp = max_write_stamp(max_stamp, Some(stamp));
+                }
+
+                let event_id = event_id_for(origin, namespace.clone(), event.body.origin_seq);
+                let prev_sha = event.prev.prev.map(|sha| Sha256(sha.0));
+                let broadcast = BroadcastEvent::new(
+                    event_id,
+                    event.sha256,
+                    prev_sha,
+                    EventBytes::<Canonical>::new(Bytes::copy_from_slice(event.bytes.as_ref())),
+                );
+                if let Err(err) = store.broadcaster.publish(broadcast) {
+                    tracing::warn!("event broadcast failed: {err}");
+                }
+
+                store
+                    .watermarks_applied
+                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
+                    .map_err(|err| Box::new(watermark_error_payload(&namespace, &origin, err)))?;
+                store
+                    .watermarks_durable
+                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
+                    .map_err(|err| Box::new(watermark_error_payload(&namespace, &origin, err)))?;
             }
-
-            let event_id = event_id_for(origin, namespace.clone(), event.body.origin_seq);
-            let prev_sha = event.prev.prev.map(|sha| Sha256(sha.0));
-            let broadcast = BroadcastEvent::new(
-                event_id,
-                event.sha256,
-                prev_sha,
-                EventBytes::<Canonical>::new(Bytes::copy_from_slice(event.bytes.as_ref())),
-            );
-            if let Err(err) = store.broadcaster.publish(broadcast) {
-                tracing::warn!("event broadcast failed: {err}");
-            }
-
-            store
-                .watermarks_applied
-                .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
-                .map_err(|err| Box::new(watermark_error_payload(&namespace, &origin, err)))?;
-            store
-                .watermarks_durable
-                .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
-                .map_err(|err| Box::new(watermark_error_payload(&namespace, &origin, err)))?;
-        }
 
             if let Some(stamp) = max_stamp.clone() {
                 let now_wall_ms = WallClock::now().0;
                 store.repo_state.last_seen_stamp = Some(stamp.clone());
-                store.repo_state.last_clock_skew =
-                    detect_clock_skew(now_wall_ms, stamp.wall_ms);
+                store.repo_state.last_clock_skew = detect_clock_skew(now_wall_ms, stamp.wall_ms);
             }
             store.repo_state.mark_dirty();
 
@@ -999,7 +1004,14 @@ impl Daemon {
             let durable_head = store.durable_head_sha(&namespace, &origin);
             let remote = store.primary_remote.clone();
 
-            (remote, max_stamp, durable, applied, applied_head, durable_head)
+            (
+                remote,
+                max_stamp,
+                durable,
+                applied,
+                applied_head,
+                durable_head,
+            )
         };
 
         if let Some(stamp) = max_stamp.clone() {
@@ -1918,6 +1930,12 @@ impl Daemon {
 
             Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx),
 
+            Request::Subscribe { .. } => Response::err(error_payload(
+                ErrorCode::InvalidRequest,
+                "subscribe must be handled by the streaming IPC path",
+                false,
+            )),
+
             // Control
             Request::Refresh { repo } => {
                 // Force reload from git (invalidates cached state).
@@ -2382,7 +2400,7 @@ pub(crate) fn load_replica_roster(store_id: StoreId) -> Result<Option<ReplicaRos
             return Err(OpError::ValidationFailed {
                 field: "replicas".into(),
                 reason: format!("failed to read {}: {err}", path.display()),
-            })
+            });
         }
     };
 

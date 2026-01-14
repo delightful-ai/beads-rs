@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::core::{
-    DurabilityClass, DurabilityOutcome, DurabilityReceipt, NamespaceId, NamespacePolicy,
-    ReplicatedProof, ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, Seq1,
+    DurabilityClass, DurabilityOutcome, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaId,
+    ReplicaRole, ReplicaRoster, ReplicateMode, ReplicatedProof, Seq0, Seq1,
 };
 use crate::daemon::ops::OpError;
 use crate::daemon::repl::{PeerAckTable, QuorumOutcome};
@@ -155,7 +155,10 @@ impl DurabilityCoordinator {
     }
 }
 
-fn pending_receipt(mut receipt: DurabilityReceipt, requested: DurabilityClass) -> DurabilityReceipt {
+fn pending_receipt(
+    mut receipt: DurabilityReceipt,
+    requested: DurabilityClass,
+) -> DurabilityReceipt {
     receipt.outcome = DurabilityOutcome::Pending { requested };
     receipt
 }
@@ -174,10 +177,7 @@ fn achieved_receipt(
     receipt
 }
 
-fn pending_replica_ids(
-    eligible: &BTreeSet<ReplicaId>,
-    acked_by: &[ReplicaId],
-) -> Vec<ReplicaId> {
+fn pending_replica_ids(eligible: &BTreeSet<ReplicaId>, acked_by: &[ReplicaId]) -> Vec<ReplicaId> {
     let acked: BTreeSet<ReplicaId> = acked_by.iter().copied().collect();
     eligible
         .iter()
@@ -261,10 +261,14 @@ mod tests {
         ]);
 
         let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
-        let coordinator = DurabilityCoordinator::new(local, policy_peers(), Some(roster), peer_acks.clone());
+        let coordinator =
+            DurabilityCoordinator::new(local, policy_peers(), Some(roster), peer_acks.clone());
 
         let mut durable = WatermarkMap::new();
-        durable.entry(namespace.clone()).or_default().insert(local, 2);
+        durable
+            .entry(namespace.clone())
+            .or_default()
+            .insert(local, 2);
         peer_acks
             .lock()
             .unwrap()
@@ -302,7 +306,10 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
-        let proof = updated.durability_proof.replicated.expect("replicated proof");
+        let proof = updated
+            .durability_proof
+            .replicated
+            .expect("replicated proof");
         assert_eq!(proof.k.get(), 2);
         assert_eq!(proof.acked_by.len(), 2);
     }

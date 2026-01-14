@@ -92,7 +92,8 @@ impl Daemon {
             )
         };
         let roster = load_replica_roster(proof.store_id())?;
-        let coordinator = DurabilityCoordinator::new(origin_replica_id, policies, roster, peer_acks);
+        let coordinator =
+            DurabilityCoordinator::new(origin_replica_id, policies, roster, peer_acks);
         let wait_timeout = Duration::from_millis(limits.dead_ms);
         let store_dir = paths::store_dir(proof.store_id());
 
@@ -709,9 +710,7 @@ fn try_reuse_idempotent_response(
     let mut max_seq = event_id.origin_seq;
     for eid in &row.event_ids {
         if eid.origin_replica_id != origin_replica_id || eid.namespace != ctx.namespace {
-            return Err(OpError::Internal(
-                "idempotent request event id mismatch",
-            ));
+            return Err(OpError::Internal("idempotent request event id mismatch"));
         }
         if eid.origin_seq > max_seq {
             max_seq = eid.origin_seq;
@@ -1152,7 +1151,9 @@ mod tests {
             replica_id,
             std::collections::BTreeMap::new(),
             None,
-            Arc::new(std::sync::Mutex::new(crate::daemon::repl::PeerAckTable::new())),
+            Arc::new(std::sync::Mutex::new(
+                crate::daemon::repl::PeerAckTable::new(),
+            )),
         );
 
         let response = try_reuse_idempotent_response(

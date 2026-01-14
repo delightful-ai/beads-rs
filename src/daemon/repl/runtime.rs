@@ -10,13 +10,15 @@ use bytes::Bytes;
 use crossbeam::channel::{Sender, TrySendError};
 use thiserror::Error;
 
-use crate::core::error::details::{IndexCorruptDetails, OverloadedDetails, OverloadedSubsystem, WalCorruptDetails};
+use crate::core::error::details::{
+    IndexCorruptDetails, OverloadedDetails, OverloadedSubsystem, WalCorruptDetails,
+};
 use crate::core::{
     ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, EventShaLookupError, Limits,
     NamespaceId, Opaque, PrevVerified, ReplicaId, SegmentId, Sha256, StoreId, VerifiedEvent,
 };
-use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
+use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{EventWalError, FrameReader, Record, WalIndex, WalIndexError};
 use crate::paths;
 
@@ -225,7 +227,8 @@ impl WalRangeReader {
             });
         }
 
-        let segments = segment_paths_for_namespace(&self.store_dir, self.wal_index.as_ref(), namespace)?;
+        let segments =
+            segment_paths_for_namespace(&self.store_dir, self.wal_index.as_ref(), namespace)?;
 
         let mut frames = Vec::new();
         for item in items {
@@ -244,13 +247,14 @@ impl WalRangeReader {
                 }
             };
 
-            let record = read_record_at(segment_path, item.offset, self.limits.max_wal_record_bytes)
-                .map_err(|err| WalRangeError::Corrupt {
-                    namespace: namespace.clone(),
-                    segment_id: Some(item.segment_id),
-                    offset: Some(item.offset),
-                    reason: err.to_string(),
-                })?;
+            let record =
+                read_record_at(segment_path, item.offset, self.limits.max_wal_record_bytes)
+                    .map_err(|err| WalRangeError::Corrupt {
+                        namespace: namespace.clone(),
+                        segment_id: Some(item.segment_id),
+                        offset: Some(item.offset),
+                        reason: err.to_string(),
+                    })?;
 
             if record.header.origin_replica_id != *origin
                 || record.header.origin_seq != item.event_id.origin_seq.get()
@@ -321,10 +325,13 @@ impl WalRangeError {
                     reason: reason.clone(),
                 },
             ),
-            WalRangeError::Index(err) => ErrorPayload::new(ErrorCode::Corruption, "index corrupt", false)
-                .with_details(IndexCorruptDetails {
-                    reason: err.to_string(),
-                }),
+            WalRangeError::Index(err) => {
+                ErrorPayload::new(ErrorCode::Corruption, "index corrupt", false).with_details(
+                    IndexCorruptDetails {
+                        reason: err.to_string(),
+                    },
+                )
+            }
         }
     }
 }
@@ -347,7 +354,11 @@ fn segment_paths_for_namespace(
     Ok(map)
 }
 
-fn read_record_at(path: &Path, offset: u64, max_record_bytes: usize) -> Result<Record, EventWalError> {
+fn read_record_at(
+    path: &Path,
+    offset: u64,
+    max_record_bytes: usize,
+) -> Result<Record, EventWalError> {
     let mut file = File::open(path).map_err(|source| EventWalError::Io {
         path: Some(path.to_path_buf()),
         source,

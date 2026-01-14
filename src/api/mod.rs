@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 pub use crate::core::DurabilityReceipt;
 
 use crate::core::{
-    ActorId, Applied, Bead, Claim, ClientRequestId, DepEdge as CoreDepEdge,
-    DepKey as CoreDepKey, EventId, HlcMax, NamespaceId, ReplicaId, Seq1, StoreIdentity,
-    Tombstone as CoreTombstone, TxnDeltaV1, TxnId, Watermarks, WallClock, Workflow, WriteStamp,
+    ActorId, Applied, Bead, Claim, ClientRequestId, DepEdge as CoreDepEdge, DepKey as CoreDepKey,
+    EventId, HlcMax, NamespaceId, ReplicaId, Seq1, StoreIdentity, Tombstone as CoreTombstone,
+    TxnDeltaV1, TxnId, WallClock, Watermarks, Workflow, WriteStamp,
 };
 
 // =============================================================================

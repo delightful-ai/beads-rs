@@ -6,8 +6,8 @@
 //! - Wire format serialization (JSONL with sparse _v)
 //! - ID collision detection and resolution
 
-pub mod collision;
 pub mod checkpoint;
+pub mod collision;
 pub mod error;
 pub mod sync;
 pub mod wire;

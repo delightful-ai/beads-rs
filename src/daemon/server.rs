@@ -13,16 +13,35 @@ use std::time::Instant;
 
 use crossbeam::channel::{Receiver, Sender};
 
+use super::broadcast::{
+    BroadcastError, BroadcastEvent, DropReason, EventSubscription, SubscriberLimits,
+};
 use super::core::Daemon;
 use super::git_worker::{GitOp, GitResult};
-use super::ipc::{Request, Response, decode_request_with_limits, encode_response};
+use super::ipc::{
+    Request, Response, ResponsePayload, decode_request_with_limits, encode_response, send_response,
+};
+use super::ops::OpError;
 use super::remote::RemoteUrl;
-use crate::core::Limits;
+use crate::core::error::details as error_details;
+use crate::core::{ErrorCode, ErrorPayload, Limits, NamespaceId, decode_event_body};
 
 /// Message sent from socket handlers to state thread.
+pub enum ServerReply {
+    Response(Response),
+    Subscribe(SubscribeReply),
+}
+
+pub struct SubscribeReply {
+    pub ack: Response,
+    pub namespace: NamespaceId,
+    pub subscription: EventSubscription,
+    pub hot_cache: Vec<BroadcastEvent>,
+}
+
 pub struct RequestMessage {
     pub request: Request,
-    pub respond: Sender<Response>,
+    pub respond: Sender<ServerReply>,
 }
 
 /// Run the state thread loop.
@@ -35,7 +54,7 @@ pub fn run_state_loop(
     git_tx: Sender<GitOp>,
     git_result_rx: Receiver<GitResult>,
 ) {
-    let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<Response>>> = HashMap::new();
+    let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<ServerReply>>> = HashMap::new();
     let repl_capacity = daemon.limits().max_repl_ingest_queue_events.max(1);
     let (repl_tx, repl_rx) = crossbeam::channel::bounded(repl_capacity);
     daemon.set_repl_ingest_tx(repl_tx);
@@ -61,22 +80,86 @@ pub fn run_state_loop(
                                     let repo_state = match daemon.repo_state(&loaded) {
                                         Ok(repo_state) => repo_state,
                                         Err(e) => {
-                                            let _ = respond.send(Response::err(e));
+                                            let _ = respond.send(ServerReply::Response(Response::err(e)));
                                             continue;
                                         }
                                     };
                                     let clean = !repo_state.dirty && !repo_state.sync_in_progress;
 
                                     if clean {
-                                        let _ = respond.send(Response::ok(super::ipc::ResponsePayload::synced()));
+                                        let _ = respond.send(ServerReply::Response(Response::ok(
+                                            super::ipc::ResponsePayload::synced(),
+                                        )));
                                     } else {
                                         sync_waiters.entry(loaded.remote().clone()).or_default().push(respond);
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = respond.send(Response::err(e));
+                                    let _ = respond.send(ServerReply::Response(Response::err(e)));
                                 }
                             }
+                            continue;
+                        }
+
+                        if let Request::Subscribe { repo, read } = request {
+                            let read = match daemon.normalize_read_consistency(read) {
+                                Ok(read) => read,
+                                Err(e) => {
+                                    let _ = respond.send(ServerReply::Response(Response::err(e)));
+                                    continue;
+                                }
+                            };
+                            let loaded = match daemon.ensure_repo_fresh(&repo, &git_tx) {
+                                Ok(remote) => remote,
+                                Err(e) => {
+                                    let _ = respond.send(ServerReply::Response(Response::err(e)));
+                                    continue;
+                                }
+                            };
+                            if let Err(err) = daemon.check_read_gate(&loaded, &read) {
+                                let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                continue;
+                            }
+                            let store_runtime = match daemon.store_runtime(&loaded) {
+                                Ok(runtime) => runtime,
+                                Err(e) => {
+                                    let _ = respond.send(ServerReply::Response(Response::err(e)));
+                                    continue;
+                                }
+                            };
+                            let subscription = match store_runtime
+                                .broadcaster
+                                .subscribe(subscriber_limits(daemon.limits()))
+                            {
+                                Ok(subscription) => subscription,
+                                Err(err) => {
+                                    let _ = respond.send(ServerReply::Response(Response::err(
+                                        broadcast_error_to_op(err),
+                                    )));
+                                    continue;
+                                }
+                            };
+                            let hot_cache = match store_runtime.broadcaster.hot_cache() {
+                                Ok(cache) => cache,
+                                Err(err) => {
+                                    let _ = respond.send(ServerReply::Response(Response::err(
+                                        broadcast_error_to_op(err),
+                                    )));
+                                    continue;
+                                }
+                            };
+                            let namespace = read.namespace().clone();
+                            let info = crate::api::SubscribeInfo {
+                                namespace: namespace.clone(),
+                                watermarks_applied: store_runtime.watermarks_applied.clone(),
+                            };
+                            let ack = Response::ok(ResponsePayload::subscribed(info));
+                            let _ = respond.send(ServerReply::Subscribe(SubscribeReply {
+                                ack,
+                                namespace,
+                                subscription,
+                                hot_cache,
+                            }));
                             continue;
                         }
 
@@ -84,7 +167,7 @@ pub fn run_state_loop(
                         let is_shutdown = matches!(request, Request::Shutdown);
 
                         let response = daemon.handle_request(request, &git_tx);
-                        let _ = respond.send(response);
+                        let _ = respond.send(ServerReply::Response(response));
 
                         if is_shutdown {
                             daemon.shutdown_replication();
@@ -173,7 +256,7 @@ pub fn run_state_loop(
     }
 }
 
-fn flush_sync_waiters(daemon: &Daemon, waiters: &mut HashMap<RemoteUrl, Vec<Sender<Response>>>) {
+fn flush_sync_waiters(daemon: &Daemon, waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>) {
     let ready: Vec<RemoteUrl> = waiters
         .keys()
         .filter(|remote| {
@@ -188,7 +271,9 @@ fn flush_sync_waiters(daemon: &Daemon, waiters: &mut HashMap<RemoteUrl, Vec<Send
     for remote in ready {
         if let Some(list) = waiters.remove(&remote) {
             for respond in list {
-                let _ = respond.send(Response::ok(super::ipc::ResponsePayload::synced()));
+                let _ = respond.send(ServerReply::Response(Response::ok(
+                    super::ipc::ResponsePayload::synced(),
+                )));
             }
         }
     }
@@ -280,31 +365,164 @@ pub(super) fn handle_client(
             break; // State thread died
         }
 
-        let response = match respond_rx.recv() {
+        let reply = match respond_rx.recv() {
             Ok(r) => r,
             Err(_) => break, // State thread died
         };
 
-        // Write response
-        let bytes = match encode_response(&response) {
-            Ok(b) => b,
-            Err(e) => {
-                let msg = e.to_string().replace('"', "\\\"");
-                format!(r#"{{"err":{{"code":"internal","message":"{}"}}}}\n"#, msg).into_bytes()
-            }
-        };
-        // encode_response already includes newline, but let's be safe
-        let response_str = String::from_utf8_lossy(&bytes);
-        if write!(writer, "{}", response_str).is_err() {
-            break; // Client disconnected
-        }
-        if writer.flush().is_err() {
-            break;
-        }
+        match reply {
+            ServerReply::Response(response) => {
+                // Write response
+                let bytes = match encode_response(&response) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let msg = e.to_string().replace('"', "\\\"");
+                        format!(r#"{{"err":{{"code":"internal","message":"{}"}}}}\n"#, msg)
+                            .into_bytes()
+                    }
+                };
+                // encode_response already includes newline, but let's be safe
+                let response_str = String::from_utf8_lossy(&bytes);
+                if write!(writer, "{}", response_str).is_err() {
+                    break; // Client disconnected
+                }
+                if writer.flush().is_err() {
+                    break;
+                }
 
-        // If shutdown, close connection
-        if is_shutdown {
-            break;
+                // If shutdown, close connection
+                if is_shutdown {
+                    break;
+                }
+            }
+            ServerReply::Subscribe(reply) => {
+                if send_response(&mut writer, &reply.ack).is_err() {
+                    break;
+                }
+                stream_subscription(&mut writer, reply, &limits);
+                break;
+            }
         }
+    }
+}
+
+fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &Limits) {
+    let namespace = reply.namespace;
+    let subscriber_limits = subscriber_limits(limits);
+
+    for event in reply.hot_cache {
+        if event.namespace != namespace {
+            continue;
+        }
+        if !send_stream_event(writer, event, limits) {
+            return;
+        }
+    }
+
+    let subscription = reply.subscription;
+    loop {
+        match subscription.recv() {
+            Ok(event) => {
+                if event.namespace != namespace {
+                    continue;
+                }
+                if !send_stream_event(writer, event, limits) {
+                    return;
+                }
+            }
+            Err(_) => {
+                if matches!(
+                    subscription.drop_reason(),
+                    Some(DropReason::SubscriberLagged)
+                ) {
+                    let payload =
+                        ErrorPayload::new(ErrorCode::SubscriberLagged, "subscriber lagged", true)
+                            .with_details(error_details::SubscriberLaggedDetails {
+                                max_queue_bytes: Some(subscriber_limits.max_bytes as u64),
+                                max_queue_events: Some(subscriber_limits.max_events as u64),
+                            });
+                    let _ = send_response(writer, &Response::err(payload));
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn send_stream_event(writer: &mut UnixStream, event: BroadcastEvent, limits: &Limits) -> bool {
+    let response = match stream_event_response(event, limits) {
+        Ok(response) => response,
+        Err(payload) => {
+            let _ = send_response(writer, &Response::err(payload));
+            return false;
+        }
+    };
+    send_response(writer, &response).is_ok()
+}
+
+fn stream_event_response(event: BroadcastEvent, limits: &Limits) -> Result<Response, ErrorPayload> {
+    let (_, body) = decode_event_body(event.bytes.as_ref(), limits).map_err(|err| {
+        ErrorPayload::new(ErrorCode::Corruption, "event body decode failed", false).with_details(
+            error_details::CorruptionDetails {
+                reason: err.to_string(),
+            },
+        )
+    })?;
+
+    let stream_event = crate::api::StreamEvent {
+        event_id: event.event_id,
+        sha256: hex::encode(event.sha256.as_bytes()),
+        prev_sha256: event.prev_sha256.map(|prev| hex::encode(prev.as_bytes())),
+        body: crate::api::EventBody::from(&body),
+        body_bytes_hex: Some(hex::encode(event.bytes.as_ref())),
+    };
+
+    Ok(Response::ok(ResponsePayload::event(stream_event)))
+}
+
+fn subscriber_limits(limits: &Limits) -> SubscriberLimits {
+    let max_events = limits.max_event_batch_events.max(1);
+    let max_bytes = limits.max_event_batch_bytes.max(1);
+    SubscriberLimits::new(max_events, max_bytes).expect("subscriber limits")
+}
+
+fn broadcast_error_to_op(err: BroadcastError) -> OpError {
+    match err {
+        BroadcastError::SubscriberLimitReached { max_subscribers } => OpError::Overloaded {
+            subsystem: error_details::OverloadedSubsystem::Ipc,
+            retry_after_ms: None,
+            queue_bytes: None,
+            queue_events: Some(max_subscribers as u64),
+        },
+        BroadcastError::InvalidSubscriberLimits { .. } => {
+            OpError::Internal("invalid IPC subscriber limits")
+        }
+        BroadcastError::LockPoisoned => OpError::Internal("broadcaster lock poisoned"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use uuid::Uuid;
+
+    use crate::core::{Canonical, EventBytes, EventId, ReplicaId, Seq1, Sha256};
+
+    #[test]
+    fn stream_event_decode_failure_is_corruption() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
+        let event_id = EventId::new(origin, namespace, Seq1::from_u64(1).unwrap());
+        let bytes = EventBytes::<Canonical>::new(Bytes::from(vec![0x01]));
+        let event = BroadcastEvent::new(event_id, Sha256([0u8; 32]), None, bytes);
+
+        let err = stream_event_response(event, &Limits::default()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Corruption);
+        let details = err
+            .details_as::<error_details::CorruptionDetails>()
+            .unwrap()
+            .expect("details");
+        assert!(!details.reason.is_empty());
     }
 }
