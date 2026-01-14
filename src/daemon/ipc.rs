@@ -21,6 +21,7 @@ use super::ops::{BeadPatch, OpError, OpResult};
 use super::query::{Filters, QueryResult};
 use super::store_lock::{StoreLockError, StoreLockOperation};
 use super::store_runtime::StoreRuntimeError;
+use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
 use crate::core::error::details as error_details;
 use crate::core::{
     Applied, BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, NamespaceId, Priority,
@@ -384,6 +385,16 @@ pub enum Request {
         max_records_per_namespace: Option<u64>,
         #[serde(default)]
         verify_checkpoint_cache: bool,
+    },
+
+    /// Admin fingerprint report.
+    AdminFingerprint {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+        mode: AdminFingerprintMode,
+        #[serde(default)]
+        sample: Option<AdminFingerprintSample>,
     },
 
     /// Admin maintenance mode toggle.

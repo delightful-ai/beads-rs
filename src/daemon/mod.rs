@@ -15,6 +15,7 @@ pub mod clock;
 pub mod core;
 pub mod durability_coordinator;
 pub mod executor;
+pub mod fingerprint;
 pub mod git_worker;
 pub mod ipc;
 pub mod metrics;

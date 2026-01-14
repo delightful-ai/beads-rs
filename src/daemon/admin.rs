@@ -7,16 +7,19 @@ use std::path::Path;
 use crossbeam::channel::Sender;
 
 use crate::api::{
-    AdminCheckpointGroup, AdminDoctorOutput, AdminMaintenanceModeOutput, AdminMetricHistogram,
-    AdminMetricLabel, AdminMetricSample, AdminMetricsOutput, AdminRebuildIndexOutput,
-    AdminRebuildIndexStats, AdminRebuildIndexTruncation, AdminReplicationNamespace,
-    AdminReplicationPeer, AdminScrubOutput, AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
+    AdminCheckpointGroup, AdminDoctorOutput, AdminFingerprintMode, AdminFingerprintOutput,
+    AdminFingerprintSample, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
+    AdminMetricSample, AdminMetricsOutput, AdminRebuildIndexOutput, AdminRebuildIndexStats,
+    AdminRebuildIndexTruncation, AdminReplicationNamespace, AdminReplicationPeer, AdminScrubOutput,
+    AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
 };
 use crate::core::{NamespaceId, ReplicaId, Watermarks};
+use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_namespaces};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::scrubber::{ScrubOptions, scrub_store};
 use crate::daemon::store_runtime::StoreRuntimeError;
 use crate::daemon::wal::{ReplayStats, SegmentRow, WalIndex, rebuild_index};
+use crate::git::checkpoint::layout::SHARD_COUNT;
 
 use super::core::Daemon;
 use super::ipc::ReadConsistency;
@@ -211,6 +214,105 @@ impl Daemon {
 
         let output = AdminScrubOutput { report };
         Response::ok(ResponsePayload::Query(QueryResult::AdminScrub(output)))
+    }
+
+    pub fn admin_fingerprint(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        mode: AdminFingerprintMode,
+        sample: Option<AdminFingerprintSample>,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
+        let proof = match self.ensure_repo_fresh(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(e) => return Response::err(e),
+        };
+        if let Err(err) = self.check_read_gate(&proof, &read) {
+            return Response::err(err);
+        }
+        let store = match self.store_runtime(&proof) {
+            Ok(store) => store,
+            Err(e) => return Response::err(e),
+        };
+
+        let fingerprint_mode = match mode {
+            AdminFingerprintMode::Full => {
+                if sample.is_some() {
+                    return Response::err(OpError::InvalidRequest {
+                        field: Some("sample".into()),
+                        reason: "sample only valid with mode=sample".into(),
+                    });
+                }
+                FingerprintMode::Full
+            }
+            AdminFingerprintMode::Sample => {
+                let sample = match sample.as_ref() {
+                    Some(sample) => sample,
+                    None => {
+                        return Response::err(OpError::InvalidRequest {
+                            field: Some("sample".into()),
+                            reason: "sample required for mode=sample".into(),
+                        });
+                    }
+                };
+                let shard_count = usize::from(sample.shard_count);
+                if shard_count == 0 {
+                    return Response::err(OpError::InvalidRequest {
+                        field: Some("sample.shard_count".into()),
+                        reason: "shard_count must be >= 1".into(),
+                    });
+                }
+                if shard_count > SHARD_COUNT {
+                    return Response::err(OpError::InvalidRequest {
+                        field: Some("sample.shard_count".into()),
+                        reason: format!("shard_count must be <= {SHARD_COUNT}"),
+                    });
+                }
+                if sample.nonce.trim().is_empty() {
+                    return Response::err(OpError::InvalidRequest {
+                        field: Some("sample.nonce".into()),
+                        reason: "nonce must be non-empty".into(),
+                    });
+                }
+                FingerprintMode::Sample {
+                    shard_count,
+                    nonce: sample.nonce.clone(),
+                }
+            }
+        };
+
+        let namespaces = collect_namespaces(store).into_iter().collect::<Vec<_>>();
+        let now_ms = crate::WallClock::now().0;
+        let namespaces = match fingerprint_namespaces(store, &namespaces, fingerprint_mode, now_ms) {
+            Ok(namespaces) => namespaces,
+            Err(err) => {
+                let reason = match &err {
+                    FingerprintError::Snapshot(_) => err.to_string(),
+                    FingerprintError::InvalidShardPath { .. }
+                    | FingerprintError::InvalidShardIndex { .. } => err.to_string(),
+                };
+                return Response::err(OpError::InvalidRequest {
+                    field: None,
+                    reason,
+                });
+            }
+        };
+
+        let output = AdminFingerprintOutput {
+            mode,
+            sample,
+            watermarks_applied: store.watermarks_applied.clone(),
+            watermarks_durable: store.watermarks_durable.clone(),
+            namespaces,
+        };
+        Response::ok(ResponsePayload::Query(QueryResult::AdminFingerprint(
+            output,
+        )))
     }
 
     pub fn admin_maintenance_mode(
