@@ -173,7 +173,9 @@ fn phase5_repl_equivocation_errors() {
 
     let e1_alt = event_frame_with_txn(identity, namespace.clone(), origin, 1, None, 7);
     let actions = session.handle_message(
-        ReplMessage::Events(Events { events: vec![e1_alt] }),
+        ReplMessage::Events(Events {
+            events: vec![e1_alt],
+        }),
         &mut store,
         20,
     );
@@ -205,7 +207,9 @@ fn phase5_repl_prev_sha_mismatch_rejects() {
     let bad_prev = Sha256([9u8; 32]);
     let e2_bad = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(bad_prev));
     let actions = session.handle_message(
-        ReplMessage::Events(Events { events: vec![e2_bad] }),
+        ReplMessage::Events(Events {
+            events: vec![e2_bad],
+        }),
         &mut store,
         20,
     );
