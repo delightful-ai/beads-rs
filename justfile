@@ -19,11 +19,15 @@ lint:
 
 # Run tests
 test:
-    cargo test --all-features
+    cargo test
+
+# Run slow tests (opt-in)
+test-slow:
+    cargo test --features slow-tests
 
 # Run a specific test
 test-one NAME:
-    cargo test --all-features {{NAME}}
+    cargo test {{NAME}}
 
 # Build debug
 build:
@@ -43,7 +47,7 @@ clean:
 
 # Watch for changes and run tests
 watch:
-    cargo watch -x 'test --all-features'
+    cargo watch -x 'test'
 
 # Pre-commit hook - run before committing
 pre-commit: fmt lint test
