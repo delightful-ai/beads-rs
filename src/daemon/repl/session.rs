@@ -870,33 +870,18 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct TestStore {
-        identity: StoreIdentity,
-        replica_id: ReplicaId,
         lookup: BTreeMap<EventId, Sha256>,
         durable: WatermarkState<Durable>,
         applied: WatermarkState<Applied>,
     }
 
     impl TestStore {
-        fn new(identity: StoreIdentity, replica_id: ReplicaId) -> Self {
+        fn new() -> Self {
             Self {
-                identity,
-                replica_id,
                 lookup: BTreeMap::new(),
                 durable: BTreeMap::new(),
                 applied: BTreeMap::new(),
             }
-        }
-
-        fn set_durable(
-            &mut self,
-            namespace: NamespaceId,
-            origin: ReplicaId,
-            seq: u64,
-            head: HeadStatus,
-        ) {
-            let wm = Watermark::new(Seq0::new(seq), head).expect("watermark");
-            self.durable.entry(namespace).or_default().insert(origin, wm);
         }
 
         fn snapshot_for(&self, namespaces: &[NamespaceId]) -> WatermarkSnapshot {
@@ -985,7 +970,7 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));
         let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
-        (TestStore::new(identity, replica), identity, replica)
+        (TestStore::new(), identity, replica)
     }
 
     fn make_event(
