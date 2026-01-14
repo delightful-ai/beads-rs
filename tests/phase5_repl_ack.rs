@@ -11,16 +11,20 @@ use beads_rs::daemon::repl::{
     Events, ReplMessage, Session, SessionAction, SessionConfig, SessionPhase, SessionRole,
     WalRangeReader,
 };
-use beads_rs::daemon::wal::rebuild_index;
+use beads_rs::daemon::wal::{
+    IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
+};
+use beads_rs::paths;
 use beads_rs::{
     ActorId, ErrorCode, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
-    NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId,
-    encode_event_body_canonical, hash_event_body,
+    NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
+    StoreMetaVersions, TxnDeltaV1, TxnId, encode_event_body_canonical, hash_event_body,
 };
 
 use fixtures::repl_frames;
 use fixtures::repl_peer::MockStore;
-use fixtures::wal::{TempWalDir, record_for_seq};
+use fixtures::store_dir::TempStoreDir;
+use fixtures::wal::record_for_seq;
 
 fn inbound_session() -> (Session, MockStore, StoreIdentity) {
     let limits = Limits::default();
@@ -227,27 +231,42 @@ fn phase5_repl_prev_sha_mismatch_rejects() {
 
 #[test]
 fn phase5_repl_want_reads_from_wal() {
-    let temp = TempWalDir::new();
+    let _temp_store = TempStoreDir::new().expect("temp store dir");
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
 
-    let record1 = record_for_seq(temp.meta(), &namespace, origin, 1, None);
-    let record2 = record_for_seq(
-        temp.meta(),
-        &namespace,
-        origin,
-        2,
-        Some(record1.header.sha256),
-    );
-
-    temp.write_segment(&namespace, 1_700_000_000_000, &[record1, record2])
-        .expect("write segment");
-
-    let index = temp.open_index().expect("open wal index");
+    let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
+    let store_dir = paths::store_dir(store_id);
+    std::fs::create_dir_all(&store_dir).expect("create store dir");
+    let identity = StoreIdentity::new(store_id, StoreEpoch::new(0));
+    let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+    let versions = StoreMetaVersions::new(1, 2, 1, 1, 1);
+    let meta = StoreMeta::new(identity, replica_id, versions, 1_700_000_000_000);
     let limits = Limits::default();
-    rebuild_index(temp.store_dir(), temp.meta(), &index, &limits).expect("rebuild index");
 
-    let reader = WalRangeReader::new(temp.meta().store_id(), Arc::new(index), limits.clone());
+    let record1 = record_for_seq(&meta, &namespace, origin, 1, None);
+    let record2 = record_for_seq(&meta, &namespace, origin, 2, Some(record1.header.sha256));
+
+    let mut writer = SegmentWriter::open(
+        &store_dir,
+        &meta,
+        &namespace,
+        1_700_000_000_000,
+        SegmentConfig::from_limits(&limits),
+    )
+    .expect("open segment writer");
+    writer
+        .append(&record1, 1_700_000_000_000)
+        .expect("append record1");
+    writer
+        .append(&record2, 1_700_000_000_000)
+        .expect("append record2");
+
+    let index = SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache)
+        .expect("open wal index");
+    rebuild_index(&store_dir, &meta, &index, &limits).expect("rebuild index");
+
+    let reader = WalRangeReader::new(store_id, Arc::new(index), limits.clone());
     let frames = reader
         .read_range(&namespace, &origin, 0, limits.max_event_batch_bytes)
         .expect("read wal range");
