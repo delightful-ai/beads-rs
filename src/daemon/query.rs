@@ -10,9 +10,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
+    AdminDoctorOutput as ApiAdminDoctorOutput,
     AdminMaintenanceModeOutput as ApiAdminMaintenanceModeOutput,
     AdminMetricsOutput as ApiAdminMetricsOutput,
     AdminRebuildIndexOutput as ApiAdminRebuildIndexOutput,
+    AdminScrubOutput as ApiAdminScrubOutput,
     AdminStatusOutput as ApiAdminStatusOutput, BlockedIssue as ApiBlockedIssue,
     CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo, DeletedLookup as ApiDeletedLookup,
     DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue, IssueSummary, Note as ApiNote,
@@ -495,6 +497,12 @@ pub enum QueryResult {
 
     /// Admin metrics snapshot.
     AdminMetrics(ApiAdminMetricsOutput),
+
+    /// Admin doctor report.
+    AdminDoctor(ApiAdminDoctorOutput),
+
+    /// Admin scrub report.
+    AdminScrub(ApiAdminScrubOutput),
 
     /// Maintenance mode toggle.
     AdminMaintenanceMode(ApiAdminMaintenanceModeOutput),

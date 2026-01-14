@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
@@ -76,14 +76,14 @@ impl From<WalReplayError> for FsckError {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FsckStats {
     pub namespaces: usize,
     pub segments: usize,
     pub records: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsckStatus {
     Pass,
@@ -91,7 +91,7 @@ pub enum FsckStatus {
     Fail,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsckSeverity {
     Low,
@@ -100,7 +100,7 @@ pub enum FsckSeverity {
     Critical,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsckRisk {
     Low,
@@ -120,7 +120,7 @@ impl From<FsckSeverity> for FsckRisk {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsckCheckId {
     SegmentHeaders,
@@ -128,9 +128,10 @@ pub enum FsckCheckId {
     RecordHashes,
     OriginContiguity,
     IndexOffsets,
+    CheckpointCache,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsckEvidenceCode {
     SegmentHeaderInvalid,
@@ -149,9 +150,10 @@ pub enum FsckEvidenceCode {
     IndexMissingSegment,
     IndexBehindWal,
     IndexOpenFailed,
+    CheckpointCacheInvalid,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FsckEvidence {
     pub code: FsckEvidenceCode,
     pub message: String,
@@ -167,7 +169,7 @@ pub struct FsckEvidence {
     pub offset: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FsckCheck {
     pub id: FsckCheckId,
     pub status: FsckStatus,
@@ -178,7 +180,7 @@ pub struct FsckCheck {
     pub suggested_actions: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsckRepairKind {
     TruncateTail,
@@ -186,7 +188,7 @@ pub enum FsckRepairKind {
     RebuildIndex,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FsckRepair {
     pub kind: FsckRepairKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,13 +196,15 @@ pub struct FsckRepair {
     pub detail: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FsckSummary {
     pub risk: FsckRisk,
     pub safe_to_accept_writes: bool,
+    pub safe_to_prune_wal: bool,
+    pub safe_to_rebuild_index: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FsckReport {
     pub store_id: StoreId,
     pub checked_at_ms: u64,
@@ -1339,6 +1343,7 @@ impl FsckReportBuilder {
             FsckCheckId::RecordHashes,
             FsckCheckId::OriginContiguity,
             FsckCheckId::IndexOffsets,
+            FsckCheckId::CheckpointCache,
         ] {
             checks.insert(
                 id,
@@ -1393,10 +1398,24 @@ impl FsckReportBuilder {
         }
 
         let mut risk = FsckRisk::Low;
-        let mut safe = true;
+        let mut safe_to_accept_writes = true;
+        let mut safe_to_prune_wal = true;
+        let mut safe_to_rebuild_index = true;
         for check in &checks {
             if check.status == FsckStatus::Fail {
-                safe = false;
+                safe_to_accept_writes = false;
+            }
+            if check.status == FsckStatus::Fail {
+                match check.id {
+                    FsckCheckId::SegmentFrames | FsckCheckId::RecordHashes => {
+                        safe_to_prune_wal = false;
+                        safe_to_rebuild_index = false;
+                    }
+                    FsckCheckId::IndexOffsets => {
+                        safe_to_prune_wal = false;
+                    }
+                    _ => {}
+                }
             }
             if check.status != FsckStatus::Pass {
                 risk = std::cmp::max(risk, FsckRisk::from(check.severity));
@@ -1410,7 +1429,9 @@ impl FsckReportBuilder {
             checks,
             summary: FsckSummary {
                 risk,
-                safe_to_accept_writes: safe,
+                safe_to_accept_writes,
+                safe_to_prune_wal,
+                safe_to_rebuild_index,
             },
             repairs: self.repairs,
         }

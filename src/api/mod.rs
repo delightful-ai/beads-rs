@@ -102,6 +102,122 @@ pub struct AdminMetricsOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminDoctorOutput {
+    pub report: AdminHealthReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminScrubOutput {
+    pub report: AdminHealthReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminHealthReport {
+    pub checked_at_ms: u64,
+    pub stats: AdminHealthStats,
+    pub checks: Vec<AdminHealthCheck>,
+    pub summary: AdminHealthSummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdminHealthStats {
+    pub namespaces: usize,
+    pub segments_checked: usize,
+    pub records_checked: u64,
+    pub index_offsets_checked: u64,
+    pub checkpoint_groups_checked: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminHealthStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminHealthSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminHealthRisk {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminHealthCheckId {
+    WalFrames,
+    WalHashes,
+    IndexOffsets,
+    CheckpointCache,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminHealthEvidenceCode {
+    SegmentHeaderInvalid,
+    FrameHeaderInvalid,
+    FrameTruncated,
+    FrameCrcMismatch,
+    RecordDecodeInvalid,
+    EventBodyDecodeInvalid,
+    RecordHeaderMismatch,
+    RecordShaMismatch,
+    IndexOffsetInvalid,
+    IndexSegmentMissing,
+    IndexOpenFailed,
+    CheckpointCacheInvalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminHealthEvidence {
+    pub code: AdminHealthEvidenceCode,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<NamespaceId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ReplicaId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminHealthCheck {
+    pub id: AdminHealthCheckId,
+    pub status: AdminHealthStatus,
+    pub severity: AdminHealthSeverity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<AdminHealthEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminHealthSummary {
+    pub risk: AdminHealthRisk,
+    pub safe_to_accept_writes: bool,
+    pub safe_to_prune_wal: bool,
+    pub safe_to_rebuild_index: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminMaintenanceModeOutput {
     pub enabled: bool,
 }

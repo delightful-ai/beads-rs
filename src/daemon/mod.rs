@@ -28,6 +28,7 @@ pub mod repl;
 pub mod repo;
 pub mod run;
 pub mod scheduler;
+pub mod scrubber;
 pub mod server;
 pub mod store_lock;
 pub mod store_runtime;

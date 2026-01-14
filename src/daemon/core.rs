@@ -2187,6 +2187,32 @@ impl Daemon {
 
             Request::AdminMetrics { repo, read } => self.admin_metrics(&repo, read, git_tx),
 
+            Request::AdminDoctor {
+                repo,
+                read,
+                max_records_per_namespace,
+                verify_checkpoint_cache,
+            } => self.admin_doctor(
+                &repo,
+                read,
+                max_records_per_namespace,
+                verify_checkpoint_cache,
+                git_tx,
+            ),
+
+            Request::AdminScrub {
+                repo,
+                read,
+                max_records_per_namespace,
+                verify_checkpoint_cache,
+            } => self.admin_scrub_now(
+                &repo,
+                read,
+                max_records_per_namespace,
+                verify_checkpoint_cache,
+                git_tx,
+            ),
+
             Request::AdminMaintenanceMode { repo, enabled } => {
                 self.admin_maintenance_mode(&repo, enabled, git_tx)
             }

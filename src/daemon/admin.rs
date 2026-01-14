@@ -7,13 +7,14 @@ use std::path::Path;
 use crossbeam::channel::Sender;
 
 use crate::api::{
-    AdminCheckpointGroup, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
-    AdminMetricSample, AdminMetricsOutput, AdminRebuildIndexOutput, AdminRebuildIndexStats,
-    AdminRebuildIndexTruncation, AdminReplicationNamespace, AdminReplicationPeer,
-    AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
+    AdminCheckpointGroup, AdminDoctorOutput, AdminMaintenanceModeOutput, AdminMetricHistogram,
+    AdminMetricLabel, AdminMetricSample, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminRebuildIndexStats, AdminRebuildIndexTruncation, AdminReplicationNamespace,
+    AdminReplicationPeer, AdminScrubOutput, AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
 };
 use crate::core::{NamespaceId, ReplicaId, Watermarks};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
+use crate::daemon::scrubber::{ScrubOptions, scrub_store};
 use crate::daemon::store_runtime::StoreRuntimeError;
 use crate::daemon::wal::{ReplayStats, SegmentRow, WalIndex, rebuild_index};
 
@@ -88,6 +89,128 @@ impl Daemon {
         let snapshot = crate::daemon::metrics::snapshot();
         let output = build_metrics_output(snapshot);
         Response::ok(ResponsePayload::Query(QueryResult::AdminMetrics(output)))
+    }
+
+    pub fn admin_doctor(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        max_records_per_namespace: Option<u64>,
+        verify_checkpoint_cache: bool,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
+        let proof = match self.ensure_repo_fresh(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(e) => return Response::err(e),
+        };
+        if let Err(err) = self.check_read_gate(&proof, &read) {
+            return Response::err(err);
+        }
+        let store = match self.store_runtime(&proof) {
+            Ok(store) => store,
+            Err(e) => return Response::err(e),
+        };
+
+        let mut options = ScrubOptions::default_for_doctor();
+        if let Some(value) = max_records_per_namespace {
+            let value = usize::try_from(value).map_err(|_| OpError::InvalidRequest {
+                field: Some("max_records_per_namespace".into()),
+                reason: "max_records_per_namespace too large".into(),
+            });
+            match value {
+                Ok(0) => {
+                    return Response::err(OpError::InvalidRequest {
+                        field: Some("max_records_per_namespace".into()),
+                        reason: "max_records_per_namespace must be >= 1".into(),
+                    });
+                }
+                Ok(value) => options.max_records_per_namespace = value,
+                Err(err) => return Response::err(err),
+            }
+        }
+        options.verify_checkpoint_cache = verify_checkpoint_cache;
+
+        let checkpoint_groups = self
+            .checkpoint_group_snapshots(store.meta.store_id())
+            .into_iter()
+            .map(|snapshot| snapshot.group)
+            .collect::<Vec<_>>();
+
+        let report = scrub_store(store, self.limits(), &checkpoint_groups, options);
+        if report.summary.safe_to_accept_writes {
+            crate::daemon::metrics::scrub_ok();
+        } else {
+            crate::daemon::metrics::scrub_err();
+        }
+        crate::daemon::metrics::scrub_records_checked(report.stats.records_checked);
+
+        let output = AdminDoctorOutput { report };
+        Response::ok(ResponsePayload::Query(QueryResult::AdminDoctor(output)))
+    }
+
+    pub fn admin_scrub_now(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        max_records_per_namespace: Option<u64>,
+        verify_checkpoint_cache: bool,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let read = match self.normalize_read_consistency(read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
+        let proof = match self.ensure_repo_fresh(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(e) => return Response::err(e),
+        };
+        if let Err(err) = self.check_read_gate(&proof, &read) {
+            return Response::err(err);
+        }
+        let store = match self.store_runtime(&proof) {
+            Ok(store) => store,
+            Err(e) => return Response::err(e),
+        };
+
+        let mut options = ScrubOptions::default_for_scrub();
+        if let Some(value) = max_records_per_namespace {
+            let value = usize::try_from(value).map_err(|_| OpError::InvalidRequest {
+                field: Some("max_records_per_namespace".into()),
+                reason: "max_records_per_namespace too large".into(),
+            });
+            match value {
+                Ok(0) => {
+                    return Response::err(OpError::InvalidRequest {
+                        field: Some("max_records_per_namespace".into()),
+                        reason: "max_records_per_namespace must be >= 1".into(),
+                    });
+                }
+                Ok(value) => options.max_records_per_namespace = value,
+                Err(err) => return Response::err(err),
+            }
+        }
+        options.verify_checkpoint_cache = verify_checkpoint_cache;
+
+        let checkpoint_groups = self
+            .checkpoint_group_snapshots(store.meta.store_id())
+            .into_iter()
+            .map(|snapshot| snapshot.group)
+            .collect::<Vec<_>>();
+
+        let report = scrub_store(store, self.limits(), &checkpoint_groups, options);
+        if report.summary.safe_to_accept_writes {
+            crate::daemon::metrics::scrub_ok();
+        } else {
+            crate::daemon::metrics::scrub_err();
+        }
+        crate::daemon::metrics::scrub_records_checked(report.stats.records_checked);
+
+        let output = AdminScrubOutput { report };
+        Response::ok(ResponsePayload::Query(QueryResult::AdminScrub(output)))
     }
 
     pub fn admin_maintenance_mode(

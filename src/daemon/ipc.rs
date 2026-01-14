@@ -364,6 +364,28 @@ pub enum Request {
         read: ReadConsistency,
     },
 
+    /// Admin doctor report.
+    AdminDoctor {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+        #[serde(default)]
+        max_records_per_namespace: Option<u64>,
+        #[serde(default)]
+        verify_checkpoint_cache: bool,
+    },
+
+    /// Admin scrub now.
+    AdminScrub {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+        #[serde(default)]
+        max_records_per_namespace: Option<u64>,
+        #[serde(default)]
+        verify_checkpoint_cache: bool,
+    },
+
     /// Admin maintenance mode toggle.
     AdminMaintenanceMode { repo: PathBuf, enabled: bool },
 
