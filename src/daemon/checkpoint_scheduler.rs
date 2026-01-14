@@ -50,10 +50,7 @@ impl CheckpointGroupConfig {
     pub fn auto_push(&self) -> bool {
         match self.primary_writer {
             Some(primary) => primary == self.local_replica_id,
-            None => self
-                .checkpoint_writers
-                .iter()
-                .any(|replica| *replica == self.local_replica_id),
+            None => self.checkpoint_writers.contains(&self.local_replica_id),
         }
     }
 }
@@ -207,6 +204,12 @@ impl CheckpointScheduler {
                 }
             }
         }
+    }
+}
+
+impl Default for CheckpointScheduler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
