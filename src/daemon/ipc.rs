@@ -469,11 +469,17 @@ pub struct OpResponse {
     #[serde(flatten)]
     pub result: OpResult,
     pub receipt: DurabilityReceipt,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<crate::api::Issue>,
 }
 
 impl OpResponse {
     pub fn new(result: OpResult, receipt: DurabilityReceipt) -> Self {
-        Self { result, receipt }
+        Self {
+            result,
+            receipt,
+            issue: None,
+        }
     }
 }
 

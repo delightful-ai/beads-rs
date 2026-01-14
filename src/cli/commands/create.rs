@@ -69,21 +69,27 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     };
 
     let created_payload = send(&req)?;
-    let created_id = match &created_payload {
+    let (created_id, issue) = match &created_payload {
         ResponsePayload::Op(op) => match &op.result {
-            OpResult::Created { id } => id.as_str().to_string(),
+            OpResult::Created { id } => (id.as_str().to_string(), op.issue.clone()),
             _ => {
                 print_ok(&created_payload, ctx.json)?;
                 return Ok(());
             }
         },
+        ResponsePayload::Query(QueryResult::Issue(attached)) => {
+            (attached.id.clone(), Some(attached.clone()))
+        }
         _ => {
             print_ok(&created_payload, ctx.json)?;
             return Ok(());
         }
     };
 
-    let issue = fetch_issue(ctx, &created_id)?;
+    let issue = match issue {
+        Some(issue) => issue,
+        None => fetch_issue(ctx, &created_id)?,
+    };
 
     // Print warning to stderr (visible even in --json mode)
     if warn_no_desc {

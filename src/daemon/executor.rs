@@ -30,10 +30,10 @@ use super::wal::{
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    Applied, BeadId, BeadType, DepKind, DurabilityClass, DurabilityReceipt, Durable, EventBody,
-    EventId, HeadStatus, Limits, NoteId, Priority, ReplicaId, Seq1, Sha256, StoreIdentity,
-    TxnDeltaV1, TxnOpV1, WallClock, Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp,
-    apply_event, decode_event_body, hash_event_body,
+    Applied, BeadId, BeadType, CanonicalState, DepKind, DurabilityClass, DurabilityReceipt,
+    Durable, EventBody, EventId, HeadStatus, Limits, NoteId, Priority, ReplicaId, Seq1, Sha256,
+    StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark, WatermarkError, Watermarks,
+    WirePatch, WriteStamp, apply_event, decode_event_body, hash_event_body,
 };
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
@@ -120,7 +120,7 @@ impl Daemon {
         };
 
         if ctx.client_request_id.is_some()
-            && let Some(response) = try_reuse_idempotent_response(
+            && let Some(mut response) = try_reuse_idempotent_response(
                 &engine,
                 &ctx,
                 &request,
@@ -136,6 +136,8 @@ impl Daemon {
                 wait_timeout,
             )?
         {
+            let state = &self.store_runtime(&proof)?.repo_state.state;
+            attach_issue_if_created(state, &mut response);
             return Ok(response);
         }
 
@@ -430,7 +432,10 @@ impl Daemon {
         )?;
 
         tracing::info!("mutation committed");
-        Ok(OpResponse::new(result, receipt))
+        let mut response = OpResponse::new(result, receipt);
+        let state = &self.store_runtime(&proof)?.repo_state.state;
+        attach_issue_if_created(state, &mut response);
+        Ok(response)
     }
 
     /// Create a new bead.
@@ -920,6 +925,18 @@ fn op_result_from_delta(
     }
 }
 
+fn attach_issue_if_created(state: &CanonicalState, response: &mut OpResponse) {
+    if response.issue.is_some() {
+        return;
+    }
+    let OpResult::Created { id } = &response.result else {
+        return;
+    };
+    if let Some(bead) = state.get(id) {
+        response.issue = Some(crate::api::Issue::from_bead(bead));
+    }
+}
+
 fn parse_bead_id(raw: &str) -> Result<BeadId, OpError> {
     BeadId::parse(raw).map_err(|_| OpError::Internal("invalid id after validation"))
 }
@@ -985,9 +1002,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, CanonicalState, Claim, ClientRequestId, Labels, Lww,
-        NamespaceId, NoteAppendV1, NoteId, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
-        StoreMetaVersions, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        ActorId, Bead, BeadCore, BeadFields, CanonicalState, Claim, ClientRequestId,
+        DurabilityReceipt, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Stamp, StoreEpoch,
+        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnId, TxnOpV1, WireBeadPatch,
+        WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::daemon::Clock;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, rebuild_index};
@@ -1065,6 +1083,23 @@ mod tests {
 
         let result = op_result_from_delta(&request, &delta).unwrap();
         assert!(matches!(result, OpResult::Created { id: got } if got == id));
+    }
+
+    #[test]
+    fn attach_issue_includes_created_issue() {
+        let actor = actor_id("alice");
+        let state = make_state_with_bead("bd-123", &actor);
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([9u8; 16])), StoreEpoch::ZERO);
+        let receipt = DurabilityReceipt::local_fsync_defaults(
+            store,
+            TxnId::new(Uuid::from_bytes([8u8; 16])),
+            Vec::new(),
+            1_700_000_000_000,
+        );
+        let mut response = OpResponse::new(OpResult::Created { id: bead_id("bd-123") }, receipt);
+        attach_issue_if_created(&state, &mut response);
+        let issue = response.issue.expect("issue attached");
+        assert_eq!(issue.id, "bd-123");
     }
 
     #[test]
