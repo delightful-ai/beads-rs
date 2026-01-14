@@ -792,8 +792,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Durable, EventId, HeadStatus, NamespacePolicy, Seq0, Seq1, Sha256, StoreEpoch,
-        StoreId, Watermark,
+        Applied, Durable, EventId, HeadStatus, NamespacePolicy, Seq0, Sha256, StoreEpoch, StoreId,
+        Watermark,
     };
     use crate::daemon::broadcast::BroadcasterLimits;
     use crate::daemon::repl::proto::{Capabilities, Hello, WatermarkHeads, WatermarkMap};
