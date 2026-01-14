@@ -148,7 +148,10 @@ impl TestRepo {
 
         let runtime_dir = TempDir::new().expect("failed to create runtime dir");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
-        let store_id = beads_rs::StoreId::new(uuid::Uuid::new_v4());
+        let runtime_str = runtime_dir.path().to_string_lossy();
+        let store_uuid =
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, runtime_str.as_bytes());
+        let store_id = beads_rs::StoreId::new(store_uuid);
 
         Self {
             work_dir,
