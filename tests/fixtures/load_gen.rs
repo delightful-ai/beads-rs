@@ -32,7 +32,7 @@ pub struct LoadConfig {
     pub max_errors: usize,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct LoadReport {
     pub attempts: usize,
     pub successes: usize,
@@ -151,7 +151,8 @@ impl LoadGenerator {
             let _ = handle.join();
         }
 
-        let errors = errors.lock().expect("errors lock").clone();
+        let mut guard = errors.lock().expect("errors lock");
+        let errors = std::mem::take(&mut *guard);
         LoadReport {
             attempts: attempts.load(Ordering::Relaxed),
             successes: successes.load(Ordering::Relaxed),
