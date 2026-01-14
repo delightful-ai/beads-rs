@@ -115,7 +115,7 @@ pub trait SessionStore {
         origin: &ReplicaId,
         batch: &[VerifiedEvent<PrevVerified>],
         now_ms: u64,
-    ) -> Result<IngestOutcome, ErrorPayload>;
+    ) -> SessionResult<IngestOutcome>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +130,7 @@ pub enum SessionAction {
 }
 
 type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
+type SessionResult<T> = Result<T, Box<ErrorPayload>>;
 
 #[derive(Debug)]
 pub struct Session {
@@ -246,7 +247,7 @@ impl Session {
         if let Err(payload) =
             self.validate_peer_store(hello.store_id, hello.store_epoch, hello.sender_replica_id)
         {
-            return self.fail(payload);
+            return self.fail(*payload);
         }
 
         if hello.min_protocol_version > hello.protocol_version {
@@ -265,16 +266,11 @@ impl Session {
             intersect_namespaces(&self.config.requested_namespaces, &hello.offered_namespaces);
 
         let snapshot = store.watermark_snapshot(&accepted_namespaces);
-        let peer_caps = hello.capabilities.clone();
         let welcome = self.build_welcome(
             negotiated,
-            hello.store_id,
-            hello.store_epoch,
+            &hello,
             snapshot,
             accepted_namespaces.clone(),
-            hello.max_frame_bytes,
-            peer_caps,
-            now_ms,
         );
 
         self.seed_watermarks(store, &incoming_namespaces);
@@ -305,7 +301,7 @@ impl Session {
         if let Err(payload) =
             self.validate_peer_store(welcome.store_id, welcome.store_epoch, welcome.receiver_replica_id)
         {
-            return self.fail(payload);
+            return self.fail(*payload);
         }
 
         if welcome.protocol_version < self.config.protocol.min
@@ -369,7 +365,7 @@ impl Session {
 
             let expected_prev = match self.expected_prev_head(&namespace, &origin, durable, frame.eid.origin_seq) {
                 Ok(prev) => prev,
-                Err(payload) => return self.fail(payload),
+                Err(payload) => return self.fail(*payload),
             };
 
             let verified = {
@@ -391,10 +387,11 @@ impl Session {
                 .ingest(namespace.clone(), origin, durable, verified, now_ms)
             {
                 IngestDecision::ForwardContiguousBatch(batch) => {
-                    let outcome = match store.ingest_remote_batch(&namespace, &origin, &batch, now_ms) {
-                        Ok(outcome) => outcome,
-                        Err(payload) => return self.fail(payload),
-                    };
+                    let outcome =
+                        match store.ingest_remote_batch(&namespace, &origin, &batch, now_ms) {
+                            Ok(outcome) => outcome,
+                            Err(payload) => return self.fail(*payload),
+                        };
 
                     if let Err(err) = self
                         .gap_buffer
@@ -456,20 +453,16 @@ impl Session {
     fn build_welcome(
         &mut self,
         protocol_version: u32,
-        store_id: StoreId,
-        store_epoch: StoreEpoch,
+        hello: &Hello,
         snapshot: WatermarkSnapshot,
         accepted_namespaces: Vec<NamespaceId>,
-        peer_max_frame_bytes: u32,
-        peer_caps: Capabilities,
-        _now_ms: u64,
     ) -> super::proto::Welcome {
         let live_stream_enabled = self.config.capabilities.supports_live_stream
-            && peer_caps.supports_live_stream;
+            && hello.capabilities.supports_live_stream;
         super::proto::Welcome {
             protocol_version,
-            store_id,
-            store_epoch,
+            store_id: hello.store_id,
+            store_epoch: hello.store_epoch,
             receiver_replica_id: self.config.local_replica_id,
             welcome_nonce: self.next_nonce(),
             accepted_namespaces,
@@ -478,7 +471,7 @@ impl Session {
             receiver_seen_applied: Some(snapshot.applied),
             receiver_seen_applied_heads: optional_heads(snapshot.applied_heads),
             live_stream_enabled,
-            max_frame_bytes: std::cmp::min(self.config.max_frame_bytes, peer_max_frame_bytes),
+            max_frame_bytes: std::cmp::min(self.config.max_frame_bytes, hello.max_frame_bytes),
         }
     }
 
@@ -509,7 +502,7 @@ impl Session {
         origin: &ReplicaId,
         durable: Watermark<Durable>,
         seq: Seq1,
-    ) -> Result<Option<Sha256>, ErrorPayload> {
+    ) -> SessionResult<Option<Sha256>> {
         if seq.get() != durable.seq().get().saturating_add(1) {
             return Ok(None);
         }
@@ -517,10 +510,10 @@ impl Session {
         match durable.head() {
             HeadStatus::Genesis => Ok(None),
             HeadStatus::Known(head) => Ok(Some(Sha256(head))),
-            HeadStatus::Unknown => Err(internal_error(format!(
+            HeadStatus::Unknown => Err(Box::new(internal_error(format!(
                 "missing durable head for {namespace} {origin} seq {}",
                 durable.seq().get()
-            ))),
+            )))),
         }
     }
 
@@ -529,22 +522,22 @@ impl Session {
         peer_store_id: StoreId,
         peer_epoch: StoreEpoch,
         peer_replica_id: ReplicaId,
-    ) -> Result<(), ErrorPayload> {
+    ) -> SessionResult<()> {
         if peer_replica_id == self.config.local_replica_id {
-            return Err(replica_id_collision_payload(peer_replica_id));
+            return Err(Box::new(replica_id_collision_payload(peer_replica_id)));
         }
         if peer_store_id != self.config.local_store.store_id {
             return Err(wrong_store_payload(
                 self.config.local_store.store_id,
                 peer_store_id,
-            ));
+            ).into());
         }
         if peer_epoch != self.config.local_store.store_epoch {
-            return Err(store_epoch_mismatch_payload(
+            return Err(Box::new(store_epoch_mismatch_payload(
                 self.config.local_store.store_id,
                 self.config.local_store.store_epoch,
                 peer_epoch,
-            ));
+            )));
         }
         Ok(())
     }
@@ -612,7 +605,7 @@ fn normalize_namespaces(namespaces: &mut Vec<NamespaceId>) {
     }
     let mut set = BTreeSet::new();
     set.extend(namespaces.drain(..));
-    namespaces.extend(set.into_iter());
+    namespaces.extend(set);
 }
 
 fn intersect_namespaces(a: &[NamespaceId], b: &[NamespaceId]) -> Vec<NamespaceId> {
@@ -962,7 +955,7 @@ mod tests {
             origin: &ReplicaId,
             batch: &[VerifiedEvent<PrevVerified>],
             _now_ms: u64,
-        ) -> Result<IngestOutcome, ErrorPayload> {
+        ) -> SessionResult<IngestOutcome> {
             for ev in batch {
                 let eid = EventId::new(
                     ev.body.origin_replica_id,
