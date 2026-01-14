@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
     ActorId, Applied, Durable, ErrorCode, ErrorPayload, HeadStatus, Limits, NamespaceId,
-    NamespacePolicy, ReplicaId, Seq0, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
-    StoreMetaVersions, WatermarkError, Watermarks, WriteStamp,
+    NamespacePolicies, NamespacePolicy, ReplicaId, Seq0, StoreEpoch, StoreId, StoreIdentity,
+    StoreMeta, StoreMetaVersions, WatermarkError, Watermarks, WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
@@ -146,7 +146,7 @@ impl StoreRuntime {
         let runtime = Self {
             primary_remote,
             meta,
-            policies: default_policies(),
+            policies: load_namespace_policies(store_id)?,
             repo_state,
             watermarks_applied,
             watermarks_durable,
@@ -223,6 +223,15 @@ impl StoreRuntime {
             watermarks_durable: &self.watermarks_durable,
         })
     }
+
+    pub fn rotate_replica_id(&mut self) -> Result<(ReplicaId, ReplicaId), StoreRuntimeError> {
+        let old = self.meta.replica_id;
+        let new = new_replica_id();
+        self.meta.replica_id = new;
+        let path = paths::store_meta_path(self.meta.store_id());
+        write_store_meta(&path, &self.meta)?;
+        Ok((old, new))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -250,6 +259,18 @@ pub enum StoreRuntimeError {
         path: Box<std::path::PathBuf>,
         #[source]
         source: io::Error,
+    },
+    #[error("namespace policies read failed at {path:?}: {source}")]
+    NamespacePoliciesRead {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: io::Error,
+    },
+    #[error("namespace policies parse failed at {path:?}: {source}")]
+    NamespacePoliciesParse {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: crate::core::NamespacePoliciesError,
     },
     #[error(transparent)]
     WalIndex(#[from] WalIndexError),
@@ -315,6 +336,31 @@ fn default_policies() -> BTreeMap<NamespaceId, NamespacePolicy> {
     let mut policies = BTreeMap::new();
     policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
     policies
+}
+
+pub(crate) fn load_namespace_policies(
+    store_id: StoreId,
+) -> Result<BTreeMap<NamespaceId, NamespacePolicy>, StoreRuntimeError> {
+    let path = paths::namespaces_path(store_id);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(default_policies()),
+        Err(err) => {
+            return Err(StoreRuntimeError::NamespacePoliciesRead {
+                path: Box::new(path),
+                source: err,
+            });
+        }
+    };
+
+    let policies = NamespacePolicies::from_toml_str(&raw).map_err(|source| {
+        StoreRuntimeError::NamespacePoliciesParse {
+            path: Box::new(path),
+            source,
+        }
+    })?;
+
+    Ok(policies.namespaces)
 }
 
 fn load_watermarks(
