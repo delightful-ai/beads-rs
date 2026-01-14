@@ -60,3 +60,14 @@ required-features = ["cli"]
 assert_cmd = "2"
 predicates = "3"
 proptest = "1"
+
+# Build profiles
+[profile.dev]
+incremental = true
+
+[profile.release]
+incremental = false  # Default; prioritize binary quality over rebuild speed
+
+# Optimize dependencies in dev builds for faster test/runtime execution
+[profile.dev.package."*"]
+opt-level = 2
