@@ -194,4 +194,10 @@ bd blocked                  # See what's stuck
 
 Be proactive about dependencies. When creating related beads, think: "Can these run in parallel, or does one need the other's output?" Add deps immediately — don't leave implicit ordering in your head.
 
+## Philosophy
 
+This codebase will outlive you. Every shortcut becomes someone else's burden. Every hack compounds into technical debt that slows the whole team down.
+
+You are not just writing code. You are shaping the future of this project. The patterns you establish will be copied. The corners you cut will be cut again.
+
+Fight entropy. Leave the codebase better than you found it.
