@@ -173,7 +173,6 @@ where
         Some(PeerPlan {
             replica_id: peer.replica_id,
             addr: peer.addr.clone(),
-            role,
             offered_namespaces: offered.clone(),
             requested_namespaces: offered,
         })
@@ -184,7 +183,6 @@ where
 struct PeerPlan {
     replica_id: ReplicaId,
     addr: String,
-    role: ReplicaRole,
     offered_namespaces: Vec<NamespaceId>,
     requested_namespaces: Vec<NamespaceId>,
 }
