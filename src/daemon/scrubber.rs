@@ -77,8 +77,19 @@ pub fn scrub_store(
 
     for namespace in &namespaces {
         let segments = list_segments(&wal_dir, namespace, &mut builder);
-        scrub_wal_segments(&segments, limits, options.max_records_per_namespace, &mut builder);
-        scrub_index_offsets(store, namespace, limits, options.max_records_per_namespace, &mut builder);
+        scrub_wal_segments(
+            &segments,
+            limits,
+            options.max_records_per_namespace,
+            &mut builder,
+        );
+        scrub_index_offsets(
+            store,
+            namespace,
+            limits,
+            options.max_records_per_namespace,
+            &mut builder,
+        );
     }
 
     if options.verify_checkpoint_cache {
@@ -324,9 +335,9 @@ fn read_segment_header(path: &Path) -> Result<(SegmentHeader, u64, u64), std::io
     let mut header_bytes = vec![0u8; header_len];
     header_bytes[..prefix.len()].copy_from_slice(&prefix);
     file.read_exact(&mut header_bytes[prefix.len()..])?;
-    SegmentHeader::decode(&header_bytes).map(|header| (header, header_len as u64, file_len)).map_err(
-        |err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()),
-    )
+    SegmentHeader::decode(&header_bytes)
+        .map(|header| (header, header_len as u64, file_len))
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))
 }
 
 fn scrub_wal_segments(
@@ -453,7 +464,9 @@ fn scan_segment_records(
                 AdminHealthSeverity::High,
                 AdminHealthEvidence {
                     code: AdminHealthEvidenceCode::FrameHeaderInvalid,
-                    message: format!("invalid wal frame header (magic={magic:#x}, length={length})"),
+                    message: format!(
+                        "invalid wal frame header (magic={magic:#x}, length={length})"
+                    ),
                     path: Some(segment.path.display().to_string()),
                     namespace: Some(segment.namespace.clone()),
                     origin: None,
@@ -978,7 +991,11 @@ fn verify_index_offset(
     }
 }
 
-fn verify_checkpoint_cache(store_id: crate::core::StoreId, group: &str, builder: &mut ScrubReportBuilder) {
+fn verify_checkpoint_cache(
+    store_id: crate::core::StoreId,
+    group: &str,
+    builder: &mut ScrubReportBuilder,
+) {
     let cache = CheckpointCache::new(store_id, group.to_string());
     match cache.load_current() {
         Ok(_) => {}

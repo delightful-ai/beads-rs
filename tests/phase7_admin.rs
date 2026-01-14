@@ -144,6 +144,80 @@ fn admin_metrics_includes_counters() {
 }
 
 #[test]
+fn admin_doctor_includes_checks() {
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("admin doctor test");
+
+    let output = fixture
+        .bd()
+        .args(["admin", "doctor", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
+    assert_eq!(payload["result"], "admin_doctor");
+    let report = &payload["data"]["report"];
+    assert!(report["checked_at_ms"].is_number());
+    assert!(report["checks"].is_array());
+    assert!(report["summary"].is_object());
+}
+
+#[test]
+fn admin_scrub_reports_segment_header_failure() {
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("admin scrub test");
+
+    let status_output = fixture
+        .bd()
+        .args(["admin", "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_payload: serde_json::Value =
+        serde_json::from_slice(&status_output).expect("parse status json");
+    let store_id = status_payload["data"]["store_id"]
+        .as_str()
+        .expect("store_id");
+
+    let wal_dir = fixture
+        .data_dir()
+        .join("stores")
+        .join(store_id)
+        .join("wal")
+        .join("core");
+    fs::create_dir_all(&wal_dir).expect("create wal dir");
+    let bad_path = wal_dir.join("segment-invalid.wal");
+    fs::write(&bad_path, b"bad wal").expect("write invalid wal segment");
+
+    let output = fixture
+        .bd()
+        .args(["admin", "scrub", "--json", "--max-records", "1"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
+    assert_eq!(payload["result"], "admin_scrub");
+    let checks = payload["data"]["report"]["checks"]
+        .as_array()
+        .expect("checks array");
+    let wal_frames = checks
+        .iter()
+        .find(|check| check["id"].as_str() == Some("wal_frames"))
+        .expect("wal_frames check");
+    assert_eq!(wal_frames["status"], "fail");
+}
+
+#[test]
 fn admin_maintenance_blocks_mutations() {
     let fixture = AdminFixture::new();
     fixture.start_daemon();
