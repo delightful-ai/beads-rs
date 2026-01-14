@@ -450,24 +450,26 @@ fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &
 }
 
 fn send_stream_event(writer: &mut UnixStream, event: BroadcastEvent, limits: &Limits) -> bool {
-    let response = match stream_event_response(event, limits) {
-        Ok(response) => response,
-        Err(payload) => {
-            let _ = send_response(writer, &Response::err(payload));
-            return false;
-        }
-    };
-    send_response(writer, &response).is_ok()
+    let response = stream_event_response(event, limits);
+    let should_continue = !matches!(response, Response::Err { .. });
+    if send_response(writer, &response).is_err() {
+        return false;
+    }
+    should_continue
 }
 
-fn stream_event_response(event: BroadcastEvent, limits: &Limits) -> Result<Response, ErrorPayload> {
-    let (_, body) = decode_event_body(event.bytes.as_ref(), limits).map_err(|err| {
-        ErrorPayload::new(ErrorCode::Corruption, "event body decode failed", false).with_details(
-            error_details::CorruptionDetails {
-                reason: err.to_string(),
-            },
-        )
-    })?;
+fn stream_event_response(event: BroadcastEvent, limits: &Limits) -> Response {
+    let (_, body) = match decode_event_body(event.bytes.as_ref(), limits) {
+        Ok(body) => body,
+        Err(err) => {
+            return Response::err(
+                ErrorPayload::new(ErrorCode::Corruption, "event body decode failed", false)
+                    .with_details(error_details::CorruptionDetails {
+                        reason: err.to_string(),
+                    }),
+            );
+        }
+    };
 
     let stream_event = crate::api::StreamEvent {
         event_id: event.event_id,
@@ -477,7 +479,7 @@ fn stream_event_response(event: BroadcastEvent, limits: &Limits) -> Result<Respo
         body_bytes_hex: Some(hex::encode(event.bytes.as_ref())),
     };
 
-    Ok(Response::ok(ResponsePayload::event(stream_event)))
+    Response::ok(ResponsePayload::event(stream_event))
 }
 
 fn subscriber_limits(limits: &Limits) -> SubscriberLimits {
@@ -517,7 +519,10 @@ mod tests {
         let bytes = EventBytes::<Canonical>::new(Bytes::from(vec![0x01]));
         let event = BroadcastEvent::new(event_id, Sha256([0u8; 32]), None, bytes);
 
-        let err = stream_event_response(event, &Limits::default()).unwrap_err();
+        let response = stream_event_response(event, &Limits::default());
+        let Response::Err { err } = response else {
+            panic!("expected corruption error");
+        };
         assert_eq!(err.code, ErrorCode::Corruption);
         let details = err
             .details_as::<error_details::CorruptionDetails>()

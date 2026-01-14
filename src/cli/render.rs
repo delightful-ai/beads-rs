@@ -21,6 +21,12 @@ pub fn render_human(payload: &ResponsePayload) -> String {
         ResponsePayload::Refreshed(_) => "refreshed".into(),
         ResponsePayload::Initialized(_) => "initialized".into(),
         ResponsePayload::ShuttingDown(_) => "shutting down".into(),
+        ResponsePayload::Subscribed(sub) => {
+            format!("subscribed to {}", sub.subscribed.namespace.as_str())
+        }
+        ResponsePayload::Event(ev) => {
+            format!("event {}", ev.event.event_id.origin_seq.get())
+        }
     }
 }
 
