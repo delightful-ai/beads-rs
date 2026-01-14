@@ -278,7 +278,7 @@ fn list_segments(
                             offset: None,
                             segment_id: Some(header.segment_id),
                         },
-                        Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                        Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
                     );
                     continue;
                 }
@@ -307,7 +307,7 @@ fn list_segments(
                         offset: None,
                         segment_id: None,
                     },
-                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                    Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
                 );
             }
         }
@@ -381,7 +381,7 @@ fn scan_segment_records(
                     offset: None,
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
             );
             return 0;
         }
@@ -402,7 +402,7 @@ fn scan_segment_records(
                 offset: Some(segment.header_len),
                 segment_id: Some(segment.segment_id),
             },
-            Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+            Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
         );
         return 0;
     }
@@ -428,7 +428,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to truncate tail corruption"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to truncate tail corruption"),
             );
             break;
         }
@@ -449,7 +449,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to truncate tail corruption"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to truncate tail corruption"),
             );
             break;
         }
@@ -475,7 +475,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
             );
             break;
         }
@@ -494,7 +494,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
             );
             break;
         }
@@ -515,7 +515,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to truncate tail corruption"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to truncate tail corruption"),
             );
             break;
         }
@@ -536,7 +536,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to truncate tail corruption"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to truncate tail corruption"),
             );
             break;
         }
@@ -559,7 +559,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
             );
             break;
         }
@@ -581,7 +581,7 @@ fn scan_segment_records(
                         offset: Some(offset),
                         segment_id: Some(segment.segment_id),
                     },
-                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                    Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
                 );
                 break;
             }
@@ -604,7 +604,7 @@ fn scan_segment_records(
                         offset: Some(offset),
                         segment_id: Some(segment.segment_id),
                     },
-                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                    Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
                 );
                 break;
             }
@@ -625,7 +625,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
             );
             break;
         }
@@ -646,7 +646,7 @@ fn scan_segment_records(
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
-                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
             );
             break;
         }
