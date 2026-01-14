@@ -13,9 +13,9 @@ use beads_rs::git::checkpoint::{
 };
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, ContentHash,
-    DepEdge, DepKey, DepKind, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId,
-    Seq0, Stamp, Tombstone, Watermarks, WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1,
-    Workflow, WriteStamp, sha256_bytes,
+    DepEdge, DepKey, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0,
+    Stamp, Tombstone, Watermarks, WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1, Workflow,
+    WriteStamp, sha256_bytes,
 };
 
 use super::identity;
@@ -34,10 +34,7 @@ impl CheckpointFixture {
             previous: None,
         })
         .expect("export checkpoint");
-        let manifest_json = export
-            .manifest
-            .canon_bytes()
-            .expect("manifest canon bytes");
+        let manifest_json = export.manifest.canon_bytes().expect("manifest canon bytes");
         let meta_json = export.meta.canon_bytes().expect("meta canon bytes");
         Self {
             snapshot,
@@ -103,16 +100,36 @@ pub fn fixture_multi_namespace() -> CheckpointFixture {
     let core_id = BeadId::parse("bd-core").expect("bead id");
     let sys_id = BeadId::parse("bd-sys").expect("bead id");
 
-    let core_state = build_state(vec![make_bead(&core_id, &stamp, "core")], Vec::new(), Vec::new());
-    let sys_state = build_state(vec![make_bead(&sys_id, &stamp, "sys")], Vec::new(), Vec::new());
+    let core_state = build_state(
+        vec![make_bead(&core_id, &stamp, "core")],
+        Vec::new(),
+        Vec::new(),
+    );
+    let sys_state = build_state(
+        vec![make_bead(&sys_id, &stamp, "sys")],
+        Vec::new(),
+        Vec::new(),
+    );
 
     let mut states = BTreeMap::new();
     states.insert(core.clone(), core_state);
     states.insert(sys.clone(), sys_state);
 
     let mut watermarks = Watermarks::<Durable>::new();
-    observe_watermark(&mut watermarks, &core, &identity::replica_id(3), 5, [5u8; 32]);
-    observe_watermark(&mut watermarks, &sys, &identity::replica_id(4), 2, [2u8; 32]);
+    observe_watermark(
+        &mut watermarks,
+        &core,
+        &identity::replica_id(3),
+        5,
+        [5u8; 32],
+    );
+    observe_watermark(
+        &mut watermarks,
+        &sys,
+        &identity::replica_id(4),
+        2,
+        [2u8; 32],
+    );
 
     CheckpointFixture::from_snapshot(build_snapshot(
         "core",
@@ -187,8 +204,7 @@ pub fn assert_manifest_files(
         if hash != entry.sha256 {
             errors.push(format!(
                 "file hash mismatch for {path}: expected {}, got {}",
-                entry.sha256,
-                hash
+                entry.sha256, hash
             ));
         }
         let bytes = payload.bytes.len() as u64;
@@ -216,10 +232,7 @@ pub fn assert_meta_hashes(meta: &CheckpointMeta, manifest: &CheckpointManifest) 
         "manifest hash mismatch"
     );
     let computed_content = meta.compute_content_hash().expect("content hash");
-    assert_eq!(
-        meta.content_hash, computed_content,
-        "content hash mismatch"
-    );
+    assert_eq!(meta.content_hash, computed_content, "content hash mismatch");
 }
 
 fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
@@ -353,15 +366,13 @@ fn build_shards_for_state(
     for (id, bead) in state.iter_live() {
         let shard = shard_for_bead(id);
         let path = shard_path(namespace, CheckpointFileKind::State, &shard);
-        push_jsonl_line(&mut payloads, path, &WireBeadFull::from(bead))
-            .expect("bead jsonl");
+        push_jsonl_line(&mut payloads, path, &WireBeadFull::from(bead)).expect("bead jsonl");
     }
 
     for (key, tombstone) in state.iter_tombstones() {
         let shard = shard_for_tombstone(&key.id);
         let path = shard_path(namespace, CheckpointFileKind::Tombstones, &shard);
-        push_jsonl_line(&mut payloads, path, &wire_tombstone(tombstone))
-            .expect("tombstone jsonl");
+        push_jsonl_line(&mut payloads, path, &wire_tombstone(tombstone)).expect("tombstone jsonl");
     }
 
     for (key, edge) in state.iter_deps() {
@@ -443,11 +454,13 @@ mod tests {
         let fixture = fixture_tombstones();
         let namespace = NamespaceId::core();
         let tomb_paths = tombstone_shard_paths(&namespace);
-        assert!(fixture
-            .export
-            .files
-            .keys()
-            .any(|path| tomb_paths.contains(path)));
+        assert!(
+            fixture
+                .export
+                .files
+                .keys()
+                .any(|path| tomb_paths.contains(path))
+        );
     }
 
     #[test]

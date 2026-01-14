@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 
-use beads_rs::git::checkpoint::{CheckpointExport, CheckpointManifest, CheckpointMeta, CheckpointShardPayload};
+use beads_rs::git::checkpoint::{
+    CheckpointExport, CheckpointManifest, CheckpointMeta, CheckpointShardPayload,
+};
 use beads_rs::{ContentHash, sha256_bytes};
 
 pub fn diff_exports(expected: &CheckpointExport, actual: &CheckpointExport) -> Vec<String> {
@@ -95,7 +97,8 @@ fn diff_files(
             Some(actual_payload) => {
                 let expected_hash = hash_payload(payload);
                 let actual_hash = hash_payload(actual_payload);
-                if expected_hash != actual_hash || payload.bytes.len() != actual_payload.bytes.len() {
+                if expected_hash != actual_hash || payload.bytes.len() != actual_payload.bytes.len()
+                {
                     diffs.push(format!(
                         "file mismatch {path}: expected {} ({} bytes), got {} ({} bytes)",
                         expected_hash.to_hex(),
