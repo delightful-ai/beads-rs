@@ -1,0 +1,254 @@
+//! Phase 5 tests: replication ACK/WANT semantics.
+
+mod fixtures;
+
+use std::sync::Arc;
+
+use uuid::Uuid;
+
+use beads_rs::daemon::admission::AdmissionController;
+use beads_rs::daemon::repl::{
+    Events, ReplMessage, Session, SessionAction, SessionConfig, SessionPhase, SessionRole,
+    WalRangeReader,
+};
+use beads_rs::daemon::wal::rebuild_index;
+use beads_rs::{
+    ActorId, ErrorCode, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
+    NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId,
+    encode_event_body_canonical, hash_event_body,
+};
+
+use fixtures::repl_frames;
+use fixtures::repl_peer::MockStore;
+use fixtures::wal::{TempWalDir, record_for_seq};
+
+fn inbound_session() -> (Session, MockStore, StoreIdentity) {
+    let limits = Limits::default();
+    let identity = repl_frames::store_identity(1);
+    let local_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+    let mut config = SessionConfig::new(identity, local_replica, &limits);
+    config.requested_namespaces = vec![NamespaceId::core()];
+    config.offered_namespaces = vec![NamespaceId::core()];
+    let admission = AdmissionController::new(&limits);
+    let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+    let mut store = MockStore::default();
+
+    let peer_replica = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
+    let hello = repl_frames::hello(identity, peer_replica);
+    session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+    assert!(matches!(session.phase(), SessionPhase::Streaming));
+
+    (session, store, identity)
+}
+
+fn event_frame_with_txn(
+    store: StoreIdentity,
+    namespace: NamespaceId,
+    origin: ReplicaId,
+    seq: u64,
+    prev: Option<Sha256>,
+    txn_seed: u8,
+) -> EventFrameV1 {
+    let txn_id = TxnId::new(Uuid::from_bytes([txn_seed; 16]));
+    let event_time_ms = 1_700_000_000_000 + seq;
+    let body = EventBody {
+        envelope_v: 1,
+        store,
+        namespace: namespace.clone(),
+        origin_replica_id: origin,
+        origin_seq: Seq1::from_u64(seq).expect("seq1"),
+        event_time_ms,
+        txn_id,
+        client_request_id: None,
+        kind: EventKindV1::TxnV1,
+        delta: TxnDeltaV1::new(),
+        hlc_max: Some(HlcMax {
+            actor_id: ActorId::new("fixture").expect("actor"),
+            physical_ms: event_time_ms,
+            logical: 0,
+        }),
+    };
+    let canonical = encode_event_body_canonical(&body).expect("encode event body");
+    let sha = hash_event_body(&canonical);
+    let bytes = EventBytes::<Opaque>::new(bytes::Bytes::copy_from_slice(canonical.as_ref()));
+
+    EventFrameV1 {
+        eid: EventId::new(origin, namespace, body.origin_seq),
+        sha256: sha,
+        prev_sha256: prev,
+        bytes,
+    }
+}
+
+#[test]
+fn phase5_repl_ack_advances_watermarks() {
+    let (mut session, mut store, identity) = inbound_session();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+
+    let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
+    let e2 = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(e1.sha256));
+
+    let actions = session.handle_message(
+        ReplMessage::Events(Events {
+            events: vec![e1, e2.clone()],
+        }),
+        &mut store,
+        10,
+    );
+
+    let ack = actions
+        .iter()
+        .find_map(|action| match action {
+            SessionAction::Send(ReplMessage::Ack(ack)) => Some(ack),
+            _ => None,
+        })
+        .expect("ack");
+
+    let seq = ack
+        .durable
+        .get(&namespace)
+        .and_then(|m| m.get(&origin))
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(seq, 2);
+
+    let head = ack
+        .durable_heads
+        .as_ref()
+        .and_then(|heads| heads.get(&namespace))
+        .and_then(|m| m.get(&origin))
+        .copied()
+        .expect("head");
+    assert_eq!(head, e2.sha256);
+
+    let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(2).expect("seq1"));
+    assert!(store.has_event(&event_id));
+}
+
+#[test]
+fn phase5_repl_gap_triggers_want() {
+    let (mut session, mut store, identity) = inbound_session();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+
+    let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
+    let e3 = repl_frames::event_frame(identity, namespace.clone(), origin, 3, Some(e1.sha256));
+
+    let actions = session.handle_message(
+        ReplMessage::Events(Events { events: vec![e3] }),
+        &mut store,
+        10,
+    );
+
+    let want = actions
+        .iter()
+        .find_map(|action| match action {
+            SessionAction::Send(ReplMessage::Want(want)) => Some(want),
+            _ => None,
+        })
+        .expect("want");
+
+    let seq = want
+        .want
+        .get(&namespace)
+        .and_then(|m| m.get(&origin))
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(seq, 0);
+}
+
+#[test]
+fn phase5_repl_equivocation_errors() {
+    let (mut session, mut store, identity) = inbound_session();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
+
+    let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
+    session.handle_message(
+        ReplMessage::Events(Events { events: vec![e1] }),
+        &mut store,
+        10,
+    );
+
+    let e1_alt = event_frame_with_txn(identity, namespace.clone(), origin, 1, None, 7);
+    let actions = session.handle_message(
+        ReplMessage::Events(Events { events: vec![e1_alt] }),
+        &mut store,
+        20,
+    );
+
+    let error = actions
+        .iter()
+        .find_map(|action| match action {
+            SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+            _ => None,
+        })
+        .expect("error");
+
+    assert_eq!(error.code, ErrorCode::Equivocation);
+}
+
+#[test]
+fn phase5_repl_prev_sha_mismatch_rejects() {
+    let (mut session, mut store, identity) = inbound_session();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
+
+    let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
+    session.handle_message(
+        ReplMessage::Events(Events { events: vec![e1] }),
+        &mut store,
+        10,
+    );
+
+    let bad_prev = Sha256([9u8; 32]);
+    let e2_bad = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(bad_prev));
+    let actions = session.handle_message(
+        ReplMessage::Events(Events { events: vec![e2_bad] }),
+        &mut store,
+        20,
+    );
+
+    let error = actions
+        .iter()
+        .find_map(|action| match action {
+            SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+            _ => None,
+        })
+        .expect("error");
+
+    assert_eq!(error.code, ErrorCode::Corruption);
+}
+
+#[test]
+fn phase5_repl_want_reads_from_wal() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
+
+    let record1 = record_for_seq(temp.meta(), &namespace, origin, 1, None);
+    let record2 = record_for_seq(
+        temp.meta(),
+        &namespace,
+        origin,
+        2,
+        Some(record1.header.sha256),
+    );
+
+    temp.write_segment(&namespace, 1_700_000_000_000, &[record1, record2])
+        .expect("write segment");
+
+    let index = temp.open_index().expect("open wal index");
+    let limits = Limits::default();
+    rebuild_index(temp.store_dir(), temp.meta(), &index, &limits).expect("rebuild index");
+
+    let reader = WalRangeReader::new(temp.meta().store_id(), Arc::new(index), limits.clone());
+    let frames = reader
+        .read_range(&namespace, &origin, 0, limits.max_event_batch_bytes)
+        .expect("read wal range");
+
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].eid.origin_seq.get(), 1);
+    assert_eq!(frames[1].eid.origin_seq.get(), 2);
+}
