@@ -388,7 +388,7 @@ where
                 if !offered_set.contains(&event.namespace) {
                     continue;
                 }
-                let frame = broadcast_to_frame(&event);
+                let frame = broadcast_to_frame(event);
                 send_events(&mut writer, &session, vec![frame], &limits)?;
             }
             recv(tick) -> _ => {}
@@ -568,17 +568,17 @@ fn send_hot_cache(
     let frames = cache
         .into_iter()
         .filter(|event| offered_set.contains(&event.namespace))
-        .map(|event| broadcast_to_frame(&event))
+        .map(broadcast_to_frame)
         .collect::<Vec<_>>();
     send_events(writer, session, frames, limits)
 }
 
-fn broadcast_to_frame(event: &BroadcastEvent) -> EventFrameV1 {
+fn broadcast_to_frame(event: BroadcastEvent) -> EventFrameV1 {
     EventFrameV1 {
-        eid: event.event_id.clone(),
+        eid: event.event_id,
         sha256: event.sha256,
         prev_sha256: event.prev_sha256,
-        bytes: EventBytes::<Opaque>::from(event.bytes.clone()),
+        bytes: EventBytes::<Opaque>::from(event.bytes),
     }
 }
 
@@ -633,7 +633,7 @@ fn handle_want(
         if event.event_id.origin_seq.get() == want_seq.saturating_add(1) {
             started.insert(key.clone());
         }
-        frames.push(broadcast_to_frame(&event));
+        frames.push(broadcast_to_frame(event));
     }
 
     if started.len() != needed.len() {
