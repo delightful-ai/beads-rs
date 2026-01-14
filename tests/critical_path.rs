@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "slow-tests")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -66,6 +66,24 @@ fn daemon_pid(runtime_dir: &Path) -> u32 {
 #[cfg(feature = "slow-tests")]
 fn parse_response_payload(bytes: &[u8]) -> beads_rs::daemon::ipc::ResponsePayload {
     serde_json::from_slice(bytes).expect("parse response payload")
+}
+
+#[cfg(feature = "slow-tests")]
+fn wait_for_exit(pid: u32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !process_alive(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(feature = "slow-tests")]
+fn process_alive(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
 #[cfg(feature = "slow-tests")]
@@ -3698,7 +3716,7 @@ fn test_crash_recovery_replays_wal() {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid as i32), Signal::SIGKILL).expect("failed to SIGKILL daemon");
-    std::thread::sleep(Duration::from_millis(100));
+    wait_for_exit(pid, Duration::from_secs(1));
 
     let store_id_arg = store_id.to_string();
     let unlock_out = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
