@@ -121,7 +121,7 @@ valuable but **must not** run by default.
 Guidelines:
 - Gate heavy suites behind `--features slow-tests`.
 - Default `cargo test` should stay fast and predictable.
-- CI should include at least one job that runs slow suites (we use `cargo test --all-features`).
+- CI should include at least one job that runs slow suites (scheduled or manual).
 
 Run locally when needed:
 
@@ -392,4 +392,3 @@ And every time we add a test, we ask the same question:
 > “Which bad program am I ruling out by doing this?”
 
 If the answer is “none that I care about,” the correct move is to not write the test.
-
