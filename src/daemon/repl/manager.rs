@@ -35,6 +35,20 @@ pub struct PeerConfig {
     pub allowed_namespaces: Option<Vec<NamespaceId>>,
 }
 
+#[derive(Clone)]
+pub struct ReplicationManagerConfig {
+    pub local_store: StoreIdentity,
+    pub local_replica_id: ReplicaId,
+    pub admission: AdmissionController,
+    pub broadcaster: EventBroadcaster,
+    pub peer_acks: Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
+    pub policies: BTreeMap<NamespaceId, NamespacePolicy>,
+    pub roster: Option<ReplicaRoster>,
+    pub peers: Vec<PeerConfig>,
+    pub limits: crate::core::Limits,
+    pub backoff: BackoffPolicy,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffPolicy {
     pub base: Duration,
@@ -74,31 +88,19 @@ impl<S> ReplicationManager<S>
 where
     S: SessionStore + Send + 'static,
 {
-    pub fn new(
-        local_store: StoreIdentity,
-        local_replica_id: ReplicaId,
-        store: SharedSessionStore<S>,
-        admission: AdmissionController,
-        broadcaster: EventBroadcaster,
-        peer_acks: Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
-        policies: BTreeMap<NamespaceId, NamespacePolicy>,
-        roster: Option<ReplicaRoster>,
-        peers: Vec<PeerConfig>,
-        limits: crate::core::Limits,
-        backoff: BackoffPolicy,
-    ) -> Self {
+    pub fn new(store: SharedSessionStore<S>, config: ReplicationManagerConfig) -> Self {
         Self {
-            local_store,
-            local_replica_id,
+            local_store: config.local_store,
+            local_replica_id: config.local_replica_id,
             store,
-            admission,
-            broadcaster,
-            peer_acks,
-            policies,
-            roster,
-            peers,
-            limits,
-            backoff,
+            admission: config.admission,
+            broadcaster: config.broadcaster,
+            peer_acks: config.peer_acks,
+            policies: config.policies,
+            roster: config.roster,
+            peers: config.peers,
+            limits: config.limits,
+            backoff: config.backoff,
         }
     }
 
@@ -110,30 +112,19 @@ where
             let Some(plan) = self.build_peer_plan(&peer) else {
                 continue;
             };
-            let shutdown = Arc::clone(&shutdown);
-            let store = self.store.clone();
-            let admission = self.admission.clone();
-            let broadcaster = self.broadcaster.clone();
-            let peer_acks = Arc::clone(&self.peer_acks);
-            let limits = self.limits.clone();
-            let backoff = self.backoff;
-            let local_store = self.local_store;
-            let local_replica_id = self.local_replica_id;
+            let runtime = PeerRuntime {
+                local_store: self.local_store,
+                local_replica_id: self.local_replica_id,
+                store: self.store.clone(),
+                admission: self.admission.clone(),
+                broadcaster: self.broadcaster.clone(),
+                peer_acks: Arc::clone(&self.peer_acks),
+                limits: self.limits.clone(),
+                backoff: self.backoff,
+                shutdown: Arc::clone(&shutdown),
+            };
 
-            joins.push(thread::spawn(move || {
-                run_peer_loop(
-                    plan,
-                    local_store,
-                    local_replica_id,
-                    store,
-                    admission,
-                    broadcaster,
-                    peer_acks,
-                    limits,
-                    backoff,
-                    shutdown,
-                );
-            }));
+            joins.push(thread::spawn(move || run_peer_loop(plan, runtime)));
         }
 
         ReplicationManagerHandle { shutdown, joins }
@@ -187,6 +178,18 @@ struct PeerPlan {
     requested_namespaces: Vec<NamespaceId>,
 }
 
+struct PeerRuntime<S> {
+    local_store: StoreIdentity,
+    local_replica_id: ReplicaId,
+    store: SharedSessionStore<S>,
+    admission: AdmissionController,
+    broadcaster: EventBroadcaster,
+    peer_acks: Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
+    limits: crate::core::Limits,
+    backoff: BackoffPolicy,
+    shutdown: Arc<AtomicBool>,
+}
+
 fn eligible_namespaces(
     policies: &BTreeMap<NamespaceId, NamespacePolicy>,
     role: ReplicaRole,
@@ -199,10 +202,10 @@ fn eligible_namespaces(
         if !role_allows_policy(role, policy.replicate_mode) {
             continue;
         }
-        if let Some(allowed) = &allowed_set {
-            if !allowed.contains(namespace) {
-                continue;
-            }
+        if let Some(allowed) = &allowed_set
+            && !allowed.contains(namespace)
+        {
+            continue;
         }
         namespaces.push(namespace.clone());
     }
@@ -221,39 +224,18 @@ fn role_allows_policy(role: ReplicaRole, mode: ReplicateMode) -> bool {
     }
 }
 
-fn run_peer_loop<S>(
-    plan: PeerPlan,
-    local_store: StoreIdentity,
-    local_replica_id: ReplicaId,
-    store: SharedSessionStore<S>,
-    admission: AdmissionController,
-    broadcaster: EventBroadcaster,
-    peer_acks: Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
-    limits: crate::core::Limits,
-    backoff_policy: BackoffPolicy,
-    shutdown: Arc<AtomicBool>,
-) where
+fn run_peer_loop<S>(plan: PeerPlan, runtime: PeerRuntime<S>)
+where
     S: SessionStore + Send + 'static,
 {
-    let mut backoff = Backoff::new(backoff_policy);
+    let mut backoff = Backoff::new(runtime.backoff);
 
-    while !shutdown.load(Ordering::Relaxed) {
+    while !runtime.shutdown.load(Ordering::Relaxed) {
         let connect_start = Instant::now();
         match TcpStream::connect(&plan.addr) {
             Ok(stream) => {
                 backoff.reset();
-                if let Err(err) = run_outbound_session(
-                    stream,
-                    &plan,
-                    local_store,
-                    local_replica_id,
-                    store.clone(),
-                    admission.clone(),
-                    broadcaster.clone(),
-                    peer_acks.clone(),
-                    limits.clone(),
-                    shutdown.clone(),
-                ) {
+                if let Err(err) = run_outbound_session(stream, &plan, &runtime) {
                     tracing::warn!("replication peer {} disconnected: {err}", plan.replica_id);
                 }
             }
@@ -262,7 +244,7 @@ fn run_peer_loop<S>(
             }
         }
 
-        if shutdown.load(Ordering::Relaxed) {
+        if runtime.shutdown.load(Ordering::Relaxed) {
             break;
         }
 
@@ -295,19 +277,21 @@ enum InboundMessage {
 fn run_outbound_session<S>(
     stream: TcpStream,
     plan: &PeerPlan,
-    local_store: StoreIdentity,
-    local_replica_id: ReplicaId,
-    mut store: SharedSessionStore<S>,
-    admission: AdmissionController,
-    broadcaster: EventBroadcaster,
-    peer_acks: Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
-    limits: crate::core::Limits,
-    shutdown: Arc<AtomicBool>,
+    runtime: &PeerRuntime<S>,
 ) -> Result<(), PeerError>
 where
     S: SessionStore + Send + 'static,
 {
     stream.set_nodelay(true)?;
+
+    let mut store = runtime.store.clone();
+    let admission = runtime.admission.clone();
+    let broadcaster = runtime.broadcaster.clone();
+    let peer_acks = Arc::clone(&runtime.peer_acks);
+    let limits = runtime.limits.clone();
+    let shutdown = runtime.shutdown.clone();
+    let local_store = runtime.local_store;
+    let local_replica_id = runtime.local_replica_id;
 
     let reader_stream = stream.try_clone()?;
     let mut reader = FrameReader::new(reader_stream, limits.max_frame_bytes);
@@ -357,10 +341,10 @@ where
                     InboundMessage::Message(msg) => {
                         let actions = session.handle_message(msg, &mut store, now_ms());
                         for action in actions {
-                            if let SessionAction::PeerAck(ack) = &action {
-                                if let Err(err) = update_peer_ack(&peer_acks, plan.replica_id, ack) {
-                                    tracing::warn!("peer ack update failed: {err}");
-                                }
+                            if let SessionAction::PeerAck(ack) = &action
+                                && let Err(err) = update_peer_ack(&peer_acks, plan.replica_id, ack)
+                            {
+                                tracing::warn!("peer ack update failed: {err}");
                             }
 
                             if let SessionAction::PeerWant(want) = &action {
@@ -374,10 +358,8 @@ where
                                     tracing::warn!("peer want handling failed: {err}");
                                     return Err(err);
                                 }
-                            } else {
-                                if apply_action(&mut writer, &session, action)? {
-                                    return Ok(());
-                                }
+                            } else if apply_action(&mut writer, &session, action)? {
+                                return Ok(());
                             }
                         }
                     }
@@ -859,25 +841,28 @@ mod tests {
         let local_replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
 
-        let manager = ReplicationManager::new(
+        let config = ReplicationManagerConfig {
             local_store,
-            local_replica,
-            SharedSessionStore::new(TestStore::default()),
-            AdmissionController::new(&test_limits()),
-            EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+            local_replica_id: local_replica,
+            admission: AdmissionController::new(&test_limits()),
+            broadcaster: EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
                 max_subscribers: 4,
                 hot_cache_max_events: 16,
                 hot_cache_max_bytes: 1024,
             }),
-            Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
-            test_policy(),
-            None,
-            vec![test_peer_config(peer_replica, addr)],
-            test_limits(),
-            BackoffPolicy {
+            peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
+            policies: test_policy(),
+            roster: None,
+            peers: vec![test_peer_config(peer_replica, addr)],
+            limits: test_limits(),
+            backoff: BackoffPolicy {
                 base: Duration::from_millis(5),
                 max: Duration::from_millis(10),
             },
+        };
+        let manager = ReplicationManager::new(
+            SharedSessionStore::new(TestStore::default()),
+            config,
         );
 
         let handle = manager.start();
@@ -918,21 +903,24 @@ mod tests {
         let tmp = NamespaceId::parse("tmp").unwrap();
         policies.insert(tmp.clone(), tmp_policy);
 
-        let manager = ReplicationManager::new(
+        let config = ReplicationManagerConfig {
             local_store,
-            local_replica,
-            SharedSessionStore::new(TestStore::default()),
-            AdmissionController::new(&test_limits()),
-            broadcaster.clone(),
-            Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
+            local_replica_id: local_replica,
+            admission: AdmissionController::new(&test_limits()),
+            broadcaster: broadcaster.clone(),
+            peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
             policies,
-            None,
-            vec![test_peer_config(peer_replica, addr)],
-            test_limits(),
-            BackoffPolicy {
+            roster: None,
+            peers: vec![test_peer_config(peer_replica, addr)],
+            limits: test_limits(),
+            backoff: BackoffPolicy {
                 base: Duration::from_millis(5),
                 max: Duration::from_millis(10),
             },
+        };
+        let manager = ReplicationManager::new(
+            SharedSessionStore::new(TestStore::default()),
+            config,
         );
 
         let handle = manager.start();
@@ -981,25 +969,28 @@ mod tests {
         let local_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
 
-        let manager = ReplicationManager::new(
+        let config = ReplicationManagerConfig {
             local_store,
-            local_replica,
-            SharedSessionStore::new(TestStore::default()),
-            AdmissionController::new(&test_limits()),
-            EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+            local_replica_id: local_replica,
+            admission: AdmissionController::new(&test_limits()),
+            broadcaster: EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
                 max_subscribers: 4,
                 hot_cache_max_events: 16,
                 hot_cache_max_bytes: 1024,
             }),
-            Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
-            test_policy(),
-            None,
-            vec![test_peer_config(peer_replica, addr)],
-            test_limits(),
-            BackoffPolicy {
+            peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
+            policies: test_policy(),
+            roster: None,
+            peers: vec![test_peer_config(peer_replica, addr)],
+            limits: test_limits(),
+            backoff: BackoffPolicy {
                 base: Duration::from_millis(20),
                 max: Duration::from_millis(40),
             },
+        };
+        let manager = ReplicationManager::new(
+            SharedSessionStore::new(TestStore::default()),
+            config,
         );
 
         let handle = manager.start();

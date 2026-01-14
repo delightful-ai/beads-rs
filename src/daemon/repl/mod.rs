@@ -10,7 +10,10 @@ pub mod store;
 
 pub use frame::{FrameError, FrameReader, FrameWriter};
 pub use gap_buffer::{GapBufferByNsOrigin, IngestDecision, OriginStreamState};
-pub use manager::{BackoffPolicy, PeerConfig, ReplicationManager, ReplicationManagerHandle};
+pub use manager::{
+    BackoffPolicy, PeerConfig, ReplicationManager, ReplicationManagerConfig,
+    ReplicationManagerHandle,
+};
 pub use peer_acks::{PeerAckError, PeerAckTable, QuorumOutcome};
 pub use proto::{
     Ack, Capabilities, Events, Hello, ProtoDecodeError, ProtoEncodeError, ReplEnvelope,
