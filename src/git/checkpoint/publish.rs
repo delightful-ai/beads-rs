@@ -7,7 +7,7 @@ use git2::{ErrorCode, Oid, Repository, Signature};
 use serde::Serialize;
 use thiserror::Error;
 
-use super::export::CheckpointExport;
+use super::export::{CheckpointExport, CheckpointExportError};
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{MANIFEST_FILE, META_FILE};
 use crate::core::{ContentHash, StoreEpoch, StoreId};
@@ -51,6 +51,8 @@ pub struct CheckpointPublishOutcome {
 
 #[derive(Debug, Error)]
 pub enum CheckpointPublishError {
+    #[error(transparent)]
+    Export(#[from] CheckpointExportError),
     #[error(transparent)]
     CanonJson(#[from] CanonJsonError),
     #[error("checkpoint tree path conflict at {path}")]

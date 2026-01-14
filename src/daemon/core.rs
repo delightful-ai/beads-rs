@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use super::Clock;
 use super::broadcast::BroadcastEvent;
+use super::checkpoint_scheduler::{CheckpointGroupConfig, CheckpointGroupKey, CheckpointScheduler};
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
     ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
@@ -142,6 +143,7 @@ use crate::core::{
     decode_event_body,
 };
 use crate::git::SyncError;
+use crate::git::checkpoint::{CheckpointPublishError, CheckpointPublishOutcome};
 use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::sync::SyncOutcome;
 
@@ -198,6 +200,8 @@ pub struct Daemon {
 
     /// Sync scheduler for debouncing.
     scheduler: SyncScheduler,
+    /// Checkpoint scheduler for debounce/max interval.
+    checkpoint_scheduler: CheckpointScheduler,
 
     /// Write-ahead log for mutation durability.
     wal: Arc<Wal>,
@@ -256,6 +260,7 @@ impl Daemon {
             clock: Clock::new_with_max_forward_drift(limits.hlc_max_forward_drift_ms),
             actor,
             scheduler: SyncScheduler::new(),
+            checkpoint_scheduler: CheckpointScheduler::new(),
             wal: Arc::new(wal),
             export_ctx,
             limits,
@@ -300,6 +305,26 @@ impl Daemon {
 
     pub(crate) fn schedule_sync(&mut self, remote: RemoteUrl) {
         self.scheduler.schedule(remote);
+    }
+
+    pub(crate) fn mark_checkpoint_dirty(
+        &mut self,
+        store_id: StoreId,
+        namespace: &NamespaceId,
+        events: u64,
+    ) {
+        self.checkpoint_scheduler
+            .mark_dirty_for_namespace(store_id, namespace, events);
+    }
+
+    fn register_default_checkpoint_groups(&mut self, store_id: StoreId) -> Result<(), OpError> {
+        let store = self
+            .stores
+            .get(&store_id)
+            .ok_or(OpError::Internal("loaded store missing from state"))?;
+        let config = CheckpointGroupConfig::core_default(store_id, store.meta.replica_id);
+        self.checkpoint_scheduler.register_group(config);
+        Ok(())
     }
 
     /// Get repo state. Returns Internal if invariant is violated.
@@ -485,6 +510,8 @@ impl Daemon {
                 self.clock.receive(&hlc_state);
             }
             self.stores.insert(store_id, runtime);
+            self.register_default_checkpoint_groups(store_id)?;
+            self.register_default_checkpoint_groups(store_id)?;
 
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
             git_tx
@@ -1027,6 +1054,7 @@ impl Daemon {
         if let Some(stamp) = max_stamp.clone() {
             self.clock.receive(&stamp);
         }
+        self.mark_checkpoint_dirty(store_id, &namespace, batch.len() as u64);
         self.schedule_sync(remote);
 
         let applied_seq = applied.seq().get();
@@ -1364,6 +1392,40 @@ impl Daemon {
         }
     }
 
+    pub fn complete_checkpoint(
+        &mut self,
+        store_id: StoreId,
+        checkpoint_group: &str,
+        result: Result<CheckpointPublishOutcome, CheckpointPublishError>,
+    ) {
+        let key = CheckpointGroupKey {
+            store_id,
+            group: checkpoint_group.to_string(),
+        };
+        match &result {
+            Ok(outcome) => {
+                tracing::info!(
+                    store_id = %store_id,
+                    checkpoint_group = checkpoint_group,
+                    checkpoint_id = %outcome.checkpoint_id,
+                    "checkpoint publish succeeded"
+                );
+                self.checkpoint_scheduler
+                    .complete_success(&key, Instant::now());
+            }
+            Err(err) => {
+                tracing::warn!(
+                    store_id = %store_id,
+                    checkpoint_group = checkpoint_group,
+                    error = ?err,
+                    "checkpoint publish failed"
+                );
+                self.checkpoint_scheduler
+                    .complete_failure(&key, Instant::now());
+            }
+        }
+    }
+
     /// Export state to Go-compatible JSONL format.
     ///
     /// Called after successful sync to keep .beads/issues.jsonl in sync.
@@ -1463,10 +1525,102 @@ impl Daemon {
         self.scheduler.next_deadline()
     }
 
+    pub fn next_checkpoint_deadline(&mut self) -> Option<Instant> {
+        self.checkpoint_scheduler.next_deadline()
+    }
+
     pub fn fire_due_syncs(&mut self, git_tx: &Sender<GitOp>) {
         let due = self.scheduler.drain_due(Instant::now());
         for remote in due {
             self.maybe_start_sync(&remote, git_tx);
+        }
+    }
+
+    pub fn fire_due_checkpoints(&mut self, git_tx: &Sender<GitOp>) {
+        let now = Instant::now();
+        let due = self.checkpoint_scheduler.drain_due(now);
+        for key in due {
+            self.start_checkpoint_job(&key, git_tx, now);
+        }
+    }
+
+    fn start_checkpoint_job(
+        &mut self,
+        key: &CheckpointGroupKey,
+        git_tx: &Sender<GitOp>,
+        now: Instant,
+    ) {
+        let config = match self.checkpoint_scheduler.group_config(key).cloned() {
+            Some(config) => config,
+            None => return,
+        };
+        if !config.auto_push() {
+            return;
+        }
+
+        let checkpoint_groups = self
+            .checkpoint_scheduler
+            .checkpoint_groups_for_store(key.store_id);
+
+        let (snapshot, repo_path) = {
+            let store = match self.stores.get(&key.store_id) {
+                Some(store) => store,
+                None => {
+                    tracing::warn!(
+                        store_id = %key.store_id,
+                        checkpoint_group = %config.group,
+                        "checkpoint store missing"
+                    );
+                    self.checkpoint_scheduler.complete_failure(key, now);
+                    return;
+                }
+            };
+            let Some(path) = store.repo_state.any_valid_path().cloned() else {
+                tracing::warn!(
+                    store_id = %key.store_id,
+                    checkpoint_group = %config.group,
+                    "checkpoint repo path missing"
+                );
+                self.checkpoint_scheduler.complete_failure(key, now);
+                return;
+            };
+            let created_at_ms = WallClock::now().0;
+            let snapshot =
+                match store.checkpoint_snapshot(&config.group, &config.namespaces, created_at_ms) {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        tracing::warn!(
+                            store_id = %key.store_id,
+                            checkpoint_group = %config.group,
+                            error = ?err,
+                            "checkpoint snapshot failed"
+                        );
+                        self.checkpoint_scheduler.complete_failure(key, now);
+                        return;
+                    }
+                };
+            (snapshot, path)
+        };
+
+        if git_tx
+            .send(GitOp::Checkpoint {
+                repo: repo_path,
+                store_id: key.store_id,
+                checkpoint_group: config.group.clone(),
+                git_ref: config.git_ref.clone(),
+                snapshot,
+                checkpoint_groups,
+            })
+            .is_ok()
+        {
+            self.checkpoint_scheduler.start_in_flight(key, now);
+        } else {
+            tracing::warn!(
+                store_id = %key.store_id,
+                checkpoint_group = %config.group,
+                "checkpoint git worker not responding"
+            );
+            self.checkpoint_scheduler.complete_failure(key, now);
         }
     }
 

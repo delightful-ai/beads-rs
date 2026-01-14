@@ -66,7 +66,15 @@ pub fn run_state_loop(
     daemon.set_repl_ingest_tx(repl_tx);
 
     loop {
-        let tick = match daemon.next_sync_deadline() {
+        let next_sync = daemon.next_sync_deadline();
+        let next_checkpoint = daemon.next_checkpoint_deadline();
+        let next_deadline = match (next_sync, next_checkpoint) {
+            (Some(sync), Some(checkpoint)) => Some(std::cmp::min(sync, checkpoint)),
+            (Some(sync), None) => Some(sync),
+            (None, Some(checkpoint)) => Some(checkpoint),
+            (None, None) => None,
+        };
+        let tick = match next_deadline {
             Some(deadline) => {
                 let wait = deadline.saturating_duration_since(Instant::now());
                 crossbeam::channel::after(wait)
@@ -229,6 +237,9 @@ pub fn run_state_loop(
                                             // Just complete any in-flight refreshes during shutdown
                                             daemon.complete_refresh(&remote, refresh_result);
                                         }
+                                        GitResult::Checkpoint(store_id, group, result) => {
+                                            daemon.complete_checkpoint(store_id, &group, result);
+                                        }
                                     }
                                 } else {
                                     break;
@@ -241,6 +252,7 @@ pub fn run_state_loop(
                         }
 
                         daemon.fire_due_syncs(&git_tx);
+                        daemon.fire_due_checkpoints(&git_tx);
                         flush_sync_waiters(&daemon, &mut sync_waiters);
                     }
                     Err(_) => {
@@ -253,6 +265,7 @@ pub fn run_state_loop(
 
             recv(tick) -> _ => {
                 daemon.fire_due_syncs(&git_tx);
+                daemon.fire_due_checkpoints(&git_tx);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
             }
 
@@ -261,6 +274,7 @@ pub fn run_state_loop(
                 if let Ok(request) = msg {
                     daemon.handle_repl_ingest(request);
                     daemon.fire_due_syncs(&git_tx);
+                    daemon.fire_due_checkpoints(&git_tx);
                     flush_sync_waiters(&daemon, &mut sync_waiters);
                 }
             }
@@ -275,9 +289,13 @@ pub fn run_state_loop(
                         GitResult::Refresh(remote, refresh_result) => {
                             daemon.complete_refresh(&remote, refresh_result);
                         }
+                        GitResult::Checkpoint(store_id, group, result) => {
+                            daemon.complete_checkpoint(store_id, &group, result);
+                        }
                     }
                 }
                 daemon.fire_due_syncs(&git_tx);
+                daemon.fire_due_checkpoints(&git_tx);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
             }
         }

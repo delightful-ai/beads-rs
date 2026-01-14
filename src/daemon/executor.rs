@@ -348,6 +348,7 @@ impl Daemon {
             )
         };
 
+        self.mark_checkpoint_dirty(proof.store_id(), &namespace, 1);
         self.schedule_sync(proof.remote().clone());
 
         let mut watermark_txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;

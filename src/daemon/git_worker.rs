@@ -3,7 +3,7 @@
 //! Owns git2::Repository handles (which are !Send !Sync) and runs on a dedicated thread.
 //! Receives GitOp messages from state thread, sends results back.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, hash_map::Entry};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -11,12 +11,18 @@ use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
 use super::remote::RemoteUrl;
-use crate::core::{ActorId, CanonicalState, Stamp, WriteStamp};
+use crate::core::{ActorId, CanonicalState, Stamp, StoreId, WriteStamp};
+use crate::git::checkpoint::{
+    CHECKPOINT_FORMAT_VERSION, CheckpointCache, CheckpointExportInput, CheckpointPublishError,
+    CheckpointPublishOutcome, CheckpointSnapshot, CheckpointStoreMeta, export_checkpoint,
+    publish_checkpoint as publish_checkpoint_git,
+};
 use crate::git::error::SyncError;
 use crate::git::sync::{DivergenceInfo, SyncOutcome, SyncProcess, init_beads_ref, sync_with_retry};
 
 /// Result of a sync operation.
 pub type SyncResult = Result<SyncOutcome, SyncError>;
+pub type CheckpointResult = Result<CheckpointPublishOutcome, CheckpointPublishError>;
 
 /// Result of a load operation (includes metadata).
 #[derive(Clone)]
@@ -42,6 +48,8 @@ pub enum GitResult {
     Sync(RemoteUrl, SyncResult),
     /// Background refresh completed.
     Refresh(RemoteUrl, Result<LoadResult, SyncError>),
+    /// Checkpoint publish completed.
+    Checkpoint(StoreId, String, CheckpointResult),
 }
 
 /// Operations sent from state thread to git thread.
@@ -68,6 +76,16 @@ pub enum GitOp {
         remote: RemoteUrl,
         state: CanonicalState,
         actor: ActorId,
+    },
+
+    /// Background checkpoint export + push (non-blocking).
+    Checkpoint {
+        repo: PathBuf,
+        store_id: StoreId,
+        checkpoint_group: String,
+        git_ref: String,
+        snapshot: CheckpointSnapshot,
+        checkpoint_groups: BTreeMap<String, String>,
     },
 
     /// Initialize beads ref (blocking - bd init command).
@@ -226,6 +244,34 @@ impl GitWorker {
         sync_with_retry(repo, path, state, resolution_stamp, 5)
     }
 
+    pub fn publish_checkpoint(
+        &mut self,
+        path: &Path,
+        snapshot: &CheckpointSnapshot,
+        git_ref: &str,
+        checkpoint_groups: BTreeMap<String, String>,
+    ) -> CheckpointResult {
+        let repo = self.open(path)?;
+        let export = export_checkpoint(CheckpointExportInput {
+            snapshot,
+            previous: None,
+        })?;
+
+        let cache = CheckpointCache::new(snapshot.store_id, snapshot.checkpoint_group.clone());
+        if let Err(err) = cache.publish(&export) {
+            tracing::warn!(error = ?err, "checkpoint cache publish failed");
+        }
+
+        let store_meta = CheckpointStoreMeta::new(
+            snapshot.store_id,
+            snapshot.store_epoch,
+            CHECKPOINT_FORMAT_VERSION,
+            checkpoint_groups,
+        );
+
+        publish_checkpoint_git(repo, &export, git_ref, &store_meta)
+    }
+
     /// Initialize beads ref.
     pub fn init(&mut self, path: &Path) -> Result<(), SyncError> {
         let repo = self.open(path)?;
@@ -266,6 +312,39 @@ impl GitWorker {
                     Err(err) => tracing::warn!(elapsed_ms, error = ?err, "sync failed"),
                 }
                 let _ = self.result_tx.send(GitResult::Sync(remote, result));
+            }
+
+            GitOp::Checkpoint {
+                repo,
+                store_id,
+                checkpoint_group,
+                git_ref,
+                snapshot,
+                checkpoint_groups,
+            } => {
+                let span = tracing::info_span!(
+                    "checkpoint",
+                    store_id = %store_id,
+                    checkpoint_group = %checkpoint_group,
+                    repo = %repo.display()
+                );
+                let _guard = span.enter();
+                let started = Instant::now();
+                let result = self.publish_checkpoint(&repo, &snapshot, &git_ref, checkpoint_groups);
+                let elapsed_ms = started.elapsed().as_millis();
+                match &result {
+                    Ok(outcome) => tracing::info!(
+                        elapsed_ms,
+                        checkpoint_id = %outcome.checkpoint_id,
+                        "checkpoint publish completed"
+                    ),
+                    Err(err) => {
+                        tracing::warn!(elapsed_ms, error = ?err, "checkpoint publish failed")
+                    }
+                }
+                let _ =
+                    self.result_tx
+                        .send(GitResult::Checkpoint(store_id, checkpoint_group, result));
             }
 
             GitOp::Init { repo, respond } => {
