@@ -405,21 +405,11 @@ impl Session {
                         )));
                     }
 
-                    self.update_watermark(&mut self.durable, &namespace, &origin, outcome.durable);
-                    self.update_watermark(&mut self.applied, &namespace, &origin, outcome.applied);
+                    update_watermark(&mut self.durable, &namespace, &origin, outcome.durable);
+                    update_watermark(&mut self.applied, &namespace, &origin, outcome.applied);
 
-                    self.update_watermark(
-                        &mut ack_updates,
-                        &namespace,
-                        &origin,
-                        outcome.durable,
-                    );
-                    self.update_watermark(
-                        &mut applied_updates,
-                        &namespace,
-                        &origin,
-                        outcome.applied,
-                    );
+                    update_watermark(&mut ack_updates, &namespace, &origin, outcome.durable);
+                    update_watermark(&mut applied_updates, &namespace, &origin, outcome.applied);
                 }
                 IngestDecision::BufferedNeedWant { want_from } => {
                     insert_want(&mut wants, namespace, origin, want_from);
@@ -503,19 +493,6 @@ impl Session {
         self.durable = watermark_state_from_snapshot(&snapshot.durable, Some(&snapshot.durable_heads));
         self.applied =
             watermark_state_from_snapshot(&snapshot.applied, Some(&snapshot.applied_heads));
-    }
-
-    fn update_watermark<K>(
-        &self,
-        state: &mut WatermarkState<K>,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        watermark: Watermark<K>,
-    ) {
-        state
-            .entry(namespace.clone())
-            .or_default()
-            .insert(*origin, watermark);
     }
 
     fn durable_for(&self, namespace: &NamespaceId, origin: &ReplicaId) -> Watermark<Durable> {
@@ -665,7 +642,7 @@ fn watermark_state_from_snapshot<K>(
     map: &WatermarkMap,
     heads: Option<&WatermarkHeads>,
 ) -> WatermarkState<K> {
-    let mut out = BTreeMap::new();
+        let mut out: WatermarkState<K> = BTreeMap::new();
     for (namespace, origins) in map {
         let ns_map = out.entry(namespace.clone()).or_default();
         for (origin, seq) in origins {
@@ -704,6 +681,18 @@ fn insert_want(
         .or_insert_with(|| from.get());
 }
 
+fn update_watermark<K>(
+    state: &mut WatermarkState<K>,
+    namespace: &NamespaceId,
+    origin: &ReplicaId,
+    watermark: Watermark<K>,
+) {
+    state
+        .entry(namespace.clone())
+        .or_default()
+        .insert(*origin, watermark);
+}
+
 fn build_ack(
     durable_updates: &WatermarkState<Durable>,
     applied_updates: &WatermarkState<Applied>,
@@ -726,8 +715,8 @@ fn build_ack(
 fn watermark_maps_from_state<K>(
     state: &WatermarkState<K>,
 ) -> (WatermarkMap, Option<WatermarkHeads>) {
-    let mut map = BTreeMap::new();
-    let mut heads = BTreeMap::new();
+    let mut map: WatermarkMap = BTreeMap::new();
+    let mut heads: WatermarkHeads = BTreeMap::new();
 
     for (namespace, origins) in state {
         let ns_map = map.entry(namespace.clone()).or_default();
