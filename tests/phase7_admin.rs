@@ -10,6 +10,7 @@ use tempfile::TempDir;
 struct AdminFixture {
     runtime_dir: TempDir,
     repo_dir: TempDir,
+    #[allow(dead_code)]
     remote_dir: TempDir,
 }
 
