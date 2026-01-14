@@ -22,16 +22,16 @@ fn phase7_subscribe_streams_events_in_order() {
 
     let (origin, start_seq) = current_origin_seq(&repo, &namespace);
 
-    let report = run_load(repo.clone(), 5, &namespace);
-    assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
-
     let required = require_min_seen(&namespace, origin, start_seq);
     let read = ReadConsistency {
         namespace: Some(namespace.as_str().to_string()),
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
-    let mut client = StreamingClient::subscribe_with_read(repo, read).expect("subscribe");
+    let mut client = StreamingClient::subscribe_with_read(repo.clone(), read).expect("subscribe");
+
+    let report = run_load(repo, 5, &namespace);
+    assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
     let seqs = collect_origin_seqs(&mut client, origin, start_seq, report.successes);
 
     let expected: Vec<u64> = ((start_seq + 1)..=(start_seq + report.successes as u64)).collect();
@@ -80,10 +80,15 @@ fn phase7_subscribe_gates_on_require_min_seen() {
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
-    let mut client = StreamingClient::subscribe_with_read(repo, read).expect("subscribe");
+    let mut client = StreamingClient::subscribe_with_read(repo.clone(), read).expect("subscribe");
+
+    let report = run_load(repo, 1, &namespace);
+    assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
+
+    let expected_seq = required_seq + 1;
     let event = client.next_event().expect("next event").expect("event");
     assert_eq!(event.event_id.origin_replica_id, origin);
-    assert!(event.event_id.origin_seq.get() >= required_seq);
+    assert_eq!(event.event_id.origin_seq.get(), expected_seq);
 }
 
 #[test]
@@ -95,9 +100,6 @@ fn phase7_subscribe_multiple_clients_receive_same_events() {
     let repo = fixture.repo_path().to_path_buf();
     let (origin, start_seq) = current_origin_seq(&repo, &namespace);
 
-    let report = run_load(repo.clone(), 3, &namespace);
-    assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
-
     let required = require_min_seen(&namespace, origin, start_seq);
     let read = ReadConsistency {
         namespace: Some(namespace.as_str().to_string()),
@@ -108,7 +110,10 @@ fn phase7_subscribe_multiple_clients_receive_same_events() {
     let mut client_a = StreamingClient::subscribe_with_read(repo.clone(), read.clone())
         .expect("subscribe client A");
     let mut client_b =
-        StreamingClient::subscribe_with_read(repo, read).expect("subscribe client B");
+        StreamingClient::subscribe_with_read(repo.clone(), read).expect("subscribe client B");
+
+    let report = run_load(repo, 3, &namespace);
+    assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
     let seqs_a = collect_origin_seqs(&mut client_a, origin, start_seq, report.successes);
     let seqs_b = collect_origin_seqs(&mut client_b, origin, start_seq, report.successes);
