@@ -1,6 +1,6 @@
 //! Checkpoint snapshot builder (coordinator-side barrier).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use serde::Serialize;
