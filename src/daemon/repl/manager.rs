@@ -879,10 +879,8 @@ mod tests {
                 max: Duration::from_millis(10),
             },
         };
-        let manager = ReplicationManager::new(
-            SharedSessionStore::new(TestStore::default()),
-            config,
-        );
+        let manager =
+            ReplicationManager::new(SharedSessionStore::new(TestStore::default()), config);
 
         let handle = manager.start();
         let msg = rx.recv_timeout(Duration::from_secs(1)).expect("hello");
@@ -936,10 +934,8 @@ mod tests {
                 max: Duration::from_millis(10),
             },
         };
-        let manager = ReplicationManager::new(
-            SharedSessionStore::new(TestStore::default()),
-            config,
-        );
+        let manager =
+            ReplicationManager::new(SharedSessionStore::new(TestStore::default()), config);
 
         let handle = manager.start();
         rx.recv_timeout(Duration::from_secs(1)).expect("hello");
@@ -1011,10 +1007,8 @@ mod tests {
                 max: Duration::from_millis(40),
             },
         };
-        let manager = ReplicationManager::new(
-            SharedSessionStore::new(TestStore::default()),
-            config,
-        );
+        let manager =
+            ReplicationManager::new(SharedSessionStore::new(TestStore::default()), config);
 
         let handle = manager.start();
         let (seen_tx, seen_rx) = crossbeam::channel::bounded(2);
