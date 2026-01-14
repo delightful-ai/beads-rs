@@ -301,11 +301,7 @@ fn record_state(name: &'static str, value: &MetricValue, labels: &[MetricLabel])
             guard.gauges.insert(key, *value);
         }
         MetricValue::Histogram(value) => {
-            guard
-                .histograms
-                .entry(key)
-                .or_default()
-                .record(*value);
+            guard.histograms.entry(key).or_default().record(*value);
         }
     }
 }
@@ -442,17 +438,13 @@ mod tests {
         set_ipc_inflight(3);
 
         let snapshot = snapshot();
-        assert!(snapshot
-            .counters
-            .iter()
-            .any(|m| m.name == "wal_append_ok"));
-        assert!(snapshot
-            .histograms
-            .iter()
-            .any(|m| m.name == "wal_append_duration"));
-        assert!(snapshot
-            .gauges
-            .iter()
-            .any(|m| m.name == "ipc_inflight"));
+        assert!(snapshot.counters.iter().any(|m| m.name == "wal_append_ok"));
+        assert!(
+            snapshot
+                .histograms
+                .iter()
+                .any(|m| m.name == "wal_append_duration")
+        );
+        assert!(snapshot.gauges.iter().any(|m| m.name == "ipc_inflight"));
     }
 }

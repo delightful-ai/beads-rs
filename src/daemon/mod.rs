@@ -7,8 +7,8 @@
 //! - IPC over Unix socket
 //! - Background sync scheduling
 
-pub mod admission;
 pub mod admin;
+pub mod admission;
 pub mod broadcast;
 pub mod checkpoint_scheduler;
 pub mod clock;

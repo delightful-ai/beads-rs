@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 use super::Clock;
 use super::broadcast::BroadcastEvent;
-use super::checkpoint_scheduler::{CheckpointGroupConfig, CheckpointGroupKey, CheckpointScheduler};
+use super::checkpoint_scheduler::{
+    CheckpointGroupConfig, CheckpointGroupKey, CheckpointGroupSnapshot, CheckpointScheduler,
+};
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
     ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
@@ -396,6 +398,13 @@ impl Daemon {
         self.stores
             .get_mut(&proof.store_id)
             .ok_or(OpError::Internal("loaded store missing from state"))
+    }
+
+    pub(crate) fn checkpoint_group_snapshots(
+        &self,
+        store_id: StoreId,
+    ) -> Vec<CheckpointGroupSnapshot> {
+        self.checkpoint_scheduler.snapshot_for_store(store_id)
     }
 
     /// Get repo state by raw remote URL (for internal sync waiters, etc.).
@@ -1471,8 +1480,11 @@ impl Daemon {
                     checkpoint_id = %outcome.checkpoint_id,
                     "checkpoint publish succeeded"
                 );
-                self.checkpoint_scheduler
-                    .complete_success(&key, Instant::now(), self.clock.wall_ms());
+                self.checkpoint_scheduler.complete_success(
+                    &key,
+                    Instant::now(),
+                    self.clock.wall_ms(),
+                );
             }
             Err(err) => {
                 tracing::warn!(

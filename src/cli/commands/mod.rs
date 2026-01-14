@@ -1,3 +1,4 @@
+pub(super) mod admin;
 pub(super) mod blocked;
 pub(super) mod claim;
 pub(super) mod close;
@@ -26,4 +27,3 @@ pub(super) mod sync;
 pub(super) mod unclaim;
 pub(super) mod update;
 pub(super) mod upgrade;
-pub(super) mod admin;

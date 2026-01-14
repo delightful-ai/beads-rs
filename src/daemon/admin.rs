@@ -11,10 +11,10 @@ use crate::api::{
     AdminMetricsOutput, AdminReplicationNamespace, AdminReplicationPeer, AdminStatusOutput,
     AdminWalNamespace, AdminWalSegment,
 };
-use crate::core::{NamespaceId, ReplicaId, StoreId, Watermarks};
+use crate::core::{NamespaceId, ReplicaId, Watermarks};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::SegmentRow;
+use crate::daemon::wal::{SegmentRow, WalIndex};
 
 use super::core::Daemon;
 use super::ipc::ReadConsistency;
@@ -49,7 +49,8 @@ impl Daemon {
             Err(err) => return Response::err(err),
         };
         let replication = build_replication_status(store, &namespaces);
-        let checkpoints = build_checkpoint_status(&self.checkpoint_scheduler, store.meta.store_id());
+        let checkpoints =
+            build_checkpoint_status(self.checkpoint_group_snapshots(store.meta.store_id()));
 
         let output = AdminStatusOutput {
             store_id: store.meta.store_id(),
@@ -140,7 +141,9 @@ fn build_wal_status(
 }
 
 fn segment_bytes(segment: &SegmentRow) -> Option<u64> {
-    segment.final_len.or_else(|| fs::metadata(&segment.segment_path).ok().map(|m| m.len()))
+    segment
+        .final_len
+        .or_else(|| fs::metadata(&segment.segment_path).ok().map(|m| m.len()))
 }
 
 fn build_replication_status(
@@ -160,9 +163,11 @@ fn build_replication_status(
             let lag_by_namespace = namespaces
                 .iter()
                 .map(|namespace| {
-                    let local_durable = seq_for(&store.watermarks_durable, namespace, &local_replica);
+                    let local_durable =
+                        seq_for(&store.watermarks_durable, namespace, &local_replica);
                     let peer_durable = seq_for(&snapshot.durable, namespace, &local_replica);
-                    let local_applied = seq_for(&store.watermarks_applied, namespace, &local_replica);
+                    let local_applied =
+                        seq_for(&store.watermarks_applied, namespace, &local_replica);
                     let peer_applied = seq_for(&snapshot.applied, namespace, &local_replica);
                     AdminReplicationNamespace {
                         namespace: namespace.clone(),
@@ -189,11 +194,9 @@ fn build_replication_status(
 }
 
 fn build_checkpoint_status(
-    scheduler: &crate::daemon::checkpoint_scheduler::CheckpointScheduler,
-    store_id: StoreId,
+    snapshots: Vec<crate::daemon::checkpoint_scheduler::CheckpointGroupSnapshot>,
 ) -> Vec<AdminCheckpointGroup> {
-    scheduler
-        .snapshot_for_store(store_id)
+    snapshots
         .into_iter()
         .map(|snapshot| AdminCheckpointGroup {
             group: snapshot.group,
