@@ -10,7 +10,7 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
@@ -1585,6 +1585,11 @@ pub fn socket_path() -> PathBuf {
         .unwrap_or_else(|_| per_user_tmp_dir().join("daemon.sock"))
 }
 
+/// Build a daemon socket path for a specific runtime directory.
+pub fn socket_path_for_runtime_dir(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("beads").join("daemon.sock")
+}
+
 /// Read daemon metadata from the meta file.
 /// Returns None if file doesn't exist or is corrupt.
 fn read_daemon_meta() -> Option<crate::api::DaemonInfo> {
@@ -1618,6 +1623,65 @@ fn socket_dir_candidates() -> Vec<PathBuf> {
 // =============================================================================
 // Client - Send requests to daemon
 // =============================================================================
+
+#[derive(Clone, Debug)]
+pub struct IpcClient {
+    socket: PathBuf,
+    autostart: bool,
+}
+
+impl IpcClient {
+    pub fn new() -> Self {
+        Self {
+            socket: socket_path(),
+            autostart: true,
+        }
+    }
+
+    pub fn for_socket_path(socket: PathBuf) -> Self {
+        Self {
+            socket,
+            autostart: true,
+        }
+    }
+
+    pub fn for_runtime_dir(runtime_dir: &Path) -> Self {
+        Self::for_socket_path(socket_path_for_runtime_dir(runtime_dir))
+    }
+
+    pub fn with_autostart(mut self, autostart: bool) -> Self {
+        self.autostart = autostart;
+        self
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket
+    }
+
+    pub fn send_request(&self, req: &Request) -> Result<Response, IpcError> {
+        if self.autostart {
+            send_request_at(&self.socket, req)
+        } else {
+            send_request_no_autostart_at(&self.socket, req)
+        }
+    }
+
+    pub fn send_request_no_autostart(&self, req: &Request) -> Result<Response, IpcError> {
+        send_request_no_autostart_at(&self.socket, req)
+    }
+
+    pub fn subscribe_stream(&self, req: &Request) -> Result<SubscriptionStream, IpcError> {
+        if self.autostart {
+            subscribe_stream_at(&self.socket, req)
+        } else {
+            subscribe_stream_no_autostart_at(&self.socket, req)
+        }
+    }
+
+    pub fn wait_for_daemon_ready(&self, expected_version: &str) -> Result<(), IpcError> {
+        wait_for_daemon_ready_at(&self.socket, expected_version)
+    }
+}
 
 fn should_autostart(err: &std::io::Error) -> bool {
     matches!(
@@ -1829,12 +1893,11 @@ fn send_request_over_stream(stream: UnixStream, req: &Request) -> Result<Respons
 ///
 /// Retries up to 3 times on version mismatch or stale socket errors,
 /// with exponential backoff between attempts.
-pub fn send_request(req: &Request) -> Result<Response, IpcError> {
+pub fn send_request_at(socket: &PathBuf, req: &Request) -> Result<Response, IpcError> {
     const MAX_ATTEMPTS: u32 = 3;
-    let socket = socket_path();
 
     for attempt in 1..=MAX_ATTEMPTS {
-        let stream = match connect_with_autostart(&socket) {
+        let stream = match connect_with_autostart(socket) {
             Ok(s) => s,
             Err(e) => {
                 if attempt >= MAX_ATTEMPTS {
@@ -1857,9 +1920,9 @@ pub fn send_request(req: &Request) -> Result<Response, IpcError> {
 
                 // Try to restart the daemon
                 if let Some(info) = daemon {
-                    let _ = kill_daemon_forcefully(info.pid, &socket);
+                    let _ = kill_daemon_forcefully(info.pid, socket);
                 } else {
-                    let _ = try_restart_daemon_by_socket(&socket);
+                    let _ = try_restart_daemon_by_socket(socket);
                 }
 
                 // Exponential backoff: 100ms, 200ms, 400ms
@@ -1869,7 +1932,7 @@ pub fn send_request(req: &Request) -> Result<Response, IpcError> {
             Err(IpcError::DaemonUnavailable(ref msg)) if attempt < MAX_ATTEMPTS => {
                 tracing::debug!("daemon unavailable ({}), retrying", msg);
                 // Socket might have gone stale mid-request
-                let _ = try_restart_daemon_by_socket(&socket);
+                let _ = try_restart_daemon_by_socket(socket);
                 let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
                 std::thread::sleep(backoff);
             }
@@ -1882,14 +1945,23 @@ pub fn send_request(req: &Request) -> Result<Response, IpcError> {
     ))
 }
 
+pub fn send_request(req: &Request) -> Result<Response, IpcError> {
+    let socket = socket_path();
+    send_request_at(&socket, req)
+}
+
 /// Send a request without auto-starting the daemon.
 ///
 /// Returns `DaemonUnavailable` if daemon is not running.
-pub fn send_request_no_autostart(req: &Request) -> Result<Response, IpcError> {
-    let socket = socket_path();
-    let stream = UnixStream::connect(&socket)
+pub fn send_request_no_autostart_at(socket: &PathBuf, req: &Request) -> Result<Response, IpcError> {
+    let stream = UnixStream::connect(socket)
         .map_err(|e| IpcError::DaemonUnavailable(format!("daemon not running: {}", e)))?;
     send_request_over_stream(stream, req)
+}
+
+pub fn send_request_no_autostart(req: &Request) -> Result<Response, IpcError> {
+    let socket = socket_path();
+    send_request_no_autostart_at(&socket, req)
 }
 
 /// Stream responses for a subscribe request.
@@ -1911,7 +1983,10 @@ impl SubscriptionStream {
 }
 
 /// Send a subscribe request and return a stream of responses.
-pub fn subscribe_stream(req: &Request) -> Result<SubscriptionStream, IpcError> {
+pub fn subscribe_stream_at(
+    socket: &PathBuf,
+    req: &Request,
+) -> Result<SubscriptionStream, IpcError> {
     if !matches!(req, Request::Subscribe { .. }) {
         return Err(IpcError::InvalidRequest {
             field: Some("op".into()),
@@ -1920,10 +1995,8 @@ pub fn subscribe_stream(req: &Request) -> Result<SubscriptionStream, IpcError> {
     }
 
     const MAX_ATTEMPTS: u32 = 3;
-    let socket = socket_path();
-
     for attempt in 1..=MAX_ATTEMPTS {
-        let stream = match connect_with_autostart(&socket) {
+        let stream = match connect_with_autostart(socket) {
             Ok(s) => s,
             Err(e) => {
                 if attempt >= MAX_ATTEMPTS {
@@ -1948,9 +2021,9 @@ pub fn subscribe_stream(req: &Request) -> Result<SubscriptionStream, IpcError> {
                         MAX_ATTEMPTS
                     );
                     if let Some(info) = daemon {
-                        let _ = kill_daemon_forcefully(info.pid, &socket);
+                        let _ = kill_daemon_forcefully(info.pid, socket);
                     } else {
-                        let _ = try_restart_daemon_by_socket(&socket);
+                        let _ = try_restart_daemon_by_socket(socket);
                     }
                     let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
                     std::thread::sleep(backoff);
@@ -1972,11 +2045,50 @@ pub fn subscribe_stream(req: &Request) -> Result<SubscriptionStream, IpcError> {
     ))
 }
 
+/// Send a subscribe request without auto-starting the daemon.
+pub fn subscribe_stream_no_autostart_at(
+    socket: &PathBuf,
+    req: &Request,
+) -> Result<SubscriptionStream, IpcError> {
+    if !matches!(req, Request::Subscribe { .. }) {
+        return Err(IpcError::InvalidRequest {
+            field: Some("op".into()),
+            reason: "subscribe_stream expects subscribe request".into(),
+        });
+    }
+
+    let stream = UnixStream::connect(socket)
+        .map_err(|e| IpcError::DaemonUnavailable(format!("daemon not running: {}", e)))?;
+    let mut writer = stream;
+    let reader_stream = writer.try_clone()?;
+    let mut reader = BufReader::new(reader_stream);
+    verify_daemon_version(&mut writer, &mut reader)?;
+    write_req_line(&mut writer, req)?;
+    Ok(SubscriptionStream {
+        _writer: writer,
+        reader,
+    })
+}
+
+/// Send a subscribe request and return a stream of responses.
+pub fn subscribe_stream(req: &Request) -> Result<SubscriptionStream, IpcError> {
+    let socket = socket_path();
+    subscribe_stream_at(&socket, req)
+}
+
 /// Wait for daemon to be ready and responding with expected version.
 ///
 /// Returns Ok if daemon is responsive with matching version, Err on timeout (30s).
 pub fn wait_for_daemon_ready(expected_version: &str) -> Result<(), IpcError> {
     let socket = socket_path();
+    wait_for_daemon_ready_at(&socket, expected_version)
+}
+
+/// Wait for daemon to be ready and responding with expected version.
+pub fn wait_for_daemon_ready_at(
+    socket: &PathBuf,
+    expected_version: &str,
+) -> Result<(), IpcError> {
     let deadline = SystemTime::now() + Duration::from_secs(30);
     let mut backoff = Duration::from_millis(50);
 
