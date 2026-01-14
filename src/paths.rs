@@ -1,5 +1,6 @@
 //! XDG directory helpers for config/data locations.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -12,6 +13,10 @@ use crate::core::{NamespaceId, StoreId};
 /// Uses `BD_DATA_DIR` if set, otherwise `$XDG_DATA_HOME/beads-rs` or
 /// `~/.local/share/beads-rs`.
 pub(crate) fn data_dir() -> PathBuf {
+    if let Some(dir) = thread_local_data_dir_override() {
+        return dir;
+    }
+
     #[cfg(test)]
     if let Some(dir) = test_data_dir_override() {
         return dir;
@@ -34,6 +39,40 @@ pub(crate) fn data_dir() -> PathBuf {
                 .join("share")
         })
         .join("beads-rs")
+}
+
+#[doc(hidden)]
+pub struct DataDirOverride {
+    prev: Option<PathBuf>,
+}
+
+impl DataDirOverride {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        let prev = TEST_DATA_DIR_OVERRIDE.with(|cell| cell.replace(path));
+        Self { prev }
+    }
+}
+
+impl Drop for DataDirOverride {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        TEST_DATA_DIR_OVERRIDE.with(|cell| {
+            cell.replace(prev);
+        });
+    }
+}
+
+#[doc(hidden)]
+pub fn override_data_dir_for_tests(path: Option<PathBuf>) -> DataDirOverride {
+    DataDirOverride::new(path)
+}
+
+fn thread_local_data_dir_override() -> Option<PathBuf> {
+    TEST_DATA_DIR_OVERRIDE.with(|cell| cell.borrow().clone())
+}
+
+thread_local! {
+    static TEST_DATA_DIR_OVERRIDE: RefCell<Option<PathBuf>> = RefCell::new(None);
 }
 
 #[cfg(test)]
