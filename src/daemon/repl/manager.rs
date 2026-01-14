@@ -773,11 +773,11 @@ mod tests {
                 let mut writer = FrameWriter::new(stream, 1024 * 1024);
                 let mut welcome_sent = false;
                 loop {
-                    let Some(bytes) = match reader.read_next() {
+                    let Some(bytes) = (match reader.read_next() {
                         Ok(Some(bytes)) => Some(bytes),
                         Ok(None) => None,
                         Err(_) => None,
-                    } else {
+                    }) else {
                         break;
                     };
                     let envelope =
