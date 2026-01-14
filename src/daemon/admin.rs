@@ -21,8 +21,9 @@ use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::scrubber::{ScrubOptions, scrub_store};
 use crate::daemon::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::{ReplayStats, SegmentRow, WalIndex, rebuild_index};
+use crate::daemon::wal::{ReplayStats, WalIndex, rebuild_index};
 use crate::git::checkpoint::layout::SHARD_COUNT;
+use crate::paths;
 
 use super::core::Daemon;
 use super::ipc::ReadConsistency;
@@ -468,6 +469,7 @@ fn build_wal_status(
 ) -> Result<Vec<AdminWalNamespace>, OpError> {
     let reader = store.wal_index.reader();
     let mut out = Vec::new();
+    let store_dir = paths::store_dir(store.meta.store_id());
     for namespace in namespaces {
         let mut segments = reader
             .list_segments(namespace)
@@ -480,7 +482,8 @@ fn build_wal_status(
         let mut segment_infos = Vec::new();
         let mut total_bytes = 0u64;
         for segment in segments {
-            let bytes = segment_bytes(&segment);
+            let resolved_path = resolve_segment_path(&store_dir, &segment.segment_path);
+            let bytes = segment_bytes(&resolved_path, segment.final_len);
             if let Some(value) = bytes {
                 total_bytes = total_bytes.saturating_add(value);
             }
@@ -491,7 +494,7 @@ fn build_wal_status(
                 sealed: segment.sealed,
                 final_len: segment.final_len,
                 bytes,
-                path: segment.segment_path.to_string_lossy().to_string(),
+                path: resolved_path.to_string_lossy().to_string(),
             });
         }
         out.push(AdminWalNamespace {
@@ -504,10 +507,16 @@ fn build_wal_status(
     Ok(out)
 }
 
-fn segment_bytes(segment: &SegmentRow) -> Option<u64> {
-    segment
-        .final_len
-        .or_else(|| fs::metadata(&segment.segment_path).ok().map(|m| m.len()))
+fn segment_bytes(path: &Path, final_len: Option<u64>) -> Option<u64> {
+    final_len.or_else(|| fs::metadata(path).ok().map(|m| m.len()))
+}
+
+fn resolve_segment_path(store_dir: &Path, segment_path: &Path) -> PathBuf {
+    if segment_path.is_absolute() {
+        segment_path.to_path_buf()
+    } else {
+        store_dir.join(segment_path)
+    }
 }
 
 fn build_replication_status(
