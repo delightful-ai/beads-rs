@@ -770,16 +770,13 @@ mod tests {
     }
 
     fn spawn_peer_listener(
+        peer_store: StoreIdentity,
+        peer_replica: ReplicaId,
         respond_with_welcome: bool,
     ) -> (std::net::SocketAddr, Receiver<ReplMessage>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (tx, rx) = crossbeam::channel::unbounded();
-        let local_store = StoreIdentity::new(
-            crate::core::StoreId::new(Uuid::from_bytes([7u8; 16])),
-            crate::core::StoreEpoch::ZERO,
-        );
-        let local_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
 
         thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {
@@ -802,8 +799,8 @@ mod tests {
                     if respond_with_welcome && !welcome_sent {
                         if let ReplMessage::Hello(hello) = envelope.message {
                             let mut config = SessionConfig::new(
-                                local_store,
-                                local_replica,
+                                peer_store,
+                                peer_replica,
                                 &crate::core::Limits::default(),
                             );
                             config.offered_namespaces = hello.requested_namespaces.clone();
@@ -854,14 +851,14 @@ mod tests {
 
     #[test]
     fn manager_connects_and_sends_hello() {
-        let (addr, rx) = spawn_peer_listener(false);
-        let addr = addr.to_string();
         let local_store = StoreIdentity::new(
             crate::core::StoreId::new(Uuid::from_bytes([1u8; 16])),
             crate::core::StoreEpoch::ZERO,
         );
         let local_replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, false);
+        let addr = addr.to_string();
 
         let config = ReplicationManagerConfig {
             local_store,
@@ -902,15 +899,14 @@ mod tests {
 
     #[test]
     fn manager_fans_out_events_and_respects_policy() {
-        let (addr, rx) = spawn_peer_listener(true);
-        let addr = addr.to_string();
-
         let local_store = StoreIdentity::new(
             crate::core::StoreId::new(Uuid::from_bytes([4u8; 16])),
             crate::core::StoreEpoch::ZERO,
         );
         let local_replica = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true);
+        let addr = addr.to_string();
 
         let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
             max_subscribers: 4,
