@@ -213,6 +213,16 @@ impl<K> Watermarks<K> {
             .and_then(|origins| origins.get(origin))
     }
 
+    pub fn origins(
+        &self,
+        namespace: &NamespaceId,
+    ) -> impl Iterator<Item = (&ReplicaId, &Watermark<K>)> {
+        self.inner
+            .get(namespace)
+            .into_iter()
+            .flat_map(|origins| origins.iter())
+    }
+
     pub fn advance_contiguous(
         &mut self,
         namespace: &NamespaceId,

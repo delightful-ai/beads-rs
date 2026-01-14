@@ -167,6 +167,10 @@ impl NormalizedReadConsistency {
     pub(crate) fn namespace(&self) -> &NamespaceId {
         &self.namespace
     }
+
+    pub(crate) fn require_min_seen(&self) -> Option<&Watermarks<Applied>> {
+        self.require_min_seen.as_ref()
+    }
 }
 
 /// The daemon coordinator.
