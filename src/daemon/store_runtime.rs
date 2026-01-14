@@ -25,6 +25,9 @@ use crate::daemon::wal::{
     IndexDurabilityMode, SqliteWalIndex, Wal, WalIndex, WalIndexError, WalReplayError,
     catch_up_index, rebuild_index,
 };
+use crate::git::checkpoint::{
+    CheckpointSnapshot, CheckpointSnapshotError, build_snapshot, policy_hash,
+};
 use crate::paths;
 
 const STORE_FORMAT_VERSION: u32 = 1;
@@ -166,6 +169,28 @@ impl StoreRuntime {
             .into_iter()
             .find(|row| row.actor_id == *actor)
             .map(|row| WriteStamp::new(row.last_physical_ms, row.last_logical)))
+    }
+
+    pub fn checkpoint_snapshot(
+        &self,
+        checkpoint_group: &str,
+        namespaces: &[NamespaceId],
+        created_at_ms: u64,
+    ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
+        let policy_hash = policy_hash(&self.policies)?;
+        let roster_hash = None;
+        build_snapshot(
+            checkpoint_group.to_string(),
+            namespaces.to_vec(),
+            self.meta.store_id(),
+            self.meta.store_epoch(),
+            created_at_ms,
+            self.meta.replica_id,
+            policy_hash,
+            roster_hash,
+            &self.repo_state.state,
+            &self.watermarks_durable,
+        )
     }
 }
 
