@@ -238,7 +238,7 @@ impl Session {
         &mut self,
         hello: Hello,
         store: &mut impl SessionStore,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> Vec<SessionAction> {
         if self.role != SessionRole::Inbound || self.phase != SessionPhase::Connecting {
             return self.invalid_request("unexpected HELLO");
