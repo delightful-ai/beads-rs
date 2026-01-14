@@ -35,7 +35,6 @@ pub struct ReplIngestRequest {
 pub struct ReplSessionStore {
     store_id: StoreId,
     wal_index: Arc<dyn WalIndex>,
-    limits: Limits,
     ingest_tx: Sender<ReplIngestRequest>,
 }
 
@@ -43,13 +42,11 @@ impl ReplSessionStore {
     pub fn new(
         store_id: StoreId,
         wal_index: Arc<dyn WalIndex>,
-        limits: Limits,
         ingest_tx: Sender<ReplIngestRequest>,
     ) -> Self {
         Self {
             store_id,
             wal_index,
-            limits,
             ingest_tx,
         }
     }

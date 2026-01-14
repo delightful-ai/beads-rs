@@ -6,11 +6,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use crossbeam::channel::Sender;
 use git2::{ErrorCode as GitErrorCode, Repository};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
     ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
 };
+use super::broadcast::BroadcastEvent;
 use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
@@ -31,10 +33,17 @@ use super::repo::{
 use super::scheduler::SyncScheduler;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError};
 use super::wal::{
-    EventWalError, FrameReader, Wal, WalEntry, WalIndex, WalIndexError, WalReplayError,
+    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentConfig, SegmentRow,
+    SegmentWriter, Wal, WalEntry, WalIndex, WalIndexError, WalReplayError,
+};
+use super::repl::{
+    BackoffPolicy, IngestOutcome, ReplIngestRequest, ReplSessionStore, ReplicationManager,
+    ReplicationManagerConfig, ReplicationManagerHandle, ReplicationServer,
+    ReplicationServerConfig, ReplicationServerHandle, SharedSessionStore, WalRangeReader,
 };
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
+use crate::core::error::details as error_details;
 
 /// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded`,
 /// `Daemon::ensure_repo_loaded_strict`, or `Daemon::ensure_repo_fresh`.
@@ -124,9 +133,11 @@ struct StorePathMap {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, Applied, BeadId, CanonicalState, ClientRequestId, CoreError, DurabilityClass,
-    ErrorCode, EventBody, Limits, NamespaceId, SegmentId, Stamp, StoreEpoch, StoreId,
-    StoreIdentity, WallClock, Watermarks, WriteStamp, apply_event, decode_event_body,
+    ActorId, Applied, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
+    DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, Limits, NamespaceId, PrevVerified,
+    ReplicaId, ReplicaRoster, SegmentId, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
+    StoreIdentity, VerifiedEvent, WallClock,
+    Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::collision::{detect_collisions, resolve_collisions};
@@ -134,6 +145,7 @@ use crate::git::sync::SyncOutcome;
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
 const LOAD_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_REPL_MAX_CONNECTIONS: usize = 32;
 
 #[derive(Clone, Debug)]
 pub(crate) struct NormalizedMutationMeta {
@@ -184,6 +196,28 @@ pub struct Daemon {
 
     /// Realtime safety limits.
     limits: Limits,
+
+    /// Replication ingest channel (set by run_state_loop).
+    repl_ingest_tx: Option<Sender<ReplIngestRequest>>,
+
+    /// Replication runtime handles per store.
+    repl_handles: BTreeMap<StoreId, ReplicationHandles>,
+}
+
+struct ReplicationHandles {
+    manager: Option<ReplicationManagerHandle>,
+    server: Option<ReplicationServerHandle>,
+}
+
+impl ReplicationHandles {
+    fn shutdown(self) {
+        if let Some(handle) = self.manager {
+            handle.shutdown();
+        }
+        if let Some(handle) = self.server {
+            handle.shutdown();
+        }
+    }
 }
 
 impl Daemon {
@@ -214,6 +248,8 @@ impl Daemon {
             wal: Arc::new(wal),
             export_ctx,
             limits,
+            repl_ingest_tx: None,
+            repl_handles: BTreeMap::new(),
         }
     }
 
@@ -235,6 +271,10 @@ impl Daemon {
     /// Get the safety limits.
     pub fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    pub(crate) fn set_repl_ingest_tx(&mut self, tx: Sender<ReplIngestRequest>) {
+        self.repl_ingest_tx = Some(tx);
     }
 
     /// Get mutable clock.
@@ -677,7 +717,316 @@ impl Daemon {
 
         // Initial Go-compat export for newly loaded repo
         self.export_go_compat(store_id, remote);
+
+        if let Err(err) = self.ensure_replication_runtime(store_id) {
+            tracing::warn!("replication runtime init failed for {store_id}: {err}");
+        }
         Ok(())
+    }
+
+    fn ensure_replication_runtime(&mut self, store_id: StoreId) -> Result<(), OpError> {
+        if self.repl_handles.contains_key(&store_id) {
+            return Ok(());
+        }
+
+        let Some(ingest_tx) = self.repl_ingest_tx.clone() else {
+            tracing::warn!("replication ingest channel not initialized");
+            return Ok(());
+        };
+
+        let store = self
+            .stores
+            .get(&store_id)
+            .ok_or(OpError::Internal("loaded store missing from state"))?;
+
+        let wal_index: Arc<dyn WalIndex> = Arc::clone(&store.wal_index);
+        let wal_reader = Some(WalRangeReader::new(store_id, wal_index.clone(), self.limits.clone()));
+        let session_store = SharedSessionStore::new(ReplSessionStore::new(
+            store_id,
+            wal_index,
+            ingest_tx,
+        ));
+
+        let roster = load_replica_roster(store_id)?;
+        let peers = Vec::new();
+
+        let manager_config = ReplicationManagerConfig {
+            local_store: store.meta.identity,
+            local_replica_id: store.meta.replica_id,
+            admission: store.admission.clone(),
+            broadcaster: store.broadcaster.clone(),
+            peer_acks: store.peer_acks.clone(),
+            policies: store.policies.clone(),
+            roster: roster.clone(),
+            peers,
+            wal_reader: wal_reader.clone(),
+            limits: self.limits.clone(),
+            backoff: BackoffPolicy {
+                base: Duration::from_millis(250),
+                max: Duration::from_secs(5),
+            },
+        };
+        let manager_handle = ReplicationManager::new(session_store.clone(), manager_config).start();
+
+        let max_connections = if roster.is_some() {
+            None
+        } else {
+            replication_max_connections()
+        };
+        let server_config = ReplicationServerConfig {
+            listen_addr: replication_listen_addr(),
+            local_store: store.meta.identity,
+            local_replica_id: store.meta.replica_id,
+            admission: store.admission.clone(),
+            broadcaster: store.broadcaster.clone(),
+            peer_acks: store.peer_acks.clone(),
+            policies: store.policies.clone(),
+            roster,
+            wal_reader,
+            limits: self.limits.clone(),
+            max_connections,
+        };
+
+        let server_handle = match ReplicationServer::new(session_store, server_config).start() {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                tracing::warn!("replication server failed to start: {err}");
+                None
+            }
+        };
+
+        self.repl_handles.insert(
+            store_id,
+            ReplicationHandles {
+                manager: Some(manager_handle),
+                server: server_handle,
+            },
+        );
+
+        Ok(())
+    }
+
+    pub(crate) fn handle_repl_ingest(&mut self, request: ReplIngestRequest) {
+        let outcome = self.ingest_remote_batch(
+            request.store_id,
+            request.namespace,
+            request.origin,
+            request.batch,
+            request.now_ms,
+        );
+        let _ = request.respond.send(outcome);
+    }
+
+    pub(crate) fn shutdown_replication(&mut self) {
+        let handles = std::mem::take(&mut self.repl_handles);
+        for (_, handle) in handles {
+            handle.shutdown();
+        }
+    }
+
+    fn ingest_remote_batch(
+        &mut self,
+        store_id: StoreId,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        batch: Vec<VerifiedEvent<PrevVerified>>,
+        now_ms: u64,
+    ) -> Result<IngestOutcome, Box<ErrorPayload>> {
+        let store = self.stores.get_mut(&store_id).ok_or_else(|| {
+            Box::new(ErrorPayload::new(
+                ErrorCode::Internal,
+                "store not loaded",
+                true,
+            ))
+        })?;
+
+        if batch.is_empty() {
+            let durable = store
+                .watermarks_durable
+                .get(&namespace, &origin)
+                .copied()
+                .unwrap_or_else(Watermark::genesis);
+            let applied = store
+                .watermarks_applied
+                .get(&namespace, &origin)
+                .copied()
+                .unwrap_or_else(Watermark::genesis);
+            return Ok(IngestOutcome { durable, applied });
+        }
+
+        let store_dir = paths::store_dir(store_id);
+        let mut writer = SegmentWriter::open(
+            &store_dir,
+            &store.meta,
+            &namespace,
+            now_ms,
+            SegmentConfig::from_limits(self.limits()),
+        )
+        .map_err(|err| Box::new(event_wal_error_payload(&namespace, None, None, err)))?;
+
+        let wal_index = Arc::clone(&store.wal_index);
+        let mut txn = wal_index
+            .writer()
+            .begin_txn()
+            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+
+        for event in &batch {
+            if event.body.namespace != namespace || event.body.origin_replica_id != origin {
+                return Err(Box::new(ErrorPayload::new(
+                    ErrorCode::Internal,
+                    "replication batch has mismatched origin",
+                    false,
+                )));
+            }
+
+            let record = Record {
+                header: RecordHeader {
+                    origin_replica_id: origin,
+                    origin_seq: event.body.origin_seq.get(),
+                    event_time_ms: event.body.event_time_ms,
+                    txn_id: event.body.txn_id,
+                    client_request_id: event.body.client_request_id,
+                    request_sha256: None,
+                    sha256: event.sha256.0,
+                    prev_sha256: event.prev.prev.map(|sha| sha.0),
+                },
+                payload: Bytes::copy_from_slice(event.bytes.as_ref()),
+            };
+
+            let append = writer
+                .append(&record, now_ms)
+                .map_err(|err| Box::new(event_wal_error_payload(&namespace, None, None, err)))?;
+            let last_indexed_offset = append.offset + append.len as u64;
+            let segment_row = SegmentRow {
+                namespace: namespace.clone(),
+                segment_id: append.segment_id,
+                segment_path: segment_rel_path(&store_dir, writer.current_path()),
+                created_at_ms: writer.current_created_at_ms(),
+                last_indexed_offset,
+                sealed: false,
+                final_len: None,
+            };
+
+            txn.upsert_segment(&segment_row)
+                .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            txn.record_event(
+                &namespace,
+                &event_id_for(origin, namespace.clone(), event.body.origin_seq),
+                event.sha256.0,
+                event.prev.prev.map(|sha| sha.0),
+                append.segment_id,
+                append.offset,
+                append.len,
+                event.body.event_time_ms,
+                event.body.txn_id,
+                event.body.client_request_id,
+                None,
+            )
+            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+
+            if let Some(hlc_max) = &event.body.hlc_max {
+                txn.update_hlc(&HlcRow {
+                    actor_id: hlc_max.actor_id.clone(),
+                    last_physical_ms: hlc_max.physical_ms,
+                    last_logical: hlc_max.logical,
+                })
+                .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            }
+        }
+
+        txn.commit()
+            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+
+        let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
+            let mut max_stamp = store.repo_state.last_seen_stamp.clone();
+            for event in &batch {
+            apply_event(&mut store.repo_state.state, &event.body).map_err(|err| {
+                Box::new(ErrorPayload::new(
+                    ErrorCode::Internal,
+                    format!("apply_event failed: {err}"),
+                    false,
+                ))
+            })?;
+
+            if let Some(hlc_max) = &event.body.hlc_max {
+                let stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
+                max_stamp = max_write_stamp(max_stamp, Some(stamp));
+            }
+
+            let event_id = event_id_for(origin, namespace.clone(), event.body.origin_seq);
+            let prev_sha = event.prev.prev.map(|sha| Sha256(sha.0));
+            let broadcast = BroadcastEvent::new(
+                event_id,
+                event.sha256,
+                prev_sha,
+                EventBytes::<Canonical>::new(Bytes::copy_from_slice(event.bytes.as_ref())),
+            );
+            if let Err(err) = store.broadcaster.publish(broadcast) {
+                tracing::warn!("event broadcast failed: {err}");
+            }
+
+            store
+                .watermarks_applied
+                .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
+                .map_err(|err| Box::new(watermark_error_payload(&namespace, &origin, err)))?;
+            store
+                .watermarks_durable
+                .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
+                .map_err(|err| Box::new(watermark_error_payload(&namespace, &origin, err)))?;
+        }
+
+            if let Some(stamp) = max_stamp.clone() {
+                let now_wall_ms = WallClock::now().0;
+                store.repo_state.last_seen_stamp = Some(stamp.clone());
+                store.repo_state.last_clock_skew =
+                    detect_clock_skew(now_wall_ms, stamp.wall_ms);
+            }
+            store.repo_state.mark_dirty();
+
+            let durable = store
+                .watermarks_durable
+                .get(&namespace, &origin)
+                .copied()
+                .unwrap_or_else(Watermark::genesis);
+            let applied = store
+                .watermarks_applied
+                .get(&namespace, &origin)
+                .copied()
+                .unwrap_or_else(Watermark::genesis);
+            let applied_head = store.applied_head_sha(&namespace, &origin);
+            let durable_head = store.durable_head_sha(&namespace, &origin);
+            let remote = store.primary_remote.clone();
+
+            (remote, max_stamp, durable, applied, applied_head, durable_head)
+        };
+
+        if let Some(stamp) = max_stamp.clone() {
+            self.clock.receive(&stamp);
+        }
+        self.schedule_sync(remote);
+
+        let applied_seq = applied.seq().get();
+        let durable_seq = durable.seq().get();
+
+        let mut watermark_txn = wal_index
+            .writer()
+            .begin_txn()
+            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+        watermark_txn
+            .update_watermark(
+                &namespace,
+                &origin,
+                applied_seq,
+                durable_seq,
+                applied_head,
+                durable_head,
+            )
+            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+        watermark_txn
+            .commit()
+            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+
+        Ok(IngestOutcome { durable, applied })
     }
 
     /// Ensure repo is loaded and reasonably fresh from remote.
@@ -2008,6 +2357,135 @@ fn parse_durability(raw: Option<String>) -> Result<DurabilityClass, OpError> {
         field: Some("durability".into()),
         reason: format!("unsupported durability class: {raw}"),
     })
+}
+
+fn replication_listen_addr() -> String {
+    std::env::var("BD_REPL_LISTEN_ADDR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "127.0.0.1:0".to_string())
+}
+
+fn replication_max_connections() -> Option<NonZeroUsize> {
+    if let Ok(raw) = std::env::var("BD_REPL_MAX_CONNECTIONS") {
+        match raw.trim().parse::<usize>() {
+            Ok(parsed) => return NonZeroUsize::new(parsed),
+            Err(err) => {
+                tracing::warn!("invalid BD_REPL_MAX_CONNECTIONS: {err}");
+            }
+        }
+    }
+    NonZeroUsize::new(DEFAULT_REPL_MAX_CONNECTIONS)
+}
+
+fn load_replica_roster(store_id: StoreId) -> Result<Option<ReplicaRoster>, OpError> {
+    let path = paths::replicas_path(store_id);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(OpError::ValidationFailed {
+                field: "replicas".into(),
+                reason: format!("failed to read {}: {err}", path.display()),
+            })
+        }
+    };
+
+    ReplicaRoster::from_toml_str(&raw)
+        .map(Some)
+        .map_err(|err| OpError::ValidationFailed {
+            field: "replicas".into(),
+            reason: format!("replica roster parse failed: {err}"),
+        })
+}
+
+fn event_id_for(origin: ReplicaId, namespace: NamespaceId, origin_seq: Seq1) -> EventId {
+    EventId::new(origin, namespace, origin_seq)
+}
+
+fn segment_rel_path(store_dir: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(store_dir).unwrap_or(path).to_path_buf()
+}
+
+fn event_wal_error_payload(
+    namespace: &NamespaceId,
+    segment_id: Option<SegmentId>,
+    offset: Option<u64>,
+    err: EventWalError,
+) -> ErrorPayload {
+    ErrorPayload::new(ErrorCode::WalCorrupt, "wal error", true).with_details(
+        error_details::WalCorruptDetails {
+            namespace: namespace.clone(),
+            segment_id,
+            offset,
+            reason: err.to_string(),
+        },
+    )
+}
+
+fn wal_index_error_payload(err: &WalIndexError) -> ErrorPayload {
+    match err {
+        WalIndexError::Equivocation {
+            namespace,
+            origin,
+            seq,
+            existing_sha256,
+            new_sha256,
+        } => ErrorPayload::new(ErrorCode::Equivocation, "equivocation", false).with_details(
+            error_details::EquivocationDetails {
+                eid: error_details::EventIdDetails {
+                    namespace: namespace.clone(),
+                    origin_replica_id: *origin,
+                    origin_seq: *seq,
+                },
+                existing_sha256: hex::encode(existing_sha256),
+                new_sha256: hex::encode(new_sha256),
+            },
+        ),
+        WalIndexError::ClientRequestIdReuseMismatch {
+            namespace,
+            client_request_id,
+            expected_request_sha256,
+            got_request_sha256,
+        } => ErrorPayload::new(
+            ErrorCode::ClientRequestIdReuseMismatch,
+            "client_request_id reuse mismatch",
+            false,
+        )
+        .with_details(error_details::ClientRequestIdReuseMismatchDetails {
+            namespace: namespace.clone(),
+            client_request_id: *client_request_id,
+            expected_request_sha256: hex::encode(expected_request_sha256),
+            got_request_sha256: hex::encode(got_request_sha256),
+        }),
+        _ => ErrorPayload::new(ErrorCode::IndexCorrupt, "index error", true).with_details(
+            error_details::IndexCorruptDetails {
+                reason: err.to_string(),
+            },
+        ),
+    }
+}
+
+fn watermark_error_payload(
+    namespace: &NamespaceId,
+    origin: &ReplicaId,
+    err: WatermarkError,
+) -> ErrorPayload {
+    match err {
+        WatermarkError::NonContiguous { expected, got } => {
+            let durable_seen = expected.prev_seq0().get();
+            ErrorPayload::new(ErrorCode::GapDetected, "gap detected", false).with_details(
+                error_details::GapDetectedDetails {
+                    namespace: namespace.clone(),
+                    origin_replica_id: *origin,
+                    durable_seen,
+                    got_seq: got.get(),
+                },
+            )
+        }
+        other => ErrorPayload::new(ErrorCode::Internal, other.to_string(), false),
+    }
 }
 
 #[cfg(test)]

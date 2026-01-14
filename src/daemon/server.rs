@@ -36,6 +36,9 @@ pub fn run_state_loop(
     git_result_rx: Receiver<GitResult>,
 ) {
     let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<Response>>> = HashMap::new();
+    let repl_capacity = daemon.limits().max_repl_ingest_queue_events.max(1);
+    let (repl_tx, repl_rx) = crossbeam::channel::bounded(repl_capacity);
+    daemon.set_repl_ingest_tx(repl_tx);
 
     loop {
         let tick = match daemon.next_sync_deadline() {
@@ -84,6 +87,8 @@ pub fn run_state_loop(
                         let _ = respond.send(response);
 
                         if is_shutdown {
+                            daemon.shutdown_replication();
+
                             // Sync all dirty repos before exiting (avoid double-borrow).
                             let remotes_to_sync: Vec<RemoteUrl> = daemon
                                 .repos()
@@ -138,6 +143,15 @@ pub fn run_state_loop(
             recv(tick) -> _ => {
                 daemon.fire_due_syncs(&git_tx);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
+            }
+
+            // Replication ingest request
+            recv(repl_rx) -> msg => {
+                if let Ok(request) = msg {
+                    daemon.handle_repl_ingest(request);
+                    daemon.fire_due_syncs(&git_tx);
+                    flush_sync_waiters(&daemon, &mut sync_waiters);
+                }
             }
 
             // Git operation completed

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rand::RngCore;
 use thiserror::Error;
@@ -44,7 +44,7 @@ pub struct StoreRuntime {
     pub(crate) broadcaster: EventBroadcaster,
     pub(crate) admission: AdmissionController,
     #[allow(dead_code)]
-    pub(crate) peer_acks: PeerAckTable,
+    pub(crate) peer_acks: Arc<Mutex<PeerAckTable>>,
     #[allow(dead_code)]
     pub(crate) wal: Arc<Wal>,
     #[allow(dead_code)]
@@ -113,7 +113,7 @@ impl StoreRuntime {
         let (watermarks_applied, watermarks_durable) = load_watermarks(&wal_index)?;
         let broadcaster = EventBroadcaster::new(BroadcasterLimits::from_limits(limits));
         let admission = AdmissionController::new(limits);
-        let peer_acks = PeerAckTable::new();
+        let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
 
         Ok(Self {
             primary_remote,

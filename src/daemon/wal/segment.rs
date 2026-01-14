@@ -232,6 +232,10 @@ impl SegmentWriter {
         self.header.segment_id
     }
 
+    pub fn current_created_at_ms(&self) -> u64 {
+        self.header.created_at_ms
+    }
+
     pub fn append(&mut self, record: &Record, now_ms: u64) -> EventWalResult<AppendOutcome> {
         let frame = encode_frame(record, self.config.max_record_bytes)?;
 
