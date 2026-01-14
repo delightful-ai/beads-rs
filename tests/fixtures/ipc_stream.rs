@@ -85,7 +85,10 @@ impl StreamingClient {
                 Some(StreamMessage::Subscribed(info)) => {
                     self.subscribed = Some(info);
                 }
-                None => return Ok(None),
+                None => {
+                    tracing::warn!("subscribe stream closed before delivering next event");
+                    return Err(StreamClientError::Ipc(IpcError::Disconnected));
+                }
             }
         }
     }
