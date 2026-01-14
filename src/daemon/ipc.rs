@@ -651,6 +651,15 @@ impl From<OpError> for ErrorPayload {
                     queue_events,
                 },
             ),
+            OpError::RateLimited {
+                retry_after_ms,
+                limit_bytes_per_sec,
+            } => ErrorPayload::new(ErrorCode::RateLimited, message, retryable).with_details(
+                error_details::RateLimitedDetails {
+                    retry_after_ms,
+                    limit_bytes_per_sec,
+                },
+            ),
             OpError::MaintenanceMode { reason } => {
                 ErrorPayload::new(ErrorCode::MaintenanceMode, message, retryable).with_details(
                     error_details::MaintenanceModeDetails {

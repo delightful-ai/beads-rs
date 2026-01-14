@@ -295,6 +295,12 @@ pub enum OpError {
         queue_events: Option<u64>,
     },
 
+    #[error("rate limited")]
+    RateLimited {
+        retry_after_ms: Option<u64>,
+        limit_bytes_per_sec: u64,
+    },
+
     #[error("maintenance mode enabled")]
     MaintenanceMode { reason: Option<String> },
 
@@ -431,6 +437,7 @@ impl OpError {
             OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
             OpError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             OpError::Overloaded { .. } => ErrorCode::Overloaded,
+            OpError::RateLimited { .. } => ErrorCode::RateLimited,
             OpError::MaintenanceMode { .. } => ErrorCode::MaintenanceMode,
             OpError::ClientRequestIdReuseMismatch { .. } => ErrorCode::ClientRequestIdReuseMismatch,
             OpError::NotAGitRepo(_) => ErrorCode::NotAGitRepo,
@@ -476,6 +483,8 @@ impl OpError {
             },
             OpError::WalMerge { .. } => Transience::Permanent,
             OpError::AlreadyClaimed { .. } => Transience::Retryable,
+            OpError::Overloaded { .. } => Transience::Retryable,
+            OpError::RateLimited { .. } => Transience::Retryable,
             OpError::MaintenanceMode { .. } => Transience::Retryable,
             OpError::NotFound(_)
             | OpError::AlreadyExists(_)
@@ -483,7 +492,6 @@ impl OpError {
             | OpError::InvalidTransition { .. }
             | OpError::ValidationFailed { .. }
             | OpError::InvalidRequest { .. }
-            | OpError::Overloaded { .. }
             | OpError::ClientRequestIdReuseMismatch { .. }
             | OpError::NotAGitRepo(_)
             | OpError::NoRemote(_)
