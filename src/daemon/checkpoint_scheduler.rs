@@ -61,6 +61,16 @@ pub struct CheckpointGroupKey {
     pub group: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct CheckpointGroupSnapshot {
+    pub group: String,
+    pub namespaces: Vec<NamespaceId>,
+    pub git_ref: String,
+    pub dirty: bool,
+    pub in_flight: bool,
+    pub last_checkpoint_wall_ms: Option<u64>,
+}
+
 pub struct CheckpointScheduler {
     groups: HashMap<CheckpointGroupKey, GroupState>,
     pending: HashMap<CheckpointGroupKey, Instant>,
@@ -102,6 +112,24 @@ impl CheckpointScheduler {
             }
         }
         map
+    }
+
+    pub(crate) fn snapshot_for_store(&self, store_id: StoreId) -> Vec<CheckpointGroupSnapshot> {
+        let mut out: Vec<CheckpointGroupSnapshot> = self
+            .groups
+            .iter()
+            .filter(|(key, _)| key.store_id == store_id)
+            .map(|(_, state)| CheckpointGroupSnapshot {
+                group: state.config.group.clone(),
+                namespaces: state.config.namespaces.clone(),
+                git_ref: state.config.git_ref.clone(),
+                dirty: state.dirty,
+                in_flight: state.in_flight,
+                last_checkpoint_wall_ms: state.last_checkpoint_wall_ms,
+            })
+            .collect();
+        out.sort_by(|a, b| a.group.cmp(&b.group));
+        out
     }
 
     pub fn in_flight_count(&self) -> usize {
@@ -176,9 +204,9 @@ impl CheckpointScheduler {
         self.pending.remove(key);
     }
 
-    pub fn complete_success(&mut self, key: &CheckpointGroupKey, now: Instant) {
+    pub fn complete_success(&mut self, key: &CheckpointGroupKey, now: Instant, wall_ms: u64) {
         if let Some(state) = self.groups.get_mut(key) {
-            state.complete_in_flight(now);
+            state.complete_in_flight(wall_ms);
         }
         self.schedule_if_needed(key, now);
     }
@@ -228,8 +256,7 @@ struct GroupState {
     last_event_at: Option<Instant>,
     pending_events: u64,
     in_flight: bool,
-    #[allow(dead_code)]
-    last_checkpoint_at: Option<Instant>,
+    last_checkpoint_wall_ms: Option<u64>,
 }
 
 impl GroupState {
@@ -241,7 +268,7 @@ impl GroupState {
             last_event_at: None,
             pending_events: 0,
             in_flight: false,
-            last_checkpoint_at: None,
+            last_checkpoint_wall_ms: None,
         }
     }
 
@@ -262,9 +289,9 @@ impl GroupState {
         self.pending_events = 0;
     }
 
-    fn complete_in_flight(&mut self, now: Instant) {
+    fn complete_in_flight(&mut self, wall_ms: u64) {
         self.in_flight = false;
-        self.last_checkpoint_at = Some(now);
+        self.last_checkpoint_wall_ms = Some(wall_ms);
     }
 
     fn fail_in_flight(&mut self, now: Instant) {
@@ -394,7 +421,7 @@ mod tests {
 
         assert!(scheduler.next_deadline().is_none());
 
-        scheduler.complete_success(&key, base + Duration::from_millis(20));
+        scheduler.complete_success(&key, base + Duration::from_millis(20), 20);
         assert_eq!(
             scheduler.next_deadline(),
             Some(base + Duration::from_millis(22))

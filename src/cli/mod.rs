@@ -131,6 +131,12 @@ pub enum Commands {
         cmd: StoreCmd,
     },
 
+    /// Admin / introspection operations.
+    Admin {
+        #[command(subcommand)]
+        cmd: AdminCmd,
+    },
+
     /// Upgrade bd to the latest version.
     Upgrade(UpgradeArgs),
 
@@ -779,6 +785,14 @@ pub enum StoreCmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum AdminCmd {
+    /// Show admin status snapshot.
+    Status,
+    /// Show admin metrics snapshot.
+    Metrics,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum SetupCmd {
     /// Setup Claude Code integration (hooks for SessionStart/PreCompact).
     Claude(SetupClaudeArgs),
@@ -1001,6 +1015,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 Commands::Label { cmd } => commands::label::handle(&ctx, cmd),
                 Commands::Epic { cmd } => commands::epic::handle(&ctx, cmd),
                 Commands::Status => commands::status::handle(&ctx),
+                Commands::Admin { cmd } => commands::admin::handle(&ctx, cmd),
                 Commands::Migrate { cmd } => commands::migrate::handle(&ctx, cmd),
                 // Daemon, Prime, Setup, Onboard, and Upgrade handled above.
                 Commands::Daemon { .. }

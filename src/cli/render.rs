@@ -4,8 +4,8 @@
 //! This module is pure formatting; handlers gather any extra data needed.
 
 use crate::api::{
-    BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
-    Note, StatusOutput, SyncWarning, Tombstone,
+    AdminMetricsOutput, AdminStatusOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup,
+    DepEdge, EpicStatus, Issue, IssueSummary, Note, StatusOutput, SyncWarning, Tombstone,
 };
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
@@ -489,6 +489,8 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::DeletedLookup(out) => render_deleted_lookup(out),
         QueryResult::EpicStatus(statuses) => render_epic_statuses(statuses),
         QueryResult::DaemonInfo(info) => render_daemon_info(info),
+        QueryResult::AdminStatus(status) => render_admin_status(status),
+        QueryResult::AdminMetrics(metrics) => render_admin_metrics(metrics),
         QueryResult::Validation { warnings } => {
             if warnings.is_empty() {
                 "ok".into()
@@ -504,6 +506,132 @@ fn render_daemon_info(info: &DaemonInfo) -> String {
         "daemon {} (protocol {}, pid {})",
         info.version, info.protocol_version, info.pid
     )
+}
+
+fn render_admin_status(status: &AdminStatusOutput) -> String {
+    let mut out = String::new();
+    out.push_str("Admin Status\n============\n\n");
+    out.push_str(&format!("Store:   {}\n", status.store_id));
+    out.push_str(&format!("Replica: {}\n", status.replica_id));
+    if !status.namespaces.is_empty() {
+        let ns = status
+            .namespaces
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("Namespaces: {}\n", ns));
+    }
+
+    if !status.wal.is_empty() {
+        out.push_str("\nWAL:\n");
+        for ns in &status.wal {
+            out.push_str(&format!(
+                "  {}: {} segments, {} bytes\n",
+                ns.namespace.as_str(),
+                ns.segment_count,
+                ns.total_bytes
+            ));
+        }
+    }
+
+    if !status.replication.is_empty() {
+        out.push_str("\nReplication:\n");
+        for peer in &status.replication {
+            let last_ack = if peer.last_ack_at_ms == 0 {
+                "never".to_string()
+            } else {
+                fmt_wall_ms(peer.last_ack_at_ms)
+            };
+            out.push_str(&format!(
+                "  {} (last_ack={}, diverged={})\n",
+                peer.peer, last_ack, peer.diverged
+            ));
+            for ns in &peer.lag_by_namespace {
+                out.push_str(&format!(
+                    "    {}: durable_lag={}, applied_lag={}\n",
+                    ns.namespace.as_str(),
+                    ns.durable_lag,
+                    ns.applied_lag
+                ));
+            }
+        }
+    }
+
+    if !status.checkpoints.is_empty() {
+        out.push_str("\nCheckpoints:\n");
+        for group in &status.checkpoints {
+            let last = group
+                .last_checkpoint_wall_ms
+                .map(fmt_wall_ms)
+                .unwrap_or_else(|| "never".to_string());
+            out.push_str(&format!(
+                "  {} (dirty={}, in_flight={}, last={})\n",
+                group.group, group.dirty, group.in_flight, last
+            ));
+        }
+    }
+
+    out.trim_end().into()
+}
+
+fn render_admin_metrics(metrics: &AdminMetricsOutput) -> String {
+    let mut out = String::new();
+    out.push_str("Admin Metrics\n=============\n");
+
+    out.push_str("\nCounters:\n");
+    if metrics.counters.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for metric in &metrics.counters {
+            out.push_str(&format!(
+                "  {}{} {}\n",
+                metric.name,
+                fmt_metric_labels(&metric.labels),
+                metric.value
+            ));
+        }
+    }
+
+    out.push_str("\nGauges:\n");
+    if metrics.gauges.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for metric in &metrics.gauges {
+            out.push_str(&format!(
+                "  {}{} {}\n",
+                metric.name,
+                fmt_metric_labels(&metric.labels),
+                metric.value
+            ));
+        }
+    }
+
+    out.push_str("\nHistograms:\n");
+    if metrics.histograms.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for metric in &metrics.histograms {
+            let p50 = metric
+                .p50
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_string());
+            let p95 = metric
+                .p95
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_string());
+            out.push_str(&format!(
+                "  {}{} count={} p50={} p95={}\n",
+                metric.name,
+                fmt_metric_labels(&metric.labels),
+                metric.count,
+                p50,
+                p95
+            ));
+        }
+    }
+
+    out.trim_end().into()
 }
 
 fn render_status(out: &StatusOutput) -> String {
@@ -842,6 +970,23 @@ fn fmt_labels(labels: &[String]) -> String {
         out.push_str(l);
     }
     out.push(']');
+    out
+}
+
+fn fmt_metric_labels(labels: &[crate::api::AdminMetricLabel]) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(" {");
+    for (i, label) in labels.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(label.key.as_str());
+        out.push('=');
+        out.push_str(label.value.as_str());
+    }
+    out.push('}');
     out
 }
 

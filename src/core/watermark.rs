@@ -207,6 +207,10 @@ impl<K> Watermarks<K> {
         }
     }
 
+    pub fn namespaces(&self) -> impl Iterator<Item = &NamespaceId> {
+        self.inner.keys()
+    }
+
     pub fn get(&self, namespace: &NamespaceId, origin: &ReplicaId) -> Option<&Watermark<K>> {
         self.inner
             .get(namespace)

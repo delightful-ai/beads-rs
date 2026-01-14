@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
+    AdminMetricsOutput as ApiAdminMetricsOutput, AdminStatusOutput as ApiAdminStatusOutput,
     BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo,
     DeletedLookup as ApiDeletedLookup, DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue,
     IssueSummary, Note as ApiNote, ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput,
@@ -486,6 +487,12 @@ pub enum QueryResult {
 
     /// Daemon info (handshake).
     DaemonInfo(ApiDaemonInfo),
+
+    /// Admin status snapshot.
+    AdminStatus(ApiAdminStatusOutput),
+
+    /// Admin metrics snapshot.
+    AdminMetrics(ApiAdminMetricsOutput),
 }
 
 // NOTE: daemon IPC uses the canonical `crate::api` schemas for issues/notes/deps.

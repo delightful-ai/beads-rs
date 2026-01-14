@@ -35,6 +35,15 @@ impl Default for PeerAckState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PeerAckSnapshot {
+    pub peer: ReplicaId,
+    pub durable: Watermarks<Durable>,
+    pub applied: Watermarks<Applied>,
+    pub last_ack_at_ms: u64,
+    pub diverged: bool,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PeerAckError {
     #[error(
@@ -102,6 +111,27 @@ impl QuorumOutcome {
 impl PeerAckTable {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<PeerAckSnapshot> {
+        let mut peers: BTreeSet<ReplicaId> = self.peers.keys().copied().collect();
+        for eligible in self.eligible.values() {
+            peers.extend(eligible.iter().copied());
+        }
+
+        peers
+            .into_iter()
+            .map(|peer| {
+                let state = self.peers.get(&peer).cloned().unwrap_or_default();
+                PeerAckSnapshot {
+                    peer,
+                    durable: state.durable,
+                    applied: state.applied,
+                    last_ack_at_ms: state.last_ack_at_ms,
+                    diverged: state.diverged,
+                }
+            })
+            .collect()
     }
 
     pub fn set_eligibility(&mut self, namespace: NamespaceId, eligible: BTreeSet<ReplicaId>) {

@@ -1472,7 +1472,7 @@ impl Daemon {
                     "checkpoint publish succeeded"
                 );
                 self.checkpoint_scheduler
-                    .complete_success(&key, Instant::now());
+                    .complete_success(&key, Instant::now(), self.clock.wall_ms());
             }
             Err(err) => {
                 tracing::warn!(
@@ -2158,6 +2158,10 @@ impl Daemon {
             } => self.query_epic_status(&repo, eligible_only, read, git_tx),
 
             Request::Status { repo, read } => self.query_status(&repo, read, git_tx),
+
+            Request::AdminStatus { repo, read } => self.admin_status(&repo, read, git_tx),
+
+            Request::AdminMetrics { repo, read } => self.admin_metrics(&repo, read, git_tx),
 
             Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx),
 

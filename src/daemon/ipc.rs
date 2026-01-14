@@ -350,6 +350,20 @@ pub enum Request {
         read: ReadConsistency,
     },
 
+    /// Admin status snapshot.
+    AdminStatus {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
+
+    /// Admin metrics snapshot.
+    AdminMetrics {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
+
     /// Validate state.
     Validate {
         repo: PathBuf,

@@ -8,6 +8,7 @@
 //! - Background sync scheduling
 
 pub mod admission;
+pub mod admin;
 pub mod broadcast;
 pub mod checkpoint_scheduler;
 pub mod clock;

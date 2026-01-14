@@ -10,7 +10,7 @@ pub use crate::core::DurabilityReceipt;
 
 use crate::core::{
     ActorId, Applied, Bead, Claim, ClientRequestId, DepEdge as CoreDepEdge, DepKey as CoreDepKey,
-    EventId, HlcMax, NamespaceId, ReplicaId, SegmentId, Seq1, StoreIdentity,
+    Durable, EventId, HlcMax, NamespaceId, ReplicaId, SegmentId, Seq1, StoreId, StoreIdentity,
     Tombstone as CoreTombstone, TxnDeltaV1, TxnId, WallClock, Watermarks, Workflow, WriteStamp,
 };
 
@@ -23,6 +23,112 @@ pub struct DaemonInfo {
     pub version: String,
     pub protocol_version: u32,
     pub pid: u32,
+}
+
+// =============================================================================
+// Admin status / metrics
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminStatusOutput {
+    pub store_id: StoreId,
+    pub replica_id: ReplicaId,
+    pub namespaces: Vec<NamespaceId>,
+    pub watermarks_applied: Watermarks<Applied>,
+    pub watermarks_durable: Watermarks<Durable>,
+    pub wal: Vec<AdminWalNamespace>,
+    pub replication: Vec<AdminReplicationPeer>,
+    pub checkpoints: Vec<AdminCheckpointGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWalNamespace {
+    pub namespace: NamespaceId,
+    pub segment_count: usize,
+    pub total_bytes: u64,
+    pub segments: Vec<AdminWalSegment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWalSegment {
+    pub segment_id: SegmentId,
+    pub created_at_ms: u64,
+    pub last_indexed_offset: u64,
+    pub sealed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_len: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminReplicationPeer {
+    pub peer: ReplicaId,
+    pub last_ack_at_ms: u64,
+    pub diverged: bool,
+    pub lag_by_namespace: Vec<AdminReplicationNamespace>,
+    pub watermarks_durable: Watermarks<Durable>,
+    pub watermarks_applied: Watermarks<Applied>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminReplicationNamespace {
+    pub namespace: NamespaceId,
+    pub local_durable_seq: u64,
+    pub peer_durable_seq: u64,
+    pub durable_lag: u64,
+    pub local_applied_seq: u64,
+    pub peer_applied_seq: u64,
+    pub applied_lag: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminCheckpointGroup {
+    pub group: String,
+    pub namespaces: Vec<NamespaceId>,
+    pub git_ref: String,
+    pub dirty: bool,
+    pub in_flight: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checkpoint_wall_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminMetricsOutput {
+    pub counters: Vec<AdminMetricSample>,
+    pub gauges: Vec<AdminMetricSample>,
+    pub histograms: Vec<AdminMetricHistogram>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminMetricSample {
+    pub name: String,
+    pub value: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<AdminMetricLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminMetricHistogram {
+    pub name: String,
+    pub count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p50: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<AdminMetricLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminMetricLabel {
+    pub key: String,
+    pub value: String,
 }
 
 // =============================================================================
