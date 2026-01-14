@@ -604,7 +604,7 @@ fn store_lock_error_code(err: &StoreLockError) -> ErrorCode {
 fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
     match err {
         StoreRuntimeError::Lock(lock_err) => match lock_err {
-            StoreLockError::Held { .. } => Transience::Retryable,
+            StoreLockError::Held { .. } => Transience::Permanent,
             StoreLockError::Symlink { .. } | StoreLockError::MetadataCorrupt { .. } => {
                 Transience::Permanent
             }
@@ -703,6 +703,7 @@ fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
 
 fn wal_index_transience(err: &WalIndexError) -> Transience {
     match err {
+        WalIndexError::SchemaVersionMismatch { .. } => Transience::Retryable,
         WalIndexError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 Transience::Permanent
@@ -710,7 +711,13 @@ fn wal_index_transience(err: &WalIndexError) -> Transience {
                 Transience::Retryable
             }
         }
-        _ => Transience::Permanent,
+        WalIndexError::MetaMismatch { key, .. } => match *key {
+            "store_id" | "store_epoch" => Transience::Permanent,
+            _ => Transience::Retryable,
+        },
+        WalIndexError::Equivocation { .. }
+        | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
+        _ => Transience::Retryable,
     }
 }
 
