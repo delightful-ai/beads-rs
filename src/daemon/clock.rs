@@ -22,6 +22,18 @@ impl TimeSource for SystemTimeSource {
 
 use crate::core::{Limits, WriteStamp};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockAnomalyKind {
+    ForwardJumpClamped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockAnomaly {
+    pub wall_ms: u64,
+    pub kind: ClockAnomalyKind,
+    pub delta_ms: i64,
+}
+
 /// Hybrid Logical Clock.
 ///
 /// Combines wall clock time with a logical counter to ensure monotonicity
@@ -35,6 +47,7 @@ pub struct Clock {
     /// Max forward drift allowed within a session.
     max_forward_drift_ms: u64,
     time_source: Box<dyn TimeSource>,
+    last_anomaly: Option<ClockAnomaly>,
 }
 
 impl Clock {
@@ -67,6 +80,7 @@ impl Clock {
             counter: 0,
             max_forward_drift_ms,
             time_source,
+            last_anomaly: None,
         }
     }
 
@@ -89,6 +103,12 @@ impl Clock {
                 // Clamp large forward jumps within a session.
                 self.wall_ms = max_forward;
                 self.counter += 1;
+                let delta_ms = now.saturating_sub(max_forward) as i64;
+                self.last_anomaly = Some(ClockAnomaly {
+                    wall_ms: now,
+                    kind: ClockAnomalyKind::ForwardJumpClamped,
+                    delta_ms,
+                });
                 tracing::warn!(
                     now_ms = now,
                     last_physical_ms = prev_wall_ms,
@@ -136,6 +156,10 @@ impl Clock {
     /// Get the current wall time tracked by this clock.
     pub fn wall_ms(&self) -> u64 {
         self.wall_ms
+    }
+
+    pub fn last_anomaly(&self) -> Option<ClockAnomaly> {
+        self.last_anomaly
     }
 }
 
@@ -240,6 +264,9 @@ mod tests {
         assert!(s2 > s1);
         assert_eq!(s2.wall_ms, 1_100);
         assert_eq!(s2.counter, s1.counter + 1);
+        let anomaly = clock.last_anomaly().expect("clock anomaly");
+        assert_eq!(anomaly.kind, ClockAnomalyKind::ForwardJumpClamped);
+        assert_eq!(anomaly.delta_ms, 400);
     }
 
     #[test]

@@ -1129,6 +1129,7 @@ impl ScrubReportBuilder {
                 safe_to_prune_wal,
                 safe_to_rebuild_index,
             },
+            last_clock_anomaly: None,
         }
     }
 }

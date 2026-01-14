@@ -8,7 +8,15 @@ use std::process::Command as StdCommand;
 use assert_cmd::Command;
 use tempfile::TempDir;
 
-use beads_rs::{NamespaceId, NamespacePolicies, NamespacePolicy, ReplicateMode};
+use beads_rs::api::{
+    AdminClockAnomaly, AdminClockAnomalyKind, AdminHealthReport, AdminHealthRisk, AdminHealthStats,
+    AdminHealthSummary, AdminStatusOutput,
+};
+use beads_rs::{
+    Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicateMode,
+    StoreId, Watermarks,
+};
+use uuid::Uuid;
 
 struct AdminFixture {
     runtime_dir: TempDir,
@@ -373,6 +381,47 @@ fn admin_fingerprint_sample_is_deterministic() {
     assert_eq!(ns_a["shards"], ns_b["shards"]);
     let shards = ns_a["shards"].as_array().expect("shards array");
     assert_eq!(shards.len(), 3 * 3);
+}
+
+#[test]
+fn admin_clock_anomaly_serializes_in_status_and_doctor() {
+    let anomaly = AdminClockAnomaly {
+        at_wall_ms: 1_700_000_000_000,
+        kind: AdminClockAnomalyKind::ForwardJumpClamped,
+        delta_ms: 42,
+    };
+    let status = AdminStatusOutput {
+        store_id: StoreId::new(Uuid::from_bytes([1u8; 16])),
+        replica_id: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
+        namespaces: Vec::new(),
+        watermarks_applied: Watermarks::<Applied>::new(),
+        watermarks_durable: Watermarks::<Durable>::new(),
+        last_clock_anomaly: Some(anomaly.clone()),
+        wal: Vec::new(),
+        replication: Vec::new(),
+        checkpoints: Vec::new(),
+    };
+    let status_json = serde_json::to_value(status).expect("serialize status");
+    assert_eq!(
+        status_json["last_clock_anomaly"]["kind"],
+        "forward_jump_clamped"
+    );
+    assert_eq!(status_json["last_clock_anomaly"]["delta_ms"], 42);
+
+    let report = AdminHealthReport {
+        checked_at_ms: 1_700_000_000_001,
+        stats: AdminHealthStats::default(),
+        checks: Vec::new(),
+        summary: AdminHealthSummary {
+            risk: AdminHealthRisk::Low,
+            safe_to_accept_writes: true,
+            safe_to_prune_wal: true,
+            safe_to_rebuild_index: true,
+        },
+        last_clock_anomaly: Some(anomaly),
+    };
+    let report_json = serde_json::to_value(report).expect("serialize report");
+    assert!(report_json["last_clock_anomaly"].is_object());
 }
 
 #[test]

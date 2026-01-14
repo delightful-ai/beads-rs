@@ -4,12 +4,12 @@
 //! This module is pure formatting; handlers gather any extra data needed.
 
 use crate::api::{
-    AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode, AdminFingerprintOutput,
-    AdminFingerprintSample, AdminHealthReport, AdminHealthStatus, AdminMaintenanceModeOutput,
-    AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadPoliciesOutput,
-    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult,
-    DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary, Note, StatusOutput,
-    SyncWarning, Tombstone,
+    AdminClockAnomalyKind, AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode,
+    AdminFingerprintOutput, AdminFingerprintSample, AdminHealthReport, AdminHealthStatus,
+    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminReloadPoliciesOutput, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
+    BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
+    Note, StatusOutput, SyncWarning, Tombstone,
 };
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
@@ -533,6 +533,14 @@ fn render_admin_status(status: &AdminStatusOutput) -> String {
             .join(", ");
         out.push_str(&format!("Namespaces: {}\n", ns));
     }
+    if let Some(anomaly) = &status.last_clock_anomaly {
+        out.push_str(&format!(
+            "Clock anomaly: {} delta={}ms at {}\n",
+            clock_anomaly_kind_str(&anomaly.kind),
+            anomaly.delta_ms,
+            fmt_wall_ms(anomaly.at_wall_ms)
+        ));
+    }
 
     if !status.wal.is_empty() {
         out.push_str("\nWAL:\n");
@@ -770,6 +778,14 @@ fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
         report.stats.index_offsets_checked,
         report.stats.checkpoint_groups_checked
     ));
+    if let Some(anomaly) = &report.last_clock_anomaly {
+        out.push_str(&format!(
+            "clock_anomaly: {} delta={}ms at {}\n",
+            clock_anomaly_kind_str(&anomaly.kind),
+            anomaly.delta_ms,
+            fmt_wall_ms(anomaly.at_wall_ms)
+        ));
+    }
 
     out.push_str("\nchecks:\n");
     for check in &report.checks {
@@ -881,6 +897,12 @@ fn fingerprint_kind_str(kind: &AdminFingerprintKind) -> &'static str {
         AdminFingerprintKind::State => "state",
         AdminFingerprintKind::Tombstones => "tombstones",
         AdminFingerprintKind::Deps => "deps",
+    }
+}
+
+fn clock_anomaly_kind_str(kind: &AdminClockAnomalyKind) -> &'static str {
+    match kind {
+        AdminClockAnomalyKind::ForwardJumpClamped => "forward_jump_clamped",
     }
 }
 

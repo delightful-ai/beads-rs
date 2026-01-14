@@ -7,15 +7,16 @@ use std::path::Path;
 use crossbeam::channel::Sender;
 
 use crate::api::{
-    AdminCheckpointGroup, AdminDoctorOutput, AdminFingerprintMode, AdminFingerprintOutput,
-    AdminFingerprintSample, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
-    AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
-    AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
-    AdminReloadPoliciesOutput, AdminReplicationNamespace, AdminReplicationPeer,
-    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalNamespace,
-    AdminWalSegment,
+    AdminCheckpointGroup, AdminClockAnomaly, AdminClockAnomalyKind, AdminDoctorOutput,
+    AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample,
+    AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel, AdminMetricSample,
+    AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff, AdminRebuildIndexOutput,
+    AdminRebuildIndexStats, AdminRebuildIndexTruncation, AdminReloadPoliciesOutput,
+    AdminReplicationNamespace, AdminReplicationPeer, AdminRotateReplicaIdOutput, AdminScrubOutput,
+    AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
 };
 use crate::core::{NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, Watermarks};
+use crate::daemon::clock::{ClockAnomaly, ClockAnomalyKind};
 use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_namespaces};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::scrubber::{ScrubOptions, scrub_store};
@@ -65,6 +66,7 @@ impl Daemon {
             namespaces: namespaces.into_iter().collect(),
             watermarks_applied: store.watermarks_applied.clone(),
             watermarks_durable: store.watermarks_durable.clone(),
+            last_clock_anomaly: clock_anomaly_output(self.clock.last_anomaly()),
             wal,
             replication,
             checkpoints,
@@ -145,7 +147,8 @@ impl Daemon {
             .map(|snapshot| snapshot.group)
             .collect::<Vec<_>>();
 
-        let report = scrub_store(store, self.limits(), &checkpoint_groups, options);
+        let mut report = scrub_store(store, self.limits(), &checkpoint_groups, options);
+        report.last_clock_anomaly = clock_anomaly_output(self.clock.last_anomaly());
         if report.summary.safe_to_accept_writes {
             crate::daemon::metrics::scrub_ok();
         } else {
@@ -206,7 +209,8 @@ impl Daemon {
             .map(|snapshot| snapshot.group)
             .collect::<Vec<_>>();
 
-        let report = scrub_store(store, self.limits(), &checkpoint_groups, options);
+        let mut report = scrub_store(store, self.limits(), &checkpoint_groups, options);
+        report.last_clock_anomaly = clock_anomaly_output(self.clock.last_anomaly());
         if report.summary.safe_to_accept_writes {
             crate::daemon::metrics::scrub_ok();
         } else {
@@ -834,4 +838,14 @@ fn format_gc_authority(value: crate::core::GcAuthority) -> String {
         }
         crate::core::GcAuthority::None => "none".to_string(),
     }
+}
+
+fn clock_anomaly_output(anomaly: Option<ClockAnomaly>) -> Option<AdminClockAnomaly> {
+    anomaly.map(|anomaly| AdminClockAnomaly {
+        at_wall_ms: anomaly.wall_ms,
+        kind: match anomaly.kind {
+            ClockAnomalyKind::ForwardJumpClamped => AdminClockAnomalyKind::ForwardJumpClamped,
+        },
+        delta_ms: anomaly.delta_ms,
+    })
 }

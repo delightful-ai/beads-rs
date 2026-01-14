@@ -37,9 +37,24 @@ pub struct AdminStatusOutput {
     pub namespaces: Vec<NamespaceId>,
     pub watermarks_applied: Watermarks<Applied>,
     pub watermarks_durable: Watermarks<Durable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_clock_anomaly: Option<AdminClockAnomaly>,
     pub wal: Vec<AdminWalNamespace>,
     pub replication: Vec<AdminReplicationPeer>,
     pub checkpoints: Vec<AdminCheckpointGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminClockAnomaly {
+    pub at_wall_ms: u64,
+    pub kind: AdminClockAnomalyKind,
+    pub delta_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminClockAnomalyKind {
+    ForwardJumpClamped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +133,8 @@ pub struct AdminHealthReport {
     pub stats: AdminHealthStats,
     pub checks: Vec<AdminHealthCheck>,
     pub summary: AdminHealthSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_clock_anomaly: Option<AdminClockAnomaly>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
