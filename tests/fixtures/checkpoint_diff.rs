@@ -4,10 +4,11 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 
+use beads_rs::core::ContentHash;
 use beads_rs::git::checkpoint::{
     CheckpointExport, CheckpointManifest, CheckpointMeta, CheckpointShardPayload,
 };
-use beads_rs::{ContentHash, sha256_bytes};
+use beads_rs::sha256_bytes;
 
 pub fn diff_exports(expected: &CheckpointExport, actual: &CheckpointExport) -> Vec<String> {
     let mut diffs = Vec::new();

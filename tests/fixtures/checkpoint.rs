@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 
+use beads_rs::core::ContentHash;
 use beads_rs::git::checkpoint::json_canon::to_canon_json_bytes;
 use beads_rs::git::checkpoint::{
     CheckpointExport, CheckpointExportInput, CheckpointFileKind, CheckpointManifest,
@@ -12,10 +13,10 @@ use beads_rs::git::checkpoint::{
     shard_path,
 };
 use beads_rs::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, ContentHash,
-    DepEdge, DepKey, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0,
-    Stamp, Tombstone, Watermarks, WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1, Workflow,
-    WriteStamp, sha256_bytes,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
+    Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, Tombstone,
+    Watermarks, WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1, Workflow, WriteStamp,
+    sha256_bytes,
 };
 
 use super::identity;
