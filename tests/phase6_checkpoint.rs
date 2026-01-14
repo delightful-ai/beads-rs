@@ -12,10 +12,11 @@ use beads_rs::git::checkpoint::{
     CheckpointExport, CheckpointExportInput, CheckpointImportError, CheckpointSnapshotInput,
     IncludedHeads, IncludedWatermarks, export_checkpoint, import_checkpoint,
 };
+use beads_rs::core::ContentHash;
 use beads_rs::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, ContentHash,
-    DepEdge, DepKey, DepKind, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId,
-    Seq0, Stamp, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
+    DepKind, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp,
+    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
 };
 
 use fixtures::checkpoint::{
