@@ -13,9 +13,9 @@ use beads_rs::git::checkpoint::{
     IncludedHeads, IncludedWatermarks, export_checkpoint, import_checkpoint,
 };
 use beads_rs::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
-    DepKind, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp,
-    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, ContentHash,
+    DepEdge, DepKey, DepKind, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId,
+    Seq0, Stamp, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
 };
 
 use fixtures::checkpoint::{
@@ -172,7 +172,7 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
         StoreEpoch::new(0),
         1_700_000_000_000,
         origin,
-        beads_rs::ContentHash::from_bytes([9u8; 32]),
+        ContentHash::from_bytes([9u8; 32]),
         None,
         &state,
         &watermarks,
@@ -193,8 +193,8 @@ fn build_snapshot_from_state(
     store_epoch: StoreEpoch,
     created_at_ms: u64,
     created_by_replica_id: ReplicaId,
-    policy_hash: beads_rs::ContentHash,
-    roster_hash: Option<beads_rs::ContentHash>,
+    policy_hash: ContentHash,
+    roster_hash: Option<ContentHash>,
     state: &CanonicalState,
     watermarks: &Watermarks<Durable>,
 ) -> beads_rs::git::checkpoint::CheckpointSnapshot {
