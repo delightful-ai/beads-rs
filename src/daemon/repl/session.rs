@@ -900,10 +900,10 @@ mod tests {
         }
 
         fn snapshot_for(&self, namespaces: &[NamespaceId]) -> WatermarkSnapshot {
-            let mut durable = BTreeMap::new();
-            let mut durable_heads = BTreeMap::new();
-            let mut applied = BTreeMap::new();
-            let mut applied_heads = BTreeMap::new();
+            let mut durable: WatermarkMap = BTreeMap::new();
+            let mut durable_heads: WatermarkHeads = BTreeMap::new();
+            let mut applied: WatermarkMap = BTreeMap::new();
+            let mut applied_heads: WatermarkHeads = BTreeMap::new();
 
             for ns in namespaces {
                 if let Some(origins) = self.durable.get(ns) {
@@ -1139,6 +1139,7 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
         let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
+        let e2_sha = e2.sha256;
 
         let actions = session.handle_message(
             ReplMessage::Events(Events {
@@ -1169,7 +1170,7 @@ mod tests {
             .and_then(|m| m.get(&origin))
             .copied()
             .expect("head");
-        assert_eq!(head, e2.sha256);
+        assert_eq!(head, e2_sha);
     }
 
     #[test]
