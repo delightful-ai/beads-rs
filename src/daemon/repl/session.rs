@@ -854,17 +854,16 @@ fn event_frame_error_payload(
 
 fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) -> ErrorPayload {
     match err {
-        DecodeError::DecodeLimit(reason) => match *reason {
-            "max_wal_record_bytes" | "max_frame_bytes" => {
-                ErrorPayload::new(ErrorCode::FrameTooLarge, "event frame too large", false)
-                    .with_details(FrameTooLargeDetails {
-                        max_frame_bytes: limits.max_frame_bytes.min(limits.max_wal_record_bytes)
-                            as u64,
-                        got_bytes: frame_bytes as u64,
-                    })
-            }
-            _ => invalid_request_decode_error(err),
-        },
+        DecodeError::DecodeLimit(reason)
+            if matches!(*reason, "max_wal_record_bytes" | "max_frame_bytes") =>
+        {
+            ErrorPayload::new(ErrorCode::FrameTooLarge, "event frame too large", false)
+                .with_details(FrameTooLargeDetails {
+                    max_frame_bytes: limits.max_frame_bytes.min(limits.max_wal_record_bytes) as u64,
+                    got_bytes: frame_bytes as u64,
+                })
+        }
+        DecodeError::DecodeLimit(_) => invalid_request_decode_error(err),
         DecodeError::IndefiniteLength | DecodeError::TrailingBytes => {
             ErrorPayload::new(ErrorCode::NonCanonical, err.to_string(), false).with_details(
                 NonCanonicalDetails {
