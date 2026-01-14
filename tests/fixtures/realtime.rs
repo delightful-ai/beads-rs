@@ -97,11 +97,11 @@ impl EnvBackup {
         }
     }
 
-    fn restore(self) {
-        restore_var("XDG_RUNTIME_DIR", self.xdg_runtime_dir);
-        restore_var("BD_WAL_DIR", self.wal_dir);
-        restore_var("BD_DATA_DIR", self.data_dir);
-        restore_var("BD_NO_AUTO_UPGRADE", self.no_auto_upgrade);
+    fn restore(&mut self) {
+        restore_var("XDG_RUNTIME_DIR", self.xdg_runtime_dir.take());
+        restore_var("BD_WAL_DIR", self.wal_dir.take());
+        restore_var("BD_DATA_DIR", self.data_dir.take());
+        restore_var("BD_NO_AUTO_UPGRADE", self.no_auto_upgrade.take());
     }
 }
 
