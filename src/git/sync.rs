@@ -654,7 +654,6 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
     let state_blob = repo
         .find_object(state_entry.id(), Some(ObjectType::Blob))?
         .peel_to_blob()?;
-    let beads = wire::parse_state(state_blob.content())?;
 
     // Read tombstones.jsonl
     let tombs_entry = tree
@@ -663,7 +662,6 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
     let tombs_blob = repo
         .find_object(tombs_entry.id(), Some(ObjectType::Blob))?
         .peel_to_blob()?;
-    let tombstones = wire::parse_tombstones(tombs_blob.content())?;
 
     // Read deps.jsonl
     let deps_entry = tree
@@ -672,7 +670,6 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
     let deps_blob = repo
         .find_object(deps_entry.id(), Some(ObjectType::Blob))?
         .peel_to_blob()?;
-    let deps = wire::parse_deps(deps_blob.content())?;
 
     // Read meta.json for root_slug + last_write_stamp
     let mut root_slug = None;
@@ -686,21 +683,11 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         last_write_stamp = meta.last_write_stamp;
     }
 
-    // Build state
-    let mut state = CanonicalState::new();
-    for bead in beads {
-        state.insert_live(bead);
-    }
-    for tomb in tombstones {
-        state.insert_tombstone(tomb);
-    }
-    for (key, dep) in deps {
-        state.insert_dep(key, dep);
-    }
-
-    // Ensure dep indexes are built (insert_dep does this incrementally,
-    // but we rebuild to guarantee consistency after bulk loading)
-    state.rebuild_dep_indexes();
+    let state = wire::parse_legacy_state(
+        state_blob.content(),
+        tombs_blob.content(),
+        deps_blob.content(),
+    )?;
 
     Ok(LoadedStore {
         state,

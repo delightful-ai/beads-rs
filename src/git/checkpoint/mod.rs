@@ -14,7 +14,10 @@ pub use export::{
     CheckpointExport, CheckpointExportError, CheckpointExportInput, CheckpointSnapshotError,
     CheckpointSnapshotInput, build_snapshot, export_checkpoint, policy_hash,
 };
-pub use import::{CheckpointImport, CheckpointImportError, import_checkpoint, merge_store_states};
+pub use import::{
+    CheckpointImport, CheckpointImportError, import_checkpoint, merge_store_states,
+    store_state_from_legacy,
+};
 pub use layout::{
     CheckpointFileKind, CheckpointShardPath, DEPS_DIR, MANIFEST_FILE, META_FILE, NAMESPACES_DIR,
     SHARD_COUNT, STATE_DIR, TOMBSTONES_DIR, parse_shard_path, shard_for_bead, shard_for_dep,

@@ -325,6 +325,13 @@ pub fn merge_store_states(
     }
 }
 
+/// Lift a legacy, non-namespaced state into the core namespace.
+pub fn store_state_from_legacy(state: CanonicalState) -> StoreState {
+    let mut store = StoreState::new();
+    *store.ensure_namespace(NamespaceId::core()) = state;
+    store
+}
+
 struct JsonlStats {
     sha256: ContentHash,
     bytes: u64,
@@ -818,5 +825,17 @@ mod tests {
             state_fingerprint(merged_a_state),
             state_fingerprint(merged_b_state)
         );
+    }
+
+    #[test]
+    fn store_state_from_legacy_places_state_in_core_namespace() {
+        let mut state = CanonicalState::default();
+        let bead = crate::core::Bead::from(sample_wire_bead_full("bd-legacy"));
+        state.insert_live(bead);
+        let expected = state_fingerprint(&state);
+
+        let store = store_state_from_legacy(state);
+        let core_state = store.get(&NamespaceId::core()).expect("core state");
+        assert_eq!(state_fingerprint(core_state), expected);
     }
 }

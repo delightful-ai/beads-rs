@@ -332,6 +332,30 @@ pub fn parse_deps(bytes: &[u8]) -> Result<Vec<(DepKey, DepEdge)>, WireError> {
     Ok(deps)
 }
 
+/// Parse legacy git JSONL files into a canonical state.
+pub fn parse_legacy_state(
+    state_bytes: &[u8],
+    tombstones_bytes: &[u8],
+    deps_bytes: &[u8],
+) -> Result<CanonicalState, WireError> {
+    let beads = parse_state(state_bytes)?;
+    let tombstones = parse_tombstones(tombstones_bytes)?;
+    let deps = parse_deps(deps_bytes)?;
+
+    let mut state = CanonicalState::new();
+    for bead in beads {
+        state.insert_live(bead);
+    }
+    for tombstone in tombstones {
+        state.insert_tombstone(tombstone);
+    }
+    for (key, dep) in deps {
+        state.insert_dep(key, dep);
+    }
+    state.rebuild_dep_indexes();
+    Ok(state)
+}
+
 /// Parsed metadata from meta.json.
 pub struct ParsedMeta {
     pub format_version: u32,
@@ -682,6 +706,35 @@ mod tests {
         let bytes = serialize_state(&state).unwrap();
         let beads = parse_state(&bytes).unwrap();
         assert!(beads.is_empty());
+    }
+
+    #[test]
+    fn parse_legacy_state_roundtrip() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let bead = make_bead(&bead_id("bd-legacy"), &stamp);
+        state.insert(bead).unwrap();
+        state.insert_tombstone(Tombstone::new(
+            bead_id("bd-legacy-tomb"),
+            stamp.clone(),
+            None,
+        ));
+        let dep_key = DepKey::new(
+            bead_id("bd-legacy"),
+            bead_id("bd-legacy-target"),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        state.insert_dep(dep_key, DepEdge::new(stamp.clone()));
+
+        let state_bytes = serialize_state(&state).unwrap();
+        let tomb_bytes = serialize_tombstones(&state).unwrap();
+        let deps_bytes = serialize_deps(&state).unwrap();
+
+        let parsed = parse_legacy_state(&state_bytes, &tomb_bytes, &deps_bytes).unwrap();
+        assert_eq!(serialize_state(&parsed).unwrap(), state_bytes);
+        assert_eq!(serialize_tombstones(&parsed).unwrap(), tomb_bytes);
+        assert_eq!(serialize_deps(&parsed).unwrap(), deps_bytes);
     }
 
     proptest! {
