@@ -1866,20 +1866,19 @@ fn verify_daemon_version(
     writer: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
 ) -> Result<(), IpcError> {
-    if let Some(meta) = read_daemon_meta_at(socket) {
-        if daemon_pid_alive(meta.pid) {
-            if meta.protocol_version == IPC_PROTOCOL_VERSION
-                && meta.version == env!("CARGO_PKG_VERSION")
-            {
-                return Ok(());
-            }
-            return Err(IpcError::DaemonVersionMismatch {
-                daemon: Some(meta),
-                client_version: env!("CARGO_PKG_VERSION").to_string(),
-                protocol_version: IPC_PROTOCOL_VERSION,
-                parse_error: None,
-            });
+    if let Some(meta) = read_daemon_meta_at(socket)
+        && daemon_pid_alive(meta.pid)
+    {
+        if meta.protocol_version == IPC_PROTOCOL_VERSION && meta.version == env!("CARGO_PKG_VERSION")
+        {
+            return Ok(());
         }
+        return Err(IpcError::DaemonVersionMismatch {
+            daemon: Some(meta),
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: IPC_PROTOCOL_VERSION,
+            parse_error: None,
+        });
     }
 
     write_req_line(writer, &Request::Ping)?;
