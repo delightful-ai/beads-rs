@@ -436,7 +436,7 @@ mod tests {
     fn find_two_ids_same_shard() -> (BeadId, BeadId, String) {
         let mut seen: BTreeMap<String, BeadId> = BTreeMap::new();
         for i in 0..10_000 {
-            let id = BeadId::parse(format!("beads-rs-{:04}", i)).expect("bead id");
+            let id = BeadId::parse(&format!("beads-rs-{:04}", i)).expect("bead id");
             let shard = shard_for_bead(&id);
             if let Some(prev) = seen.insert(shard.clone(), id.clone()) {
                 return (prev, id, shard);
@@ -448,7 +448,7 @@ mod tests {
     fn find_two_ids_different_shards() -> (BeadId, BeadId) {
         let mut first: Option<(BeadId, String)> = None;
         for i in 0..10_000 {
-            let id = BeadId::parse(format!("beads-rs-{:04}", i)).expect("bead id");
+            let id = BeadId::parse(&format!("beads-rs-{:04}", i)).expect("bead id");
             let shard = shard_for_bead(&id);
             match &first {
                 None => first = Some((id, shard)),
