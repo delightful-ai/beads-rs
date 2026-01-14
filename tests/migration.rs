@@ -11,17 +11,6 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 use fixtures::daemon_runtime::shutdown_daemon;
 
-fn test_runtime_dir() -> &'static std::path::Path {
-    use std::sync::OnceLock;
-
-    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("beads-test-runtime-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("failed to create test runtime dir");
-        dir
-    })
-}
-
 fn data_dir_for_runtime(runtime_dir: &std::path::Path) -> std::path::PathBuf {
     let dir = runtime_dir.join("data");
     fs::create_dir_all(&dir).expect("failed to create test data dir");
@@ -33,6 +22,8 @@ struct TestRepo {
     work_dir: TempDir,
     #[allow(dead_code)]
     remote_dir: TempDir,
+    runtime_dir: TempDir,
+    data_dir: std::path::PathBuf,
 }
 
 impl TestRepo {
@@ -75,9 +66,14 @@ impl TestRepo {
             .output()
             .expect("failed to add remote");
 
+        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
+        let data_dir = data_dir_for_runtime(runtime_dir.path());
+
         Self {
             work_dir,
             remote_dir,
+            runtime_dir,
+            data_dir,
         }
     }
 
@@ -88,8 +84,8 @@ impl TestRepo {
     fn bd(&self) -> Command {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.path());
-        cmd.env("XDG_RUNTIME_DIR", test_runtime_dir());
-        cmd.env("BD_DATA_DIR", data_dir_for_runtime(test_runtime_dir()));
+        cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
+        cmd.env("BD_DATA_DIR", &self.data_dir);
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd
     }
@@ -97,7 +93,7 @@ impl TestRepo {
 
 impl Drop for TestRepo {
     fn drop(&mut self) {
-        shutdown_daemon(test_runtime_dir());
+        shutdown_daemon(self.runtime_dir.path());
     }
 }
 

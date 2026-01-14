@@ -14,30 +14,18 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 use fixtures::daemon_runtime::shutdown_daemon;
 
-fn test_runtime_dir() -> &'static std::path::Path {
-    use std::sync::OnceLock;
-
-    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("beads-test-runtime-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("failed to create test runtime dir");
-        dir
-    })
-}
-
 fn data_dir_for_runtime(runtime_dir: &Path) -> PathBuf {
     let dir = runtime_dir.join("data");
     fs::create_dir_all(&dir).expect("failed to create test data dir");
     dir
 }
 
-fn bd_with_runtime(repo: &Path, runtime_dir: &Path) -> Command {
-    let data_dir = data_dir_for_runtime(runtime_dir);
+fn bd_with_runtime(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
     cmd.current_dir(repo);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("BD_WAL_DIR", runtime_dir);
-    cmd.env("BD_DATA_DIR", &data_dir);
+    cmd.env("BD_DATA_DIR", data_dir);
     cmd.env("BD_NO_AUTO_UPGRADE", "1");
     cmd
 }
@@ -87,6 +75,8 @@ struct TestRepo {
     work_dir: TempDir,
     #[allow(dead_code)]
     remote_dir: TempDir,
+    runtime_dir: TempDir,
+    data_dir: PathBuf,
 }
 
 impl TestRepo {
@@ -131,9 +121,14 @@ impl TestRepo {
             .output()
             .expect("failed to add remote");
 
+        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
+        let data_dir = data_dir_for_runtime(runtime_dir.path());
+
         Self {
             work_dir,
             remote_dir,
+            runtime_dir,
+            data_dir,
         }
     }
 
@@ -142,13 +137,13 @@ impl TestRepo {
     }
 
     fn bd(&self) -> Command {
-        bd_with_runtime(self.path(), test_runtime_dir())
+        bd_with_runtime(self.path(), self.runtime_dir.path(), &self.data_dir)
     }
 }
 
 impl Drop for TestRepo {
     fn drop(&mut self) {
-        shutdown_daemon(test_runtime_dir());
+        shutdown_daemon(self.runtime_dir.path());
     }
 }
 
@@ -2663,6 +2658,7 @@ fn test_double_init() {
 fn test_init_fails_without_origin_remote() {
     let work_dir = TempDir::new().expect("failed to create work dir");
     let runtime_dir = TempDir::new().expect("failed to create runtime dir");
+    let data_dir = data_dir_for_runtime(runtime_dir.path());
 
     std::process::Command::new("git")
         .args(["init"])
@@ -2682,26 +2678,10 @@ fn test_init_fails_without_origin_remote() {
         .output()
         .expect("failed to configure git name");
 
-    let mut cmd = bd_with_runtime(work_dir.path(), runtime_dir.path());
+    let mut cmd = bd_with_runtime(work_dir.path(), runtime_dir.path(), &data_dir);
     cmd.arg("init").assert().failure();
 
-    // Best-effort: shut down the daemon started for this test.
-    let socket = runtime_dir.path().join("beads/daemon.sock");
-    for _ in 0..20 {
-        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket) {
-            use std::io::{BufRead, BufReader, Write};
-            let req = beads_rs::daemon::ipc::Request::Shutdown;
-            let mut json = serde_json::to_string(&req).expect("serialize shutdown request");
-            json.push('\n');
-            let _ = stream.write_all(json.as_bytes());
-            let _ = stream.flush();
-            let mut reader = BufReader::new(stream);
-            let mut _line = String::new();
-            let _ = reader.read_line(&mut _line);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+    shutdown_daemon(runtime_dir.path());
 }
 
 #[test]
@@ -3598,14 +3578,15 @@ fn test_crash_recovery_replays_wal() {
 
     let repo = TestRepo::new();
     let runtime_dir = TempDir::new().expect("failed to create runtime dir");
+    let data_dir = data_dir_for_runtime(runtime_dir.path());
     let store_id = store_id_from_remote_path(repo.remote_dir.path());
-    let wal_dir = data_dir_for_runtime(runtime_dir.path())
+    let wal_dir = data_dir
         .join("stores")
         .join(store_id.to_string())
         .join("wal")
         .join(beads_rs::core::NamespaceId::core().as_str());
 
-    let output = bd_with_runtime(repo.path(), runtime_dir.path())
+    let output = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
         .args(["create", "Crash recovery", "--json"])
         .output()
         .expect("run bd create");
@@ -3637,13 +3618,13 @@ fn test_crash_recovery_replays_wal() {
     std::thread::sleep(Duration::from_millis(100));
 
     let store_id_arg = store_id.to_string();
-    let unlock_out = bd_with_runtime(repo.path(), runtime_dir.path())
+    let unlock_out = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
         .args(["store", "unlock", "--store-id", store_id_arg.as_str()])
         .output()
         .expect("run bd store unlock");
     assert!(unlock_out.status.success());
 
-    let list_out = bd_with_runtime(repo.path(), runtime_dir.path())
+    let list_out = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
         .args(["list", "--json"])
         .output()
         .expect("run bd list");
@@ -3657,7 +3638,7 @@ fn test_crash_recovery_replays_wal() {
         "expected recovered issue to appear after restart"
     );
 
-    let sync_out = bd_with_runtime(repo.path(), runtime_dir.path())
+    let sync_out = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
         .args(["sync", "--json"])
         .output()
         .expect("run bd sync");
