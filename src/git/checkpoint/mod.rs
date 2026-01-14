@@ -7,6 +7,7 @@ pub mod json_canon;
 pub mod layout;
 pub mod manifest;
 pub mod meta;
+pub mod publish;
 pub mod types;
 
 pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
@@ -29,4 +30,8 @@ pub use layout::{
 };
 pub use manifest::{CheckpointManifest, ManifestFile};
 pub use meta::{CheckpointMeta, CheckpointMetaPreimage, IncludedHeads, IncludedWatermarks};
+pub use publish::{
+    CheckpointPublishError, CheckpointPublishOutcome, CheckpointStoreMeta, STORE_META_REF,
+    publish_checkpoint,
+};
 pub use types::{CheckpointShardPayload, CheckpointSnapshot};
