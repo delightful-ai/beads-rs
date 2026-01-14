@@ -330,7 +330,7 @@ struct JsonlStats {
     bytes: u64,
 }
 
-struct JsonlLineContext<'a> {
+struct JsonlLineContext {
     line_no: u64,
     namespace: NamespaceId,
 }
@@ -343,7 +343,7 @@ fn parse_jsonl_file<T, F>(
 ) -> Result<JsonlStats, CheckpointImportError>
 where
     T: DeserializeOwned,
-    F: FnMut(JsonlLineContext<'_>, T) -> Result<(), CheckpointImportError>,
+    F: FnMut(JsonlLineContext, T) -> Result<(), CheckpointImportError>,
 {
     let file = File::open(path).map_err(|source| CheckpointImportError::Io {
         path: path.to_path_buf(),
@@ -519,7 +519,7 @@ fn read_file_bytes(path: &Path) -> Result<Vec<u8>, CheckpointImportError> {
 fn tombstone_from_wire(
     wire: &WireTombstoneV1,
     path: &Path,
-    line: JsonlLineContext<'_>,
+    line: JsonlLineContext,
 ) -> Result<Tombstone, CheckpointImportError> {
     let deleted = StampFromWire::stamp(wire.deleted_at, &wire.deleted_by);
     let lineage = match (wire.lineage_created_at, wire.lineage_created_by.clone()) {
@@ -544,7 +544,7 @@ fn tombstone_from_wire(
 fn dep_from_wire(
     wire: &WireDepV1,
     path: &Path,
-    line: JsonlLineContext<'_>,
+    line: JsonlLineContext,
 ) -> Result<(DepKey, DepEdge), CheckpointImportError> {
     let created = StampFromWire::stamp(wire.created_at, &wire.created_by);
     let mut edge = DepEdge::new(created.clone());
