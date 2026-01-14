@@ -177,6 +177,19 @@ impl NormalizedReadConsistency {
     pub(crate) fn require_min_seen(&self) -> Option<&Watermarks<Applied>> {
         self.require_min_seen.as_ref()
     }
+
+    pub(crate) fn wait_timeout_ms(&self) -> u64 {
+        self.wait_timeout_ms
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ReadGateStatus {
+    Satisfied,
+    Unsatisfied {
+        required: Watermarks<Applied>,
+        current_applied: Watermarks<Applied>,
+    },
 }
 
 /// The daemon coordinator.
@@ -1810,23 +1823,42 @@ impl Daemon {
         proof: &LoadedStore,
         read: &NormalizedReadConsistency,
     ) -> Result<(), OpError> {
-        let Some(required) = read.require_min_seen.as_ref() else {
-            return Ok(());
+        match self.read_gate_status(proof, read)? {
+            ReadGateStatus::Satisfied => Ok(()),
+            ReadGateStatus::Unsatisfied {
+                required,
+                current_applied,
+            } => {
+                if read.wait_timeout_ms() > 0 {
+                    return Err(OpError::RequireMinSeenTimeout {
+                        waited_ms: read.wait_timeout_ms(),
+                        required: Box::new(required),
+                        current_applied: Box::new(current_applied),
+                    });
+                }
+                Err(OpError::RequireMinSeenUnsatisfied {
+                    required: Box::new(required),
+                    current_applied: Box::new(current_applied),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn read_gate_status(
+        &self,
+        proof: &LoadedStore,
+        read: &NormalizedReadConsistency,
+    ) -> Result<ReadGateStatus, OpError> {
+        let Some(required) = read.require_min_seen() else {
+            return Ok(ReadGateStatus::Satisfied);
         };
-        let current = self.store_runtime(proof)?.watermarks_applied.clone();
-        if current.satisfies_at_least(required) {
-            return Ok(());
+        let current_applied = self.store_runtime(proof)?.watermarks_applied.clone();
+        if current_applied.satisfies_at_least(required) {
+            return Ok(ReadGateStatus::Satisfied);
         }
-        if read.wait_timeout_ms > 0 {
-            return Err(OpError::RequireMinSeenTimeout {
-                waited_ms: read.wait_timeout_ms,
-                required: Box::new(required.clone()),
-                current_applied: Box::new(current),
-            });
-        }
-        Err(OpError::RequireMinSeenUnsatisfied {
-            required: Box::new(required.clone()),
-            current_applied: Box::new(current),
+        Ok(ReadGateStatus::Unsatisfied {
+            required: required.clone(),
+            current_applied,
         })
     }
 
@@ -2836,6 +2868,30 @@ fn watermark_error_payload(
         }
         other => ErrorPayload::new(ErrorCode::Internal, other.to_string(), false),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn insert_store_for_tests(
+    daemon: &mut Daemon,
+    store_id: StoreId,
+    remote: RemoteUrl,
+    repo_path: &Path,
+) -> Result<(), OpError> {
+    let open = StoreRuntime::open(
+        store_id,
+        remote.clone(),
+        Arc::clone(&daemon.wal),
+        WallClock::now().0,
+        env!("CARGO_PKG_VERSION"),
+        daemon.limits(),
+    )
+    .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
+    daemon.stores.insert(store_id, open.runtime);
+    daemon.remote_to_store_id.insert(remote, store_id);
+    daemon.path_to_store_id.insert(repo_path.to_owned(), store_id);
+    daemon.path_to_remote.insert(repo_path.to_owned(), remote);
+    daemon.register_default_checkpoint_groups(store_id)?;
+    Ok(())
 }
 
 #[cfg(test)]
