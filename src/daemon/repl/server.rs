@@ -29,7 +29,7 @@ use crate::daemon::repl::{
     decode_envelope, encode_envelope,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ReplicationServerConfig {
     pub listen_addr: String,
     pub local_store: StoreIdentity,
@@ -114,7 +114,6 @@ where
     }
 }
 
-#[derive(Clone)]
 struct ServerRuntime<S> {
     local_store: StoreIdentity,
     local_replica_id: ReplicaId,
@@ -130,6 +129,24 @@ struct ServerRuntime<S> {
     active_connections: Arc<AtomicUsize>,
 }
 
+impl<S> Clone for ServerRuntime<S> {
+    fn clone(&self) -> Self {
+        Self {
+            local_store: self.local_store,
+            local_replica_id: self.local_replica_id,
+            store: self.store.clone(),
+            admission: self.admission.clone(),
+            broadcaster: self.broadcaster.clone(),
+            peer_acks: Arc::clone(&self.peer_acks),
+            policies: self.policies.clone(),
+            roster: self.roster.clone(),
+            limits: self.limits.clone(),
+            max_connections: self.max_connections,
+            shutdown: Arc::clone(&self.shutdown),
+            active_connections: Arc::clone(&self.active_connections),
+        }
+    }
+}
 #[derive(Debug, Error)]
 enum ConnectionError {
     #[error("io error: {0}")]
@@ -238,7 +255,7 @@ where
     }
 }
 
-fn send_overloaded(mut stream: TcpStream, limits: &Limits) {
+fn send_overloaded(stream: TcpStream, limits: &Limits) {
     let _ = stream.set_nodelay(true);
     let payload = ErrorPayload::new(
         ErrorCode::Overloaded,
