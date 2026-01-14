@@ -66,7 +66,7 @@ impl Daemon {
             namespaces: namespaces.into_iter().collect(),
             watermarks_applied: store.watermarks_applied.clone(),
             watermarks_durable: store.watermarks_durable.clone(),
-            last_clock_anomaly: clock_anomaly_output(self.clock.last_anomaly()),
+            last_clock_anomaly: clock_anomaly_output(self.clock().last_anomaly()),
             wal,
             replication,
             checkpoints,
@@ -148,7 +148,7 @@ impl Daemon {
             .collect::<Vec<_>>();
 
         let mut report = scrub_store(store, self.limits(), &checkpoint_groups, options);
-        report.last_clock_anomaly = clock_anomaly_output(self.clock.last_anomaly());
+        report.last_clock_anomaly = clock_anomaly_output(self.clock().last_anomaly());
         if report.summary.safe_to_accept_writes {
             crate::daemon::metrics::scrub_ok();
         } else {
@@ -210,7 +210,7 @@ impl Daemon {
             .collect::<Vec<_>>();
 
         let mut report = scrub_store(store, self.limits(), &checkpoint_groups, options);
-        report.last_clock_anomaly = clock_anomaly_output(self.clock.last_anomaly());
+        report.last_clock_anomaly = clock_anomaly_output(self.clock().last_anomaly());
         if report.summary.safe_to_accept_writes {
             crate::daemon::metrics::scrub_ok();
         } else {
