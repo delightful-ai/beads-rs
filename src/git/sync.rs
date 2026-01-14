@@ -1552,6 +1552,7 @@ mod tests {
         (raw % 3) + 1
     }
 
+    #[cfg(feature = "slow-tests")]
     fn push_store(local_repo: &Repository) -> Result<(), TestCaseError> {
         let mut remote = local_repo
             .find_remote("origin")
