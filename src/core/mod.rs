@@ -27,6 +27,7 @@ pub mod json_canon;
 pub mod limits;
 pub mod meta;
 pub mod namespace;
+pub mod namespace_policies;
 pub mod replica_roster;
 pub mod state;
 pub mod store_meta;
@@ -70,6 +71,7 @@ pub use namespace::{
     CheckpointGroup, GcAuthority, NamespaceId, NamespacePolicy, NamespaceVisibility, ReplicateMode,
     RetentionPolicy, TtlBasis,
 };
+pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
 pub use replica_roster::{ReplicaEntry, ReplicaRole, ReplicaRoster, ReplicaRosterError};
 pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use store_meta::{StoreMeta, StoreMetaVersions};
