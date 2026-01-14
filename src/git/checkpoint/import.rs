@@ -331,7 +331,6 @@ struct JsonlStats {
 }
 
 struct JsonlLineContext<'a> {
-    path: &'a Path,
     line_no: u64,
     namespace: NamespaceId,
 }
@@ -406,7 +405,6 @@ where
 
         let namespace = namespace.clone();
         let ctx = JsonlLineContext {
-            path,
             line_no,
             namespace,
         };
@@ -478,30 +476,6 @@ fn validate_rel_path(path: &str) -> Result<(), CheckpointImportError> {
             }
             Component::Normal(_) => {}
         }
-    }
-    Ok(())
-}
-
-fn verify_bytes(
-    bytes: &[u8],
-    entry: &super::manifest::ManifestFile,
-    path: &Path,
-) -> Result<(), CheckpointImportError> {
-    let actual_bytes = bytes.len() as u64;
-    if actual_bytes != entry.bytes {
-        return Err(CheckpointImportError::FileSizeMismatch {
-            path: path.to_path_buf(),
-            expected: entry.bytes,
-            got: actual_bytes,
-        });
-    }
-    let hash = ContentHash::from_bytes(sha256_bytes(bytes).0);
-    if hash != entry.sha256 {
-        return Err(CheckpointImportError::FileHashMismatch {
-            path: path.to_path_buf(),
-            expected: entry.sha256,
-            got: hash,
-        });
     }
     Ok(())
 }
