@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use assert_cmd::Command;
 use tempfile::TempDir;
 
+use super::daemon_runtime::shutdown_daemon;
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub struct RealtimeFixture {
@@ -76,6 +78,7 @@ impl RealtimeFixture {
 
 impl Drop for RealtimeFixture {
     fn drop(&mut self) {
+        shutdown_daemon(self.runtime_dir.path());
         self.prev_env.restore();
     }
 }

@@ -2,11 +2,14 @@
 //!
 //! Tests importing issues.jsonl from Go beads export format.
 
+mod fixtures;
+
 use std::fs;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
+use fixtures::daemon_runtime::shutdown_daemon;
 
 fn test_runtime_dir() -> &'static std::path::Path {
     use std::sync::OnceLock;
@@ -89,6 +92,12 @@ impl TestRepo {
         cmd.env("BD_DATA_DIR", data_dir_for_runtime(test_runtime_dir()));
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd
+    }
+}
+
+impl Drop for TestRepo {
+    fn drop(&mut self) {
+        shutdown_daemon(test_runtime_dir());
     }
 }
 

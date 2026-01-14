@@ -1,5 +1,7 @@
 //! Phase 7 tests: admin status and metrics IPC ops.
 
+mod fixtures;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,7 @@ use beads_rs::{
     StoreId, Watermarks,
 };
 use uuid::Uuid;
+use fixtures::daemon_runtime::shutdown_daemon;
 
 struct AdminFixture {
     runtime_dir: TempDir,
@@ -63,6 +66,12 @@ impl AdminFixture {
 
     fn create_issue(&self, title: &str) {
         self.bd().args(["create", title]).assert().success();
+    }
+}
+
+impl Drop for AdminFixture {
+    fn drop(&mut self) {
+        shutdown_daemon(self.runtime_dir.path());
     }
 }
 

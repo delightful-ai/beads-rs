@@ -2,6 +2,8 @@
 //!
 //! These tests run the actual `bd` binary against temp git repos.
 
+mod fixtures;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -10,6 +12,7 @@ use std::time::Duration;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
+use fixtures::daemon_runtime::shutdown_daemon;
 
 fn test_runtime_dir() -> &'static std::path::Path {
     use std::sync::OnceLock;
@@ -140,6 +143,12 @@ impl TestRepo {
 
     fn bd(&self) -> Command {
         bd_with_runtime(self.path(), test_runtime_dir())
+    }
+}
+
+impl Drop for TestRepo {
+    fn drop(&mut self) {
+        shutdown_daemon(test_runtime_dir());
     }
 }
 
