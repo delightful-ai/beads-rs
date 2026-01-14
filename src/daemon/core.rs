@@ -24,6 +24,7 @@ use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
     ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
 };
+use super::migration::MigrationError;
 use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
@@ -629,28 +630,34 @@ impl Daemon {
         let mut state = loaded.state;
         let mut root_slug = loaded.root_slug;
 
-        // WAL recovery: merge any state from WAL file
-        match self.wal.read(remote) {
-            Ok(Some(wal_entry)) => {
+        // WAL recovery: merge any state from legacy snapshot WAL
+        match crate::daemon::migration::import_legacy_snapshot_wal(&self.wal, remote) {
+            Ok(Some(wal_import)) => {
                 tracing::info!(
-                    "recovering WAL for {:?} (sequence {})",
+                    "recovering legacy WAL for {:?} (sequence {})",
                     remote,
-                    wal_entry.sequence
+                    wal_import.sequence
                 );
 
+                let wal_state = wal_import
+                    .state
+                    .get(&NamespaceId::core())
+                    .cloned()
+                    .unwrap_or_default();
+
                 // Advance clock for WAL timestamps
-                if let Some(max_stamp) = wal_entry.state.max_write_stamp() {
+                if let Some(max_stamp) = wal_state.max_write_stamp() {
                     self.clock.receive(&max_stamp);
                     last_seen_stamp = max_write_stamp(last_seen_stamp, Some(max_stamp));
                 }
 
                 // CRDT merge WAL state with git state
-                match CanonicalState::join(&state, &wal_entry.state) {
+                match CanonicalState::join(&state, &wal_state) {
                     Ok(merged) => {
                         state = merged;
                         // WAL slug takes precedence if set
-                        if wal_entry.root_slug.is_some() {
-                            root_slug = wal_entry.root_slug;
+                        if wal_import.root_slug.is_some() {
+                            root_slug = wal_import.root_slug;
                         }
                         // WAL had data - need to sync it to remote
                         needs_sync = true;
@@ -663,9 +670,8 @@ impl Daemon {
                 }
             }
             Ok(None) => {}
-            Err(e) => {
-                return Err(OpError::from(e));
-            }
+            Err(MigrationError::WalSnapshot(err)) => return Err(OpError::from(err)),
+            Err(MigrationError::Sync(err)) => return Err(OpError::from(err)),
         }
 
         let replayed_event_wal = {

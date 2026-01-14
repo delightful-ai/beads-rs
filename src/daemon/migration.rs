@@ -4,6 +4,8 @@ use git2::{ErrorCode, Oid, Repository};
 use thiserror::Error;
 
 use crate::core::{StoreState, WriteStamp};
+use crate::daemon::remote::RemoteUrl;
+use crate::daemon::wal::{Wal, WalEntry, WalError};
 use crate::git::checkpoint::store_state_from_legacy;
 use crate::git::error::SyncError;
 use crate::git::sync::read_state_at_oid;
@@ -17,8 +19,17 @@ pub struct LegacyGitImport {
     pub last_write_stamp: Option<WriteStamp>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LegacyWalImport {
+    pub state: StoreState,
+    pub root_slug: Option<String>,
+    pub sequence: u64,
+}
+
 #[derive(Debug, Error)]
 pub enum MigrationError {
+    #[error(transparent)]
+    WalSnapshot(#[from] WalError),
     #[error(transparent)]
     Sync(#[from] SyncError),
 }
@@ -33,6 +44,27 @@ pub fn import_legacy_git_ref(repo: &Repository) -> Result<Option<LegacyGitImport
         state: store_state_from_legacy(loaded.state),
         root_slug: loaded.root_slug,
         last_write_stamp: loaded.last_write_stamp,
+    }))
+}
+
+/// Read legacy snapshot WAL (if present) into the core namespace.
+pub fn import_legacy_snapshot_wal(
+    wal: &Wal,
+    remote: &RemoteUrl,
+) -> Result<Option<LegacyWalImport>, MigrationError> {
+    let Some(entry) = wal.read(remote)? else {
+        return Ok(None);
+    };
+    let WalEntry {
+        state,
+        root_slug,
+        sequence,
+        ..
+    } = entry;
+    Ok(Some(LegacyWalImport {
+        state: store_state_from_legacy(state),
+        root_slug,
+        sequence,
     }))
 }
 
@@ -110,6 +142,10 @@ mod tests {
         commit_oid
     }
 
+    fn test_remote() -> RemoteUrl {
+        RemoteUrl("git@github.com:test/repo.git".into())
+    }
+
     #[test]
     fn import_legacy_git_ref_reads_core_state() {
         let tmp = TempDir::new().unwrap();
@@ -135,5 +171,36 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
         assert!(import_legacy_git_ref(&repo).unwrap().is_none());
+    }
+
+    #[test]
+    fn import_legacy_snapshot_wal_reads_core_state() {
+        let tmp = TempDir::new().unwrap();
+        let wal = Wal::new(tmp.path()).unwrap();
+        let remote = test_remote();
+
+        let mut state = crate::core::CanonicalState::new();
+        state.insert(make_bead("bd-legacy-wal")).unwrap();
+        let entry = WalEntry::new(state, Some("wal-root".to_string()), 7, 123);
+        wal.write(&remote, &entry).unwrap();
+
+        let import = import_legacy_snapshot_wal(&wal, &remote)
+            .unwrap()
+            .expect("legacy wal import");
+        let core_state = import
+            .state
+            .get(&crate::core::NamespaceId::core())
+            .expect("core namespace");
+        assert_eq!(core_state.live_count(), 1);
+        assert_eq!(import.root_slug.as_deref(), Some("wal-root"));
+        assert_eq!(import.sequence, 7);
+    }
+
+    #[test]
+    fn import_legacy_snapshot_wal_none_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let wal = Wal::new(tmp.path()).unwrap();
+        let remote = test_remote();
+        assert!(import_legacy_snapshot_wal(&wal, &remote).unwrap().is_none());
     }
 }
