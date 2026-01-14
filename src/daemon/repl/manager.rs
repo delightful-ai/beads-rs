@@ -984,7 +984,6 @@ mod tests {
     #[test]
     fn reconnects_after_disconnect() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.set_nonblocking(true).expect("nonblocking");
         let addr = listener.local_addr().unwrap().to_string();
         let local_store = StoreIdentity::new(
             crate::core::StoreId::new(Uuid::from_bytes([8u8; 16])),
@@ -1018,41 +1017,24 @@ mod tests {
         );
 
         let handle = manager.start();
-        let start = Instant::now();
-        let deadline = Duration::from_secs(1);
-
-        let first_at = loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    drop(stream);
-                    break Instant::now();
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    if start.elapsed() > deadline {
-                        panic!("timeout waiting for first connection");
-                    }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(err) => panic!("accept 1 failed: {err}"),
+        let (seen_tx, seen_rx) = crossbeam::channel::bounded(2);
+        thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().expect("accept");
+                let reader_stream = stream.try_clone().expect("clone");
+                let mut reader = FrameReader::new(reader_stream, 1024 * 1024);
+                let _ = reader.read_next();
+                drop(stream);
+                let _ = seen_tx.send(Instant::now());
             }
-        };
+        });
 
-        let second_at = loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    drop(stream);
-                    break Instant::now();
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    if first_at.elapsed() > deadline {
-                        panic!("timeout waiting for second connection");
-                    }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(err) => panic!("accept 2 failed: {err}"),
-            }
-        };
-
+        let first_at = seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first connection");
+        let second_at = seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second connection");
         assert!(second_at.duration_since(first_at) >= Duration::from_millis(20));
         handle.shutdown();
     }
