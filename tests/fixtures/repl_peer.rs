@@ -11,7 +11,7 @@ use beads_rs::core::{
 };
 use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
 use beads_rs::daemon::repl::{
-    Ack, IngestOutcome, Session, SessionAction, SessionConfig, SessionPhase, SessionRole,
+    Ack, Events, IngestOutcome, Session, SessionAction, SessionConfig, SessionPhase, SessionRole,
     SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
 };
 
