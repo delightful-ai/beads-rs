@@ -3,14 +3,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::error::details::{
-    CorruptionDetails, InternalErrorDetails, InvalidRequestDetails, ReplicaIdCollisionDetails,
-    StoreEpochMismatchDetails, SubscriberLaggedDetails, VersionIncompatibleDetails,
-    WrongStoreDetails,
+    CorruptionDetails, FrameTooLargeDetails, InternalErrorDetails, InvalidRequestDetails,
+    NonCanonicalDetails, ReplicaIdCollisionDetails, StoreEpochMismatchDetails,
+    SubscriberLaggedDetails, VersionIncompatibleDetails, WrongStoreDetails,
 };
 use crate::core::{
-    Applied, Durable, ErrorCode, ErrorPayload, EventFrameError, EventId, EventShaLookup,
-    EventShaLookupError, HeadStatus, Limits, NamespaceId, PrevVerified, ReplicaId, Seq0, Seq1,
-    Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEvent, Watermark, verify_event_frame,
+    Applied, DecodeError, Durable, ErrorCode, ErrorPayload, EventFrameError, EventFrameV1, EventId,
+    EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, PrevVerified, ReplicaId,
+    Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEvent, Watermark,
+    verify_event_frame,
 };
 use crate::daemon::admission::AdmissionController;
 
@@ -379,7 +380,9 @@ impl Session {
                     &lookup,
                 ) {
                     Ok(event) => event,
-                    Err(err) => return self.fail(event_frame_error_payload(err)),
+                    Err(err) => {
+                        return self.fail(event_frame_error_payload(&frame, &self.limits, err));
+                    }
                 }
             };
 
@@ -793,7 +796,11 @@ fn internal_error(message: impl Into<String>) -> ErrorPayload {
     )
 }
 
-fn event_frame_error_payload(err: EventFrameError) -> ErrorPayload {
+fn event_frame_error_payload(
+    frame: &EventFrameV1,
+    limits: &Limits,
+    err: EventFrameError,
+) -> ErrorPayload {
     match err {
         EventFrameError::WrongStore { expected, got } => {
             if expected.store_id != got.store_id {
@@ -837,19 +844,46 @@ fn event_frame_error_payload(err: EventFrameError) -> ErrorPayload {
                 },
             )
         }
-        EventFrameError::Decode(err) => {
-            ErrorPayload::new(ErrorCode::InvalidRequest, err.to_string(), false).with_details(
-                InvalidRequestDetails {
-                    field: None,
-                    reason: Some(err.to_string()),
-                },
-            )
-        }
+        EventFrameError::Decode(err) => decode_error_payload(&err, limits, frame.bytes.len()),
         EventFrameError::Lookup(err) => internal_error(err.to_string()),
         EventFrameError::Equivocation => {
             ErrorPayload::new(ErrorCode::Equivocation, "equivocation detected", false)
         }
     }
+}
+
+fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) -> ErrorPayload {
+    match err {
+        DecodeError::DecodeLimit(reason) => match *reason {
+            "max_wal_record_bytes" | "max_frame_bytes" => {
+                ErrorPayload::new(ErrorCode::FrameTooLarge, "event frame too large", false)
+                    .with_details(FrameTooLargeDetails {
+                        max_frame_bytes: limits.max_frame_bytes.min(limits.max_wal_record_bytes)
+                            as u64,
+                        got_bytes: frame_bytes as u64,
+                    })
+            }
+            _ => invalid_request_decode_error(err),
+        },
+        DecodeError::IndefiniteLength | DecodeError::TrailingBytes => {
+            ErrorPayload::new(ErrorCode::NonCanonical, err.to_string(), false).with_details(
+                NonCanonicalDetails {
+                    format: "cbor".to_string(),
+                    reason: Some(err.to_string()),
+                },
+            )
+        }
+        _ => invalid_request_decode_error(err),
+    }
+}
+
+fn invalid_request_decode_error(err: &DecodeError) -> ErrorPayload {
+    ErrorPayload::new(ErrorCode::InvalidRequest, err.to_string(), false).with_details(
+        InvalidRequestDetails {
+            field: None,
+            reason: Some(err.to_string()),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1261,5 +1295,70 @@ mod tests {
             panic!("expected error payload");
         };
         assert_eq!(payload.code, ErrorCode::WrongStore);
+    }
+
+    #[test]
+    fn decode_error_indefinite_length_maps_to_non_canonical() {
+        let (_store, identity, origin) = base_store();
+        let frame = make_event(identity, NamespaceId::core(), origin, 1, None);
+        let limits = Limits::default();
+        let payload = event_frame_error_payload(
+            &frame,
+            &limits,
+            EventFrameError::Decode(DecodeError::IndefiniteLength),
+        );
+        assert_eq!(payload.code, ErrorCode::NonCanonical);
+        let details = payload
+            .details_as::<NonCanonicalDetails>()
+            .unwrap()
+            .expect("non canonical details");
+        assert_eq!(details.format, "cbor");
+    }
+
+    #[test]
+    fn decode_error_frame_too_large_maps_to_frame_too_large() {
+        let (_store, identity, origin) = base_store();
+        let frame = make_event(identity, NamespaceId::core(), origin, 1, None);
+        let mut limits = Limits::default();
+        limits.max_frame_bytes = 1;
+
+        let payload = event_frame_error_payload(
+            &frame,
+            &limits,
+            EventFrameError::Decode(DecodeError::DecodeLimit("max_wal_record_bytes")),
+        );
+        assert_eq!(payload.code, ErrorCode::FrameTooLarge);
+        let details = payload
+            .details_as::<FrameTooLargeDetails>()
+            .unwrap()
+            .expect("frame too large details");
+        assert_eq!(details.max_frame_bytes, limits.max_frame_bytes as u64);
+        assert_eq!(details.got_bytes, frame.bytes.len() as u64);
+    }
+
+    #[test]
+    fn decode_error_invalid_field_maps_to_invalid_request() {
+        let (_store, identity, origin) = base_store();
+        let frame = make_event(identity, NamespaceId::core(), origin, 1, None);
+        let limits = Limits::default();
+        let payload = event_frame_error_payload(
+            &frame,
+            &limits,
+            EventFrameError::Decode(DecodeError::InvalidField {
+                field: "store_id",
+                reason: "bad".to_string(),
+            }),
+        );
+        assert_eq!(payload.code, ErrorCode::InvalidRequest);
+        let details = payload
+            .details_as::<InvalidRequestDetails>()
+            .unwrap()
+            .expect("invalid request details");
+        assert!(
+            details
+                .reason
+                .unwrap_or_default()
+                .contains("invalid field store_id")
+        );
     }
 }
