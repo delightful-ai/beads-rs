@@ -3,8 +3,11 @@
 //! These helpers emit structured metrics via tracing by default. A test sink can
 //! be installed to capture emissions in unit tests.
 
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+
+const HISTOGRAM_MAX_SAMPLES: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetricValue {
@@ -13,7 +16,7 @@ pub enum MetricValue {
     Histogram(u64),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MetricLabel {
     pub key: &'static str,
     pub value: String,
@@ -24,6 +27,45 @@ pub struct MetricEvent {
     pub name: &'static str,
     pub value: MetricValue,
     pub labels: Vec<MetricLabel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MetricKey {
+    name: &'static str,
+    labels: Vec<MetricLabel>,
+}
+
+impl MetricKey {
+    fn new(name: &'static str, labels: Vec<MetricLabel>) -> Self {
+        let mut labels = labels;
+        labels.sort();
+        Self { name, labels }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetricSample {
+    pub name: &'static str,
+    pub value: u64,
+    pub labels: Vec<MetricLabel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetricHistogram {
+    pub name: &'static str,
+    pub count: u64,
+    pub min: Option<u64>,
+    pub max: Option<u64>,
+    pub p50: Option<u64>,
+    pub p95: Option<u64>,
+    pub labels: Vec<MetricLabel>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MetricsSnapshot {
+    pub counters: Vec<MetricSample>,
+    pub gauges: Vec<MetricSample>,
+    pub histograms: Vec<MetricHistogram>,
 }
 
 pub trait MetricSink: Send + Sync {
@@ -64,6 +106,7 @@ impl MetricSink for TracingSink {
 }
 
 static METRIC_SINK: std::sync::OnceLock<RwLock<Arc<dyn MetricSink>>> = std::sync::OnceLock::new();
+static METRIC_STATE: std::sync::OnceLock<Mutex<MetricsState>> = std::sync::OnceLock::new();
 
 fn sink() -> Arc<dyn MetricSink> {
     METRIC_SINK
@@ -78,7 +121,12 @@ pub fn set_sink(sink: Arc<dyn MetricSink>) {
     *lock.write().expect("metrics sink lock poisoned") = sink;
 }
 
+fn state() -> &'static Mutex<MetricsState> {
+    METRIC_STATE.get_or_init(|| Mutex::new(MetricsState::default()))
+}
+
 fn emit(name: &'static str, value: MetricValue, labels: Vec<MetricLabel>) {
+    record_state(name, &value, &labels);
     sink().record(MetricEvent {
         name,
         value,
@@ -236,6 +284,122 @@ pub fn scrub_records_checked(count: u64) {
     );
 }
 
+pub fn snapshot() -> MetricsSnapshot {
+    let guard = state().lock().expect("metrics state lock poisoned");
+    guard.snapshot()
+}
+
+fn record_state(name: &'static str, value: &MetricValue, labels: &[MetricLabel]) {
+    let mut guard = state().lock().expect("metrics state lock poisoned");
+    let key = MetricKey::new(name, labels.to_vec());
+    match value {
+        MetricValue::Counter(delta) => {
+            let entry = guard.counters.entry(key).or_insert(0);
+            *entry = entry.saturating_add(*delta);
+        }
+        MetricValue::Gauge(value) => {
+            guard.gauges.insert(key, *value);
+        }
+        MetricValue::Histogram(value) => {
+            guard
+                .histograms
+                .entry(key)
+                .or_default()
+                .record(*value);
+        }
+    }
+}
+
+#[derive(Default)]
+struct MetricsState {
+    counters: BTreeMap<MetricKey, u64>,
+    gauges: BTreeMap<MetricKey, u64>,
+    histograms: BTreeMap<MetricKey, HistogramState>,
+}
+
+impl MetricsState {
+    fn snapshot(&self) -> MetricsSnapshot {
+        let counters = self
+            .counters
+            .iter()
+            .map(|(key, value)| MetricSample {
+                name: key.name,
+                value: *value,
+                labels: key.labels.clone(),
+            })
+            .collect();
+
+        let gauges = self
+            .gauges
+            .iter()
+            .map(|(key, value)| MetricSample {
+                name: key.name,
+                value: *value,
+                labels: key.labels.clone(),
+            })
+            .collect();
+
+        let histograms = self
+            .histograms
+            .iter()
+            .map(|(key, histogram)| {
+                let mut values: Vec<u64> = histogram.samples.iter().copied().collect();
+                values.sort_unstable();
+                let min = values.first().copied();
+                let max = values.last().copied();
+                let p50 = percentile(&values, 0.50);
+                let p95 = percentile(&values, 0.95);
+                MetricHistogram {
+                    name: key.name,
+                    count: histogram.count,
+                    min,
+                    max,
+                    p50,
+                    p95,
+                    labels: key.labels.clone(),
+                }
+            })
+            .collect();
+
+        MetricsSnapshot {
+            counters,
+            gauges,
+            histograms,
+        }
+    }
+}
+
+#[derive(Default)]
+struct HistogramState {
+    samples: VecDeque<u64>,
+    count: u64,
+}
+
+impl HistogramState {
+    fn record(&mut self, value: u64) {
+        self.count = self.count.saturating_add(1);
+        if self.samples.len() >= HISTOGRAM_MAX_SAMPLES {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(value);
+    }
+}
+
+fn percentile(sorted: &[u64], percentile: f64) -> Option<u64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let p = if percentile < 0.0 {
+        0.0
+    } else if percentile > 1.0 {
+        1.0
+    } else {
+        percentile
+    };
+    let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+    sorted.get(idx).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +433,26 @@ mod tests {
         assert!(events.iter().any(|e| e.name == "apply_ok"));
         assert!(events.iter().any(|e| e.name == "apply_duration"));
         assert!(events.iter().any(|e| e.name == "checkpoint_queue_depth"));
+    }
+
+    #[test]
+    fn snapshot_collects_metrics() {
+        wal_append_ok(Duration::from_millis(4));
+        wal_fsync_ok(Duration::from_millis(2));
+        set_ipc_inflight(3);
+
+        let snapshot = snapshot();
+        assert!(snapshot
+            .counters
+            .iter()
+            .any(|m| m.name == "wal_append_ok"));
+        assert!(snapshot
+            .histograms
+            .iter()
+            .any(|m| m.name == "wal_append_duration"));
+        assert!(snapshot
+            .gauges
+            .iter()
+            .any(|m| m.name == "ipc_inflight"));
     }
 }
