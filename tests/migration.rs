@@ -106,6 +106,7 @@ fn sample_go_export() -> &'static str {
 }
 
 /// Sample Go beads JSONL export using a repo-name slug (beads-go default).
+#[cfg(feature = "slow-tests")]
 fn sample_go_export_repo_slug() -> &'static str {
     r#"{"id":"beads-rs-abc1","title":"Open task","description":"A task that is open","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T10:00:00Z","updated_at":"2025-01-01T10:00:00Z"}
 {"id":"beads-rs-abc2","title":"Bug to fix","description":"Something is broken","status":"in_progress","priority":0,"issue_type":"bug","assignee":"alice","created_at":"2025-01-02T10:00:00Z","updated_at":"2025-01-02T12:00:00Z"}
@@ -113,6 +114,7 @@ fn sample_go_export_repo_slug() -> &'static str {
 }
 
 /// Sample with dependencies.
+#[cfg(feature = "slow-tests")]
 fn sample_with_deps() -> &'static str {
     r#"{"id":"bd-dep1","title":"Foundation","description":"Build the base","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T10:00:00Z","updated_at":"2025-01-01T10:00:00Z"}
 {"id":"bd-dep2","title":"Feature on top","description":"Needs foundation","status":"open","priority":1,"issue_type":"feature","dependencies":[{"issue_id":"bd-dep2","depends_on_id":"bd-dep1","type":"blocks","created_at":"2025-01-01T10:00:00Z"}],"created_at":"2025-01-01T11:00:00Z","updated_at":"2025-01-01T11:00:00Z"}
@@ -120,18 +122,21 @@ fn sample_with_deps() -> &'static str {
 }
 
 /// Sample with labels.
+#[cfg(feature = "slow-tests")]
 fn sample_with_labels() -> &'static str {
     r#"{"id":"bd-lbl1","title":"Labeled issue","description":"Has some labels","status":"open","priority":2,"issue_type":"task","labels":["tech-debt","backend"],"created_at":"2025-01-01T10:00:00Z","updated_at":"2025-01-01T10:00:00Z"}
 "#
 }
 
 /// Sample with comments/notes.
+#[cfg(feature = "slow-tests")]
 fn sample_with_comments() -> &'static str {
     r#"{"id":"bd-cmt1","title":"Issue with discussion","description":"Has comments","status":"open","priority":2,"issue_type":"task","comments":[{"id":1,"issue_id":"bd-cmt1","author":"bob","text":"First comment","created_at":"2025-01-01T11:00:00Z"},{"id":2,"issue_id":"bd-cmt1","author":"alice","text":"Reply here","created_at":"2025-01-01T12:00:00Z"}],"created_at":"2025-01-01T10:00:00Z","updated_at":"2025-01-01T12:00:00Z"}
 "#
 }
 
 /// Sample epic with hierarchical IDs.
+#[cfg(feature = "slow-tests")]
 fn sample_epic() -> &'static str {
     r#"{"id":"bd-epic","title":"Big project","description":"An epic","status":"open","priority":1,"issue_type":"epic","created_at":"2025-01-01T10:00:00Z","updated_at":"2025-01-01T10:00:00Z"}
 {"id":"bd-epic.1","title":"Subtask one","description":"First part","status":"open","priority":2,"issue_type":"task","created_at":"2025-01-01T11:00:00Z","updated_at":"2025-01-01T11:00:00Z"}
@@ -140,6 +145,7 @@ fn sample_epic() -> &'static str {
 }
 
 /// Sample tombstone (deleted issue).
+#[cfg(feature = "slow-tests")]
 fn sample_tombstone() -> &'static str {
     r#"{"id":"bd-tomb","title":"(deleted)","description":"","status":"tombstone","priority":4,"issue_type":"task","deleted_at":"2025-01-05T10:00:00Z","deleted_by":"admin","delete_reason":"Duplicate","created_at":"2025-01-01T10:00:00Z","updated_at":"2025-01-05T10:00:00Z"}
 "#
@@ -168,6 +174,7 @@ fn test_migrate_dry_run() {
         .stdout(predicate::str::contains("\"dry_run\": true"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_basic_import() {
     let repo = TestRepo::new();
@@ -207,6 +214,7 @@ fn test_migrate_basic_import() {
         .stdout(predicate::str::contains("in_progress"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_with_dependencies() {
     let repo = TestRepo::new();
@@ -242,6 +250,7 @@ fn test_migrate_with_dependencies() {
         .stdout(predicate::str::contains("Feature on top").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_with_labels() {
     let repo = TestRepo::new();
@@ -281,6 +290,7 @@ fn test_migrate_with_labels() {
         .stdout(predicate::str::contains("Labeled issue").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_with_comments() {
     let repo = TestRepo::new();
@@ -309,6 +319,7 @@ fn test_migrate_with_comments() {
         .stdout(predicate::str::contains("Reply here"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_epic_hierarchy() {
     let repo = TestRepo::new();
@@ -344,6 +355,7 @@ fn test_migrate_epic_hierarchy() {
         .stdout(predicate::str::contains("Big project"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_tombstone() {
     let repo = TestRepo::new();
@@ -378,6 +390,7 @@ fn test_migrate_tombstone() {
         .stdout(predicate::str::contains("bd-tomb"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_refuses_without_force_if_exists() {
     let repo = TestRepo::new();
@@ -424,6 +437,7 @@ fn test_migrate_refuses_without_force_if_exists() {
         .success();
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_then_create_new() {
     let repo = TestRepo::new();
@@ -464,6 +478,7 @@ fn test_migrate_then_create_new() {
         .stdout(predicate::str::contains("Brand new issue")); // newly created
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_preserves_repo_slug_and_new_ids_use_it() {
     let repo = TestRepo::new();
@@ -512,6 +527,7 @@ fn test_migrate_preserves_repo_slug_and_new_ids_use_it() {
     );
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_can_rewrite_root_slug() {
     let repo = TestRepo::new();
@@ -540,6 +556,7 @@ fn test_migrate_can_rewrite_root_slug() {
         .stdout(predicate::str::contains("Something is broken"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_migrate_preserves_all_fields() {
     let repo = TestRepo::new();

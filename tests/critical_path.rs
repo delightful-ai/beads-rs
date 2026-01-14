@@ -5,8 +5,10 @@
 mod fixtures;
 
 use std::fs;
+#[cfg(feature = "slow-tests")]
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "slow-tests")]
 use std::time::Duration;
 
 use assert_cmd::Command;
@@ -30,10 +32,12 @@ fn bd_with_runtime(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command 
     cmd
 }
 
+#[cfg(feature = "slow-tests")]
 fn socket_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("beads").join("daemon.sock")
 }
 
+#[cfg(feature = "slow-tests")]
 fn daemon_pid(runtime_dir: &Path) -> u32 {
     use beads_rs::daemon::ipc::{Request, Response, ResponsePayload};
     use beads_rs::daemon::query::QueryResult;
@@ -59,10 +63,12 @@ fn daemon_pid(runtime_dir: &Path) -> u32 {
     info.pid
 }
 
+#[cfg(feature = "slow-tests")]
 fn parse_response_payload(bytes: &[u8]) -> beads_rs::daemon::ipc::ResponsePayload {
     serde_json::from_slice(bytes).expect("parse response payload")
 }
 
+#[cfg(feature = "slow-tests")]
 fn store_id_from_remote_path(remote: &Path) -> beads_rs::StoreId {
     let remote_str = remote.to_str().expect("remote path");
     let normalized = beads_rs::daemon::remote::normalize_url(remote_str);
@@ -165,6 +171,7 @@ fn test_init_creates_beads_branch() {
     );
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_create_and_list() {
     let repo = TestRepo::new();
@@ -239,6 +246,7 @@ fn test_create_show_close_workflow() {
         .stdout(predicate::str::contains("Bug to fix").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_claim_and_unclaim() {
     let repo = TestRepo::new();
@@ -332,6 +340,7 @@ fn test_dependencies() {
         .stdout(predicate::str::contains("Task B"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_discovered_from_workflow() {
     let repo = TestRepo::new();
@@ -371,6 +380,7 @@ fn test_discovered_from_workflow() {
         .stdout(predicate::str::contains("Found edge case"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_epic_with_subtasks() {
     let repo = TestRepo::new();
@@ -422,6 +432,7 @@ fn test_epic_with_subtasks() {
         .stdout(predicate::str::contains("Big feature"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_epic_show_progress_display() {
     let repo = TestRepo::new();
@@ -511,6 +522,7 @@ fn test_epic_show_progress_display() {
         .stdout(predicate::str::contains("[P3]")); // Low priority shown
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_update_parent_and_unparent() {
     let repo = TestRepo::new();
@@ -585,6 +597,7 @@ fn test_update_parent_and_unparent() {
         .failure();
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_labels() {
     let repo = TestRepo::new();
@@ -626,6 +639,7 @@ fn test_labels() {
         .stdout(predicate::str::contains("Labeled issue").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_search() {
     let repo = TestRepo::new();
@@ -723,6 +737,7 @@ fn test_status_overview() {
         .stdout(predicate::str::contains("closed"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_update_bead() {
     let repo = TestRepo::new();
@@ -812,6 +827,7 @@ fn test_update_bead() {
     assert_eq!(json["data"]["closed_reason"].as_str(), Some("Done"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_delete_and_undelete() {
     let repo = TestRepo::new();
@@ -857,6 +873,7 @@ fn test_delete_and_undelete() {
         .stderr(predicate::str::contains("deleted"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_reopen_closed() {
     let repo = TestRepo::new();
@@ -896,6 +913,7 @@ fn test_reopen_closed() {
         .stdout(predicate::str::contains("\"status\": \"open\""));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_comments() {
     let repo = TestRepo::new();
@@ -940,6 +958,7 @@ fn test_comments() {
         .stdout(predicate::str::contains("\"notes\""));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_filter_by_priority() {
     let repo = TestRepo::new();
@@ -995,6 +1014,7 @@ fn test_filter_by_priority() {
         .stdout(predicate::str::contains("Critical bug").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_filter_by_type() {
     let repo = TestRepo::new();
@@ -1032,6 +1052,7 @@ fn test_filter_by_type() {
         .stdout(predicate::str::contains("A bug").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_count_command() {
     let repo = TestRepo::new();
@@ -1073,6 +1094,7 @@ fn test_count_command() {
         .stdout(predicate::str::contains("task"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_stale_command() {
     let repo = TestRepo::new();
@@ -1098,6 +1120,7 @@ fn test_stale_command() {
         .stdout(predicate::str::contains("Fresh issue"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_sync_command() {
     let repo = TestRepo::new();
@@ -1120,6 +1143,7 @@ fn test_sync_command() {
         .stdout(predicate::str::contains("Test sync"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_comment_compat_alias() {
     let repo = TestRepo::new();
@@ -1151,6 +1175,7 @@ fn test_comment_compat_alias() {
         .stdout(predicate::str::contains("A compat comment"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_dep_rm() {
     let repo = TestRepo::new();
@@ -1216,6 +1241,7 @@ fn test_dep_rm() {
         .stdout(predicate::str::contains("Task B"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_dep_tree() {
     let repo = TestRepo::new();
@@ -1268,6 +1294,7 @@ fn test_dep_tree() {
         .stdout(predicate::str::contains(&child_id));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_label_list_and_list_all() {
     let repo = TestRepo::new();
@@ -1333,6 +1360,7 @@ fn test_label_list_and_list_all() {
         .stdout(predicate::str::contains("frontend"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_epic_close_eligible() {
     let repo = TestRepo::new();
@@ -1425,6 +1453,7 @@ fn test_epic_close_eligible() {
         .stdout(predicate::str::contains("closed"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_prime_command() {
     let repo = TestRepo::new();
@@ -1440,6 +1469,7 @@ fn test_prime_command() {
         .stdout(predicate::str::contains("bd claim"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_deleted_id_lookup() {
     let repo = TestRepo::new();
@@ -1472,6 +1502,7 @@ fn test_deleted_id_lookup() {
         .stdout(predicate::str::contains("found"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_list_sorting() {
     let repo = TestRepo::new();
@@ -1541,6 +1572,7 @@ fn test_list_sorting() {
     assert_eq!(issues[0]["priority"].as_u64().unwrap(), 4);
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_list_limit() {
     let repo = TestRepo::new();
@@ -1569,6 +1601,7 @@ fn test_list_limit() {
     assert_eq!(issues.len(), 2);
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_create_design_and_acceptance() {
     let repo = TestRepo::new();
@@ -1607,6 +1640,7 @@ fn test_create_design_and_acceptance() {
         .stdout(predicate::str::contains("All tests pass"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_create_with_assignee() {
     let repo = TestRepo::new();
@@ -1671,6 +1705,7 @@ fn test_error_handling_invalid_id() {
         .stderr(predicate::str::contains("invalid"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_error_handling_invalid_transitions() {
     let repo = TestRepo::new();
@@ -1706,6 +1741,7 @@ fn test_error_handling_invalid_transitions() {
         .stderr(predicate::str::contains("invalid").or(predicate::str::contains("closed")));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_reclaim_extends_lease() {
     let repo = TestRepo::new();
@@ -1764,6 +1800,7 @@ fn test_reclaim_extends_lease() {
     assert!(new_expires > initial_expires);
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_bulk_label_operations() {
     let repo = TestRepo::new();
@@ -1825,6 +1862,7 @@ fn test_bulk_label_operations() {
         .stdout(predicate::str::contains("Issue 2").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_setup_cursor() {
     let repo = TestRepo::new();
@@ -1862,6 +1900,7 @@ fn test_setup_cursor() {
         .success();
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_setup_aider() {
     let repo = TestRepo::new();
@@ -1896,6 +1935,7 @@ fn test_setup_aider() {
         .success();
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_setup_claude_project() {
     let repo = TestRepo::new();
@@ -1937,6 +1977,7 @@ fn test_setup_claude_project() {
 // =============================================================================
 
 /// Circular dependencies should be rejected.
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_circular_dependency_prevention() {
     let repo = TestRepo::new();
@@ -1984,6 +2025,7 @@ fn test_circular_dependency_prevention() {
 }
 
 /// Self-dependencies should be rejected.
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_self_dependency_prevention() {
     let repo = TestRepo::new();
@@ -2014,6 +2056,7 @@ fn test_self_dependency_prevention() {
 }
 
 /// Related dependencies should allow cycles (they're informational links).
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_related_deps_allow_cycles() {
     let repo = TestRepo::new();
@@ -2060,6 +2103,7 @@ fn test_related_deps_allow_cycles() {
 }
 
 /// discovered_from deps should also allow cycles.
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_discovered_from_deps_allow_cycles() {
     let repo = TestRepo::new();
@@ -2106,6 +2150,7 @@ fn test_discovered_from_deps_allow_cycles() {
 }
 
 /// Parent deps should still enforce DAG (no cycles).
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_parent_deps_reject_cycles() {
     let repo = TestRepo::new();
@@ -2152,6 +2197,7 @@ fn test_parent_deps_reject_cycles() {
         .stderr(predicate::str::contains("circular").or(predicate::str::contains("cycle")));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_operations_on_deleted_issue() {
     let repo = TestRepo::new();
@@ -2187,6 +2233,7 @@ fn test_operations_on_deleted_issue() {
     repo.bd().args(["close", &id]).assert().failure();
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_claim_already_claimed_issue() {
     let repo = TestRepo::new();
@@ -2222,6 +2269,7 @@ fn test_claim_already_claimed_issue() {
     assert!(output.status.success() || !output.stderr.is_empty());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_delete_issue_that_blocks_others() {
     let repo = TestRepo::new();
@@ -2275,6 +2323,7 @@ fn test_delete_issue_that_blocks_others() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_close_blocked_issue() {
     let repo = TestRepo::new();
@@ -2322,6 +2371,7 @@ fn test_close_blocked_issue() {
     assert!(output.status.success() || !output.stderr.is_empty());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_epic_close_with_open_children() {
     let repo = TestRepo::new();
@@ -2377,6 +2427,7 @@ fn test_epic_close_with_open_children() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_unicode_and_special_characters() {
     let repo = TestRepo::new();
@@ -2451,6 +2502,7 @@ fn test_unicode_and_special_characters() {
 }
 
 /// Empty titles should be rejected.
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_empty_and_whitespace_inputs() {
     let repo = TestRepo::new();
@@ -2469,6 +2521,7 @@ fn test_empty_and_whitespace_inputs() {
         .failure();
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_duplicate_dependency() {
     let repo = TestRepo::new();
@@ -2514,6 +2567,7 @@ fn test_duplicate_dependency() {
     assert!(output.status.success() || !output.stderr.is_empty());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_duplicate_label() {
     let repo = TestRepo::new();
@@ -2552,6 +2606,7 @@ fn test_duplicate_label() {
         .stdout(predicate::str::contains("my-label"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_remove_nonexistent_dependency() {
     let repo = TestRepo::new();
@@ -2591,6 +2646,7 @@ fn test_remove_nonexistent_dependency() {
     assert!(output.status.success() || !output.stderr.is_empty());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_remove_nonexistent_label() {
     let repo = TestRepo::new();
@@ -2642,6 +2698,7 @@ fn test_auto_init_on_first_create() {
         .stdout(predicate::str::contains("Auto-init test"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_double_init() {
     let repo = TestRepo::new();
@@ -2654,6 +2711,7 @@ fn test_double_init() {
     assert!(output.status.success() || !output.stderr.is_empty());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_init_fails_without_origin_remote() {
     let work_dir = TempDir::new().expect("failed to create work dir");
@@ -2684,6 +2742,7 @@ fn test_init_fails_without_origin_remote() {
     shutdown_daemon(runtime_dir.path());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_partial_id_matching() {
     let repo = TestRepo::new();
@@ -2726,6 +2785,7 @@ fn test_partial_id_matching() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_double_close() {
     let repo = TestRepo::new();
@@ -2761,6 +2821,7 @@ fn test_double_close() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_double_reopen() {
     let repo = TestRepo::new();
@@ -2793,6 +2854,7 @@ fn test_double_reopen() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_invalid_priority_values() {
     let repo = TestRepo::new();
@@ -2824,6 +2886,7 @@ fn test_invalid_priority_values() {
 /// BUG/FEATURE: String priority like "high" is accepted and converted to P1
 /// This might be intentional UX (nice to have) or a bug (should reject)
 /// Document the behavior either way
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_string_priority_accepted() {
     let repo = TestRepo::new();
@@ -2846,6 +2909,7 @@ fn test_string_priority_accepted() {
         );
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_invalid_type_value() {
     let repo = TestRepo::new();
@@ -2858,6 +2922,7 @@ fn test_invalid_type_value() {
         .failure();
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_create_with_nonexistent_parent() {
     let repo = TestRepo::new();
@@ -2871,6 +2936,7 @@ fn test_create_with_nonexistent_parent() {
         .stderr(predicate::str::contains("not found").or(predicate::str::contains("invalid")));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_create_with_deleted_parent() {
     let repo = TestRepo::new();
@@ -2912,6 +2978,7 @@ fn test_create_with_deleted_parent() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_dep_add_nonexistent_blocker() {
     let repo = TestRepo::new();
@@ -2938,6 +3005,7 @@ fn test_dep_add_nonexistent_blocker() {
         .stderr(predicate::str::contains("not found").or(predicate::str::contains("invalid")));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_dep_add_deleted_blocker() {
     let repo = TestRepo::new();
@@ -2983,6 +3051,7 @@ fn test_dep_add_deleted_blocker() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_long_dependency_chain() {
     let repo = TestRepo::new();
@@ -3040,6 +3109,7 @@ fn test_long_dependency_chain() {
         .stdout(predicate::str::contains("Chain issue 2").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_delete_middle_of_dependency_chain() {
     let repo = TestRepo::new();
@@ -3092,6 +3162,7 @@ fn test_delete_middle_of_dependency_chain() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_empty_comment() {
     let repo = TestRepo::new();
@@ -3132,6 +3203,7 @@ fn test_empty_comment() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_very_long_title() {
     let repo = TestRepo::new();
@@ -3162,6 +3234,7 @@ fn test_very_long_title() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_very_long_description() {
     let repo = TestRepo::new();
@@ -3190,6 +3263,7 @@ fn test_very_long_description() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_many_labels() {
     let repo = TestRepo::new();
@@ -3236,6 +3310,7 @@ fn test_many_labels() {
     assert!(output_str.contains("label-49"), "Should have label-49");
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_unclaim_not_claimed() {
     let repo = TestRepo::new();
@@ -3262,6 +3337,7 @@ fn test_unclaim_not_claimed() {
     assert!(output.status.success() || !output.stderr.is_empty());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_claim_closed_issue() {
     let repo = TestRepo::new();
@@ -3299,6 +3375,7 @@ fn test_claim_closed_issue() {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_update_multiple_fields_at_once() {
     let repo = TestRepo::new();
@@ -3338,6 +3415,7 @@ fn test_update_multiple_fields_at_once() {
         .stdout(predicate::str::contains("New desc"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_update_deps() {
     let repo = TestRepo::new();
@@ -3416,6 +3494,7 @@ fn test_update_deps() {
         .stdout(predicate::str::contains("Task A"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_update_deps_with_kind() {
     let repo = TestRepo::new();
@@ -3474,6 +3553,7 @@ fn test_update_deps_with_kind() {
     assert_eq!(deps_outgoing[0]["to"].as_str().unwrap(), id_main);
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_filter_no_results() {
     let repo = TestRepo::new();
@@ -3500,6 +3580,7 @@ fn test_filter_no_results() {
         .stdout(predicate::str::contains("A task").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_search_no_results() {
     let repo = TestRepo::new();
@@ -3518,6 +3599,7 @@ fn test_search_no_results() {
         .stdout(predicate::str::contains("Test issue").not());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_show_with_all_optional_fields() {
     let repo = TestRepo::new();
@@ -3568,6 +3650,7 @@ fn test_show_with_all_optional_fields() {
         .stdout(predicate::str::contains("important"));
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_crash_recovery_replays_wal() {
     use beads_rs::daemon::ipc::ResponsePayload;

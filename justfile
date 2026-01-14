@@ -21,6 +21,10 @@ lint:
 test:
     cargo test
 
+# Run the fast test tier (default)
+test-fast:
+    cargo test
+
 # Run slow tests (opt-in)
 test-slow:
     cargo test --features slow-tests

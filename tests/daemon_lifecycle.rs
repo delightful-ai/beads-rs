@@ -1,3 +1,4 @@
+#![cfg(feature = "slow-tests")]
 //! Integration tests for daemon lifecycle: stale sockets, version mismatch, restarts
 //!
 //! These tests verify robust daemon handling including:
