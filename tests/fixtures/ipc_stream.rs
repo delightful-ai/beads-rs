@@ -34,13 +34,18 @@ pub struct StreamingClient {
 
 impl StreamingClient {
     pub fn subscribe(repo: PathBuf, namespace: NamespaceId) -> Result<Self, StreamClientError> {
-        let request = Request::Subscribe {
-            repo,
-            read: ReadConsistency {
-                namespace: Some(namespace.as_str().to_string()),
-                ..ReadConsistency::default()
-            },
+        let read = ReadConsistency {
+            namespace: Some(namespace.as_str().to_string()),
+            ..ReadConsistency::default()
         };
+        Self::subscribe_with_read(repo, read)
+    }
+
+    pub fn subscribe_with_read(
+        repo: PathBuf,
+        read: ReadConsistency,
+    ) -> Result<Self, StreamClientError> {
+        let request = Request::Subscribe { repo, read };
         let mut stream = subscribe_stream(&request)?;
         let subscribed = loop {
             match Self::read_message_from_stream(&mut stream)? {
