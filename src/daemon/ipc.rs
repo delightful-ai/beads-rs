@@ -2565,6 +2565,22 @@ mod tests {
         assert_eq!(details.to_namespace.as_str(), "tmp");
     }
 
+    #[test]
+    fn rate_limited_includes_details() {
+        let err = OpError::RateLimited {
+            retry_after_ms: Some(250),
+            limit_bytes_per_sec: 1024,
+        };
+        let payload: ErrorPayload = err.into();
+        assert_eq!(payload.code, ErrorCode::RateLimited);
+        let details = payload
+            .details_as::<error_details::RateLimitedDetails>()
+            .expect("details decode")
+            .expect("details");
+        assert_eq!(details.retry_after_ms, Some(250));
+        assert_eq!(details.limit_bytes_per_sec, 1024);
+    }
+
     // Regression tests: verify all ResponsePayload variants roundtrip through Response
     mod response_roundtrip {
         use super::*;
