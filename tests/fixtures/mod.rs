@@ -4,7 +4,6 @@ pub mod cbor;
 pub mod checkpoint;
 pub mod checkpoint_diff;
 pub mod daemon_runtime;
-pub mod env_guard;
 pub mod event_body;
 pub mod identity;
 pub mod ipc_stream;

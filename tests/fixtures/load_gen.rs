@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use beads_rs::daemon::ipc::{
-    IpcError, MutationMeta, Request, Response, send_request, send_request_no_autostart,
-};
+use beads_rs::daemon::ipc::{IpcClient, IpcError, MutationMeta, Request, Response};
 use beads_rs::{BeadType, Priority};
 
 #[derive(Debug, Error)]
@@ -43,14 +41,20 @@ pub struct LoadReport {
 
 pub struct LoadGenerator {
     repo: PathBuf,
+    client: IpcClient,
     config: LoadConfig,
     counter: Arc<AtomicUsize>,
 }
 
 impl LoadGenerator {
     pub fn new(repo: PathBuf) -> Self {
+        Self::with_client(repo, IpcClient::new())
+    }
+
+    pub fn with_client(repo: PathBuf, client: IpcClient) -> Self {
         Self {
             repo,
+            client,
             config: LoadConfig {
                 workers: 1,
                 total_requests: 1,
@@ -76,12 +80,14 @@ impl LoadGenerator {
         let attempts = Arc::new(AtomicUsize::new(0));
         let successes = Arc::new(AtomicUsize::new(0));
         let failures = Arc::new(AtomicUsize::new(0));
+        let client = self.client.clone();
 
         let started = Instant::now();
         let mut handles = Vec::with_capacity(workers);
         for worker in 0..workers {
             let repo = self.repo.clone();
             let config = self.config.clone();
+            let client = client.clone();
             let errors = Arc::clone(&errors);
             let attempts = Arc::clone(&attempts);
             let successes = Arc::clone(&successes);
@@ -123,9 +129,9 @@ impl LoadGenerator {
                         },
                     };
                     let result = if config.autostart {
-                        send_request(&request)
+                        client.send_request(&request)
                     } else {
-                        send_request_no_autostart(&request)
+                        client.send_request_no_autostart(&request)
                     };
                     match result {
                         Ok(Response::Ok { .. }) => {

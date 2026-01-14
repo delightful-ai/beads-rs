@@ -21,16 +21,18 @@ fn phase7_admin_status_monotonic_under_load() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
+    let client = fixture.ipc_client().with_autostart(false);
 
-    let mut generator = LoadGenerator::new(repo.clone());
+    let mut generator = LoadGenerator::with_client(repo.clone(), client.clone());
     let config = generator.config_mut();
     config.workers = 2;
     config.total_requests = 40;
     config.namespace = Some(namespace.as_str().to_string());
+    config.autostart = false;
 
     let handle = thread::spawn(move || generator.run());
 
-    let mut collector = StatusCollector::new(repo);
+    let mut collector = StatusCollector::with_client(repo, client);
     collector
         .collect_for(Duration::from_millis(250), Duration::from_millis(25))
         .expect("collect status");
@@ -47,11 +49,12 @@ fn phase7_admin_status_segment_stats_match_files() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
+    let client = fixture.ipc_client().with_autostart(false);
 
-    let report = run_load(repo.clone(), 6, &namespace);
+    let report = run_load(repo.clone(), 6, &namespace, client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
-    let mut collector = StatusCollector::new(repo);
+    let mut collector = StatusCollector::with_client(repo, client);
     let status = collector.sample().expect("admin status").clone();
 
     assert_segments_match_files(&status);
@@ -68,12 +71,18 @@ fn phase7_admin_status_segment_stats_match_files() {
     );
 }
 
-fn run_load(repo: PathBuf, total: usize, namespace: &NamespaceId) -> LoadReport {
-    let mut generator = LoadGenerator::new(repo);
+fn run_load(
+    repo: PathBuf,
+    total: usize,
+    namespace: &NamespaceId,
+    client: beads_rs::daemon::ipc::IpcClient,
+) -> LoadReport {
+    let mut generator = LoadGenerator::with_client(repo, client);
     let config = generator.config_mut();
     config.workers = 1;
     config.total_requests = total;
     config.namespace = Some(namespace.as_str().to_string());
+    config.autostart = false;
     generator.run()
 }
 

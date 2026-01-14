@@ -1,34 +1,27 @@
 #![allow(dead_code)]
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-use super::env_guard;
+use beads_rs::paths::{DataDirOverride, override_data_dir_for_tests};
 
 pub struct TempStoreDir {
-    _lock: std::sync::MutexGuard<'static, ()>,
     _temp: TempDir,
     data_dir: PathBuf,
-    prev_data_dir: Option<OsString>,
+    _override: DataDirOverride,
 }
 
 impl TempStoreDir {
     pub fn new() -> std::io::Result<Self> {
-        let lock = env_guard::lock_env();
         let temp = TempDir::new()?;
         let data_dir = temp.path().join("data");
         std::fs::create_dir_all(&data_dir)?;
-        let prev_data_dir = std::env::var_os("BD_DATA_DIR");
-        unsafe {
-            std::env::set_var("BD_DATA_DIR", &data_dir);
-        }
+        let override_guard = override_data_dir_for_tests(Some(data_dir.clone()));
 
         Ok(Self {
-            _lock: lock,
             _temp: temp,
             data_dir,
-            prev_data_dir,
+            _override: override_guard,
         })
     }
 
@@ -61,19 +54,5 @@ impl TempStoreDir {
             std::fs::remove_file(path)?;
         }
         Ok(())
-    }
-}
-
-impl Drop for TempStoreDir {
-    fn drop(&mut self) {
-        if let Some(prev) = self.prev_data_dir.take() {
-            unsafe {
-                std::env::set_var("BD_DATA_DIR", prev);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("BD_DATA_DIR");
-            }
-        }
     }
 }

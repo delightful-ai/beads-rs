@@ -4,7 +4,7 @@ mod fixtures;
 
 use std::path::PathBuf;
 
-use beads_rs::daemon::ipc::{ReadConsistency, Request, Response, subscribe_stream};
+use beads_rs::daemon::ipc::{ReadConsistency, Request, Response};
 use beads_rs::{Applied, ErrorCode, HeadStatus, NamespaceId, Seq0, Watermarks};
 
 use fixtures::admin_status::StatusCollector;
@@ -19,8 +19,9 @@ fn phase7_subscribe_streams_events_in_order() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
+    let ipc_client = fixture.ipc_client().with_autostart(false);
 
-    let (origin, start_seq) = current_origin_seq(&repo, &namespace);
+    let (origin, start_seq) = current_origin_seq(&repo, &namespace, ipc_client.clone());
 
     let required = require_min_seen(&namespace, origin, start_seq);
     let read = ReadConsistency {
@@ -28,9 +29,11 @@ fn phase7_subscribe_streams_events_in_order() {
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
-    let mut client = StreamingClient::subscribe_with_read(repo.clone(), read).expect("subscribe");
+    let mut client =
+        StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
+            .expect("subscribe");
 
-    let report = run_load(repo, 5, &namespace);
+    let report = run_load(repo, 5, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
     let seqs = collect_origin_seqs(&mut client, origin, start_seq, report.successes);
 
@@ -45,7 +48,8 @@ fn phase7_subscribe_gates_on_require_min_seen() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
-    let (origin, start_seq) = current_origin_seq(&repo, &namespace);
+    let ipc_client = fixture.ipc_client().with_autostart(false);
+    let (origin, start_seq) = current_origin_seq(&repo, &namespace, ipc_client.clone());
 
     let required_seq = start_seq + 1;
     let required = require_min_seen(&namespace, origin, required_seq);
@@ -59,7 +63,7 @@ fn phase7_subscribe_gates_on_require_min_seen() {
         read,
     };
 
-    let mut stream = subscribe_stream(&request).expect("subscribe stream");
+    let mut stream = ipc_client.subscribe_stream(&request).expect("subscribe stream");
     let response = stream
         .read_response()
         .expect("read response")
@@ -72,7 +76,7 @@ fn phase7_subscribe_gates_on_require_min_seen() {
         other => panic!("expected require_min_seen error, got {other:?}"),
     }
 
-    let report = run_load(repo.clone(), 1, &namespace);
+    let report = run_load(repo.clone(), 1, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
     let read = ReadConsistency {
@@ -80,9 +84,11 @@ fn phase7_subscribe_gates_on_require_min_seen() {
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
-    let mut client = StreamingClient::subscribe_with_read(repo.clone(), read).expect("subscribe");
+    let mut client =
+        StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
+            .expect("subscribe");
 
-    let report = run_load(repo, 1, &namespace);
+    let report = run_load(repo, 1, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
     let expected_seq = required_seq + 1;
@@ -98,7 +104,8 @@ fn phase7_subscribe_multiple_clients_receive_same_events() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
-    let (origin, start_seq) = current_origin_seq(&repo, &namespace);
+    let ipc_client = fixture.ipc_client().with_autostart(false);
+    let (origin, start_seq) = current_origin_seq(&repo, &namespace, ipc_client.clone());
 
     let required = require_min_seen(&namespace, origin, start_seq);
     let read = ReadConsistency {
@@ -107,12 +114,14 @@ fn phase7_subscribe_multiple_clients_receive_same_events() {
         wait_timeout_ms: None,
     };
 
-    let mut client_a = StreamingClient::subscribe_with_read(repo.clone(), read.clone())
-        .expect("subscribe client A");
+    let mut client_a =
+        StreamingClient::subscribe_with_client(repo.clone(), read.clone(), ipc_client.clone())
+            .expect("subscribe client A");
     let mut client_b =
-        StreamingClient::subscribe_with_read(repo.clone(), read).expect("subscribe client B");
+        StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
+            .expect("subscribe client B");
 
-    let report = run_load(repo, 3, &namespace);
+    let report = run_load(repo, 3, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
     let seqs_a = collect_origin_seqs(&mut client_a, origin, start_seq, report.successes);
@@ -121,17 +130,27 @@ fn phase7_subscribe_multiple_clients_receive_same_events() {
     assert_eq!(seqs_a, seqs_b);
 }
 
-fn run_load(repo: PathBuf, total: usize, namespace: &NamespaceId) -> LoadReport {
-    let mut generator = LoadGenerator::new(repo);
+fn run_load(
+    repo: PathBuf,
+    total: usize,
+    namespace: &NamespaceId,
+    client: beads_rs::daemon::ipc::IpcClient,
+) -> LoadReport {
+    let mut generator = LoadGenerator::with_client(repo, client);
     let config = generator.config_mut();
     config.workers = 1;
     config.total_requests = total;
     config.namespace = Some(namespace.as_str().to_string());
+    config.autostart = false;
     generator.run()
 }
 
-fn current_origin_seq(repo: &PathBuf, namespace: &NamespaceId) -> (beads_rs::ReplicaId, u64) {
-    let mut collector = StatusCollector::new(repo.clone());
+fn current_origin_seq(
+    repo: &PathBuf,
+    namespace: &NamespaceId,
+    client: beads_rs::daemon::ipc::IpcClient,
+) -> (beads_rs::ReplicaId, u64) {
+    let mut collector = StatusCollector::with_client(repo.clone(), client);
     let status = collector.sample().expect("admin status");
     let origin = status.replica_id;
     let start_seq = status

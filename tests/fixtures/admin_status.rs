@@ -7,9 +7,7 @@ use thiserror::Error;
 
 use beads_rs::Watermarks;
 use beads_rs::api::AdminStatusOutput;
-use beads_rs::daemon::ipc::{
-    IpcError, ReadConsistency, Request, Response, ResponsePayload, send_request_no_autostart,
-};
+use beads_rs::daemon::ipc::{IpcClient, IpcError, ReadConsistency, Request, Response, ResponsePayload};
 use beads_rs::daemon::query::QueryResult;
 
 #[derive(Debug, Error)]
@@ -27,14 +25,20 @@ pub struct StatusCollector {
     repo: PathBuf,
     read: ReadConsistency,
     samples: Vec<AdminStatusOutput>,
+    client: IpcClient,
 }
 
 impl StatusCollector {
     pub fn new(repo: PathBuf) -> Self {
+        Self::with_client(repo, IpcClient::new())
+    }
+
+    pub fn with_client(repo: PathBuf, client: IpcClient) -> Self {
         Self {
             repo,
             read: ReadConsistency::default(),
             samples: Vec::new(),
+            client,
         }
     }
 
@@ -48,7 +52,7 @@ impl StatusCollector {
             repo: self.repo.clone(),
             read: self.read.clone(),
         };
-        let response = send_request_no_autostart(&request)?;
+        let response = self.client.send_request_no_autostart(&request)?;
         let status = parse_admin_status(response)?;
         self.samples.push(status);
         Ok(self.samples.last().expect("sample inserted"))
