@@ -172,14 +172,23 @@ fn sample_indices(namespace: &NamespaceId, nonce: &str, shard_count: usize) -> V
 fn collect_all_shards(hashes: &NamespaceHashes) -> Vec<AdminFingerprintShard> {
     let mut out = Vec::with_capacity(SHARD_COUNT * 3);
     push_all(&mut out, AdminFingerprintKind::State, &hashes.state);
-    push_all(&mut out, AdminFingerprintKind::Tombstones, &hashes.tombstones);
+    push_all(
+        &mut out,
+        AdminFingerprintKind::Tombstones,
+        &hashes.tombstones,
+    );
     push_all(&mut out, AdminFingerprintKind::Deps, &hashes.deps);
     out
 }
 
 fn collect_sample_shards(hashes: &NamespaceHashes, indices: &[u8]) -> Vec<AdminFingerprintShard> {
     let mut out = Vec::with_capacity(indices.len() * 3);
-    push_sample(&mut out, AdminFingerprintKind::State, &hashes.state, indices);
+    push_sample(
+        &mut out,
+        AdminFingerprintKind::State,
+        &hashes.state,
+        indices,
+    );
     push_sample(
         &mut out,
         AdminFingerprintKind::Tombstones,
@@ -190,7 +199,11 @@ fn collect_sample_shards(hashes: &NamespaceHashes, indices: &[u8]) -> Vec<AdminF
     out
 }
 
-fn push_all(out: &mut Vec<AdminFingerprintShard>, kind: AdminFingerprintKind, hashes: &[ContentHash]) {
+fn push_all(
+    out: &mut Vec<AdminFingerprintShard>,
+    kind: AdminFingerprintKind,
+    hashes: &[ContentHash],
+) {
     for (index, hash) in hashes.iter().enumerate() {
         out.push(AdminFingerprintShard {
             kind,

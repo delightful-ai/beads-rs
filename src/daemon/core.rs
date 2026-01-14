@@ -2213,9 +2213,12 @@ impl Daemon {
                 git_tx,
             ),
 
-            Request::AdminFingerprint { repo, read, mode, sample } => {
-                self.admin_fingerprint(&repo, read, mode, sample, git_tx)
-            }
+            Request::AdminFingerprint {
+                repo,
+                read,
+                mode,
+                sample,
+            } => self.admin_fingerprint(&repo, read, mode, sample, git_tx),
 
             Request::AdminMaintenanceMode { repo, enabled } => {
                 self.admin_maintenance_mode(&repo, enabled, git_tx)

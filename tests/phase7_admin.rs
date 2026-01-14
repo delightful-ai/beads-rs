@@ -218,6 +218,85 @@ fn admin_scrub_reports_segment_header_failure() {
 }
 
 #[test]
+fn admin_fingerprint_full_includes_shards() {
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("admin fingerprint full");
+
+    let output = fixture
+        .bd()
+        .args(["admin", "fingerprint", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
+    assert_eq!(payload["result"], "admin_fingerprint");
+    assert_eq!(payload["data"]["mode"], "full");
+    let namespaces = payload["data"]["namespaces"]
+        .as_array()
+        .expect("namespaces array");
+    assert!(!namespaces.is_empty(), "expected at least one namespace");
+    for namespace in namespaces {
+        assert!(namespace["state_sha256"].is_string());
+        assert!(namespace["tombstones_sha256"].is_string());
+        assert!(namespace["deps_sha256"].is_string());
+        assert!(namespace["namespace_root"].is_string());
+        let shards = namespace["shards"].as_array().expect("shards array");
+        assert_eq!(shards.len(), 256 * 3);
+    }
+}
+
+#[test]
+fn admin_fingerprint_sample_is_deterministic() {
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("admin fingerprint sample");
+
+    let args = [
+        "admin",
+        "fingerprint",
+        "--json",
+        "--sample",
+        "3",
+        "--nonce",
+        "fixed-nonce",
+    ];
+    let output_a = fixture
+        .bd()
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output_b = fixture
+        .bd()
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload_a: serde_json::Value = serde_json::from_slice(&output_a).expect("parse json");
+    let payload_b: serde_json::Value = serde_json::from_slice(&output_b).expect("parse json");
+    assert_eq!(payload_a["result"], "admin_fingerprint");
+    assert_eq!(payload_a["data"]["mode"], "sample");
+    assert_eq!(payload_a["data"]["sample"]["shard_count"], 3);
+    assert_eq!(payload_a["data"]["sample"]["nonce"], "fixed-nonce");
+
+    let ns_a = payload_a["data"]["namespaces"][0].clone();
+    let ns_b = payload_b["data"]["namespaces"][0].clone();
+    assert_eq!(ns_a["namespace_root"], ns_b["namespace_root"]);
+    assert_eq!(ns_a["shards"], ns_b["shards"]);
+    let shards = ns_a["shards"].as_array().expect("shards array");
+    assert_eq!(shards.len(), 3 * 3);
+}
+
+#[test]
 fn admin_maintenance_blocks_mutations() {
     let fixture = AdminFixture::new();
     fixture.start_daemon();

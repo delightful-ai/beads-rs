@@ -288,7 +288,8 @@ impl Daemon {
 
         let namespaces = collect_namespaces(store).into_iter().collect::<Vec<_>>();
         let now_ms = crate::WallClock::now().0;
-        let namespaces = match fingerprint_namespaces(store, &namespaces, fingerprint_mode, now_ms) {
+        let namespaces = match fingerprint_namespaces(store, &namespaces, fingerprint_mode, now_ms)
+        {
             Ok(namespaces) => namespaces,
             Err(err) => {
                 let reason = match &err {

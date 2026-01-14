@@ -821,7 +821,12 @@ fn fingerprint_mode_str(
     match mode {
         AdminFingerprintMode::Full => "full".to_string(),
         AdminFingerprintMode::Sample => sample
-            .map(|sample| format!("sample (shards={}, nonce={})", sample.shard_count, sample.nonce))
+            .map(|sample| {
+                format!(
+                    "sample (shards={}, nonce={})",
+                    sample.shard_count, sample.nonce
+                )
+            })
             .unwrap_or_else(|| "sample".to_string()),
     }
 }
