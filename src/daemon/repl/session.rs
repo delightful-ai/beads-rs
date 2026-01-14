@@ -114,7 +114,7 @@ pub trait SessionStore {
         namespace: &NamespaceId,
         origin: &ReplicaId,
         batch: &[VerifiedEvent<PrevVerified>],
-        now_ms: u64,
+        _now_ms: u64,
     ) -> SessionResult<IngestOutcome>;
 }
 
