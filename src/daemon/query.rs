@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     AdminDoctorOutput as ApiAdminDoctorOutput,
+    AdminFingerprintOutput as ApiAdminFingerprintOutput,
     AdminMaintenanceModeOutput as ApiAdminMaintenanceModeOutput,
     AdminMetricsOutput as ApiAdminMetricsOutput,
     AdminRebuildIndexOutput as ApiAdminRebuildIndexOutput, AdminScrubOutput as ApiAdminScrubOutput,
@@ -502,6 +503,9 @@ pub enum QueryResult {
 
     /// Admin scrub report.
     AdminScrub(ApiAdminScrubOutput),
+
+    /// Admin fingerprint report.
+    AdminFingerprint(ApiAdminFingerprintOutput),
 
     /// Maintenance mode toggle.
     AdminMaintenanceMode(ApiAdminMaintenanceModeOutput),

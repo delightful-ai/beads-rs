@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 pub use crate::core::DurabilityReceipt;
 
 use crate::core::{
-    ActorId, Applied, Bead, Claim, ClientRequestId, DepEdge as CoreDepEdge, DepKey as CoreDepKey,
-    Durable, EventId, HlcMax, NamespaceId, ReplicaId, SegmentId, Seq1, StoreId, StoreIdentity,
-    Tombstone as CoreTombstone, TxnDeltaV1, TxnId, WallClock, Watermarks, Workflow, WriteStamp,
+    ActorId, Applied, Bead, Claim, ClientRequestId, ContentHash, DepEdge as CoreDepEdge,
+    DepKey as CoreDepKey, Durable, EventId, HlcMax, NamespaceId, ReplicaId, SegmentId, Seq1,
+    StoreId, StoreIdentity, Tombstone as CoreTombstone, TxnDeltaV1, TxnId, WallClock, Watermarks,
+    Workflow, WriteStamp,
 };
 
 // =============================================================================
@@ -215,6 +216,55 @@ pub struct AdminHealthSummary {
     pub safe_to_accept_writes: bool,
     pub safe_to_prune_wal: bool,
     pub safe_to_rebuild_index: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminFingerprintOutput {
+    pub mode: AdminFingerprintMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample: Option<AdminFingerprintSample>,
+    pub watermarks_applied: Watermarks<Applied>,
+    pub watermarks_durable: Watermarks<Durable>,
+    pub namespaces: Vec<AdminNamespaceFingerprint>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminFingerprintMode {
+    Full,
+    Sample,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminFingerprintSample {
+    pub shard_count: u16,
+    pub nonce: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminNamespaceFingerprint {
+    pub namespace: NamespaceId,
+    pub state_sha256: ContentHash,
+    pub tombstones_sha256: ContentHash,
+    pub deps_sha256: ContentHash,
+    pub namespace_root: ContentHash,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shards: Vec<AdminFingerprintShard>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminFingerprintKind {
+    State,
+    Tombstones,
+    Deps,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminFingerprintShard {
+    pub kind: AdminFingerprintKind,
+    pub index: u8,
+    pub sha256: ContentHash,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

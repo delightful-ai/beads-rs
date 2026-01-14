@@ -4,7 +4,8 @@
 //! This module is pure formatting; handlers gather any extra data needed.
 
 use crate::api::{
-    AdminDoctorOutput, AdminHealthReport, AdminHealthStatus, AdminMaintenanceModeOutput,
+    AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode, AdminFingerprintOutput,
+    AdminFingerprintSample, AdminHealthReport, AdminHealthStatus, AdminMaintenanceModeOutput,
     AdminMetricsOutput, AdminRebuildIndexOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue,
     CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary, Note,
     StatusOutput, SyncWarning, Tombstone,
@@ -495,6 +496,7 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::AdminMetrics(metrics) => render_admin_metrics(metrics),
         QueryResult::AdminDoctor(out) => render_admin_doctor(out),
         QueryResult::AdminScrub(out) => render_admin_scrub(out),
+        QueryResult::AdminFingerprint(out) => render_admin_fingerprint(out),
         QueryResult::AdminMaintenanceMode(out) => render_admin_maintenance(out),
         QueryResult::AdminRebuildIndex(out) => render_admin_rebuild_index(out),
         QueryResult::Validation { warnings } => {
@@ -648,6 +650,57 @@ fn render_admin_scrub(out: &AdminScrubOutput) -> String {
     render_admin_health("Admin Scrub", &out.report)
 }
 
+fn render_admin_fingerprint(out: &AdminFingerprintOutput) -> String {
+    let mut out_str = String::new();
+    out_str.push_str("Admin Fingerprint\n");
+    out_str.push_str("=================\n\n");
+    out_str.push_str(&format!(
+        "mode: {}\n",
+        fingerprint_mode_str(&out.mode, out.sample.as_ref())
+    ));
+    if !out.namespaces.is_empty() {
+        let ns_list = out
+            .namespaces
+            .iter()
+            .map(|ns| ns.namespace.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out_str.push_str(&format!("namespaces: {}\n", ns_list));
+    }
+    for namespace in &out.namespaces {
+        out_str.push_str(&format!("\n{}:\n", namespace.namespace.as_str()));
+        out_str.push_str(&format!(
+            "  roots: state={} tombstones={} deps={} namespace={}\n",
+            namespace.state_sha256,
+            namespace.tombstones_sha256,
+            namespace.deps_sha256,
+            namespace.namespace_root
+        ));
+        if namespace.shards.is_empty() {
+            continue;
+        }
+        for kind in [
+            AdminFingerprintKind::State,
+            AdminFingerprintKind::Tombstones,
+            AdminFingerprintKind::Deps,
+        ] {
+            let shards = namespace
+                .shards
+                .iter()
+                .filter(|shard| shard.kind == kind)
+                .collect::<Vec<_>>();
+            if shards.is_empty() {
+                continue;
+            }
+            out_str.push_str(&format!("  {} shards:\n", fingerprint_kind_str(&kind)));
+            for shard in shards {
+                out_str.push_str(&format!("    {:02x}: {}\n", shard.index, shard.sha256));
+            }
+        }
+    }
+    out_str.trim_end().into()
+}
+
 fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
     let mut out = String::new();
     out.push_str(title);
@@ -759,6 +812,26 @@ fn render_admin_rebuild_index(out: &AdminRebuildIndexOutput) -> String {
         }
     }
     out.trim_end().into()
+}
+
+fn fingerprint_mode_str(
+    mode: &AdminFingerprintMode,
+    sample: Option<&AdminFingerprintSample>,
+) -> String {
+    match mode {
+        AdminFingerprintMode::Full => "full".to_string(),
+        AdminFingerprintMode::Sample => sample
+            .map(|sample| format!("sample (shards={}, nonce={})", sample.shard_count, sample.nonce))
+            .unwrap_or_else(|| "sample".to_string()),
+    }
+}
+
+fn fingerprint_kind_str(kind: &AdminFingerprintKind) -> &'static str {
+    match kind {
+        AdminFingerprintKind::State => "state",
+        AdminFingerprintKind::Tombstones => "tombstones",
+        AdminFingerprintKind::Deps => "deps",
+    }
 }
 
 fn health_status_str(status: &AdminHealthStatus) -> &'static str {
