@@ -96,7 +96,6 @@ impl Daemon {
         enabled: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let limits = self.limits().clone();
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err(err),
@@ -114,6 +113,7 @@ impl Daemon {
     }
 
     pub fn admin_rebuild_index(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+        let limits = self.limits().clone();
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err(err),
