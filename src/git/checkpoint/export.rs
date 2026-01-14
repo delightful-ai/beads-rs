@@ -6,11 +6,13 @@ use bytes::Bytes;
 use serde::Serialize;
 use thiserror::Error;
 
+use super::CHECKPOINT_FORMAT_VERSION;
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{
     CheckpointFileKind, shard_for_bead, shard_for_dep, shard_for_tombstone, shard_path,
 };
-use super::meta::{IncludedHeads, IncludedWatermarks};
+use super::manifest::{CheckpointManifest, ManifestFile};
+use super::meta::{CheckpointMeta, IncludedHeads, IncludedWatermarks};
 use super::types::{CheckpointShardPayload, CheckpointSnapshot};
 use crate::core::dep::DepKey;
 use crate::core::tombstone::TombstoneKey;
@@ -24,6 +26,42 @@ use crate::core::{
 pub enum CheckpointSnapshotError {
     #[error("checkpoint snapshot unsupported namespace {namespace}")]
     NamespaceUnsupported { namespace: NamespaceId },
+    #[error(transparent)]
+    CanonJson(#[from] CanonJsonError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckpointExport {
+    pub manifest: CheckpointManifest,
+    pub meta: CheckpointMeta,
+    pub files: BTreeMap<String, CheckpointShardPayload>,
+}
+
+#[derive(Debug, Error)]
+pub enum CheckpointExportError {
+    #[error(
+        "checkpoint export previous store id mismatch (previous {previous}, snapshot {snapshot})"
+    )]
+    PreviousStoreId {
+        previous: StoreId,
+        snapshot: StoreId,
+    },
+    #[error(
+        "checkpoint export previous store epoch mismatch (previous {previous}, snapshot {snapshot})"
+    )]
+    PreviousStoreEpoch {
+        previous: StoreEpoch,
+        snapshot: StoreEpoch,
+    },
+    #[error("checkpoint export previous group mismatch (previous {previous}, snapshot {snapshot})")]
+    PreviousGroup { previous: String, snapshot: String },
+    #[error(
+        "checkpoint export previous namespaces mismatch (previous {previous:?}, snapshot {snapshot:?})"
+    )]
+    PreviousNamespaces {
+        previous: Vec<NamespaceId>,
+        snapshot: Vec<NamespaceId>,
+    },
     #[error(transparent)]
     CanonJson(#[from] CanonJsonError),
 }
@@ -95,6 +133,142 @@ pub fn build_snapshot(
         shards,
         dirty_shards,
     })
+}
+
+pub struct CheckpointExportInput<'a> {
+    pub snapshot: &'a CheckpointSnapshot,
+    pub previous: Option<&'a CheckpointExport>,
+}
+
+pub fn export_checkpoint(
+    input: CheckpointExportInput<'_>,
+) -> Result<CheckpointExport, CheckpointExportError> {
+    let CheckpointExportInput { snapshot, previous } = input;
+    if let Some(previous) = previous {
+        validate_previous(snapshot, previous)?;
+    }
+
+    let files = assemble_export_files(snapshot, previous);
+    let manifest = build_manifest(snapshot, &files);
+    let manifest_hash = manifest.manifest_hash()?;
+    let mut meta = CheckpointMeta {
+        checkpoint_format_version: CHECKPOINT_FORMAT_VERSION,
+        store_id: snapshot.store_id,
+        store_epoch: snapshot.store_epoch,
+        checkpoint_group: snapshot.checkpoint_group.clone(),
+        namespaces: snapshot.namespaces.clone(),
+        created_at_ms: snapshot.created_at_ms,
+        created_by_replica_id: snapshot.created_by_replica_id,
+        policy_hash: snapshot.policy_hash,
+        roster_hash: snapshot.roster_hash,
+        included: snapshot.included.clone(),
+        included_heads: snapshot.included_heads.clone(),
+        content_hash: ContentHash::from_bytes([0u8; 32]),
+        manifest_hash,
+    };
+    let content_hash = meta.compute_content_hash()?;
+    meta.content_hash = content_hash;
+
+    Ok(CheckpointExport {
+        manifest,
+        meta,
+        files,
+    })
+}
+
+fn validate_previous(
+    snapshot: &CheckpointSnapshot,
+    previous: &CheckpointExport,
+) -> Result<(), CheckpointExportError> {
+    let prev_manifest = &previous.manifest;
+    if prev_manifest.store_id != snapshot.store_id {
+        return Err(CheckpointExportError::PreviousStoreId {
+            previous: prev_manifest.store_id,
+            snapshot: snapshot.store_id,
+        });
+    }
+    if prev_manifest.store_epoch != snapshot.store_epoch {
+        return Err(CheckpointExportError::PreviousStoreEpoch {
+            previous: prev_manifest.store_epoch,
+            snapshot: snapshot.store_epoch,
+        });
+    }
+    if prev_manifest.checkpoint_group != snapshot.checkpoint_group {
+        return Err(CheckpointExportError::PreviousGroup {
+            previous: prev_manifest.checkpoint_group.clone(),
+            snapshot: snapshot.checkpoint_group.clone(),
+        });
+    }
+    let prev_namespaces = normalize_namespaces(&prev_manifest.namespaces);
+    let snap_namespaces = normalize_namespaces(&snapshot.namespaces);
+    if prev_namespaces != snap_namespaces {
+        return Err(CheckpointExportError::PreviousNamespaces {
+            previous: prev_namespaces,
+            snapshot: snap_namespaces,
+        });
+    }
+    Ok(())
+}
+
+fn normalize_namespaces(namespaces: &[NamespaceId]) -> Vec<NamespaceId> {
+    let mut out = namespaces.to_vec();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn assemble_export_files(
+    snapshot: &CheckpointSnapshot,
+    previous: Option<&CheckpointExport>,
+) -> BTreeMap<String, CheckpointShardPayload> {
+    let mut files = BTreeMap::new();
+
+    if let Some(previous) = previous {
+        for (path, payload) in &previous.files {
+            if snapshot.dirty_shards.contains(path) {
+                continue;
+            }
+            files.insert(path.clone(), payload.clone());
+        }
+    }
+
+    for (path, payload) in &snapshot.shards {
+        if snapshot.dirty_shards.contains(path) || !files.contains_key(path) {
+            files.insert(path.clone(), payload.clone());
+        }
+    }
+
+    if previous.is_some() {
+        for path in snapshot.dirty_shards.iter() {
+            if !snapshot.shards.contains_key(path) {
+                files.remove(path);
+            }
+        }
+    }
+
+    files
+}
+
+fn build_manifest(
+    snapshot: &CheckpointSnapshot,
+    files: &BTreeMap<String, CheckpointShardPayload>,
+) -> CheckpointManifest {
+    let mut manifest_files = BTreeMap::new();
+    for (path, payload) in files {
+        let hash = ContentHash::from_bytes(sha256_bytes(payload.bytes.as_ref()).0);
+        let entry = ManifestFile {
+            sha256: hash,
+            bytes: payload.bytes.len() as u64,
+        };
+        manifest_files.insert(path.clone(), entry);
+    }
+    CheckpointManifest {
+        checkpoint_group: snapshot.checkpoint_group.clone(),
+        store_id: snapshot.store_id,
+        store_epoch: snapshot.store_epoch,
+        namespaces: snapshot.namespaces.clone(),
+        files: manifest_files,
+    }
 }
 
 fn included_watermarks(
@@ -221,6 +395,7 @@ fn wire_dep(key: &DepKey, edge: &DepEdge) -> WireDepV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     use crate::core::bead::{BeadCore, BeadFields};
@@ -256,6 +431,64 @@ mod tests {
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         crate::core::Bead::new(core, fields)
+    }
+
+    fn find_two_ids_same_shard() -> (BeadId, BeadId, String) {
+        let mut seen: BTreeMap<String, BeadId> = BTreeMap::new();
+        for i in 0..10_000 {
+            let id = BeadId::parse(format!("beads-rs-{:04}", i)).expect("bead id");
+            let shard = shard_for_bead(&id);
+            if let Some(prev) = seen.insert(shard.clone(), id.clone()) {
+                return (prev, id, shard);
+            }
+        }
+        panic!("failed to find shard collision");
+    }
+
+    fn find_two_ids_different_shards() -> (BeadId, BeadId) {
+        let mut first: Option<(BeadId, String)> = None;
+        for i in 0..10_000 {
+            let id = BeadId::parse(format!("beads-rs-{:04}", i)).expect("bead id");
+            let shard = shard_for_bead(&id);
+            match &first {
+                None => first = Some((id, shard)),
+                Some((first_id, first_shard)) if &shard != first_shard => {
+                    return (first_id.clone(), id);
+                }
+                _ => {}
+            }
+        }
+        panic!("failed to find different shard ids");
+    }
+
+    fn build_test_snapshot(
+        state: &CanonicalState,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+    ) -> CheckpointSnapshot {
+        let mut watermarks = Watermarks::<Durable>::new();
+        watermarks
+            .observe_at_least(
+                namespace,
+                &origin,
+                Seq0::new(seq),
+                HeadStatus::Known([seq as u8; 32]),
+            )
+            .unwrap();
+        build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![namespace.clone()],
+            store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
+            store_epoch: StoreEpoch::new(0),
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: ContentHash::from_bytes([9u8; 32]),
+            roster_hash: None,
+            state,
+            watermarks_durable: &watermarks,
+        })
+        .expect("snapshot")
     }
 
     #[test]
@@ -341,5 +574,156 @@ mod tests {
         assert!(snapshot.dirty_shards.contains(&state_path));
         assert!(snapshot.dirty_shards.contains(&tomb_path));
         assert!(snapshot.dirty_shards.contains(&dep_path));
+    }
+
+    #[test]
+    fn export_builds_manifest_and_meta() {
+        let namespace = NamespaceId::core();
+        let stamp = make_stamp(1, 0, "author");
+        let bead_id = BeadId::parse("beads-rs-abc1").unwrap();
+
+        let bead = make_bead(&bead_id, &stamp);
+        let mut state = CanonicalState::new();
+        state.insert(bead.clone()).unwrap();
+
+        let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
+        let snapshot = build_test_snapshot(&state, &namespace, origin, 5);
+
+        let export = export_checkpoint(CheckpointExportInput {
+            snapshot: &snapshot,
+            previous: None,
+        })
+        .expect("export");
+
+        let state_path = shard_path(
+            &namespace,
+            CheckpointFileKind::State,
+            &shard_for_bead(&bead_id),
+        );
+        let file = export.files.get(&state_path).expect("state file");
+        let manifest_entry = export
+            .manifest
+            .files
+            .get(&state_path)
+            .expect("manifest entry");
+        let expected_hash = ContentHash::from_bytes(sha256_bytes(file.bytes.as_ref()).0);
+        assert_eq!(manifest_entry.sha256, expected_hash);
+        assert_eq!(manifest_entry.bytes, file.bytes.len() as u64);
+
+        assert_eq!(
+            export.meta.checkpoint_format_version,
+            CHECKPOINT_FORMAT_VERSION
+        );
+        assert_eq!(
+            export
+                .meta
+                .included
+                .get(&namespace)
+                .and_then(|origins| origins.get(&origin)),
+            Some(&5)
+        );
+        let computed = export.meta.compute_content_hash().expect("content hash");
+        assert_eq!(export.meta.content_hash, computed);
+        assert_eq!(
+            export.meta.manifest_hash,
+            export.manifest.manifest_hash().expect("manifest hash"),
+        );
+    }
+
+    #[test]
+    fn export_reuses_clean_shards() {
+        let namespace = NamespaceId::core();
+        let stamp = make_stamp(1, 0, "author");
+        let (id_dirty, id_clean) = find_two_ids_different_shards();
+
+        let bead_dirty = make_bead(&id_dirty, &stamp);
+        let bead_clean = make_bead(&id_clean, &stamp);
+        let mut state = CanonicalState::new();
+        state.insert(bead_dirty.clone()).unwrap();
+        state.insert(bead_clean.clone()).unwrap();
+
+        let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+        let snapshot = build_test_snapshot(&state, &namespace, origin, 1);
+        let export = export_checkpoint(CheckpointExportInput {
+            snapshot: &snapshot,
+            previous: None,
+        })
+        .expect("export");
+
+        let mut next_snapshot = snapshot.clone();
+        let dirty_path = shard_path(
+            &namespace,
+            CheckpointFileKind::State,
+            &shard_for_bead(&id_dirty),
+        );
+        let clean_path = shard_path(
+            &namespace,
+            CheckpointFileKind::State,
+            &shard_for_bead(&id_clean),
+        );
+
+        next_snapshot.dirty_shards = [dirty_path.clone()].into_iter().collect();
+        let dirty_payload = next_snapshot
+            .shards
+            .get_mut(&dirty_path)
+            .expect("dirty shard");
+        dirty_payload.bytes = Bytes::from_static(b"{\"dirty\":true}\n");
+        let clean_payload = next_snapshot
+            .shards
+            .get_mut(&clean_path)
+            .expect("clean shard");
+        clean_payload.bytes = Bytes::from_static(b"{\"corrupt\":true}\n");
+
+        let export_next = export_checkpoint(CheckpointExportInput {
+            snapshot: &next_snapshot,
+            previous: Some(&export),
+        })
+        .expect("export next");
+
+        assert_eq!(
+            export_next.files.get(&clean_path).unwrap().bytes,
+            export.files.get(&clean_path).unwrap().bytes
+        );
+        assert_eq!(
+            export_next.files.get(&dirty_path).unwrap().bytes,
+            Bytes::from_static(b"{\"dirty\":true}\n"),
+        );
+    }
+
+    #[test]
+    fn export_writes_sorted_shards() {
+        let namespace = NamespaceId::core();
+        let stamp = make_stamp(1, 0, "author");
+        let (id_a, id_b, shard) = find_two_ids_same_shard();
+
+        let bead_a = make_bead(&id_a, &stamp);
+        let bead_b = make_bead(&id_b, &stamp);
+
+        let mut state = CanonicalState::new();
+        state.insert(bead_b.clone()).unwrap();
+        state.insert(bead_a.clone()).unwrap();
+
+        let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
+        let snapshot = build_test_snapshot(&state, &namespace, origin, 2);
+        let export = export_checkpoint(CheckpointExportInput {
+            snapshot: &snapshot,
+            previous: None,
+        })
+        .expect("export");
+
+        let path = shard_path(&namespace, CheckpointFileKind::State, &shard);
+        let payload = export.files.get(&path).expect("state shard");
+
+        let mut ids = vec![id_a.clone(), id_b.clone()];
+        ids.sort();
+        let mut expected = Vec::new();
+        for id in ids {
+            let bead = if id == id_a { &bead_a } else { &bead_b };
+            let mut line = to_canon_json_bytes(&WireBeadFull::from(bead)).unwrap();
+            line.push(b'\n');
+            expected.extend_from_slice(&line);
+        }
+
+        assert_eq!(payload.bytes.as_ref(), expected);
     }
 }

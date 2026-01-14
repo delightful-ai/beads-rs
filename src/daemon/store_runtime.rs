@@ -26,14 +26,13 @@ use crate::daemon::wal::{
     catch_up_index, rebuild_index,
 };
 use crate::git::checkpoint::{
-    CheckpointSnapshot, CheckpointSnapshotError, CheckpointSnapshotInput, build_snapshot,
-    policy_hash,
+    CHECKPOINT_FORMAT_VERSION, CheckpointSnapshot, CheckpointSnapshotError,
+    CheckpointSnapshotInput, build_snapshot, policy_hash,
 };
 use crate::paths;
 
 const STORE_FORMAT_VERSION: u32 = 1;
 const WAL_FORMAT_VERSION: u32 = 2;
-const CHECKPOINT_FORMAT_VERSION: u32 = 1;
 const REPLICATION_PROTOCOL_VERSION: u32 = 1;
 const INDEX_SCHEMA_VERSION: u32 = 1;
 
