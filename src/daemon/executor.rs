@@ -875,6 +875,7 @@ mod tests {
         StoreMetaVersions, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, rebuild_index};
+    use crate::daemon::Clock;
 
     fn bead_id(id: &str) -> BeadId {
         BeadId::parse(id).unwrap()
