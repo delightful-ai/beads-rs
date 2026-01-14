@@ -551,6 +551,15 @@ impl SyncProcess<Committed> {
     /// Returns NonFastForward error if remote moved - caller should retry.
     /// If no remote is configured, returns success (local-only repo).
     pub fn push(self, repo: &Repository) -> Result<CanonicalState, SyncError> {
+        let is_retryable = |message: &str| {
+            let msg = message.to_lowercase();
+            msg.contains("non-fast-forward")
+                || msg.contains("fetch first")
+                || msg.contains("cannot lock ref")
+                || msg.contains("failed to update ref")
+                || msg.contains("failed to lock file")
+        };
+
         // Try to find remote - if no remote, just return success (local-only)
         let mut remote = match repo.find_remote("origin") {
             Ok(r) => r,
@@ -597,11 +606,7 @@ impl SyncProcess<Committed> {
 
             if let Err(e) = remote.push(&[refspec], Some(&mut push_options)) {
                 let msg = e.to_string();
-                if msg.contains("non-fast-forward")
-                    || msg.contains("fetch first")
-                    || msg.contains("cannot lock ref")
-                    || msg.contains("failed to update ref")
-                {
+                if is_retryable(&msg) {
                     return Err(SyncError::NonFastForward);
                 }
                 return Err(SyncError::from(e));
@@ -609,7 +614,7 @@ impl SyncProcess<Committed> {
         }
 
         if let Some(err) = push_error.into_inner() {
-            if err.contains("non-fast-forward") || err.contains("fetch first") {
+            if is_retryable(&err) {
                 return Err(SyncError::NonFastForward);
             }
             return Err(crate::git::error::PushRejected { message: err }.into());
