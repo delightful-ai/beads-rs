@@ -206,10 +206,10 @@ fn resolve_max_connections(
     if let Some(limit) = config.max_connections {
         return Ok(limit);
     }
-    if let Some(roster) = &config.roster {
-        if let Some(limit) = NonZeroUsize::new(roster.replicas.len()) {
-            return Ok(limit);
-        }
+    if let Some(roster) = &config.roster
+        && let Some(limit) = NonZeroUsize::new(roster.replicas.len())
+    {
+        return Ok(limit);
     }
     Err(ReplicationServerError::MissingConnectionLimit)
 }
@@ -365,11 +365,11 @@ where
 
     let mut accepted_set = BTreeSet::new();
     let mut live_stream_enabled = false;
-    if session.phase() == SessionPhase::Streaming {
-        if let Some(peer) = session.peer() {
-            accepted_set = peer.accepted_namespaces.iter().cloned().collect();
-            live_stream_enabled = peer.live_stream_enabled;
-        }
+    if session.phase() == SessionPhase::Streaming
+        && let Some(peer) = session.peer()
+    {
+        accepted_set = peer.accepted_namespaces.iter().cloned().collect();
+        live_stream_enabled = peer.live_stream_enabled;
     }
 
     let (event_rx, event_handle) = if live_stream_enabled {
