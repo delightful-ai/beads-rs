@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam::channel::{Receiver, Sender, unbounded};
 
-use beads_rs::daemon::repl::proto::{ReplEnvelope, ReplMessage};
 use beads_rs::Limits;
+use beads_rs::daemon::repl::proto::{ReplEnvelope, ReplMessage};
 
 use super::repl_frames;
 
@@ -148,7 +148,10 @@ impl NetworkController {
     }
 
     pub fn drop_next(&self, direction: Direction) {
-        self.inner.lock().expect("network lock").drop_next(direction);
+        self.inner
+            .lock()
+            .expect("network lock")
+            .drop_next(direction);
     }
 
     pub fn delay_next(&self, direction: Direction, delay_ms: u64) {

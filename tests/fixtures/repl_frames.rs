@@ -6,6 +6,7 @@ use std::io::Cursor;
 use bytes::Bytes;
 use uuid::Uuid;
 
+use beads_rs::Limits;
 use beads_rs::core::{
     ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, NamespaceId,
     Opaque, ReplicaId, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId,
@@ -13,10 +14,9 @@ use beads_rs::core::{
 };
 use beads_rs::daemon::repl::frame::{FrameReader, encode_frame};
 use beads_rs::daemon::repl::proto::{
-    Ack, Capabilities, Events, Hello, ReplEnvelope, ReplMessage, Want, Welcome, WatermarkHeads,
-    WatermarkMap, decode_envelope, encode_envelope, PROTOCOL_VERSION_V1,
+    Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplEnvelope, ReplMessage, Want,
+    WatermarkHeads, WatermarkMap, Welcome, decode_envelope, encode_envelope,
 };
-use beads_rs::Limits;
 
 pub fn default_capabilities() -> Capabilities {
     Capabilities {
