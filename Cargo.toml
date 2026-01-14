@@ -49,6 +49,7 @@ rusqlite = "0.31"
 [features]
 default = ["cli"]
 cli = ["clap"]
+slow-tests = []
 
 [[bin]]
 name = "bd"

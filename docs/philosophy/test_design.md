@@ -113,6 +113,22 @@ We don’t distinguish “unit/integration/e2e” by ceremony; those are just sc
 If you can’t tag a test as Law / Example / Scenario / Regression, change it until you can.
 
 ---
+## 2.1 Slow tests are opt-in
+
+Some property tests exercise expensive setup (git repos, IPC daemons, large payloads). These are
+valuable but **must not** run by default.
+
+Guidelines:
+- Gate heavy suites behind `--features slow-tests`.
+- Default `cargo test` should stay fast and predictable.
+- CI should include at least one job that runs slow suites (we use `cargo test --all-features`).
+
+Run locally when needed:
+
+```bash
+cargo test --features slow-tests
+```
+
 Totally fair. That section *was* a bit hand‑wavy for how central contracts are in your world.
 
 Here’s a beefed‑up **Section 3** you can drop in verbatim over the old one — still mechanical, but with enough shape that people will actually build the right thing.
@@ -376,5 +392,4 @@ And every time we add a test, we ask the same question:
 > “Which bad program am I ruling out by doing this?”
 
 If the answer is “none that I care about,” the correct move is to not write the test.
-
 

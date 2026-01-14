@@ -1167,6 +1167,7 @@ mod tests {
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepEdge, DepKey, DepKind,
         Lww, Priority, Workflow,
     };
+    #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;
     use tempfile::TempDir;
 
@@ -1521,6 +1522,7 @@ mod tests {
         assert!(outcome.divergence.is_some());
     }
 
+    #[cfg(feature = "slow-tests")]
     #[derive(Debug, Clone)]
     enum Relation {
         BothMissing,
@@ -1532,6 +1534,7 @@ mod tests {
         Diverged,
     }
 
+    #[cfg(feature = "slow-tests")]
     fn relation_strategy() -> impl Strategy<Value = Relation> {
         prop_oneof![
             Just(Relation::BothMissing),
@@ -1544,6 +1547,7 @@ mod tests {
         ]
     }
 
+    #[cfg(feature = "slow-tests")]
     fn nonzero_steps(raw: u8) -> u8 {
         (raw % 3) + 1
     }
@@ -1562,6 +1566,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "slow-tests")]
     fn write_chain(repo: &Repository, parent: Option<Oid>, steps: u8, label: &str) -> Option<Oid> {
         let mut current = parent;
         for idx in 0..steps {
@@ -1571,6 +1576,7 @@ mod tests {
         current
     }
 
+    #[cfg(feature = "slow-tests")]
     #[derive(Debug, Clone)]
     enum Action {
         LocalCommit(u8),
@@ -1580,6 +1586,7 @@ mod tests {
         Fetch,
     }
 
+    #[cfg(feature = "slow-tests")]
     fn action_strategy() -> impl Strategy<Value = Action> {
         prop_oneof![
             (1u8..=3).prop_map(Action::LocalCommit),
@@ -1590,6 +1597,7 @@ mod tests {
         ]
     }
 
+    #[cfg(feature = "slow-tests")]
     fn local_ref(repo: &Repository) -> Result<Option<Oid>, TestCaseError> {
         match refname_to_id_optional(repo, "refs/heads/beads/store") {
             Ok(oid) => Ok(oid),
@@ -1597,6 +1605,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "slow-tests")]
     fn remote_ref(repo: &Repository) -> Result<Option<Oid>, TestCaseError> {
         match refname_to_id_optional(repo, "refs/heads/beads/store") {
             Ok(oid) => Ok(oid),
@@ -1604,6 +1613,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "slow-tests")]
     proptest! {
         #[test]
         fn fetch_respects_history_invariants(
@@ -1761,6 +1771,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "slow-tests")]
     proptest! {
         #[test]
         fn fetch_sequence_preserves_local_history(
@@ -1900,6 +1911,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "slow-tests")]
     proptest! {
         #[test]
         fn sync_with_retry_surfaces_fetch_divergence(
@@ -2047,6 +2059,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "slow-tests")]
     proptest! {
         #[test]
         fn fetch_detects_force_push(rewrite_steps in 1u8..=3) {
