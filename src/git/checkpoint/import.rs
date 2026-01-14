@@ -3,9 +3,10 @@
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
 
@@ -91,6 +92,15 @@ pub enum CheckpointImportError {
         max_bytes: u64,
         got_bytes: u64,
     },
+    #[error(
+        "checkpoint json depth exceeded at {path:?} line {line}: max {max_depth}, got {got_depth}"
+    )]
+    JsonDepthExceeded {
+        path: PathBuf,
+        line: u64,
+        max_depth: usize,
+        got_depth: usize,
+    },
     #[error("checkpoint jsonl parse error at {path:?} line {line}: {source}")]
     JsonLine {
         path: PathBuf,
@@ -98,8 +108,18 @@ pub enum CheckpointImportError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(
+        "checkpoint jsonl shard entry limit exceeded at {path:?}: max {max_entries}, got {got_entries}"
+    )]
+    ShardEntryLimit {
+        path: PathBuf,
+        max_entries: usize,
+        got_entries: usize,
+    },
     #[error("checkpoint contains unexpected file {path}")]
     UnexpectedFile { path: String },
+    #[error("checkpoint contains invalid path {path}")]
+    InvalidPath { path: String },
     #[error("invalid tombstone lineage at {path:?} line {line}")]
     InvalidLineage { path: PathBuf, line: u64 },
     #[error("invalid dep at {path:?} line {line}: {reason}")]
@@ -172,7 +192,7 @@ pub fn import_checkpoint(
         });
     }
 
-    let manifest_hash = manifest.manifest_hash()?;
+    let manifest_hash = ContentHash::from_bytes(sha256_bytes(&manifest_bytes).0);
     if manifest_hash != meta.manifest_hash {
         return Err(CheckpointImportError::ManifestHashMismatch {
             expected: meta.manifest_hash,
@@ -192,6 +212,13 @@ pub fn import_checkpoint(
     let allowed_namespaces: BTreeSet<NamespaceId> = manifest_namespaces.iter().cloned().collect();
 
     for (rel_path, entry) in &manifest.files {
+        validate_rel_path(rel_path)?;
+        if rel_path == META_FILE || rel_path == MANIFEST_FILE {
+            return Err(CheckpointImportError::UnexpectedFile {
+                path: rel_path.clone(),
+            });
+        }
+
         let full_path = dir.join(rel_path);
         if !full_path.exists() {
             return Err(CheckpointImportError::MissingFile {
@@ -199,17 +226,8 @@ pub fn import_checkpoint(
             });
         }
 
-        if rel_path == META_FILE {
-            verify_bytes(&meta_bytes, entry, &full_path)?;
-            continue;
-        }
-        if rel_path == MANIFEST_FILE {
-            verify_bytes(&manifest_bytes, entry, &full_path)?;
-            continue;
-        }
-
-        let shard =
-            parse_shard_path(rel_path).ok_or_else(|| CheckpointImportError::UnexpectedFile {
+        let shard = parse_shard_path(rel_path)
+            .ok_or_else(|| CheckpointImportError::UnexpectedFile {
                 path: rel_path.clone(),
             })?;
         if !allowed_namespaces.contains(&shard.namespace) {
@@ -229,6 +247,7 @@ pub fn import_checkpoint(
         let stats = match shard.kind {
             CheckpointFileKind::State => parse_jsonl_file::<WireBeadFull, _>(
                 &full_path,
+                &shard.namespace,
                 limits,
                 |line, wire| {
                     let bead = crate::core::Bead::from(wire);
@@ -239,6 +258,7 @@ pub fn import_checkpoint(
             )?,
             CheckpointFileKind::Tombstones => parse_jsonl_file::<WireTombstoneV1, _>(
                 &full_path,
+                &shard.namespace,
                 limits,
                 |line, wire| {
                     let tomb = tombstone_from_wire(&wire, &full_path, line)?;
@@ -249,6 +269,7 @@ pub fn import_checkpoint(
             )?,
             CheckpointFileKind::Deps => parse_jsonl_file::<WireDepV1, _>(
                 &full_path,
+                &shard.namespace,
                 limits,
                 |line, wire| {
                     let (key, edge) = dep_from_wire(&wire, &full_path, line)?;
@@ -317,6 +338,7 @@ struct JsonlLineContext<'a> {
 
 fn parse_jsonl_file<T, F>(
     path: &Path,
+    namespace: &NamespaceId,
     limits: &Limits,
     mut on_item: F,
 ) -> Result<JsonlStats, CheckpointImportError>
@@ -333,6 +355,7 @@ where
     let mut hasher = Sha2::new();
     let mut total_bytes = 0u64;
     let mut line_no = 0u64;
+    let mut entries = 0usize;
 
     loop {
         buf.clear();
@@ -365,26 +388,23 @@ where
             });
         }
 
-        if buf.iter().all(|b| b.is_ascii_whitespace()) {
-            line_no += 1;
-            continue;
-        }
-
         let line = if buf.ends_with(b"\n") {
             &buf[..buf.len() - 1]
         } else {
             &buf[..]
         };
         line_no += 1;
-        let value: T = serde_json::from_slice(line).map_err(|source| {
-            CheckpointImportError::JsonLine {
+        let value = parse_json_line::<T>(line, limits, path, line_no)?;
+        entries += 1;
+        if entries > limits.max_snapshot_entries {
+            return Err(CheckpointImportError::ShardEntryLimit {
                 path: path.to_path_buf(),
-                line: line_no,
-                source,
-            }
-        })?;
+                max_entries: limits.max_snapshot_entries,
+                got_entries: entries,
+            });
+        }
 
-        let namespace = namespace_from_path(path)?;
+        let namespace = namespace.clone();
         let ctx = JsonlLineContext {
             path,
             line_no,
@@ -402,21 +422,64 @@ where
     })
 }
 
-fn namespace_from_path(path: &Path) -> Result<NamespaceId, CheckpointImportError> {
-    let mut parts = path
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect::<Vec<_>>();
-    parts.reverse();
-    let mut iter = parts.into_iter();
-    let _file = iter.next();
-    let _kind = iter.next();
-    let namespace = iter.next().ok_or_else(|| CheckpointImportError::UnexpectedFile {
-        path: path.display().to_string(),
+fn parse_json_line<T: DeserializeOwned>(
+    line: &[u8],
+    limits: &Limits,
+    path: &Path,
+    line_no: u64,
+) -> Result<T, CheckpointImportError> {
+    let value: Value =
+        serde_json::from_slice(line).map_err(|source| CheckpointImportError::JsonLine {
+            path: path.to_path_buf(),
+            line: line_no,
+            source,
+        }
     })?;
-    NamespaceId::parse(namespace.to_string()).map_err(|_| CheckpointImportError::UnexpectedFile {
-        path: path.display().to_string(),
+    let depth = json_depth(&value);
+    if depth > limits.max_cbor_depth {
+        return Err(CheckpointImportError::JsonDepthExceeded {
+            path: path.to_path_buf(),
+            line: line_no,
+            max_depth: limits.max_cbor_depth,
+            got_depth: depth,
+        });
+    }
+    serde_json::from_value(value).map_err(|source| CheckpointImportError::JsonLine {
+        path: path.to_path_buf(),
+        line: line_no,
+        source,
     })
+}
+
+fn json_depth(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => 1 + values.iter().map(json_depth).max().unwrap_or(0),
+        Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
+fn validate_rel_path(path: &str) -> Result<(), CheckpointImportError> {
+    let rel = Path::new(path);
+    if rel.is_absolute() {
+        return Err(CheckpointImportError::InvalidPath {
+            path: path.to_string(),
+        });
+    }
+    for component in rel.components() {
+        match component {
+            Component::ParentDir
+            | Component::CurDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(CheckpointImportError::InvalidPath {
+                    path: path.to_string(),
+                });
+            }
+            Component::Normal(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn verify_bytes(
@@ -551,14 +614,17 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use crate::core::{NamespaceId, ReplicaId, StoreEpoch, StoreId};
+    use crate::core::{
+        ActorId, BeadId, BeadType, Labels, NamespaceId, Priority, ReplicaId, StoreEpoch, StoreId,
+        WorkflowStatus,
+    };
 
     fn write_file(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
 
-    fn minimal_manifest_and_meta(dir: &Path) -> (CheckpointManifest, CheckpointMeta) {
+    fn minimal_manifest_and_meta(_dir: &Path) -> (CheckpointManifest, CheckpointMeta) {
         let store_id = StoreId::new(Uuid::from_u128(1));
         let store_epoch = StoreEpoch::new(0);
         let manifest = CheckpointManifest {
@@ -587,6 +653,37 @@ mod tests {
         (manifest, meta)
     }
 
+    fn sample_wire_bead_full(id: &str) -> WireBeadFull {
+        WireBeadFull {
+            id: BeadId::parse(id).unwrap(),
+            created_at: WireStamp(1, 0),
+            created_by: ActorId::new("me").unwrap(),
+            created_on_branch: None,
+            title: "t".to_string(),
+            description: "d".to_string(),
+            design: None,
+            acceptance_criteria: None,
+            priority: Priority::P2,
+            bead_type: BeadType::Task,
+            labels: Labels::new(),
+            external_ref: None,
+            source_repo: None,
+            estimated_minutes: None,
+            status: WorkflowStatus::Open,
+            closed_at: None,
+            closed_by: None,
+            closed_reason: None,
+            closed_on_branch: None,
+            assignee: None,
+            assignee_at: None,
+            assignee_expires: None,
+            notes: Vec::new(),
+            at: WireStamp(1, 0),
+            by: ActorId::new("me").unwrap(),
+            v: None,
+        }
+    }
+
     #[test]
     fn import_rejects_manifest_hash_mismatch() {
         let tmp = TempDir::new().unwrap();
@@ -596,17 +693,17 @@ mod tests {
         meta.manifest_hash = ContentHash::from_bytes([9u8; 32]);
         meta.content_hash = meta.compute_content_hash().unwrap();
 
-        write_file(
-            &dir.join(META_FILE),
-            serde_json::to_vec(&meta).unwrap().as_slice(),
-        );
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
         write_file(
             &dir.join(MANIFEST_FILE),
-            serde_json::to_vec(&manifest).unwrap().as_slice(),
+            manifest.canon_bytes().unwrap().as_slice(),
         );
 
         let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
-        assert!(matches!(err, CheckpointImportError::ManifestHashMismatch { .. }));
+        assert!(matches!(
+            err,
+            CheckpointImportError::ManifestHashMismatch { .. }
+        ));
     }
 
     #[test]
@@ -630,13 +727,10 @@ mod tests {
         meta.manifest_hash = manifest.manifest_hash().unwrap();
         meta.content_hash = meta.compute_content_hash().unwrap();
 
-        write_file(
-            &dir.join(META_FILE),
-            serde_json::to_vec(&meta).unwrap().as_slice(),
-        );
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
         write_file(
             &dir.join(MANIFEST_FILE),
-            serde_json::to_vec(&manifest).unwrap().as_slice(),
+            manifest.canon_bytes().unwrap().as_slice(),
         );
 
         let limits = Limits {
@@ -648,38 +742,88 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_json_depth_exceeded() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
+        let shard_path = "namespaces/core/state/00.jsonl";
+        let line = b"[[[]]]\n";
+        write_file(&dir.join(shard_path), line);
+
+        manifest.files.insert(
+            shard_path.to_string(),
+            super::manifest::ManifestFile {
+                sha256: ContentHash::from_bytes(sha256_bytes(line).0),
+                bytes: line.len() as u64,
+            },
+        );
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
+        write_file(
+            &dir.join(MANIFEST_FILE),
+            manifest.canon_bytes().unwrap().as_slice(),
+        );
+
+        let limits = Limits {
+            max_cbor_depth: 2,
+            ..Limits::default()
+        };
+        let err = import_checkpoint(dir, &limits).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::JsonDepthExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn import_rejects_shard_entry_limit() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
+        let shard_path = "namespaces/core/state/00.jsonl";
+        let line1 = serde_json::to_vec(&sample_wire_bead_full("bd-abc")).unwrap();
+        let line2 = serde_json::to_vec(&sample_wire_bead_full("bd-def")).unwrap();
+        let mut shard_bytes = Vec::new();
+        shard_bytes.extend_from_slice(&line1);
+        shard_bytes.push(b'\n');
+        shard_bytes.extend_from_slice(&line2);
+        shard_bytes.push(b'\n');
+        write_file(&dir.join(shard_path), &shard_bytes);
+
+        manifest.files.insert(
+            shard_path.to_string(),
+            super::manifest::ManifestFile {
+                sha256: ContentHash::from_bytes(sha256_bytes(&shard_bytes).0),
+                bytes: shard_bytes.len() as u64,
+            },
+        );
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
+        write_file(
+            &dir.join(MANIFEST_FILE),
+            manifest.canon_bytes().unwrap().as_slice(),
+        );
+
+        let limits = Limits {
+            max_snapshot_entries: 1,
+            ..Limits::default()
+        };
+        let err = import_checkpoint(dir, &limits).unwrap_err();
+        assert!(matches!(err, CheckpointImportError::ShardEntryLimit { .. }));
+    }
+
+    #[test]
     fn merge_store_states_is_commutative() {
         let mut left = StoreState::new();
         let mut right = StoreState::new();
         let mut state = CanonicalState::default();
-        let bead = crate::core::Bead::from(WireBeadFull {
-            id: crate::core::BeadId::parse("bd-abc").unwrap(),
-            created_at: WireStamp(1, 0),
-            created_by: crate::core::ActorId::new("me").unwrap(),
-            created_on_branch: None,
-            title: "t".to_string(),
-            description: "d".to_string(),
-            design: None,
-            acceptance_criteria: None,
-            priority: crate::core::Priority::P2,
-            bead_type: crate::core::BeadType::Task,
-            labels: crate::core::Labels::new(),
-            external_ref: None,
-            source_repo: None,
-            estimated_minutes: None,
-            status: crate::core::WorkflowStatus::Open,
-            closed_at: None,
-            closed_by: None,
-            closed_reason: None,
-            closed_on_branch: None,
-            assignee: None,
-            assignee_at: None,
-            assignee_expires: None,
-            notes: Vec::new(),
-            at: WireStamp(1, 0),
-            by: crate::core::ActorId::new("me").unwrap(),
-            v: None,
-        });
+        let bead = crate::core::Bead::from(sample_wire_bead_full("bd-abc"));
         state.insert_live(bead);
         left.ensure_namespace(NamespaceId::core())
             .clone_from(&state);
