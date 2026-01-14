@@ -783,6 +783,24 @@ impl From<OpError> for ErrorPayload {
                 ErrorPayload::new(ErrorCode::NamespaceUnknown, message, retryable)
                     .with_details(error_details::NamespaceUnknownDetails { namespace })
             }
+            OpError::NamespacePolicyViolation {
+                namespace,
+                rule,
+                reason,
+            } => ErrorPayload::new(ErrorCode::NamespacePolicyViolation, message, retryable)
+                .with_details(error_details::NamespacePolicyViolationDetails {
+                    namespace,
+                    rule,
+                    reason,
+                }),
+            OpError::CrossNamespaceDependency {
+                from_namespace,
+                to_namespace,
+            } => ErrorPayload::new(ErrorCode::CrossNamespaceDependency, message, retryable)
+                .with_details(error_details::CrossNamespaceDependencyDetails {
+                    from_namespace,
+                    to_namespace,
+                }),
             OpError::Wal(e) => match e.as_ref() {
                 crate::daemon::wal::WalError::TooLarge {
                     max_bytes,

@@ -377,6 +377,19 @@ pub enum OpError {
     #[error("namespace unknown: {namespace}")]
     NamespaceUnknown { namespace: NamespaceId },
 
+    #[error("namespace policy violation for {namespace}: {rule}")]
+    NamespacePolicyViolation {
+        namespace: NamespaceId,
+        rule: String,
+        reason: Option<String>,
+    },
+
+    #[error("cross-namespace dependency from {from_namespace} to {to_namespace}")]
+    CrossNamespaceDependency {
+        from_namespace: NamespaceId,
+        to_namespace: NamespaceId,
+    },
+
     #[error(transparent)]
     Wal(#[from] Box<WalError>),
 
@@ -435,6 +448,8 @@ impl OpError {
             OpError::RequireMinSeenUnsatisfied { .. } => ErrorCode::RequireMinSeenUnsatisfied,
             OpError::NamespaceInvalid { .. } => ErrorCode::NamespaceInvalid,
             OpError::NamespaceUnknown { .. } => ErrorCode::NamespaceUnknown,
+            OpError::NamespacePolicyViolation { .. } => ErrorCode::NamespacePolicyViolation,
+            OpError::CrossNamespaceDependency { .. } => ErrorCode::CrossNamespaceDependency,
             OpError::WalRecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
             OpError::Wal(err) => match err.as_ref() {
                 WalError::TooLarge { .. } => ErrorCode::WalRecordTooLarge,
@@ -479,7 +494,9 @@ impl OpError {
             | OpError::WalRecordTooLarge { .. }
             | OpError::LabelsTooMany { .. }
             | OpError::NotClaimedByYou
-            | OpError::DepNotFound => Transience::Permanent,
+            | OpError::DepNotFound
+            | OpError::NamespacePolicyViolation { .. }
+            | OpError::CrossNamespaceDependency { .. } => Transience::Permanent,
             OpError::StoreRuntime(err) => store_runtime_transience(err.as_ref()),
             OpError::DurabilityTimeout { .. } => Transience::Retryable,
             OpError::DurabilityUnavailable { .. } => Transience::Permanent,
