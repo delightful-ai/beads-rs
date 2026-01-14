@@ -44,6 +44,7 @@ use super::repl::{
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
 use crate::core::error::details as error_details;
+use crate::paths;
 
 /// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded`,
 /// `Daemon::ensure_repo_loaded_strict`, or `Daemon::ensure_repo_fresh`.
@@ -739,7 +740,7 @@ impl Daemon {
             .get(&store_id)
             .ok_or(OpError::Internal("loaded store missing from state"))?;
 
-        let wal_index: Arc<dyn WalIndex> = Arc::clone(&store.wal_index);
+        let wal_index: Arc<dyn WalIndex> = store.wal_index.clone();
         let wal_reader = Some(WalRangeReader::new(store_id, wal_index.clone(), self.limits.clone()));
         let session_store = SharedSessionStore::new(ReplSessionStore::new(
             store_id,
@@ -832,6 +833,7 @@ impl Daemon {
         batch: Vec<VerifiedEvent<PrevVerified>>,
         now_ms: u64,
     ) -> Result<IngestOutcome, Box<ErrorPayload>> {
+        let limits = self.limits().clone();
         let store = self.stores.get_mut(&store_id).ok_or_else(|| {
             Box::new(ErrorPayload::new(
                 ErrorCode::Internal,
@@ -860,7 +862,7 @@ impl Daemon {
             &store.meta,
             &namespace,
             now_ms,
-            SegmentConfig::from_limits(self.limits()),
+            SegmentConfig::from_limits(&limits),
         )
         .map_err(|err| Box::new(event_wal_error_payload(&namespace, None, None, err)))?;
 
@@ -2448,6 +2450,7 @@ fn wal_index_error_payload(err: &WalIndexError) -> ErrorPayload {
             client_request_id,
             expected_request_sha256,
             got_request_sha256,
+            ..
         } => ErrorPayload::new(
             ErrorCode::ClientRequestIdReuseMismatch,
             "client_request_id reuse mismatch",
