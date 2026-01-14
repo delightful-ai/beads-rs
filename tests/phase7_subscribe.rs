@@ -5,9 +5,7 @@ mod fixtures;
 use std::path::PathBuf;
 
 use beads_rs::daemon::ipc::{ReadConsistency, Request, Response, subscribe_stream};
-use beads_rs::{
-    Applied, ErrorCode, HeadStatus, NamespaceId, Seq0, Watermarks,
-};
+use beads_rs::{Applied, ErrorCode, HeadStatus, NamespaceId, Seq0, Watermarks};
 
 use fixtures::admin_status::StatusCollector;
 use fixtures::ipc_stream::StreamingClient;
@@ -83,10 +81,7 @@ fn phase7_subscribe_gates_on_require_min_seen() {
         wait_timeout_ms: None,
     };
     let mut client = StreamingClient::subscribe_with_read(repo, read).expect("subscribe");
-    let event = client
-        .next_event()
-        .expect("next event")
-        .expect("event");
+    let event = client.next_event().expect("next event").expect("event");
     assert_eq!(event.event_id.origin_replica_id, origin);
     assert!(event.event_id.origin_seq.get() >= required_seq);
 }
@@ -112,7 +107,8 @@ fn phase7_subscribe_multiple_clients_receive_same_events() {
 
     let mut client_a = StreamingClient::subscribe_with_read(repo.clone(), read.clone())
         .expect("subscribe client A");
-    let mut client_b = StreamingClient::subscribe_with_read(repo, read).expect("subscribe client B");
+    let mut client_b =
+        StreamingClient::subscribe_with_read(repo, read).expect("subscribe client B");
 
     let seqs_a = collect_origin_seqs(&mut client_a, origin, start_seq, report.successes);
     let seqs_b = collect_origin_seqs(&mut client_b, origin, start_seq, report.successes);
@@ -166,10 +162,7 @@ fn collect_origin_seqs(
 ) -> Vec<u64> {
     let mut seqs = Vec::with_capacity(total);
     while seqs.len() < total {
-        let event = client
-            .next_event()
-            .expect("stream event")
-            .expect("event");
+        let event = client.next_event().expect("stream event").expect("event");
         if event.event_id.origin_replica_id != origin {
             continue;
         }
