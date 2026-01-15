@@ -153,5 +153,5 @@ fn origin_seq_after_restart_is_max_plus_one() {
         .expect("next origin seq");
     txn.rollback().expect("rollback");
 
-    assert_eq!(next, 3);
+    assert_eq!(next, Seq1::from_u64(3).expect("seq1"));
 }

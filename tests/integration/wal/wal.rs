@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{Seek, SeekFrom};
 
 use beads_rs::daemon::wal::{FrameReader, WalReplayError, rebuild_index};
-use beads_rs::{Limits, NamespaceId, ReplicaId};
+use beads_rs::{Limits, NamespaceId, ReplicaId, Seq1};
 use uuid::Uuid;
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq, sample_record};
@@ -83,7 +83,7 @@ fn wal_replay_rejects_header_mismatch() {
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([42u8; 16]));
     let mut record = record_for_seq(temp.meta(), &namespace, origin, 1, None);
-    record.header.origin_seq = 2;
+    record.header.origin_seq = Seq1::from_u64(2).expect("seq1");
     temp.write_segment(&namespace, 1_700_000_000_000, &[record])
         .expect("write segment");
     let index = temp.open_index().expect("open wal index");

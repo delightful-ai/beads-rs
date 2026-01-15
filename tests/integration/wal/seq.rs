@@ -4,7 +4,7 @@
 use uuid::Uuid;
 
 use beads_rs::daemon::wal::{Record, WalIndex, rebuild_index};
-use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
+use beads_rs::{Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
 
@@ -24,15 +24,15 @@ fn seq_allocation_is_monotonic() {
         .expect("next origin seq");
     txn.commit().expect("commit");
 
-    assert_eq!(first, 1);
-    assert_eq!(second, 2);
+    assert_eq!(first, Seq1::from_u64(1).unwrap());
+    assert_eq!(second, Seq1::from_u64(2).unwrap());
 
     let mut txn = index.writer().begin_txn().expect("begin txn");
     let third = txn
         .next_origin_seq(&namespace, &origin)
         .expect("next origin seq");
     txn.commit().expect("commit");
-    assert_eq!(third, 3);
+    assert_eq!(third, Seq1::from_u64(3).unwrap());
 
     let other_origin = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
     let mut txn = index.writer().begin_txn().expect("begin txn");
@@ -40,7 +40,7 @@ fn seq_allocation_is_monotonic() {
         .next_origin_seq(&namespace, &other_origin)
         .expect("next origin seq");
     txn.commit().expect("commit");
-    assert_eq!(other_first, 1);
+    assert_eq!(other_first, Seq1::from_u64(1).unwrap());
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn seq_allocation_resumes_after_replay() {
         .next_origin_seq(&namespace, &origin)
         .expect("next origin seq");
     txn.commit().expect("commit");
-    assert_eq!(next, 3);
+    assert_eq!(next, Seq1::from_u64(3).unwrap());
 }
 
 fn record_chain(

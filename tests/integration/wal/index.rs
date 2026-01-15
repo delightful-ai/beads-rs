@@ -8,7 +8,7 @@ use uuid::Uuid;
 use beads_rs::daemon::wal::{
     FrameWriter, Record, WalIndex, WalReplayError, catch_up_index, rebuild_index,
 };
-use beads_rs::{Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
+use beads_rs::{Limits, NamespaceId, ReplicaId, Seq0, Seq1, StoreMeta};
 
 use crate::fixtures::wal::{SegmentFixture, TempWalDir, record_for_seq};
 
@@ -49,7 +49,7 @@ fn index_rebuild_populates_watermarks_and_segments() {
 
     let range = index
         .reader()
-        .iter_from(&namespace, &origin, 0, MAX_RECORD_BYTES)
+        .iter_from(&namespace, &origin, Seq0::ZERO, MAX_RECORD_BYTES)
         .expect("range");
     assert_eq!(range.len(), 2);
     assert_eq!(range[0].event_id.origin_seq, Seq1::from_u64(1).unwrap());
@@ -100,7 +100,7 @@ fn index_catch_up_scans_new_frames() {
 
     let range = index
         .reader()
-        .iter_from(&namespace, &origin, 0, MAX_RECORD_BYTES)
+        .iter_from(&namespace, &origin, Seq0::ZERO, MAX_RECORD_BYTES)
         .expect("range");
     assert_eq!(range.len(), 3);
     assert_eq!(range[2].event_id.origin_seq, Seq1::from_u64(3).unwrap());

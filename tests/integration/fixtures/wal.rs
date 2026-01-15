@@ -190,7 +190,7 @@ pub fn record_for_seq(
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
         origin_replica_id: origin,
-        origin_seq: seq,
+        origin_seq: Seq1::from_u64(seq).expect("seq1"),
         event_time_ms,
         txn_id,
         client_request_id: None,
@@ -221,7 +221,7 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Rec
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
         origin_replica_id: origin,
-        origin_seq,
+        origin_seq: Seq1::from_u64(origin_seq).expect("seq1"),
         event_time_ms,
         txn_id,
         client_request_id,
@@ -249,7 +249,7 @@ pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Rec
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
         origin_replica_id: origin,
-        origin_seq,
+        origin_seq: Seq1::from_u64(origin_seq).expect("seq1"),
         event_time_ms,
         txn_id,
         client_request_id: None,

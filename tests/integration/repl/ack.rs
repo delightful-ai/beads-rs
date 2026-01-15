@@ -267,7 +267,7 @@ fn repl_want_reads_from_wal() {
 
     let reader = WalRangeReader::new(store_id, Arc::new(index), limits.clone());
     let frames = reader
-        .read_range(&namespace, &origin, 0, limits.max_event_batch_bytes)
+        .read_range(&namespace, &origin, Seq0::ZERO, limits.max_event_batch_bytes)
         .expect("read wal range");
 
     assert_eq!(frames.len(), 2);
