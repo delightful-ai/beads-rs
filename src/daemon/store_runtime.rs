@@ -1,6 +1,6 @@
 //! Store runtime state and on-disk identity handling.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
-    ActorId, Applied, Durable, ErrorCode, ErrorPayload, HeadStatus, Limits, NamespaceId,
-    NamespacePolicies, NamespacePolicy, ReplicaId, ReplicaRosterError, Seq0, StoreEpoch, StoreId,
-    StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks, WriteStamp,
+    ActorId, ApplyOutcome, Applied, Durable, ErrorCode, ErrorPayload, HeadStatus, Limits,
+    NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicaRosterError, Seq0,
+    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks,
+    WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
@@ -28,8 +29,9 @@ use crate::daemon::wal::{
     WalIndexError, WalReplayError, catch_up_index, rebuild_index,
 };
 use crate::git::checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, CheckpointSnapshot, CheckpointSnapshotError,
-    CheckpointSnapshotInput, build_snapshot, policy_hash,
+    CHECKPOINT_FORMAT_VERSION, CheckpointFileKind, CheckpointSnapshot, CheckpointSnapshotError,
+    CheckpointSnapshotInput, build_snapshot, policy_hash, shard_for_bead, shard_for_dep,
+    shard_for_tombstone, shard_path,
 };
 use crate::paths;
 
@@ -60,6 +62,8 @@ pub struct StoreRuntime {
     pub(crate) repo_state: RepoState,
     pub(crate) watermarks_applied: Watermarks<Applied>,
     pub(crate) watermarks_durable: Watermarks<Durable>,
+    checkpoint_dirty_shards: BTreeMap<NamespaceId, BTreeSet<String>>,
+    checkpoint_dirty_inflight: BTreeMap<String, BTreeMap<NamespaceId, BTreeSet<String>>>,
     pub(crate) broadcaster: EventBroadcaster,
     pub(crate) admission: AdmissionController,
     pub(crate) maintenance_mode: bool,
@@ -173,6 +177,8 @@ impl StoreRuntime {
             repo_state,
             watermarks_applied,
             watermarks_durable,
+            checkpoint_dirty_shards: BTreeMap::new(),
+            checkpoint_dirty_inflight: BTreeMap::new(),
             broadcaster,
             admission,
             maintenance_mode: false,
@@ -230,7 +236,7 @@ impl StoreRuntime {
         Ok(self.wal_index.reader().load_hlc()?)
     }
 
-    pub fn checkpoint_snapshot(
+    pub fn checkpoint_snapshot_readonly(
         &self,
         checkpoint_group: &str,
         namespaces: &[NamespaceId],
@@ -247,9 +253,127 @@ impl StoreRuntime {
             created_by_replica_id: self.meta.replica_id,
             policy_hash,
             roster_hash,
+            dirty_shards: None,
             state: &self.repo_state.state,
             watermarks_durable: &self.watermarks_durable,
         })
+    }
+
+    pub fn checkpoint_snapshot(
+        &mut self,
+        checkpoint_group: &str,
+        namespaces: &[NamespaceId],
+        created_at_ms: u64,
+    ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
+        let policy_hash = policy_hash(&self.policies)?;
+        let roster_hash = None;
+        let dirty_shards = self.begin_checkpoint_dirty_shards(checkpoint_group, namespaces);
+        let snapshot = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: checkpoint_group.to_string(),
+            namespaces: namespaces.to_vec(),
+            store_id: self.meta.store_id(),
+            store_epoch: self.meta.store_epoch(),
+            created_at_ms,
+            created_by_replica_id: self.meta.replica_id,
+            policy_hash,
+            roster_hash,
+            dirty_shards: Some(dirty_shards),
+            state: &self.repo_state.state,
+            watermarks_durable: &self.watermarks_durable,
+        });
+        if snapshot.is_err() {
+            self.rollback_checkpoint_dirty_shards(checkpoint_group);
+        }
+        snapshot
+    }
+
+    pub(crate) fn record_checkpoint_dirty_shards(
+        &mut self,
+        namespace: &NamespaceId,
+        outcome: &ApplyOutcome,
+    ) {
+        if outcome.changed_beads.is_empty()
+            && outcome.changed_deps.is_empty()
+            && outcome.changed_notes.is_empty()
+        {
+            return;
+        }
+        let dirty = self
+            .checkpoint_dirty_shards
+            .entry(namespace.clone())
+            .or_default();
+        for bead_id in &outcome.changed_beads {
+            let shard = shard_for_bead(bead_id);
+            dirty.insert(shard_path(namespace, CheckpointFileKind::State, &shard));
+            let tombstone_shard = shard_for_tombstone(bead_id);
+            dirty.insert(shard_path(
+                namespace,
+                CheckpointFileKind::Tombstones,
+                &tombstone_shard,
+            ));
+        }
+        for dep_key in &outcome.changed_deps {
+            let shard = shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind());
+            dirty.insert(shard_path(namespace, CheckpointFileKind::Deps, &shard));
+        }
+        for note_key in &outcome.changed_notes {
+            let shard = shard_for_bead(&note_key.bead_id);
+            dirty.insert(shard_path(namespace, CheckpointFileKind::State, &shard));
+            let tombstone_shard = shard_for_tombstone(&note_key.bead_id);
+            dirty.insert(shard_path(
+                namespace,
+                CheckpointFileKind::Tombstones,
+                &tombstone_shard,
+            ));
+        }
+    }
+
+    pub(crate) fn commit_checkpoint_dirty_shards(&mut self, checkpoint_group: &str) {
+        self.checkpoint_dirty_inflight.remove(checkpoint_group);
+    }
+
+    pub(crate) fn rollback_checkpoint_dirty_shards(&mut self, checkpoint_group: &str) {
+        let Some(in_flight) = self.checkpoint_dirty_inflight.remove(checkpoint_group) else {
+            return;
+        };
+        for (namespace, shards) in in_flight {
+            self.checkpoint_dirty_shards
+                .entry(namespace)
+                .or_default()
+                .extend(shards);
+        }
+    }
+
+    fn begin_checkpoint_dirty_shards(
+        &mut self,
+        checkpoint_group: &str,
+        namespaces: &[NamespaceId],
+    ) -> BTreeSet<String> {
+        let mut in_flight: BTreeMap<NamespaceId, BTreeSet<String>> = BTreeMap::new();
+        for namespace in namespaces {
+            let shards = self
+                .checkpoint_dirty_shards
+                .remove(namespace)
+                .unwrap_or_default();
+            in_flight.insert(namespace.clone(), shards);
+        }
+        if let Some(existing) = self.checkpoint_dirty_inflight.remove(checkpoint_group) {
+            tracing::warn!(
+                checkpoint_group = checkpoint_group,
+                "checkpoint dirty shards already in flight; merging"
+            );
+            for (namespace, shards) in existing {
+                in_flight.entry(namespace).or_default().extend(shards);
+            }
+        }
+
+        let dirty_shards = in_flight
+            .values()
+            .flat_map(|shards| shards.iter().cloned())
+            .collect();
+        self.checkpoint_dirty_inflight
+            .insert(checkpoint_group.to_string(), in_flight);
+        dirty_shards
     }
 
     pub fn rotate_replica_id(&mut self) -> Result<(ReplicaId, ReplicaId), StoreRuntimeError> {
@@ -697,6 +821,14 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::core::bead::{BeadCore, BeadFields};
+    use crate::core::collections::Labels;
+    use crate::core::composite::{Claim, Workflow};
+    use crate::core::crdt::Lww;
+    use crate::core::domain::{BeadType, DepKind, Priority};
+    use crate::core::identity::BeadId;
+    use crate::core::time::{Stamp, WriteStamp};
+    use crate::core::{ActorId, CanonicalState, DepEdge, DepKey, StoreState};
     use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, Wal, WalIndex};
     use crate::paths;
@@ -878,6 +1010,106 @@ mod tests {
             runtime.wal_index.durability_mode(),
             IndexDurabilityMode::Durable
         );
+    }
+
+    #[test]
+    fn checkpoint_dirty_shards_roundtrip() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([50u8; 16]));
+        let wal = Wal::new(temp.path()).expect("wal");
+        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let mut runtime = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            Arc::new(wal),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        let namespace = NamespaceId::core();
+        let stamp = Stamp::new(
+            WriteStamp::new(1_700_000_000_000, 1),
+            ActorId::new("author").expect("actor id"),
+        );
+        let bead_id = BeadId::parse("bd-dirty1").expect("bead id");
+        let dep_to = BeadId::parse("bd-dirty2").expect("bead id");
+        let core = BeadCore::new(bead_id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        let bead = crate::core::Bead::new(core, fields);
+        let dep_key = DepKey::new(bead_id.clone(), dep_to, DepKind::Blocks).expect("dep key");
+        let dep_edge = DepEdge::new(stamp.clone());
+
+        let mut core_state = CanonicalState::new();
+        core_state.insert(bead).expect("insert bead");
+        core_state.insert_dep(dep_key.clone(), dep_edge);
+        let mut store_state = StoreState::new();
+        store_state.set_namespace_state(namespace.clone(), core_state);
+        runtime.repo_state.state = store_state;
+
+        let mut outcome = ApplyOutcome::default();
+        outcome.changed_beads.insert(bead_id.clone());
+        outcome.changed_deps.insert(dep_key.clone());
+        runtime.record_checkpoint_dirty_shards(&namespace, &outcome);
+
+        let snapshot = runtime
+            .checkpoint_snapshot("core", &[namespace.clone()], 1_700_000_000_000)
+            .expect("snapshot");
+
+        let state_path = shard_path(
+            &namespace,
+            CheckpointFileKind::State,
+            &shard_for_bead(&bead_id),
+        );
+        let tomb_path = shard_path(
+            &namespace,
+            CheckpointFileKind::Tombstones,
+            &shard_for_tombstone(&bead_id),
+        );
+        let dep_path = shard_path(
+            &namespace,
+            CheckpointFileKind::Deps,
+            &shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind()),
+        );
+        let mut expected = BTreeSet::new();
+        expected.insert(state_path);
+        expected.insert(tomb_path);
+        expected.insert(dep_path);
+
+        assert_eq!(snapshot.dirty_shards, expected);
+        assert!(runtime.checkpoint_dirty_shards.get(&namespace).is_none());
+
+        runtime.rollback_checkpoint_dirty_shards("core");
+        let restored = runtime
+            .checkpoint_dirty_shards
+            .get(&namespace)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(restored, expected);
+
+        let _ = runtime
+            .checkpoint_snapshot("core", &[namespace.clone()], 1_700_000_000_001)
+            .expect("snapshot");
+        runtime.commit_checkpoint_dirty_shards("core");
+        assert!(runtime.checkpoint_dirty_shards.get(&namespace).is_none());
     }
 
     #[cfg(unix)]

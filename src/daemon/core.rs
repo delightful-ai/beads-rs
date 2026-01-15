@@ -1505,13 +1505,19 @@ impl Daemon {
                     let state = store.repo_state.state.ensure_namespace(namespace.clone());
                     apply_event(state, &event.body)
                 };
-                if let Err(err) = apply_result {
-                    metrics::apply_err(apply_start.elapsed());
-                    return Err(Box::new(apply_event_error_payload(
-                        &namespace, &origin, err,
-                    )));
-                }
-                metrics::apply_ok(apply_start.elapsed());
+                let outcome = match apply_result {
+                    Ok(outcome) => {
+                        metrics::apply_ok(apply_start.elapsed());
+                        outcome
+                    }
+                    Err(err) => {
+                        metrics::apply_err(apply_start.elapsed());
+                        return Err(Box::new(apply_event_error_payload(
+                            &namespace, &origin, err,
+                        )));
+                    }
+                };
+                store.record_checkpoint_dirty_shards(&namespace, &outcome);
 
                 if let Some(hlc_max) = &event.body.hlc_max {
                     let stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
@@ -1940,6 +1946,9 @@ impl Daemon {
                     checkpoint_id = %outcome.checkpoint_id,
                     "checkpoint publish succeeded"
                 );
+                if let Some(store) = self.stores.get_mut(&store_id) {
+                    store.commit_checkpoint_dirty_shards(checkpoint_group);
+                }
                 self.checkpoint_scheduler.complete_success(
                     &key,
                     Instant::now(),
@@ -1953,6 +1962,9 @@ impl Daemon {
                     error = ?err,
                     "checkpoint publish failed"
                 );
+                if let Some(store) = self.stores.get_mut(&store_id) {
+                    store.rollback_checkpoint_dirty_shards(checkpoint_group);
+                }
                 self.checkpoint_scheduler
                     .complete_failure(&key, Instant::now());
             }
@@ -2104,7 +2116,7 @@ impl Daemon {
             .checkpoint_groups_for_store(key.store_id);
 
         let (snapshot, repo_path) = {
-            let store = match self.stores.get(&key.store_id) {
+            let store = match self.stores.get_mut(&key.store_id) {
                 Some(store) => store,
                 None => {
                     tracing::warn!(
@@ -2165,6 +2177,9 @@ impl Daemon {
                 checkpoint_group = %config.group,
                 "checkpoint git worker not responding"
             );
+            if let Some(store) = self.stores.get_mut(&key.store_id) {
+                store.rollback_checkpoint_dirty_shards(&config.group);
+            }
             self.checkpoint_scheduler.complete_failure(key, now);
             self.emit_checkpoint_queue_depth();
         }
@@ -4100,6 +4115,7 @@ mod tests {
             created_by_replica_id: origin,
             policy_hash,
             roster_hash: None,
+            dirty_shards: None,
             state: &store_state,
             watermarks_durable: &watermarks,
         })

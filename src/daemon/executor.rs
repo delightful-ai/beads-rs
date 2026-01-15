@@ -397,12 +397,18 @@ impl Daemon {
                     .ensure_namespace(namespace.clone());
                 apply_event(state, &draft.event_body)
             };
-            if let Err(err) = apply_result {
-                metrics::apply_err(apply_start.elapsed());
-                tracing::error!(error = ?err, "apply_event failed");
-                return Err(OpError::Internal("apply_event failed"));
-            }
-            metrics::apply_ok(apply_start.elapsed());
+            let outcome = match apply_result {
+                Ok(outcome) => {
+                    metrics::apply_ok(apply_start.elapsed());
+                    outcome
+                }
+                Err(err) => {
+                    metrics::apply_err(apply_start.elapsed());
+                    tracing::error!(error = ?err, "apply_event failed");
+                    return Err(OpError::Internal("apply_event failed"));
+                }
+            };
+            store_runtime.record_checkpoint_dirty_shards(&namespace, &outcome);
             let write_stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
             let now_wall_ms = WallClock::now().0;
             store_runtime.repo_state.last_seen_stamp = Some(write_stamp.clone());

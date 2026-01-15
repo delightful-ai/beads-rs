@@ -34,7 +34,7 @@ pub fn fingerprint_namespaces(
     mode: FingerprintMode,
     now_ms: u64,
 ) -> Result<Vec<AdminNamespaceFingerprint>, FingerprintError> {
-    let snapshot = store.checkpoint_snapshot(FINGERPRINT_GROUP, namespaces, now_ms)?;
+    let snapshot = store.checkpoint_snapshot_readonly(FINGERPRINT_GROUP, namespaces, now_ms)?;
     let empty_hash = ContentHash::from_bytes(sha256_bytes(&[]).0);
 
     let mut by_namespace = BTreeMap::new();

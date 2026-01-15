@@ -208,6 +208,7 @@ fn build_snapshot_from_state(
         created_by_replica_id,
         policy_hash,
         roster_hash,
+        dirty_shards: None,
         state,
         watermarks_durable: watermarks,
     })

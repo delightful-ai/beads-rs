@@ -1,6 +1,6 @@
 //! Checkpoint snapshot builder (coordinator-side barrier).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use serde::Serialize;
@@ -82,6 +82,7 @@ pub struct CheckpointSnapshotInput<'a> {
     pub created_by_replica_id: ReplicaId,
     pub policy_hash: ContentHash,
     pub roster_hash: Option<ContentHash>,
+    pub dirty_shards: Option<BTreeSet<String>>,
     pub state: &'a StoreState,
     pub watermarks_durable: &'a Watermarks<Durable>,
 }
@@ -98,6 +99,7 @@ pub fn build_snapshot(
         created_by_replica_id,
         policy_hash,
         roster_hash,
+        dirty_shards,
         state,
         watermarks_durable,
     } = input;
@@ -112,7 +114,7 @@ pub fn build_snapshot(
 
     let included = included_watermarks(watermarks_durable, &namespaces);
     let included_heads = included_heads(watermarks_durable, &namespaces);
-    let dirty_shards = shards.keys().cloned().collect();
+    let dirty_shards = dirty_shards.unwrap_or_else(|| shards.keys().cloned().collect());
 
     Ok(CheckpointSnapshot {
         checkpoint_group,
@@ -393,7 +395,7 @@ fn wire_dep(key: &DepKey, edge: &DepEdge) -> WireDepV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
 
     use crate::core::bead::{BeadCore, BeadFields};
@@ -483,6 +485,7 @@ mod tests {
             created_by_replica_id: origin,
             policy_hash: ContentHash::from_bytes([9u8; 32]),
             roster_hash: None,
+            dirty_shards: None,
             state,
             watermarks_durable: &watermarks,
         })
@@ -528,6 +531,7 @@ mod tests {
             created_by_replica_id: origin,
             policy_hash: ContentHash::from_bytes([9u8; 32]),
             roster_hash: None,
+            dirty_shards: None,
             state: &state,
             watermarks_durable: &watermarks,
         })
@@ -574,6 +578,54 @@ mod tests {
         assert!(snapshot.dirty_shards.contains(&state_path));
         assert!(snapshot.dirty_shards.contains(&tomb_path));
         assert!(snapshot.dirty_shards.contains(&dep_path));
+    }
+
+    #[test]
+    fn snapshot_respects_dirty_shards_input() {
+        let namespace = NamespaceId::core();
+        let stamp = make_stamp(1, 0, "author");
+        let bead_id = BeadId::parse("beads-rs-abc1").unwrap();
+        let bead = make_bead(&bead_id, &stamp);
+
+        let mut core_state = CanonicalState::new();
+        core_state.insert(bead.clone()).unwrap();
+        let mut state = StoreState::new();
+        state.set_namespace_state(namespace.clone(), core_state);
+
+        let origin = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
+        let mut watermarks = Watermarks::<Durable>::new();
+        watermarks
+            .observe_at_least(
+                &namespace,
+                &origin,
+                Seq0::new(4),
+                HeadStatus::Known([4u8; 32]),
+            )
+            .unwrap();
+        let state_path = shard_path(
+            &namespace,
+            CheckpointFileKind::State,
+            &shard_for_bead(&bead_id),
+        );
+
+        let mut expected = BTreeSet::new();
+        expected.insert(state_path.clone());
+        let custom = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![namespace.clone()],
+            store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
+            store_epoch: StoreEpoch::new(0),
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: ContentHash::from_bytes([9u8; 32]),
+            roster_hash: None,
+            dirty_shards: Some(expected.clone()),
+            state: &state,
+            watermarks_durable: &watermarks,
+        })
+        .expect("snapshot");
+
+        assert_eq!(custom.dirty_shards, expected);
     }
 
     #[test]
