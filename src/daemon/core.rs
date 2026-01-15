@@ -143,11 +143,13 @@ use crate::core::{
     ActorId, Applied, ApplyError, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
     DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, Limits, NamespaceId, PrevVerified,
     ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
-    StoreIdentity, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
-    apply_event, decode_event_body,
+    StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks,
+    WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
-use crate::git::checkpoint::{CheckpointPublishError, CheckpointPublishOutcome};
+use crate::git::checkpoint::{
+    CheckpointPublishError, CheckpointPublishOutcome, merge_store_states, store_state_from_legacy,
+};
 use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::sync::SyncOutcome;
 
@@ -728,7 +730,7 @@ impl Daemon {
             self.clock.receive(max_stamp);
         }
         let mut needs_sync = loaded.needs_sync;
-        let mut state = loaded.state;
+        let mut state = store_state_from_legacy(loaded.state);
         let mut root_slug = loaded.root_slug;
 
         // WAL recovery: merge any state from legacy snapshot WAL
@@ -740,20 +742,14 @@ impl Daemon {
                     wal_import.sequence
                 );
 
-                let wal_state = wal_import
-                    .state
-                    .get(&NamespaceId::core())
-                    .cloned()
-                    .unwrap_or_default();
-
                 // Advance clock for WAL timestamps
-                if let Some(max_stamp) = wal_state.max_write_stamp() {
+                if let Some(max_stamp) = wal_import.state.max_write_stamp() {
                     self.clock.receive(&max_stamp);
                     last_seen_stamp = max_write_stamp(last_seen_stamp, Some(max_stamp));
                 }
 
                 // CRDT merge WAL state with git state
-                match CanonicalState::join(&state, &wal_state) {
+                match merge_store_states(&state, &wal_import.state) {
                     Ok(merged) => {
                         state = merged;
                         // WAL slug takes precedence if set
@@ -763,10 +759,13 @@ impl Daemon {
                         // WAL had data - need to sync it to remote
                         needs_sync = true;
                     }
-                    Err(errs) => {
+                    Err(crate::git::checkpoint::CheckpointImportError::Merge(errors)) => {
                         return Err(OpError::WalMerge {
-                            errors: Box::new(errs),
+                            errors: Box::new(errors),
                         });
+                    }
+                    Err(_) => {
+                        return Err(OpError::Internal("store state merge failed"));
                     }
                 }
             }
@@ -1021,7 +1020,7 @@ impl Daemon {
             return Ok(IngestOutcome { durable, applied });
         }
 
-        let mut preview_state = store.repo_state.state.clone();
+        let mut preview_state = store.repo_state.state.get_or_default(&namespace);
         for event in &batch {
             if event.body.namespace != namespace || event.body.origin_replica_id != origin {
                 return Err(Box::new(ErrorPayload::new(
@@ -1145,7 +1144,11 @@ impl Daemon {
             let mut max_stamp = store.repo_state.last_seen_stamp.clone();
             for event in &batch {
                 let apply_start = Instant::now();
-                if let Err(err) = apply_event(&mut store.repo_state.state, &event.body) {
+                let apply_result = {
+                    let state = store.repo_state.state.ensure_namespace(namespace.clone());
+                    apply_event(state, &event.body)
+                };
+                if let Err(err) = apply_result {
                     metrics::apply_err(apply_start.elapsed());
                     return Err(Box::new(apply_event_error_payload(
                         &namespace, &origin, err,
@@ -1316,7 +1319,9 @@ impl Daemon {
                 // Only apply refresh if repo is still clean (no mutations happened
                 // during the refresh). If dirty, we'll sync soon anyway.
                 if !repo_state.dirty {
-                    repo_state.state = fresh.state;
+                    repo_state
+                        .state
+                        .set_namespace_state(NamespaceId::core(), fresh.state);
                     // Update root_slug if remote has one and we don't
                     if fresh.root_slug.is_some() {
                         repo_state.root_slug = fresh.root_slug;
@@ -1408,7 +1413,7 @@ impl Daemon {
         let _ = git_tx.send(GitOp::Sync {
             repo: path,
             remote: remote.clone(),
-            state: repo_state.state.clone(),
+            state: repo_state.state.get_or_default(&NamespaceId::core()),
             actor: self.actor.clone(),
         });
     }
@@ -1475,7 +1480,7 @@ impl Daemon {
 
                 // If mutations happened during sync, merge them
                 if repo_state.dirty {
-                    let local_state = repo_state.state.clone();
+                    let local_state = repo_state.state.get_or_default(&NamespaceId::core());
                     let merged = match CanonicalState::join(&synced_state, &local_state) {
                         Ok(merged) => Ok(merged),
                         Err(mut errs) => {
@@ -1503,7 +1508,9 @@ impl Daemon {
 
                     match merged {
                         Ok(merged) => {
-                            repo_state.complete_sync(merged, self.clock.wall_ms());
+                            let mut next_state = repo_state.state.clone();
+                            next_state.set_namespace_state(NamespaceId::core(), merged);
+                            repo_state.complete_sync(next_state, self.clock.wall_ms());
                             // Still dirty from mutations during sync - reschedule
                             repo_state.dirty = true;
                             self.scheduler.schedule(remote.clone());
@@ -1521,7 +1528,9 @@ impl Daemon {
                     }
                 } else {
                     // No mutations during sync - just take synced state
-                    repo_state.complete_sync(synced_state, self.clock.wall_ms());
+                    let mut next_state = repo_state.state.clone();
+                    next_state.set_namespace_state(NamespaceId::core(), synced_state);
+                    repo_state.complete_sync(next_state, self.clock.wall_ms());
 
                     // State is now durable in remote - delete WAL
                     if let Err(e) = self.wal.delete(remote) {
@@ -1603,8 +1612,14 @@ impl Daemon {
         };
         let repo_state = &store.repo_state;
 
+        let empty_state = CanonicalState::new();
+        let export_state = repo_state
+            .state
+            .get(&NamespaceId::core())
+            .unwrap_or(&empty_state);
+
         // Export to canonical location
-        let export_path = match export_jsonl(&repo_state.state, ctx, remote.as_str()) {
+        let export_path = match export_jsonl(export_state, ctx, remote.as_str()) {
             Ok(path) => path,
             Err(e) => {
                 tracing::warn!("Go-compat export failed for {:?}: {}", remote, e);
@@ -1631,7 +1646,7 @@ impl Daemon {
         let (mut next_state, root_slug, sequence, last_seen_stamp) = {
             let repo_state = self.repo_state(proof)?;
             (
-                repo_state.state.clone(),
+                repo_state.state.get_or_default(&NamespaceId::core()),
                 repo_state.root_slug.clone(),
                 repo_state.wal_sequence,
                 repo_state.last_seen_stamp.clone(),
@@ -1664,7 +1679,9 @@ impl Daemon {
             .write_with_limits(proof.remote(), &entry, self.limits())?;
 
         let repo_state = self.repo_state_mut(proof)?;
-        repo_state.state = next_state;
+        repo_state
+            .state
+            .set_namespace_state(NamespaceId::core(), next_state);
         repo_state.wal_sequence = sequence + 1;
         repo_state.last_seen_stamp = Some(write_stamp);
         repo_state.last_clock_skew = clock_skew;
@@ -1809,9 +1826,10 @@ impl Daemon {
 
     fn normalize_mutation_meta(
         &self,
+        proof: &LoadedStore,
         meta: MutationMeta,
     ) -> Result<NormalizedMutationMeta, OpError> {
-        let namespace = self.normalize_namespace(meta.namespace)?;
+        let namespace = self.normalize_namespace(proof, meta.namespace)?;
         let durability = parse_durability(meta.durability)?;
         let client_request_id =
             match trim_non_empty(meta.client_request_id) {
@@ -1841,9 +1859,10 @@ impl Daemon {
 
     pub(crate) fn normalize_read_consistency(
         &self,
+        proof: &LoadedStore,
         read: ReadConsistency,
     ) -> Result<NormalizedReadConsistency, OpError> {
-        let namespace = self.normalize_namespace(read.namespace)?;
+        let namespace = self.normalize_namespace(proof, read.namespace)?;
         Ok(NormalizedReadConsistency {
             namespace,
             require_min_seen: read.require_min_seen,
@@ -1895,7 +1914,11 @@ impl Daemon {
         })
     }
 
-    fn normalize_namespace(&self, raw: Option<String>) -> Result<NamespaceId, OpError> {
+    fn normalize_namespace(
+        &self,
+        proof: &LoadedStore,
+        raw: Option<String>,
+    ) -> Result<NamespaceId, OpError> {
         let namespace = match trim_non_empty(raw) {
             None => NamespaceId::core(),
             Some(value) => {
@@ -1905,12 +1928,12 @@ impl Daemon {
                 })?
             }
         };
-
-        if namespace != NamespaceId::core() {
-            return Err(OpError::NamespaceUnknown { namespace });
+        let store = self.store_runtime(proof)?;
+        if store.policies.contains_key(&namespace) {
+            Ok(namespace)
+        } else {
+            Err(OpError::NamespaceUnknown { namespace })
         }
-
-        Ok(namespace)
     }
 
     /// Handle a request from IPC.
@@ -1940,10 +1963,6 @@ impl Daemon {
                 dependencies,
                 meta,
             } => {
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
-                };
                 self.apply_create(
                     &repo,
                     meta,
@@ -1975,10 +1994,6 @@ impl Daemon {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
-                };
                 self.apply_update(&repo, meta, &id, patch, cas, git_tx)
             }
 
@@ -1992,10 +2007,6 @@ impl Daemon {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
-                };
                 self.apply_add_labels(&repo, meta, &id, labels, git_tx)
             }
 
@@ -2008,10 +2019,6 @@ impl Daemon {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_remove_labels(&repo, meta, &id, labels, git_tx)
             }
@@ -2035,10 +2042,6 @@ impl Daemon {
                     },
                     None => None,
                 };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
-                };
                 self.apply_set_parent(&repo, meta, &id, parent, git_tx)
             }
 
@@ -2053,10 +2056,6 @@ impl Daemon {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
-                };
                 self.apply_close(&repo, meta, &id, reason, on_branch, git_tx)
             }
 
@@ -2064,10 +2063,6 @@ impl Daemon {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_reopen(&repo, meta, &id, git_tx)
             }
@@ -2081,10 +2076,6 @@ impl Daemon {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_delete(&repo, meta, &id, reason, git_tx)
             }
@@ -2104,10 +2095,6 @@ impl Daemon {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
-                };
                 self.apply_add_dep(&repo, meta, &from, &to, kind, git_tx)
             }
 
@@ -2126,10 +2113,6 @@ impl Daemon {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
-                };
                 self.apply_remove_dep(&repo, meta, &from, &to, kind, git_tx)
             }
 
@@ -2142,10 +2125,6 @@ impl Daemon {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_add_note(&repo, meta, &id, content, git_tx)
             }
@@ -2160,10 +2139,6 @@ impl Daemon {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
-                };
                 self.apply_claim(&repo, meta, &id, lease_secs, git_tx)
             }
 
@@ -2171,10 +2146,6 @@ impl Daemon {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_unclaim(&repo, meta, &id, git_tx)
             }
@@ -2188,10 +2159,6 @@ impl Daemon {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
                     Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let meta = match self.normalize_mutation_meta(meta) {
-                    Ok(meta) => meta,
-                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_extend_claim(&repo, meta, &id, lease_secs, git_tx)
             }
@@ -2622,7 +2589,7 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
 fn replay_event_wal(
     store_id: StoreId,
     wal_index: &dyn WalIndex,
-    state: &mut CanonicalState,
+    state: &mut StoreState,
     limits: &Limits,
 ) -> Result<bool, StoreRuntimeError> {
     let store_dir = crate::paths::store_dir(store_id);
@@ -2638,20 +2605,22 @@ fn replay_event_wal(
         if row.applied_seq == 0 {
             continue;
         }
-        if !segment_cache.contains_key(&row.namespace) {
-            let segments = segment_paths_for_namespace(&store_dir, wal_index, &row.namespace)?;
-            segment_cache.insert(row.namespace.clone(), segments);
+        let namespace = row.namespace.clone();
+        if !segment_cache.contains_key(&namespace) {
+            let segments = segment_paths_for_namespace(&store_dir, wal_index, &namespace)?;
+            segment_cache.insert(namespace.clone(), segments);
         }
-        let segments = segment_cache.get(&row.namespace).ok_or_else(|| {
+        let segments = segment_cache.get(&namespace).ok_or_else(|| {
             StoreRuntimeError::WalIndex(WalIndexError::SegmentRowDecode(
                 "segment cache missing".to_string(),
             ))
         })?;
 
+        let state_for_namespace = state.ensure_namespace(namespace.clone());
         let mut from_seq_excl = 0u64;
         while from_seq_excl < row.applied_seq {
             let items = wal_index.reader().iter_from(
-                &row.namespace,
+                &namespace,
                 &row.origin,
                 from_seq_excl,
                 limits.max_event_batch_bytes,
@@ -2676,11 +2645,11 @@ fn replay_event_wal(
                     StoreRuntimeError::WalIndex(WalIndexError::SegmentRowDecode(format!(
                         "missing segment {} for {}",
                         item.segment_id,
-                        row.namespace.as_str(),
+                        namespace.as_str(),
                     )))
                 })?;
                 let event_body = load_event_body_at(segment_path, item.offset, limits)?;
-                apply_event(state, &event_body).map_err(|err| {
+                apply_event(state_for_namespace, &event_body).map_err(|err| {
                     StoreRuntimeError::WalReplay(Box::new(WalReplayError::RecordDecode {
                         path: segment_path.clone(),
                         source: EventWalError::RecordHeaderInvalid {
@@ -2981,12 +2950,13 @@ mod tests {
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId, NoteAppendV1,
-        NoteId, PrevVerified, Priority, ReplicaId, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1,
-        VerifiedEvent, WallClock, Watermarks, WireNoteV1, WireStamp, Workflow, WriteStamp,
-        encode_event_body_canonical, hash_event_body,
+        EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId,
+        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaId, SegmentId, Seq0,
+        Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
+        TxnDeltaV1, TxnId, TxnOpV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1,
+        WireStamp, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
+    use crate::daemon::ops::OpResult;
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
@@ -3506,7 +3476,12 @@ mod tests {
 
         assert!(matches!(result, Err(OpError::Wal(_))));
         let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
-        assert_eq!(repo_state.state.live_count(), 0);
+        let live_count = repo_state
+            .state
+            .get(&NamespaceId::core())
+            .map(|state| state.live_count())
+            .unwrap_or(0);
+        assert_eq!(live_count, 0);
         assert_eq!(repo_state.wal_sequence, 0);
     }
 
@@ -3537,6 +3512,141 @@ mod tests {
     }
 
     #[test]
+    fn non_core_mutation_and_query_use_namespace_state() {
+        let (tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path).unwrap();
+
+        let tmp_ns = NamespaceId::parse("tmp").unwrap();
+        {
+            let runtime = daemon.stores.get_mut(&store_id).unwrap();
+            runtime
+                .policies
+                .insert(tmp_ns.clone(), NamespacePolicy::tmp_default());
+        }
+
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let response = daemon.handle_request(
+            Request::Create {
+                repo: repo_path.clone(),
+                id: None,
+                parent: None,
+                title: "non-core".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+                meta: MutationMeta {
+                    namespace: Some(tmp_ns.as_str().to_string()),
+                    ..MutationMeta::default()
+                },
+            },
+            &git_tx,
+        );
+
+        let created_id = match response {
+            HandleOutcome::Response(Response::Ok {
+                ok: ResponsePayload::Op(op),
+            }) => match op.result {
+                OpResult::Created { id } => id,
+                other => panic!("unexpected op result: {other:?}"),
+            },
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+
+        let read = ReadConsistency {
+            namespace: Some(tmp_ns.as_str().to_string()),
+            ..ReadConsistency::default()
+        };
+        let response = daemon.query_show(&repo_path, &created_id, read, &git_tx);
+        match response {
+            Response::Ok {
+                ok: ResponsePayload::Query(QueryResult::Issue(issue)),
+            } => {
+                assert_eq!(issue.id, created_id.as_str());
+            }
+            other => panic!("unexpected query response: {other:?}"),
+        }
+
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
+        let core_count = repo_state
+            .state
+            .get(&NamespaceId::core())
+            .map(|state| state.live_count())
+            .unwrap_or(0);
+        let tmp_count = repo_state
+            .state
+            .get(&tmp_ns)
+            .map(|state| state.live_count())
+            .unwrap_or(0);
+        assert_eq!(core_count, 0);
+        assert_eq!(tmp_count, 1);
+    }
+
+    #[test]
+    fn repl_ingest_accepts_non_core_namespace() {
+        let tmp = TempStoreDir::new();
+        let namespace = NamespaceId::parse("tmp").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([11u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+
+        let bead_id = BeadId::parse("bd-repl").unwrap();
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        patch.title = Some("replicated".to_string());
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
+            .unwrap();
+        let event = verified_event_with_delta(store, &namespace, origin, 1, None, delta);
+
+        let wal = Wal::new(tmp.data_dir()).unwrap();
+        let mut daemon = Daemon::new_with_limits(test_actor(), wal, Limits::default());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+
+        {
+            let runtime = daemon.stores.get_mut(&store_id).unwrap();
+            runtime
+                .policies
+                .insert(namespace.clone(), NamespacePolicy::core_default());
+        }
+
+        let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            store_id,
+            namespace: namespace.clone(),
+            origin,
+            batch: vec![event],
+            now_ms,
+            respond: respond_tx,
+        });
+
+        let outcome = respond_rx.recv().expect("ingest response");
+        assert!(outcome.is_ok());
+
+        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
+        let state = repo_state
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(state.get_live(&bead_id).is_some());
+    }
+
+    #[test]
     fn complete_sync_resolves_collisions_for_dirty_state() {
         let (_tmp, wal) = test_wal();
         let remote = test_remote();
@@ -3553,7 +3663,9 @@ mod tests {
         local_state.insert_live(loser);
 
         let mut repo_state = RepoState::new();
-        repo_state.state = local_state;
+        repo_state
+            .state
+            .set_namespace_state(NamespaceId::core(), local_state);
         repo_state.dirty = true;
         repo_state.sync_in_progress = true;
         daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
@@ -3567,10 +3679,14 @@ mod tests {
         daemon.complete_sync(&remote, Ok(outcome));
 
         let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
-        assert_eq!(repo_state.state.live_count(), 2);
+        let core_state = repo_state
+            .state
+            .get(&NamespaceId::core())
+            .expect("core state");
+        assert_eq!(core_state.live_count(), 2);
 
         let id = BeadId::parse("bd-abc").unwrap();
-        let merged = repo_state.state.get_live(&id).unwrap();
+        let merged = core_state.get_live(&id).unwrap();
         assert_eq!(merged.core.created(), winner.core.created());
     }
 

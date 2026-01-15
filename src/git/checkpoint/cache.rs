@@ -345,7 +345,7 @@ mod tests {
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
         ActorId, CanonicalState, ContentHash, Durable, HeadStatus, NamespaceId, ReplicaId, Seq0,
-        StoreEpoch, StoreId, Watermarks,
+        StoreEpoch, StoreId, StoreState, Watermarks,
     };
     use crate::git::checkpoint::{
         CheckpointExportInput, CheckpointSnapshotInput, build_snapshot, export_checkpoint,
@@ -385,8 +385,10 @@ mod tests {
         let bead_id = BeadId::parse("beads-rs-0001").unwrap();
 
         let bead = make_bead(&bead_id, &stamp);
-        let mut state = CanonicalState::new();
-        state.insert(bead).unwrap();
+        let mut core_state = CanonicalState::new();
+        core_state.insert(bead).unwrap();
+        let mut state = StoreState::new();
+        state.set_namespace_state(namespace.clone(), core_state);
 
         let mut watermarks = Watermarks::<Durable>::new();
         watermarks

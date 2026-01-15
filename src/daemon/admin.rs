@@ -36,12 +36,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&proof, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
@@ -82,12 +82,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&proof, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
@@ -107,12 +107,12 @@ impl Daemon {
         verify_checkpoint_cache: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&proof, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
@@ -169,12 +169,12 @@ impl Daemon {
         verify_checkpoint_cache: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&proof, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
@@ -231,12 +231,12 @@ impl Daemon {
         sample: Option<AdminFingerprintSample>,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&proof, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {

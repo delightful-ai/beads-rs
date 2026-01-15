@@ -22,7 +22,7 @@ use super::core::{
 };
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
-use super::ipc::{OpResponse, Response, ResponsePayload};
+use super::ipc::{MutationMeta, OpResponse, Response, ResponsePayload};
 use super::mutation_engine::{IdContext, MutationContext, MutationEngine, MutationRequest};
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::store_runtime::StoreRuntimeError;
@@ -79,7 +79,7 @@ impl Daemon {
     fn apply_mutation_request(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         request: MutationRequest,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
@@ -92,7 +92,7 @@ impl Daemon {
     fn apply_mutation_request_inner(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         request: MutationRequest,
         git_tx: &Sender<GitOp>,
     ) -> Result<MutationOutcome, OpError> {
@@ -106,6 +106,7 @@ impl Daemon {
         }
 
         let proof = self.ensure_repo_loaded_strict(repo, git_tx)?;
+        let meta = self.normalize_mutation_meta(&proof, meta)?;
         if self.store_runtime(&proof)?.maintenance_mode {
             return Err(OpError::MaintenanceMode {
                 reason: Some("maintenance mode enabled".into()),
@@ -170,7 +171,13 @@ impl Daemon {
                 wait_timeout,
             )?
         {
-            let state = &self.store_runtime(&proof)?.repo_state.state;
+            let empty_state = CanonicalState::new();
+            let state = self
+                .store_runtime(&proof)?
+                .repo_state
+                .state
+                .get(&namespace)
+                .unwrap_or(&empty_state);
             attach_issue_if_created(state, outcome.response_mut());
             return Ok(outcome);
         }
@@ -229,7 +236,7 @@ impl Daemon {
 
         let state_snapshot = {
             let repo_state = self.repo_state(&proof)?;
-            repo_state.state.clone()
+            repo_state.state.get_or_default(&namespace)
         };
         let draft = engine.plan(
             &state_snapshot,
@@ -378,7 +385,14 @@ impl Daemon {
         ) = {
             let store_runtime = self.store_runtime_mut(&proof)?;
             let apply_start = Instant::now();
-            if let Err(err) = apply_event(&mut store_runtime.repo_state.state, &draft.event_body) {
+            let apply_result = {
+                let state = store_runtime
+                    .repo_state
+                    .state
+                    .ensure_namespace(namespace.clone());
+                apply_event(state, &draft.event_body)
+            };
+            if let Err(err) = apply_result {
                 metrics::apply_err(apply_start.elapsed());
                 tracing::error!(error = ?err, "apply_event failed");
                 return Err(OpError::Internal("apply_event failed"));
@@ -515,7 +529,13 @@ impl Daemon {
         };
 
         tracing::info!("mutation committed");
-        let state = &self.store_runtime(&proof)?.repo_state.state;
+        let empty_state = CanonicalState::new();
+        let state = self
+            .store_runtime(&proof)?
+            .repo_state
+            .state
+            .get(&namespace)
+            .unwrap_or(&empty_state);
         attach_issue_if_created(state, outcome.response_mut());
         Ok(outcome)
     }
@@ -525,7 +545,7 @@ impl Daemon {
     pub(crate) fn apply_create(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         requested_id: Option<String>,
         parent: Option<String>,
         title: String,
@@ -563,7 +583,7 @@ impl Daemon {
     pub(crate) fn apply_update(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         patch: BeadPatch,
         cas: Option<String>,
@@ -581,7 +601,7 @@ impl Daemon {
     pub(crate) fn apply_add_labels(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         labels: Vec<String>,
         git_tx: &Sender<GitOp>,
@@ -597,7 +617,7 @@ impl Daemon {
     pub(crate) fn apply_remove_labels(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         labels: Vec<String>,
         git_tx: &Sender<GitOp>,
@@ -613,7 +633,7 @@ impl Daemon {
     pub(crate) fn apply_set_parent(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         parent: Option<BeadId>,
         git_tx: &Sender<GitOp>,
@@ -629,7 +649,7 @@ impl Daemon {
     pub(crate) fn apply_close(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         reason: Option<String>,
         on_branch: Option<String>,
@@ -647,7 +667,7 @@ impl Daemon {
     pub(crate) fn apply_reopen(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
@@ -661,7 +681,7 @@ impl Daemon {
     pub(crate) fn apply_delete(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         reason: Option<String>,
         git_tx: &Sender<GitOp>,
@@ -677,7 +697,7 @@ impl Daemon {
     pub(crate) fn apply_add_dep(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         from: &BeadId,
         to: &BeadId,
         kind: DepKind,
@@ -695,7 +715,7 @@ impl Daemon {
     pub(crate) fn apply_remove_dep(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         from: &BeadId,
         to: &BeadId,
         kind: DepKind,
@@ -713,7 +733,7 @@ impl Daemon {
     pub(crate) fn apply_add_note(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         content: String,
         git_tx: &Sender<GitOp>,
@@ -729,7 +749,7 @@ impl Daemon {
     pub(crate) fn apply_claim(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         lease_secs: u64,
         git_tx: &Sender<GitOp>,
@@ -745,7 +765,7 @@ impl Daemon {
     pub(crate) fn apply_unclaim(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
@@ -759,7 +779,7 @@ impl Daemon {
     pub(crate) fn apply_extend_claim(
         &mut self,
         repo: &Path,
-        meta: NormalizedMutationMeta,
+        meta: MutationMeta,
         id: &BeadId,
         lease_secs: u64,
         git_tx: &Sender<GitOp>,

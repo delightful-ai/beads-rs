@@ -16,7 +16,7 @@ use crate::api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
     Note, StatusOutput, StatusSummary, SyncStatus, SyncWarning, Tombstone,
 };
-use crate::core::{BeadId, DepKind, DepLife, WallClock};
+use crate::core::{BeadId, CanonicalState, DepKind, DepLife, WallClock};
 
 impl Daemon {
     /// Get a single bead.
@@ -27,12 +27,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -43,7 +43,13 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        match repo_state.state.require_live(id).map_live_err(id) {
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
+        match state.require_live(id).map_live_err(id) {
             Ok(bead) => {
                 let issue = Issue::from_bead(bead);
                 Response::ok(ResponsePayload::Query(QueryResult::Issue(issue)))
@@ -60,12 +66,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -76,13 +82,19 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
         let mut summaries = Vec::with_capacity(ids.len());
         for id_str in ids {
             let id = match BeadId::parse(id_str) {
                 Ok(id) => id,
                 Err(_) => continue, // Skip invalid IDs silently
             };
-            if let Ok(bead) = repo_state.state.require_live(&id) {
+            if let Ok(bead) = state.require_live(&id) {
                 summaries.push(IssueSummary::from_bead(bead));
             }
         }
@@ -98,12 +110,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -114,12 +126,17 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
         // Build children set if parent filter is specified.
         // Parent deps: from=child, to=parent, kind=Parent.
         let children_of_parent: Option<std::collections::HashSet<&BeadId>> =
             filters.parent.as_ref().map(|parent_id| {
-                repo_state
-                    .state
+                state
                     .iter_deps()
                     .filter(|(key, edge)| {
                         edge.life.value == DepLife::Active
@@ -130,8 +147,7 @@ impl Daemon {
                     .collect()
             });
 
-        let mut views: Vec<IssueSummary> = repo_state
-            .state
+        let mut views: Vec<IssueSummary> = state
             .iter_live()
             .filter(|(id, bead)| {
                 // If parent filter specified, only include children of that parent.
@@ -211,12 +227,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -227,13 +243,19 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
         // Collect IDs that are blocked by *blocking* deps (kind=blocks).
         let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
-        for (key, edge) in repo_state.state.iter_deps() {
+        for (key, edge) in state.iter_deps() {
             // Only count active `blocks` edges where the target is not closed.
             if edge.life.value == DepLife::Active
                 && key.kind() == crate::core::DepKind::Blocks
-                && let Some(to_bead) = repo_state.state.get_live(key.to())
+                && let Some(to_bead) = state.get_live(key.to())
                 && !to_bead.fields.workflow.value.is_closed()
             {
                 blocked.insert(key.from());
@@ -244,8 +266,7 @@ impl Daemon {
         let mut blocked_count = 0usize;
         let mut closed_count = 0usize;
 
-        let mut views: Vec<IssueSummary> = repo_state
-            .state
+        let mut views: Vec<IssueSummary> = state
             .iter_live()
             .filter(|(id, bead)| {
                 if bead.fields.workflow.value.is_closed() {
@@ -286,12 +307,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -302,8 +323,14 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
         // Check if bead exists
-        if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
+        if let Err(e) = state.require_live(id).map_live_err(id) {
             return Response::err(e);
         }
 
@@ -318,7 +345,7 @@ impl Daemon {
                 continue;
             }
 
-            for (key, edge) in repo_state.state.iter_deps() {
+            for (key, edge) in state.iter_deps() {
                 if key.from() == &current && edge.life.value == DepLife::Active {
                     edges.push(DepEdge::from((key, edge)));
                     if !visited.contains(key.to()) {
@@ -342,12 +369,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -358,15 +385,21 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
         // Check if bead exists
-        if let Err(e) = repo_state.state.require_live(id).map_live_err(id) {
+        if let Err(e) = state.require_live(id).map_live_err(id) {
             return Response::err(e);
         }
 
         let mut incoming = Vec::new();
         let mut outgoing = Vec::new();
 
-        for (key, edge) in repo_state.state.iter_deps() {
+        for (key, edge) in state.iter_deps() {
             if edge.life.value != DepLife::Active {
                 continue;
             }
@@ -393,12 +426,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -409,7 +442,13 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        let bead = match repo_state.state.get_live(id) {
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
+        let bead = match state.get_live(id) {
             Some(b) => b,
             None => return Response::err(OpError::NotFound(id.clone())),
         };
@@ -426,12 +465,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -442,7 +481,13 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        let blocked_by = compute_blocked_by(repo_state);
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
+        let blocked_by = compute_blocked_by(state);
         let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
 
         let mut open_issues = 0usize;
@@ -451,7 +496,7 @@ impl Daemon {
         let mut blocked_issues = 0usize;
         let mut ready_issues = 0usize;
 
-        for (id, bead) in repo_state.state.iter_live() {
+        for (id, bead) in state.iter_live() {
             if bead.fields.workflow.value.is_closed() {
                 closed_issues += 1;
                 continue;
@@ -470,16 +515,16 @@ impl Daemon {
             }
         }
 
-        let epics_eligible_for_closure = compute_epic_statuses(repo_state, true).len();
+        let epics_eligible_for_closure = compute_epic_statuses(state, true).len();
 
         let summary = StatusSummary {
-            total_issues: repo_state.state.live_count(),
+            total_issues: state.live_count(),
             open_issues,
             in_progress_issues,
             blocked_issues,
             closed_issues,
             ready_issues,
-            tombstone_issues: Some(repo_state.state.tombstone_count()),
+            tombstone_issues: Some(state.tombstone_count()),
             epics_eligible_for_closure: Some(epics_eligible_for_closure),
         };
 
@@ -556,12 +601,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -572,11 +617,16 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        let blocked_by = compute_blocked_by(repo_state);
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+        let blocked_by = compute_blocked_by(state);
         let mut out: Vec<BlockedIssue> = Vec::new();
 
         for (from, deps) in blocked_by {
-            let bead = match repo_state.state.get_live(&from) {
+            let bead = match state.get_live(&from) {
                 Some(b) => b,
                 None => continue,
             };
@@ -617,12 +667,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -645,7 +695,12 @@ impl Daemon {
             });
         }
 
-        let blocked_by = compute_blocked_by(repo_state);
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+        let blocked_by = compute_blocked_by(state);
         let cutoff_ms = self
             .clock()
             .wall_ms()
@@ -653,7 +708,7 @@ impl Daemon {
 
         let mut out: Vec<IssueSummary> = Vec::new();
 
-        for (id, bead) in repo_state.state.iter_live() {
+        for (id, bead) in state.iter_live() {
             if bead.fields.workflow.value.is_closed() {
                 continue;
             }
@@ -705,12 +760,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -721,7 +776,12 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        let blocked_by = compute_blocked_by(repo_state);
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+        let blocked_by = compute_blocked_by(state);
 
         let status_filter = filters
             .status
@@ -747,7 +807,7 @@ impl Daemon {
 
         let mut matched: Vec<(&BeadId, &crate::core::Bead)> = Vec::new();
 
-        for (id, bead) in repo_state.state.iter_live() {
+        for (id, bead) in state.iter_live() {
             if !base_filters.matches(bead) {
                 continue;
             }
@@ -852,12 +912,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -868,8 +928,14 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
         if let Some(id) = id {
-            let record = repo_state.state.get_tombstone(id).map(Tombstone::from);
+            let record = state.get_tombstone(id).map(Tombstone::from);
             let out = DeletedLookup {
                 found: record.is_some(),
                 id: id.as_str().to_string(),
@@ -879,8 +945,7 @@ impl Daemon {
         }
 
         let cutoff_ms = since_ms.map(|d| self.clock().wall_ms().saturating_sub(d));
-        let mut tombs: Vec<Tombstone> = repo_state
-            .state
+        let mut tombs: Vec<Tombstone> = state
             .iter_tombstones()
             .filter(|(_, t)| {
                 t.lineage.is_none() && cutoff_ms.map(|c| t.deleted.at.wall_ms >= c).unwrap_or(true)
@@ -902,12 +967,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -918,7 +983,13 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
-        let statuses = compute_epic_statuses(repo_state, eligible_only);
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
+        let statuses = compute_epic_statuses(state, eligible_only);
         Response::ok(ResponsePayload::Query(QueryResult::EpicStatus(statuses)))
     }
 
@@ -929,12 +1000,12 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let read = match self.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err(e),
-        };
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
             Err(e) => return Response::err(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
@@ -945,15 +1016,21 @@ impl Daemon {
             Err(e) => return Response::err(e),
         };
 
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
         // Run validation checks
         let mut errors = Vec::new();
 
         // Check for orphan dependencies
-        for (key, edge) in repo_state.state.iter_deps() {
+        for (key, edge) in state.iter_deps() {
             if edge.life.value != DepLife::Active {
                 continue;
             }
-            if repo_state.state.get_live(key.from()).is_none() {
+            if state.get_live(key.from()).is_none() {
                 errors.push(format!(
                     "orphan dep: {} depends on {} but {} doesn't exist",
                     key.from().as_str(),
@@ -961,7 +1038,7 @@ impl Daemon {
                     key.from().as_str()
                 ));
             }
-            if repo_state.state.get_live(key.to()).is_none() {
+            if state.get_live(key.to()).is_none() {
                 errors.push(format!(
                     "orphan dep: {} depends on {} but {} doesn't exist",
                     key.from().as_str(),
@@ -973,7 +1050,7 @@ impl Daemon {
 
         // Check for dependency cycles
         // (simplified - just report if found, don't enumerate all)
-        for (id, _) in repo_state.state.iter_live() {
+        for (id, _) in state.iter_live() {
             let mut visited = std::collections::HashSet::new();
             let mut queue = std::collections::VecDeque::new();
             queue.push_back(id.clone());
@@ -986,7 +1063,7 @@ impl Daemon {
                 if !visited.insert(current.clone()) {
                     continue;
                 }
-                for (key, edge) in repo_state.state.iter_deps() {
+                for (key, edge) in state.iter_deps() {
                     if key.from() == &current && edge.life.value == DepLife::Active {
                         queue.push_back(key.to().clone());
                     }
@@ -1001,12 +1078,12 @@ impl Daemon {
 }
 
 fn compute_blocked_by(
-    repo_state: &super::repo::RepoState,
+    state: &CanonicalState,
 ) -> std::collections::BTreeMap<BeadId, Vec<BeadId>> {
     let mut blocked: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
 
-    for (key, edge) in repo_state.state.iter_deps() {
+    for (key, edge) in state.iter_deps() {
         if edge.life.value != DepLife::Active {
             continue;
         }
@@ -1015,7 +1092,7 @@ fn compute_blocked_by(
         }
 
         // Only count blockers that are currently open (not closed).
-        if let Some(to_bead) = repo_state.state.get_live(key.to()) {
+        if let Some(to_bead) = state.get_live(key.to()) {
             if to_bead.fields.workflow.value.is_closed() {
                 continue;
             }
@@ -1033,13 +1110,13 @@ fn compute_blocked_by(
 }
 
 fn compute_epic_statuses(
-    repo_state: &super::repo::RepoState,
+    state: &CanonicalState,
     eligible_only: bool,
 ) -> Vec<EpicStatus> {
     // Build epic -> children mapping from parent edges.
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
-    for (key, edge) in repo_state.state.iter_deps() {
+    for (key, edge) in state.iter_deps() {
         if edge.life.value != DepLife::Active {
             continue;
         }
@@ -1053,7 +1130,7 @@ fn compute_epic_statuses(
     }
 
     let mut out = Vec::new();
-    for (id, bead) in repo_state.state.iter_live() {
+    for (id, bead) in state.iter_live() {
         if bead.fields.bead_type.value != crate::core::BeadType::Epic {
             continue;
         }
@@ -1066,8 +1143,7 @@ fn compute_epic_statuses(
         let closed_children = child_ids
             .iter()
             .filter(|cid| {
-                repo_state
-                    .state
+                state
                     .get_live(cid)
                     .map(|b| b.fields.workflow.value.is_closed())
                     .unwrap_or(false)

@@ -18,8 +18,8 @@ use crate::core::dep::DepKey;
 use crate::core::tombstone::TombstoneKey;
 use crate::core::{
     CanonicalState, ContentHash, DepEdge, Durable, HeadStatus, NamespaceId, NamespacePolicy,
-    ReplicaId, StoreEpoch, StoreId, Tombstone, Watermarks, WireBeadFull, WireDepV1, WireStamp,
-    WireTombstoneV1, sha256_bytes,
+    ReplicaId, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireDepV1,
+    WireStamp, WireTombstoneV1, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -82,7 +82,7 @@ pub struct CheckpointSnapshotInput<'a> {
     pub created_by_replica_id: ReplicaId,
     pub policy_hash: ContentHash,
     pub roster_hash: Option<ContentHash>,
-    pub state: &'a CanonicalState,
+    pub state: &'a StoreState,
     pub watermarks_durable: &'a Watermarks<Durable>,
 }
 
@@ -106,11 +106,6 @@ pub fn build_snapshot(
 
     let mut shards: BTreeMap<String, CheckpointShardPayload> = BTreeMap::new();
     for namespace in &namespaces {
-        if *namespace != NamespaceId::core() {
-            return Err(CheckpointSnapshotError::NamespaceUnsupported {
-                namespace: namespace.clone(),
-            });
-        }
         let ns_shards = build_namespace_shards(namespace, state)?;
         shards.extend(ns_shards);
     }
@@ -307,8 +302,11 @@ fn included_heads(
 
 fn build_namespace_shards(
     namespace: &NamespaceId,
-    state: &CanonicalState,
+    state: &StoreState,
 ) -> Result<BTreeMap<String, CheckpointShardPayload>, CheckpointSnapshotError> {
+    let Some(state) = state.get(namespace) else {
+        return Ok(BTreeMap::new());
+    };
     let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     for (id, bead) in state.iter_live() {
@@ -462,7 +460,7 @@ mod tests {
     }
 
     fn build_test_snapshot(
-        state: &CanonicalState,
+        state: &StoreState,
         namespace: &NamespaceId,
         origin: ReplicaId,
         seq: u64,
@@ -503,10 +501,12 @@ mod tests {
         let dep_key = DepKey::new(bead_id.clone(), dep_to.clone(), DepKind::Blocks).unwrap();
         let dep_edge = DepEdge::new(stamp.clone());
 
-        let mut state = CanonicalState::new();
-        state.insert(bead.clone()).unwrap();
-        state.insert_tombstone(tombstone.clone());
-        state.insert_dep(dep_key.clone(), dep_edge.clone());
+        let mut core_state = CanonicalState::new();
+        core_state.insert(bead.clone()).unwrap();
+        core_state.insert_tombstone(tombstone.clone());
+        core_state.insert_dep(dep_key.clone(), dep_edge.clone());
+        let mut state = StoreState::new();
+        state.set_namespace_state(namespace.clone(), core_state);
 
         let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
         let mut watermarks = Watermarks::<Durable>::new();
@@ -583,8 +583,10 @@ mod tests {
         let bead_id = BeadId::parse("beads-rs-abc1").unwrap();
 
         let bead = make_bead(&bead_id, &stamp);
-        let mut state = CanonicalState::new();
-        state.insert(bead.clone()).unwrap();
+        let mut core_state = CanonicalState::new();
+        core_state.insert(bead.clone()).unwrap();
+        let mut state = StoreState::new();
+        state.set_namespace_state(namespace.clone(), core_state);
 
         let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
         let snapshot = build_test_snapshot(&state, &namespace, origin, 5);
@@ -638,9 +640,11 @@ mod tests {
 
         let bead_dirty = make_bead(&id_dirty, &stamp);
         let bead_clean = make_bead(&id_clean, &stamp);
-        let mut state = CanonicalState::new();
-        state.insert(bead_dirty.clone()).unwrap();
-        state.insert(bead_clean.clone()).unwrap();
+        let mut core_state = CanonicalState::new();
+        core_state.insert(bead_dirty.clone()).unwrap();
+        core_state.insert(bead_clean.clone()).unwrap();
+        let mut state = StoreState::new();
+        state.set_namespace_state(namespace.clone(), core_state);
 
         let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let snapshot = build_test_snapshot(&state, &namespace, origin, 1);
@@ -699,9 +703,11 @@ mod tests {
         let bead_a = make_bead(&id_a, &stamp);
         let bead_b = make_bead(&id_b, &stamp);
 
-        let mut state = CanonicalState::new();
-        state.insert(bead_b.clone()).unwrap();
-        state.insert(bead_a.clone()).unwrap();
+        let mut core_state = CanonicalState::new();
+        core_state.insert(bead_b.clone()).unwrap();
+        core_state.insert(bead_a.clone()).unwrap();
+        let mut state = StoreState::new();
+        state.set_namespace_state(namespace.clone(), core_state);
 
         let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let snapshot = build_test_snapshot(&state, &namespace, origin, 2);

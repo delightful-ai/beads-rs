@@ -129,7 +129,14 @@ pub fn run_state_loop(
                 match msg {
                     Ok(RequestMessage { request, respond }) => {
                         if let Some(read_gate) = read_gate_request(&request) {
-                            let read = match daemon.normalize_read_consistency(read_gate.read) {
+                            let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
+                                Ok(remote) => remote,
+                                Err(err) => {
+                                    let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                    continue;
+                                }
+                            };
+                            let read = match daemon.normalize_read_consistency(&loaded, read_gate.read) {
                                 Ok(read) => read,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err(err)));
@@ -138,13 +145,6 @@ pub fn run_state_loop(
                             };
 
                             if read.require_min_seen().is_some() {
-                                let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
-                                    Ok(remote) => remote,
-                                    Err(err) => {
-                                        let _ = respond.send(ServerReply::Response(Response::err(err)));
-                                        continue;
-                                    }
-                                };
                                 match daemon.read_gate_status(&loaded, &read) {
                                     Ok(ReadGateStatus::Satisfied) => {}
                                     Ok(ReadGateStatus::Unsatisfied {
@@ -381,15 +381,15 @@ fn process_request_message(
     }
 
     if let Request::Subscribe { repo, read } = request {
-        let read = match daemon.normalize_read_consistency(read) {
-            Ok(read) => read,
+        let loaded = match daemon.ensure_repo_fresh(&repo, git_tx) {
+            Ok(remote) => remote,
             Err(e) => {
                 let _ = respond.send(ServerReply::Response(Response::err(e)));
                 return RequestOutcome::Continue;
             }
         };
-        let loaded = match daemon.ensure_repo_fresh(&repo, git_tx) {
-            Ok(remote) => remote,
+        let read = match daemon.normalize_read_consistency(&loaded, read) {
+            Ok(read) => read,
             Err(e) => {
                 let _ = respond.send(ServerReply::Response(Response::err(e)));
                 return RequestOutcome::Continue;
@@ -1412,7 +1412,10 @@ mod tests {
             repo: env.repo_path.clone(),
             read: read.clone(),
         };
-        let normalized = env.daemon.normalize_read_consistency(read).unwrap();
+        let normalized = env
+            .daemon
+            .normalize_read_consistency(&loaded, read)
+            .unwrap();
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let started_at = Instant::now();
         let deadline = started_at + Duration::from_millis(normalized.wait_timeout_ms());
@@ -1485,7 +1488,10 @@ mod tests {
             repo: env.repo_path.clone(),
             read: read.clone(),
         };
-        let normalized = env.daemon.normalize_read_consistency(read).unwrap();
+        let normalized = env
+            .daemon
+            .normalize_read_consistency(&loaded, read)
+            .unwrap();
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let started_at = Instant::now() - Duration::from_millis(20);
         let deadline = started_at;

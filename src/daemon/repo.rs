@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::core::{CanonicalState, NamespaceId, SegmentId, WriteStamp};
+use crate::core::{NamespaceId, SegmentId, StoreState, WriteStamp};
 
 #[derive(Clone, Debug)]
 pub struct FetchErrorRecord {
@@ -45,8 +45,8 @@ pub struct WalTailTruncatedRecord {
 
 /// In-memory state for a single repository.
 pub struct RepoState {
-    /// The current canonical state (beads, tombstones, deps).
-    pub state: CanonicalState,
+    /// The current namespaced canonical state (beads, tombstones, deps).
+    pub state: StoreState,
 
     /// Root slug for bead IDs (from meta.json).
     /// When set, new bead IDs will use this slug (e.g., "myproject-xxx").
@@ -105,7 +105,7 @@ impl RepoState {
     /// Create a new RepoState with empty state.
     pub fn new() -> Self {
         RepoState {
-            state: CanonicalState::new(),
+            state: StoreState::new(),
             root_slug: None,
             known_paths: HashSet::new(),
             dirty: false,
@@ -127,7 +127,7 @@ impl RepoState {
     }
 
     /// Create a new RepoState with the given state.
-    pub fn with_state(state: CanonicalState) -> Self {
+    pub fn with_state(state: StoreState) -> Self {
         RepoState {
             state,
             root_slug: None,
@@ -152,7 +152,7 @@ impl RepoState {
 
     /// Create a new RepoState with state, root slug, and initial clone path.
     pub fn with_state_and_path(
-        state: CanonicalState,
+        state: StoreState,
         root_slug: Option<String>,
         path: PathBuf,
     ) -> Self {
@@ -204,7 +204,7 @@ impl RepoState {
     }
 
     /// Mark sync as completed successfully.
-    pub fn complete_sync(&mut self, synced_state: CanonicalState, wall_ms: u64) {
+    pub fn complete_sync(&mut self, synced_state: StoreState, wall_ms: u64) {
         self.state = synced_state;
         self.sync_in_progress = false;
         let now = Instant::now();
