@@ -317,8 +317,8 @@ impl SegmentWriter {
                 source,
             })?;
         crate::daemon::test_hooks::maybe_pause("wal_after_write");
-        // LocalFsync requires full fsync for metadata durability.
-        sync_segment(&self.file, &self.path, SyncMode::All)?;
+        // LocalFsync: fsync record data; metadata fsync happens on segment creation/rotation.
+        sync_segment(&self.file, &self.path, SyncMode::Data)?;
         self.bytes_written = self
             .bytes_written
             .checked_add(frame.len() as u64)
@@ -336,7 +336,7 @@ impl SegmentWriter {
     }
 
     pub fn flush(&mut self) -> EventWalResult<()> {
-        sync_segment(&self.file, &self.path, SyncMode::All)
+        sync_segment(&self.file, &self.path, SyncMode::Data)
     }
 
     fn should_rotate(&self, now_ms: u64, next_len: u64) -> bool {
@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn append_uses_full_fsync() {
+    fn append_uses_data_fsync() {
         let temp = TempDir::new().unwrap();
         let store_id = StoreId::new(Uuid::from_bytes([6u8; 16]));
         let meta = test_meta(store_id, StoreEpoch::new(1));
@@ -581,7 +581,7 @@ mod tests {
         let record = test_record();
         let _ = take_sync_mode();
         writer.append(&record, 10).unwrap();
-        assert_eq!(take_sync_mode(), Some(SyncMode::All));
+        assert_eq!(take_sync_mode(), Some(SyncMode::Data));
     }
 
     #[cfg(unix)]
