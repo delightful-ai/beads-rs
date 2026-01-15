@@ -1175,6 +1175,8 @@ fn decode_event_ids(bytes: &[u8]) -> Result<Vec<EventId>, WalIndexError> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     fn test_meta() -> StoreMeta {
         let store_id = crate::core::StoreId::new(Uuid::from_bytes([7u8; 16]));
@@ -1240,6 +1242,36 @@ mod tests {
             result,
             Err(WalIndexError::SchemaVersionMismatch { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_index_rejects_symlinked_db_path() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index_dir = temp.path().join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let target = temp.path().join("target.sqlite");
+        std::fs::write(&target, b"").unwrap();
+        let db_path = index_dir.join("wal.sqlite");
+        symlink(&target, &db_path).unwrap();
+
+        let err = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap_err();
+        assert!(matches!(err, WalIndexError::Symlink { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_index_rejects_symlinked_index_dir() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let target = temp.path().join("real-index");
+        std::fs::create_dir_all(&target).unwrap();
+        let index_dir = temp.path().join("index");
+        symlink(&target, &index_dir).unwrap();
+
+        let err = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap_err();
+        assert!(matches!(err, WalIndexError::Symlink { .. }));
     }
 
     #[test]

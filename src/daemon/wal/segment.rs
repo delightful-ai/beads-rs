@@ -508,6 +508,8 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use tempfile::TempDir;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = crate::core::StoreIdentity::new(store_id, store_epoch);
@@ -560,6 +562,32 @@ mod tests {
         let _ = take_sync_mode();
         writer.append(&record, 10).unwrap();
         assert_eq!(take_sync_mode(), Some(SyncMode::All));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn segment_open_rejects_symlinked_namespace_dir() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([5u8; 16]));
+        let meta = test_meta(store_id, StoreEpoch::new(1));
+        let namespace = NamespaceId::core();
+
+        let wal_dir = temp.path().join("wal");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let target = temp.path().join("real-namespace");
+        fs::create_dir_all(&target).unwrap();
+        let ns_dir = wal_dir.join(namespace.as_str());
+        symlink(&target, &ns_dir).unwrap();
+
+        let err = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::new(1024, 1024, 60_000),
+        )
+        .unwrap_err();
+        assert!(matches!(err, EventWalError::Symlink { .. }));
     }
 
     #[test]

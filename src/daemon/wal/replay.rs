@@ -867,6 +867,8 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use tempfile::TempDir;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use uuid::Uuid;
 
     use crate::core::{
@@ -912,6 +914,36 @@ mod tests {
                 logical: 1,
             }),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_namespaces_rejects_symlinked_namespace_dir() {
+        let temp = TempDir::new().unwrap();
+        let wal_dir = temp.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let target = temp.path().join("ns-target");
+        std::fs::create_dir_all(&target).unwrap();
+        let ns_dir = wal_dir.join("core");
+        symlink(&target, &ns_dir).unwrap();
+
+        let err = list_namespaces(&wal_dir).unwrap_err();
+        assert!(matches!(err, WalReplayError::Symlink { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_segments_rejects_symlinked_dir() {
+        let temp = TempDir::new().unwrap();
+        let wal_dir = temp.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let target = temp.path().join("seg-target");
+        std::fs::create_dir_all(&target).unwrap();
+        let ns_dir = wal_dir.join("core");
+        symlink(&target, &ns_dir).unwrap();
+
+        let err = list_segments(&ns_dir).unwrap_err();
+        assert!(matches!(err, WalReplayError::Symlink { .. }));
     }
 
     #[test]
