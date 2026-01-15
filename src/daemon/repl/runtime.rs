@@ -421,3 +421,41 @@ fn read_record_at(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::core::error::details::{IndexCorruptDetails, WalCorruptDetails};
+
+    #[test]
+    fn wal_range_corrupt_maps_to_wal_corrupt_details() {
+        let namespace = NamespaceId::core();
+        let segment_id = SegmentId::new(uuid::Uuid::nil());
+        let payload = WalRangeError::Corrupt {
+            namespace: namespace.clone(),
+            segment_id: Some(segment_id),
+            offset: Some(42),
+            reason: "header mismatch".to_string(),
+        }
+        .as_error_payload();
+
+        assert_eq!(payload.code, ErrorCode::WalCorrupt);
+        let details: WalCorruptDetails = payload.details_as().unwrap().unwrap();
+        assert_eq!(details.namespace, namespace);
+        assert_eq!(details.segment_id, Some(segment_id));
+        assert_eq!(details.offset, Some(42));
+        assert_eq!(details.reason, "header mismatch");
+    }
+
+    #[test]
+    fn wal_range_index_maps_to_index_corrupt_details() {
+        let payload =
+            WalRangeError::Index(WalIndexError::MetaMissing { key: "store_id" })
+                .as_error_payload();
+
+        assert_eq!(payload.code, ErrorCode::IndexCorrupt);
+        let details: IndexCorruptDetails = payload.details_as().unwrap().unwrap();
+        assert_eq!(details.reason, "missing meta key: store_id");
+    }
+}
