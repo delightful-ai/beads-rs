@@ -1143,6 +1143,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::replica_roster::ReplicaEntry;
+    use crate::daemon::repl::proto::WatermarkHeads;
     use crate::core::{
         ActorId, Applied, BeadId, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
         EventBytes, EventFrameV1, EventId, HeadStatus, NamespacePolicy, Opaque, ReplicaRole,

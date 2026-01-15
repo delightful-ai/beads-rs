@@ -231,7 +231,7 @@ fn role_allows_policy(role: ReplicaRole, mode: ReplicateMode) -> bool {
 mod tests {
     use super::*;
     use crate::core::{NamespaceId, Seq0, StoreEpoch, StoreId, StoreIdentity};
-    use crate::daemon::repl::proto::WatermarkMap;
+    use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
     use uuid::Uuid;
 
     fn replica(seed: u128) -> ReplicaId {
