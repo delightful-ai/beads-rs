@@ -28,6 +28,7 @@ use crate::daemon::repl::{
     SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore, WalRangeReader,
     decode_envelope, encode_envelope,
 };
+use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 
 #[derive(Clone, Debug)]
 pub struct PeerConfig {
@@ -658,15 +659,6 @@ fn send_hot_cache(
     send_events(writer, session, frames, limits)
 }
 
-fn broadcast_to_frame(event: BroadcastEvent) -> EventFrameV1 {
-    EventFrameV1 {
-        eid: event.event_id,
-        sha256: event.sha256,
-        prev_sha256: event.prev_sha256,
-        bytes: EventBytes::<Opaque>::from(event.bytes),
-    }
-}
-
 fn update_peer_ack(
     store: &impl SessionStore,
     peer_acks: &Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
@@ -716,95 +708,28 @@ fn handle_want(
     }
 
     let cache = broadcaster.hot_cache()?;
-    let mut needed: BTreeMap<(NamespaceId, ReplicaId), u64> = BTreeMap::new();
-    for (namespace, origins) in &want.want {
-        if let Some(allowed) = allowed_set
-            && !allowed.contains(namespace)
-        {
-            continue;
+    let outcome = match build_want_frames(want, cache, wal_reader, limits, allowed_set) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let payload = err.as_error_payload();
+            send_payload(writer, session, ReplMessage::Error(payload))?;
+            return Ok(());
         }
-        for (origin, seq) in origins {
-            needed.insert((namespace.clone(), *origin), *seq);
-        }
-    }
+    };
 
-    if needed.is_empty() {
-        return Ok(());
-    }
-
-    let mut started = BTreeSet::new();
-    let mut frames = Vec::new();
-
-    for event in cache {
-        if let Some(allowed) = allowed_set
-            && !allowed.contains(&event.namespace)
-        {
-            continue;
-        }
-        let key = (event.namespace.clone(), event.event_id.origin_replica_id);
-        let Some(want_seq) = needed.get(&key) else {
-            continue;
-        };
-        if event.event_id.origin_seq.get() <= *want_seq {
-            continue;
-        }
-        if event.event_id.origin_seq.get() == want_seq.saturating_add(1) {
-            started.insert(key.clone());
-            frames.push(broadcast_to_frame(event));
-        } else if started.contains(&key) {
-            frames.push(broadcast_to_frame(event));
+    match outcome {
+        WantFramesOutcome::Frames(frames) => send_events(writer, session, frames, limits),
+        WantFramesOutcome::BootstrapRequired { namespaces } => {
+            let payload =
+                ErrorPayload::new(ErrorCode::BootstrapRequired, "bootstrap required", false)
+                    .with_details(BootstrapRequiredDetails {
+                        namespaces: namespaces.into_iter().collect(),
+                        reason: SnapshotRangeReason::RangeMissing,
+                    });
+            send_payload(writer, session, ReplMessage::Error(payload))?;
+            Ok(())
         }
     }
-
-    if started.len() != needed.len() {
-        let missing = needed
-            .iter()
-            .filter(|(key, _)| !started.contains(*key))
-            .map(|(key, seq)| (key.clone(), *seq))
-            .collect::<Vec<_>>();
-
-        if let Some(wal_reader) = wal_reader {
-            for (key, want_seq) in missing {
-                let (namespace, origin) = key.clone();
-                match wal_reader.read_range(
-                    &namespace,
-                    &origin,
-                    want_seq,
-                    limits.max_event_batch_bytes,
-                ) {
-                    Ok(wal_frames) => {
-                        if let Some(first) = wal_frames.first()
-                            && first.eid.origin_seq.get() == want_seq.saturating_add(1)
-                        {
-                            started.insert(key);
-                            frames.extend(wal_frames);
-                        }
-                    }
-                    Err(err @ crate::daemon::repl::WalRangeError::MissingRange { .. }) => {
-                        let _ = err;
-                    }
-                    Err(err) => {
-                        let payload = err.as_error_payload();
-                        send_payload(writer, session, ReplMessage::Error(payload))?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    if started.len() != needed.len() {
-        let namespaces: BTreeSet<NamespaceId> = needed.keys().map(|(ns, _)| ns.clone()).collect();
-        let payload = ErrorPayload::new(ErrorCode::BootstrapRequired, "bootstrap required", false)
-            .with_details(BootstrapRequiredDetails {
-                namespaces: namespaces.into_iter().collect(),
-                reason: SnapshotRangeReason::RangeMissing,
-            });
-        send_payload(writer, session, ReplMessage::Error(payload))?;
-        return Ok(());
-    }
-
-    send_events(writer, session, frames, limits)
 }
 
 fn subscriber_limits(limits: &crate::core::Limits) -> SubscriberLimits {

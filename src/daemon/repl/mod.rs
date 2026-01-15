@@ -10,6 +10,7 @@ pub mod runtime;
 pub mod server;
 pub mod session;
 pub mod store;
+mod want;
 
 pub use frame::{FrameError, FrameReader, FrameWriter};
 pub use gap_buffer::{GapBufferByNsOrigin, IngestDecision, OriginStreamState};
