@@ -1252,9 +1252,10 @@ mod tests {
 
     fn make_bead(id: &str, stamp: &Stamp) -> Bead {
         let id = BeadId::parse(id).expect("bead id");
+        let title = format!("title-{}", id.as_str());
         let core = BeadCore::new(id, stamp.clone(), None);
         let fields = BeadFields {
-            title: Lww::new(format!("title-{id}"), stamp.clone()),
+            title: Lww::new(title, stamp.clone()),
             description: Lww::new("desc".to_string(), stamp.clone()),
             design: Lww::new(None, stamp.clone()),
             acceptance_criteria: Lww::new(None, stamp.clone()),
