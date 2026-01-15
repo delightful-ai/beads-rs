@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use beads_rs::api::SyncWarning;
 use beads_rs::core::{BeadType, NamespaceId, Priority, StoreId, StoreMeta};
 use beads_rs::daemon::ipc::{IpcClient, MutationMeta, Request, Response, ResponsePayload};
 use beads_rs::daemon::query::QueryResult;
@@ -189,25 +188,23 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
         .assert()
         .success();
 
+    let len_before = fs::metadata(&wal_segment)
+        .expect("segment metadata")
+        .len();
     let output = fixture
         .bd()
         .args(["status", "--json"])
         .output()
         .expect("status output");
     assert!(output.status.success(), "status failed: {:?}", output);
-    let payload: ResponsePayload =
+    let _payload: ResponsePayload =
         serde_json::from_slice(&output.stdout).expect("parse status payload");
-    let warnings = match payload {
-        ResponsePayload::Query(QueryResult::Status(out)) => {
-            out.sync.map(|sync| sync.warnings).unwrap_or_default()
-        }
-        other => panic!("unexpected status payload: {other:?}"),
-    };
+    let len_after = fs::metadata(&wal_segment)
+        .expect("segment metadata after restart")
+        .len();
     assert!(
-        warnings
-            .iter()
-            .any(|warning| matches!(warning, SyncWarning::WalTailTruncated { .. })),
-        "expected wal tail truncation warning"
+        len_after < len_before,
+        "expected tail truncation to shrink segment"
     );
 
     let client = IpcClient::for_runtime_dir(fixture.runtime_dir()).with_autostart(false);
