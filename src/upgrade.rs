@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::{Config, load_or_init};
 use crate::daemon::OpError;
@@ -121,7 +122,8 @@ pub fn run_upgrade(config: Config, background: bool) -> Result<UpgradeOutcome> {
     }
 
     let method = if let Some(asset) = asset {
-        let temp_bin = download_prebuilt(asset)?;
+        let checksum = fetch_asset_checksum(&release, asset)?;
+        let temp_bin = download_prebuilt(asset, checksum)?;
         install_binary(temp_bin.as_ref(), &install_path)?;
         UpgradeMethod::Prebuilt
     } else {
@@ -186,7 +188,10 @@ fn find_asset<'a>(release: &'a ReleaseInfo, platform: &str) -> Option<&'a Releas
     release.assets.iter().find(|asset| asset.name == name)
 }
 
-fn download_prebuilt(asset: &ReleaseAsset) -> Result<tempfile::TempPath> {
+fn download_prebuilt(
+    asset: &ReleaseAsset,
+    expected_checksum: Option<String>,
+) -> Result<tempfile::TempPath> {
     if let Ok(fake) = std::env::var("BD_UPGRADE_FAKE_BIN") {
         let temp = tempfile::NamedTempFile::new()
             .map_err(|e| upgrade_error(format!("failed to create temp file: {e}")))?;
@@ -198,25 +203,8 @@ fn download_prebuilt(asset: &ReleaseAsset) -> Result<tempfile::TempPath> {
     let archive_file = tempfile::NamedTempFile::new()
         .map_err(|e| upgrade_error(format!("failed to create temp archive: {e}")))?;
 
-    if let Ok(dir) = std::env::var("BD_UPGRADE_ASSET_DIR") {
-        let src = PathBuf::from(dir).join(&asset.name);
-        fs::copy(&src, archive_file.path())
-            .map_err(|e| upgrade_error(format!("failed to copy asset {}: {e}", src.display())))?;
-    } else {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(30))
-            .build();
-        let resp = agent
-            .get(&asset.browser_download_url)
-            .set("User-Agent", "beads-rs-upgrade")
-            .call()
-            .map_err(|e| upgrade_error(format!("failed to download asset: {e}")))?;
-        let mut reader = resp.into_reader();
-        let mut file = fs::File::create(archive_file.path())
-            .map_err(|e| upgrade_error(format!("failed to create archive: {e}")))?;
-        std::io::copy(&mut reader, &mut file)
-            .map_err(|e| upgrade_error(format!("failed to write archive: {e}")))?;
-    }
+    download_asset(&asset.name, &asset.browser_download_url, archive_file.path())?;
+    verify_archive_checksum(&asset.name, archive_file.path(), expected_checksum)?;
 
     let archive = fs::File::open(archive_file.path())
         .map_err(|e| upgrade_error(format!("failed to open archive: {e}")))?;
@@ -243,6 +231,141 @@ fn download_prebuilt(asset: &ReleaseAsset) -> Result<tempfile::TempPath> {
         return Err(upgrade_error("archive missing bd binary".to_string()));
     }
     Ok(temp_path)
+}
+
+fn fetch_asset_checksum(release: &ReleaseInfo, asset: &ReleaseAsset) -> Result<Option<String>> {
+    if let Ok(path) = std::env::var("BD_UPGRADE_CHECKSUMS") {
+        let contents = fs::read_to_string(&path).map_err(|e| {
+            upgrade_error(format!("failed to read upgrade checksums {}: {e}", path))
+        })?;
+        return Ok(parse_checksum_file(&contents, &asset.name));
+    }
+
+    let checksum_name = format!("{}.sha256", asset.name);
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|entry| entry.name == checksum_name);
+    let Some(checksum_asset) = checksum_asset else {
+        return Ok(None);
+    };
+
+    let contents =
+        download_asset_text(&checksum_asset.name, &checksum_asset.browser_download_url)?;
+    Ok(parse_checksum_file(&contents, &asset.name))
+}
+
+fn download_asset(name: &str, url: &str, dest: &Path) -> Result<()> {
+    if let Ok(dir) = std::env::var("BD_UPGRADE_ASSET_DIR") {
+        let src = PathBuf::from(dir).join(name);
+        fs::copy(&src, dest)
+            .map_err(|e| upgrade_error(format!("failed to copy asset {}: {e}", src.display())))?;
+        return Ok(());
+    }
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build();
+    let resp = agent
+        .get(url)
+        .set("User-Agent", "beads-rs-upgrade")
+        .call()
+        .map_err(|e| upgrade_error(format!("failed to download asset: {e}")))?;
+    let mut reader = resp.into_reader();
+    let mut file =
+        fs::File::create(dest).map_err(|e| upgrade_error(format!("failed to create archive: {e}")))?;
+    std::io::copy(&mut reader, &mut file)
+        .map_err(|e| upgrade_error(format!("failed to write archive: {e}")))?;
+    Ok(())
+}
+
+fn download_asset_text(name: &str, url: &str) -> Result<String> {
+    if let Ok(dir) = std::env::var("BD_UPGRADE_ASSET_DIR") {
+        let src = PathBuf::from(dir).join(name);
+        return fs::read_to_string(&src)
+            .map_err(|e| upgrade_error(format!("failed to read asset {}: {e}", src.display())));
+    }
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build();
+    let resp = agent
+        .get(url)
+        .set("User-Agent", "beads-rs-upgrade")
+        .call()
+        .map_err(|e| upgrade_error(format!("failed to download asset: {e}")))?;
+    let mut body = String::new();
+    resp.into_reader()
+        .read_to_string(&mut body)
+        .map_err(|e| upgrade_error(format!("failed to read asset body: {e}")))?;
+    Ok(body)
+}
+
+fn verify_archive_checksum(
+    asset_name: &str,
+    archive_path: &Path,
+    expected_checksum: Option<String>,
+) -> Result<()> {
+    let Some(expected) = expected_checksum else {
+        return Err(upgrade_error(format!(
+            "missing checksum for asset {}",
+            asset_name
+        )));
+    };
+
+    let actual = sha256_file_hex(archive_path)?;
+    if actual != expected {
+        return Err(upgrade_error(format!(
+            "checksum mismatch for {}: expected {}, got {}",
+            asset_name, expected, actual
+        )));
+    }
+    Ok(())
+}
+
+fn sha256_file_hex(path: &Path) -> Result<String> {
+    let mut file =
+        fs::File::open(path).map_err(|e| upgrade_error(format!("failed to open archive: {e}")))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| upgrade_error(format!("failed to read archive: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn parse_checksum_file(contents: &str, asset_name: &str) -> Option<String> {
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let hash = parts.next()?;
+        let name = parts.next();
+        if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        match name {
+            None => return Some(hash.to_lowercase()),
+            Some(name) => {
+                if Path::new(name)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|base| base == asset_name)
+                {
+                    return Some(hash.to_lowercase());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn build_with_cargo() -> Result<tempfile::TempPath> {
