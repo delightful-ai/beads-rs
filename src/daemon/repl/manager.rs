@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::Sender;
 use thiserror::Error;
 
-use crate::core::Opaque;
 use crate::core::error::details::{BootstrapRequiredDetails, SnapshotRangeReason};
 use crate::core::{
-    ErrorCode, ErrorPayload, EventBytes, EventFrameV1, NamespaceId, NamespacePolicy, ReplicaId,
-    ReplicaRole, ReplicaRoster, ReplicateMode, StoreIdentity,
+    ErrorCode, ErrorPayload, EventFrameV1, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRole,
+    ReplicaRoster, ReplicateMode, StoreIdentity,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
@@ -780,8 +779,8 @@ mod tests {
 
     use crate::core::{
         Applied, Canonical, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId,
-        HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch,
-        StoreId, StoreIdentity, Watermark,
+        HeadStatus, NamespaceId, NamespacePolicy, Opaque, ReplicaId, Seq0, Seq1, Sha256,
+        StoreEpoch, StoreId, StoreIdentity, Watermark,
     };
     use crate::daemon::repl::IngestOutcome;
     use crate::daemon::repl::WatermarkSnapshot;
