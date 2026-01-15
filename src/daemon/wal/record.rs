@@ -4,7 +4,7 @@ use bytes::Bytes;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::core::{ClientRequestId, EventBody, ReplicaId, TxnId};
+use crate::core::{ClientRequestId, EventBody, ReplicaId, Seq1, TxnId};
 
 use super::{EventWalError, EventWalResult};
 
@@ -64,7 +64,7 @@ impl RecordFlags {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordHeader {
     pub origin_replica_id: ReplicaId,
-    pub origin_seq: u64,
+    pub origin_seq: Seq1,
     pub event_time_ms: u64,
     pub txn_id: TxnId,
     pub client_request_id: Option<ClientRequestId>,
@@ -78,7 +78,7 @@ pub enum RecordHeaderMismatch {
     #[error("origin_replica_id mismatch (header {header}, body {body})")]
     OriginReplicaId { header: ReplicaId, body: ReplicaId },
     #[error("origin_seq mismatch (header {header}, body {body})")]
-    OriginSeq { header: u64, body: u64 },
+    OriginSeq { header: Seq1, body: Seq1 },
     #[error("event_time_ms mismatch (header {header}, body {body})")]
     EventTimeMs { header: u64, body: u64 },
     #[error("txn_id mismatch (header {header}, body {body})")]
@@ -119,7 +119,7 @@ impl RecordHeader {
         buf.extend_from_slice(&flags.to_bits().to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
         buf.extend_from_slice(self.origin_replica_id.as_uuid().as_bytes());
-        buf.extend_from_slice(&self.origin_seq.to_le_bytes());
+        buf.extend_from_slice(&self.origin_seq.get().to_le_bytes());
         buf.extend_from_slice(&self.event_time_ms.to_le_bytes());
         buf.extend_from_slice(self.txn_id.as_uuid().as_bytes());
 
@@ -187,7 +187,12 @@ impl RecordHeader {
         }
 
         let origin_replica_id = ReplicaId::new(read_uuid(bytes, &mut offset)?);
-        let origin_seq = read_u64_le(bytes, &mut offset)?;
+        let origin_seq_raw = read_u64_le(bytes, &mut offset)?;
+        let origin_seq = Seq1::from_u64(origin_seq_raw).ok_or_else(|| {
+            EventWalError::RecordHeaderInvalid {
+                reason: "origin_seq must be >= 1".to_string(),
+            }
+        })?;
         let event_time_ms = read_u64_le(bytes, &mut offset)?;
         let txn_id = TxnId::new(read_uuid(bytes, &mut offset)?);
 
@@ -242,10 +247,10 @@ pub fn validate_header_matches_body(
             body: body.origin_replica_id,
         });
     }
-    if header.origin_seq != body.origin_seq.get() {
+    if header.origin_seq != body.origin_seq {
         return Err(RecordHeaderMismatch::OriginSeq {
             header: header.origin_seq,
-            body: body.origin_seq.get(),
+            body: body.origin_seq,
         });
     }
     if header.event_time_ms != body.event_time_ms {
@@ -339,7 +344,7 @@ mod tests {
     fn record_roundtrip_with_optional_fields() {
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
-            origin_seq: 42,
+            origin_seq: Seq1::from_u64(42).unwrap(),
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([3u8; 16]))),
@@ -362,7 +367,7 @@ mod tests {
     fn record_encode_rejects_request_sha_without_client_request_id() {
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
-            origin_seq: 42,
+            origin_seq: Seq1::from_u64(42).unwrap(),
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,

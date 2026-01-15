@@ -339,14 +339,19 @@ fn replay_index(
                     seq,
                 });
             }
-            let next_seq =
-                state
-                    .max_seq
-                    .checked_add(1)
-                    .ok_or_else(|| WalReplayError::OriginSeqOverflow {
-                        namespace: namespace.to_string(),
-                        origin,
-                    })?;
+            let next_seq = state
+                .max_seq
+                .checked_add(1)
+                .ok_or_else(|| WalReplayError::OriginSeqOverflow {
+                    namespace: namespace.to_string(),
+                    origin,
+                })?;
+            let next_seq = Seq1::from_u64(next_seq).ok_or_else(|| {
+                WalReplayError::OriginSeqOverflow {
+                    namespace: namespace.to_string(),
+                    origin,
+                }
+            })?;
 
             txn.update_watermark(&namespace, &origin, seq, seq, head, head)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
@@ -369,19 +374,13 @@ fn index_record(
     limits: &Limits,
 ) -> Result<(), WalReplayError> {
     let header = &record.header;
-    let origin_seq =
-        Seq1::from_u64(header.origin_seq).ok_or_else(|| WalReplayError::NonContiguousSeq {
-            namespace: namespace.to_string(),
-            origin: header.origin_replica_id,
-            expected: 1,
-            got: header.origin_seq,
-        })?;
+    let origin_seq = header.origin_seq;
     let event_id = EventId::new(header.origin_replica_id, namespace.clone(), origin_seq);
 
     tracker.observe_record(
         namespace,
         header.origin_replica_id,
-        header.origin_seq,
+        header.origin_seq.get(),
         header.sha256,
         header.prev_sha256,
     )?;
@@ -825,7 +824,7 @@ where
                 RecordShaMismatchInfo {
                     namespace: segment.header.namespace.clone(),
                     origin: record.header.origin_replica_id,
-                    seq: record.header.origin_seq,
+                    seq: record.header.origin_seq.get(),
                     expected: expected_sha,
                     got: record.header.sha256,
                     path: segment.path.clone(),
@@ -1046,7 +1045,7 @@ mod tests {
         let record = Record {
             header: RecordHeader {
                 origin_replica_id: origin,
-                origin_seq: body.origin_seq.get(),
+                origin_seq: body.origin_seq,
                 event_time_ms: body.event_time_ms,
                 txn_id: body.txn_id,
                 client_request_id: body.client_request_id,

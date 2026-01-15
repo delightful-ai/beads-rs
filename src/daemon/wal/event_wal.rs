@@ -86,7 +86,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, StoreMetaVersions,
+        ReplicaId, SegmentId, Seq1, StoreEpoch, StoreId, StoreIdentity, StoreMetaVersions,
     };
     use crate::daemon::wal::RecordHeader;
     use crate::daemon::wal::frame::encode_frame;
@@ -106,7 +106,7 @@ mod tests {
     fn test_record() -> Record {
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
-            origin_seq: 1,
+            origin_seq: Seq1::from_u64(1).unwrap(),
             event_time_ms: 1_700_000_000_100,
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,

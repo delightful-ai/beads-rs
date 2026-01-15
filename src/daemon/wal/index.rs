@@ -10,7 +10,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::{
-    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, ReplicaRole, SegmentId, Seq1,
+    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, ReplicaRole, SegmentId, Seq0, Seq1,
     StoreId, StoreMeta, TxnId,
 };
 
@@ -92,12 +92,12 @@ pub trait WalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-    ) -> Result<u64, WalIndexError>;
+    ) -> Result<Seq1, WalIndexError>;
     fn set_next_origin_seq(
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        next_seq: u64,
+        next_seq: Seq1,
     ) -> Result<(), WalIndexError>;
     #[allow(clippy::too_many_arguments)]
     fn record_event(
@@ -155,7 +155,7 @@ pub trait WalIndexReader {
         &self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        from_seq_excl: u64,
+        from_seq_excl: Seq0,
         max_bytes: usize,
     ) -> Result<Vec<IndexedRangeItem>, WalIndexError>;
     fn lookup_client_request(
@@ -164,7 +164,7 @@ pub trait WalIndexReader {
         origin: &ReplicaId,
         client_request_id: ClientRequestId,
     ) -> Result<Option<ClientRequestRow>, WalIndexError>;
-    fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<u64, WalIndexError>;
+    fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<Seq0, WalIndexError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,7 +335,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-    ) -> Result<u64, WalIndexError> {
+    ) -> Result<Seq1, WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
         let next_seq: Option<u64> = self
@@ -347,13 +347,16 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             )
             .optional()?;
 
-        let next = next_seq.unwrap_or(1);
-        let updated = next
+        let next_raw = next_seq.unwrap_or(1);
+        let updated = next_raw
             .checked_add(1)
             .ok_or_else(|| WalIndexError::OriginSeqOverflow {
                 namespace: namespace.to_string(),
                 origin: *origin,
             })?;
+        let next = Seq1::from_u64(next_raw).ok_or_else(|| {
+            WalIndexError::EventIdDecode("origin_seq must be >= 1".to_string())
+        })?;
         self.conn.execute(
             "INSERT INTO origin_seq (namespace, origin_replica_id, next_seq) VALUES (?1, ?2, ?3) \
              ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET next_seq = excluded.next_seq",
@@ -366,14 +369,14 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        next_seq: u64,
+        next_seq: Seq1,
     ) -> Result<(), WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
         self.conn.execute(
             "INSERT INTO origin_seq (namespace, origin_replica_id, next_seq) VALUES (?1, ?2, ?3) \
              ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET next_seq = excluded.next_seq",
-            params![namespace, origin_blob, next_seq as i64],
+            params![namespace, origin_blob, next_seq.get() as i64],
         )?;
         Ok(())
     }
@@ -842,7 +845,7 @@ impl WalIndexReader for SqliteWalIndexReader {
         &self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        from_seq_excl: u64,
+        from_seq_excl: Seq0,
         max_bytes: usize,
     ) -> Result<Vec<IndexedRangeItem>, WalIndexError> {
         self.with_conn(|conn| {
@@ -853,7 +856,7 @@ impl WalIndexReader for SqliteWalIndexReader {
                  FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq > ?3 \
                  ORDER BY origin_seq ASC",
             )?;
-            let mut rows = stmt.query(params![namespace, origin_blob, from_seq_excl as i64])?;
+            let mut rows = stmt.query(params![namespace, origin_blob, from_seq_excl.get() as i64])?;
             let mut items = Vec::new();
             let mut bytes_accum = 0usize;
             while let Some(row) = rows.next()? {
@@ -952,7 +955,7 @@ impl WalIndexReader for SqliteWalIndexReader {
         })
     }
 
-    fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<u64, WalIndexError> {
+    fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<Seq0, WalIndexError> {
         self.with_conn(|conn| {
             let namespace = ns.as_str();
             let origin_blob = uuid_blob(origin.as_uuid());
@@ -962,10 +965,13 @@ impl WalIndexReader for SqliteWalIndexReader {
                 |row| row.get::<_, Option<i64>>(0),
             )?;
             match max_seq {
-                Some(seq) => u64::try_from(seq).map_err(|_| {
-                    WalIndexError::EventIdDecode("origin_seq out of range".to_string())
-                }),
-                None => Ok(0),
+                Some(seq) => {
+                    let raw = u64::try_from(seq).map_err(|_| {
+                        WalIndexError::EventIdDecode("origin_seq out of range".to_string())
+                    })?;
+                    Ok(Seq0::new(raw))
+                }
+                None => Ok(Seq0::ZERO),
             }
         })
     }
@@ -1406,8 +1412,7 @@ mod tests {
         let ns = NamespaceId::core();
         let origin = meta.replica_id;
         let mut txn = index.writer().begin_txn().unwrap();
-        let seq = txn.next_origin_seq(&ns, &origin).unwrap();
-        let origin_seq = Seq1::from_u64(seq).unwrap();
+        let origin_seq = txn.next_origin_seq(&ns, &origin).unwrap();
         let event_id = EventId::new(origin, ns.clone(), origin_seq);
         let txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
         let client_request_id = ClientRequestId::new(Uuid::from_bytes([3u8; 16]));
@@ -1428,6 +1433,7 @@ mod tests {
             Some([7u8; 32]),
         )
         .unwrap();
+        let seq = origin_seq.get();
         txn.update_watermark(&ns, &origin, seq, seq, Some(sha), Some(sha))
             .unwrap();
         txn.upsert_client_request(
@@ -1444,7 +1450,7 @@ mod tests {
 
         let reader = index.reader();
         assert_eq!(reader.lookup_event_sha(&ns, &event_id).unwrap(), Some(sha));
-        let items = reader.iter_from(&ns, &origin, 0, 1024).unwrap();
+        let items = reader.iter_from(&ns, &origin, Seq0::ZERO, 1024).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].event_id, event_id);
         assert_eq!(items[0].txn_id, txn_id);
@@ -1461,7 +1467,7 @@ mod tests {
         assert_eq!(req.txn_id, txn_id);
         assert_eq!(req.event_ids, vec![event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
-        assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), 1);
+        assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), Seq0::new(1));
     }
 
     #[test]
@@ -1687,8 +1693,7 @@ mod tests {
         let ns = NamespaceId::core();
         let origin = meta.replica_id;
         let mut txn = index.writer().begin_txn().unwrap();
-        let seq = txn.next_origin_seq(&ns, &origin).unwrap();
-        let origin_seq = Seq1::from_u64(seq).unwrap();
+        let origin_seq = txn.next_origin_seq(&ns, &origin).unwrap();
         let event_id = EventId::new(origin, ns.clone(), origin_seq);
         let txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
         let sha = [9u8; 32];
@@ -1716,8 +1721,7 @@ mod tests {
         let ns = NamespaceId::core();
         let origin = meta.replica_id;
         let mut txn = index.writer().begin_txn().unwrap();
-        let seq = txn.next_origin_seq(&ns, &origin).unwrap();
-        let origin_seq = Seq1::from_u64(seq).unwrap();
+        let origin_seq = txn.next_origin_seq(&ns, &origin).unwrap();
         let event_id = EventId::new(origin, ns.clone(), origin_seq);
         let txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
         let segment_id = SegmentId::new(Uuid::from_bytes([4u8; 16]));

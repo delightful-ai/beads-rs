@@ -129,7 +129,7 @@ pub fn encode_frame(record: &Record, max_record_bytes: usize) -> EventWalResult<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{ClientRequestId, ReplicaId, TxnId};
+    use crate::core::{ClientRequestId, ReplicaId, Seq1, TxnId};
     use crate::daemon::wal::record::RecordHeader;
     use bytes::Bytes;
     use std::io::Cursor;
@@ -138,7 +138,7 @@ mod tests {
     fn sample_record() -> Record {
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
-            origin_seq: 7,
+            origin_seq: Seq1::from_u64(7).unwrap(),
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([3u8; 16]))),

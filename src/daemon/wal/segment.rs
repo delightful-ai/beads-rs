@@ -545,7 +545,7 @@ mod tests {
     fn test_record() -> Record {
         let header = crate::daemon::wal::record::RecordHeader {
             origin_replica_id: crate::core::ReplicaId::new(Uuid::from_bytes([1u8; 16])),
-            origin_seq: 1,
+            origin_seq: crate::core::Seq1::from_u64(1).unwrap(),
             event_time_ms: 1_700_000_000_100,
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,
