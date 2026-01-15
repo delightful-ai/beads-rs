@@ -209,6 +209,28 @@ pub fn repl_events_out(count: usize) {
     );
 }
 
+pub fn repl_pending_dropped_events(direction: &'static str, count: usize) {
+    emit(
+        "repl_pending_dropped_events",
+        MetricValue::Counter(count as u64),
+        vec![MetricLabel {
+            key: "direction",
+            value: direction.to_string(),
+        }],
+    );
+}
+
+pub fn repl_pending_dropped_bytes(direction: &'static str, count: usize) {
+    emit(
+        "repl_pending_dropped_bytes",
+        MetricValue::Counter(count as u64),
+        vec![MetricLabel {
+            key: "direction",
+            value: direction.to_string(),
+        }],
+    );
+}
+
 pub fn checkpoint_export_ok(duration: Duration) {
     emit("checkpoint_export_ok", MetricValue::Counter(1), Vec::new());
     emit(
