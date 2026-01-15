@@ -1,0 +1,180 @@
+//! Event WAL writer that reuses active segments per namespace.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use crate::core::{Limits, NamespaceId, StoreMeta};
+
+use super::{AppendOutcome, EventWalResult, Record, SegmentConfig, SegmentWriter};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentSnapshot {
+    pub segment_id: crate::core::SegmentId,
+    pub created_at_ms: u64,
+    pub path: PathBuf,
+}
+
+pub struct EventWal {
+    store_dir: PathBuf,
+    meta: StoreMeta,
+    config: SegmentConfig,
+    writers: BTreeMap<NamespaceId, SegmentWriter>,
+}
+
+impl EventWal {
+    pub fn new(store_dir: PathBuf, meta: StoreMeta, limits: &Limits) -> Self {
+        Self {
+            store_dir,
+            meta,
+            config: SegmentConfig::from_limits(limits),
+            writers: BTreeMap::new(),
+        }
+    }
+
+    pub fn append(
+        &mut self,
+        namespace: &NamespaceId,
+        record: &Record,
+        now_ms: u64,
+    ) -> EventWalResult<AppendOutcome> {
+        let writer = self.writer_mut(namespace, now_ms)?;
+        writer.append(record, now_ms)
+    }
+
+    pub fn segment_snapshot(&self, namespace: &NamespaceId) -> Option<SegmentSnapshot> {
+        self.writers.get(namespace).map(|writer| SegmentSnapshot {
+            segment_id: writer.current_segment_id(),
+            created_at_ms: writer.current_created_at_ms(),
+            path: writer.current_path().to_path_buf(),
+        })
+    }
+
+    fn writer_mut(
+        &mut self,
+        namespace: &NamespaceId,
+        now_ms: u64,
+    ) -> EventWalResult<&mut SegmentWriter> {
+        if !self.writers.contains_key(namespace) {
+            let writer = SegmentWriter::open(
+                &self.store_dir,
+                &self.meta,
+                namespace,
+                now_ms,
+                self.config,
+            )?;
+            self.writers.insert(namespace.clone(), writer);
+        }
+        Ok(self
+            .writers
+            .get_mut(namespace)
+            .expect("writer missing after insert"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use crate::daemon::wal::frame::encode_frame;
+    use crate::daemon::wal::segment::SegmentHeader;
+    use crate::daemon::wal::RecordHeader;
+    use crate::core::{ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, StoreMetaVersions};
+
+    fn test_meta(store_id: StoreId) -> StoreMeta {
+        let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));
+        let versions = StoreMetaVersions::new(1, 2, 3, 4, 5);
+        StoreMeta::new(
+            identity,
+            ReplicaId::new(Uuid::from_bytes([9u8; 16])),
+            versions,
+            1_700_000_000_000,
+        )
+    }
+
+    fn test_record() -> Record {
+        let header = RecordHeader {
+            origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            origin_seq: 1,
+            event_time_ms: 1_700_000_000_100,
+            txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
+            client_request_id: None,
+            request_sha256: None,
+            sha256: [7u8; 32],
+            prev_sha256: None,
+        };
+        Record {
+            header,
+            payload: Bytes::from_static(b"event"),
+        }
+    }
+
+    fn frame_len(record: &Record, max_record_bytes: usize) -> u64 {
+        encode_frame(record, max_record_bytes)
+            .expect("frame")
+            .len() as u64
+    }
+
+    #[test]
+    fn event_wal_reuses_active_segment() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
+        let meta = test_meta(store_id);
+        let namespace = NamespaceId::core();
+        let record = test_record();
+
+        let header_len = SegmentHeader::new(&meta, namespace.clone(), 10, SegmentId::new(Uuid::nil()))
+            .encode()
+            .unwrap()
+            .len() as u64;
+        let mut limits = Limits::default();
+        limits.wal_segment_max_bytes =
+            (header_len + frame_len(&record, limits.max_wal_record_bytes) * 10) as usize;
+
+        let mut wal = EventWal::new(temp.path().to_path_buf(), meta, &limits);
+
+        let first = wal.append(&namespace, &record, 10).unwrap();
+        let first_snapshot = wal.segment_snapshot(&namespace).unwrap();
+        assert!(!first.rotated);
+
+        let second = wal.append(&namespace, &record, 10).unwrap();
+        let second_snapshot = wal.segment_snapshot(&namespace).unwrap();
+        assert!(!second.rotated);
+        assert_eq!(first.segment_id, second.segment_id);
+        assert_eq!(first_snapshot.segment_id, second_snapshot.segment_id);
+        assert_eq!(first_snapshot.path, second_snapshot.path);
+    }
+
+    #[test]
+    fn event_wal_rotates_on_size() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([8u8; 16]));
+        let meta = test_meta(store_id);
+        let namespace = NamespaceId::core();
+        let record = test_record();
+
+        let header_len = SegmentHeader::new(&meta, namespace.clone(), 10, SegmentId::new(Uuid::nil()))
+            .encode()
+            .unwrap()
+            .len() as u64;
+        let mut limits = Limits::default();
+        let frame_len = frame_len(&record, limits.max_wal_record_bytes);
+        limits.wal_segment_max_bytes = (header_len + frame_len + 1) as usize;
+
+        let mut wal = EventWal::new(temp.path().to_path_buf(), meta, &limits);
+
+        let first = wal.append(&namespace, &record, 10).unwrap();
+        assert!(!first.rotated);
+        let first_snapshot = wal.segment_snapshot(&namespace).unwrap();
+
+        let second = wal.append(&namespace, &record, 10).unwrap();
+        assert!(second.rotated);
+        let second_snapshot = wal.segment_snapshot(&namespace).unwrap();
+
+        assert_ne!(first.segment_id, second.segment_id);
+        assert_ne!(first_snapshot.segment_id, second_snapshot.segment_id);
+        assert_ne!(first_snapshot.path, second_snapshot.path);
+    }
+}
