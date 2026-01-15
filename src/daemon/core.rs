@@ -2981,10 +2981,11 @@ mod tests {
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId, PrevVerified,
-        Priority, ReplicaId, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
-        StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, VerifiedEvent, WallClock,
-        Watermarks, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId, NoteAppendV1,
+        NoteId, PrevVerified, Priority, ReplicaId, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
+        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1,
+        VerifiedEvent, WallClock, Watermarks, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::store_runtime::StoreRuntime;
@@ -3048,12 +3049,13 @@ mod tests {
         store_id
     }
 
-    fn verified_event_for_seq(
+    fn verified_event_with_delta(
         store: StoreIdentity,
         namespace: &NamespaceId,
         origin: ReplicaId,
         seq: u64,
         prev: Option<Sha256>,
+        delta: TxnDeltaV1,
     ) -> VerifiedEvent<PrevVerified> {
         let event_time_ms = 1_700_000_000_000 + seq;
         let body = EventBody {
@@ -3066,7 +3068,7 @@ mod tests {
             txn_id: TxnId::new(Uuid::from_bytes([seq as u8; 16])),
             client_request_id: None,
             kind: EventKindV1::TxnV1,
-            delta: TxnDeltaV1::new(),
+            delta,
             hlc_max: Some(HlcMax {
                 actor_id: ActorId::new("alice").unwrap(),
                 physical_ms: event_time_ms,
@@ -3081,6 +3083,23 @@ mod tests {
             sha256,
             prev: PrevVerified { prev },
         }
+    }
+
+    fn verified_event_for_seq(
+        store: StoreIdentity,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        prev: Option<Sha256>,
+    ) -> VerifiedEvent<PrevVerified> {
+        verified_event_with_delta(
+            store,
+            namespace,
+            origin,
+            seq,
+            prev,
+            TxnDeltaV1::new(),
+        )
     }
 
     fn record_for_event(event: &VerifiedEvent<PrevVerified>) -> Record {
@@ -3617,6 +3636,53 @@ mod tests {
             .expect("sealed segment metadata")
             .len();
         assert_eq!(sealed.final_len, Some(sealed_len));
+    }
+
+    #[test]
+    fn ingest_rejects_apply_failure_before_append() {
+        let tmp = TempStoreDir::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([11u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+
+        let mut delta = TxnDeltaV1::new();
+        let note_id = NoteId::new("note-1").unwrap();
+        let note = WireNoteV1 {
+            id: note_id,
+            content: "hi".to_string(),
+            author: ActorId::new("alice").unwrap(),
+            at: WireStamp(now_ms, 0),
+        };
+        delta
+            .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
+                bead_id: BeadId::parse("bd-missing").unwrap(),
+                note,
+            }))
+            .unwrap();
+
+        let event = verified_event_with_delta(store, &namespace, origin, 1, None, delta);
+
+        let wal = Wal::new(tmp.data_dir()).unwrap();
+        let mut daemon = Daemon::new_with_limits(test_actor(), wal, Limits::default());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+
+        let err = daemon
+            .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event], now_ms)
+            .expect_err("apply failure should reject batch");
+        assert_eq!(err.code, ErrorCode::Corruption);
+
+        let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
+        let segments = store_runtime
+            .wal_index
+            .reader()
+            .list_segments(&namespace)
+            .expect("segments");
+        assert!(segments.is_empty());
     }
 
     #[test]
