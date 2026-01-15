@@ -147,6 +147,7 @@ version = "0.0.0"
 dependencies = [
  "beads-rs",
  "libfuzzer-sys",
+ "libz-sys",
 ]
 
 [[package]]
