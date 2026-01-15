@@ -3685,6 +3685,32 @@ mod tests {
         assert!(matches!(err, StoreRuntimeError::ReplicaRosterSymlink { .. }));
     }
 
+    #[test]
+    fn admin_flush_returns_output() {
+        let (tmp, wal) = test_wal();
+        let actor = test_actor();
+        let mut daemon = Daemon::new(actor, wal);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+
+        let store_id = StoreId::new(Uuid::from_bytes([55u8; 16]));
+        let remote = RemoteUrl("example.com/test/repo".into());
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path)
+            .expect("insert store");
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        let response = daemon.admin_flush(&repo_path, None, true, &git_tx);
+        let Response::Ok { ok } = response else {
+            panic!("expected ok response");
+        };
+        let ResponsePayload::Query(QueryResult::AdminFlush(out)) = ok else {
+            panic!("expected admin flush payload");
+        };
+        assert_eq!(out.namespace, NamespaceId::core());
+        assert!(out.checkpoint_now);
+        assert!(out.checkpoint_groups.contains(&"core".to_string()));
+    }
+
     fn verified_event_with_delta(
         store: StoreIdentity,
         namespace: &NamespaceId,

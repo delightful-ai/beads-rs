@@ -2864,7 +2864,8 @@ mod tests {
         use super::*;
         use crate::core::{
             ActorId, Applied, BeadId, DurabilityReceipt, EventId, EventKindV1, HlcMax, NamespaceId,
-            ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, Watermarks,
+            ReplicaId, SegmentId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId,
+            Watermarks,
         };
         use uuid::Uuid;
 
@@ -2922,6 +2923,24 @@ mod tests {
                 pid: 12345,
             };
             let resp = Response::ok(ResponsePayload::Query(QueryResult::DaemonInfo(info)));
+            roundtrip_response(resp);
+        }
+
+        #[test]
+        fn query_admin_flush() {
+            let segment_id = SegmentId::new(Uuid::from_bytes([9u8; 16]));
+            let output = crate::api::AdminFlushOutput {
+                namespace: NamespaceId::core(),
+                flushed_at_ms: 1_700_000_000_000,
+                segment: Some(crate::api::AdminFlushSegment {
+                    segment_id,
+                    created_at_ms: 1_700_000_000_000,
+                    path: "wal/core/segment-1.wal".to_string(),
+                }),
+                checkpoint_now: true,
+                checkpoint_groups: vec!["core".to_string()],
+            };
+            let resp = Response::ok(ResponsePayload::Query(QueryResult::AdminFlush(output)));
             roundtrip_response(resp);
         }
 
