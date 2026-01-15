@@ -255,6 +255,7 @@ impl SegmentWriter {
             source,
         })?;
         reject_symlink(&wal_dir)?;
+        ensure_dir_permissions(&wal_dir)?;
 
         let dir = wal_dir.join(namespace.as_str());
         reject_symlink(&dir)?;
@@ -263,6 +264,7 @@ impl SegmentWriter {
             source,
         })?;
         reject_symlink(&dir)?;
+        ensure_dir_permissions(&dir)?;
 
         let header = SegmentHeader::new(meta, namespace.clone(), now_ms, new_segment_id());
         let (file, path, header_len) = create_segment(&dir, &header)?;
@@ -434,6 +436,20 @@ fn reject_symlink(path: &Path) -> EventWalResult<()> {
             source: err,
         }),
     }
+}
+
+fn ensure_dir_permissions(path: &Path) -> EventWalResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            EventWalError::Io {
+                path: Some(path.to_path_buf()),
+                source,
+            }
+        })?;
+    }
+    Ok(())
 }
 
 fn segment_file_name(created_at_ms: u64, segment_id: SegmentId) -> String {
