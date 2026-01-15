@@ -378,6 +378,7 @@ impl Wal {
 ///
 /// Uses `BD_WAL_DIR` if set, otherwise `BD_DATA_DIR` or
 /// `$XDG_DATA_HOME/beads-rs` (`~/.local/share/beads-rs`).
+#[allow(dead_code)]
 pub fn default_wal_base_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("BD_WAL_DIR")
         && !dir.trim().is_empty()

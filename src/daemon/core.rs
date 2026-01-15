@@ -873,7 +873,7 @@ impl Daemon {
         }
         let mut needs_sync = loaded.needs_sync;
         let mut state = store_state_from_legacy(loaded.state);
-        let mut root_slug = loaded.root_slug;
+        let root_slug = loaded.root_slug;
         let checkpoint_imports = self.load_checkpoint_imports(store_id, repo);
         for import in &checkpoint_imports {
             match merge_store_states(&state, &import.state) {
