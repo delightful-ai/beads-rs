@@ -730,6 +730,8 @@ pub enum DepCmd {
     Rm(DepRmArgs),
     /// Show dependency tree for an issue.
     Tree { id: String },
+    /// List dependency cycles.
+    Cycles,
 }
 
 #[derive(Args, Debug)]
