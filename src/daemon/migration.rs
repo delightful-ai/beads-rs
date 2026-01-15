@@ -118,7 +118,8 @@ mod tests {
         let state_bytes = wire::serialize_state(&state).unwrap();
         let tombs_bytes = wire::serialize_tombstones(&state).unwrap();
         let deps_bytes = wire::serialize_deps(&state).unwrap();
-        let meta_bytes = wire::serialize_meta(Some(root_slug), Some(&stamp)).unwrap();
+        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let meta_bytes = wire::serialize_meta(Some(root_slug), Some(&stamp), &checksums).unwrap();
 
         let state_oid = repo.blob(&state_bytes).unwrap();
         let tombs_oid = repo.blob(&tombs_bytes).unwrap();

@@ -566,7 +566,10 @@ impl SyncProcess<Merged> {
                 None => Some(parent_stamp),
             };
         }
-        let meta_bytes = wire::serialize_meta(root_slug.as_deref(), meta_last_stamp.as_ref())?;
+        let checksums =
+            wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let meta_bytes =
+            wire::serialize_meta(root_slug.as_deref(), meta_last_stamp.as_ref(), &checksums)?;
 
         // Write blobs to ODB
         let state_oid = repo.blob(&state_bytes)?;
@@ -747,9 +750,10 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         .find_object(deps_entry.id(), Some(ObjectType::Blob))?
         .peel_to_blob()?;
 
-    // Read meta.json for root_slug + last_write_stamp
+    // Read meta.json for root_slug + last_write_stamp + checksums
     let mut root_slug = None;
     let mut last_write_stamp = None;
+    let mut checksums = None;
     if let Some(meta_entry) = tree.get_name("meta.json")
         && let Ok(meta_obj) = repo.find_object(meta_entry.id(), Some(ObjectType::Blob))
         && let Ok(meta_blob) = meta_obj.peel_to_blob()
@@ -757,6 +761,16 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
     {
         root_slug = meta.root_slug;
         last_write_stamp = meta.last_write_stamp;
+        checksums = meta.checksums;
+    }
+
+    if let Some(expected) = checksums.as_ref() {
+        wire::verify_store_checksums(
+            expected,
+            state_blob.content(),
+            tombs_blob.content(),
+            deps_blob.content(),
+        )?;
     }
 
     let state = wire::parse_legacy_state(
@@ -1141,7 +1155,9 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
         let state_bytes = wire::serialize_state(&state)?;
         let tombs_bytes = wire::serialize_tombstones(&state)?;
         let deps_bytes = wire::serialize_deps(&state)?;
-        let meta_bytes = wire::serialize_meta(Some(&root_slug), None)?;
+        let checksums =
+            wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let meta_bytes = wire::serialize_meta(Some(&root_slug), None, &checksums)?;
 
         // Write blobs
         let state_oid = repo.blob(&state_bytes)?;
@@ -1284,7 +1300,10 @@ mod tests {
         let state_bytes = wire::serialize_state(&state).unwrap();
         let tombs_bytes = wire::serialize_tombstones(&state).unwrap();
         let deps_bytes = wire::serialize_deps(&state).unwrap();
-        let meta_bytes = wire::serialize_meta(Some("test"), last_stamp.as_ref()).unwrap();
+        let checksums =
+            wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let meta_bytes = wire::serialize_meta(Some("test"), last_stamp.as_ref(), &checksums)
+            .unwrap();
 
         let state_oid = repo.blob(&state_bytes).unwrap();
         let tombs_oid = repo.blob(&tombs_bytes).unwrap();

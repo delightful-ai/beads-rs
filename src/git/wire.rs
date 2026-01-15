@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use super::error::WireError;
 use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepEdge,
-    DepKey, DepKind, Label, Labels, Lww, Priority, Stamp, Tombstone, WallClock, Workflow,
-    WriteStamp,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure,
+    ContentHash, DepEdge, DepKey, DepKind, Label, Labels, Lww, Priority, Stamp, Tombstone,
+    WallClock, Workflow, WriteStamp, sha256_bytes,
 };
 
 // =============================================================================
@@ -124,6 +124,29 @@ struct WireMeta {
     root_slug: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_write_stamp: Option<WireStamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_sha256: Option<ContentHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tombstones_sha256: Option<ContentHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deps_sha256: Option<ContentHash>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreChecksums {
+    pub state: ContentHash,
+    pub tombstones: ContentHash,
+    pub deps: ContentHash,
+}
+
+impl StoreChecksums {
+    pub fn from_bytes(state_bytes: &[u8], tombs_bytes: &[u8], deps_bytes: &[u8]) -> Self {
+        Self {
+            state: ContentHash::from_bytes(sha256_bytes(state_bytes).0),
+            tombstones: ContentHash::from_bytes(sha256_bytes(tombs_bytes).0),
+            deps: ContentHash::from_bytes(sha256_bytes(deps_bytes).0),
+        }
+    }
 }
 
 // =============================================================================
@@ -217,11 +240,15 @@ pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
 pub fn serialize_meta(
     root_slug: Option<&str>,
     last_write_stamp: Option<&WriteStamp>,
+    checksums: &StoreChecksums,
 ) -> Result<Vec<u8>, WireError> {
     let meta = WireMeta {
         format_version: 1,
         root_slug: root_slug.map(|s| s.to_string()),
         last_write_stamp: last_write_stamp.map(stamp_to_wire),
+        state_sha256: Some(checksums.state),
+        tombstones_sha256: Some(checksums.tombstones),
+        deps_sha256: Some(checksums.deps),
     };
     let json = serde_json::to_string_pretty(&meta)?;
     Ok(json.into_bytes())
@@ -361,17 +388,67 @@ pub struct ParsedMeta {
     pub format_version: u32,
     pub root_slug: Option<String>,
     pub last_write_stamp: Option<WriteStamp>,
+    pub checksums: Option<StoreChecksums>,
 }
 
 /// Parse meta.json bytes.
 pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
     let content = parse_utf8(bytes)?;
     let meta: WireMeta = serde_json::from_str(content)?;
+    let checksums = match (
+        meta.state_sha256,
+        meta.tombstones_sha256,
+        meta.deps_sha256,
+    ) {
+        (None, None, None) => None,
+        (Some(state), Some(tombstones), Some(deps)) => Some(StoreChecksums {
+            state,
+            tombstones,
+            deps,
+        }),
+        _ => {
+            return Err(WireError::InvalidValue(
+                "meta.json missing checksum fields".into(),
+            ));
+        }
+    };
     Ok(ParsedMeta {
         format_version: meta.format_version,
         root_slug: meta.root_slug,
         last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
+        checksums,
     })
+}
+
+pub fn verify_store_checksums(
+    expected: &StoreChecksums,
+    state_bytes: &[u8],
+    tombs_bytes: &[u8],
+    deps_bytes: &[u8],
+) -> Result<(), WireError> {
+    let actual = StoreChecksums::from_bytes(state_bytes, tombs_bytes, deps_bytes);
+    if actual.state != expected.state {
+        return Err(WireError::ChecksumMismatch {
+            blob: "state.jsonl",
+            expected: expected.state,
+            actual: actual.state,
+        });
+    }
+    if actual.tombstones != expected.tombstones {
+        return Err(WireError::ChecksumMismatch {
+            blob: "tombstones.jsonl",
+            expected: expected.tombstones,
+            actual: actual.tombstones,
+        });
+    }
+    if actual.deps != expected.deps {
+        return Err(WireError::ChecksumMismatch {
+            blob: "deps.jsonl",
+            expected: expected.deps,
+            actual: actual.deps,
+        });
+    }
+    Ok(())
 }
 
 fn parse_utf8(bytes: &[u8]) -> Result<&str, WireError> {
@@ -798,11 +875,27 @@ mod tests {
         #[test]
         fn roundtrip_meta(root in proptest::option::of(base58_id_strategy()), stamp in proptest::option::of((0u64..10_000, 0u32..5))) {
             let write_stamp = stamp.map(|(wall_ms, counter)| WriteStamp::new(wall_ms, counter));
-            let bytes = serialize_meta(root.as_deref(), write_stamp.as_ref())
+            let checksums = StoreChecksums::from_bytes(&[], &[], &[]);
+            let bytes = serialize_meta(root.as_deref(), write_stamp.as_ref(), &checksums)
                 .unwrap_or_else(|e| panic!("serialize_meta failed: {e}"));
             let parsed = parse_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
             prop_assert_eq!(parsed.root_slug, root);
             prop_assert_eq!(parsed.last_write_stamp, write_stamp);
+            prop_assert_eq!(parsed.checksums, Some(checksums));
+        }
+    }
+
+    #[test]
+    fn verify_store_checksums_detects_mismatch() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps");
+        verify_store_checksums(&checksums, b"state", b"tombs", b"deps").unwrap();
+
+        let err = verify_store_checksums(&checksums, b"state-x", b"tombs", b"deps").unwrap_err();
+        match err {
+            WireError::ChecksumMismatch { blob, .. } => {
+                assert_eq!(blob, "state.jsonl");
+            }
+            other => panic!("expected checksum mismatch, got {other:?}"),
         }
     }
 }

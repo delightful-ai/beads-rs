@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::core::BeadId;
-use crate::core::CoreError;
+use crate::core::{BeadId, ContentHash, CoreError};
 use crate::error::{Effect, Transience};
 
 /// Errors that can occur during git sync operations.
@@ -138,6 +137,13 @@ pub enum WireError {
 
     #[error("invalid field value: {0}")]
     InvalidValue(String),
+
+    #[error("checksum mismatch for {blob}: expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        blob: &'static str,
+        expected: ContentHash,
+        actual: ContentHash,
+    },
 }
 
 /// Push was rejected by the remote with a status message.

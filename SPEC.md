@@ -222,6 +222,13 @@ Each commit on the sync ref **MUST** contain, at minimum:
 
 If `deps.jsonl` is not present, dependency features are incomplete and the project is not “complete” under this specification.
 
+`meta.json` **MUST** include integrity checksums for the other blobs:
+- `state_sha256`: SHA-256 of `state.jsonl` bytes (hex)
+- `tombstones_sha256`: SHA-256 of `tombstones.jsonl` bytes (hex)
+- `deps_sha256`: SHA-256 of `deps.jsonl` bytes (hex)
+
+Readers **MUST** verify these checksums when present; mismatch indicates corruption and **MUST** fail load.
+
 #### 5.2.1 Write stamp storage in state.jsonl
 
 Each bead object in `state.jsonl` **MUST** include sufficient write stamp information to perform per-field conflict resolution.

@@ -851,6 +851,13 @@ pub mod details {
     }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct StoreChecksumMismatchDetails {
+        pub blob: String,
+        pub expected_sha256: String,
+        pub got_sha256: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct WalTailTruncatedDetails {
         pub namespace: NamespaceId,
         #[serde(skip_serializing_if = "Option::is_none")]

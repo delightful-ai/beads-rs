@@ -30,6 +30,7 @@ use crate::core::{
 pub use crate::core::{ErrorCode, ErrorPayload};
 use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
+use crate::git::error::{SyncError, WireError};
 
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
@@ -704,7 +705,20 @@ impl From<OpError> for ErrorPayload {
                     },
                 )
             }
-            OpError::Sync(_) => ErrorPayload::new(ErrorCode::SyncFailed, message, retryable),
+            OpError::Sync(err) => match err.as_ref() {
+                SyncError::Wire(WireError::ChecksumMismatch {
+                    blob,
+                    expected,
+                    actual,
+                }) => ErrorPayload::new(ErrorCode::Corruption, message, retryable).with_details(
+                    error_details::StoreChecksumMismatchDetails {
+                        blob: (*blob).to_string(),
+                        expected_sha256: expected.to_hex(),
+                        got_sha256: actual.to_hex(),
+                    },
+                ),
+                _ => ErrorPayload::new(ErrorCode::SyncFailed, message, retryable),
+            },
             OpError::BeadDeleted(id) => {
                 ErrorPayload::new(ErrorCode::BeadDeleted, message, retryable)
                     .with_details(error_details::BeadDeletedDetails { id })
