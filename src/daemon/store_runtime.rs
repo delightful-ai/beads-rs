@@ -1323,6 +1323,24 @@ durability_eligible = true
             StoreRuntimeError::NamespacePoliciesSymlink { .. }
         ));
     }
+
+    #[test]
+    fn namespace_policies_fall_back_to_defaults_when_missing() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([44u8; 16]));
+        let defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let loaded = load_namespace_policies(store_id, &defaults).expect("load policies");
+
+        assert_eq!(loaded, defaults);
+        assert!(loaded.contains_key(&NamespaceId::core()));
+        assert!(loaded.contains_key(&NamespaceId::parse("sys").unwrap()));
+        assert!(loaded.contains_key(&NamespaceId::parse("wf").unwrap()));
+        assert!(loaded.contains_key(&NamespaceId::parse("tmp").unwrap()));
+    }
 }
 
 fn new_replica_id() -> ReplicaId {
