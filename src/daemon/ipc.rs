@@ -2386,8 +2386,8 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, DurabilityClass, DurabilityReceipt, EventKindV1, HlcMax, NamespaceId, ReplicaId,
-        StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
+        DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, StoreEpoch, StoreId,
+        StoreIdentity, TxnId,
     };
     use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
     use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo, WalIndexError, WalReplayError};
@@ -3031,10 +3031,10 @@ mod tests {
                 event_time_ms: 123,
                 txn_id: TxnId::new(Uuid::from_bytes([3u8; 16])),
                 client_request_id: None,
-                kind: EventKindV1::TxnV1(TxnV1 {
-                    delta: TxnDeltaV1::new(),
-                    hlc_max: HlcMax {
-                        actor_id: ActorId::new("tester").unwrap(),
+                kind: crate::core::EventKindV1::TxnV1(crate::core::TxnV1 {
+                    delta: crate::core::TxnDeltaV1::new(),
+                    hlc_max: crate::core::HlcMax {
+                        actor_id: crate::core::ActorId::new("tester").unwrap(),
                         physical_ms: 123,
                         logical: 0,
                     },

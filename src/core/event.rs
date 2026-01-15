@@ -2699,8 +2699,9 @@ mod tests {
     #[test]
     fn decode_rejects_hlc_physical_mismatch() {
         let mut body = sample_body();
+        let event_time_ms = body.event_time_ms;
         let hlc_max = &mut txn_mut(&mut body).hlc_max;
-        hlc_max.physical_ms = body.event_time_ms + 1;
+        hlc_max.physical_ms = event_time_ms + 1;
         let encoded = encode_event_body_canonical(&body).unwrap();
         let err = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap_err();
         assert!(matches!(
@@ -2715,8 +2716,9 @@ mod tests {
     #[test]
     fn decode_event_hlc_max_rejects_physical_mismatch() {
         let mut body = sample_body();
+        let event_time_ms = body.event_time_ms;
         let hlc_max = &mut txn_mut(&mut body).hlc_max;
-        hlc_max.physical_ms = body.event_time_ms + 1;
+        hlc_max.physical_ms = event_time_ms + 1;
         let encoded = encode_event_body_canonical(&body).unwrap();
         let err = decode_event_hlc_max(encoded.as_ref(), &Limits::default()).unwrap_err();
         assert!(matches!(
