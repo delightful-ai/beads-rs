@@ -2897,9 +2897,8 @@ mod tests {
     mod response_roundtrip {
         use super::*;
         use crate::core::{
-            ActorId, Applied, BeadId, DurabilityReceipt, EventId, EventKindV1, HlcMax, NamespaceId,
-            ReplicaId, SegmentId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId,
-            Watermarks,
+            Applied, BeadId, DurabilityReceipt, EventId, NamespaceId, ReplicaId, SegmentId, Seq1,
+            StoreEpoch, StoreId, StoreIdentity, TxnId, Watermarks,
         };
         use uuid::Uuid;
 
