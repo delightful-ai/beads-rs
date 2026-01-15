@@ -12,7 +12,7 @@ use crate::core::{
     Applied, DecodeError, Durable, ErrorCode, ErrorPayload, EventFrameError, EventFrameV1, EventId,
     EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, PrevVerified, ReplicaId,
     ReplicaRole, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEvent, Watermark,
-    verify_event_frame,
+    WatermarkError, verify_event_frame,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::metrics;
@@ -309,7 +309,9 @@ impl Session {
         let snapshot = store.watermark_snapshot(&accepted_namespaces);
         let welcome = self.build_welcome(negotiated, &hello, snapshot, accepted_namespaces.clone());
 
-        self.seed_watermarks(store, &incoming_namespaces);
+        if let Err(payload) = self.seed_watermarks(store, &incoming_namespaces) {
+            return self.fail(*payload);
+        }
         self.peer = Some(SessionPeer {
             replica_id: hello.sender_replica_id,
             store_epoch: hello.store_epoch,
@@ -357,7 +359,9 @@ impl Session {
             &self.config.requested_namespaces,
             &welcome.accepted_namespaces,
         );
-        self.seed_watermarks(store, &incoming_namespaces);
+        if let Err(payload) = self.seed_watermarks(store, &incoming_namespaces) {
+            return self.fail(*payload);
+        }
 
         self.peer = Some(SessionPeer {
             replica_id: welcome.receiver_replica_id,
@@ -423,7 +427,7 @@ impl Session {
             let durable = self.durable_for(&namespace, &origin);
 
             let expected_prev =
-                match self.expected_prev_head(&namespace, &origin, durable, frame.eid.origin_seq) {
+                match self.expected_prev_head(durable, frame.eid.origin_seq) {
                     Ok(prev) => prev,
                     Err(payload) => return self.fail(*payload),
                 };
@@ -540,12 +544,31 @@ impl Session {
         nonce
     }
 
-    fn seed_watermarks(&mut self, store: &impl SessionStore, namespaces: &[NamespaceId]) {
+    fn seed_watermarks(
+        &mut self,
+        store: &impl SessionStore,
+        namespaces: &[NamespaceId],
+    ) -> SessionResult<()> {
         let snapshot = store.watermark_snapshot(namespaces);
-        self.durable =
-            watermark_state_from_snapshot(&snapshot.durable, Some(&snapshot.durable_heads));
-        self.applied =
-            watermark_state_from_snapshot(&snapshot.applied, Some(&snapshot.applied_heads));
+        self.durable = watermark_state_from_snapshot(
+            &snapshot.durable,
+            Some(&snapshot.durable_heads),
+        )
+        .map_err(|err| {
+            Box::new(internal_error(format!(
+                "invalid durable watermark snapshot: {err}"
+            )))
+        })?;
+        self.applied = watermark_state_from_snapshot(
+            &snapshot.applied,
+            Some(&snapshot.applied_heads),
+        )
+        .map_err(|err| {
+            Box::new(internal_error(format!(
+                "invalid applied watermark snapshot: {err}"
+            )))
+        })?;
+        Ok(())
     }
 
     fn durable_for(&self, namespace: &NamespaceId, origin: &ReplicaId) -> Watermark<Durable> {
@@ -558,8 +581,6 @@ impl Session {
 
     fn expected_prev_head(
         &self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
         durable: Watermark<Durable>,
         seq: Seq1,
     ) -> SessionResult<Option<Sha256>> {
@@ -570,10 +591,7 @@ impl Session {
         match durable.head() {
             HeadStatus::Genesis => Ok(None),
             HeadStatus::Known(head) => Ok(Some(Sha256(head))),
-            HeadStatus::Unknown => Err(Box::new(internal_error(format!(
-                "missing durable head for {namespace} {origin} seq {}",
-                durable.seq().get()
-            )))),
+            HeadStatus::Unknown => unreachable!("unknown head should never reach session state"),
         }
     }
 
@@ -755,28 +773,24 @@ fn optional_heads(mut heads: WatermarkHeads) -> Option<WatermarkHeads> {
 fn watermark_state_from_snapshot<K>(
     map: &WatermarkMap,
     heads: Option<&WatermarkHeads>,
-) -> WatermarkState<K> {
+) -> Result<WatermarkState<K>, WatermarkError> {
     let mut out: WatermarkState<K> = BTreeMap::new();
     for (namespace, origins) in map {
         let ns_map = out.entry(namespace.clone()).or_default();
         for (origin, seq) in origins {
-            let head = heads
+            let head = match heads
                 .and_then(|heads| heads.get(namespace))
                 .and_then(|origins| origins.get(origin))
-                .map(|sha| HeadStatus::Known(sha.0))
-                .unwrap_or_else(|| {
-                    if *seq == Seq0::ZERO {
-                        HeadStatus::Genesis
-                    } else {
-                        HeadStatus::Unknown
-                    }
-                });
-            if let Ok(watermark) = Watermark::new(*seq, head) {
-                ns_map.insert(*origin, watermark);
-            }
+            {
+                Some(sha) => HeadStatus::Known(sha.0),
+                None if *seq == Seq0::ZERO => HeadStatus::Genesis,
+                None => return Err(WatermarkError::MissingHead { seq: *seq }),
+            };
+            let watermark = Watermark::new(*seq, head)?;
+            ns_map.insert(*origin, watermark);
         }
     }
-    out
+    Ok(out)
 }
 
 fn insert_want(want: &mut WatermarkMap, namespace: NamespaceId, origin: ReplicaId, from: Seq0) {
@@ -996,10 +1010,6 @@ fn drain_error_payload(err: DrainError) -> ErrorPayload {
             ErrorPayload::new(ErrorCode::Corruption, "prev_sha256 mismatch", false)
                 .with_details(CorruptionDetails { reason })
         }
-        DrainError::PrevUnknown { seq } => internal_error(format!(
-            "missing durable head while draining buffered events for seq {}",
-            seq.get()
-        )),
     }
 }
 

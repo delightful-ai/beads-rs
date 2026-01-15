@@ -220,16 +220,7 @@ impl Daemon {
         let prev_sha = match durable_watermark.head() {
             HeadStatus::Genesis => None,
             HeadStatus::Known(sha) => Some(sha),
-            HeadStatus::Unknown => {
-                return Err(OpError::from(StoreRuntimeError::WatermarkInvalid {
-                    kind: "durable",
-                    namespace: namespace.clone(),
-                    origin: origin_replica_id,
-                    source: WatermarkError::MissingHead {
-                        seq: durable_watermark.seq(),
-                    },
-                }));
-            }
+            HeadStatus::Unknown => unreachable!("durable watermark head should be known"),
         };
 
         let state_snapshot = {

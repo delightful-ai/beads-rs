@@ -80,6 +80,14 @@ pub enum PeerAckError {
 
     #[error("peer {peer} is marked diverged")]
     PeerDiverged { peer: ReplicaId },
+
+    #[error("missing head from {peer} for {namespace} {origin} at {seq}")]
+    MissingHead {
+        peer: ReplicaId,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq0,
+    },
 }
 
 pub type PeerAckResult<T> = Result<T, Box<PeerAckError>>;
@@ -261,23 +269,29 @@ impl PeerAckTable {
 }
 
 fn head_status_for(
+    peer: ReplicaId,
     seq: Seq0,
     heads: Option<&WatermarkHeads>,
     namespace: &NamespaceId,
     origin: &ReplicaId,
-) -> HeadStatus {
+) -> Result<HeadStatus, PeerAckError> {
     if let Some(sha) = heads
         .and_then(|map| map.get(namespace))
         .and_then(|origins| origins.get(origin))
     {
-        return HeadStatus::Known(sha.0);
+        return Ok(HeadStatus::Known(sha.0));
     }
 
     if seq == Seq0::ZERO {
-        HeadStatus::Genesis
-    } else {
-        HeadStatus::Unknown
+        return Ok(HeadStatus::Genesis);
     }
+
+    Err(PeerAckError::MissingHead {
+        peer,
+        namespace: namespace.clone(),
+        origin: *origin,
+        seq,
+    })
 }
 
 fn update_watermarks<K>(
@@ -290,7 +304,8 @@ fn update_watermarks<K>(
     for (namespace, origins) in updates {
         for (origin, seq) in origins {
             let seq0 = *seq;
-            let incoming_head = head_status_for(seq0, heads, namespace, origin);
+            let incoming_head =
+                head_status_for(peer, seq0, heads, namespace, origin).map_err(Box::new)?;
             let (current_seq, current_head) = watermarks
                 .get(namespace, origin)
                 .map(|watermark| (watermark.seq(), watermark.head()))
@@ -364,8 +379,13 @@ mod tests {
             .entry(ns.clone())
             .or_default()
             .insert(origin, Seq0::new(3));
+        let mut heads = WatermarkHeads::new();
+        heads
+            .entry(ns.clone())
+            .or_default()
+            .insert(origin, crate::core::Sha256([3u8; 32]));
         table
-            .update_peer(peer, &durable, None, None, None, 10)
+            .update_peer(peer, &durable, Some(&heads), None, None, 10)
             .unwrap();
 
         let mut backwards = WatermarkMap::new();
@@ -373,8 +393,13 @@ mod tests {
             .entry(ns.clone())
             .or_default()
             .insert(origin, Seq0::new(2));
+        let mut backwards_heads = WatermarkHeads::new();
+        backwards_heads
+            .entry(ns.clone())
+            .or_default()
+            .insert(origin, crate::core::Sha256([2u8; 32]));
         let err = table
-            .update_peer(peer, &backwards, None, None, None, 12)
+            .update_peer(peer, &backwards, Some(&backwards_heads), None, None, 12)
             .unwrap_err();
         assert!(matches!(*err, PeerAckError::NonMonotonic { .. }));
 
@@ -439,8 +464,13 @@ mod tests {
             .entry(ns.clone())
             .or_default()
             .insert(origin, Seq0::new(5));
+        let mut heads_a = WatermarkHeads::new();
+        heads_a
+            .entry(ns.clone())
+            .or_default()
+            .insert(origin, crate::core::Sha256([5u8; 32]));
         table
-            .update_peer(peer_a, &durable_a, None, None, None, 10)
+            .update_peer(peer_a, &durable_a, Some(&heads_a), None, None, 10)
             .unwrap();
 
         let mut durable_b = WatermarkMap::new();
@@ -448,8 +478,13 @@ mod tests {
             .entry(ns.clone())
             .or_default()
             .insert(origin, Seq0::new(4));
+        let mut heads_b = WatermarkHeads::new();
+        heads_b
+            .entry(ns.clone())
+            .or_default()
+            .insert(origin, crate::core::Sha256([4u8; 32]));
         table
-            .update_peer(peer_b, &durable_b, None, None, None, 11)
+            .update_peer(peer_b, &durable_b, Some(&heads_b), None, None, 11)
             .unwrap();
 
         let mut durable_c = WatermarkMap::new();
@@ -457,8 +492,13 @@ mod tests {
             .entry(ns.clone())
             .or_default()
             .insert(origin, Seq0::new(5));
+        let mut heads_c = WatermarkHeads::new();
+        heads_c
+            .entry(ns.clone())
+            .or_default()
+            .insert(origin, crate::core::Sha256([5u8; 32]));
         table
-            .update_peer(peer_c, &durable_c, None, None, None, 12)
+            .update_peer(peer_c, &durable_c, Some(&heads_c), None, None, 12)
             .unwrap();
 
         let status = table.satisfied_k(&ns, &origin, Seq0::new(5), 2);
@@ -472,5 +512,24 @@ mod tests {
             insufficient,
             QuorumOutcome::InsufficientEligible { .. }
         ));
+    }
+
+    #[test]
+    fn missing_head_for_nonzero_seq_is_error() {
+        let peer = replica(9);
+        let origin = replica(10);
+        let ns = namespace();
+        let mut table = PeerAckTable::new();
+
+        let mut durable = WatermarkMap::new();
+        durable
+            .entry(ns.clone())
+            .or_default()
+            .insert(origin, Seq0::new(1));
+
+        let err = table
+            .update_peer(peer, &durable, None, None, None, 10)
+            .unwrap_err();
+        assert!(matches!(*err, PeerAckError::MissingHead { .. }));
     }
 }

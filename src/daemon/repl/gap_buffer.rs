@@ -52,9 +52,6 @@ pub enum DrainError {
         expected: Option<Sha256>,
         got: Option<Sha256>,
     },
-    PrevUnknown {
-        seq: Seq1,
-    },
 }
 
 impl OriginStreamState {
@@ -155,11 +152,7 @@ impl OriginStreamState {
         let mut head = match self.durable.head() {
             HeadStatus::Genesis => None,
             HeadStatus::Known(head) => Some(Sha256(head)),
-            HeadStatus::Unknown => {
-                return Err(DrainError::PrevUnknown {
-                    seq: self.durable.seq().next(),
-                });
-            }
+            HeadStatus::Unknown => unreachable!("unknown head should never reach gap buffer"),
         };
 
         let mut batch = Vec::new();

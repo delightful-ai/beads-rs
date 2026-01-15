@@ -122,11 +122,10 @@ pub enum HeadStatus {
     Unknown,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Watermark<K> {
     seq: Seq0,
     head: HeadStatus,
-    #[serde(skip)]
     _kind: PhantomData<K>,
 }
 
@@ -165,6 +164,29 @@ impl<K> Watermark<K> {
     }
 }
 
+impl<K> Serialize for Watermark<K> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = WatermarkWire {
+            seq: self.seq,
+            head: self.head,
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de, K> Deserialize<'de> for Watermark<K> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = WatermarkWire::deserialize(deserializer)?;
+        Watermark::new(wire.seq, wire.head).map_err(serde::de::Error::custom)
+    }
+}
+
 impl<K> Default for Watermark<K> {
     fn default() -> Self {
         Self::genesis()
@@ -190,8 +212,8 @@ fn validate_head(seq: Seq0, head: HeadStatus) -> Result<(), WatermarkError> {
     }
 
     match head {
-        HeadStatus::Genesis => Err(WatermarkError::MissingHead { seq }),
-        _ => Ok(()),
+        HeadStatus::Known(_) => Ok(()),
+        _ => Err(WatermarkError::MissingHead { seq }),
     }
 }
 
@@ -268,12 +290,6 @@ impl<K> Watermarks<K> {
         }
 
         if seq == current.seq() {
-            let should_upgrade = matches!(current.head(), HeadStatus::Unknown)
-                && matches!(head, HeadStatus::Known(_));
-            if should_upgrade {
-                let updated = Watermark::new(seq, head)?;
-                *self.entry_mut(namespace, origin) = updated;
-            }
             return Ok(());
         }
 
@@ -313,6 +329,12 @@ impl<K> Watermarks<K> {
             .entry(*origin)
             .or_default()
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WatermarkWire {
+    seq: Seq0,
+    head: HeadStatus,
 }
 
 #[cfg(test)]
@@ -355,10 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn watermark_allows_unknown_for_nonzero_seq() {
+    fn watermark_rejects_unknown_for_nonzero_seq() {
         let seq = Seq0::new(2);
-        let watermark = Watermark::<Applied>::new(seq, HeadStatus::Unknown).expect("watermark");
-        assert!(matches!(watermark.head(), HeadStatus::Unknown));
+        let err = Watermark::<Applied>::new(seq, HeadStatus::Unknown).unwrap_err();
+        assert_eq!(err, WatermarkError::MissingHead { seq });
+    }
+
+    #[test]
+    fn watermark_rejects_unknown_on_deserialize() {
+        let raw = r#"{"seq":2,"head":"Unknown"}"#;
+        let err = serde_json::from_str::<Watermark<Applied>>(raw).unwrap_err();
+        assert!(err.to_string().contains("head hash required"));
     }
 
     #[test]

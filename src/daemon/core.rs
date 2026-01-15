@@ -3034,7 +3034,13 @@ fn apply_checkpoint_watermarks(
         for (namespace, origin_map) in &import.included {
             for (origin, seq) in origin_map {
                 let head =
-                    checkpoint_head_status(import.included_heads.as_ref(), namespace, origin, *seq);
+                    checkpoint_head_status(import.included_heads.as_ref(), namespace, origin, *seq)
+                        .map_err(|source| StoreRuntimeError::WatermarkInvalid {
+                            kind: "applied",
+                            namespace: namespace.clone(),
+                            origin: *origin,
+                            source,
+                        })?;
                 store
                     .watermarks_applied
                     .observe_at_least(namespace, origin, Seq0::new(*seq), head)
@@ -3133,17 +3139,19 @@ fn checkpoint_head_status(
     namespace: &NamespaceId,
     origin: &ReplicaId,
     seq: u64,
-) -> HeadStatus {
+) -> Result<HeadStatus, WatermarkError> {
     if seq == 0 {
-        return HeadStatus::Genesis;
+        return Ok(HeadStatus::Genesis);
     }
     if let Some(heads) = included_heads
         && let Some(origins) = heads.get(namespace)
         && let Some(head) = origins.get(origin)
     {
-        return HeadStatus::Known(*head.as_bytes());
+        return Ok(HeadStatus::Known(*head.as_bytes()));
     }
-    HeadStatus::Unknown
+    Err(WatermarkError::MissingHead {
+        seq: Seq0::new(seq),
+    })
 }
 
 fn head_sha(head: HeadStatus) -> Option<[u8; 32]> {
@@ -4016,7 +4024,12 @@ mod tests {
             .replica_id;
         let mut required = Watermarks::<Applied>::new();
         required
-            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .observe_at_least(
+                &namespace,
+                &origin,
+                Seq0::new(1),
+                HeadStatus::Known([1u8; 32]),
+            )
             .expect("watermark");
 
         let read = NormalizedReadConsistency {
@@ -4062,7 +4075,12 @@ mod tests {
         let runtime = daemon.stores.get_mut(&store_id).expect("store runtime");
         runtime
             .watermarks_applied
-            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .observe_at_least(
+                &namespace,
+                &origin,
+                Seq0::new(1),
+                HeadStatus::Known([1u8; 32]),
+            )
             .expect("watermark");
         let read = NormalizedReadConsistency {
             namespace,
