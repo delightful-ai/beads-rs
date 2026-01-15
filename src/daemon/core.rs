@@ -1824,7 +1824,7 @@ impl Daemon {
             .map(|(id, store)| (id, &mut store.repo_state))
     }
 
-    fn normalize_mutation_meta(
+    pub(crate) fn normalize_mutation_meta(
         &self,
         proof: &LoadedStore,
         meta: MutationMeta,

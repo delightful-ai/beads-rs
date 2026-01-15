@@ -17,9 +17,9 @@ use super::types::{CheckpointShardPayload, CheckpointSnapshot};
 use crate::core::dep::DepKey;
 use crate::core::tombstone::TombstoneKey;
 use crate::core::{
-    CanonicalState, ContentHash, DepEdge, Durable, HeadStatus, NamespaceId, NamespacePolicy,
-    ReplicaId, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireDepV1,
-    WireStamp, WireTombstoneV1, sha256_bytes,
+    ContentHash, DepEdge, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, StoreEpoch,
+    StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireDepV1, WireStamp,
+    WireTombstoneV1, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
