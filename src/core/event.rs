@@ -976,11 +976,13 @@ fn decode_wire_bead_patch(
     depth: usize,
 ) -> Result<WireBeadPatch, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
     let mut patch = WireBeadPatch::new(bead_id_placeholder());
     let mut id_set = false;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "acceptance_criteria" => {
                 patch.acceptance_criteria = decode_wire_patch_str(dec, limits)?;
@@ -1130,6 +1132,7 @@ fn decode_wire_note(
     depth: usize,
 ) -> Result<WireNoteV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
     let mut id = None;
     let mut content = None;
     let mut author = None;
@@ -1137,6 +1140,7 @@ fn decode_wire_note(
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "at" => {
                 at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
@@ -1226,6 +1230,7 @@ fn decode_wire_tombstone(
     depth: usize,
 ) -> Result<WireTombstoneV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
     let mut id = None;
     let mut deleted_at = None;
     let mut deleted_by = None;
@@ -1235,6 +1240,7 @@ fn decode_wire_tombstone(
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "id" => {
                 let raw = decode_text(dec, limits)?;
@@ -1323,6 +1329,7 @@ fn decode_wire_dep(
     depth: usize,
 ) -> Result<WireDepV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
     let mut from = None;
     let mut to = None;
     let mut kind = None;
@@ -1333,6 +1340,7 @@ fn decode_wire_dep(
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "from" => {
                 let raw = decode_text(dec, limits)?;
@@ -1411,6 +1419,7 @@ fn decode_wire_dep_delete(
     depth: usize,
 ) -> Result<WireDepDeleteV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
     let mut from = None;
     let mut to = None;
     let mut kind = None;
@@ -1419,6 +1428,7 @@ fn decode_wire_dep_delete(
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "from" => {
                 let raw = decode_text(dec, limits)?;
