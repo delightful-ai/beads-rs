@@ -265,24 +265,26 @@ impl GitWorker {
         git_ref: &str,
         checkpoint_groups: BTreeMap<String, String>,
     ) -> CheckpointResult {
-        let repo = self.open(path)?;
         let export = export_checkpoint(CheckpointExportInput {
             snapshot,
             previous: None,
         })?;
 
         let cache = CheckpointCache::new(snapshot.store_id, snapshot.checkpoint_group.clone());
-        let budget = self.background_budget(snapshot.store_id);
-        let mut throttle = |bytes: u64| {
-            let wait = budget.throttle(bytes);
-            if !wait.is_zero() {
-                metrics::background_io_throttle(wait, bytes);
+        {
+            let budget = self.background_budget(snapshot.store_id);
+            let mut throttle = |bytes: u64| {
+                let wait = budget.throttle(bytes);
+                if !wait.is_zero() {
+                    metrics::background_io_throttle(wait, bytes);
+                }
+            };
+            if let Err(err) = cache.publish_with_throttle(&export, Some(&mut throttle)) {
+                tracing::warn!(error = ?err, "checkpoint cache publish failed");
             }
-        };
-        if let Err(err) = cache.publish_with_throttle(&export, Some(&mut throttle)) {
-            tracing::warn!(error = ?err, "checkpoint cache publish failed");
         }
 
+        let repo = self.open(path)?;
         let store_meta = CheckpointStoreMeta::new(
             snapshot.store_id,
             snapshot.store_epoch,
