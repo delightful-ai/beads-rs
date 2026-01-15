@@ -66,7 +66,7 @@ pub struct ReplicationPeerConfig {
     pub allowed_namespaces: Option<Vec<NamespaceId>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct CheckpointGroupConfig {
     pub namespaces: Vec<NamespaceId>,
@@ -77,21 +77,6 @@ pub struct CheckpointGroupConfig {
     pub max_interval_ms: Option<u64>,
     pub max_events: Option<u64>,
     pub durable_copy_via_git: bool,
-}
-
-impl Default for CheckpointGroupConfig {
-    fn default() -> Self {
-        Self {
-            namespaces: Vec::new(),
-            git_ref: None,
-            checkpoint_writers: Vec::new(),
-            primary_writer: None,
-            debounce_ms: None,
-            max_interval_ms: None,
-            max_events: None,
-            durable_copy_via_git: false,
-        }
-    }
 }
 
 fn default_namespace_policies() -> NamespacePolicies {
@@ -200,7 +185,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let peer = ReplicationPeerConfig {
-            replica_id: ReplicaId::new(Uuid::new_v4()),
+            replica_id: ReplicaId::new(Uuid::from_bytes([7u8; 16])),
             addr: "127.0.0.1:9000".to_string(),
             role: Some(ReplicaRole::Anchor),
             allowed_namespaces: Some(vec![NamespaceId::core()]),

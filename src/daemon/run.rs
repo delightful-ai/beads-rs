@@ -96,7 +96,7 @@ pub fn run_daemon() -> Result<()> {
     wal.cleanup_stale().ok(); // Clean up any stale .tmp files from crashes
 
     // Create daemon core and git worker.
-    let daemon = Daemon::new_with_limits(actor, wal, (*limits).clone());
+    let daemon = Daemon::new_with_config(actor, wal, config.clone());
     let git_worker = GitWorker::new(git_result_tx, (*limits).clone());
 
     // Spawn state thread.

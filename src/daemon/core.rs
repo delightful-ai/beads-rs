@@ -34,9 +34,9 @@ use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
 use super::repl::{
-    BackoffPolicy, IngestOutcome, ReplIngestRequest, ReplSessionStore, ReplicationManager,
-    ReplicationManagerConfig, ReplicationManagerHandle, ReplicationServer, ReplicationServerConfig,
-    ReplicationServerHandle, SharedSessionStore, WalRangeReader,
+    BackoffPolicy, IngestOutcome, PeerConfig, ReplIngestRequest, ReplSessionStore,
+    ReplicationManager, ReplicationManagerConfig, ReplicationManagerHandle, ReplicationServer,
+    ReplicationServerConfig, ReplicationServerHandle, SharedSessionStore, WalRangeReader,
 };
 use super::repo::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
@@ -49,6 +49,7 @@ use super::wal::{
 };
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
+use crate::config::CheckpointGroupConfig as ConfigCheckpointGroup;
 use crate::core::error::details as error_details;
 use crate::paths;
 
@@ -156,9 +157,9 @@ use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
     ActorId, Applied, ApplyError, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
     DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, HeadStatus, Limits, NamespaceId,
-    PrevVerified, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp,
-    StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark,
-    WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
+    NamespacePolicy, PrevVerified, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1,
+    Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock,
+    Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
@@ -260,6 +261,12 @@ pub struct Daemon {
 
     /// Realtime safety limits.
     limits: Limits,
+    /// Replication settings loaded from config (env overrides applied at use sites).
+    replication: crate::config::ReplicationConfig,
+    /// Default checkpoint group specs from config.
+    checkpoint_groups: BTreeMap<String, ConfigCheckpointGroup>,
+    /// Default namespace policies when namespaces.toml is missing.
+    namespace_defaults: BTreeMap<NamespaceId, NamespacePolicy>,
 
     /// Replication ingest channel (set by run_state_loop).
     repl_ingest_tx: Option<Sender<ReplIngestRequest>>,
@@ -295,6 +302,16 @@ impl Daemon {
 
     /// Create a new daemon with custom limits.
     pub fn new_with_limits(actor: ActorId, wal: Wal, limits: Limits) -> Self {
+        let config = crate::config::Config {
+            limits,
+            ..Default::default()
+        };
+        Self::new_with_config(actor, wal, config)
+    }
+
+    /// Create a new daemon with config settings.
+    pub fn new_with_config(actor: ActorId, wal: Wal, config: crate::config::Config) -> Self {
+        let limits = config.limits.clone();
         // Initialize Go-compat export context (best effort - don't fail daemon startup)
         let export_ctx = match ExportContext::new() {
             Ok(ctx) => Some(ctx),
@@ -319,6 +336,9 @@ impl Daemon {
             wal: Arc::new(wal),
             export_ctx,
             limits,
+            replication: config.replication.clone(),
+            checkpoint_groups: config.checkpoint_groups.clone(),
+            namespace_defaults: config.namespace_defaults.namespaces.clone(),
             repl_ingest_tx: None,
             repl_handles: BTreeMap::new(),
             shutting_down: false,
@@ -423,15 +443,98 @@ impl Daemon {
         self.emit_checkpoint_queue_depth();
     }
 
+    fn replication_peers(&self) -> Vec<PeerConfig> {
+        self.replication
+            .peers
+            .iter()
+            .map(|peer| PeerConfig {
+                replica_id: peer.replica_id,
+                addr: peer.addr.clone(),
+                role: peer.role,
+                allowed_namespaces: peer.allowed_namespaces.clone(),
+            })
+            .collect()
+    }
+
     fn register_default_checkpoint_groups(&mut self, store_id: StoreId) -> Result<(), OpError> {
         let store = self
             .stores
             .get(&store_id)
             .ok_or(OpError::Internal("loaded store missing from state"))?;
-        let config = CheckpointGroupConfig::core_default(store_id, store.meta.replica_id);
-        self.checkpoint_scheduler.register_group(config);
+        let configs = self.checkpoint_group_configs(store_id, store.meta.replica_id);
+        for config in configs {
+            self.checkpoint_scheduler.register_group(config);
+        }
         self.emit_checkpoint_queue_depth();
         Ok(())
+    }
+
+    fn checkpoint_group_configs(
+        &self,
+        store_id: StoreId,
+        local_replica_id: ReplicaId,
+    ) -> Vec<CheckpointGroupConfig> {
+        if self.checkpoint_groups.is_empty() {
+            return vec![CheckpointGroupConfig::core_default(
+                store_id,
+                local_replica_id,
+            )];
+        }
+
+        let mut configs = Vec::new();
+        for (group, spec) in &self.checkpoint_groups {
+            let namespaces = if spec.namespaces.is_empty() {
+                if group == "core" {
+                    vec![NamespaceId::core()]
+                } else {
+                    tracing::warn!(
+                        checkpoint_group = %group,
+                        "checkpoint group has no namespaces; skipping"
+                    );
+                    continue;
+                }
+            } else {
+                spec.namespaces.clone()
+            };
+
+            let mut config = CheckpointGroupConfig::core_default(store_id, local_replica_id);
+            config.group = group.clone();
+            config.namespaces = namespaces;
+            config.git_ref =
+                resolve_checkpoint_git_ref(store_id, group, spec.git_ref.as_deref());
+            config.checkpoint_writers = if spec.checkpoint_writers.is_empty() {
+                vec![local_replica_id]
+            } else {
+                spec.checkpoint_writers.clone()
+            };
+            config.primary_writer = spec.primary_writer.or(Some(local_replica_id));
+            if let Some(primary_writer) = config.primary_writer
+                && !config.checkpoint_writers.contains(&primary_writer)
+            {
+                config.checkpoint_writers.push(primary_writer);
+            }
+            if let Some(debounce_ms) = spec.debounce_ms {
+                config.debounce = Duration::from_millis(debounce_ms);
+            }
+            if let Some(max_interval_ms) = spec.max_interval_ms {
+                config.max_interval = Duration::from_millis(max_interval_ms);
+            }
+            if let Some(max_events) = spec.max_events {
+                config.max_events = max_events;
+            }
+            config.durable_copy_via_git = spec.durable_copy_via_git;
+
+            configs.push(config);
+        }
+
+        if configs.is_empty() {
+            configs.push(CheckpointGroupConfig::core_default(
+                store_id,
+                local_replica_id,
+            ));
+        }
+
+        configs
     }
 
     /// Get repo state. Returns Internal if invariant is violated.
@@ -619,6 +722,7 @@ impl Daemon {
                 WallClock::now().0,
                 env!("CARGO_PKG_VERSION"),
                 self.limits(),
+                &self.namespace_defaults,
             )?;
             let runtime = open.runtime;
             self.seed_actor_clocks(&runtime)?;
@@ -704,6 +808,7 @@ impl Daemon {
                 WallClock::now().0,
                 env!("CARGO_PKG_VERSION"),
                 self.limits(),
+                &self.namespace_defaults,
             )?;
             let runtime = open.runtime;
             self.seed_actor_clocks(&runtime)?;
@@ -1093,7 +1198,7 @@ impl Daemon {
             SharedSessionStore::new(ReplSessionStore::new(store_id, wal_index, ingest_tx));
 
         let roster = load_replica_roster(store_id)?;
-        let peers = Vec::new();
+        let peers = self.replication_peers();
 
         let manager_config = ReplicationManagerConfig {
             local_store: store.meta.identity,
@@ -1106,20 +1211,17 @@ impl Daemon {
             peers,
             wal_reader: wal_reader.clone(),
             limits: self.limits.clone(),
-            backoff: BackoffPolicy {
-                base: Duration::from_millis(250),
-                max: Duration::from_secs(5),
-            },
+            backoff: replication_backoff(&self.replication),
         };
         let manager_handle = ReplicationManager::new(session_store.clone(), manager_config).start();
 
         let max_connections = if roster.is_some() {
             None
         } else {
-            replication_max_connections()
+            replication_max_connections(&self.replication)
         };
         let server_config = ReplicationServerConfig {
-            listen_addr: replication_listen_addr(),
+            listen_addr: replication_listen_addr(&self.replication),
             local_store: store.meta.identity,
             local_replica_id: store.meta.replica_id,
             admission: store.admission.clone(),
@@ -3224,15 +3326,24 @@ fn parse_durability(raw: Option<String>) -> Result<DurabilityClass, OpError> {
     })
 }
 
-fn replication_listen_addr() -> String {
+fn replication_listen_addr(config: &crate::config::ReplicationConfig) -> String {
     std::env::var("BD_REPL_LISTEN_ADDR")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "127.0.0.1:0".to_string())
+        .unwrap_or_else(|| {
+            let trimmed = config.listen_addr.trim();
+            if trimmed.is_empty() {
+                "127.0.0.1:0".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
 }
 
-fn replication_max_connections() -> Option<NonZeroUsize> {
+fn replication_max_connections(
+    config: &crate::config::ReplicationConfig,
+) -> Option<NonZeroUsize> {
     if let Ok(raw) = std::env::var("BD_REPL_MAX_CONNECTIONS") {
         match raw.trim().parse::<usize>() {
             Ok(parsed) => return NonZeroUsize::new(parsed),
@@ -3241,7 +3352,29 @@ fn replication_max_connections() -> Option<NonZeroUsize> {
             }
         }
     }
-    NonZeroUsize::new(DEFAULT_REPL_MAX_CONNECTIONS)
+    match config.max_connections {
+        Some(0) => None,
+        Some(value) => NonZeroUsize::new(value),
+        None => NonZeroUsize::new(DEFAULT_REPL_MAX_CONNECTIONS),
+    }
+}
+
+fn replication_backoff(config: &crate::config::ReplicationConfig) -> BackoffPolicy {
+    let base = Duration::from_millis(config.backoff_base_ms);
+    let mut max = Duration::from_millis(config.backoff_max_ms);
+    if max < base {
+        max = base;
+    }
+    BackoffPolicy { base, max }
+}
+
+fn resolve_checkpoint_git_ref(store_id: StoreId, group: &str, git_ref: Option<&str>) -> String {
+    let raw = git_ref.unwrap_or("").trim();
+    if raw.is_empty() {
+        return format!("refs/beads/{store_id}/{group}");
+    }
+    raw.replace("{store_id}", &store_id.to_string())
+        .replace("{group}", group)
 }
 
 pub(crate) fn load_replica_roster(store_id: StoreId) -> Result<Option<ReplicaRoster>, OpError> {
@@ -3380,6 +3513,7 @@ pub(crate) fn insert_store_for_tests(
         WallClock::now().0,
         env!("CARGO_PKG_VERSION"),
         daemon.limits(),
+        &daemon.namespace_defaults,
     )
     .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
     daemon.seed_actor_clocks(&open.runtime)?;
@@ -3472,6 +3606,7 @@ mod tests {
             WallClock::now().0,
             env!("CARGO_PKG_VERSION"),
             daemon.limits(),
+            &daemon.namespace_defaults,
         )
         .unwrap()
         .runtime;

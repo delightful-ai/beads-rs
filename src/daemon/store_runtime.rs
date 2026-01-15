@@ -72,6 +72,7 @@ impl StoreRuntime {
         now_ms: u64,
         daemon_version: &str,
         limits: &Limits,
+        namespace_defaults: &BTreeMap<NamespaceId, NamespacePolicy>,
     ) -> Result<StoreRuntimeOpen, StoreRuntimeError> {
         let meta_path = paths::store_meta_path(store_id);
         let existing = read_store_meta_optional(&meta_path)?;
@@ -148,7 +149,7 @@ impl StoreRuntime {
         let runtime = Self {
             primary_remote,
             meta,
-            policies: load_namespace_policies(store_id)?,
+            policies: load_namespace_policies(store_id, namespace_defaults)?,
             repo_state,
             watermarks_applied,
             watermarks_durable,
@@ -339,19 +340,16 @@ fn remove_wal_index_files(store_id: StoreId) -> Result<(), StoreRuntimeError> {
     Ok(())
 }
 
-fn default_policies() -> BTreeMap<NamespaceId, NamespacePolicy> {
-    let mut policies = BTreeMap::new();
-    policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
-    policies
-}
-
 pub(crate) fn load_namespace_policies(
     store_id: StoreId,
+    defaults: &BTreeMap<NamespaceId, NamespacePolicy>,
 ) -> Result<BTreeMap<NamespaceId, NamespacePolicy>, StoreRuntimeError> {
     let path = paths::namespaces_path(store_id);
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(default_policies()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(defaults.clone());
+        }
         Err(err) => {
             return Err(StoreRuntimeError::NamespacePoliciesRead {
                 path: Box::new(path),
@@ -566,6 +564,7 @@ mod tests {
         txn.commit().expect("commit watermark");
 
         let wal = Wal::new(temp.path()).expect("wal");
+        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
         let runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
@@ -573,6 +572,7 @@ mod tests {
             now_ms + 1,
             "test",
             &Limits::default(),
+            &namespace_defaults,
         )
         .expect("open runtime")
         .runtime;
@@ -620,6 +620,7 @@ mod tests {
         txn.commit().expect("commit watermark");
 
         let wal = Wal::new(temp.path()).expect("wal");
+        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
         let result = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
@@ -627,6 +628,7 @@ mod tests {
             now_ms + 1,
             "test",
             &Limits::default(),
+            &namespace_defaults,
         );
 
         assert!(matches!(
