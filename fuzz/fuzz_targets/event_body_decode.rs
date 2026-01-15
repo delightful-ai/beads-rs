@@ -1,10 +1,8 @@
 #![no_main]
 
+use beads_rs::{decode_event_body, Limits};
 use libfuzzer_sys::fuzz_target;
 
-use beads_rs::{Limits, decode_event_body};
-
 fuzz_target!(|data: &[u8]| {
-    let limits = Limits::default();
-    let _ = decode_event_body(data, &limits);
+    let _ = decode_event_body(data, &Limits::default());
 });

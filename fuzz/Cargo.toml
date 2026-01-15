@@ -9,27 +9,25 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+beads-rs = { path = ".." }
 
-[dependencies.beads-rs]
-path = ".."
+[workspace]
+members = ["."]
 
 [[bin]]
 name = "wal_decode"
 path = "fuzz_targets/wal_decode.rs"
 test = false
 doc = false
-bench = false
 
 [[bin]]
 name = "event_body_decode"
 path = "fuzz_targets/event_body_decode.rs"
 test = false
 doc = false
-bench = false
 
 [[bin]]
 name = "repl_message_decode"
 path = "fuzz_targets/repl_message_decode.rs"
 test = false
 doc = false
-bench = false

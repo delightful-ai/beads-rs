@@ -62,3 +62,8 @@ Temporary Items
 
 # Samply profiling output
 samply-*.json
+
+# Fuzzing artifacts
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/coverage/
