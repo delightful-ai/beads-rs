@@ -9,8 +9,8 @@ use beads_rs::daemon::wal::{FrameReader, WalReplayError, rebuild_index};
 use beads_rs::{Limits, NamespaceId, ReplicaId};
 use uuid::Uuid;
 
-use fixtures::wal::{TempWalDir, record_for_seq, sample_record};
-use fixtures::wal_corrupt::{corrupt_frame_body, truncated_segment};
+use crate::fixtures::wal::{TempWalDir, record_for_seq, sample_record};
+use crate::fixtures::wal_corrupt::{corrupt_frame_body, truncated_segment};
 
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 

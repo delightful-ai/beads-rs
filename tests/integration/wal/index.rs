@@ -11,7 +11,7 @@ use beads_rs::daemon::wal::{
 };
 use beads_rs::{Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
 
-use fixtures::wal::{SegmentFixture, TempWalDir, record_for_seq};
+use crate::fixtures::wal::{SegmentFixture, TempWalDir, record_for_seq};
 
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 

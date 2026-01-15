@@ -6,10 +6,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use fixtures::identity::{
+use crate::fixtures::identity::{
     invalid_namespaces, namespace_id, store_id, store_meta, valid_namespaces,
 };
-use fixtures::store_dir::TempStoreDir;
+use crate::fixtures::store_dir::TempStoreDir;
 use uuid::Uuid;
 
 use beads_rs::daemon::remote::normalize_url;

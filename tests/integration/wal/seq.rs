@@ -7,7 +7,7 @@ use uuid::Uuid;
 use beads_rs::daemon::wal::{Record, WalIndex, rebuild_index};
 use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
 
-use fixtures::wal::{TempWalDir, record_for_seq};
+use crate::fixtures::wal::{TempWalDir, record_for_seq};
 
 #[test]
 fn phase3_seq_allocation_is_monotonic() {

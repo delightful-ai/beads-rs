@@ -15,7 +15,7 @@ use crate::core::error::details::{
 };
 use crate::core::{
     ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, EventShaLookupError, Limits,
-    NamespaceId, Opaque, PrevVerified, ReplicaId, ReplicaRole, SegmentId, Sha256, StoreId,
+    NamespaceId, Opaque, PrevVerified, ReplicaId, ReplicaRole, SegmentId, Seq0, Sha256, StoreId,
     VerifiedEvent,
 };
 use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
@@ -225,7 +225,7 @@ impl WalRangeReader {
         &self,
         namespace: &NamespaceId,
         origin: &ReplicaId,
-        from_seq_excl: u64,
+        from_seq_excl: Seq0,
         max_bytes: usize,
     ) -> Result<Vec<EventFrameV1>, WalRangeError> {
         let items = self
@@ -241,7 +241,7 @@ impl WalRangeReader {
                 from_seq_excl,
             });
         };
-        if first.event_id.origin_seq.get() != from_seq_excl.saturating_add(1) {
+        if first.event_id.origin_seq != from_seq_excl.next() {
             return Err(WalRangeError::MissingRange {
                 namespace: namespace.clone(),
                 origin: *origin,
@@ -279,7 +279,7 @@ impl WalRangeReader {
                     })?;
 
             if record.header.origin_replica_id != *origin
-                || record.header.origin_seq != item.event_id.origin_seq.get()
+                || record.header.origin_seq != item.event_id.origin_seq
             {
                 return Err(WalRangeError::Corrupt {
                     namespace: namespace.clone(),
@@ -315,7 +315,7 @@ pub enum WalRangeError {
     MissingRange {
         namespace: NamespaceId,
         origin: ReplicaId,
-        from_seq_excl: u64,
+        from_seq_excl: Seq0,
     },
     #[error("wal corrupt: {reason}")]
     Corrupt {

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
-use fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::daemon_runtime::shutdown_daemon;
 use predicates::prelude::*;
 use tempfile::TempDir;
 

@@ -141,7 +141,7 @@ pub fn corrupt_payload(payload: &CheckpointShardPayload) -> CheckpointShardPaylo
 mod tests {
     use super::*;
 
-    use crate::fixtures::checkpoint::fixture_small_state;
+    use crate::crate::fixtures::checkpoint::fixture_small_state;
 
     #[test]
     fn fixtures_checkpoint_diff_empty_for_equal_exports() {

@@ -31,7 +31,7 @@ use super::repl::{WalRangeError, WalRangeReader};
 use crate::core::error::details as error_details;
 use crate::core::{
     Applied, DurabilityClass, ErrorCode, ErrorPayload, EventFrameV1, EventId, Limits, NamespaceId,
-    ReplicaId, Sha256, Watermark, Watermarks, decode_event_body,
+    ReplicaId, Seq0, Sha256, Watermark, Watermarks, decode_event_body,
 };
 
 /// Message sent from socket handlers to state thread.
@@ -1045,7 +1045,7 @@ trait WalRangeRead {
         &self,
         namespace: &NamespaceId,
         origin: &ReplicaId,
-        from_seq_excl: u64,
+        from_seq_excl: Seq0,
         max_bytes: usize,
     ) -> Result<Vec<EventFrameV1>, WalRangeError>;
 }
@@ -1055,7 +1055,7 @@ impl WalRangeRead for WalRangeReader {
         &self,
         namespace: &NamespaceId,
         origin: &ReplicaId,
-        from_seq_excl: u64,
+        from_seq_excl: Seq0,
         max_bytes: usize,
     ) -> Result<Vec<EventFrameV1>, WalRangeError> {
         WalRangeReader::read_range(self, namespace, origin, from_seq_excl, max_bytes)
@@ -1092,8 +1092,8 @@ fn build_backfill_plan<R: WalRangeRead>(
             continue;
         }
 
-        let mut from_seq_excl = required_seq;
-        while from_seq_excl < current_seq {
+        let mut from_seq_excl = Seq0::new(required_seq);
+        while from_seq_excl.get() < current_seq {
             let frames = wal_reader
                 .read_range(
                     namespace,
@@ -1109,7 +1109,7 @@ fn build_backfill_plan<R: WalRangeRead>(
                     from_seq_excl,
                 }));
             };
-            from_seq_excl = last.eid.origin_seq.get();
+            from_seq_excl = Seq0::new(last.eid.origin_seq.get());
             plan.frames.extend(frames);
         }
     }
@@ -1191,13 +1191,13 @@ mod tests {
     struct ReadCall {
         namespace: NamespaceId,
         origin: ReplicaId,
-        from_seq_excl: u64,
+        from_seq_excl: Seq0,
         max_bytes: usize,
     }
 
     #[derive(Default)]
     struct FakeWalReader {
-        responses: RefCell<HashMap<(ReplicaId, u64), Result<Vec<EventFrameV1>, WalRangeError>>>,
+        responses: RefCell<HashMap<(ReplicaId, Seq0), Result<Vec<EventFrameV1>, WalRangeError>>>,
         calls: RefCell<Vec<ReadCall>>,
     }
 
@@ -1205,7 +1205,7 @@ mod tests {
         fn with_response(
             self,
             origin: ReplicaId,
-            from_seq_excl: u64,
+            from_seq_excl: Seq0,
             response: Result<Vec<EventFrameV1>, WalRangeError>,
         ) -> Self {
             self.responses
@@ -1224,7 +1224,7 @@ mod tests {
             &self,
             namespace: &NamespaceId,
             origin: &ReplicaId,
-            from_seq_excl: u64,
+            from_seq_excl: Seq0,
             max_bytes: usize,
         ) -> Result<Vec<EventFrameV1>, WalRangeError> {
             self.calls.borrow_mut().push(ReadCall {
@@ -1270,8 +1270,8 @@ mod tests {
         let frame3 = frame(origin, namespace.clone(), 3);
         let frame4 = frame(origin, namespace.clone(), 4);
         let reader = FakeWalReader::default()
-            .with_response(origin, 2, Ok(vec![frame3.clone()]))
-            .with_response(origin, 3, Ok(vec![frame4.clone()]));
+            .with_response(origin, Seq0::new(2), Ok(vec![frame3.clone()]))
+            .with_response(origin, Seq0::new(3), Ok(vec![frame4.clone()]));
         let limits = Limits::default();
 
         let plan =
@@ -1288,13 +1288,13 @@ mod tests {
                 ReadCall {
                     namespace: namespace.clone(),
                     origin,
-                    from_seq_excl: 2,
+                    from_seq_excl: Seq0::new(2),
                     max_bytes: limits.max_event_batch_bytes,
                 },
                 ReadCall {
                     namespace: namespace.clone(),
                     origin,
-                    from_seq_excl: 3,
+                    from_seq_excl: Seq0::new(3),
                     max_bytes: limits.max_event_batch_bytes,
                 },
             ]
@@ -1317,11 +1317,11 @@ mod tests {
 
         let reader = FakeWalReader::default().with_response(
             origin,
-            1,
+            Seq0::new(1),
             Err(WalRangeError::MissingRange {
                 namespace: namespace.clone(),
                 origin,
-                from_seq_excl: 1,
+                from_seq_excl: Seq0::new(1),
             }),
         );
 
@@ -1361,7 +1361,7 @@ mod tests {
 
         let reader = FakeWalReader::default().with_response(
             origin,
-            1,
+            Seq0::new(1),
             Err(WalRangeError::Corrupt {
                 namespace: namespace.clone(),
                 segment_id: None,

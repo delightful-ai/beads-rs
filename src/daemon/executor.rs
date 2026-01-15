@@ -202,11 +202,9 @@ impl Daemon {
             .unwrap_or_else(Watermark::genesis);
 
         let mut txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
-        let next_seq = txn
+        let origin_seq = txn
             .next_origin_seq(&namespace, &origin_replica_id)
             .map_err(wal_index_to_op)?;
-        let origin_seq =
-            Seq1::from_u64(next_seq).ok_or(OpError::Internal("origin_seq must be nonzero"))?;
         let expected_next = durable_watermark.seq().next();
         if origin_seq != expected_next {
             return Err(OpError::from(StoreRuntimeError::WatermarkInvalid {
@@ -270,7 +268,7 @@ impl Daemon {
         let record = Record {
             header: RecordHeader {
                 origin_replica_id,
-                origin_seq: origin_seq.get(),
+                origin_seq,
                 event_time_ms: draft.event_body.event_time_ms,
                 txn_id: draft.event_body.txn_id,
                 client_request_id: draft.event_body.client_request_id,
@@ -943,7 +941,7 @@ fn load_event_body(
     limits: &Limits,
 ) -> Result<EventBody, OpError> {
     let reader = wal_index.reader();
-    let from_seq_excl = event_id.origin_seq.get().saturating_sub(1);
+    let from_seq_excl = event_id.origin_seq.prev_seq0();
     let max_bytes = limits.max_wal_record_bytes.saturating_add(FRAME_HEADER_LEN);
     let items = reader
         .iter_from(
@@ -1370,7 +1368,7 @@ mod tests {
         let record = Record {
             header: RecordHeader {
                 origin_replica_id: replica_id,
-                origin_seq: origin_seq.get(),
+                origin_seq,
                 event_time_ms: draft.event_body.event_time_ms,
                 txn_id: draft.event_body.txn_id,
                 client_request_id: draft.event_body.client_request_id,

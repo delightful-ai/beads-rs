@@ -13,6 +13,7 @@ pub mod realtime;
 pub mod receipt;
 pub mod repl_frames;
 pub mod repl_peer;
+pub mod repl_rig;
 pub mod repl_transport;
 pub mod store_dir;
 pub mod wal;

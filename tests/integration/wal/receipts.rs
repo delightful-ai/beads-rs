@@ -10,9 +10,9 @@ use beads_rs::{
     StoreIdentity, TxnId, Watermarks, sha256_bytes,
 };
 
-use fixtures::identity;
-use fixtures::receipt;
-use fixtures::wal::{TempWalDir, record_for_seq};
+use crate::fixtures::identity;
+use crate::fixtures::receipt;
+use crate::fixtures::wal::{TempWalDir, record_for_seq};
 
 #[test]
 fn phase4_receipt_min_seen_is_monotonic() {

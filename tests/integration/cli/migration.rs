@@ -7,7 +7,7 @@ mod fixtures;
 use std::fs;
 
 use assert_cmd::Command;
-use fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::daemon_runtime::shutdown_daemon;
 use predicates::prelude::*;
 use tempfile::TempDir;
 

@@ -7,9 +7,9 @@ use uuid::Uuid;
 use beads_rs::daemon::wal::{WalIndex, WalIndexError};
 use beads_rs::{EventId, NamespaceId, Seq1, TxnId};
 
-use fixtures::identity;
-use fixtures::mutation;
-use fixtures::wal::TempWalDir;
+use crate::fixtures::identity;
+use crate::fixtures::mutation;
+use crate::fixtures::wal::TempWalDir;
 
 #[test]
 fn phase4_idempotency_mapping_reuses_txn_and_event_ids() {

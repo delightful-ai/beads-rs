@@ -8,10 +8,10 @@ use beads_rs::{
     WireNoteV1, WireStamp, apply_event,
 };
 
-use fixtures::apply_harness::{
+use crate::fixtures::apply_harness::{
     ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
 };
-use fixtures::event_body::{actor_id, bead_id, event_body_with_delta, note_id, sample_event_body};
+use crate::fixtures::event_body::{actor_id, bead_id, event_body_with_delta, note_id, sample_event_body};
 
 fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -> EventBody {
     let mut patch = WireBeadPatch::new(bead_id.clone());

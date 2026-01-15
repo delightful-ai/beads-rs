@@ -21,10 +21,10 @@ use beads_rs::{
     StoreMetaVersions, TxnDeltaV1, TxnId, encode_event_body_canonical, hash_event_body,
 };
 
-use fixtures::repl_frames;
-use fixtures::repl_peer::MockStore;
-use fixtures::store_dir::TempStoreDir;
-use fixtures::wal::record_for_seq;
+use crate::fixtures::repl_frames;
+use crate::fixtures::repl_peer::MockStore;
+use crate::fixtures::store_dir::TempStoreDir;
+use crate::fixtures::wal::record_for_seq;
 
 fn inbound_session() -> (Session, MockStore, StoreIdentity) {
     let limits = Limits::default();

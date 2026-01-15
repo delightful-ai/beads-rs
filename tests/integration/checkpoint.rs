@@ -19,7 +19,7 @@ use beads_rs::{
     StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
 };
 
-use fixtures::checkpoint::{
+use crate::fixtures::checkpoint::{
     assert_manifest_files, assert_meta_hashes, fixture_multi_namespace, fixture_small_state,
 };
 

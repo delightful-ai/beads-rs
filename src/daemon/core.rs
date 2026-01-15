@@ -1441,7 +1441,7 @@ impl Daemon {
             let record = Record {
                 header: RecordHeader {
                     origin_replica_id: origin,
-                    origin_seq: event.body.origin_seq.get(),
+                    origin_seq: event.body.origin_seq,
                     event_time_ms: event.body.event_time_ms,
                     txn_id: event.body.txn_id,
                     client_request_id: event.body.client_request_id,
@@ -3066,7 +3066,7 @@ fn apply_checkpoint_watermarks(
     }
 
     let wal_index = store.wal_index.clone();
-    let mut max_event_seq: BTreeMap<(NamespaceId, ReplicaId), u64> = BTreeMap::new();
+    let mut max_event_seq: BTreeMap<(NamespaceId, ReplicaId), Seq0> = BTreeMap::new();
     for (namespace, origin_map) in &origins {
         for origin in origin_map.keys() {
             let max_seq = wal_index.reader().max_origin_seq(namespace, origin)?;
@@ -3091,15 +3091,18 @@ fn apply_checkpoint_watermarks(
             let max_seq = max_event_seq
                 .get(&(namespace.clone(), origin))
                 .copied()
-                .unwrap_or(0);
-            let next_base = durable.seq().get().max(max_seq);
-            let next_seq =
+                .unwrap_or(Seq0::ZERO);
+            let next_base = durable.seq().get().max(max_seq.get());
+            let next_seq_raw =
                 next_base
                     .checked_add(1)
                     .ok_or_else(|| WalIndexError::OriginSeqOverflow {
                         namespace: namespace.to_string(),
                         origin,
                     })?;
+            let next_seq = Seq1::from_u64(next_seq_raw).ok_or_else(|| {
+                WalIndexError::EventIdDecode("origin_seq must be >= 1".to_string())
+            })?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
 
             if durable.seq().get() == 0 {
@@ -3268,8 +3271,8 @@ fn replay_event_wal(
         })?;
 
         let state_for_namespace = state.ensure_namespace(namespace.clone());
-        let mut from_seq_excl = 0u64;
-        while from_seq_excl < row.applied_seq {
+        let mut from_seq_excl = Seq0::ZERO;
+        while from_seq_excl.get() < row.applied_seq {
             let items = wal_index.reader().iter_from(
                 &namespace,
                 &row.origin,
@@ -3281,7 +3284,7 @@ fn replay_event_wal(
                     WalReplayError::NonContiguousSeq {
                         namespace: row.namespace.as_str().to_string(),
                         origin: row.origin,
-                        expected: from_seq_excl + 1,
+                        expected: from_seq_excl.get() + 1,
                         got: 0,
                     },
                 )));
@@ -3289,7 +3292,7 @@ fn replay_event_wal(
             for item in items {
                 let seq = item.event_id.origin_seq.get();
                 if seq > row.applied_seq {
-                    from_seq_excl = row.applied_seq;
+                    from_seq_excl = Seq0::new(row.applied_seq);
                     break;
                 }
                 let segment_path = segments.get(&item.segment_id).ok_or_else(|| {
@@ -3308,7 +3311,7 @@ fn replay_event_wal(
                         },
                     }))
                 })?;
-                from_seq_excl = seq;
+                from_seq_excl = Seq0::new(seq);
                 applied_any = true;
             }
         }
@@ -3925,7 +3928,7 @@ mod tests {
         Record {
             header: RecordHeader {
                 origin_replica_id: event.body.origin_replica_id,
-                origin_seq: event.body.origin_seq.get(),
+                origin_seq: event.body.origin_seq,
                 event_time_ms: event.body.event_time_ms,
                 txn_id: event.body.txn_id,
                 client_request_id: event.body.client_request_id,
@@ -4317,7 +4320,7 @@ mod tests {
             .next_origin_seq(&NamespaceId::core(), &origin)
             .expect("next seq");
         txn.rollback().expect("rollback");
-        assert_eq!(next_seq, 4);
+        assert_eq!(next_seq.get(), 4);
     }
 
     #[test]

@@ -10,8 +10,8 @@ use beads_rs::daemon::repl::{
 };
 use beads_rs::{ErrorCode, Limits, NamespaceId, ReplicaId, StoreIdentity};
 
-use fixtures::repl_frames;
-use fixtures::repl_peer::MockStore;
+use crate::fixtures::repl_frames;
+use crate::fixtures::repl_peer::MockStore;
 
 fn inbound_session_with_limits(limits: Limits) -> (Session, MockStore, StoreIdentity) {
     let identity = repl_frames::store_identity(2);

@@ -1,8 +1,7 @@
-mod fixtures;
 
 use std::fs;
 
-use fixtures::store_dir::TempStoreDir;
+use crate::fixtures::store_dir::TempStoreDir;
 use uuid::Uuid;
 
 use beads_rs::daemon::store_lock::{StoreLock, StoreLockError, read_lock_meta};

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::core::{EventFrameV1, Limits, NamespaceId, ReplicaId};
+use crate::core::{EventFrameV1, Limits, NamespaceId, ReplicaId, Seq0};
 use crate::daemon::broadcast::BroadcastEvent;
 use crate::daemon::repl::proto::Want;
 use crate::daemon::repl::runtime::{WalRangeError, WalRangeReader};
@@ -94,7 +94,12 @@ pub(crate) fn build_want_frames(
                 continue;
             }
             let (namespace, origin) = key;
-            match wal_reader.read_range(namespace, origin, *want_seq, limits.max_event_batch_bytes)
+            match wal_reader.read_range(
+                namespace,
+                origin,
+                Seq0::new(*want_seq),
+                limits.max_event_batch_bytes,
+            )
             {
                 Ok(wal_frames) => {
                     state.frames = VecDeque::from(wal_frames);

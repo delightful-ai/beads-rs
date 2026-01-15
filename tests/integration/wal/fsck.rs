@@ -12,8 +12,8 @@ use beads_rs::daemon::wal::fsck::{
 use beads_rs::daemon::wal::{Record, WalIndex, rebuild_index};
 use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
 
-use fixtures::wal::{TempWalDir, record_for_seq};
-use fixtures::wal_corrupt::{corrupt_frame_body, truncate_frame_mid_body};
+use crate::fixtures::wal::{TempWalDir, record_for_seq};
+use crate::fixtures::wal_corrupt::{corrupt_frame_body, truncate_frame_mid_body};
 
 #[test]
 fn phase3_fsck_clean_segment_passes() {

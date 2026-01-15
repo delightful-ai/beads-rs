@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use beads_rs::daemon::ipc::{IpcError, ReadConsistency, Request, Response};
 use beads_rs::{Applied, ErrorCode, HeadStatus, NamespaceId, Seq0, Watermarks};
 
-use fixtures::admin_status::StatusCollector;
-use fixtures::ipc_stream::{StreamClientError, StreamingClient};
-use fixtures::load_gen::{LoadGenerator, LoadReport};
-use fixtures::realtime::RealtimeFixture;
+use crate::fixtures::admin_status::StatusCollector;
+use crate::fixtures::ipc_stream::{StreamClientError, StreamingClient};
+use crate::fixtures::load_gen::{LoadGenerator, LoadReport};
+use crate::fixtures::realtime::RealtimeFixture;
 
 #[test]
 fn phase7_subscribe_streams_events_in_order() {

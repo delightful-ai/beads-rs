@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use beads_rs::NamespaceId;
 use beads_rs::api::AdminStatusOutput;
 
-use fixtures::admin_status::{StatusCollector, assert_monotonic_watermarks};
-use fixtures::load_gen::{LoadGenerator, LoadReport};
-use fixtures::realtime::RealtimeFixture;
+use crate::fixtures::admin_status::{StatusCollector, assert_monotonic_watermarks};
+use crate::fixtures::load_gen::{LoadGenerator, LoadReport};
+use crate::fixtures::realtime::RealtimeFixture;
 
 #[test]
 fn phase7_admin_status_monotonic_under_load() {

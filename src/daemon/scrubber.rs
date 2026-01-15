@@ -10,7 +10,7 @@ use crate::api::{
     AdminHealthReport, AdminHealthRisk, AdminHealthSeverity, AdminHealthStats, AdminHealthStatus,
     AdminHealthSummary,
 };
-use crate::core::{Limits, NamespaceId, ReplicaId, SegmentId, decode_event_body, sha256_bytes};
+use crate::core::{Limits, NamespaceId, ReplicaId, SegmentId, Seq0, decode_event_body, sha256_bytes};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::store_runtime::StoreRuntime;
@@ -613,7 +613,7 @@ fn scan_segment_records(
                         path: Some(segment.path.display().to_string()),
                         namespace: Some(segment.namespace.clone()),
                         origin: Some(record.header.origin_replica_id),
-                        seq: Some(record.header.origin_seq),
+                        seq: Some(record.header.origin_seq.get()),
                         offset: Some(offset),
                         segment_id: Some(segment.segment_id),
                     },
@@ -634,7 +634,7 @@ fn scan_segment_records(
                     path: Some(segment.path.display().to_string()),
                     namespace: Some(segment.namespace.clone()),
                     origin: Some(record.header.origin_replica_id),
-                    seq: Some(record.header.origin_seq),
+                    seq: Some(record.header.origin_seq.get()),
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
@@ -655,7 +655,7 @@ fn scan_segment_records(
                     path: Some(segment.path.display().to_string()),
                     namespace: Some(segment.namespace.clone()),
                     origin: Some(record.header.origin_replica_id),
-                    seq: Some(record.header.origin_seq),
+                    seq: Some(record.header.origin_seq.get()),
                     offset: Some(offset),
                     segment_id: Some(segment.segment_id),
                 },
@@ -720,7 +720,7 @@ fn scrub_index_offsets(
         if remaining == 0 {
             break;
         }
-        let mut from_seq_excl = 0u64;
+        let mut from_seq_excl = Seq0::ZERO;
         while remaining > 0 {
             let batch_records = remaining.min(INDEX_BATCH_RECORDS);
             let max_bytes = max_record_bytes.saturating_mul(batch_records);
@@ -766,7 +766,7 @@ fn scrub_index_offsets(
                     &mut handles,
                     builder,
                 );
-                from_seq_excl = item.event_id.origin_seq.get();
+                from_seq_excl = Seq0::new(item.event_id.origin_seq.get());
                 remaining = remaining.saturating_sub(1);
             }
         }
