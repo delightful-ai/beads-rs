@@ -181,7 +181,8 @@ Concurrent behavior:
    * If modification is newer, edge is restored (deletion is superseded).
 3. Tie-break on `deleted_by` vs `created_by` lexicographically if write stamps are equal.
 
-Deleted dependency edges **MAY** be garbage collected after the same TTL as tombstones (§8.4).
+Deleted dependency edges **MAY** be garbage collected after the same TTL as tombstones (§8.4),
+when tombstone GC is enabled.
 
 ### 4.4 Tombstones
 
@@ -215,7 +216,7 @@ Tombstones **MUST** be queryable (at least for debugging/validation) and partici
 Each commit on the sync ref **MUST** contain, at minimum:
 
 * `state.jsonl` (live beads)
-* `tombstones.jsonl` (recent deletions within TTL window; see §8.4)
+* `tombstones.jsonl` (deletions; may be pruned if tombstone GC is enabled; see §8.4)
 * `deps.jsonl` (dependency edges)
 * `meta.json` (format metadata; includes at least a `format_version` integer)
 
@@ -376,16 +377,17 @@ Deletion is explicit via tombstones.
 
 For a bead `X`:
 
-1. If a tombstone for `X` exists and is within TTL, `X` is considered deleted unless a post-delete update is proven newer per the conflict resolution order.
+1. If a tombstone for `X` exists (and has not been garbage-collected), `X` is considered deleted unless a post-delete update is proven newer per the conflict resolution order.
 2. A modification **MAY** “resurrect” a bead only if it is ordered strictly after the delete in the merge order.
 3. This rule **MUST** be deterministic and identical on all replicas.
 
 ### 8.4 Tombstone TTL and garbage collection
 
-1. Tombstones **MUST** be retained for a configurable TTL duration.
-2. The default TTL **MUST** be at least **7 days**.
+1. Tombstones **MUST** be retained by default (no GC) to prevent ID reuse/resurrection.
+2. Garbage collection is optional and **MUST** be explicitly configured (e.g., `BD_TOMBSTONE_TTL_MS`). When enabled, TTL **MUST** be at least **7 days**.
 3. Tombstones older than TTL **MAY** be garbage-collected.
 4. After garbage collection, a replica that has been offline longer than TTL is **not guaranteed** to observe deletes that occurred during its absence (bounded anti-entropy). This is acceptable behavior for a conforming implementation.
+5. If GC is enabled, manual reuse of deleted IDs **SHOULD** be avoided to prevent unintended resurrection.
 
 ### 8.5 `content_hash` requirement
 
@@ -560,4 +562,3 @@ A beads-rs project is “complete” under this specification when:
 * The cache is rebuildable and never required as truth.
 
 ---
-

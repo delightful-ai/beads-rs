@@ -20,7 +20,7 @@ use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 use super::collision::{Collision, detect_collisions, resolve_collisions};
 use super::error::SyncError;
 use super::wire;
-use crate::core::{BeadId, CanonicalState, Stamp, WriteStamp};
+use crate::core::{BeadId, CanonicalState, Stamp, WallClock, WriteStamp};
 
 // =============================================================================
 // Phase markers (zero-sized types for typestate)
@@ -219,6 +219,46 @@ impl SyncDiff {
 // SyncProcess - the typestate machine
 // =============================================================================
 
+/// Sync configuration (mostly set from environment).
+#[derive(Clone, Debug, Default)]
+pub struct SyncConfig {
+    pub tombstone_ttl_ms: Option<u64>,
+}
+
+impl SyncConfig {
+    const MIN_TOMBSTONE_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+
+    pub fn from_env() -> Self {
+        let Ok(raw) = std::env::var("BD_TOMBSTONE_TTL_MS") else {
+            return Self::default();
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Self::default();
+        }
+        let tombstone_ttl_ms = match trimmed.parse::<u64>() {
+            Ok(ms) if ms < Self::MIN_TOMBSTONE_TTL_MS => {
+                tracing::warn!(
+                    raw = trimmed,
+                    min_ms = Self::MIN_TOMBSTONE_TTL_MS,
+                    "BD_TOMBSTONE_TTL_MS below minimum; clamping to min"
+                );
+                Some(Self::MIN_TOMBSTONE_TTL_MS)
+            }
+            Ok(ms) => Some(ms),
+            Err(err) => {
+                tracing::warn!(
+                    raw = trimmed,
+                    error = %err,
+                    "invalid BD_TOMBSTONE_TTL_MS; ignoring"
+                );
+                None
+            }
+        };
+        Self { tombstone_ttl_ms }
+    }
+}
+
 /// Sync process with typestate-enforced phases.
 ///
 /// Use `SyncProcess::new()` to start, then chain transitions:
@@ -231,14 +271,20 @@ impl SyncDiff {
 /// ```
 pub struct SyncProcess<Phase> {
     pub repo_path: PathBuf,
+    pub config: SyncConfig,
     pub phase: Phase,
 }
 
 impl SyncProcess<Idle> {
     /// Create a new sync process in Idle phase.
     pub fn new(repo_path: PathBuf) -> Self {
+        Self::new_with_config(repo_path, SyncConfig::from_env())
+    }
+
+    pub fn new_with_config(repo_path: PathBuf, config: SyncConfig) -> Self {
         SyncProcess {
             repo_path,
+            config,
             phase: Idle,
         }
     }
@@ -260,6 +306,11 @@ impl SyncProcess<Idle> {
         repo: &Repository,
         policy: FetchPolicy,
     ) -> Result<SyncProcess<Fetched>, SyncError> {
+        let SyncProcess {
+            repo_path,
+            config,
+            phase: _,
+        } = self;
         let mut fetch_error = None;
         let prev_remote_oid_opt = refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?;
         // Fetch from origin
@@ -376,7 +427,8 @@ impl SyncProcess<Idle> {
             refname_to_id_optional(repo, "refs/heads/beads/store")?.unwrap_or(Oid::zero());
 
         Ok(SyncProcess {
-            repo_path: self.repo_path,
+            repo_path,
+            config,
             phase: Fetched {
                 local_oid,
                 remote_oid,
@@ -403,14 +455,19 @@ impl SyncProcess<Fetched> {
         local_state: &CanonicalState,
         resolution_stamp: Stamp,
     ) -> Result<SyncProcess<Merged>, SyncError> {
-        let Fetched {
-            local_oid,
-            remote_oid,
-            remote_state,
-            root_slug,
-            parent_meta_stamp,
-            ..
-        } = self.phase;
+        let SyncProcess {
+            repo_path,
+            config,
+            phase:
+                Fetched {
+                    local_oid,
+                    remote_oid,
+                    remote_state,
+                    root_slug,
+                    parent_meta_stamp,
+                    ..
+                },
+        } = self;
 
         let parent_oid = if remote_oid.is_zero() {
             local_oid
@@ -422,7 +479,8 @@ impl SyncProcess<Fetched> {
         if remote_oid.is_zero() {
             let diff = compute_diff(&CanonicalState::new(), local_state);
             return Ok(SyncProcess {
-                repo_path: self.repo_path,
+                repo_path,
+                config,
                 phase: Merged {
                     state: local_state.clone(),
                     collisions: Vec::new(),
@@ -449,14 +507,21 @@ impl SyncProcess<Fetched> {
         let mut merged = CanonicalState::join(&local_resolved, &remote_resolved)
             .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
 
-        // Garbage collect soft-deleted deps. We intentionally never GC tombstones.
+        // Garbage collect soft-deleted deps. Tombstones are GC'd only if configured.
         merged.gc_deleted_deps();
+        if let Some(ttl_ms) = config.tombstone_ttl_ms {
+            let removed = merged.gc_tombstones(ttl_ms, WallClock::now());
+            if removed > 0 {
+                tracing::info!(removed, ttl_ms, "tombstone GC pruned records");
+            }
+        }
 
         // Compute diff for commit message
         let diff = compute_diff(&remote_resolved, &merged);
 
         Ok(SyncProcess {
-            repo_path: self.repo_path,
+            repo_path,
+            config,
             phase: Merged {
                 state: merged,
                 collisions,
@@ -476,14 +541,19 @@ impl SyncProcess<Merged> {
     /// - Single parent (remote HEAD) - keeps history linear
     /// - Meaningful commit message based on diff
     pub fn commit(self, repo: &Repository) -> Result<SyncProcess<Committed>, SyncError> {
-        let Merged {
-            state,
-            parent_oid,
-            diff,
-            root_slug,
-            parent_meta_stamp,
-            ..
-        } = self.phase;
+        let SyncProcess {
+            repo_path,
+            config,
+            phase:
+                Merged {
+                    state,
+                    parent_oid,
+                    diff,
+                    root_slug,
+                    parent_meta_stamp,
+                    ..
+                },
+        } = self;
 
         // Serialize state to blobs
         let state_bytes = wire::serialize_state(&state)?;
@@ -538,7 +608,8 @@ impl SyncProcess<Merged> {
         )?;
 
         Ok(SyncProcess {
-            repo_path: self.repo_path,
+            repo_path,
+            config,
             phase: Committed { commit_oid, state },
         })
     }
@@ -1170,7 +1241,7 @@ mod tests {
     use super::*;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepEdge, DepKey, DepKind,
-        Lww, Priority, Workflow,
+        Lww, Priority, Tombstone, Workflow,
     };
     #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;
@@ -1301,6 +1372,38 @@ mod tests {
         assert_eq!(diff.details.len(), 1);
         assert_eq!(diff.details[0].id, "bd-aaa");
         assert!(diff.details[0].changed_fields.contains(&"deps"));
+    }
+
+    #[test]
+    fn merge_keeps_tombstones_without_gc() {
+        let id = BeadId::parse("bd-dead").unwrap();
+        let deleted = make_stamp(1, "alice");
+        let mut local_state = CanonicalState::new();
+        local_state.insert_tombstone(Tombstone::new(
+            id.clone(),
+            deleted,
+            Some("gone".into()),
+        ));
+
+        let fetched = SyncProcess {
+            repo_path: PathBuf::new(),
+            config: SyncConfig::default(),
+            phase: Fetched {
+                local_oid: Oid::from_bytes(&[1; 20]).unwrap(),
+                remote_oid: Oid::from_bytes(&[2; 20]).unwrap(),
+                remote_state: CanonicalState::new(),
+                root_slug: None,
+                parent_meta_stamp: None,
+                fetch_error: None,
+                divergence: None,
+                force_push: None,
+            },
+        };
+
+        let merged = fetched
+            .merge(&local_state, make_stamp(2, "bob"))
+            .expect("merge");
+        assert!(merged.phase.state.get_tombstone(&id).is_some());
     }
 
     #[test]
