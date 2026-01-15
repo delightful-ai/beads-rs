@@ -90,7 +90,7 @@ impl ConfigLayer {
                 let entry = base
                     .checkpoint_groups
                     .entry(group.clone())
-                    .or_insert_with(CheckpointGroupConfig::default);
+                    .or_default();
                 override_cfg.apply_to(entry);
             }
         }
