@@ -1221,7 +1221,8 @@ mod tests {
     use super::{dep_cycles_from_state, sort_ready_issues};
     use crate::api::IssueSummary;
     use crate::core::{
-        ActorId, CanonicalState, DepEdge, DepKey, DepKind, NamespaceId, Stamp, WriteStamp,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge,
+        DepKey, DepKind, Labels, Lww, NamespaceId, Priority, Stamp, Workflow, WriteStamp,
     };
 
     fn issue_summary(id: &str, priority: u8, created_at_ms: u64) -> IssueSummary {
@@ -1249,6 +1250,26 @@ mod tests {
         }
     }
 
+    fn make_bead(id: &str, stamp: &Stamp) -> Bead {
+        let id = BeadId::parse(id).expect("bead id");
+        let core = BeadCore::new(id, stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new(format!("title-{id}"), stamp.clone()),
+            description: Lww::new("desc".to_string(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            labels: Lww::new(Labels::new(), stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
     #[test]
     fn ready_sort_orders_by_priority_then_created_at() {
         let mut issues = vec![
@@ -1262,6 +1283,18 @@ mod tests {
 
         let ids: Vec<&str> = issues.iter().map(|issue| issue.id.as_str()).collect();
         assert_eq!(ids, vec!["d", "b", "c", "a"]);
+    }
+
+    #[test]
+    fn issue_summary_uses_read_namespace() {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(1_000, 0), actor);
+        let bead = make_bead("bd-123", &stamp);
+        let namespace = NamespaceId::parse("wf").unwrap();
+
+        let summary = IssueSummary::from_bead(&namespace, &bead);
+
+        assert_eq!(summary.namespace, namespace);
     }
 
     #[test]
