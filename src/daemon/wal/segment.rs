@@ -181,11 +181,20 @@ impl SegmentHeader {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealedSegment {
+    pub segment_id: SegmentId,
+    pub path: PathBuf,
+    pub created_at_ms: u64,
+    pub final_len: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppendOutcome {
     pub segment_id: SegmentId,
     pub offset: u64,
     pub len: u32,
     pub rotated: bool,
+    pub sealed: Option<SealedSegment>,
 }
 
 pub struct SegmentWriter {
@@ -240,6 +249,16 @@ impl SegmentWriter {
         let frame = encode_frame(record, self.config.max_record_bytes)?;
 
         let rotated = self.should_rotate(now_ms, frame.len() as u64);
+        let sealed = if rotated {
+            Some(SealedSegment {
+                segment_id: self.header.segment_id,
+                path: self.path.clone(),
+                created_at_ms: self.header.created_at_ms,
+                final_len: self.bytes_written,
+            })
+        } else {
+            None
+        };
         if rotated {
             self.rotate(now_ms)?;
         }
@@ -268,6 +287,7 @@ impl SegmentWriter {
             offset,
             len: frame.len() as u32,
             rotated,
+            sealed,
         })
     }
 
@@ -489,6 +509,10 @@ mod tests {
 
         let second = writer.append(&record, 10).unwrap();
         assert!(second.rotated);
+        let sealed = second.sealed.as_ref().expect("sealed segment info");
+        assert_eq!(sealed.segment_id, first.segment_id);
+        let sealed_len = fs::metadata(&sealed.path).expect("sealed metadata").len();
+        assert_eq!(sealed.final_len, sealed_len);
         assert_ne!(first.segment_id, second.segment_id);
         let second_name = writer
             .current_path()
