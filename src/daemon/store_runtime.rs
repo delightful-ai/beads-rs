@@ -26,8 +26,8 @@ use crate::daemon::repl::PeerAckTable;
 use crate::daemon::repo::{RepoState, WalTailTruncatedRecord};
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
 use crate::daemon::wal::{
-    EventWal, HlcRow, IndexDurabilityMode, ReplayStats, SqliteWalIndex, Wal, WalIndex,
-    WalIndexError, WalReplayError, catch_up_index, rebuild_index,
+    EventWal, HlcRow, IndexDurabilityMode, ReplayStats, SqliteWalIndex, WalIndex, WalIndexError,
+    WalReplayError, catch_up_index, rebuild_index,
 };
 use crate::git::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, CheckpointFileKind, CheckpointSnapshot, CheckpointSnapshotError,
@@ -70,8 +70,6 @@ pub struct StoreRuntime {
     pub(crate) maintenance_mode: bool,
     #[allow(dead_code)]
     pub(crate) peer_acks: Arc<Mutex<PeerAckTable>>,
-    #[allow(dead_code)]
-    pub(crate) wal: Arc<Wal>,
     pub(crate) event_wal: EventWal,
     #[allow(dead_code)]
     pub(crate) wal_index: Arc<SqliteWalIndex>,
@@ -90,7 +88,6 @@ impl StoreRuntime {
     pub fn open(
         store_id: StoreId,
         primary_remote: RemoteUrl,
-        wal: Arc<Wal>,
         now_ms: u64,
         daemon_version: &str,
         limits: &Limits,
@@ -191,7 +188,6 @@ impl StoreRuntime {
             admission,
             maintenance_mode: false,
             peer_acks,
-            wal,
             event_wal,
             wal_index: Arc::new(wal_index),
             last_wal_checkpoint: None,
@@ -934,11 +930,10 @@ mod tests {
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{ActorId, CanonicalState, DepEdge, DepKey, StoreState};
     use crate::daemon::remote::RemoteUrl;
-    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, Wal, WalIndex};
+    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
     use crate::paths;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::sync::Arc;
 
     fn write_meta_for(store_id: StoreId, replica_id: ReplicaId, now_ms: u64) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
@@ -978,14 +973,12 @@ mod tests {
             .expect("update watermark");
         txn.commit().expect("commit watermark");
 
-        let wal = Wal::new(temp.path()).expect("wal");
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
-            Arc::new(wal),
             now_ms + 1,
             "test",
             &Limits::default(),
@@ -1036,14 +1029,12 @@ mod tests {
             .expect("update watermark");
         txn.commit().expect("commit watermark");
 
-        let wal = Wal::new(temp.path()).expect("wal");
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
         let result = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
-            Arc::new(wal),
             now_ms + 1,
             "test",
             &Limits::default(),
@@ -1062,14 +1053,12 @@ mod tests {
         let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([30u8; 16]));
-        let wal = Wal::new(temp.path()).expect("wal");
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
-            Arc::new(wal),
             1_700_000_000_000,
             "test",
             &Limits::default(),
@@ -1102,14 +1091,12 @@ mod tests {
         std::fs::write(&config_path, "index_durability_mode = \"durable\"")
             .expect("write store config");
 
-        let wal = Wal::new(temp.path()).expect("wal");
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
-            Arc::new(wal),
             1_700_000_000_000,
             "test",
             &Limits::default(),
@@ -1130,14 +1117,12 @@ mod tests {
         let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([50u8; 16]));
-        let wal = Wal::new(temp.path()).expect("wal");
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
         let mut runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
-            Arc::new(wal),
             1_700_000_000_000,
             "test",
             &Limits::default(),
@@ -1245,14 +1230,12 @@ durability_eligible = true
         }
         std::fs::write(&roster_path, roster_toml).expect("write roster");
 
-        let wal = Wal::new(temp.path()).expect("wal");
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
-            Arc::new(wal),
             1_700_000_000_000,
             "test",
             &Limits::default(),

@@ -12,7 +12,6 @@ use crate::daemon::IpcError;
 use crate::daemon::Request;
 use crate::daemon::ipc::ensure_socket_dir;
 use crate::daemon::server::{RequestMessage, handle_client};
-use crate::daemon::wal::{Wal, default_wal_base_dir};
 use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop, run_state_loop};
 
 /// Run the daemon in the current process.
@@ -85,18 +84,8 @@ pub fn run_daemon() -> Result<()> {
     let config = crate::config::load_or_init();
     let limits = Arc::new(config.limits.clone());
 
-    // Create WAL for mutation durability.
-    let wal_base_dir = default_wal_base_dir();
-    let wal = Wal::new(&wal_base_dir).map_err(|e| match e {
-        crate::daemon::wal::WalError::Io(io) => IpcError::Io(io),
-        crate::daemon::wal::WalError::Json(json) => IpcError::Parse(json),
-        _ => IpcError::DaemonUnavailable(e.to_string()),
-    })?;
-    wal.migrate_from_runtime_dir(&dir);
-    wal.cleanup_stale().ok(); // Clean up any stale .tmp files from crashes
-
     // Create daemon core and git worker.
-    let daemon = Daemon::new_with_config(actor, wal, config.clone());
+    let daemon = Daemon::new_with_config(actor, config.clone());
     let git_worker = GitWorker::new(git_result_tx, (*limits).clone());
 
     // Spawn state thread.

@@ -29,7 +29,6 @@ use super::ipc::{
     ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
 };
 use super::metrics;
-use super::migration::MigrationError;
 use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
@@ -44,8 +43,8 @@ use super::repo::{
 use super::scheduler::SyncScheduler;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, Wal, WalEntry, WalIndex,
-    WalIndexError, WalReplayError,
+    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, WalIndex, WalIndexError,
+    WalReplayError,
 };
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
@@ -254,9 +253,6 @@ pub struct Daemon {
     /// Checkpoint scheduler for debounce/max interval.
     checkpoint_scheduler: CheckpointScheduler,
 
-    /// Write-ahead log for mutation durability.
-    wal: Arc<Wal>,
-
     /// Go-compatibility export context.
     export_ctx: Option<ExportContext>,
 
@@ -297,21 +293,21 @@ impl ReplicationHandles {
 
 impl Daemon {
     /// Create a new daemon.
-    pub fn new(actor: ActorId, wal: Wal) -> Self {
-        Self::new_with_limits(actor, wal, Limits::default())
+    pub fn new(actor: ActorId) -> Self {
+        Self::new_with_limits(actor, Limits::default())
     }
 
     /// Create a new daemon with custom limits.
-    pub fn new_with_limits(actor: ActorId, wal: Wal, limits: Limits) -> Self {
+    pub fn new_with_limits(actor: ActorId, limits: Limits) -> Self {
         let config = crate::config::Config {
             limits,
             ..Default::default()
         };
-        Self::new_with_config(actor, wal, config)
+        Self::new_with_config(actor, config)
     }
 
     /// Create a new daemon with config settings.
-    pub fn new_with_config(actor: ActorId, wal: Wal, config: crate::config::Config) -> Self {
+    pub fn new_with_config(actor: ActorId, config: crate::config::Config) -> Self {
         let limits = config.limits.clone();
         // Initialize Go-compat export context (best effort - don't fail daemon startup)
         let export_ctx = match ExportContext::new() {
@@ -334,7 +330,6 @@ impl Daemon {
             checkpoint_scheduler: CheckpointScheduler::new_with_queue_limit(
                 limits.max_checkpoint_job_queue,
             ),
-            wal: Arc::new(wal),
             export_ctx,
             limits,
             replication: config.replication.clone(),
@@ -347,10 +342,6 @@ impl Daemon {
     }
 
     /// Get a reference to the WAL.
-    pub fn wal(&self) -> &Wal {
-        &self.wal
-    }
-
     /// Get the actor identity.
     pub fn actor(&self) -> &ActorId {
         &self.actor
@@ -730,7 +721,6 @@ impl Daemon {
             let open = StoreRuntime::open(
                 store_id,
                 remote.clone(),
-                Arc::clone(&self.wal),
                 WallClock::now().0,
                 env!("CARGO_PKG_VERSION"),
                 self.limits(),
@@ -816,7 +806,6 @@ impl Daemon {
             let open = StoreRuntime::open(
                 store_id,
                 remote.clone(),
-                Arc::clone(&self.wal),
                 WallClock::now().0,
                 env!("CARGO_PKG_VERSION"),
                 self.limits(),
@@ -902,47 +891,6 @@ impl Daemon {
                     return Err(OpError::Internal("checkpoint merge failed"));
                 }
             }
-        }
-
-        // WAL recovery: merge any state from legacy snapshot WAL
-        match crate::daemon::migration::import_legacy_snapshot_wal(&self.wal, remote) {
-            Ok(Some(wal_import)) => {
-                tracing::info!(
-                    "recovering legacy WAL for {:?} (sequence {})",
-                    remote,
-                    wal_import.sequence
-                );
-
-                // Advance clock for WAL timestamps
-                if let Some(max_stamp) = wal_import.state.max_write_stamp() {
-                    self.clock.receive(&max_stamp);
-                    last_seen_stamp = max_write_stamp(last_seen_stamp, Some(max_stamp));
-                }
-
-                // CRDT merge WAL state with git state
-                match merge_store_states(&state, &wal_import.state) {
-                    Ok(merged) => {
-                        state = merged;
-                        // WAL slug takes precedence if set
-                        if wal_import.root_slug.is_some() {
-                            root_slug = wal_import.root_slug;
-                        }
-                        // WAL had data - need to sync it to remote
-                        needs_sync = true;
-                    }
-                    Err(crate::git::checkpoint::CheckpointImportError::Merge(errors)) => {
-                        return Err(OpError::WalMerge {
-                            errors: Box::new(errors),
-                        });
-                    }
-                    Err(_) => {
-                        return Err(OpError::Internal("store state merge failed"));
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(MigrationError::WalSnapshot(err)) => return Err(OpError::from(err)),
-            Err(MigrationError::Sync(err)) => return Err(OpError::from(err)),
         }
 
         let replayed_event_wal = {
@@ -1984,10 +1932,6 @@ impl Daemon {
                     next_state.set_namespace_state(NamespaceId::core(), synced_state);
                     repo_state.complete_sync(next_state, self.clock.wall_ms());
 
-                    // State is now durable in remote - delete WAL
-                    if let Err(e) = self.wal.delete(remote) {
-                        tracing::warn!("failed to delete WAL after sync for {:?}: {}", remote, e);
-                    }
                     sync_succeeded = true;
                 }
             }
@@ -2089,74 +2033,6 @@ impl Daemon {
         if let Err(e) = ensure_symlinks(&export_path, &repo_state.known_paths) {
             tracing::warn!("Go-compat symlink update failed for {:?}: {}", remote, e);
         }
-    }
-
-    /// Apply a mutation with WAL durability.
-    ///
-    /// The mutation runs against a cloned state. If the WAL write fails,
-    /// the in-memory state is left unchanged and the error is returned.
-    pub(crate) fn apply_wal_mutation_with_actor<R>(
-        &mut self,
-        proof: &LoadedStore,
-        actor: &ActorId,
-        f: impl FnOnce(&mut CanonicalState, Stamp) -> Result<R, OpError>,
-    ) -> Result<R, OpError> {
-        let (mut next_state, root_slug, sequence, last_seen_stamp) = {
-            let repo_state = self.repo_state(proof)?;
-            (
-                repo_state.state.get_or_default(&NamespaceId::core()),
-                repo_state.root_slug.clone(),
-                repo_state.wal_sequence,
-                repo_state.last_seen_stamp.clone(),
-            )
-        };
-
-        let now_wall_ms = WallClock::now().0;
-        let clock_skew = last_seen_stamp
-            .as_ref()
-            .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
-        let (write_stamp, wall_ms) = {
-            let clock = self.clock_for_actor_mut(actor);
-            if let Some(floor) = last_seen_stamp.as_ref() {
-                clock.receive(floor);
-            }
-            let write_stamp = clock.tick();
-            let wall_ms = clock.wall_ms();
-            (write_stamp, wall_ms)
-        };
-        let stamp = Stamp {
-            at: write_stamp.clone(),
-            by: actor.clone(),
-        };
-
-        let result = f(&mut next_state, stamp)?;
-
-        let entry = WalEntry::new(next_state.clone(), root_slug, sequence, wall_ms);
-        self.wal
-            .write_with_limits(proof.remote(), &entry, self.limits())?;
-
-        let repo_state = self.repo_state_mut(proof)?;
-        repo_state
-            .state
-            .set_namespace_state(NamespaceId::core(), next_state);
-        repo_state.wal_sequence = sequence + 1;
-        repo_state.last_seen_stamp = Some(write_stamp);
-        repo_state.last_clock_skew = clock_skew;
-        repo_state.mark_dirty();
-        self.scheduler.schedule(proof.remote().clone());
-
-        Ok(result)
-    }
-
-    /// Apply a mutation with WAL durability using the daemon's default actor.
-    #[allow(dead_code)]
-    pub(crate) fn apply_wal_mutation<R>(
-        &mut self,
-        proof: &LoadedStore,
-        f: impl FnOnce(&mut CanonicalState, Stamp) -> Result<R, OpError>,
-    ) -> Result<R, OpError> {
-        let actor = self.actor.clone();
-        self.apply_wal_mutation_with_actor(proof, &actor, f)
     }
 
     pub fn next_sync_deadline(&mut self) -> Option<Instant> {
@@ -3704,7 +3580,6 @@ pub(crate) fn insert_store_for_tests(
     let open = StoreRuntime::open(
         store_id,
         remote.clone(),
-        Arc::clone(&daemon.wal),
         WallClock::now().0,
         env!("CARGO_PKG_VERSION"),
         daemon.limits(),
@@ -3753,7 +3628,7 @@ mod tests {
     use crate::daemon::store_lock::read_lock_meta;
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
-    use crate::daemon::wal::{HlcRow, Record, RecordHeader, SegmentHeader, Wal};
+    use crate::daemon::wal::{HlcRow, Record, RecordHeader, SegmentHeader};
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointSnapshotInput,
         CheckpointStoreMeta, CheckpointImport, IncludedWatermarks, build_snapshot,
@@ -3827,10 +3702,8 @@ mod tests {
         }
     }
 
-    fn test_wal() -> (TempStoreDir, Wal) {
-        let tmp = TempStoreDir::new();
-        let wal = Wal::new(tmp.data_dir()).unwrap();
-        (tmp, wal)
+    fn test_store_dir() -> TempStoreDir {
+        TempStoreDir::new()
     }
 
     fn insert_store(daemon: &mut Daemon, remote: &RemoteUrl) -> StoreId {
@@ -3838,7 +3711,6 @@ mod tests {
         let runtime = StoreRuntime::open(
             store_id,
             remote.clone(),
-            Arc::clone(&daemon.wal),
             WallClock::now().0,
             env!("CARGO_PKG_VERSION"),
             daemon.limits(),
@@ -3854,10 +3726,10 @@ mod tests {
 
     #[test]
     fn wal_checkpoint_deadline_tracks_interval() {
-        let (_tmp, wal) = test_wal();
+        let _tmp = test_store_dir();
         let mut limits = Limits::default();
         limits.wal_sqlite_checkpoint_interval_ms = 10;
-        let mut daemon = Daemon::new_with_limits(test_actor(), wal, limits);
+        let mut daemon = Daemon::new_with_limits(test_actor(), limits);
         let remote = test_remote();
         insert_store(&mut daemon, &remote);
 
@@ -3876,8 +3748,8 @@ mod tests {
 
     #[test]
     fn store_lock_heartbeat_updates_metadata() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new_with_limits(test_actor(), wal, Limits::default());
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
         let before = read_lock_meta(store_id)
@@ -3898,8 +3770,8 @@ mod tests {
 
     #[test]
     fn checkpoint_roster_hash_mismatch_warns() {
-        let (_tmp, wal) = test_wal();
-        let daemon = Daemon::new_with_limits(test_actor(), wal, Limits::default());
+        let _tmp = test_store_dir();
+        let daemon = Daemon::new_with_limits(test_actor(), Limits::default());
         let store_id = StoreId::new(Uuid::from_bytes([99u8; 16]));
         let import = CheckpointImport {
             checkpoint_group: "core".to_string(),
@@ -3995,9 +3867,9 @@ mod tests {
 
     #[test]
     fn admin_flush_returns_output() {
-        let (tmp, wal) = test_wal();
+        let tmp = test_store_dir();
         let actor = test_actor();
-        let mut daemon = Daemon::new(actor, wal);
+        let mut daemon = Daemon::new(actor);
         let repo_path = tmp.data_dir().join("repo");
         std::fs::create_dir_all(&repo_path).expect("create repo dir");
 
@@ -4109,8 +3981,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_clears_in_progress_flag() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
@@ -4138,8 +4010,8 @@ mod tests {
 
     #[test]
     fn read_gate_requires_min_seen() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
         let proof = LoadedStore {
@@ -4214,8 +4086,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_clears_flag_on_error() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
@@ -4235,8 +4107,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_applies_state_when_clean() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
@@ -4264,8 +4136,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_skips_state_when_dirty() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
@@ -4296,8 +4168,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_schedules_sync_when_needs_sync() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
@@ -4327,8 +4199,8 @@ mod tests {
 
     #[test]
     fn complete_refresh_unknown_remote_is_noop() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let unknown = RemoteUrl("unknown.com/repo".into());
 
         // Should not panic on unknown remote
@@ -4348,8 +4220,8 @@ mod tests {
 
     #[test]
     fn load_from_checkpoint_ref_sets_watermarks() {
-        let (_tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
 
         let repo_dir = TempDir::new().unwrap();
@@ -4464,166 +4336,9 @@ mod tests {
     }
 
     #[test]
-    fn complete_sync_success_clean_deletes_wal() {
-        use crate::daemon::wal::WalEntry;
-
-        let (tmp, wal) = test_wal();
-        let remote = test_remote();
-
-        // Write a WAL entry
-        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
-        wal.write(&remote, &entry).unwrap();
-        assert!(wal.exists(&remote));
-
-        // Create daemon with WAL, recreating from same dir
-        let wal = Wal::new(tmp.data_dir()).unwrap();
-        let mut daemon = Daemon::new(test_actor(), wal);
-        let store_id = insert_store(&mut daemon, &remote);
-
-        // Insert a clean repo state
-        let mut repo_state = RepoState::new();
-        repo_state.dirty = false;
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
-
-        // Complete sync with success
-        let outcome = SyncOutcome {
-            state: CanonicalState::new(),
-            divergence: None,
-            force_push: None,
-            last_seen_stamp: None,
-        };
-        daemon.complete_sync(&remote, Ok(outcome));
-
-        // WAL should be deleted after successful sync on clean state
-        assert!(!daemon.wal.exists(&remote));
-    }
-
-    #[test]
-    fn complete_sync_success_dirty_keeps_wal() {
-        use crate::daemon::wal::WalEntry;
-
-        let (tmp, wal) = test_wal();
-        let remote = test_remote();
-
-        // Write a WAL entry
-        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
-        wal.write(&remote, &entry).unwrap();
-        assert!(wal.exists(&remote));
-
-        // Create daemon with WAL
-        let wal = Wal::new(tmp.data_dir()).unwrap();
-        let mut daemon = Daemon::new(test_actor(), wal);
-        let store_id = insert_store(&mut daemon, &remote);
-
-        // Insert a DIRTY repo state (mutations happened during sync)
-        let mut repo_state = RepoState::new();
-        repo_state.dirty = true;
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
-
-        // Complete sync with success
-        let outcome = SyncOutcome {
-            state: CanonicalState::new(),
-            divergence: None,
-            force_push: None,
-            last_seen_stamp: None,
-        };
-        daemon.complete_sync(&remote, Ok(outcome));
-
-        // WAL should NOT be deleted - dirty state needs another sync
-        assert!(daemon.wal.exists(&remote));
-    }
-
-    #[test]
-    fn complete_sync_failure_keeps_wal() {
-        use crate::daemon::wal::WalEntry;
-
-        let (tmp, wal) = test_wal();
-        let remote = test_remote();
-
-        // Write a WAL entry
-        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
-        wal.write(&remote, &entry).unwrap();
-        assert!(wal.exists(&remote));
-
-        // Create daemon with WAL
-        let wal = Wal::new(tmp.data_dir()).unwrap();
-        let mut daemon = Daemon::new(test_actor(), wal);
-        let store_id = insert_store(&mut daemon, &remote);
-
-        // Insert repo state
-        let repo_state = RepoState::new();
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
-
-        // Complete sync with failure
-        daemon.complete_sync(&remote, Err(SyncError::NonFastForward));
-
-        // WAL should NOT be deleted on failure
-        assert!(daemon.wal.exists(&remote));
-    }
-
-    #[test]
-    fn wal_write_failure_aborts_mutation() {
-        let (tmp, wal) = test_wal();
-        let remote = test_remote();
-
-        // Remove WAL directory to force write failure.
-        let wal_dir = tmp.data_dir().join("wal");
-        std::fs::remove_dir_all(&wal_dir).unwrap();
-
-        let mut daemon = Daemon::new(test_actor(), wal);
-        let store_id = insert_store(&mut daemon, &remote);
-
-        let proof = LoadedStore {
-            store_id,
-            remote: remote.clone(),
-        };
-        let result = daemon.apply_wal_mutation(&proof, |state, stamp| {
-            let bead = make_bead("bd-abc", stamp.at.wall_ms, stamp.by.as_str());
-            state.insert_live(bead);
-            Ok(())
-        });
-
-        assert!(matches!(result, Err(OpError::Wal(_))));
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
-        let live_count = repo_state
-            .state
-            .get(&NamespaceId::core())
-            .map(|state| state.live_count())
-            .unwrap_or(0);
-        assert_eq!(live_count, 0);
-        assert_eq!(repo_state.wal_sequence, 0);
-    }
-
-    #[test]
-    fn apply_wal_mutation_clamps_to_last_seen_stamp() {
-        let (_tmp, wal) = test_wal();
-        let remote = test_remote();
-        let mut daemon = Daemon::new(test_actor(), wal);
-        let store_id = insert_store(&mut daemon, &remote);
-
-        let future_stamp = WriteStamp::new(WallClock::now().0 + 60_000, 0);
-        let mut repo_state = RepoState::new();
-        repo_state.last_seen_stamp = Some(future_stamp.clone());
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
-
-        let proof = LoadedStore {
-            store_id,
-            remote: remote.clone(),
-        };
-        let result = daemon.apply_wal_mutation(&proof, |state, stamp| {
-            let bead = make_bead("bd-abc", stamp.at.wall_ms, stamp.by.as_str());
-            state.insert_live(bead);
-            Ok(stamp.at.clone())
-        });
-
-        let applied_stamp = result.unwrap();
-        assert!(applied_stamp >= future_stamp);
-    }
-
-    #[test]
     fn non_core_mutation_and_query_use_namespace_state() {
-        let (tmp, wal) = test_wal();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
         let repo_path = tmp.data_dir().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -4704,7 +4419,7 @@ mod tests {
 
     #[test]
     fn restores_hlc_state_for_non_daemon_actor() {
-        let (tmp, wal) = test_wal();
+        let tmp = test_store_dir();
         let remote = test_remote();
         let repo_path = tmp.data_dir().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -4713,7 +4428,7 @@ mod tests {
         let future_ms = WallClock::now().0 + 60_000;
 
         {
-            let mut daemon = Daemon::new(test_actor(), wal);
+            let mut daemon = Daemon::new(test_actor());
             insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path).unwrap();
 
             let runtime = daemon.stores.get(&store_id).unwrap();
@@ -4727,8 +4442,7 @@ mod tests {
             txn.commit().unwrap();
         }
 
-        let wal = Wal::new(tmp.data_dir()).unwrap();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let mut daemon = Daemon::new(test_actor());
         insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path).unwrap();
 
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
@@ -4790,8 +4504,7 @@ mod tests {
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         let event = verified_event_with_delta(store, &namespace, origin, 1, None, delta);
 
-        let wal = Wal::new(tmp.data_dir()).unwrap();
-        let mut daemon = Daemon::new_with_limits(test_actor(), wal, Limits::default());
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
         let remote = test_remote();
         let repo_path = tmp.data_dir().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -4824,9 +4537,9 @@ mod tests {
 
     #[test]
     fn complete_sync_resolves_collisions_for_dirty_state() {
-        let (_tmp, wal) = test_wal();
+        let _tmp = test_store_dir();
         let remote = test_remote();
-        let mut daemon = Daemon::new(test_actor(), wal);
+        let mut daemon = Daemon::new(test_actor());
         let store_id = insert_store(&mut daemon, &remote);
 
         let winner = make_bead("bd-abc", 1000, "alice");
@@ -4901,8 +4614,7 @@ mod tests {
             .len() as u64;
         limits.wal_segment_max_bytes = (header_len + frame_len + 1) as usize;
 
-        let wal = Wal::new(tmp.data_dir()).unwrap();
-        let mut daemon = Daemon::new_with_limits(test_actor(), wal, limits.clone());
+        let mut daemon = Daemon::new_with_limits(test_actor(), limits.clone());
         let remote = test_remote();
         let repo_path = tmp.data_dir().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -4962,8 +4674,7 @@ mod tests {
 
         let event = verified_event_with_delta(store, &namespace, origin, 1, None, delta);
 
-        let wal = Wal::new(tmp.data_dir()).unwrap();
-        let mut daemon = Daemon::new_with_limits(test_actor(), wal, Limits::default());
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
         let remote = test_remote();
         let repo_path = tmp.data_dir().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();

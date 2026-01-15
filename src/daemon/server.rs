@@ -1153,7 +1153,6 @@ mod tests {
     use crate::daemon::ops::OpResult;
     use crate::daemon::repl::PeerAckTable;
     use crate::daemon::repl::proto::WatermarkMap;
-    use crate::daemon::wal::Wal;
 
     struct TestEnv {
         _temp: TempDir,
@@ -1170,9 +1169,8 @@ mod tests {
             let data_dir = temp.path().join("data");
             std::fs::create_dir_all(&data_dir).unwrap();
             let override_guard = crate::paths::override_data_dir_for_tests(Some(data_dir.clone()));
-            let wal = Wal::new(&data_dir).unwrap();
             let actor = ActorId::new("test@host".to_string()).unwrap();
-            let mut daemon = Daemon::new(actor, wal);
+            let mut daemon = Daemon::new(actor);
             let repo_path = temp.path().join("repo");
             std::fs::create_dir_all(&repo_path).unwrap();
             let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
