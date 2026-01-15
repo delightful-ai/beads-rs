@@ -253,11 +253,7 @@ impl Daemon {
         };
 
         let checkpoint_groups = if checkpoint_now {
-            let groups = self
-                .checkpoint_scheduler
-                .force_checkpoint_for_namespace(store.meta.store_id(), &namespace);
-            self.emit_checkpoint_queue_depth();
-            groups
+            self.force_checkpoint_for_namespace(store.meta.store_id(), &namespace)
         } else {
             Vec::new()
         };

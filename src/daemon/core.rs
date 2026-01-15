@@ -580,6 +580,18 @@ impl Daemon {
         self.checkpoint_scheduler.snapshot_for_store(store_id)
     }
 
+    pub(crate) fn force_checkpoint_for_namespace(
+        &mut self,
+        store_id: StoreId,
+        namespace: &NamespaceId,
+    ) -> Vec<String> {
+        let groups = self
+            .checkpoint_scheduler
+            .force_checkpoint_for_namespace(store_id, namespace);
+        self.emit_checkpoint_queue_depth();
+        groups
+    }
+
     /// Get repo state by raw remote URL (for internal sync waiters, etc.).
     /// Returns None if not loaded.
     pub(crate) fn repo_state_by_url(&self, remote: &RemoteUrl) -> Option<&RepoState> {
@@ -2262,7 +2274,7 @@ impl Daemon {
         })
     }
 
-    fn normalize_namespace(
+    pub(crate) fn normalize_namespace(
         &self,
         proof: &LoadedStore,
         raw: Option<String>,
