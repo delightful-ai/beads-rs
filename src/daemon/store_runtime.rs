@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
-    ActorId, Applied, ApplyOutcome, Durable, ErrorCode, ErrorPayload, HeadStatus, Limits,
-    NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicaRosterError, Seq0,
-    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks,
-    WriteStamp,
+    ActorId, Applied, ApplyOutcome, ContentHash, Durable, ErrorCode, ErrorPayload, HeadStatus,
+    Limits, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicaRoster,
+    ReplicaRosterError, Seq0, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
+    WatermarkError, Watermarks, WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
@@ -31,8 +31,8 @@ use crate::daemon::wal::{
 };
 use crate::git::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, CheckpointFileKind, CheckpointSnapshot, CheckpointSnapshotError,
-    CheckpointSnapshotInput, build_snapshot, policy_hash, shard_for_bead, shard_for_dep,
-    shard_for_tombstone, shard_path,
+    CheckpointSnapshotInput, build_snapshot, policy_hash, roster_hash, shard_for_bead,
+    shard_for_dep, shard_for_tombstone, shard_path,
 };
 use crate::paths;
 
@@ -266,6 +266,23 @@ impl StoreRuntime {
         Ok(self.wal_index.reader().load_hlc()?)
     }
 
+    fn checkpoint_roster_hash(&self) -> Result<Option<ContentHash>, CheckpointSnapshotError> {
+        let roster = match load_replica_roster(self.meta.store_id()) {
+            Ok(Some(roster)) => roster,
+            Ok(None) => return Ok(None),
+            Err(err) => {
+                tracing::warn!(
+                    store_id = %self.meta.store_id(),
+                    error = ?err,
+                    "replica roster load failed for checkpoint"
+                );
+                return Ok(None);
+            }
+        };
+
+        Ok(Some(roster_hash(&roster)?))
+    }
+
     pub fn checkpoint_snapshot_readonly(
         &self,
         checkpoint_group: &str,
@@ -273,7 +290,7 @@ impl StoreRuntime {
         created_at_ms: u64,
     ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
         let policy_hash = policy_hash(&self.policies)?;
-        let roster_hash = None;
+        let roster_hash = self.checkpoint_roster_hash()?;
         build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: checkpoint_group.to_string(),
             namespaces: namespaces.to_vec(),
@@ -296,7 +313,7 @@ impl StoreRuntime {
         created_at_ms: u64,
     ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
         let policy_hash = policy_hash(&self.policies)?;
-        let roster_hash = None;
+        let roster_hash = self.checkpoint_roster_hash()?;
         let dirty_shards = self.begin_checkpoint_dirty_shards(checkpoint_group, namespaces);
         let snapshot = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: checkpoint_group.to_string(),
@@ -647,6 +664,34 @@ pub(crate) fn load_namespace_policies(
     })?;
 
     Ok(policies.namespaces)
+}
+
+pub(crate) fn load_replica_roster(
+    store_id: StoreId,
+) -> Result<Option<ReplicaRoster>, StoreRuntimeError> {
+    let path = paths::replicas_path(store_id);
+    let raw = match read_secure_store_file(&path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return Ok(None),
+        Err(StoreConfigFileError::Symlink { path }) => {
+            return Err(StoreRuntimeError::ReplicaRosterSymlink {
+                path: Box::new(path),
+            });
+        }
+        Err(StoreConfigFileError::Read { path, source }) => {
+            return Err(StoreRuntimeError::ReplicaRosterRead {
+                path: Box::new(path),
+                source,
+            });
+        }
+    };
+
+    ReplicaRoster::from_toml_str(&raw)
+        .map(Some)
+        .map_err(|source| StoreRuntimeError::ReplicaRosterParse {
+            path: Box::new(path),
+            source,
+        })
 }
 
 fn load_watermarks(
@@ -1149,6 +1194,49 @@ mod tests {
             .expect("snapshot");
         runtime.commit_checkpoint_dirty_shards("core");
         assert!(runtime.checkpoint_dirty_shards.get(&namespace).is_none());
+    }
+
+    #[test]
+    fn checkpoint_snapshot_includes_roster_hash() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([60u8; 16]));
+        let roster_toml = r#"
+[[replicas]]
+replica_id = "00000000-0000-0000-0000-000000000001"
+name = "alpha"
+role = "anchor"
+durability_eligible = true
+"#;
+        let roster_path = paths::replicas_path(store_id);
+        if let Some(parent) = roster_path.parent() {
+            std::fs::create_dir_all(parent).expect("create store dir");
+        }
+        std::fs::write(&roster_path, roster_toml).expect("write roster");
+
+        let wal = Wal::new(temp.path()).expect("wal");
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let runtime = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            Arc::new(wal),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        let snapshot = runtime
+            .checkpoint_snapshot_readonly("core", &[NamespaceId::core()], 1_700_000_000_000)
+            .expect("snapshot");
+        let roster = ReplicaRoster::from_toml_str(roster_toml).expect("parse roster");
+        let expected = roster_hash(&roster).expect("hash roster");
+        assert_eq!(snapshot.roster_hash, Some(expected));
     }
 
     #[cfg(unix)]
