@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::error::details::{
     CorruptionDetails, FrameTooLargeDetails, InternalErrorDetails, InvalidRequestDetails,
-    NonCanonicalDetails, ReplicaIdCollisionDetails, StoreEpochMismatchDetails,
-    SubscriberLaggedDetails, VersionIncompatibleDetails, WrongStoreDetails,
+    NamespacePolicyViolationDetails, NonCanonicalDetails, ReplicaIdCollisionDetails,
+    StoreEpochMismatchDetails, SubscriberLaggedDetails, VersionIncompatibleDetails,
+    WrongStoreDetails,
 };
 use crate::core::{
     Applied, DecodeError, Durable, ErrorCode, ErrorPayload, EventFrameError, EventFrameV1, EventId,
@@ -369,10 +370,21 @@ impl Session {
             ack_updates: &mut ack_updates,
             applied_updates: &mut applied_updates,
         };
+        let incoming_namespaces = match self.peer.as_ref() {
+            Some(peer) => peer.incoming_namespaces.clone(),
+            None => {
+                return self.fail(internal_error(
+                    "missing peer metadata while handling events",
+                ))
+            }
+        };
 
         for frame in events.events {
             let namespace = frame.eid.namespace.clone();
             let origin = frame.eid.origin_replica_id;
+            if !incoming_namespaces.contains(&namespace) {
+                return self.fail(namespace_policy_violation_payload(&namespace));
+            }
             let durable = self.durable_for(&namespace, &origin);
 
             let expected_prev =
@@ -883,6 +895,19 @@ fn invalid_request_payload(reason: impl Into<String>) -> ErrorPayload {
             reason: Some(reason),
         },
     )
+}
+
+fn namespace_policy_violation_payload(namespace: &NamespaceId) -> ErrorPayload {
+    ErrorPayload::new(
+        ErrorCode::NamespacePolicyViolation,
+        "namespace not accepted in replication handshake",
+        false,
+    )
+    .with_details(NamespacePolicyViolationDetails {
+        namespace: namespace.clone(),
+        rule: "accepted_namespaces".to_string(),
+        reason: Some("namespace not negotiated for this session".to_string()),
+    })
 }
 
 fn internal_error(message: impl Into<String>) -> ErrorPayload {
@@ -1445,6 +1470,59 @@ mod tests {
             .copied()
             .unwrap_or_default();
         assert_eq!(seq, 2);
+    }
+
+    #[test]
+    fn events_rejects_unaccepted_namespace() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()];
+        config.offered_namespaces = vec![NamespaceId::core()];
+
+        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: ReplicaId::new(Uuid::from_bytes([10u8; 16])),
+            hello_nonce: 10,
+            max_frame_bytes: 1024,
+            requested_namespaces: vec![NamespaceId::core()],
+            offered_namespaces: vec![NamespaceId::core()],
+            seen_durable: BTreeMap::new(),
+            seen_durable_heads: None,
+            seen_applied: None,
+            seen_applied_heads: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        };
+        session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+
+        let origin = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
+        let other_namespace = NamespaceId::parse("tmp").unwrap();
+        let e1 = make_event(identity, other_namespace, origin, 1, None);
+
+        let actions = session.handle_message(
+            ReplMessage::Events(Events { events: vec![e1] }),
+            &mut store,
+            10,
+        );
+
+        assert!(matches!(session.phase(), SessionPhase::Draining));
+        let payload = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+                _ => None,
+            })
+            .expect("error payload");
+        assert_eq!(payload.code, ErrorCode::NamespacePolicyViolation);
     }
 
     #[test]

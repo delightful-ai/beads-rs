@@ -329,7 +329,7 @@ where
         apply_action(&mut writer, &session, action)?;
     }
 
-    let offered_set: BTreeSet<NamespaceId> = plan.offered_namespaces.iter().cloned().collect();
+    let mut accepted_set = BTreeSet::new();
     let mut streaming = false;
     let mut sent_hot_cache = false;
     let mut pending_events: Vec<BroadcastEvent> = Vec::new();
@@ -366,6 +366,7 @@ where
                                     &broadcaster,
                                     runtime.wal_reader.as_ref(),
                                     &limits,
+                                    Some(&accepted_set),
                                 ) {
                                     tracing::warn!("peer want handling failed: {err}");
                                     return Err(err);
@@ -393,7 +394,7 @@ where
                     pending_events.push(event);
                     continue;
                 }
-                if !offered_set.contains(&event.namespace) {
+                if !accepted_set.contains(&event.namespace) {
                     continue;
                 }
                 let frame = broadcast_to_frame(event);
@@ -405,6 +406,7 @@ where
         if !streaming && session.phase() == SessionPhase::Streaming {
             streaming = true;
             if let Some(peer) = session.peer() {
+                accepted_set = peer.accepted_namespaces.iter().cloned().collect();
                 tracing::info!(
                     target: "repl",
                     direction = "outbound",
@@ -422,13 +424,13 @@ where
         if streaming && !pending_events.is_empty() {
             let frames = pending_events
                 .drain(..)
-                .filter(|event| offered_set.contains(&event.namespace))
+                .filter(|event| accepted_set.contains(&event.namespace))
                 .map(broadcast_to_frame)
                 .collect::<Vec<_>>();
             send_events(&mut writer, &session, frames, &limits)?;
         }
         if streaming && !sent_hot_cache {
-            send_hot_cache(&mut writer, &session, &broadcaster, &offered_set, &limits)?;
+            send_hot_cache(&mut writer, &session, &broadcaster, &accepted_set, &limits)?;
             sent_hot_cache = true;
         }
     }
@@ -585,13 +587,13 @@ fn send_hot_cache(
     writer: &mut FrameWriter<TcpStream>,
     session: &Session,
     broadcaster: &EventBroadcaster,
-    offered_set: &BTreeSet<NamespaceId>,
+    allowed_set: &BTreeSet<NamespaceId>,
     limits: &crate::core::Limits,
 ) -> Result<(), PeerError> {
     let cache = broadcaster.hot_cache()?;
     let frames = cache
         .into_iter()
-        .filter(|event| offered_set.contains(&event.namespace))
+        .filter(|event| allowed_set.contains(&event.namespace))
         .map(broadcast_to_frame)
         .collect::<Vec<_>>();
     send_events(writer, session, frames, limits)
@@ -648,6 +650,7 @@ fn handle_want(
     broadcaster: &EventBroadcaster,
     wal_reader: Option<&WalRangeReader>,
     limits: &crate::core::Limits,
+    allowed_set: Option<&BTreeSet<NamespaceId>>,
 ) -> Result<(), PeerError> {
     if want.want.is_empty() {
         return Ok(());
@@ -656,15 +659,29 @@ fn handle_want(
     let cache = broadcaster.hot_cache()?;
     let mut needed: BTreeMap<(NamespaceId, ReplicaId), u64> = BTreeMap::new();
     for (namespace, origins) in &want.want {
+        if let Some(allowed) = allowed_set
+            && !allowed.contains(namespace)
+        {
+            continue;
+        }
         for (origin, seq) in origins {
             needed.insert((namespace.clone(), *origin), *seq);
         }
+    }
+
+    if needed.is_empty() {
+        return Ok(());
     }
 
     let mut started = BTreeSet::new();
     let mut frames = Vec::new();
 
     for event in cache {
+        if let Some(allowed) = allowed_set
+            && !allowed.contains(&event.namespace)
+        {
+            continue;
+        }
         let key = (event.namespace.clone(), event.event_id.origin_replica_id);
         let Some(want_seq) = needed.get(&key) else {
             continue;
@@ -854,6 +871,7 @@ mod tests {
         peer_store: StoreIdentity,
         peer_replica: ReplicaId,
         respond_with_welcome: bool,
+        accepted_override: Option<Vec<NamespaceId>>,
     ) -> (std::net::SocketAddr, Receiver<ReplMessage>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -899,6 +917,12 @@ mod tests {
                             );
                             for action in actions {
                                 if let SessionAction::Send(message) = action {
+                                    let mut message = message;
+                                    if let Some(override_namespaces) = accepted_override.clone() {
+                                        if let ReplMessage::Welcome(ref mut welcome) = message {
+                                            welcome.accepted_namespaces = override_namespaces;
+                                        }
+                                    }
                                     let envelope = ReplEnvelope {
                                         version: PROTOCOL_VERSION_V1,
                                         message,
@@ -938,7 +962,7 @@ mod tests {
         );
         let local_replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
-        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, false);
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, false, None);
         let addr = addr.to_string();
 
         let config = ReplicationManagerConfig {
@@ -985,7 +1009,7 @@ mod tests {
         );
         let local_replica = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
-        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true);
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, None);
         let addr = addr.to_string();
 
         let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
@@ -1036,6 +1060,90 @@ mod tests {
         let tmp_event = BroadcastEvent::new(
             EventId::new(local_replica, tmp.clone(), Seq1::from_u64(2).unwrap()),
             Sha256([2u8; 32]),
+            None,
+            EventBytes::<Canonical>::new(Bytes::from_static(b"tmp")),
+        );
+
+        broadcaster.publish(core_event).unwrap();
+        broadcaster.publish(tmp_event).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut received_events = None;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let received = rx.recv_timeout(remaining).expect("message");
+            if let ReplMessage::Events(events) = received {
+                received_events = Some(events);
+                break;
+            }
+        }
+        let events = received_events.expect("events");
+        assert_eq!(events.events.len(), 1);
+        assert_eq!(events.events[0].eid.namespace, NamespaceId::core());
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn manager_filters_to_accepted_namespaces() {
+        let local_store = StoreIdentity::new(
+            crate::core::StoreId::new(Uuid::from_bytes([12u8; 16])),
+            crate::core::StoreEpoch::ZERO,
+        );
+        let local_replica = ReplicaId::new(Uuid::from_bytes([13u8; 16]));
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([14u8; 16]));
+        let accepted = Some(vec![NamespaceId::core()]);
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, accepted);
+        let addr = addr.to_string();
+
+        let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+            max_subscribers: 4,
+            hot_cache_max_events: 16,
+            hot_cache_max_bytes: 1024,
+        });
+
+        let mut policies = BTreeMap::new();
+        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        let mut tmp_policy = NamespacePolicy::tmp_default();
+        tmp_policy.replicate_mode = ReplicateMode::Peers;
+        let tmp = NamespaceId::parse("tmp").unwrap();
+        policies.insert(tmp.clone(), tmp_policy);
+
+        let config = ReplicationManagerConfig {
+            local_store,
+            local_replica_id: local_replica,
+            admission: AdmissionController::new(&test_limits()),
+            broadcaster: broadcaster.clone(),
+            peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
+            policies,
+            roster: None,
+            peers: vec![test_peer_config(peer_replica, addr)],
+            wal_reader: None,
+            limits: test_limits(),
+            backoff: BackoffPolicy {
+                base: Duration::from_millis(5),
+                max: Duration::from_millis(10),
+            },
+        };
+        let manager =
+            ReplicationManager::new(SharedSessionStore::new(TestStore::default()), config);
+
+        let handle = manager.start();
+        rx.recv_timeout(Duration::from_secs(1)).expect("hello");
+
+        let core_event = BroadcastEvent::new(
+            EventId::new(
+                local_replica,
+                NamespaceId::core(),
+                Seq1::from_u64(1).unwrap(),
+            ),
+            Sha256([10u8; 32]),
+            None,
+            EventBytes::<Canonical>::new(Bytes::from_static(b"core")),
+        );
+        let tmp_event = BroadcastEvent::new(
+            EventId::new(local_replica, tmp.clone(), Seq1::from_u64(2).unwrap()),
+            Sha256([20u8; 32]),
             None,
             EventBytes::<Canonical>::new(Bytes::from_static(b"tmp")),
         );
