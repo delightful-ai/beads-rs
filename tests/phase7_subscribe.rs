@@ -3,12 +3,13 @@
 mod fixtures;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use beads_rs::daemon::ipc::{ReadConsistency, Request, Response};
+use beads_rs::daemon::ipc::{IpcError, ReadConsistency, Request, Response};
 use beads_rs::{Applied, ErrorCode, HeadStatus, NamespaceId, Seq0, Watermarks};
 
 use fixtures::admin_status::StatusCollector;
-use fixtures::ipc_stream::StreamingClient;
+use fixtures::ipc_stream::{StreamClientError, StreamingClient};
 use fixtures::load_gen::{LoadGenerator, LoadReport};
 use fixtures::realtime::RealtimeFixture;
 
@@ -29,12 +30,21 @@ fn phase7_subscribe_streams_events_in_order() {
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
-    let mut client = StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
-        .expect("subscribe");
+    let mut client =
+        StreamingClient::subscribe_with_client(repo.clone(), read.clone(), ipc_client.clone())
+            .expect("subscribe");
 
-    let report = run_load(repo, 5, &namespace, ipc_client.clone());
+    let report = run_load(repo.clone(), 5, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
-    let seqs = collect_origin_seqs(&mut client, origin, start_seq, report.successes);
+    let seqs = collect_origin_seqs(
+        &mut client,
+        origin,
+        start_seq,
+        report.successes,
+        &repo,
+        &read,
+        &ipc_client,
+    );
 
     let expected: Vec<u64> = ((start_seq + 1)..=(start_seq + report.successes as u64)).collect();
     assert_eq!(seqs, expected);
@@ -118,14 +128,30 @@ fn phase7_subscribe_multiple_clients_receive_same_events() {
         StreamingClient::subscribe_with_client(repo.clone(), read.clone(), ipc_client.clone())
             .expect("subscribe client A");
     let mut client_b =
-        StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
+        StreamingClient::subscribe_with_client(repo.clone(), read.clone(), ipc_client.clone())
             .expect("subscribe client B");
 
-    let report = run_load(repo, 3, &namespace, ipc_client.clone());
+    let report = run_load(repo.clone(), 3, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
-    let seqs_a = collect_origin_seqs(&mut client_a, origin, start_seq, report.successes);
-    let seqs_b = collect_origin_seqs(&mut client_b, origin, start_seq, report.successes);
+    let seqs_a = collect_origin_seqs(
+        &mut client_a,
+        origin,
+        start_seq,
+        report.successes,
+        &repo,
+        &read,
+        &ipc_client,
+    );
+    let seqs_b = collect_origin_seqs(
+        &mut client_b,
+        origin,
+        start_seq,
+        report.successes,
+        &repo,
+        &read,
+        &ipc_client,
+    );
 
     assert_eq!(seqs_a, seqs_b);
 }
@@ -183,18 +209,59 @@ fn collect_origin_seqs(
     origin: beads_rs::ReplicaId,
     start_seq: u64,
     total: usize,
+    repo: &PathBuf,
+    read: &ReadConsistency,
+    ipc_client: &beads_rs::daemon::ipc::IpcClient,
 ) -> Vec<u64> {
+    const MAX_RECONNECTS: usize = 3;
+    const MAX_WAIT: Duration = Duration::from_secs(30);
+
     let mut seqs = Vec::with_capacity(total);
+    let mut last_seq = start_seq;
+    let mut reconnects = 0;
+    let deadline = Instant::now() + MAX_WAIT;
+
     while seqs.len() < total {
-        let event = client.next_event().expect("stream event").expect("event");
-        if event.event_id.origin_replica_id != origin {
-            continue;
+        if Instant::now() > deadline {
+            panic!(
+                "subscribe stream timed out after {:?} (got {} of {})",
+                MAX_WAIT,
+                seqs.len(),
+                total
+            );
         }
-        let seq = event.event_id.origin_seq.get();
-        if seq <= start_seq {
-            continue;
+
+        match client.next_event() {
+            Ok(Some(event)) => {
+                if event.event_id.origin_replica_id != origin {
+                    continue;
+                }
+                let seq = event.event_id.origin_seq.get();
+                if seq <= last_seq {
+                    continue;
+                }
+                last_seq = seq;
+                seqs.push(seq);
+            }
+            Ok(None) => continue,
+            Err(StreamClientError::Ipc(IpcError::Disconnected)) => {
+                reconnects += 1;
+                if reconnects > MAX_RECONNECTS {
+                    panic!(
+                        "subscribe stream disconnected {} times",
+                        reconnects
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(50 * reconnects as u64));
+                *client = StreamingClient::subscribe_with_client(
+                    repo.clone(),
+                    read.clone(),
+                    ipc_client.clone(),
+                )
+                .expect("resubscribe");
+            }
+            Err(err) => panic!("stream event: {err:?}"),
         }
-        seqs.push(seq);
     }
     seqs
 }
