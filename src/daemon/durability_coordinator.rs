@@ -22,7 +22,9 @@ pub struct DurabilityCoordinator {
 
 #[derive(Debug)]
 pub(crate) enum ReplicatedPoll {
-    Satisfied { acked_by: Vec<ReplicaId> },
+    Satisfied {
+        acked_by: Vec<ReplicaId>,
+    },
     Pending {
         acked_by: Vec<ReplicaId>,
         eligible: BTreeSet<ReplicaId>,
@@ -138,10 +140,9 @@ impl DurabilityCoordinator {
 
         match outcome {
             QuorumOutcome::Satisfied { acked_by, .. } => Ok(ReplicatedPoll::Satisfied { acked_by }),
-            QuorumOutcome::Pending { acked_by, .. } => Ok(ReplicatedPoll::Pending {
-                acked_by,
-                eligible,
-            }),
+            QuorumOutcome::Pending { acked_by, .. } => {
+                Ok(ReplicatedPoll::Pending { acked_by, eligible })
+            }
             QuorumOutcome::InsufficientEligible { eligible_total, .. } => {
                 Err(OpError::DurabilityUnavailable {
                     requested: DurabilityClass::ReplicatedFsync { k },

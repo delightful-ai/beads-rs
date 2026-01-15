@@ -17,19 +17,21 @@ use crossbeam::channel::{Receiver, Sender};
 use super::broadcast::{
     BroadcastError, BroadcastEvent, DropReason, EventSubscription, SubscriberLimits,
 };
-use super::core::{Daemon, NormalizedReadConsistency, ReadGateStatus};
+use super::core::{Daemon, HandleOutcome, NormalizedReadConsistency, ReadGateStatus};
+use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
+use super::executor::DurabilityWait;
 use super::git_worker::{GitOp, GitResult};
 use super::ipc::{
-    ReadConsistency, Request, Response, ResponsePayload, decode_request_with_limits, encode_response,
-    send_response,
+    ReadConsistency, Request, Response, ResponsePayload, decode_request_with_limits,
+    encode_response, send_response,
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
 use super::repl::{WalRangeError, WalRangeReader};
 use crate::core::error::details as error_details;
 use crate::core::{
-    Applied, ErrorCode, ErrorPayload, EventFrameV1, EventId, Limits, NamespaceId, ReplicaId,
-    Sha256, Watermark, Watermarks, decode_event_body,
+    Applied, DurabilityClass, ErrorCode, ErrorPayload, EventFrameV1, EventId, Limits, NamespaceId,
+    ReplicaId, Sha256, Watermark, Watermarks, decode_event_body,
 };
 
 /// Message sent from socket handlers to state thread.
@@ -66,6 +68,13 @@ struct ReadGateWaiter {
     deadline: Instant,
 }
 
+struct DurabilityWaiter {
+    respond: Sender<ServerReply>,
+    wait: DurabilityWait,
+    started_at: Instant,
+    deadline: Instant,
+}
+
 enum RequestOutcome {
     Continue,
     Shutdown,
@@ -83,6 +92,7 @@ pub fn run_state_loop(
 ) {
     let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<ServerReply>>> = HashMap::new();
     let mut read_gate_waiters: Vec<ReadGateWaiter> = Vec::new();
+    let mut durability_waiters: Vec<DurabilityWaiter> = Vec::new();
     let repl_capacity = daemon.limits().max_repl_ingest_queue_events.max(1);
     let (repl_tx, repl_rx) = crossbeam::channel::bounded(repl_capacity);
     daemon.set_repl_ingest_tx(repl_tx);
@@ -90,12 +100,13 @@ pub fn run_state_loop(
     loop {
         let next_sync = daemon.next_sync_deadline();
         let next_checkpoint = daemon.next_checkpoint_deadline();
-        let next_read_gate = read_gate_waiters
+        let next_read_gate = read_gate_waiters.iter().map(|waiter| waiter.deadline).min();
+        let next_durability = durability_waiters
             .iter()
             .map(|waiter| waiter.deadline)
             .min();
         let mut next_deadline = None;
-        for deadline in [next_sync, next_checkpoint, next_read_gate]
+        for deadline in [next_sync, next_checkpoint, next_read_gate, next_durability]
             .into_iter()
             .flatten()
         {
@@ -177,6 +188,7 @@ pub fn run_state_loop(
                             respond,
                             &git_tx,
                             &mut sync_waiters,
+                            &mut durability_waiters,
                         );
 
                         if matches!(outcome, RequestOutcome::Shutdown) {
@@ -254,7 +266,9 @@ pub fn run_state_loop(
                             &mut read_gate_waiters,
                             &git_tx,
                             &mut sync_waiters,
+                            &mut durability_waiters,
                         );
+                        flush_durability_waiters(&mut durability_waiters);
                     }
                     Err(_) => {
                         // Channel closed - time to exit
@@ -273,7 +287,9 @@ pub fn run_state_loop(
                     &mut read_gate_waiters,
                     &git_tx,
                     &mut sync_waiters,
+                    &mut durability_waiters,
                 );
+                flush_durability_waiters(&mut durability_waiters);
             }
 
             // Replication ingest request
@@ -288,7 +304,9 @@ pub fn run_state_loop(
                         &mut read_gate_waiters,
                         &git_tx,
                         &mut sync_waiters,
+                        &mut durability_waiters,
                     );
+                    flush_durability_waiters(&mut durability_waiters);
                 }
             }
 
@@ -315,7 +333,9 @@ pub fn run_state_loop(
                     &mut read_gate_waiters,
                     &git_tx,
                     &mut sync_waiters,
+                    &mut durability_waiters,
                 );
+                flush_durability_waiters(&mut durability_waiters);
             }
         }
     }
@@ -327,6 +347,7 @@ fn process_request_message(
     respond: Sender<ServerReply>,
     git_tx: &Sender<GitOp>,
     sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+    durability_waiters: &mut Vec<DurabilityWaiter>,
 ) -> RequestOutcome {
     // Sync barrier: wait until repo is clean.
     if let Request::SyncWait { repo } = request {
@@ -391,18 +412,18 @@ fn process_request_message(
         {
             Ok(subscription) => subscription,
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(
-                    broadcast_error_to_op(err),
-                )));
+                let _ = respond.send(ServerReply::Response(Response::err(broadcast_error_to_op(
+                    err,
+                ))));
                 return RequestOutcome::Continue;
             }
         };
         let hot_cache = match store_runtime.broadcaster.hot_cache() {
             Ok(cache) => cache,
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(
-                    broadcast_error_to_op(err),
-                )));
+                let _ = respond.send(ServerReply::Response(Response::err(broadcast_error_to_op(
+                    err,
+                ))));
                 return RequestOutcome::Continue;
             }
         };
@@ -444,8 +465,24 @@ fn process_request_message(
 
     let is_shutdown = matches!(request, Request::Shutdown);
 
-    let response = daemon.handle_request(request, git_tx);
-    let _ = respond.send(ServerReply::Response(response));
+    let outcome = daemon.handle_request(request, git_tx);
+    match outcome {
+        HandleOutcome::Response(response) => {
+            let _ = respond.send(ServerReply::Response(response));
+        }
+        HandleOutcome::DurabilityWait(wait) => {
+            let started_at = Instant::now();
+            let deadline = started_at
+                .checked_add(wait.wait_timeout)
+                .unwrap_or(started_at);
+            durability_waiters.push(DurabilityWaiter {
+                respond,
+                wait,
+                started_at,
+                deadline,
+            });
+        }
+    }
 
     if is_shutdown {
         RequestOutcome::Shutdown
@@ -545,6 +582,7 @@ fn flush_read_gate_waiters(
     waiters: &mut Vec<ReadGateWaiter>,
     git_tx: &Sender<GitOp>,
     sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+    durability_waiters: &mut Vec<DurabilityWaiter>,
 ) {
     if waiters.is_empty() {
         return;
@@ -556,7 +594,9 @@ fn flush_read_gate_waiters(
         let loaded = match daemon.ensure_repo_fresh(&waiter.repo, git_tx) {
             Ok(remote) => remote,
             Err(err) => {
-                let _ = waiter.respond.send(ServerReply::Response(Response::err(err)));
+                let _ = waiter
+                    .respond
+                    .send(ServerReply::Response(Response::err(err)));
                 continue;
             }
         };
@@ -569,6 +609,7 @@ fn flush_read_gate_waiters(
                     waiter.respond,
                     git_tx,
                     sync_waiters,
+                    durability_waiters,
                 );
             }
             Ok(ReadGateStatus::Unsatisfied {
@@ -576,21 +617,96 @@ fn flush_read_gate_waiters(
                 current_applied,
             }) => {
                 if now >= waiter.deadline {
-                    let waited_ms =
-                        (now.duration_since(waiter.started_at).as_millis()).min(u64::MAX as u128)
-                            as u64;
+                    let waited_ms = (now.duration_since(waiter.started_at).as_millis())
+                        .min(u64::MAX as u128) as u64;
                     let err = OpError::RequireMinSeenTimeout {
                         waited_ms,
                         required: Box::new(required),
                         current_applied: Box::new(current_applied),
                     };
-                    let _ = waiter.respond.send(ServerReply::Response(Response::err(err)));
+                    let _ = waiter
+                        .respond
+                        .send(ServerReply::Response(Response::err(err)));
                     continue;
                 }
                 remaining.push(waiter);
             }
             Err(err) => {
-                let _ = waiter.respond.send(ServerReply::Response(Response::err(err)));
+                let _ = waiter
+                    .respond
+                    .send(ServerReply::Response(Response::err(err)));
+            }
+        }
+    }
+
+    *waiters = remaining;
+}
+
+fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
+    if waiters.is_empty() {
+        return;
+    }
+
+    let now = Instant::now();
+    let mut remaining = Vec::new();
+    for waiter in waiters.drain(..) {
+        let requested = waiter.wait.requested;
+        let DurabilityClass::ReplicatedFsync { k } = requested else {
+            let _ = waiter
+                .respond
+                .send(ServerReply::Response(Response::ok(ResponsePayload::Op(
+                    waiter.wait.response,
+                ))));
+            continue;
+        };
+
+        match waiter.wait.coordinator.poll_replicated(
+            &waiter.wait.namespace,
+            waiter.wait.origin,
+            waiter.wait.seq,
+            k,
+        ) {
+            Ok(ReplicatedPoll::Satisfied { acked_by }) => {
+                let mut response = waiter.wait.response;
+                response.receipt = DurabilityCoordinator::achieved_receipt(
+                    response.receipt,
+                    requested,
+                    k,
+                    acked_by,
+                );
+                let _ =
+                    waiter
+                        .respond
+                        .send(ServerReply::Response(Response::ok(ResponsePayload::Op(
+                            response,
+                        ))));
+            }
+            Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
+                if now >= waiter.deadline {
+                    let waited_ms = (now.duration_since(waiter.started_at).as_millis())
+                        .min(u64::MAX as u128) as u64;
+                    let pending = DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
+                    let pending_receipt = DurabilityCoordinator::pending_receipt(
+                        waiter.wait.response.receipt,
+                        requested,
+                    );
+                    let err = OpError::DurabilityTimeout {
+                        requested,
+                        waited_ms,
+                        pending_replica_ids: Some(pending),
+                        receipt: Box::new(pending_receipt),
+                    };
+                    let _ = waiter
+                        .respond
+                        .send(ServerReply::Response(Response::err(err)));
+                    continue;
+                }
+                remaining.push(waiter);
+            }
+            Err(err) => {
+                let _ = waiter
+                    .respond
+                    .send(ServerReply::Response(Response::err(err)));
             }
         }
     }
@@ -1002,16 +1118,25 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::num::NonZeroU32;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use crate::daemon::core::insert_store_for_tests;
-    use crate::daemon::wal::Wal;
+    use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
-        ActorId, Applied, Canonical, EventBytes, EventFrameV1, EventId, HeadStatus, Opaque, Seq0,
-        Seq1, Sha256, StoreId, Watermarks,
+        ActorId, Applied, BeadId, Canonical, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
+        EventBytes, EventFrameV1, EventId, HeadStatus, NamespacePolicy, Opaque, ReplicaRole,
+        ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermarks,
     };
+    use crate::daemon::core::insert_store_for_tests;
+    use crate::daemon::ipc::OpResponse;
+    use crate::daemon::ops::OpResult;
+    use crate::daemon::repl::PeerAckTable;
+    use crate::daemon::repl::proto::WatermarkMap;
+    use crate::daemon::wal::Wal;
 
     struct TestEnv {
         _temp: TempDir,
@@ -1270,12 +1395,7 @@ mod tests {
             .daemon
             .ensure_repo_fresh(&env.repo_path, &env.git_tx)
             .unwrap();
-        let origin = env
-            .daemon
-            .store_runtime(&loaded)
-            .unwrap()
-            .meta
-            .replica_id;
+        let origin = env.daemon.store_runtime(&loaded).unwrap().meta.replica_id;
         let namespace = NamespaceId::core();
 
         let mut required = Watermarks::<Applied>::new();
@@ -1295,8 +1415,7 @@ mod tests {
         let normalized = env.daemon.normalize_read_consistency(read).unwrap();
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let started_at = Instant::now();
-        let deadline =
-            started_at + Duration::from_millis(normalized.wait_timeout_ms());
+        let deadline = started_at + Duration::from_millis(normalized.wait_timeout_ms());
         let waiter = ReadGateWaiter {
             request,
             respond: respond_tx,
@@ -1308,7 +1427,14 @@ mod tests {
 
         let mut waiters = vec![waiter];
         let mut sync_waiters = HashMap::new();
-        flush_read_gate_waiters(&mut env.daemon, &mut waiters, &env.git_tx, &mut sync_waiters);
+        let mut durability_waiters = Vec::new();
+        flush_read_gate_waiters(
+            &mut env.daemon,
+            &mut waiters,
+            &env.git_tx,
+            &mut sync_waiters,
+            &mut durability_waiters,
+        );
         assert_eq!(waiters.len(), 1);
         assert!(respond_rx.try_recv().is_err());
 
@@ -1319,7 +1445,13 @@ mod tests {
             .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
             .unwrap();
 
-        flush_read_gate_waiters(&mut env.daemon, &mut waiters, &env.git_tx, &mut sync_waiters);
+        flush_read_gate_waiters(
+            &mut env.daemon,
+            &mut waiters,
+            &env.git_tx,
+            &mut sync_waiters,
+            &mut durability_waiters,
+        );
         assert!(waiters.is_empty());
 
         let reply = respond_rx.recv().unwrap();
@@ -1336,12 +1468,7 @@ mod tests {
             .daemon
             .ensure_repo_fresh(&env.repo_path, &env.git_tx)
             .unwrap();
-        let origin = env
-            .daemon
-            .store_runtime(&loaded)
-            .unwrap()
-            .meta
-            .replica_id;
+        let origin = env.daemon.store_runtime(&loaded).unwrap().meta.replica_id;
         let namespace = NamespaceId::core();
 
         let mut required = Watermarks::<Applied>::new();
@@ -1373,7 +1500,14 @@ mod tests {
 
         let mut waiters = vec![waiter];
         let mut sync_waiters = HashMap::new();
-        flush_read_gate_waiters(&mut env.daemon, &mut waiters, &env.git_tx, &mut sync_waiters);
+        let mut durability_waiters = Vec::new();
+        flush_read_gate_waiters(
+            &mut env.daemon,
+            &mut waiters,
+            &env.git_tx,
+            &mut sync_waiters,
+            &mut durability_waiters,
+        );
         assert!(waiters.is_empty());
 
         let reply = respond_rx.recv().unwrap();
@@ -1384,5 +1518,226 @@ mod tests {
             panic!("expected timeout error");
         };
         assert_eq!(err.code, ErrorCode::RequireMinSeenTimeout);
+    }
+
+    fn replica(seed: u128) -> ReplicaId {
+        ReplicaId::new(Uuid::from_u128(seed))
+    }
+
+    fn roster(entries: Vec<ReplicaEntry>) -> ReplicaRoster {
+        ReplicaRoster { replicas: entries }
+    }
+
+    #[test]
+    fn durability_waiter_releases_on_quorum() {
+        let namespace = NamespaceId::core();
+        let local = replica(1);
+        let peer_a = replica(2);
+        let peer_b = replica(3);
+        let roster = roster(vec![
+            ReplicaEntry {
+                replica_id: local,
+                name: "local".to_string(),
+                role: ReplicaRole::Anchor,
+                durability_eligible: true,
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+            ReplicaEntry {
+                replica_id: peer_a,
+                name: "peer-a".to_string(),
+                role: ReplicaRole::Peer,
+                durability_eligible: true,
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+            ReplicaEntry {
+                replica_id: peer_b,
+                name: "peer-b".to_string(),
+                role: ReplicaRole::Peer,
+                durability_eligible: true,
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+        ]);
+
+        let mut policies = BTreeMap::new();
+        policies.insert(namespace.clone(), NamespacePolicy::core_default());
+
+        let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
+        let coordinator =
+            DurabilityCoordinator::new(local, policies, Some(roster), Arc::clone(&peer_acks));
+
+        let mut durable = WatermarkMap::new();
+        durable
+            .entry(namespace.clone())
+            .or_default()
+            .insert(local, 2);
+        peer_acks
+            .lock()
+            .unwrap()
+            .update_peer(peer_a, &durable, None, None, None, 10)
+            .unwrap();
+        peer_acks
+            .lock()
+            .unwrap()
+            .update_peer(peer_b, &durable, None, None, None, 12)
+            .unwrap();
+
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_u128(10)), StoreEpoch::ZERO);
+        let receipt = DurabilityReceipt::local_fsync_defaults(
+            store,
+            TxnId::new(Uuid::from_u128(11)),
+            Vec::new(),
+            123,
+        );
+        let bead_id = BeadId::parse("bd-abc").unwrap();
+        let response = OpResponse::new(OpResult::Updated { id: bead_id }, receipt);
+        let wait = DurabilityWait {
+            coordinator,
+            namespace: namespace.clone(),
+            origin: local,
+            seq: Seq1::from_u64(2).unwrap(),
+            requested: DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).unwrap(),
+            },
+            wait_timeout: Duration::from_millis(50),
+            response,
+        };
+
+        let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+        let started_at = Instant::now();
+        let deadline = started_at + Duration::from_millis(50);
+        let mut waiters = vec![DurabilityWaiter {
+            respond: respond_tx,
+            wait,
+            started_at,
+            deadline,
+        }];
+
+        flush_durability_waiters(&mut waiters);
+        assert!(waiters.is_empty());
+
+        let reply = respond_rx.recv().unwrap();
+        let ServerReply::Response(response) = reply else {
+            panic!("expected response");
+        };
+        let Response::Ok { ok } = response else {
+            panic!("expected ok response");
+        };
+        let ResponsePayload::Op(op) = ok else {
+            panic!("expected op response");
+        };
+
+        match op.receipt.outcome {
+            DurabilityOutcome::Achieved {
+                requested,
+                achieved,
+            } => {
+                assert_eq!(
+                    requested,
+                    DurabilityClass::ReplicatedFsync {
+                        k: NonZeroU32::new(2).unwrap()
+                    }
+                );
+                assert_eq!(
+                    achieved,
+                    DurabilityClass::ReplicatedFsync {
+                        k: NonZeroU32::new(2).unwrap()
+                    }
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let proof = op
+            .receipt
+            .durability_proof
+            .replicated
+            .expect("replicated proof");
+        assert_eq!(proof.k.get(), 2);
+        assert_eq!(proof.acked_by.len(), 2);
+        assert!(proof.acked_by.contains(&peer_a));
+        assert!(proof.acked_by.contains(&peer_b));
+    }
+
+    #[test]
+    fn durability_waiter_times_out() {
+        let namespace = NamespaceId::core();
+        let local = replica(5);
+        let peer = replica(6);
+        let roster = roster(vec![
+            ReplicaEntry {
+                replica_id: local,
+                name: "local".to_string(),
+                role: ReplicaRole::Anchor,
+                durability_eligible: true,
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+            ReplicaEntry {
+                replica_id: peer,
+                name: "peer".to_string(),
+                role: ReplicaRole::Peer,
+                durability_eligible: true,
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+        ]);
+
+        let mut policies = BTreeMap::new();
+        policies.insert(namespace.clone(), NamespacePolicy::core_default());
+
+        let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
+        let coordinator =
+            DurabilityCoordinator::new(local, policies, Some(roster), Arc::clone(&peer_acks));
+
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_u128(12)), StoreEpoch::ZERO);
+        let receipt = DurabilityReceipt::local_fsync_defaults(
+            store,
+            TxnId::new(Uuid::from_u128(13)),
+            Vec::new(),
+            123,
+        );
+        let bead_id = BeadId::parse("bd-def").unwrap();
+        let response = OpResponse::new(OpResult::Updated { id: bead_id }, receipt);
+        let wait = DurabilityWait {
+            coordinator,
+            namespace: namespace.clone(),
+            origin: local,
+            seq: Seq1::from_u64(1).unwrap(),
+            requested: DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(1).unwrap(),
+            },
+            wait_timeout: Duration::from_millis(10),
+            response,
+        };
+
+        let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+        let started_at = Instant::now() - Duration::from_millis(20);
+        let deadline = started_at;
+        let mut waiters = vec![DurabilityWaiter {
+            respond: respond_tx,
+            wait,
+            started_at,
+            deadline,
+        }];
+
+        flush_durability_waiters(&mut waiters);
+        assert!(waiters.is_empty());
+
+        let reply = respond_rx.recv().unwrap();
+        let ServerReply::Response(response) = reply else {
+            panic!("expected response");
+        };
+        let Response::Err { err } = response else {
+            panic!("expected error");
+        };
+        assert_eq!(err.code, ErrorCode::DurabilityTimeout);
+        let receipt = err
+            .receipt_as::<DurabilityReceipt>()
+            .unwrap()
+            .expect("receipt");
+        assert!(matches!(receipt.outcome, DurabilityOutcome::Pending { .. }));
     }
 }

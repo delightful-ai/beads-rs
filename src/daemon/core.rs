@@ -23,6 +23,7 @@ use super::broadcast::BroadcastEvent;
 use super::checkpoint_scheduler::{
     CheckpointGroupConfig, CheckpointGroupKey, CheckpointGroupSnapshot, CheckpointScheduler,
 };
+use super::executor::DurabilityWait;
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
     ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
@@ -190,6 +191,18 @@ pub(crate) enum ReadGateStatus {
         required: Watermarks<Applied>,
         current_applied: Watermarks<Applied>,
     },
+}
+
+#[derive(Debug)]
+pub(crate) enum HandleOutcome {
+    Response(Response),
+    DurabilityWait(DurabilityWait),
+}
+
+impl From<Response> for HandleOutcome {
+    fn from(response: Response) -> Self {
+        HandleOutcome::Response(response)
+    }
 }
 
 /// The daemon coordinator.
@@ -1883,7 +1896,11 @@ impl Daemon {
     /// Handle a request from IPC.
     ///
     /// Dispatches to appropriate handler based on request type.
-    pub fn handle_request(&mut self, req: Request, git_tx: &Sender<GitOp>) -> Response {
+    pub(crate) fn handle_request(
+        &mut self,
+        req: Request,
+        git_tx: &Sender<GitOp>,
+    ) -> HandleOutcome {
         match req {
             // Mutations - delegate to executor module
             Request::Create {
@@ -1905,7 +1922,7 @@ impl Daemon {
             } => {
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_create(
                     &repo,
@@ -1936,11 +1953,11 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_update(&repo, meta, &id, patch, cas, git_tx)
             }
@@ -1953,11 +1970,11 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_add_labels(&repo, meta, &id, labels, git_tx)
             }
@@ -1970,11 +1987,11 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_remove_labels(&repo, meta, &id, labels, git_tx)
             }
@@ -1987,20 +2004,20 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let parent = match parent {
                     Some(raw) => match BeadId::parse(&raw) {
                         Ok(parent) => Some(parent),
                         Err(e) => {
-                            return Response::err(invalid_id_payload(e));
+                            return Response::err(invalid_id_payload(e)).into();
                         }
                     },
                     None => None,
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_set_parent(&repo, meta, &id, parent, git_tx)
             }
@@ -2014,11 +2031,11 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_close(&repo, meta, &id, reason, on_branch, git_tx)
             }
@@ -2026,11 +2043,11 @@ impl Daemon {
             Request::Reopen { repo, id, meta } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_reopen(&repo, meta, &id, git_tx)
             }
@@ -2043,11 +2060,11 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_delete(&repo, meta, &id, reason, git_tx)
             }
@@ -2061,15 +2078,15 @@ impl Daemon {
             } => {
                 let from = match BeadId::parse(&from) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let to = match BeadId::parse(&to) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_add_dep(&repo, meta, &from, &to, kind, git_tx)
             }
@@ -2083,15 +2100,15 @@ impl Daemon {
             } => {
                 let from = match BeadId::parse(&from) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let to = match BeadId::parse(&to) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_remove_dep(&repo, meta, &from, &to, kind, git_tx)
             }
@@ -2104,11 +2121,11 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_add_note(&repo, meta, &id, content, git_tx)
             }
@@ -2121,11 +2138,11 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_claim(&repo, meta, &id, lease_secs, git_tx)
             }
@@ -2133,11 +2150,11 @@ impl Daemon {
             Request::Unclaim { repo, id, meta } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_unclaim(&repo, meta, &id, git_tx)
             }
@@ -2150,11 +2167,11 @@ impl Daemon {
             } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
                 let meta = match self.normalize_mutation_meta(meta) {
                     Ok(meta) => meta,
-                    Err(e) => return Response::err(e),
+                    Err(e) => return Response::err(e).into(),
                 };
                 self.apply_extend_claim(&repo, meta, &id, lease_secs, git_tx)
             }
@@ -2163,48 +2180,50 @@ impl Daemon {
             Request::Show { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                self.query_show(&repo, &id, read, git_tx)
+                self.query_show(&repo, &id, read, git_tx).into()
             }
 
             Request::ShowMultiple { repo, ids, read } => {
-                self.query_show_multiple(&repo, &ids, read, git_tx)
+                self.query_show_multiple(&repo, &ids, read, git_tx).into()
             }
 
             Request::List {
                 repo,
                 filters,
                 read,
-            } => self.query_list(&repo, &filters, read, git_tx),
+            } => self.query_list(&repo, &filters, read, git_tx).into(),
 
-            Request::Ready { repo, limit, read } => self.query_ready(&repo, limit, read, git_tx),
+            Request::Ready { repo, limit, read } => {
+                self.query_ready(&repo, limit, read, git_tx).into()
+            }
 
             Request::DepTree { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                self.query_dep_tree(&repo, &id, read, git_tx)
+                self.query_dep_tree(&repo, &id, read, git_tx).into()
             }
 
             Request::Deps { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                self.query_deps(&repo, &id, read, git_tx)
+                self.query_deps(&repo, &id, read, git_tx).into()
             }
 
             Request::Notes { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)),
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
                 };
-                self.query_notes(&repo, &id, read, git_tx)
+                self.query_notes(&repo, &id, read, git_tx).into()
             }
 
-            Request::Blocked { repo, read } => self.query_blocked(&repo, read, git_tx),
+            Request::Blocked { repo, read } => self.query_blocked(&repo, read, git_tx).into(),
 
             Request::Stale {
                 repo,
@@ -2212,14 +2231,18 @@ impl Daemon {
                 status,
                 limit,
                 read,
-            } => self.query_stale(&repo, days, status.as_deref(), limit, read, git_tx),
+            } => self
+                .query_stale(&repo, days, status.as_deref(), limit, read, git_tx)
+                .into(),
 
             Request::Count {
                 repo,
                 filters,
                 group_by,
                 read,
-            } => self.query_count(&repo, &filters, group_by.as_deref(), read, git_tx),
+            } => self
+                .query_count(&repo, &filters, group_by.as_deref(), read, git_tx)
+                .into(),
 
             Request::Deleted {
                 repo,
@@ -2231,76 +2254,90 @@ impl Daemon {
                     Some(s) => Some(match BeadId::parse(&s) {
                         Ok(id) => id,
                         Err(e) => {
-                            return Response::err(invalid_id_payload(e));
+                            return Response::err(invalid_id_payload(e)).into();
                         }
                     }),
                     None => None,
                 };
                 self.query_deleted(&repo, since_ms, id.as_ref(), read, git_tx)
+                    .into()
             }
 
             Request::EpicStatus {
                 repo,
                 eligible_only,
                 read,
-            } => self.query_epic_status(&repo, eligible_only, read, git_tx),
+            } => self
+                .query_epic_status(&repo, eligible_only, read, git_tx)
+                .into(),
 
-            Request::Status { repo, read } => self.query_status(&repo, read, git_tx),
+            Request::Status { repo, read } => self.query_status(&repo, read, git_tx).into(),
 
-            Request::AdminStatus { repo, read } => self.admin_status(&repo, read, git_tx),
+            Request::AdminStatus { repo, read } => self.admin_status(&repo, read, git_tx).into(),
 
-            Request::AdminMetrics { repo, read } => self.admin_metrics(&repo, read, git_tx),
+            Request::AdminMetrics { repo, read } => self.admin_metrics(&repo, read, git_tx).into(),
 
             Request::AdminDoctor {
                 repo,
                 read,
                 max_records_per_namespace,
                 verify_checkpoint_cache,
-            } => self.admin_doctor(
-                &repo,
-                read,
-                max_records_per_namespace,
-                verify_checkpoint_cache,
-                git_tx,
-            ),
+            } => self
+                .admin_doctor(
+                    &repo,
+                    read,
+                    max_records_per_namespace,
+                    verify_checkpoint_cache,
+                    git_tx,
+                )
+                .into(),
 
             Request::AdminScrub {
                 repo,
                 read,
                 max_records_per_namespace,
                 verify_checkpoint_cache,
-            } => self.admin_scrub_now(
-                &repo,
-                read,
-                max_records_per_namespace,
-                verify_checkpoint_cache,
-                git_tx,
-            ),
+            } => self
+                .admin_scrub_now(
+                    &repo,
+                    read,
+                    max_records_per_namespace,
+                    verify_checkpoint_cache,
+                    git_tx,
+                )
+                .into(),
 
             Request::AdminFingerprint {
                 repo,
                 read,
                 mode,
                 sample,
-            } => self.admin_fingerprint(&repo, read, mode, sample, git_tx),
+            } => self
+                .admin_fingerprint(&repo, read, mode, sample, git_tx)
+                .into(),
 
-            Request::AdminReloadPolicies { repo } => self.admin_reload_policies(&repo, git_tx),
-
-            Request::AdminRotateReplicaId { repo } => self.admin_rotate_replica_id(&repo, git_tx),
-
-            Request::AdminMaintenanceMode { repo, enabled } => {
-                self.admin_maintenance_mode(&repo, enabled, git_tx)
+            Request::AdminReloadPolicies { repo } => {
+                self.admin_reload_policies(&repo, git_tx).into()
             }
 
-            Request::AdminRebuildIndex { repo } => self.admin_rebuild_index(&repo, git_tx),
+            Request::AdminRotateReplicaId { repo } => {
+                self.admin_rotate_replica_id(&repo, git_tx).into()
+            }
 
-            Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx),
+            Request::AdminMaintenanceMode { repo, enabled } => {
+                self.admin_maintenance_mode(&repo, enabled, git_tx).into()
+            }
+
+            Request::AdminRebuildIndex { repo } => self.admin_rebuild_index(&repo, git_tx).into(),
+
+            Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx).into(),
 
             Request::Subscribe { .. } => Response::err(error_payload(
                 ErrorCode::InvalidRequest,
                 "subscribe must be handled by the streaming IPC path",
                 false,
-            )),
+            ))
+            .into(),
 
             // Control
             Request::Refresh { repo } => {
@@ -2310,6 +2347,7 @@ impl Daemon {
                     Ok(_) => Response::ok(ResponsePayload::refreshed()),
                     Err(e) => Response::err(e),
                 }
+                .into()
             }
 
             Request::Sync { repo } => {
@@ -2318,6 +2356,7 @@ impl Daemon {
                     Ok(_) => Response::ok(ResponsePayload::synced()),
                     Err(e) => Response::err(e),
                 }
+                .into()
             }
 
             Request::SyncWait { .. } => {
@@ -2337,7 +2376,8 @@ impl Daemon {
                         ErrorCode::Internal,
                         "git thread not responding",
                         false,
-                    ));
+                    ))
+                    .into();
                 }
 
                 match respond_rx.recv() {
@@ -2352,6 +2392,7 @@ impl Daemon {
                         Response::err(error_payload(ErrorCode::Internal, "git thread died", false))
                     }
                 }
+                .into()
             }
 
             Request::Ping => Response::ok(ResponsePayload::Query(QueryResult::DaemonInfo(
@@ -2360,11 +2401,12 @@ impl Daemon {
                     protocol_version: super::ipc::IPC_PROTOCOL_VERSION,
                     pid: std::process::id(),
                 },
-            ))),
+            )))
+            .into(),
 
             Request::Shutdown => {
                 self.begin_shutdown();
-                Response::ok(ResponsePayload::shutting_down())
+                Response::ok(ResponsePayload::shutting_down()).into()
             }
         }
     }
@@ -2888,7 +2930,9 @@ pub(crate) fn insert_store_for_tests(
     .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
     daemon.stores.insert(store_id, open.runtime);
     daemon.remote_to_store_id.insert(remote.clone(), store_id);
-    daemon.path_to_store_id.insert(repo_path.to_owned(), store_id);
+    daemon
+        .path_to_store_id
+        .insert(repo_path.to_owned(), store_id);
     daemon.path_to_remote.insert(repo_path.to_owned(), remote);
     daemon.register_default_checkpoint_groups(store_id)?;
     Ok(())

@@ -17,8 +17,10 @@ use bytes::Bytes;
 use crossbeam::channel::Sender;
 
 use super::broadcast::BroadcastEvent;
-use super::core::{Daemon, NormalizedMutationMeta, detect_clock_skew, load_replica_roster};
-use super::durability_coordinator::DurabilityCoordinator;
+use super::core::{
+    Daemon, HandleOutcome, NormalizedMutationMeta, detect_clock_skew, load_replica_roster,
+};
+use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
 use super::ipc::{OpResponse, Response, ResponsePayload};
 use super::mutation_engine::{IdContext, MutationContext, MutationEngine, MutationRequest};
@@ -31,13 +33,47 @@ use super::wal::{
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     Applied, BeadId, BeadType, CanonicalState, DepKind, DurabilityClass, DurabilityReceipt,
-    Durable, EventBody, EventId, HeadStatus, Limits, NoteId, Priority, ReplicaId, Seq1, Sha256,
-    StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark, WatermarkError, Watermarks,
-    WirePatch, WriteStamp, apply_event, decode_event_body, hash_event_body,
+    Durable, EventBody, EventId, HeadStatus, Limits, NamespaceId, NoteId, Priority, ReplicaId,
+    Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark, WatermarkError,
+    Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body, hash_event_body,
 };
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
 use crate::paths;
+
+#[derive(Debug)]
+pub(crate) struct DurabilityWait {
+    pub(crate) coordinator: DurabilityCoordinator,
+    pub(crate) namespace: NamespaceId,
+    pub(crate) origin: ReplicaId,
+    pub(crate) seq: Seq1,
+    pub(crate) requested: DurabilityClass,
+    pub(crate) wait_timeout: Duration,
+    pub(crate) response: OpResponse,
+}
+
+enum MutationOutcome {
+    Immediate(OpResponse),
+    Pending(DurabilityWait),
+}
+
+impl MutationOutcome {
+    fn response_mut(&mut self) -> &mut OpResponse {
+        match self {
+            MutationOutcome::Immediate(response) => response,
+            MutationOutcome::Pending(wait) => &mut wait.response,
+        }
+    }
+
+    fn into_handle(self) -> HandleOutcome {
+        match self {
+            MutationOutcome::Immediate(response) => {
+                HandleOutcome::Response(Response::ok(ResponsePayload::Op(response)))
+            }
+            MutationOutcome::Pending(wait) => HandleOutcome::DurabilityWait(wait),
+        }
+    }
+}
 
 impl Daemon {
     fn apply_mutation_request(
@@ -46,10 +82,10 @@ impl Daemon {
         meta: NormalizedMutationMeta,
         request: MutationRequest,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         match self.apply_mutation_request_inner(repo, meta, request, git_tx) {
-            Ok(op) => Response::ok(ResponsePayload::Op(op)),
-            Err(err) => Response::err(err),
+            Ok(outcome) => outcome.into_handle(),
+            Err(err) => HandleOutcome::Response(Response::err(err)),
         }
     }
 
@@ -59,7 +95,7 @@ impl Daemon {
         meta: NormalizedMutationMeta,
         request: MutationRequest,
         git_tx: &Sender<GitOp>,
-    ) -> Result<OpResponse, OpError> {
+    ) -> Result<MutationOutcome, OpError> {
         if self.is_shutting_down() {
             return Err(OpError::Overloaded {
                 subsystem: OverloadedSubsystem::Ipc,
@@ -120,7 +156,7 @@ impl Daemon {
         };
 
         if ctx.client_request_id.is_some()
-            && let Some(mut response) = try_reuse_idempotent_response(
+            && let Some(mut outcome) = try_reuse_idempotent_response(
                 &engine,
                 &ctx,
                 &request,
@@ -137,8 +173,8 @@ impl Daemon {
             )?
         {
             let state = &self.store_runtime(&proof)?.repo_state.state;
-            attach_issue_if_created(state, &mut response);
-            return Ok(response);
+            attach_issue_if_created(state, outcome.response_mut());
+            return Ok(outcome);
         }
 
         coordinator.ensure_available(&namespace, durability)?;
@@ -423,20 +459,54 @@ impl Daemon {
             applied_watermarks,
         );
 
-        let receipt = coordinator.await_durability(
-            &namespace,
-            origin_replica_id,
-            origin_seq,
-            durability,
-            receipt,
-            wait_timeout,
-        )?;
+        let mut response = OpResponse::new(result, receipt);
+        let mut outcome = match durability {
+            DurabilityClass::ReplicatedFsync { k } => {
+                match coordinator.poll_replicated(&namespace, origin_replica_id, origin_seq, k) {
+                    Ok(ReplicatedPoll::Satisfied { acked_by }) => {
+                        response.receipt = DurabilityCoordinator::achieved_receipt(
+                            response.receipt,
+                            durability,
+                            k,
+                            acked_by,
+                        );
+                        MutationOutcome::Immediate(response)
+                    }
+                    Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
+                        if wait_timeout.is_zero() {
+                            let pending =
+                                DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
+                            let pending_receipt = DurabilityCoordinator::pending_receipt(
+                                response.receipt,
+                                durability,
+                            );
+                            return Err(OpError::DurabilityTimeout {
+                                requested: durability,
+                                waited_ms: 0,
+                                pending_replica_ids: Some(pending),
+                                receipt: Box::new(pending_receipt),
+                            });
+                        }
+                        MutationOutcome::Pending(DurabilityWait {
+                            coordinator: coordinator.clone(),
+                            namespace: namespace.clone(),
+                            origin: origin_replica_id,
+                            seq: origin_seq,
+                            requested: durability,
+                            wait_timeout,
+                            response,
+                        })
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            _ => MutationOutcome::Immediate(response),
+        };
 
         tracing::info!("mutation committed");
-        let mut response = OpResponse::new(result, receipt);
         let state = &self.store_runtime(&proof)?.repo_state.state;
-        attach_issue_if_created(state, &mut response);
-        Ok(response)
+        attach_issue_if_created(state, outcome.response_mut());
+        Ok(outcome)
     }
 
     /// Create a new bead.
@@ -459,7 +529,7 @@ impl Daemon {
         labels: Vec<String>,
         dependencies: Vec<String>,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::Create {
             id: requested_id,
             parent,
@@ -487,7 +557,7 @@ impl Daemon {
         patch: BeadPatch,
         cas: Option<String>,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::Update {
             id: id.as_str().to_string(),
             patch,
@@ -504,7 +574,7 @@ impl Daemon {
         id: &BeadId,
         labels: Vec<String>,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::AddLabels {
             id: id.as_str().to_string(),
             labels,
@@ -520,7 +590,7 @@ impl Daemon {
         id: &BeadId,
         labels: Vec<String>,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::RemoveLabels {
             id: id.as_str().to_string(),
             labels,
@@ -536,7 +606,7 @@ impl Daemon {
         id: &BeadId,
         parent: Option<BeadId>,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::SetParent {
             id: id.as_str().to_string(),
             parent: parent.map(|value| value.as_str().to_string()),
@@ -553,7 +623,7 @@ impl Daemon {
         reason: Option<String>,
         on_branch: Option<String>,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::Close {
             id: id.as_str().to_string(),
             reason,
@@ -569,7 +639,7 @@ impl Daemon {
         meta: NormalizedMutationMeta,
         id: &BeadId,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::Reopen {
             id: id.as_str().to_string(),
         };
@@ -584,7 +654,7 @@ impl Daemon {
         id: &BeadId,
         reason: Option<String>,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::Delete {
             id: id.as_str().to_string(),
             reason,
@@ -601,7 +671,7 @@ impl Daemon {
         to: &BeadId,
         kind: DepKind,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::AddDep {
             from: from.as_str().to_string(),
             to: to.as_str().to_string(),
@@ -619,7 +689,7 @@ impl Daemon {
         to: &BeadId,
         kind: DepKind,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::RemoveDep {
             from: from.as_str().to_string(),
             to: to.as_str().to_string(),
@@ -636,7 +706,7 @@ impl Daemon {
         id: &BeadId,
         content: String,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::AddNote {
             id: id.as_str().to_string(),
             content,
@@ -652,7 +722,7 @@ impl Daemon {
         id: &BeadId,
         lease_secs: u64,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::Claim {
             id: id.as_str().to_string(),
             lease_secs,
@@ -667,7 +737,7 @@ impl Daemon {
         meta: NormalizedMutationMeta,
         id: &BeadId,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::Unclaim {
             id: id.as_str().to_string(),
         };
@@ -682,7 +752,7 @@ impl Daemon {
         id: &BeadId,
         lease_secs: u64,
         git_tx: &Sender<GitOp>,
-    ) -> Response {
+    ) -> HandleOutcome {
         let request = MutationRequest::ExtendClaim {
             id: id.as_str().to_string(),
             lease_secs,
@@ -725,7 +795,7 @@ fn try_reuse_idempotent_response(
     durability: DurabilityClass,
     coordinator: &DurabilityCoordinator,
     wait_timeout: Duration,
-) -> Result<Option<OpResponse>, OpError> {
+) -> Result<Option<MutationOutcome>, OpError> {
     let Some(client_request_id) = ctx.client_request_id else {
         return Ok(None);
     };
@@ -771,14 +841,47 @@ fn try_reuse_idempotent_response(
         }
     }
 
-    let receipt = coordinator.await_durability(
-        &ctx.namespace,
-        origin_replica_id,
-        max_seq,
-        durability,
-        receipt,
-        wait_timeout,
-    )?;
+    let mut response = OpResponse::new(result, receipt);
+    let outcome = match durability {
+        DurabilityClass::ReplicatedFsync { k } => {
+            match coordinator.poll_replicated(&ctx.namespace, origin_replica_id, max_seq, k) {
+                Ok(ReplicatedPoll::Satisfied { acked_by }) => {
+                    response.receipt = DurabilityCoordinator::achieved_receipt(
+                        response.receipt,
+                        durability,
+                        k,
+                        acked_by,
+                    );
+                    MutationOutcome::Immediate(response)
+                }
+                Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
+                    if wait_timeout.is_zero() {
+                        let pending =
+                            DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
+                        let pending_receipt =
+                            DurabilityCoordinator::pending_receipt(response.receipt, durability);
+                        return Err(OpError::DurabilityTimeout {
+                            requested: durability,
+                            waited_ms: 0,
+                            pending_replica_ids: Some(pending),
+                            receipt: Box::new(pending_receipt),
+                        });
+                    }
+                    MutationOutcome::Pending(DurabilityWait {
+                        coordinator: coordinator.clone(),
+                        namespace: ctx.namespace.clone(),
+                        origin: origin_replica_id,
+                        seq: max_seq,
+                        requested: durability,
+                        wait_timeout,
+                        response,
+                    })
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        _ => MutationOutcome::Immediate(response),
+    };
 
     tracing::info!(
         target: "mutation",
@@ -790,7 +893,7 @@ fn try_reuse_idempotent_response(
         "mutation idempotent reuse"
     );
 
-    Ok(Some(OpResponse::new(result, receipt)))
+    Ok(Some(outcome))
 }
 
 fn load_event_body(
@@ -1097,7 +1200,12 @@ mod tests {
             Vec::new(),
             1_700_000_000_000,
         );
-        let mut response = OpResponse::new(OpResult::Created { id: bead_id("bd-123") }, receipt);
+        let mut response = OpResponse::new(
+            OpResult::Created {
+                id: bead_id("bd-123"),
+            },
+            receipt,
+        );
         attach_issue_if_created(&state, &mut response);
         let issue = response.issue.expect("issue attached");
         assert_eq!(issue.id, "bd-123");
@@ -1250,7 +1358,7 @@ mod tests {
             )),
         );
 
-        let response = try_reuse_idempotent_response(
+        let outcome = try_reuse_idempotent_response(
             &engine,
             &ctx,
             &request,
@@ -1267,6 +1375,11 @@ mod tests {
         )
         .unwrap()
         .expect("expected idempotent response");
+
+        let response = match outcome {
+            MutationOutcome::Immediate(response) => response,
+            MutationOutcome::Pending(_) => panic!("expected immediate response"),
+        };
 
         assert_eq!(response.receipt.txn_id, draft.event_body.txn_id);
         assert_eq!(
