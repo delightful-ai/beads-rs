@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::bead::Bead;
-use super::dep::{DepEdge, DepKey};
+use super::dep::{DepEdge, DepKey, DepLife};
 use super::domain::DepKind;
 use super::error::CoreError;
 use super::identity::BeadId;
@@ -568,6 +568,130 @@ impl CanonicalState {
         &self.dep_indexes
     }
 
+    /// Detect dependency cycles among active deps.
+    ///
+    /// Returns cycles as paths that start and end at the same bead ID.
+    /// The ordering is deterministic.
+    pub fn dependency_cycles(&self) -> Vec<Vec<BeadId>> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum VisitState {
+            Visiting,
+            Visited,
+        }
+
+        let mut adjacency: BTreeMap<BeadId, Vec<BeadId>> = BTreeMap::new();
+        let mut nodes: BTreeSet<BeadId> = BTreeSet::new();
+        for (key, edge) in self.iter_deps() {
+            if edge.life.value != DepLife::Active {
+                continue;
+            }
+            nodes.insert(key.from().clone());
+            nodes.insert(key.to().clone());
+            adjacency.entry(key.from().clone()).or_default().push(key.to().clone());
+        }
+        for targets in adjacency.values_mut() {
+            targets.sort();
+        }
+
+        let mut state: BTreeMap<BeadId, VisitState> = BTreeMap::new();
+        let mut stack: Vec<BeadId> = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut cycles: Vec<Vec<BeadId>> = Vec::new();
+
+        fn normalize_cycle(cycle: &[BeadId]) -> Vec<BeadId> {
+            let mut base: Vec<BeadId> = cycle.to_vec();
+            if base.len() > 1 && base.first() == base.last() {
+                base.pop();
+            }
+            if base.is_empty() {
+                return base;
+            }
+            let n = base.len();
+            let mut best = 0;
+            for i in 1..n {
+                let a = base[i].as_str();
+                let b = base[best].as_str();
+                if a < b {
+                    best = i;
+                    continue;
+                }
+                if a == b {
+                    for offset in 1..n {
+                        let lhs = base[(i + offset) % n].as_str();
+                        let rhs = base[(best + offset) % n].as_str();
+                        if lhs < rhs {
+                            best = i;
+                            break;
+                        }
+                        if lhs > rhs {
+                            break;
+                        }
+                    }
+                }
+            }
+            let mut out = Vec::with_capacity(n + 1);
+            for offset in 0..n {
+                out.push(base[(best + offset) % n].clone());
+            }
+            out.push(out[0].clone());
+            out
+        }
+
+        fn cycle_key(cycle: &[BeadId]) -> String {
+            cycle
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+                .join(">")
+        }
+
+        fn dfs(
+            node: &BeadId,
+            adjacency: &BTreeMap<BeadId, Vec<BeadId>>,
+            state: &mut BTreeMap<BeadId, VisitState>,
+            stack: &mut Vec<BeadId>,
+            seen: &mut BTreeSet<String>,
+            cycles: &mut Vec<Vec<BeadId>>,
+        ) {
+            state.insert(node.clone(), VisitState::Visiting);
+            stack.push(node.clone());
+
+            if let Some(targets) = adjacency.get(node) {
+                for target in targets {
+                    match state.get(target) {
+                        Some(VisitState::Visiting) => {
+                            if let Some(pos) = stack.iter().position(|id| id == target) {
+                                let mut cycle = stack[pos..].to_vec();
+                                cycle.push(target.clone());
+                                let normalized = normalize_cycle(&cycle);
+                                let key = cycle_key(&normalized);
+                                if seen.insert(key) {
+                                    cycles.push(normalized);
+                                }
+                            }
+                        }
+                        Some(VisitState::Visited) => {}
+                        None => dfs(target, adjacency, state, stack, seen, cycles),
+                    }
+                }
+            }
+
+            stack.pop();
+            state.insert(node.clone(), VisitState::Visited);
+        }
+
+        for node in nodes {
+            if !state.contains_key(&node) {
+                dfs(&node, &adjacency, &mut state, &mut stack, &mut seen, &mut cycles);
+            }
+        }
+
+        cycles.sort_by_key(|cycle| cycle_key(cycle));
+        cycles
+    }
+
     fn has_any_tombstone(&self, id: &BeadId) -> bool {
         if matches!(self.beads.get(id), Some(BeadEntry::Tombstone(_))) {
             return true;
@@ -1043,6 +1167,50 @@ mod tests {
         let result = state.require_live(&id);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().fields.title.value, "test");
+    }
+
+    #[test]
+    fn dependency_cycles_detects_simple_cycle() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let a = bead_id("bd-aaa");
+        let b = bead_id("bd-bbb");
+        let c = bead_id("bd-ccc");
+
+        let ab = DepKey::new(a.clone(), b.clone(), DepKind::Blocks)
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+        let bc = DepKey::new(b.clone(), c.clone(), DepKind::Blocks)
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+        let ca = DepKey::new(c.clone(), a.clone(), DepKind::Blocks)
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+
+        state.insert_dep(ab, DepEdge::new(stamp.clone()));
+        state.insert_dep(bc, DepEdge::new(stamp.clone()));
+        state.insert_dep(ca, DepEdge::new(stamp));
+
+        let cycles = state.dependency_cycles();
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(cycles[0], vec![a.clone(), b.clone(), c.clone(), a.clone()]);
+    }
+
+    #[test]
+    fn dependency_cycles_empty_for_acyclic_graph() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let a = bead_id("bd-aaa");
+        let b = bead_id("bd-bbb");
+        let c = bead_id("bd-ccc");
+
+        let ab = DepKey::new(a, b.clone(), DepKind::Blocks)
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+        let bc = DepKey::new(b, c, DepKind::Blocks)
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+
+        state.insert_dep(ab, DepEdge::new(stamp.clone()));
+        state.insert_dep(bc, DepEdge::new(stamp));
+
+        let cycles = state.dependency_cycles();
+        assert!(cycles.is_empty());
     }
 
     #[test]
