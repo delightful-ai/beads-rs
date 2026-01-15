@@ -2,6 +2,7 @@
 
 pub mod frame;
 pub mod gap_buffer;
+mod keepalive;
 pub mod manager;
 mod pending;
 pub mod peer_acks;
