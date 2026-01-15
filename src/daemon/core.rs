@@ -140,7 +140,7 @@ struct StorePathMap {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, Applied, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
+    ActorId, Applied, ApplyError, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
     DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, Limits, NamespaceId, PrevVerified,
     ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
     StoreIdentity, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
@@ -1021,6 +1021,22 @@ impl Daemon {
             return Ok(IngestOutcome { durable, applied });
         }
 
+        let mut preview_state = store.repo_state.state.clone();
+        for event in &batch {
+            if event.body.namespace != namespace || event.body.origin_replica_id != origin {
+                return Err(Box::new(ErrorPayload::new(
+                    ErrorCode::Internal,
+                    "replication batch has mismatched origin",
+                    false,
+                )));
+            }
+            if let Err(err) = apply_event(&mut preview_state, &event.body) {
+                return Err(Box::new(apply_event_error_payload(
+                    &namespace, &origin, err,
+                )));
+            }
+        }
+
         let store_dir = paths::store_dir(store_id);
 
         let wal_index = Arc::clone(&store.wal_index);
@@ -1030,14 +1046,6 @@ impl Daemon {
             .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
 
         for event in &batch {
-            if event.body.namespace != namespace || event.body.origin_replica_id != origin {
-                return Err(Box::new(ErrorPayload::new(
-                    ErrorCode::Internal,
-                    "replication batch has mismatched origin",
-                    false,
-                )));
-            }
-
             let record = Record {
                 header: RecordHeader {
                     origin_replica_id: origin,
@@ -1139,10 +1147,8 @@ impl Daemon {
                 let apply_start = Instant::now();
                 if let Err(err) = apply_event(&mut store.repo_state.state, &event.body) {
                     metrics::apply_err(apply_start.elapsed());
-                    return Err(Box::new(ErrorPayload::new(
-                        ErrorCode::Internal,
-                        format!("apply_event failed: {err}"),
-                        false,
+                    return Err(Box::new(apply_event_error_payload(
+                        &namespace, &origin, err,
                     )));
                 }
                 metrics::apply_ok(apply_start.elapsed());
@@ -2858,6 +2864,18 @@ fn event_wal_error_payload(
             offset,
             reason: err.to_string(),
         },
+    )
+}
+
+fn apply_event_error_payload(
+    namespace: &NamespaceId,
+    origin: &ReplicaId,
+    err: ApplyError,
+) -> ErrorPayload {
+    ErrorPayload::new(
+        ErrorCode::Corruption,
+        format!("apply_event rejected for {namespace}/{origin}: {err}"),
+        false,
     )
 }
 
