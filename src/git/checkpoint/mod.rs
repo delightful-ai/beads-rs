@@ -17,7 +17,7 @@ pub use cache::{
 };
 pub use export::{
     CheckpointExport, CheckpointExportError, CheckpointExportInput, CheckpointSnapshotError,
-    CheckpointSnapshotInput, build_snapshot, export_checkpoint, policy_hash,
+    CheckpointSnapshotInput, build_snapshot, export_checkpoint, policy_hash, roster_hash,
 };
 pub use import::{
     CheckpointImport, CheckpointImportError, import_checkpoint, merge_store_states,

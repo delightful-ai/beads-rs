@@ -17,9 +17,9 @@ use super::types::{CheckpointShardPayload, CheckpointSnapshot};
 use crate::core::dep::DepKey;
 use crate::core::tombstone::TombstoneKey;
 use crate::core::{
-    ContentHash, DepEdge, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, StoreEpoch,
-    StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireDepV1, WireStamp,
-    WireTombstoneV1, sha256_bytes,
+    ContentHash, DepEdge, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId,
+    ReplicaRoster, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull,
+    WireDepV1, WireStamp, WireTombstoneV1, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -70,6 +70,19 @@ pub fn policy_hash(
     policies: &BTreeMap<NamespaceId, NamespacePolicy>,
 ) -> Result<ContentHash, CanonJsonError> {
     let bytes = to_canon_json_bytes(policies)?;
+    Ok(ContentHash::from_bytes(sha256_bytes(&bytes).0))
+}
+
+pub fn roster_hash(roster: &ReplicaRoster) -> Result<ContentHash, CanonJsonError> {
+    let mut roster = roster.clone();
+    for entry in &mut roster.replicas {
+        if let Some(namespaces) = &mut entry.allowed_namespaces {
+            namespaces.sort();
+            namespaces.dedup();
+        }
+    }
+    roster.replicas.sort_by_key(|entry| entry.replica_id);
+    let bytes = to_canon_json_bytes(&roster)?;
     Ok(ContentHash::from_bytes(sha256_bytes(&bytes).0))
 }
 
@@ -405,7 +418,7 @@ mod tests {
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, Seq0};
+    use crate::core::{ActorId, CanonicalState, ReplicaEntry, ReplicaRole, Seq0};
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -459,6 +472,40 @@ mod tests {
             }
         }
         panic!("failed to find different shard ids");
+    }
+
+    #[test]
+    fn roster_hash_is_stable_for_reordered_entries() {
+        let entry_a = ReplicaEntry {
+            replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            name: "alpha".to_string(),
+            role: ReplicaRole::Anchor,
+            durability_eligible: true,
+            allowed_namespaces: Some(vec![NamespaceId::core()]),
+            expire_after_ms: None,
+        };
+        let entry_b = ReplicaEntry {
+            replica_id: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
+            name: "beta".to_string(),
+            role: ReplicaRole::Peer,
+            durability_eligible: false,
+            allowed_namespaces: Some(vec![
+                NamespaceId::core(),
+                NamespaceId::parse("tmp").expect("tmp namespace"),
+            ]),
+            expire_after_ms: Some(5_000),
+        };
+
+        let roster_a = ReplicaRoster {
+            replicas: vec![entry_a.clone(), entry_b.clone()],
+        };
+        let roster_b = ReplicaRoster {
+            replicas: vec![entry_b, entry_a],
+        };
+
+        let hash_a = roster_hash(&roster_a).expect("hash a");
+        let hash_b = roster_hash(&roster_b).expect("hash b");
+        assert_eq!(hash_a, hash_b);
     }
 
     fn build_test_snapshot(
