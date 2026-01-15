@@ -914,10 +914,10 @@ impl Daemon {
                 imports.push(import);
                 continue;
             }
-            if let Some(repo) = repo_handle.as_ref() {
-                if let Some(import) = self.import_checkpoint_from_git(repo, &group) {
-                    imports.push(import);
-                }
+            if let Some(repo) = repo_handle.as_ref()
+                && let Some(import) = self.import_checkpoint_from_git(repo, &group)
+            {
+                imports.push(import);
             }
         }
 
@@ -2989,14 +2989,14 @@ fn write_checkpoint_tree(
             return TreeWalkResult::Abort;
         }
         let full_path = dir.join(&rel_path);
-        if let Some(parent) = full_path.parent() {
-            if let Err(err) = fs::create_dir_all(parent) {
-                outcome = Err(CheckpointTreeError::Io {
-                    path: parent.to_path_buf(),
-                    source: err,
-                });
-                return TreeWalkResult::Abort;
-            }
+        if let Some(parent) = full_path.parent()
+            && let Err(err) = fs::create_dir_all(parent)
+        {
+            outcome = Err(CheckpointTreeError::Io {
+                path: parent.to_path_buf(),
+                source: err,
+            });
+            return TreeWalkResult::Abort;
         }
         let blob = match repo.find_blob(entry.id()) {
             Ok(blob) => blob,
