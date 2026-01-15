@@ -1615,10 +1615,11 @@ fn split_kind_id(raw: &str) -> std::result::Result<(Option<DepKind>, String), St
 mod tests {
     use super::*;
     use crate::config::DefaultsConfig;
-    use crate::core::DurabilityClass;
+    use crate::core::{DurabilityClass, HeadStatus, ReplicaId, Seq0};
     use crate::daemon::OpError;
     use std::num::NonZeroU32;
     use std::path::PathBuf;
+    use uuid::Uuid;
 
     fn assert_validation_failed(err: Error, field: &str) {
         match err {
@@ -1731,5 +1732,56 @@ mod tests {
         };
         let meta = ctx.mutation_meta();
         assert_eq!(meta.actor_id, Some(actor.as_str().to_string()));
+    }
+
+    #[test]
+    fn parse_require_min_seen_accepts_json() {
+        let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+        let mut watermarks = Watermarks::<Applied>::new();
+        watermarks
+            .observe_at_least(
+                &NamespaceId::core(),
+                &origin,
+                Seq0::new(1),
+                HeadStatus::Known([1u8; 32]),
+            )
+            .expect("watermark");
+        let json = serde_json::to_string(&watermarks).expect("json");
+
+        let parsed = parse_require_min_seen(Some(&json)).expect("parse");
+        assert_eq!(parsed, Some(watermarks));
+    }
+
+    #[test]
+    fn parse_require_min_seen_rejects_invalid_json() {
+        let err = parse_require_min_seen(Some("{not-json")).unwrap_err();
+        assert_validation_failed(err, "require_min_seen");
+    }
+
+    #[test]
+    fn read_consistency_includes_read_gating() {
+        let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        let mut watermarks = Watermarks::<Applied>::new();
+        watermarks
+            .observe_at_least(
+                &NamespaceId::core(),
+                &origin,
+                Seq0::new(2),
+                HeadStatus::Known([2u8; 32]),
+            )
+            .expect("watermark");
+        let ctx = Ctx {
+            repo: PathBuf::from("/tmp/beads"),
+            json: false,
+            namespace: None,
+            durability: None,
+            client_request_id: None,
+            require_min_seen: Some(watermarks.clone()),
+            wait_timeout_ms: Some(50),
+            actor_id: None,
+        };
+        let read = ctx.read_consistency();
+        assert_eq!(read.require_min_seen, Some(watermarks));
+        assert_eq!(read.wait_timeout_ms, Some(50));
     }
 }
