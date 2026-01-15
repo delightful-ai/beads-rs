@@ -610,6 +610,8 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
         }
         StoreRuntimeError::MetaParse { .. } => ErrorCode::Corruption,
         StoreRuntimeError::MetaMismatch { .. } => ErrorCode::WrongStore,
+        StoreRuntimeError::NamespacePoliciesSymlink { .. }
+        | StoreRuntimeError::ReplicaRosterSymlink { .. } => ErrorCode::PathSymlinkRejected,
         StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ErrorCode::PermissionDenied
@@ -618,6 +620,14 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
             }
         }
         StoreRuntimeError::NamespacePoliciesParse { .. } => ErrorCode::ValidationFailed,
+        StoreRuntimeError::ReplicaRosterRead { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::ValidationFailed
+            }
+        }
+        StoreRuntimeError::ReplicaRosterParse { .. } => ErrorCode::ValidationFailed,
         StoreRuntimeError::WalIndex(err) => wal_index_error_code(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_error_code(err),
         StoreRuntimeError::WatermarkInvalid { .. } => ErrorCode::IndexCorrupt,
@@ -666,6 +676,8 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
                 Transience::Retryable
             }
         }
+        StoreRuntimeError::NamespacePoliciesSymlink { .. }
+        | StoreRuntimeError::ReplicaRosterSymlink { .. } => Transience::Permanent,
         StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 Transience::Permanent
@@ -674,6 +686,14 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
             }
         }
         StoreRuntimeError::NamespacePoliciesParse { .. } => Transience::Permanent,
+        StoreRuntimeError::ReplicaRosterRead { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                Transience::Permanent
+            } else {
+                Transience::Retryable
+            }
+        }
+        StoreRuntimeError::ReplicaRosterParse { .. } => Transience::Permanent,
         StoreRuntimeError::WalIndex(err) => wal_index_transience(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_transience(err),
         StoreRuntimeError::WatermarkInvalid { .. } => Transience::Permanent,

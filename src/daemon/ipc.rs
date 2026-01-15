@@ -907,6 +907,14 @@ fn store_runtime_error_payload(
                 },
             )
         }
+        StoreRuntimeError::NamespacePoliciesSymlink { path }
+        | StoreRuntimeError::ReplicaRosterSymlink { path } => {
+            ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable).with_details(
+                error_details::PathSymlinkRejectedDetails {
+                    path: path.display().to_string(),
+                },
+            )
+        }
         StoreRuntimeError::MetaRead { path, source } => match source.kind() {
             std::io::ErrorKind::PermissionDenied => {
                 ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(
@@ -964,6 +972,30 @@ fn store_runtime_error_payload(
             ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
                 error_details::ValidationFailedDetails {
                     field: "namespaces".to_string(),
+                    reason: source.to_string(),
+                },
+            )
+        }
+        StoreRuntimeError::ReplicaRosterRead { path, source } => match source.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(
+                    error_details::PermissionDeniedDetails {
+                        path: path.display().to_string(),
+                        operation: error_details::PermissionOperation::Read,
+                    },
+                )
+            }
+            _ => ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
+                error_details::ValidationFailedDetails {
+                    field: "replicas".to_string(),
+                    reason: format!("failed to read {}: {source}", path.display()),
+                },
+            ),
+        },
+        StoreRuntimeError::ReplicaRosterParse { source, .. } => {
+            ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
+                error_details::ValidationFailedDetails {
+                    field: "replicas".to_string(),
                     reason: source.to_string(),
                 },
             )
