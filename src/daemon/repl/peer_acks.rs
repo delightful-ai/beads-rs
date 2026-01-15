@@ -274,7 +274,7 @@ fn head_status_for(
     heads: Option<&WatermarkHeads>,
     namespace: &NamespaceId,
     origin: &ReplicaId,
-) -> Result<HeadStatus, PeerAckError> {
+) -> PeerAckResult<HeadStatus> {
     if let Some(sha) = heads
         .and_then(|map| map.get(namespace))
         .and_then(|origins| origins.get(origin))
@@ -286,12 +286,12 @@ fn head_status_for(
         return Ok(HeadStatus::Genesis);
     }
 
-    Err(PeerAckError::MissingHead {
+    Err(Box::new(PeerAckError::MissingHead {
         peer,
         namespace: namespace.clone(),
         origin: *origin,
         seq,
-    })
+    }))
 }
 
 fn update_watermarks<K>(
@@ -304,8 +304,7 @@ fn update_watermarks<K>(
     for (namespace, origins) in updates {
         for (origin, seq) in origins {
             let seq0 = *seq;
-            let incoming_head =
-                head_status_for(peer, seq0, heads, namespace, origin).map_err(Box::new)?;
+            let incoming_head = head_status_for(peer, seq0, heads, namespace, origin)?;
             let (current_seq, current_head) = watermarks
                 .get(namespace, origin)
                 .map(|watermark| (watermark.seq(), watermark.head()))
