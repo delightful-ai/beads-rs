@@ -661,6 +661,8 @@ impl From<OpError> for ErrorPayload {
                     },
                 )
             }
+            OpError::InvalidId(err) => ErrorPayload::new(ErrorCode::InvalidId, message, retryable)
+                .with_details(invalid_id_details(&err)),
             OpError::Overloaded {
                 subsystem,
                 retry_after_ms,

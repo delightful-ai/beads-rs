@@ -2410,11 +2410,7 @@ impl Daemon {
                 cas,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_update(&repo, meta, &id, patch, cas, git_tx)
+                self.apply_update(&repo, meta, id, patch, cas, git_tx)
             }
 
             Request::AddLabels {
@@ -2423,11 +2419,7 @@ impl Daemon {
                 labels,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_add_labels(&repo, meta, &id, labels, git_tx)
+                self.apply_add_labels(&repo, meta, id, labels, git_tx)
             }
 
             Request::RemoveLabels {
@@ -2436,11 +2428,7 @@ impl Daemon {
                 labels,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_remove_labels(&repo, meta, &id, labels, git_tx)
+                self.apply_remove_labels(&repo, meta, id, labels, git_tx)
             }
 
             Request::SetParent {
@@ -2449,20 +2437,7 @@ impl Daemon {
                 parent,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let parent = match parent {
-                    Some(raw) => match BeadId::parse(&raw) {
-                        Ok(parent) => Some(parent),
-                        Err(e) => {
-                            return Response::err(invalid_id_payload(e)).into();
-                        }
-                    },
-                    None => None,
-                };
-                self.apply_set_parent(&repo, meta, &id, parent, git_tx)
+                self.apply_set_parent(&repo, meta, id, parent, git_tx)
             }
 
             Request::Close {
@@ -2472,19 +2447,11 @@ impl Daemon {
                 on_branch,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_close(&repo, meta, &id, reason, on_branch, git_tx)
+                self.apply_close(&repo, meta, id, reason, on_branch, git_tx)
             }
 
             Request::Reopen { repo, id, meta } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_reopen(&repo, meta, &id, git_tx)
+                self.apply_reopen(&repo, meta, id, git_tx)
             }
 
             Request::Delete {
@@ -2493,11 +2460,7 @@ impl Daemon {
                 reason,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_delete(&repo, meta, &id, reason, git_tx)
+                self.apply_delete(&repo, meta, id, reason, git_tx)
             }
 
             Request::AddDep {
@@ -2507,15 +2470,7 @@ impl Daemon {
                 kind,
                 meta,
             } => {
-                let from = match BeadId::parse(&from) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let to = match BeadId::parse(&to) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_add_dep(&repo, meta, &from, &to, kind, git_tx)
+                self.apply_add_dep(&repo, meta, from, to, kind, git_tx)
             }
 
             Request::RemoveDep {
@@ -2525,15 +2480,7 @@ impl Daemon {
                 kind,
                 meta,
             } => {
-                let from = match BeadId::parse(&from) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                let to = match BeadId::parse(&to) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_remove_dep(&repo, meta, &from, &to, kind, git_tx)
+                self.apply_remove_dep(&repo, meta, from, to, kind, git_tx)
             }
 
             Request::AddNote {
@@ -2542,11 +2489,7 @@ impl Daemon {
                 content,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_add_note(&repo, meta, &id, content, git_tx)
+                self.apply_add_note(&repo, meta, id, content, git_tx)
             }
 
             Request::Claim {
@@ -2555,19 +2498,11 @@ impl Daemon {
                 lease_secs,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_claim(&repo, meta, &id, lease_secs, git_tx)
+                self.apply_claim(&repo, meta, id, lease_secs, git_tx)
             }
 
             Request::Unclaim { repo, id, meta } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_unclaim(&repo, meta, &id, git_tx)
+                self.apply_unclaim(&repo, meta, id, git_tx)
             }
 
             Request::ExtendClaim {
@@ -2576,11 +2511,7 @@ impl Daemon {
                 lease_secs,
                 meta,
             } => {
-                let id = match BeadId::parse(&id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
-                };
-                self.apply_extend_claim(&repo, meta, &id, lease_secs, git_tx)
+                self.apply_extend_claim(&repo, meta, id, lease_secs, git_tx)
             }
 
             // Queries - delegate to query_executor module

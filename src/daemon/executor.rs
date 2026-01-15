@@ -21,7 +21,9 @@ use super::core::{Daemon, HandleOutcome, ParsedMutationMeta, detect_clock_skew};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
 use super::ipc::{MutationMeta, OpResponse, Response, ResponsePayload};
-use super::mutation_engine::{IdContext, MutationContext, MutationEngine, MutationRequest};
+use super::mutation_engine::{
+    IdContext, MutationContext, MutationEngine, MutationRequest, ParsedMutationRequest,
+};
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::store_runtime::{StoreRuntimeError, load_replica_roster};
 use super::wal::{
@@ -154,11 +156,13 @@ impl Daemon {
             client_request_id,
         };
 
+        let parsed_request = ParsedMutationRequest::parse(request, &ctx.actor_id)?;
+
         if ctx.client_request_id.is_some()
             && let Some(mut outcome) = try_reuse_idempotent_response(
                 &engine,
                 &ctx,
-                &request,
+                &parsed_request,
                 wal_index.as_ref(),
                 &store_dir,
                 store,
@@ -184,7 +188,7 @@ impl Daemon {
 
         coordinator.ensure_available(&namespace, durability)?;
 
-        let id_ctx = if matches!(request, MutationRequest::Create { .. }) {
+        let id_ctx = if matches!(parsed_request, ParsedMutationRequest::Create { .. }) {
             let repo_state = self.repo_state(&proof)?;
             Some(IdContext {
                 root_slug: repo_state.root_slug.clone(),
@@ -237,7 +241,7 @@ impl Daemon {
                 origin_seq,
                 id_ctx.as_ref(),
                 ctx.clone(),
-                request.clone(),
+                parsed_request.clone(),
             )
         }?;
 
@@ -474,7 +478,7 @@ impl Daemon {
             .map_err(wal_index_to_op)?;
         watermark_txn.commit().map_err(wal_index_to_op)?;
 
-        let result = op_result_from_delta(&request, &txn_body.delta)?;
+        let result = op_result_from_delta(&parsed_request, &txn_body.delta)?;
         let receipt = DurabilityReceipt::local_fsync(
             store,
             draft.event_body.txn_id,
@@ -584,16 +588,12 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         patch: BeadPatch,
         cas: Option<String>,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Update {
-            id: id.as_str().to_string(),
-            patch,
-            cas,
-        };
+        let request = MutationRequest::Update { id, patch, cas };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -602,14 +602,11 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         labels: Vec<String>,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::AddLabels {
-            id: id.as_str().to_string(),
-            labels,
-        };
+        let request = MutationRequest::AddLabels { id, labels };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -618,14 +615,11 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         labels: Vec<String>,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::RemoveLabels {
-            id: id.as_str().to_string(),
-            labels,
-        };
+        let request = MutationRequest::RemoveLabels { id, labels };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -634,14 +628,11 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
-        parent: Option<BeadId>,
+        id: String,
+        parent: Option<String>,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::SetParent {
-            id: id.as_str().to_string(),
-            parent: parent.map(|value| value.as_str().to_string()),
-        };
+        let request = MutationRequest::SetParent { id, parent };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -650,13 +641,13 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         reason: Option<String>,
         on_branch: Option<String>,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
         let request = MutationRequest::Close {
-            id: id.as_str().to_string(),
+            id,
             reason,
             on_branch,
         };
@@ -668,12 +659,10 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Reopen {
-            id: id.as_str().to_string(),
-        };
+        let request = MutationRequest::Reopen { id };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -682,14 +671,11 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         reason: Option<String>,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Delete {
-            id: id.as_str().to_string(),
-            reason,
-        };
+        let request = MutationRequest::Delete { id, reason };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -698,16 +684,12 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        from: &BeadId,
-        to: &BeadId,
+        from: String,
+        to: String,
         kind: DepKind,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::AddDep {
-            from: from.as_str().to_string(),
-            to: to.as_str().to_string(),
-            kind,
-        };
+        let request = MutationRequest::AddDep { from, to, kind };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -716,16 +698,12 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        from: &BeadId,
-        to: &BeadId,
+        from: String,
+        to: String,
         kind: DepKind,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::RemoveDep {
-            from: from.as_str().to_string(),
-            to: to.as_str().to_string(),
-            kind,
-        };
+        let request = MutationRequest::RemoveDep { from, to, kind };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -734,14 +712,11 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         content: String,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::AddNote {
-            id: id.as_str().to_string(),
-            content,
-        };
+        let request = MutationRequest::AddNote { id, content };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -750,14 +725,11 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         lease_secs: u64,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Claim {
-            id: id.as_str().to_string(),
-            lease_secs,
-        };
+        let request = MutationRequest::Claim { id, lease_secs };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -766,12 +738,10 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Unclaim {
-            id: id.as_str().to_string(),
-        };
+        let request = MutationRequest::Unclaim { id };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 
@@ -780,14 +750,11 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: &BeadId,
+        id: String,
         lease_secs: u64,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::ExtendClaim {
-            id: id.as_str().to_string(),
-            lease_secs,
-        };
+        let request = MutationRequest::ExtendClaim { id, lease_secs };
         self.apply_mutation_request(repo, meta, request, git_tx)
     }
 }
@@ -815,7 +782,7 @@ fn event_wal_error_with_path(err: EventWalError, path: &Path) -> OpError {
 fn try_reuse_idempotent_response(
     engine: &MutationEngine,
     ctx: &MutationContext,
-    request: &MutationRequest,
+    request: &ParsedMutationRequest,
     wal_index: &dyn WalIndex,
     store_dir: &Path,
     store: StoreIdentity,
@@ -1000,58 +967,48 @@ fn load_event_body(
 }
 
 fn op_result_from_delta(
-    request: &MutationRequest,
+    request: &ParsedMutationRequest,
     delta: &TxnDeltaV1,
 ) -> Result<OpResult, OpError> {
     match request {
-        MutationRequest::Create { .. } => {
+        ParsedMutationRequest::Create { .. } => {
             let id = find_created_id(delta)?;
             Ok(OpResult::Created { id })
         }
-        MutationRequest::Update { id, .. }
-        | MutationRequest::AddLabels { id, .. }
-        | MutationRequest::RemoveLabels { id, .. }
-        | MutationRequest::SetParent { id, .. } => Ok(OpResult::Updated {
-            id: parse_bead_id(id)?,
+        ParsedMutationRequest::Update { id, .. }
+        | ParsedMutationRequest::AddLabels { id, .. }
+        | ParsedMutationRequest::RemoveLabels { id, .. }
+        | ParsedMutationRequest::SetParent { id, .. } => Ok(OpResult::Updated { id: id.clone() }),
+        ParsedMutationRequest::Close { id, .. } => Ok(OpResult::Closed { id: id.clone() }),
+        ParsedMutationRequest::Reopen { id } => Ok(OpResult::Reopened { id: id.clone() }),
+        ParsedMutationRequest::Delete { id, .. } => Ok(OpResult::Deleted { id: id.clone() }),
+        ParsedMutationRequest::AddDep { from, to, .. } => Ok(OpResult::DepAdded {
+            from: from.clone(),
+            to: to.clone(),
         }),
-        MutationRequest::Close { id, .. } => Ok(OpResult::Closed {
-            id: parse_bead_id(id)?,
+        ParsedMutationRequest::RemoveDep { from, to, .. } => Ok(OpResult::DepRemoved {
+            from: from.clone(),
+            to: to.clone(),
         }),
-        MutationRequest::Reopen { id } => Ok(OpResult::Reopened {
-            id: parse_bead_id(id)?,
-        }),
-        MutationRequest::Delete { id, .. } => Ok(OpResult::Deleted {
-            id: parse_bead_id(id)?,
-        }),
-        MutationRequest::AddDep { from, to, .. } => Ok(OpResult::DepAdded {
-            from: parse_bead_id(from)?,
-            to: parse_bead_id(to)?,
-        }),
-        MutationRequest::RemoveDep { from, to, .. } => Ok(OpResult::DepRemoved {
-            from: parse_bead_id(from)?,
-            to: parse_bead_id(to)?,
-        }),
-        MutationRequest::AddNote { id, .. } => {
-            let bead_id = parse_bead_id(id)?;
+        ParsedMutationRequest::AddNote { id, .. } => {
+            let bead_id = id.clone();
             let note_id = find_note_id(delta, &bead_id)?;
             Ok(OpResult::NoteAdded {
                 bead_id,
                 note_id: note_id.as_str().to_string(),
             })
         }
-        MutationRequest::Claim { id, .. } => {
-            let bead_id = parse_bead_id(id)?;
+        ParsedMutationRequest::Claim { id, .. } => {
+            let bead_id = id.clone();
             let expires = find_claim_expiry(delta, &bead_id)?;
             Ok(OpResult::Claimed {
                 id: bead_id,
                 expires,
             })
         }
-        MutationRequest::Unclaim { id } => Ok(OpResult::Unclaimed {
-            id: parse_bead_id(id)?,
-        }),
-        MutationRequest::ExtendClaim { id, .. } => {
-            let bead_id = parse_bead_id(id)?;
+        ParsedMutationRequest::Unclaim { id } => Ok(OpResult::Unclaimed { id: id.clone() }),
+        ParsedMutationRequest::ExtendClaim { id, .. } => {
+            let bead_id = id.clone();
             let expires = find_claim_expiry(delta, &bead_id)?;
             Ok(OpResult::ClaimExtended {
                 id: bead_id,
@@ -1075,10 +1032,6 @@ fn attach_issue_if_created(
     if let Some(bead) = state.get(id) {
         response.issue = Some(crate::api::Issue::from_bead(namespace, bead));
     }
-}
-
-fn parse_bead_id(raw: &str) -> Result<BeadId, OpError> {
-    BeadId::parse(raw).map_err(|_| OpError::Internal("invalid id after validation"))
 }
 
 fn find_created_id(delta: &TxnDeltaV1) -> Result<BeadId, OpError> {
@@ -1207,7 +1160,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
 
-        let request = MutationRequest::Create {
+        let request = ParsedMutationRequest::Create {
             id: None,
             parent: None,
             title: "title".to_string(),
@@ -1219,7 +1172,7 @@ mod tests {
             assignee: None,
             external_ref: None,
             estimated_minutes: None,
-            labels: Vec::new(),
+            labels: Labels::new(),
             dependencies: Vec::new(),
         };
 
@@ -1267,8 +1220,8 @@ mod tests {
             }))
             .unwrap();
 
-        let request = MutationRequest::AddNote {
-            id: expected_bead_id.as_str().to_string(),
+        let request = ParsedMutationRequest::AddNote {
+            id: expected_bead_id.clone(),
             content: "hi".to_string(),
         };
 
@@ -1286,8 +1239,8 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
 
-        let request = MutationRequest::Claim {
-            id: bead_id.as_str().to_string(),
+        let request = ParsedMutationRequest::Claim {
+            id: bead_id.clone(),
             lease_secs: 60,
         };
 
@@ -1304,8 +1257,8 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
 
-        let request = MutationRequest::Claim {
-            id: bead_id.as_str().to_string(),
+        let request = ParsedMutationRequest::Claim {
+            id: bead_id.clone(),
             lease_secs: 60,
         };
 
@@ -1338,10 +1291,14 @@ mod tests {
             actor_id: actor.clone(),
             client_request_id: Some(client_request_id),
         };
-        let request = MutationRequest::AddLabels {
-            id: "bd-123".into(),
-            labels: vec!["alpha".into()],
-        };
+        let request = ParsedMutationRequest::parse(
+            MutationRequest::AddLabels {
+                id: "bd-123".into(),
+                labels: vec!["alpha".into()],
+            },
+            &actor,
+        )
+        .unwrap();
 
         let origin_seq = Seq1::new(std::num::NonZeroU64::new(1).unwrap());
         let mut clock = fixed_clock(1_700_000_000_000);

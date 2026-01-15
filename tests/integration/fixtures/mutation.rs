@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use beads_rs::daemon::mutation_engine::{MutationContext, MutationEngine, MutationRequest};
+use beads_rs::daemon::mutation_engine::{
+    MutationContext, MutationEngine, MutationRequest, ParsedMutationRequest,
+};
 use beads_rs::daemon::ops::{BeadPatch, OpError, Patch};
 use beads_rs::{ActorId, BeadType, DepKind, Limits, NamespaceId, Priority};
 
@@ -26,7 +28,8 @@ pub fn request_sha256(
     request: &MutationRequest,
 ) -> Result<[u8; 32], OpError> {
     let engine = MutationEngine::new(Limits::default());
-    engine.request_sha256_for(ctx, request)
+    let parsed = ParsedMutationRequest::parse(request.clone(), &ctx.actor_id)?;
+    engine.request_sha256_for(ctx, &parsed)
 }
 
 pub fn create_request(title: impl Into<String>) -> MutationRequest {

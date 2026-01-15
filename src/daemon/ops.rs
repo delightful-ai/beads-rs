@@ -14,8 +14,8 @@ use thiserror::Error;
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     ActorId, Applied, BeadFields, BeadId, BeadType, ClientRequestId, Closure, DurabilityClass,
-    DurabilityReceipt, ErrorCode, Label, Labels, Lww, NamespaceId, Priority, ReplicaId, Stamp,
-    WallClock, Watermarks, Workflow,
+    DurabilityReceipt, ErrorCode, InvalidId, Label, Labels, Lww, NamespaceId, Priority, ReplicaId,
+    Stamp, WallClock, Watermarks, Workflow,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_lock::StoreLockError;
@@ -287,6 +287,9 @@ pub enum OpError {
         reason: String,
     },
 
+    #[error(transparent)]
+    InvalidId(#[from] InvalidId),
+
     #[error("overloaded ({subsystem:?})")]
     Overloaded {
         subsystem: OverloadedSubsystem,
@@ -430,6 +433,7 @@ impl OpError {
             OpError::InvalidTransition { .. } => ErrorCode::InvalidTransition,
             OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
             OpError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
+            OpError::InvalidId(_) => ErrorCode::InvalidId,
             OpError::Overloaded { .. } => ErrorCode::Overloaded,
             OpError::RateLimited { .. } => ErrorCode::RateLimited,
             OpError::MaintenanceMode { .. } => ErrorCode::MaintenanceMode,
@@ -474,6 +478,7 @@ impl OpError {
             | OpError::InvalidTransition { .. }
             | OpError::ValidationFailed { .. }
             | OpError::InvalidRequest { .. }
+            | OpError::InvalidId(_)
             | OpError::ClientRequestIdReuseMismatch { .. }
             | OpError::NotAGitRepo(_)
             | OpError::NoRemote(_)

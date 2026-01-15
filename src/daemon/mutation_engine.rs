@@ -8,12 +8,12 @@ use super::clock::Clock;
 use super::ops::{BeadPatch, MapLiveError, OpError, Patch};
 use super::remote::RemoteUrl;
 use crate::core::{
-    ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKey, DepKind, DepSpec,
-    EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1,
-    NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TxnDeltaError, TxnDeltaV1,
-    TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1,
-    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
-    sha256_bytes, to_canon_json_bytes,
+    ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, CoreError, DepKey,
+    DepKind, DepSpec, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
+    NamespaceId, NoteAppendV1, NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity,
+    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepDeleteV1,
+    WireDepV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
+    encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
 };
 
 #[derive(Clone, Debug)]
@@ -111,6 +111,277 @@ pub enum MutationRequest {
 }
 
 #[derive(Clone, Debug)]
+pub struct ParsedBeadPatch {
+    pub title: Patch<String>,
+    pub description: Patch<String>,
+    pub design: Patch<String>,
+    pub acceptance_criteria: Patch<String>,
+    pub priority: Patch<Priority>,
+    pub bead_type: Patch<BeadType>,
+    pub labels: Patch<Labels>,
+    pub external_ref: Patch<String>,
+    pub source_repo: Patch<String>,
+    pub estimated_minutes: Patch<u32>,
+    pub status: Patch<String>,
+}
+
+impl ParsedBeadPatch {
+    fn parse(raw: BeadPatch) -> Result<Self, OpError> {
+        let BeadPatch {
+            title,
+            description,
+            design,
+            acceptance_criteria,
+            priority,
+            bead_type,
+            labels,
+            external_ref,
+            source_repo,
+            estimated_minutes,
+            status,
+        } = raw;
+
+        if matches!(title, Patch::Clear) {
+            return Err(OpError::ValidationFailed {
+                field: "title".into(),
+                reason: "cannot clear required field".into(),
+            });
+        }
+        if matches!(description, Patch::Clear) {
+            return Err(OpError::ValidationFailed {
+                field: "description".into(),
+                reason: "cannot clear required field".into(),
+            });
+        }
+
+        let labels = match labels {
+            Patch::Set(values) => Patch::Set(parse_labels(values)?),
+            Patch::Clear => Patch::Clear,
+            Patch::Keep => Patch::Keep,
+        };
+
+        Ok(Self {
+            title,
+            description,
+            design,
+            acceptance_criteria,
+            priority,
+            bead_type,
+            labels,
+            external_ref,
+            source_repo,
+            estimated_minutes,
+            status,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ParsedMutationRequest {
+    Create {
+        id: Option<BeadId>,
+        parent: Option<BeadId>,
+        title: String,
+        bead_type: BeadType,
+        priority: Priority,
+        description: Option<String>,
+        design: Option<String>,
+        acceptance_criteria: Option<String>,
+        assignee: Option<ActorId>,
+        external_ref: Option<String>,
+        estimated_minutes: Option<u32>,
+        labels: Labels,
+        dependencies: Vec<DepSpec>,
+    },
+    Update {
+        id: BeadId,
+        patch: ParsedBeadPatch,
+        cas: Option<String>,
+    },
+    AddLabels {
+        id: BeadId,
+        labels: Labels,
+    },
+    RemoveLabels {
+        id: BeadId,
+        labels: Labels,
+    },
+    SetParent {
+        id: BeadId,
+        parent: Option<BeadId>,
+    },
+    Close {
+        id: BeadId,
+        reason: Option<String>,
+        on_branch: Option<String>,
+    },
+    Reopen {
+        id: BeadId,
+    },
+    Delete {
+        id: BeadId,
+        reason: Option<String>,
+    },
+    AddDep {
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+    },
+    RemoveDep {
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+    },
+    AddNote {
+        id: BeadId,
+        content: String,
+    },
+    Claim {
+        id: BeadId,
+        lease_secs: u64,
+    },
+    Unclaim {
+        id: BeadId,
+    },
+    ExtendClaim {
+        id: BeadId,
+        lease_secs: u64,
+    },
+}
+
+impl ParsedMutationRequest {
+    pub fn parse(req: MutationRequest, actor: &ActorId) -> Result<Self, OpError> {
+        match req {
+            MutationRequest::Create {
+                id,
+                parent,
+                title,
+                bead_type,
+                priority,
+                description,
+                design,
+                acceptance_criteria,
+                assignee,
+                external_ref,
+                estimated_minutes,
+                labels,
+                dependencies,
+            } => {
+                let requested_id = normalize_optional_string(id);
+                let parent = normalize_optional_string(parent);
+                if requested_id.is_some() && parent.is_some() {
+                    return Err(OpError::ValidationFailed {
+                        field: "create".into(),
+                        reason: "cannot specify both id and parent".into(),
+                    });
+                }
+
+                let id = match requested_id {
+                    Some(raw) => Some(parse_bead_id_validation("id", raw)?),
+                    None => None,
+                };
+                let parent = match parent {
+                    Some(raw) => Some(parse_bead_id_validation("parent", raw)?),
+                    None => None,
+                };
+
+                let labels = parse_labels(labels)?;
+                let dependencies = parse_dep_specs(&dependencies)?;
+                let assignee = normalize_assignee(assignee, actor)?;
+                let design = normalize_optional_string(design);
+                let acceptance_criteria = normalize_optional_string(acceptance_criteria);
+                let external_ref = normalize_optional_string(external_ref);
+
+                Ok(ParsedMutationRequest::Create {
+                    id,
+                    parent,
+                    title,
+                    bead_type,
+                    priority,
+                    description,
+                    design,
+                    acceptance_criteria,
+                    assignee,
+                    external_ref,
+                    estimated_minutes,
+                    labels,
+                    dependencies,
+                })
+            }
+            MutationRequest::Update { id, patch, cas } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                let patch = ParsedBeadPatch::parse(patch)?;
+                Ok(ParsedMutationRequest::Update { id, patch, cas })
+            }
+            MutationRequest::AddLabels { id, labels } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                let labels = parse_labels(labels)?;
+                Ok(ParsedMutationRequest::AddLabels { id, labels })
+            }
+            MutationRequest::RemoveLabels { id, labels } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                let labels = parse_labels(labels)?;
+                Ok(ParsedMutationRequest::RemoveLabels { id, labels })
+            }
+            MutationRequest::SetParent { id, parent } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                let parent = match parent {
+                    Some(raw) => Some(parse_bead_id_invalid_id("parent", raw)?),
+                    None => None,
+                };
+                Ok(ParsedMutationRequest::SetParent { id, parent })
+            }
+            MutationRequest::Close {
+                id,
+                reason,
+                on_branch,
+            } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                Ok(ParsedMutationRequest::Close {
+                    id,
+                    reason,
+                    on_branch,
+                })
+            }
+            MutationRequest::Reopen { id } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                Ok(ParsedMutationRequest::Reopen { id })
+            }
+            MutationRequest::Delete { id, reason } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                Ok(ParsedMutationRequest::Delete { id, reason })
+            }
+            MutationRequest::AddDep { from, to, kind } => {
+                let from = parse_bead_id_invalid_id("from", from)?;
+                let to = parse_bead_id_invalid_id("to", to)?;
+                Ok(ParsedMutationRequest::AddDep { from, to, kind })
+            }
+            MutationRequest::RemoveDep { from, to, kind } => {
+                let from = parse_bead_id_invalid_id("from", from)?;
+                let to = parse_bead_id_invalid_id("to", to)?;
+                Ok(ParsedMutationRequest::RemoveDep { from, to, kind })
+            }
+            MutationRequest::AddNote { id, content } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                Ok(ParsedMutationRequest::AddNote { id, content })
+            }
+            MutationRequest::Claim { id, lease_secs } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                Ok(ParsedMutationRequest::Claim { id, lease_secs })
+            }
+            MutationRequest::Unclaim { id } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                Ok(ParsedMutationRequest::Unclaim { id })
+            }
+            MutationRequest::ExtendClaim { id, lease_secs } => {
+                let id = parse_bead_id_invalid_id("id", id)?;
+                Ok(ParsedMutationRequest::ExtendClaim { id, lease_secs })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct MutationEngine {
     limits: Limits,
 }
@@ -123,9 +394,9 @@ impl MutationEngine {
     pub fn request_sha256_for(
         &self,
         ctx: &MutationContext,
-        req: &MutationRequest,
+        req: &ParsedMutationRequest,
     ) -> Result<[u8; 32], OpError> {
-        let canonical = self.canonicalize_request(&ctx.actor_id, req)?;
+        let canonical = self.canonicalize_request(req)?;
         request_sha256(ctx, &canonical)
     }
 
@@ -139,14 +410,14 @@ impl MutationEngine {
         origin_seq: Seq1,
         id_ctx: Option<&IdContext>,
         ctx: MutationContext,
-        req: MutationRequest,
+        req: ParsedMutationRequest,
     ) -> Result<EventDraft, OpError> {
         let now_ms = clock.wall_ms();
         let write_stamp = clock.tick();
         let stamp = Stamp::new(write_stamp.clone(), ctx.actor_id.clone());
 
         let planned = match req {
-            MutationRequest::Create {
+            ParsedMutationRequest::Create {
                 id,
                 parent,
                 title,
@@ -178,39 +449,41 @@ impl MutationEngine {
                 labels,
                 dependencies,
             )?,
-            MutationRequest::Update { id, patch, cas } => {
+            ParsedMutationRequest::Update { id, patch, cas } => {
                 self.plan_update(state, id, patch, cas)?
             }
-            MutationRequest::AddLabels { id, labels } => self.plan_add_labels(state, id, labels)?,
-            MutationRequest::RemoveLabels { id, labels } => {
+            ParsedMutationRequest::AddLabels { id, labels } => {
+                self.plan_add_labels(state, id, labels)?
+            }
+            ParsedMutationRequest::RemoveLabels { id, labels } => {
                 self.plan_remove_labels(state, id, labels)?
             }
-            MutationRequest::SetParent { id, parent } => {
+            ParsedMutationRequest::SetParent { id, parent } => {
                 self.plan_set_parent(state, id, parent, &stamp)?
             }
-            MutationRequest::Close {
+            ParsedMutationRequest::Close {
                 id,
                 reason,
                 on_branch,
             } => self.plan_close(state, id, reason, on_branch)?,
-            MutationRequest::Reopen { id } => self.plan_reopen(state, id)?,
-            MutationRequest::Delete { id, reason } => {
+            ParsedMutationRequest::Reopen { id } => self.plan_reopen(state, id)?,
+            ParsedMutationRequest::Delete { id, reason } => {
                 self.plan_delete(state, &stamp, id, reason)?
             }
-            MutationRequest::AddDep { from, to, kind } => {
+            ParsedMutationRequest::AddDep { from, to, kind } => {
                 self.plan_add_dep(state, &stamp, from, to, kind)?
             }
-            MutationRequest::RemoveDep { from, to, kind } => {
+            ParsedMutationRequest::RemoveDep { from, to, kind } => {
                 self.plan_remove_dep(&stamp, from, to, kind)?
             }
-            MutationRequest::AddNote { id, content } => {
+            ParsedMutationRequest::AddNote { id, content } => {
                 self.plan_add_note(state, &stamp, id, content)?
             }
-            MutationRequest::Claim { id, lease_secs } => {
+            ParsedMutationRequest::Claim { id, lease_secs } => {
                 self.plan_claim(state, &stamp, now_ms, id, lease_secs)?
             }
-            MutationRequest::Unclaim { id } => self.plan_unclaim(state, &stamp, id)?,
-            MutationRequest::ExtendClaim { id, lease_secs } => {
+            ParsedMutationRequest::Unclaim { id } => self.plan_unclaim(state, &stamp, id)?,
+            ParsedMutationRequest::ExtendClaim { id, lease_secs } => {
                 self.plan_extend_claim(state, &stamp, id, lease_secs)?
             }
         };
@@ -257,11 +530,10 @@ impl MutationEngine {
 
     fn canonicalize_request(
         &self,
-        actor: &ActorId,
-        req: &MutationRequest,
+        req: &ParsedMutationRequest,
     ) -> Result<CanonicalMutationOp, OpError> {
         match req {
-            MutationRequest::Create {
+            ParsedMutationRequest::Create {
                 id,
                 parent,
                 title,
@@ -276,9 +548,7 @@ impl MutationEngine {
                 labels,
                 dependencies,
             } => {
-                let requested_id = normalize_optional_string(id.clone());
-                let parent = normalize_optional_string(parent.clone());
-                if requested_id.is_some() && parent.is_some() {
+                if id.is_some() && parent.is_some() {
                     return Err(OpError::ValidationFailed {
                         field: "create".into(),
                         reason: "cannot specify both id and parent".into(),
@@ -293,193 +563,89 @@ impl MutationEngine {
                     });
                 }
 
-                if let Some(raw) = requested_id.as_ref() {
-                    let _ = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
-                        field: "id".into(),
-                        reason: e.to_string(),
-                    })?;
-                }
-                if let Some(raw) = parent.as_ref() {
-                    let _ = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
-                        field: "parent".into(),
-                        reason: e.to_string(),
-                    })?;
-                }
-
-                let labels = parse_labels(labels.clone())?;
-                enforce_label_limit(&labels, &self.limits, None)?;
-                let canonical_deps = canonical_deps(dependencies)?;
-
-                let design = normalize_optional_string(design.clone());
-                let acceptance_criteria = normalize_optional_string(acceptance_criteria.clone());
-                let external_ref = normalize_optional_string(external_ref.clone());
-                let assignee = normalize_assignee(assignee.clone(), actor)?;
+                enforce_label_limit(labels, &self.limits, None)?;
+                let canonical_deps = canonical_deps(dependencies);
                 let description = description.clone().unwrap_or_default();
 
                 Ok(CanonicalMutationOp::Create {
-                    id: requested_id,
-                    parent,
+                    id: id.clone(),
+                    parent: parent.clone(),
                     title,
                     bead_type: *bead_type,
                     priority: *priority,
                     description,
-                    design,
-                    acceptance_criteria,
-                    assignee,
-                    external_ref,
+                    design: design.clone(),
+                    acceptance_criteria: acceptance_criteria.clone(),
+                    assignee: assignee.clone(),
+                    external_ref: external_ref.clone(),
                     estimated_minutes: *estimated_minutes,
-                    labels: canonical_labels(&labels),
+                    labels: canonical_labels(labels),
                     dependencies: canonical_deps,
                 })
             }
-            MutationRequest::Update { id, patch, cas } => {
-                patch.validate()?;
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                let (_, canonical_patch) = normalize_patch(&id, patch)?;
+            ParsedMutationRequest::Update { id, patch, cas } => {
+                let (_, canonical_patch) = normalize_patch(id, patch)?;
                 Ok(CanonicalMutationOp::Update {
-                    id,
+                    id: id.clone(),
                     patch: canonical_patch,
                     cas: cas.clone(),
                 })
             }
-            MutationRequest::AddLabels { id, labels } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                let parsed = parse_labels(labels.clone())?;
-                Ok(CanonicalMutationOp::AddLabels {
-                    id,
-                    labels: canonical_labels(&parsed),
-                })
-            }
-            MutationRequest::RemoveLabels { id, labels } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                let parsed = parse_labels(labels.clone())?;
+            ParsedMutationRequest::AddLabels { id, labels } => Ok(CanonicalMutationOp::AddLabels {
+                id: id.clone(),
+                labels: canonical_labels(labels),
+            }),
+            ParsedMutationRequest::RemoveLabels { id, labels } => {
                 Ok(CanonicalMutationOp::RemoveLabels {
-                    id,
-                    labels: canonical_labels(&parsed),
+                    id: id.clone(),
+                    labels: canonical_labels(labels),
                 })
             }
-            MutationRequest::SetParent { id, parent } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                let parent = match parent {
-                    Some(raw) => {
-                        Some(BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
-                            field: "parent".into(),
-                            reason: e.to_string(),
-                        })?)
-                    }
-                    None => None,
-                };
-                Ok(CanonicalMutationOp::SetParent { id, parent })
-            }
-            MutationRequest::Close {
+            ParsedMutationRequest::SetParent { id, parent } => Ok(CanonicalMutationOp::SetParent {
+                id: id.clone(),
+                parent: parent.clone(),
+            }),
+            ParsedMutationRequest::Close {
                 id,
                 reason,
                 on_branch,
-            } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                Ok(CanonicalMutationOp::Close {
-                    id,
-                    reason: reason.clone(),
-                    on_branch: on_branch.clone(),
-                })
-            }
-            MutationRequest::Reopen { id } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                Ok(CanonicalMutationOp::Reopen { id })
-            }
-            MutationRequest::Delete { id, reason } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                Ok(CanonicalMutationOp::Delete {
-                    id,
-                    reason: reason.clone(),
-                })
-            }
-            MutationRequest::AddDep { from, to, kind } => {
-                let from = BeadId::parse(from).map_err(|e| OpError::ValidationFailed {
-                    field: "from".into(),
-                    reason: e.to_string(),
-                })?;
-                let to = BeadId::parse(to).map_err(|e| OpError::ValidationFailed {
-                    field: "to".into(),
-                    reason: e.to_string(),
-                })?;
-                Ok(CanonicalMutationOp::AddDep {
-                    from,
-                    to,
-                    kind: *kind,
-                })
-            }
-            MutationRequest::RemoveDep { from, to, kind } => {
-                let from = BeadId::parse(from).map_err(|e| OpError::ValidationFailed {
-                    field: "from".into(),
-                    reason: e.to_string(),
-                })?;
-                let to = BeadId::parse(to).map_err(|e| OpError::ValidationFailed {
-                    field: "to".into(),
-                    reason: e.to_string(),
-                })?;
+            } => Ok(CanonicalMutationOp::Close {
+                id: id.clone(),
+                reason: reason.clone(),
+                on_branch: on_branch.clone(),
+            }),
+            ParsedMutationRequest::Reopen { id } => Ok(CanonicalMutationOp::Reopen { id: id.clone() }),
+            ParsedMutationRequest::Delete { id, reason } => Ok(CanonicalMutationOp::Delete {
+                id: id.clone(),
+                reason: reason.clone(),
+            }),
+            ParsedMutationRequest::AddDep { from, to, kind } => Ok(CanonicalMutationOp::AddDep {
+                from: from.clone(),
+                to: to.clone(),
+                kind: *kind,
+            }),
+            ParsedMutationRequest::RemoveDep { from, to, kind } => {
                 Ok(CanonicalMutationOp::RemoveDep {
-                    from,
-                    to,
+                    from: from.clone(),
+                    to: to.clone(),
                     kind: *kind,
                 })
             }
-            MutationRequest::AddNote { id, content } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
+            ParsedMutationRequest::AddNote { id, content } => {
                 enforce_note_limit(content, &self.limits)?;
                 Ok(CanonicalMutationOp::AddNote {
-                    id,
+                    id: id.clone(),
                     content: content.clone(),
                 })
             }
-            MutationRequest::Claim { id, lease_secs } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                Ok(CanonicalMutationOp::Claim {
-                    id,
-                    lease_secs: *lease_secs,
-                })
-            }
-            MutationRequest::Unclaim { id } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                Ok(CanonicalMutationOp::Unclaim { id })
-            }
-            MutationRequest::ExtendClaim { id, lease_secs } => {
-                let id = BeadId::parse(id).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
+            ParsedMutationRequest::Claim { id, lease_secs } => Ok(CanonicalMutationOp::Claim {
+                id: id.clone(),
+                lease_secs: *lease_secs,
+            }),
+            ParsedMutationRequest::Unclaim { id } => Ok(CanonicalMutationOp::Unclaim { id: id.clone() }),
+            ParsedMutationRequest::ExtendClaim { id, lease_secs } => {
                 Ok(CanonicalMutationOp::ExtendClaim {
-                    id,
+                    id: id.clone(),
                     lease_secs: *lease_secs,
                 })
             }
@@ -564,28 +730,29 @@ impl MutationEngine {
         state: &CanonicalState,
         stamp: &Stamp,
         id_ctx: Option<&IdContext>,
-        id: Option<String>,
-        parent: Option<String>,
+        id: Option<BeadId>,
+        parent: Option<BeadId>,
         title: String,
         bead_type: BeadType,
         priority: Priority,
         description: Option<String>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
-        assignee: Option<String>,
+        assignee: Option<ActorId>,
         external_ref: Option<String>,
         estimated_minutes: Option<u32>,
-        labels: Vec<String>,
-        dependencies: Vec<String>,
+        labels: Labels,
+        dependencies: Vec<DepSpec>,
     ) -> Result<PlannedDelta, OpError> {
-        let requested_id = normalize_optional_string(id);
-        let parent = normalize_optional_string(parent);
-        if requested_id.is_some() && parent.is_some() {
+        if id.is_some() && parent.is_some() {
             return Err(OpError::ValidationFailed {
                 field: "create".into(),
                 reason: "cannot specify both id and parent".into(),
             });
         }
+
+        let requested_id = id.clone();
+        let requested_parent = parent.clone();
 
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -595,23 +762,11 @@ impl MutationEngine {
             });
         }
 
-        let labels = parse_labels(labels)?;
         enforce_label_limit(&labels, &self.limits, None)?;
 
-        let mut parsed_deps =
-            DepSpec::parse_list(&dependencies).map_err(|e| OpError::ValidationFailed {
-                field: "dependencies".into(),
-                reason: e.to_string(),
-            })?;
+        let mut parsed_deps = dependencies;
         sort_dedup_dep_specs(&mut parsed_deps);
-        let canonical_deps: Vec<String> = parsed_deps
-            .iter()
-            .map(|spec| spec.to_spec_string())
-            .collect();
-
-        let design = normalize_optional_string(design);
-        let acceptance_criteria = normalize_optional_string(acceptance_criteria);
-        let external_ref = normalize_optional_string(external_ref);
+        let canonical_deps = canonical_deps(&parsed_deps);
 
         let description = description.unwrap_or_default();
 
@@ -620,24 +775,18 @@ impl MutationEngine {
             reason: "id context missing for create".into(),
         })?;
 
-        let (id, parent_id) = match (requested_id.as_ref(), parent.as_ref()) {
-            (Some(raw), None) => {
-                let parsed = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
-                    field: "id".into(),
-                    reason: e.to_string(),
-                })?;
-                if state.get_live(&parsed).is_some() || state.get_tombstone(&parsed).is_some() {
-                    return Err(OpError::AlreadyExists(parsed));
+        let (id, parent_id) = match (requested_id.as_ref(), requested_parent.as_ref()) {
+            (Some(requested_id), None) => {
+                if state.get_live(requested_id).is_some()
+                    || state.get_tombstone(requested_id).is_some()
+                {
+                    return Err(OpError::AlreadyExists(requested_id.clone()));
                 }
-                (parsed, None)
+                (requested_id.clone(), None)
             }
-            (None, Some(raw)) => {
-                let parent_id = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
-                    field: "parent".into(),
-                    reason: e.to_string(),
-                })?;
-                let child = next_child_id(state, &parent_id)?;
-                (child, Some(parent_id))
+            (None, Some(parent_id)) => {
+                let child = next_child_id(state, parent_id)?;
+                (child, Some(parent_id.clone()))
             }
             (None, None) => (
                 generate_unique_id(
@@ -677,7 +826,6 @@ impl MutationEngine {
             source_repo_value = Some(sr.clone());
         }
 
-        let assignee = normalize_assignee(assignee, &stamp.by)?;
         let mut patch = WireBeadPatch::new(id.clone());
         patch.title = Some(title.clone());
         patch.description = Some(description.clone());
@@ -742,7 +890,7 @@ impl MutationEngine {
 
         let canonical = CanonicalMutationOp::Create {
             id: requested_id,
-            parent,
+            parent: requested_parent,
             title,
             bead_type,
             priority,
@@ -762,17 +910,10 @@ impl MutationEngine {
     fn plan_update(
         &self,
         state: &CanonicalState,
-        id: String,
-        patch: BeadPatch,
+        id: BeadId,
+        patch: ParsedBeadPatch,
         cas: Option<String>,
     ) -> Result<PlannedDelta, OpError> {
-        patch.validate()?;
-
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
-
         let bead = state.require_live(&id).map_live_err(&id)?;
 
         if let Some(expected) = cas.as_ref() {
@@ -804,17 +945,12 @@ impl MutationEngine {
     fn plan_add_labels(
         &self,
         state: &CanonicalState,
-        id: String,
-        labels: Vec<String>,
+        id: BeadId,
+        labels: Labels,
     ) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         let bead = state.require_live(&id).map_live_err(&id)?;
         let mut merged = bead.fields.labels.value.clone();
-        let parsed = parse_labels(labels)?;
-        for label in parsed.iter() {
+        for label in labels.iter() {
             merged.insert(label.clone());
         }
         enforce_label_limit(&merged, &self.limits, Some(id.clone()))?;
@@ -829,7 +965,7 @@ impl MutationEngine {
 
         let canonical = CanonicalMutationOp::AddLabels {
             id,
-            labels: canonical_labels(&parsed),
+            labels: canonical_labels(&labels),
         };
 
         Ok(PlannedDelta { delta, canonical })
@@ -838,17 +974,12 @@ impl MutationEngine {
     fn plan_remove_labels(
         &self,
         state: &CanonicalState,
-        id: String,
-        labels: Vec<String>,
+        id: BeadId,
+        labels: Labels,
     ) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         let bead = state.require_live(&id).map_live_err(&id)?;
         let mut merged = bead.fields.labels.value.clone();
-        let parsed = parse_labels(labels)?;
-        for label in parsed.iter() {
+        for label in labels.iter() {
             merged.remove(label.as_str());
         }
 
@@ -862,7 +993,7 @@ impl MutationEngine {
 
         let canonical = CanonicalMutationOp::RemoveLabels {
             id,
-            labels: canonical_labels(&parsed),
+            labels: canonical_labels(&labels),
         };
 
         Ok(PlannedDelta { delta, canonical })
@@ -871,14 +1002,10 @@ impl MutationEngine {
     fn plan_close(
         &self,
         state: &CanonicalState,
-        id: String,
+        id: BeadId,
         reason: Option<String>,
         on_branch: Option<String>,
     ) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         let bead = state.require_live(&id).map_live_err(&id)?;
         if bead.fields.workflow.value.is_closed() {
             return Err(OpError::InvalidTransition {
@@ -910,11 +1037,7 @@ impl MutationEngine {
         Ok(PlannedDelta { delta, canonical })
     }
 
-    fn plan_reopen(&self, state: &CanonicalState, id: String) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
+    fn plan_reopen(&self, state: &CanonicalState, id: BeadId) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
         if !bead.fields.workflow.value.is_closed() {
             let from_status = bead.fields.workflow.value.status().to_string();
@@ -941,13 +1064,9 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         stamp: &Stamp,
-        id: String,
+        id: BeadId,
         reason: Option<String>,
     ) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         state.require_live(&id).map_live_err(&id)?;
 
         let reason = normalize_optional_string(reason);
@@ -974,18 +1093,10 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         stamp: &Stamp,
-        from: String,
-        to: String,
+        from: BeadId,
+        to: BeadId,
         kind: DepKind,
     ) -> Result<PlannedDelta, OpError> {
-        let from = BeadId::parse(&from).map_err(|e| OpError::ValidationFailed {
-            field: "from".into(),
-            reason: e.to_string(),
-        })?;
-        let to = BeadId::parse(&to).map_err(|e| OpError::ValidationFailed {
-            field: "to".into(),
-            reason: e.to_string(),
-        })?;
         DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
             field: "dependency".into(),
             reason: e.reason,
@@ -1028,18 +1139,10 @@ impl MutationEngine {
     fn plan_remove_dep(
         &self,
         stamp: &Stamp,
-        from: String,
-        to: String,
+        from: BeadId,
+        to: BeadId,
         kind: DepKind,
     ) -> Result<PlannedDelta, OpError> {
-        let from = BeadId::parse(&from).map_err(|e| OpError::ValidationFailed {
-            field: "from".into(),
-            reason: e.to_string(),
-        })?;
-        let to = BeadId::parse(&to).map_err(|e| OpError::ValidationFailed {
-            field: "to".into(),
-            reason: e.to_string(),
-        })?;
         DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
             field: "dependency".into(),
             reason: e.reason,
@@ -1064,33 +1167,24 @@ impl MutationEngine {
     fn plan_set_parent(
         &self,
         state: &CanonicalState,
-        id: String,
-        parent: Option<String>,
+        id: BeadId,
+        parent: Option<BeadId>,
         stamp: &Stamp,
     ) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         state.require_live(&id).map_live_err(&id)?;
 
-        let parent = normalize_optional_string(parent);
         let parent_id = match parent.as_ref() {
-            Some(raw) => {
-                let parent_id = BeadId::parse(raw).map_err(|e| OpError::ValidationFailed {
-                    field: "parent".into(),
-                    reason: e.to_string(),
-                })?;
+            Some(parent_id) => {
                 DepKey::new(id.clone(), parent_id.clone(), DepKind::Parent).map_err(|e| {
                     OpError::ValidationFailed {
                         field: "parent".into(),
                         reason: e.reason,
                     }
                 })?;
-                if state.get_live(&parent_id).is_none() {
-                    return Err(OpError::NotFound(parent_id));
+                if state.get_live(parent_id).is_none() {
+                    return Err(OpError::NotFound(parent_id.clone()));
                 }
-                if would_create_cycle(state, &id, &parent_id, DepKind::Parent) {
+                if would_create_cycle(state, &id, parent_id, DepKind::Parent) {
                     return Err(OpError::ValidationFailed {
                         field: "parent".into(),
                         reason: format!(
@@ -1099,7 +1193,7 @@ impl MutationEngine {
                         ),
                     });
                 }
-                Some(parent_id)
+                Some(parent_id.clone())
             }
             None => None,
         };
@@ -1150,14 +1244,10 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         stamp: &Stamp,
-        id: String,
+        id: BeadId,
         content: String,
     ) -> Result<PlannedDelta, OpError> {
         enforce_note_limit(&content, &self.limits)?;
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         let bead = state.require_live(&id).map_live_err(&id)?;
         let note_id = generate_unique_note_id(&bead.notes, NoteId::generate);
 
@@ -1188,13 +1278,9 @@ impl MutationEngine {
         state: &CanonicalState,
         stamp: &Stamp,
         now_ms: u64,
-        id: String,
+        id: BeadId,
         lease_secs: u64,
     ) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         let bead = state.require_live(&id).map_live_err(&id)?;
 
         if let crate::core::Claim::Claimed {
@@ -1237,12 +1323,8 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         stamp: &Stamp,
-        id: String,
+        id: BeadId,
     ) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         let bead = state.require_live(&id).map_live_err(&id)?;
 
         if let crate::core::Claim::Claimed { assignee, .. } = &bead.fields.claim.value {
@@ -1271,13 +1353,9 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         stamp: &Stamp,
-        id: String,
+        id: BeadId,
         lease_secs: u64,
     ) -> Result<PlannedDelta, OpError> {
-        let id = BeadId::parse(&id).map_err(|e| OpError::ValidationFailed {
-            field: "id".into(),
-            reason: e.to_string(),
-        })?;
         let bead = state.require_live(&id).map_live_err(&id)?;
 
         if let crate::core::Claim::Claimed { assignee, .. } = &bead.fields.claim.value {
@@ -1330,9 +1408,9 @@ struct CanonicalMutation {
 enum CanonicalMutationOp {
     Create {
         #[serde(skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
+        id: Option<BeadId>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        parent: Option<String>,
+        parent: Option<BeadId>,
         title: String,
         bead_type: BeadType,
         priority: Priority,
@@ -1473,6 +1551,24 @@ fn normalize_assignee(value: Option<String>, actor: &ActorId) -> Result<Option<A
     }
 }
 
+fn parse_bead_id_validation(field: &str, raw: String) -> Result<BeadId, OpError> {
+    BeadId::parse(&raw).map_err(|err| OpError::ValidationFailed {
+        field: field.into(),
+        reason: err.to_string(),
+    })
+}
+
+fn parse_bead_id_invalid_id(field: &str, raw: String) -> Result<BeadId, OpError> {
+    match BeadId::parse(&raw) {
+        Ok(id) => Ok(id),
+        Err(CoreError::InvalidId(id)) => Err(OpError::InvalidId(id)),
+        Err(other) => Err(OpError::InvalidRequest {
+            field: Some(field.into()),
+            reason: other.to_string(),
+        }),
+    }
+}
+
 fn parse_labels(labels: Vec<String>) -> Result<Labels, OpError> {
     let mut parsed = Labels::new();
     for raw in labels {
@@ -1483,6 +1579,13 @@ fn parse_labels(labels: Vec<String>) -> Result<Labels, OpError> {
         parsed.insert(label);
     }
     Ok(parsed)
+}
+
+fn parse_dep_specs(deps: &[String]) -> Result<Vec<DepSpec>, OpError> {
+    DepSpec::parse_list(deps).map_err(|e| OpError::ValidationFailed {
+        field: "dependencies".into(),
+        reason: e.to_string(),
+    })
 }
 
 fn canonical_labels(labels: &Labels) -> Vec<String> {
@@ -1502,17 +1605,13 @@ fn sort_dedup_dep_specs(specs: &mut Vec<DepSpec>) {
     specs.dedup_by(|a, b| a.kind() == b.kind() && a.id() == b.id());
 }
 
-fn canonical_deps(deps: &[String]) -> Result<Vec<String>, OpError> {
-    let mut parsed: Vec<DepSpec> =
-        DepSpec::parse_list(deps).map_err(|e| OpError::ValidationFailed {
-            field: "dependencies".into(),
-            reason: e.to_string(),
-        })?;
+fn canonical_deps(deps: &[DepSpec]) -> Vec<String> {
+    let mut parsed = deps.to_vec();
     sort_dedup_dep_specs(&mut parsed);
-    Ok(parsed
+    parsed
         .into_iter()
         .map(|spec| spec.to_spec_string())
-        .collect())
+        .collect()
 }
 
 fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
@@ -1596,7 +1695,7 @@ fn would_create_cycle(state: &CanonicalState, from: &BeadId, to: &BeadId, kind: 
 
 fn normalize_patch(
     id: &BeadId,
-    patch: &BeadPatch,
+    patch: &ParsedBeadPatch,
 ) -> Result<(WireBeadPatch, CanonicalBeadPatch), OpError> {
     let mut wire = WireBeadPatch::new(id.clone());
 
@@ -1617,9 +1716,8 @@ fn normalize_patch(
 
     let canon_labels = match &patch.labels {
         Patch::Set(labels) => {
-            let parsed = parse_labels(labels.clone())?;
-            wire.labels = Some(parsed.clone());
-            Patch::Set(canonical_labels(&parsed))
+            wire.labels = Some(labels.clone());
+            Patch::Set(canonical_labels(labels))
         }
         Patch::Clear => Patch::Clear,
         Patch::Keep => Patch::Keep,
@@ -1941,14 +2039,22 @@ mod tests {
         let seq = Seq1::new(NonZeroU64::new(1).unwrap());
         let state = make_state_with_bead("bd-123", &actor);
 
-        let req_a = MutationRequest::AddLabels {
-            id: "bd-123".into(),
-            labels: vec!["b".into(), "a".into()],
-        };
-        let req_b = MutationRequest::AddLabels {
-            id: "bd-123".into(),
-            labels: vec!["a".into(), "b".into()],
-        };
+        let req_a = ParsedMutationRequest::parse(
+            MutationRequest::AddLabels {
+                id: "bd-123".into(),
+                labels: vec!["b".into(), "a".into()],
+            },
+            &actor,
+        )
+        .unwrap();
+        let req_b = ParsedMutationRequest::parse(
+            MutationRequest::AddLabels {
+                id: "bd-123".into(),
+                labels: vec!["a".into(), "b".into()],
+            },
+            &actor,
+        )
+        .unwrap();
 
         let mut clock_a = fixed_clock(1_000);
         let mut clock_b = fixed_clock(1_000);
@@ -1991,10 +2097,14 @@ mod tests {
         let seq = Seq1::new(NonZeroU64::new(1).unwrap());
         let state = make_state_with_bead("bd-456", &actor);
 
-        let req = MutationRequest::AddNote {
-            id: "bd-456".into(),
-            content: "hey".into(),
-        };
+        let req = ParsedMutationRequest::parse(
+            MutationRequest::AddNote {
+                id: "bd-456".into(),
+                content: "hey".into(),
+            },
+            &actor,
+        )
+        .unwrap();
 
         let mut clock = fixed_clock(1_000);
         let err = engine
@@ -2020,10 +2130,14 @@ mod tests {
         let seq = Seq1::new(NonZeroU64::new(1).unwrap());
         let state = make_state_with_bead("bd-789", &actor);
 
-        let req = MutationRequest::AddLabels {
-            id: "bd-789".into(),
-            labels: vec!["alpha".into()],
-        };
+        let req = ParsedMutationRequest::parse(
+            MutationRequest::AddLabels {
+                id: "bd-789".into(),
+                labels: vec!["alpha".into()],
+            },
+            &actor,
+        )
+        .unwrap();
 
         let mut clock = fixed_clock(1_000);
         let err = engine
@@ -2048,10 +2162,14 @@ mod tests {
         let state = make_state_with_bead("bd-000", &actor);
         let before = serde_json::to_string(&state).unwrap();
 
-        let req = MutationRequest::AddLabels {
-            id: "bd-000".into(),
-            labels: vec!["alpha".into()],
-        };
+        let req = ParsedMutationRequest::parse(
+            MutationRequest::AddLabels {
+                id: "bd-000".into(),
+                labels: vec!["alpha".into()],
+            },
+            &actor,
+        )
+        .unwrap();
 
         let mut clock = fixed_clock(1_000);
         let _ = engine
@@ -2060,5 +2178,35 @@ mod tests {
 
         let after = serde_json::to_string(&state).unwrap();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn parsed_request_rejects_invalid_id() {
+        let actor = actor_id("alice");
+        let err = ParsedMutationRequest::parse(
+            MutationRequest::AddLabels {
+                id: "bad".into(),
+                labels: vec![],
+            },
+            &actor,
+        )
+        .unwrap_err();
+        assert!(matches!(err, OpError::InvalidId(_)));
+    }
+
+    #[test]
+    fn parsed_request_rejects_invalid_label() {
+        let actor = actor_id("alice");
+        let err = ParsedMutationRequest::parse(
+            MutationRequest::AddLabels {
+                id: "bd-123".into(),
+                labels: vec!["bad\nlabel".into()],
+            },
+            &actor,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, OpError::ValidationFailed { field, .. } if field == "labels")
+        );
     }
 }
