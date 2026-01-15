@@ -267,6 +267,17 @@ impl SqliteWalIndex {
     pub fn durability_mode(&self) -> IndexDurabilityMode {
         self.mode
     }
+
+    pub fn checkpoint_truncate(&self) -> Result<(), WalIndexError> {
+        let conn = open_connection(&self.db_path, self.mode, false)?;
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            let _: i64 = row.get(0)?;
+            let _: i64 = row.get(1)?;
+            let _: i64 = row.get(2)?;
+            Ok(())
+        })?;
+        Ok(())
+    }
 }
 
 impl WalIndex for SqliteWalIndex {
@@ -1350,6 +1361,40 @@ mod tests {
         assert_eq!(req.event_ids, vec![event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
         assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), 1);
+    }
+
+    #[test]
+    fn sqlite_index_checkpoint_truncates_wal_file() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS scratch (id INTEGER PRIMARY KEY, val TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO scratch (val) VALUES ('hello')", [])
+            .unwrap();
+        drop(conn);
+
+        let wal_path = temp.path().join("index").join("wal.sqlite-wal");
+        let before = std::fs::metadata(&wal_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        assert!(before > 0);
+
+        index.checkpoint_truncate().unwrap();
+
+        let after = match std::fs::metadata(&wal_path) {
+            Ok(meta) => meta.len(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(err) => panic!("unexpected wal metadata error: {err}"),
+        };
+        assert_eq!(after, 0);
     }
 
     #[test]
