@@ -1009,6 +1009,51 @@ fn store_runtime_error_payload(
                 },
             )
         }
+        StoreRuntimeError::StoreConfigSymlink { path } => {
+            ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable).with_details(
+                error_details::PathSymlinkRejectedDetails {
+                    path: path.display().to_string(),
+                },
+            )
+        }
+        StoreRuntimeError::StoreConfigRead { path, source } => match source.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(
+                    error_details::PermissionDeniedDetails {
+                        path: path.display().to_string(),
+                        operation: error_details::PermissionOperation::Read,
+                    },
+                )
+            }
+            _ => ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
+                error_details::ValidationFailedDetails {
+                    field: "store_config".to_string(),
+                    reason: format!("failed to read {}: {source}", path.display()),
+                },
+            ),
+        },
+        StoreRuntimeError::StoreConfigParse { source, .. } => {
+            ErrorPayload::new(ErrorCode::ValidationFailed, message, retryable).with_details(
+                error_details::ValidationFailedDetails {
+                    field: "store_config".to_string(),
+                    reason: source.to_string(),
+                },
+            )
+        }
+        StoreRuntimeError::StoreConfigSerialize { .. } => {
+            ErrorPayload::new(ErrorCode::InternalError, message, retryable)
+        }
+        StoreRuntimeError::StoreConfigWrite { path, source } => match source.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(
+                    error_details::PermissionDeniedDetails {
+                        path: path.display().to_string(),
+                        operation: error_details::PermissionOperation::Write,
+                    },
+                )
+            }
+            _ => ErrorPayload::new(ErrorCode::InternalError, message, retryable),
+        },
         StoreRuntimeError::WatermarkInvalid {
             kind,
             namespace,

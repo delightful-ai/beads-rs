@@ -628,6 +628,23 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
             }
         }
         StoreRuntimeError::ReplicaRosterParse { .. } => ErrorCode::ValidationFailed,
+        StoreRuntimeError::StoreConfigSymlink { .. } => ErrorCode::PathSymlinkRejected,
+        StoreRuntimeError::StoreConfigRead { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::ValidationFailed
+            }
+        }
+        StoreRuntimeError::StoreConfigParse { .. } => ErrorCode::ValidationFailed,
+        StoreRuntimeError::StoreConfigSerialize { .. } => ErrorCode::InternalError,
+        StoreRuntimeError::StoreConfigWrite { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::InternalError
+            }
+        }
         StoreRuntimeError::WalIndex(err) => wal_index_error_code(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_error_code(err),
         StoreRuntimeError::WatermarkInvalid { .. } => ErrorCode::IndexCorrupt,
@@ -694,6 +711,17 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
             }
         }
         StoreRuntimeError::ReplicaRosterParse { .. } => Transience::Permanent,
+        StoreRuntimeError::StoreConfigSymlink { .. }
+        | StoreRuntimeError::StoreConfigParse { .. }
+        | StoreRuntimeError::StoreConfigSerialize { .. } => Transience::Permanent,
+        StoreRuntimeError::StoreConfigRead { source, .. }
+        | StoreRuntimeError::StoreConfigWrite { source, .. } => {
+            if source.kind() == std::io::ErrorKind::PermissionDenied {
+                Transience::Permanent
+            } else {
+                Transience::Retryable
+            }
+        }
         StoreRuntimeError::WalIndex(err) => wal_index_transience(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_transience(err),
         StoreRuntimeError::WatermarkInvalid { .. } => Transience::Permanent,

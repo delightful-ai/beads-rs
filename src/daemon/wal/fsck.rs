@@ -13,9 +13,10 @@ use crate::core::{
 };
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use crate::daemon::wal::record::{Record, validate_header_matches_body};
+use crate::daemon::store_runtime::store_index_durability_mode;
 use crate::daemon::wal::{
-    EventWalError, IndexDurabilityMode, SegmentHeader, SqliteWalIndex, WalIndex, WalIndexError,
-    WalReplayError, rebuild_index,
+    EventWalError, SegmentHeader, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
+    rebuild_index,
 };
 use crate::paths;
 
@@ -62,6 +63,8 @@ pub enum FsckError {
         #[source]
         source: std::io::Error,
     },
+    #[error("store config error: {0}")]
+    StoreConfig(Box<crate::daemon::store_runtime::StoreRuntimeError>),
     #[error(transparent)]
     WalReplay(#[from] Box<WalReplayError>),
     #[error(transparent)]
@@ -1024,7 +1027,29 @@ fn check_index_offsets(
         return;
     }
 
-    let index = match SqliteWalIndex::open(store_dir, meta, IndexDurabilityMode::Cache) {
+    let mode = match store_index_durability_mode(meta.store_id()) {
+        Ok(mode) => mode,
+        Err(err) => {
+            builder.record_issue(
+                FsckCheckId::IndexOffsets,
+                FsckStatus::Fail,
+                FsckSeverity::High,
+                FsckEvidence {
+                    code: FsckEvidenceCode::IndexOpenFailed,
+                    message: format!("failed to load store config: {err}"),
+                    path: Some(index_path),
+                    namespace: None,
+                    origin: None,
+                    seq: None,
+                    offset: None,
+                },
+                Some("fix store_config.toml and re-run fsck"),
+            );
+            return;
+        }
+    };
+
+    let index = match SqliteWalIndex::open(store_dir, meta, mode) {
         Ok(index) => index,
         Err(err) => {
             builder.record_issue(
@@ -1293,7 +1318,9 @@ fn rebuild_index_after_repair(
     options: &FsckOptions,
 ) -> Result<(), FsckError> {
     remove_wal_index_files(meta.store_id())?;
-    let index = SqliteWalIndex::open(store_dir, meta, IndexDurabilityMode::Cache)?;
+    let mode = store_index_durability_mode(meta.store_id())
+        .map_err(|err| FsckError::StoreConfig(Box::new(err)))?;
+    let index = SqliteWalIndex::open(store_dir, meta, mode)?;
     rebuild_index(store_dir, meta, &index, &options.limits)?;
     Ok(())
 }
