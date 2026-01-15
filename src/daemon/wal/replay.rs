@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,7 @@ use crate::core::{
 use super::EventWalError;
 use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use super::index::{HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow};
-use super::record::{Record, RecordHeaderMismatch, validate_header_matches_body};
+use super::record::{RecordHeaderMismatch, RecordVerifyError, UnverifiedRecord, VerifiedRecord};
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -369,11 +369,11 @@ fn index_record(
     namespace: &NamespaceId,
     segment: &SegmentDescriptor<Verified>,
     offset: u64,
-    record: &Record,
+    record: &VerifiedRecord,
     frame_len: u32,
     limits: &Limits,
 ) -> Result<(), WalReplayError> {
-    let header = &record.header;
+    let header = record.header();
     let origin_seq = header.origin_seq;
     let event_id = EventId::new(header.origin_replica_id, namespace.clone(), origin_seq);
 
@@ -414,7 +414,7 @@ fn index_record(
     }
 
     if let Some(hlc_max) =
-        decode_event_hlc_max(record.payload.as_ref(), limits).map_err(|source| {
+        decode_event_hlc_max(record.payload_bytes(), limits).map_err(|source| {
             WalReplayError::EventBodyDecode {
                 path: segment.path.clone(),
                 offset,
@@ -709,7 +709,7 @@ fn scan_segment<F>(
     mut on_record: F,
 ) -> Result<SegmentScanOutcome, WalReplayError>
 where
-    F: FnMut(u64, &Record, u32) -> Result<(), WalReplayError>,
+    F: FnMut(u64, &VerifiedRecord, u32) -> Result<(), WalReplayError>,
 {
     let mut file = OpenOptions::new()
         .read(true)
@@ -799,39 +799,38 @@ where
             });
         }
 
-        let record = Record::decode_body(&body).map_err(|source| WalReplayError::RecordDecode {
-            path: segment.path.clone(),
-            source,
-        })?;
+        let record =
+            UnverifiedRecord::decode_body(&body).map_err(|source| WalReplayError::RecordDecode {
+                path: segment.path.clone(),
+                source,
+            })?;
         let (_, event_body) =
-            decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
+            decode_event_body(record.payload_bytes(), limits).map_err(|source| {
                 WalReplayError::EventBodyDecode {
                     path: segment.path.clone(),
                     offset,
                     source,
                 }
             })?;
-        validate_header_matches_body(&record.header, &event_body).map_err(|source| {
-            WalReplayError::RecordHeaderMismatch {
+        let header = record.header();
+        let record = record.verify_with_event_body(&event_body).map_err(|err| match err {
+            RecordVerifyError::HeaderMismatch(source) => WalReplayError::RecordHeaderMismatch {
                 path: segment.path.clone(),
                 offset,
                 source,
-            }
-        })?;
-        let expected_sha = sha256_bytes(record.payload.as_ref()).0;
-        if expected_sha != record.header.sha256 {
-            return Err(WalReplayError::RecordShaMismatch(Box::new(
-                RecordShaMismatchInfo {
+            },
+            RecordVerifyError::ShaMismatch { expected, got } => {
+                WalReplayError::RecordShaMismatch(Box::new(RecordShaMismatchInfo {
                     namespace: segment.header.namespace.clone(),
-                    origin: record.header.origin_replica_id,
-                    seq: record.header.origin_seq.get(),
-                    expected: expected_sha,
-                    got: record.header.sha256,
+                    origin: header.origin_replica_id,
+                    seq: header.origin_seq.get(),
+                    expected,
+                    got,
                     path: segment.path.clone(),
                     offset,
-                },
-            )));
-        }
+                }))
+            }
+        })?;
         on_record(offset, &record, frame_len as u32)?;
 
         records += 1;
@@ -1039,27 +1038,39 @@ mod tests {
         );
         let bytes = encode_event_body_canonical(&body).unwrap();
         let expected_sha = sha256_bytes(bytes.as_ref()).0;
-        let mut bad_sha = expected_sha;
-        bad_sha[0] ^= 0xFF;
 
-        let record = Record {
-            header: RecordHeader {
+        let record = VerifiedRecord::new(
+            RecordHeader {
                 origin_replica_id: origin,
                 origin_seq: body.origin_seq,
                 event_time_ms: body.event_time_ms,
                 txn_id: body.txn_id,
                 client_request_id: body.client_request_id,
                 request_sha256: None,
-                sha256: bad_sha,
+                sha256: expected_sha,
                 prev_sha256: None,
             },
-            payload: Bytes::copy_from_slice(bytes.as_ref()),
-        };
+            Bytes::copy_from_slice(bytes.as_ref()),
+            &body,
+        )
+        .unwrap();
         writer.append(&record, 10).unwrap();
 
         let unverified =
             SegmentDescriptor::<Unverified>::load(writer.current_path().to_path_buf()).unwrap();
         let verified = unverified.verify(&meta, &namespace).unwrap();
+        let sha_offset = verified.header_len + FRAME_HEADER_LEN as u64 + 56;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(writer.current_path())
+            .unwrap();
+        file.seek(SeekFrom::Start(sha_offset)).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(sha_offset)).unwrap();
+        file.write_all(&byte).unwrap();
         let max_record_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
         let err = match scan_segment(
             &verified,
@@ -1080,7 +1091,7 @@ mod tests {
                 assert_eq!(info.origin, origin);
                 assert_eq!(info.seq, body.origin_seq.get());
                 assert_eq!(info.expected, expected_sha);
-                assert_eq!(info.got, bad_sha);
+                assert_ne!(info.got, expected_sha);
             }
             other => panic!("expected RecordShaMismatch, got {other:?}"),
         }

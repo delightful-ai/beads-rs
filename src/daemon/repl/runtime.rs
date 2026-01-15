@@ -16,12 +16,13 @@ use crate::core::error::details::{
 use crate::core::{
     ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, EventShaLookupError, Limits,
     NamespaceId, Opaque, PrevVerified, ReplicaId, ReplicaRole, SegmentId, Seq0, Sha256, StoreId,
-    VerifiedEvent,
+    VerifiedEvent, decode_event_body,
 };
 use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
 use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
-    EventWalError, FrameReader, Record, ReplicaLivenessRow, WalIndex, WalIndexError,
+    EventWalError, FrameReader, ReplicaLivenessRow, UnverifiedRecord, VerifiedRecord, WalIndex,
+    WalIndexError,
 };
 use crate::paths;
 
@@ -269,17 +270,21 @@ impl WalRangeReader {
                 }
             };
 
-            let record =
-                read_record_at(segment_path, item.offset, self.limits.max_wal_record_bytes)
-                    .map_err(|err| WalRangeError::Corrupt {
-                        namespace: namespace.clone(),
-                        segment_id: Some(item.segment_id),
-                        offset: Some(item.offset),
-                        reason: err.to_string(),
-                    })?;
+            let record = read_record_at(
+                segment_path,
+                item.offset,
+                self.limits.max_wal_record_bytes,
+                &self.limits,
+            )
+            .map_err(|err| WalRangeError::Corrupt {
+                namespace: namespace.clone(),
+                segment_id: Some(item.segment_id),
+                offset: Some(item.offset),
+                reason: err.to_string(),
+            })?;
 
-            if record.header.origin_replica_id != *origin
-                || record.header.origin_seq != item.event_id.origin_seq
+            if record.header().origin_replica_id != *origin
+                || record.header().origin_seq != item.event_id.origin_seq
             {
                 return Err(WalRangeError::Corrupt {
                     namespace: namespace.clone(),
@@ -288,7 +293,7 @@ impl WalRangeReader {
                     reason: "record header mismatch".to_string(),
                 });
             }
-            if record.header.sha256 != item.sha {
+            if record.header().sha256 != item.sha {
                 return Err(WalRangeError::Corrupt {
                     namespace: namespace.clone(),
                     segment_id: Some(item.segment_id),
@@ -301,7 +306,7 @@ impl WalRangeReader {
                 eid: item.event_id,
                 sha256: Sha256(item.sha),
                 prev_sha256: item.prev_sha.map(Sha256),
-                bytes: EventBytes::<Opaque>::new(Bytes::clone(&record.payload)),
+                bytes: EventBytes::<Opaque>::new(Bytes::clone(record.payload())),
             });
         }
 
@@ -380,7 +385,8 @@ fn read_record_at(
     path: &Path,
     offset: u64,
     max_record_bytes: usize,
-) -> Result<Record, EventWalError> {
+    limits: &Limits,
+) -> Result<VerifiedRecord, EventWalError> {
     let mut file = File::open(path).map_err(|source| EventWalError::Io {
         path: Some(path.to_path_buf()),
         source,
@@ -392,7 +398,7 @@ fn read_record_at(
         })?;
 
     let mut reader = FrameReader::new(file, max_record_bytes);
-    reader
+    let record = reader
         .read_next()
         .map_err(|err| match err {
             EventWalError::Io { source, .. } => EventWalError::Io {
@@ -403,5 +409,15 @@ fn read_record_at(
         })?
         .ok_or_else(|| EventWalError::FrameLengthInvalid {
             reason: "unexpected eof while reading record".to_string(),
-        })
+        })?;
+    let (_, event_body) = decode_event_body(record.payload_bytes(), limits).map_err(|err| {
+        EventWalError::RecordHeaderInvalid {
+            reason: format!("event body decode failed: {err}"),
+        }
+    })?;
+    record.verify_with_event_body(&event_body).map_err(|err| {
+        EventWalError::RecordHeaderInvalid {
+            reason: err.to_string(),
+        }
+    })
 }
