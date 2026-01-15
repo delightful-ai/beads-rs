@@ -5,12 +5,14 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use beads_rs::core::NamespaceId;
+use crc32c::crc32c;
+
 use beads_rs::daemon::wal::{EventWalError, EventWalResult, RecordHeader};
 
 use super::wal::{SegmentFixture, TempWalDir, valid_segment};
 
 const FRAME_CRC_OFFSET: u64 = 8;
-const FRAME_HEADER_LEN: u64 = 12;
+const FRAME_HEADER_LEN: usize = 12;
 
 pub fn bad_crc_segment(
     temp: &TempWalDir,
@@ -46,24 +48,30 @@ pub fn corrupt_record_header_event_time(
     segment: &SegmentFixture,
     frame_index: usize,
 ) -> EventWalResult<()> {
-    let offset = segment.frame_body_offset(frame_index);
+    let frame_offset = segment.frame_offset(frame_index);
+    let body_offset = frame_offset + FRAME_HEADER_LEN as u64;
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(&segment.path)
         .map_err(|source| io_err(&segment.path, source))?;
-    file.seek(SeekFrom::Start(offset))
+    file.seek(SeekFrom::Start(frame_offset))
         .map_err(|source| io_err(&segment.path, source))?;
-    let mut header_prefix = [0u8; 4];
-    file.read_exact(&mut header_prefix)
+    let mut frame_header = [0u8; FRAME_HEADER_LEN];
+    file.read_exact(&mut frame_header)
         .map_err(|source| io_err(&segment.path, source))?;
-    let header_len = u16::from_le_bytes([header_prefix[2], header_prefix[3]]) as usize;
-    file.seek(SeekFrom::Start(offset))
+    let length = u32::from_le_bytes([
+        frame_header[4],
+        frame_header[5],
+        frame_header[6],
+        frame_header[7],
+    ]) as usize;
+    file.seek(SeekFrom::Start(body_offset))
         .map_err(|source| io_err(&segment.path, source))?;
-    let mut header_bytes = vec![0u8; header_len];
-    file.read_exact(&mut header_bytes)
+    let mut body = vec![0u8; length];
+    file.read_exact(&mut body)
         .map_err(|source| io_err(&segment.path, source))?;
-    let (mut header, _) = RecordHeader::decode(&header_bytes)?;
+    let (mut header, header_len) = RecordHeader::decode(&body)?;
     header.event_time_ms = header.event_time_ms.saturating_add(1);
     let encoded = header.encode()?;
     if encoded.len() != header_len {
@@ -71,9 +79,15 @@ pub fn corrupt_record_header_event_time(
             reason: "record header length changed during corruption".to_string(),
         });
     }
-    file.seek(SeekFrom::Start(offset))
+    body[..header_len].copy_from_slice(&encoded);
+    file.seek(SeekFrom::Start(body_offset))
         .map_err(|source| io_err(&segment.path, source))?;
-    file.write_all(&encoded)
+    file.write_all(&body)
+        .map_err(|source| io_err(&segment.path, source))?;
+    let crc = crc32c(&body);
+    file.seek(SeekFrom::Start(frame_offset + 8))
+        .map_err(|source| io_err(&segment.path, source))?;
+    file.write_all(&crc.to_le_bytes())
         .map_err(|source| io_err(&segment.path, source))?;
     Ok(())
 }
