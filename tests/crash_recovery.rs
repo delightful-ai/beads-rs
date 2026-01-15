@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use beads_rs::api::SyncWarning;
 use beads_rs::core::{BeadType, NamespaceId, Priority, StoreId, StoreMeta};
-use beads_rs::daemon::ipc::{IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload};
+use beads_rs::daemon::ipc::{IpcClient, MutationMeta, Request, Response, ResponsePayload};
 use beads_rs::daemon::query::QueryResult;
 use fixtures::realtime::RealtimeFixture;
 
@@ -189,18 +189,19 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
         .assert()
         .success();
 
-    let client = IpcClient::for_runtime_dir(fixture.runtime_dir());
-    let status_resp = client
-        .send_request(&Request::Status {
-            repo: fixture.repo_path().to_path_buf(),
-            read: ReadConsistency::default(),
-        })
-        .expect("status response");
-    let warnings = match status_resp {
-        Response::Ok {
-            ok: ResponsePayload::Query(QueryResult::Status(out)),
-        } => out.sync.map(|sync| sync.warnings).unwrap_or_default(),
-        other => panic!("unexpected status response: {other:?}"),
+    let output = fixture
+        .bd()
+        .args(["status", "--json"])
+        .output()
+        .expect("status output");
+    assert!(output.status.success(), "status failed: {:?}", output);
+    let payload: ResponsePayload =
+        serde_json::from_slice(&output.stdout).expect("parse status payload");
+    let warnings = match payload {
+        ResponsePayload::Query(QueryResult::Status(out)) => {
+            out.sync.map(|sync| sync.warnings).unwrap_or_default()
+        }
+        other => panic!("unexpected status payload: {other:?}"),
     };
     assert!(
         warnings
@@ -209,6 +210,7 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
         "expected wal tail truncation warning"
     );
 
+    let client = IpcClient::for_runtime_dir(fixture.runtime_dir()).with_autostart(false);
     let create_resp = client
         .send_request(&create_request(
             fixture.repo_path(),
@@ -258,20 +260,18 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
         .assert()
         .success();
 
-    let client = IpcClient::for_runtime_dir(fixture.runtime_dir());
-    let show_resp = client
-        .send_request(&Request::Show {
-            repo: fixture.repo_path().to_path_buf(),
-            id: "bd-crash-index".to_string(),
-            read: ReadConsistency::default(),
-        })
-        .expect("show response");
-    match show_resp {
-        Response::Ok {
-            ok: ResponsePayload::Query(QueryResult::Issue(issue)),
-        } => {
+    let output = fixture
+        .bd()
+        .args(["show", "bd-crash-index", "--json"])
+        .output()
+        .expect("show output");
+    assert!(output.status.success(), "show failed: {:?}", output);
+    let payload: ResponsePayload =
+        serde_json::from_slice(&output.stdout).expect("parse show payload");
+    match payload {
+        ResponsePayload::Query(QueryResult::Issue(issue)) => {
             assert_eq!(issue.id, "bd-crash-index");
         }
-        other => panic!("unexpected show response: {other:?}"),
+        other => panic!("unexpected show payload: {other:?}"),
     }
 }
