@@ -134,6 +134,9 @@ pub enum CheckpointImportError {
 
 #[derive(Debug, Clone)]
 pub struct CheckpointImport {
+    pub checkpoint_group: String,
+    pub policy_hash: ContentHash,
+    pub roster_hash: Option<ContentHash>,
     pub state: StoreState,
     pub included: IncludedWatermarks,
     pub included_heads: Option<IncludedHeads>,
@@ -284,6 +287,9 @@ pub fn import_checkpoint(
     }
 
     Ok(CheckpointImport {
+        checkpoint_group: meta.checkpoint_group.clone(),
+        policy_hash: meta.policy_hash,
+        roster_hash: meta.roster_hash,
         state,
         included: meta.included.clone(),
         included_heads: meta.included_heads.clone(),
