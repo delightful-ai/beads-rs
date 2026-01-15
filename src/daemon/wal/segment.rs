@@ -3,6 +3,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::cell::Cell;
 
 use crc32c::crc32c;
 use rand::RngCore;
@@ -206,6 +208,38 @@ pub struct SegmentWriter {
     bytes_written: u64,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncMode {
+    All,
+    Data,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_SYNC_MODE: Cell<Option<SyncMode>> = Cell::new(None);
+}
+
+#[cfg(test)]
+fn record_sync_mode(mode: SyncMode) {
+    LAST_SYNC_MODE.with(|cell| cell.set(Some(mode)));
+}
+
+#[cfg(not(test))]
+fn record_sync_mode(_mode: SyncMode) {}
+
+fn sync_segment(file: &File, path: &Path, mode: SyncMode) -> EventWalResult<()> {
+    record_sync_mode(mode);
+    let result = match mode {
+        SyncMode::All => file.sync_all(),
+        SyncMode::Data => file.sync_data(),
+    };
+    result.map_err(|source| EventWalError::Io {
+        path: Some(path.to_path_buf()),
+        source,
+    })
+}
+
 impl SegmentWriter {
     pub fn open(
         store_dir: &Path,
@@ -271,10 +305,8 @@ impl SegmentWriter {
                 source,
             })?;
         crate::daemon::test_hooks::maybe_pause("wal_after_write");
-        self.file.sync_data().map_err(|source| EventWalError::Io {
-            path: Some(self.path.clone()),
-            source,
-        })?;
+        // LocalFsync requires full fsync for metadata durability.
+        sync_segment(&self.file, &self.path, SyncMode::All)?;
         self.bytes_written = self
             .bytes_written
             .checked_add(frame.len() as u64)
@@ -478,6 +510,31 @@ mod tests {
             header,
             payload: Bytes::from_static(b"event"),
         }
+    }
+
+    fn take_sync_mode() -> Option<SyncMode> {
+        LAST_SYNC_MODE.with(|cell| cell.replace(None))
+    }
+
+    #[test]
+    fn append_uses_full_fsync() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([6u8; 16]));
+        let meta = test_meta(store_id, StoreEpoch::new(1));
+        let namespace = NamespaceId::core();
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::new(1024, 1024, 60_000),
+        )
+        .unwrap();
+
+        let record = test_record();
+        let _ = take_sync_mode();
+        writer.append(&record, 10).unwrap();
+        assert_eq!(take_sync_mode(), Some(SyncMode::All));
     }
 
     #[test]
