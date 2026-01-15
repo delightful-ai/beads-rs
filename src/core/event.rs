@@ -1,5 +1,6 @@
 //! Event body encoding + hashing for realtime WAL and replication.
 
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
 use bytes::Bytes;
@@ -338,11 +339,13 @@ pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcM
 
     let mut dec = Decoder::new(bytes);
     let map_len = decode_map_len(&mut dec, limits, 0)?;
+    let mut seen_keys = BTreeSet::new();
     let mut hlc_max = None;
     let mut event_time_ms = None;
     let mut kind: Option<EventKindV1> = None;
     for _ in 0..map_len {
         let key = decode_text(&mut dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "kind" => {
                 let raw = decode_text(&mut dec, limits)?;
@@ -441,6 +444,7 @@ fn decode_event_body_map(
 ) -> Result<EventBody, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
 
+    let mut seen_keys = BTreeSet::new();
     let mut envelope_v = None;
     let mut store_id: Option<StoreId> = None;
     let mut store_epoch = None;
@@ -456,6 +460,7 @@ fn decode_event_body_map(
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "client_request_id" => {
                 let raw = decode_text(dec, limits)?;
@@ -647,6 +652,7 @@ fn decode_txn_delta(
 ) -> Result<TxnDeltaV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
 
+    let mut seen_keys = BTreeSet::new();
     let mut version = None;
     let mut bead_upserts: Vec<WireBeadPatch> = Vec::new();
     let mut bead_deletes: Vec<WireTombstoneV1> = Vec::new();
@@ -657,6 +663,7 @@ fn decode_txn_delta(
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "bead_upserts" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
@@ -731,8 +738,10 @@ fn decode_txn_delta(
                     }
                     let mut bead_id = None;
                     let mut note = None;
+                    let mut entry_seen = BTreeSet::new();
                     for _ in 0..entry_len {
                         let entry_key = decode_text(dec, limits)?;
+                        ensure_unique_key(&mut entry_seen, entry_key)?;
                         match entry_key {
                             "bead_id" => {
                                 let raw = decode_text(dec, limits)?;
@@ -1624,12 +1633,14 @@ fn encode_hlc_max(enc: &mut Encoder<&mut Vec<u8>>, hlc: &HlcMax) -> Result<(), E
 
 fn decode_hlc_max(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<HlcMax, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
     let mut actor_id = None;
     let mut logical = None;
     let mut physical_ms = None;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "actor_id" => {
                 let raw = decode_text(dec, limits)?;
@@ -1652,6 +1663,17 @@ fn decode_hlc_max(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<Hl
         physical_ms: physical_ms.ok_or(DecodeError::MissingField("physical_ms"))?,
         logical: logical.ok_or(DecodeError::MissingField("logical"))?,
     })
+}
+
+fn ensure_unique_key<'a>(
+    seen: &mut BTreeSet<&'a str>,
+    key: &'a str,
+) -> Result<(), DecodeError> {
+    if seen.insert(key) {
+        Ok(())
+    } else {
+        Err(DecodeError::DuplicateKey(key.to_string()))
+    }
 }
 
 fn decode_map_len(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<usize, DecodeError> {
