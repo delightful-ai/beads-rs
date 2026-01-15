@@ -1080,14 +1080,14 @@ mod tests {
             frame_header[7],
         ]) as usize;
         let body_offset = frame_offset + FRAME_HEADER_LEN as u64;
-        let mut body = vec![0u8; length];
+        let mut frame_body = vec![0u8; length];
         file.seek(SeekFrom::Start(body_offset)).unwrap();
-        file.read_exact(&mut body).unwrap();
-        assert!(body.len() > 56);
-        body[56] ^= 0xFF;
+        file.read_exact(&mut frame_body).unwrap();
+        assert!(frame_body.len() > 56);
+        frame_body[56] ^= 0xFF;
         file.seek(SeekFrom::Start(body_offset)).unwrap();
-        file.write_all(&body).unwrap();
-        let crc = crc32c(&body);
+        file.write_all(&frame_body).unwrap();
+        let crc = crc32c(&frame_body);
         file.seek(SeekFrom::Start(frame_offset + 8)).unwrap();
         file.write_all(&crc.to_le_bytes()).unwrap();
         let max_record_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
