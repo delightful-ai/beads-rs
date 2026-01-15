@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use beads_rs::core::{
     ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
     encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
@@ -165,12 +165,13 @@ fn event_body(
         event_time_ms,
         txn_id,
         client_request_id,
-        kind: EventKindV1::TxnV1,
-        delta: TxnDeltaV1::new(),
-        hlc_max: Some(HlcMax {
-            actor_id: ActorId::new("alice".to_string()).unwrap(),
-            physical_ms: event_time_ms,
-            logical: 1,
+        kind: EventKindV1::TxnV1(TxnV1 {
+            delta: TxnDeltaV1::new(),
+            hlc_max: HlcMax {
+                actor_id: ActorId::new("alice".to_string()).unwrap(),
+                physical_ms: event_time_ms,
+                logical: 1,
+            },
         }),
     }
 }

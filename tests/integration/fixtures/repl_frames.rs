@@ -9,7 +9,7 @@ use uuid::Uuid;
 use beads_rs::Limits;
 use beads_rs::core::{
     ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, NamespaceId,
-    Opaque, ReplicaId, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId,
+    Opaque, ReplicaId, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
     encode_event_body_canonical, hash_event_body,
 };
 use beads_rs::daemon::repl::frame::{FrameReader, encode_frame};
@@ -138,12 +138,13 @@ pub fn event_frame(
         event_time_ms: 1_700_000_000_000 + seq,
         txn_id: TxnId::new(Uuid::from_bytes([seq as u8; 16])),
         client_request_id: None,
-        kind: EventKindV1::TxnV1,
-        delta: TxnDeltaV1::new(),
-        hlc_max: Some(HlcMax {
-            actor_id: ActorId::new("fixture").expect("actor"),
-            physical_ms: 1_700_000_000_000 + seq,
-            logical: 0,
+        kind: EventKindV1::TxnV1(TxnV1 {
+            delta: TxnDeltaV1::new(),
+            hlc_max: HlcMax {
+                actor_id: ActorId::new("fixture").expect("actor"),
+                physical_ms: 1_700_000_000_000 + seq,
+                logical: 0,
+            },
         }),
     };
 

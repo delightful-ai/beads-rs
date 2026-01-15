@@ -17,7 +17,8 @@ use beads_rs::paths;
 use beads_rs::{
     ActorId, ErrorCode, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
     NamespaceId, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
-    StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, encode_event_body_canonical, hash_event_body,
+    StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, encode_event_body_canonical,
+    hash_event_body,
 };
 
 use crate::fixtures::repl_frames;
@@ -63,12 +64,13 @@ fn event_frame_with_txn(
         event_time_ms,
         txn_id,
         client_request_id: None,
-        kind: EventKindV1::TxnV1,
-        delta: TxnDeltaV1::new(),
-        hlc_max: Some(HlcMax {
-            actor_id: ActorId::new("fixture").expect("actor"),
-            physical_ms: event_time_ms,
-            logical: 0,
+        kind: EventKindV1::TxnV1(TxnV1 {
+            delta: TxnDeltaV1::new(),
+            hlc_max: HlcMax {
+                actor_id: ActorId::new("fixture").expect("actor"),
+                physical_ms: event_time_ms,
+                logical: 0,
+            },
         }),
     };
     let canonical = encode_event_body_canonical(&body).expect("encode event body");

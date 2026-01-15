@@ -4,7 +4,8 @@ use beads_rs::core::{Label, NoteAppendV1, NotesPatch};
 use beads_rs::{
     ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, Labels,
     NamespaceId, NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1,
-    TxnId, TxnOpV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp, WorkflowStatus,
+    TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,
+    WorkflowStatus,
 };
 use uuid::Uuid;
 
@@ -97,12 +98,13 @@ pub fn event_body_with_delta(seed: u8, delta: TxnDeltaV1) -> EventBody {
         event_time_ms,
         txn_id,
         client_request_id: Some(client_request_id),
-        kind: EventKindV1::TxnV1,
-        delta,
-        hlc_max: Some(HlcMax {
-            actor_id: actor_id(seed),
-            physical_ms: event_time_ms,
-            logical: 7 + seed as u32,
+        kind: EventKindV1::TxnV1(TxnV1 {
+            delta,
+            hlc_max: HlcMax {
+                actor_id: actor_id(seed),
+                physical_ms: event_time_ms,
+                logical: 7 + seed as u32,
+            },
         }),
     }
 }

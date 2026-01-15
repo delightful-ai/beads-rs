@@ -3,8 +3,8 @@
 
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
-    ActorId, ApplyError, CanonicalState, EventBody, HlcMax, TxnDeltaV1, TxnOpV1, WireBeadPatch,
-    WireNoteV1, WireStamp, apply_event,
+    ActorId, ApplyError, CanonicalState, EventBody, EventKindV1, HlcMax, TxnDeltaV1, TxnOpV1,
+    WireBeadPatch, WireNoteV1, WireStamp, apply_event,
 };
 
 use crate::fixtures::apply_harness::{
@@ -23,11 +23,12 @@ fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -
 
     let mut event = event_body_with_delta(9, delta);
     event.event_time_ms = 1_700_000_000_500;
-    event.hlc_max = Some(HlcMax {
+    let EventKindV1::TxnV1(txn) = &mut event.kind;
+    txn.hlc_max = HlcMax {
         actor_id: actor,
         physical_ms: event.event_time_ms,
         logical: 42,
-    });
+    };
     event
 }
 
