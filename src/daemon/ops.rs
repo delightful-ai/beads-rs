@@ -13,14 +13,14 @@ use thiserror::Error;
 
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    ActorId, Applied, BeadFields, BeadId, BeadType, ClientRequestId, Closure, CoreError,
+    ActorId, Applied, BeadFields, BeadId, BeadType, ClientRequestId, Closure,
     DurabilityClass, DurabilityReceipt, ErrorCode, Label, Labels, Lww, NamespaceId, Priority,
     ReplicaId, Stamp, WallClock, Watermarks, Workflow,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_lock::StoreLockError;
 use crate::daemon::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::{EventWalError, WalError, WalIndexError, WalReplayError};
+use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
 
@@ -397,13 +397,7 @@ pub enum OpError {
     },
 
     #[error(transparent)]
-    Wal(#[from] Box<WalError>),
-
-    #[error(transparent)]
     EventWal(#[from] Box<EventWalError>),
-
-    #[error("wal merge conflict: {errors:?}")]
-    WalMerge { errors: Box<Vec<CoreError>> },
 
     #[error("cannot unclaim - not claimed by you")]
     NotClaimedByYou,
@@ -458,12 +452,7 @@ impl OpError {
             OpError::NamespacePolicyViolation { .. } => ErrorCode::NamespacePolicyViolation,
             OpError::CrossNamespaceDependency { .. } => ErrorCode::CrossNamespaceDependency,
             OpError::WalRecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
-            OpError::Wal(err) => match err.as_ref() {
-                WalError::TooLarge { .. } => ErrorCode::WalRecordTooLarge,
-                _ => ErrorCode::WalError,
-            },
             OpError::EventWal(err) => event_wal_error_code(err.as_ref()),
-            OpError::WalMerge { .. } => ErrorCode::WalMergeConflict,
             OpError::NotClaimedByYou => ErrorCode::NotClaimedByYou,
             OpError::DepNotFound => ErrorCode::DepNotFound,
             OpError::LoadTimeout { .. } => ErrorCode::LoadTimeout,
@@ -475,13 +464,6 @@ impl OpError {
     pub fn transience(&self) -> Transience {
         match self {
             OpError::Sync(e) => e.transience(),
-            OpError::Wal(e) => match e.as_ref() {
-                WalError::Io(_) => Transience::Retryable,
-                WalError::Json(_)
-                | WalError::VersionMismatch { .. }
-                | WalError::TooLarge { .. } => Transience::Permanent,
-            },
-            OpError::WalMerge { .. } => Transience::Permanent,
             OpError::AlreadyClaimed { .. } => Transience::Retryable,
             OpError::Overloaded { .. } => Transience::Retryable,
             OpError::RateLimited { .. } => Transience::Retryable,
@@ -523,7 +505,7 @@ impl OpError {
     pub fn effect(&self) -> Effect {
         match self {
             OpError::Sync(e) => e.effect(),
-            OpError::Wal(_) | OpError::EventWal(_) | OpError::WalMerge { .. } => Effect::None,
+            OpError::EventWal(_) => Effect::None,
             OpError::DurabilityTimeout { .. } => Effect::Some,
             OpError::StoreRuntime(_) => Effect::None,
             _ => Effect::None,
@@ -540,12 +522,6 @@ impl From<StoreRuntimeError> for OpError {
 impl From<SyncError> for OpError {
     fn from(err: SyncError) -> Self {
         OpError::Sync(Box::new(err))
-    }
-}
-
-impl From<WalError> for OpError {
-    fn from(err: WalError) -> Self {
-        OpError::Wal(Box::new(err))
     }
 }
 

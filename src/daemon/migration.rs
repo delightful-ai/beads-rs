@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::core::{StoreState, WriteStamp};
 use crate::daemon::remote::RemoteUrl;
-use crate::daemon::wal::{Wal, WalEntry, WalError};
+use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError};
 use crate::git::checkpoint::store_state_from_legacy;
 use crate::git::error::SyncError;
 use crate::git::sync::read_state_at_oid;

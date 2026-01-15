@@ -839,21 +839,6 @@ impl From<OpError> for ErrorPayload {
                     from_namespace,
                     to_namespace,
                 }),
-            OpError::Wal(e) => match e.as_ref() {
-                crate::daemon::wal::WalError::TooLarge {
-                    max_bytes,
-                    got_bytes,
-                } => ErrorPayload::new(ErrorCode::WalRecordTooLarge, message, retryable)
-                    .with_details(error_details::WalRecordTooLargeDetails {
-                        max_wal_record_bytes: *max_bytes as u64,
-                        estimated_bytes: *got_bytes as u64,
-                    }),
-                _ => ErrorPayload::new(ErrorCode::WalError, message, retryable).with_details(
-                    error_details::WalErrorDetails {
-                        message: e.to_string(),
-                    },
-                ),
-            },
             OpError::EventWal(e) => match e.as_ref() {
                 EventWalError::RecordTooLarge {
                     max_bytes,
@@ -874,11 +859,6 @@ impl From<OpError> for ErrorPayload {
                         message: e.to_string(),
                     }),
             },
-            OpError::WalMerge { errors } => {
-                let errors = errors.iter().map(|err| err.to_string()).collect();
-                ErrorPayload::new(ErrorCode::WalMergeConflict, message, retryable)
-                    .with_details(error_details::WalMergeConflictDetails { errors })
-            }
             OpError::NotClaimedByYou => {
                 ErrorPayload::new(ErrorCode::NotClaimedByYou, message, retryable)
             }

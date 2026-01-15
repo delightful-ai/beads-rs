@@ -1,4 +1,4 @@
-//! Event WAL implementation (v0.5) plus legacy snapshot WAL re-exports.
+//! Event WAL implementation (v0.5).
 
 use std::path::PathBuf;
 
@@ -11,8 +11,6 @@ pub mod index;
 pub mod record;
 pub mod replay;
 pub mod segment;
-
-pub use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError, default_wal_base_dir};
 
 pub use event_wal::{EventWal, SegmentSnapshot};
 pub use frame::{FrameReader, FrameWriter};
