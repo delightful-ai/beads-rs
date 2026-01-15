@@ -1,6 +1,7 @@
 //! Durability coordination for replication ACKs.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,11 +12,21 @@ use crate::core::{
 use crate::daemon::ops::OpError;
 use crate::daemon::repl::{PeerAckTable, QuorumOutcome};
 
+#[derive(Clone, Debug)]
 pub struct DurabilityCoordinator {
     local_replica_id: ReplicaId,
     policies: std::collections::BTreeMap<NamespaceId, NamespacePolicy>,
     roster: Option<ReplicaRoster>,
     peer_acks: Arc<Mutex<PeerAckTable>>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ReplicatedPoll {
+    Satisfied { acked_by: Vec<ReplicaId> },
+    Pending {
+        acked_by: Vec<ReplicaId>,
+        eligible: BTreeSet<ReplicaId>,
+    },
 }
 
 impl DurabilityCoordinator {
@@ -72,37 +83,19 @@ impl DurabilityCoordinator {
             return Ok(receipt);
         };
 
-        let eligible = self.eligible_replicas(namespace);
-        {
-            let mut table = self.peer_acks.lock().expect("peer ack lock poisoned");
-            table.set_eligibility(namespace.clone(), eligible.clone());
-        }
-
         let start = Instant::now();
         let mut backoff = Duration::from_millis(5);
 
         loop {
-            let outcome = {
-                let table = self.peer_acks.lock().expect("peer ack lock poisoned");
-                table.satisfied_k(namespace, &origin, Seq0::new(seq.get()), k.get())
-            };
-
-            match outcome {
-                QuorumOutcome::Satisfied { acked_by, .. } => {
-                    return Ok(achieved_receipt(receipt, requested, k, acked_by));
+            match self.poll_replicated(namespace, origin, seq, k) {
+                Ok(ReplicatedPoll::Satisfied { acked_by }) => {
+                    return Ok(Self::achieved_receipt(receipt, requested, k, acked_by));
                 }
-                QuorumOutcome::InsufficientEligible { eligible_total, .. } => {
-                    return Err(OpError::DurabilityUnavailable {
-                        requested,
-                        eligible_total: eligible_total as u32,
-                        eligible_replica_ids: Some(eligible.iter().copied().collect()),
-                    });
-                }
-                QuorumOutcome::Pending { acked_by, .. } => {
+                Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
                     let elapsed = start.elapsed();
                     if wait_timeout.is_zero() || elapsed >= wait_timeout {
-                        let pending = pending_replica_ids(&eligible, &acked_by);
-                        let pending_receipt = pending_receipt(receipt, requested);
+                        let pending = Self::pending_replica_ids(&eligible, &acked_by);
+                        let pending_receipt = Self::pending_receipt(receipt, requested);
                         return Err(OpError::DurabilityTimeout {
                             requested,
                             waited_ms: elapsed.as_millis() as u64,
@@ -111,6 +104,7 @@ impl DurabilityCoordinator {
                         });
                     }
                 }
+                Err(err) => return Err(err),
             }
 
             let elapsed = start.elapsed();
@@ -121,6 +115,40 @@ impl DurabilityCoordinator {
             let sleep_for = std::cmp::min(backoff, remaining);
             std::thread::sleep(sleep_for);
             backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(50));
+        }
+    }
+
+    pub(crate) fn poll_replicated(
+        &self,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        k: NonZeroU32,
+    ) -> Result<ReplicatedPoll, OpError> {
+        let eligible = self.eligible_replicas(namespace);
+        {
+            let mut table = self.peer_acks.lock().expect("peer ack lock poisoned");
+            table.set_eligibility(namespace.clone(), eligible.clone());
+        }
+
+        let outcome = {
+            let table = self.peer_acks.lock().expect("peer ack lock poisoned");
+            table.satisfied_k(namespace, &origin, Seq0::new(seq.get()), k.get())
+        };
+
+        match outcome {
+            QuorumOutcome::Satisfied { acked_by, .. } => Ok(ReplicatedPoll::Satisfied { acked_by }),
+            QuorumOutcome::Pending { acked_by, .. } => Ok(ReplicatedPoll::Pending {
+                acked_by,
+                eligible,
+            }),
+            QuorumOutcome::InsufficientEligible { eligible_total, .. } => {
+                Err(OpError::DurabilityUnavailable {
+                    requested: DurabilityClass::ReplicatedFsync { k },
+                    eligible_total: eligible_total as u32,
+                    eligible_replica_ids: Some(eligible.iter().copied().collect()),
+                })
+            }
         }
     }
 
@@ -153,37 +181,40 @@ impl DurabilityCoordinator {
 
         eligible
     }
-}
 
-fn pending_receipt(
-    mut receipt: DurabilityReceipt,
-    requested: DurabilityClass,
-) -> DurabilityReceipt {
-    receipt.outcome = DurabilityOutcome::Pending { requested };
-    receipt
-}
+    pub(crate) fn pending_receipt(
+        mut receipt: DurabilityReceipt,
+        requested: DurabilityClass,
+    ) -> DurabilityReceipt {
+        receipt.outcome = DurabilityOutcome::Pending { requested };
+        receipt
+    }
 
-fn achieved_receipt(
-    mut receipt: DurabilityReceipt,
-    requested: DurabilityClass,
-    k: std::num::NonZeroU32,
-    acked_by: Vec<ReplicaId>,
-) -> DurabilityReceipt {
-    receipt.durability_proof.replicated = Some(ReplicatedProof { k, acked_by });
-    receipt.outcome = DurabilityOutcome::Achieved {
-        requested,
-        achieved: DurabilityClass::ReplicatedFsync { k },
-    };
-    receipt
-}
+    pub(crate) fn achieved_receipt(
+        mut receipt: DurabilityReceipt,
+        requested: DurabilityClass,
+        k: NonZeroU32,
+        acked_by: Vec<ReplicaId>,
+    ) -> DurabilityReceipt {
+        receipt.durability_proof.replicated = Some(ReplicatedProof { k, acked_by });
+        receipt.outcome = DurabilityOutcome::Achieved {
+            requested,
+            achieved: DurabilityClass::ReplicatedFsync { k },
+        };
+        receipt
+    }
 
-fn pending_replica_ids(eligible: &BTreeSet<ReplicaId>, acked_by: &[ReplicaId]) -> Vec<ReplicaId> {
-    let acked: BTreeSet<ReplicaId> = acked_by.iter().copied().collect();
-    eligible
-        .iter()
-        .filter(|replica_id| !acked.contains(replica_id))
-        .copied()
-        .collect()
+    pub(crate) fn pending_replica_ids(
+        eligible: &BTreeSet<ReplicaId>,
+        acked_by: &[ReplicaId],
+    ) -> Vec<ReplicaId> {
+        let acked: BTreeSet<ReplicaId> = acked_by.iter().copied().collect();
+        eligible
+            .iter()
+            .filter(|replica_id| !acked.contains(replica_id))
+            .copied()
+            .collect()
+    }
 }
 
 fn role_allows_policy(role: ReplicaRole, mode: ReplicateMode) -> bool {
