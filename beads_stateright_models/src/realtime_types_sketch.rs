@@ -46,6 +46,7 @@ pub struct Limits {
     pub wal_group_commit_max_latency_ms: u64,
     pub wal_group_commit_max_events: usize,
     pub wal_group_commit_max_bytes: usize,
+    pub wal_sqlite_checkpoint_interval_ms: u64,
 
     pub max_repl_ingest_queue_bytes: usize,
     pub max_repl_ingest_queue_events: usize,
@@ -105,6 +106,7 @@ impl Default for Limits {
             wal_group_commit_max_latency_ms: 2,
             wal_group_commit_max_events: 64,
             wal_group_commit_max_bytes: 1 * 1024 * 1024,
+            wal_sqlite_checkpoint_interval_ms: 3_600_000,
 
             max_repl_ingest_queue_bytes: 32 * 1024 * 1024,
             max_repl_ingest_queue_events: 50_000,
