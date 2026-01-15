@@ -244,7 +244,7 @@ fn repl_want_reads_from_wal() {
     let limits = Limits::default();
 
     let record1 = record_for_seq(&meta, &namespace, origin, 1, None);
-    let record2 = record_for_seq(&meta, &namespace, origin, 2, Some(record1.header.sha256));
+    let record2 = record_for_seq(&meta, &namespace, origin, 2, Some(record1.header().sha256));
 
     let mut writer = SegmentWriter::open(
         &store_dir,

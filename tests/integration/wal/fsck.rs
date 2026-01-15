@@ -150,7 +150,7 @@ fn fsck_reports_sealed_len_mismatch() {
         &namespace,
         origin,
         2,
-        Some(record1.header.sha256),
+        Some(record1.header().sha256),
     );
     let segment1 = temp
         .write_segment(&namespace, 1_700_000_000_000, &[record1])

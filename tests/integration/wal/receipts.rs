@@ -135,7 +135,7 @@ fn origin_seq_after_restart_is_max_plus_one() {
         &namespace,
         origin,
         2,
-        Some(record1.header.sha256),
+        Some(record1.header().sha256),
     );
 
     temp.write_segment(&namespace, 1_700_000_000_000, &[record1, record2])
