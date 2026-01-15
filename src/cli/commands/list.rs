@@ -1,8 +1,8 @@
 use super::super::render;
 use super::super::{
-    Ctx, ListArgs, SearchArgs, apply_common_filters, parse_sort, parse_time_ms_opt, print_ok, send,
+    Ctx, ListArgs, SearchArgs, apply_common_filters, normalize_bead_id_for, parse_sort,
+    parse_time_ms_opt, print_ok, send,
 };
-use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::{Filters, QueryResult};
 use crate::{Error, Result};
@@ -16,14 +16,8 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     let parent = args
         .parent
         .as_deref()
-        .map(BeadId::parse)
-        .transpose()
-        .map_err(|e| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "parent".into(),
-                reason: e.to_string(),
-            })
-        })?;
+        .map(|raw| normalize_bead_id_for("parent", raw))
+        .transpose()?;
     let mut filters = Filters::default();
     apply_common_filters(
         &mut filters,

@@ -15,9 +15,10 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
 
     let ids = normalize_bead_ids(args.ids)?;
     for id in ids {
+        let id_str = id.as_str().to_string();
         let req = Request::Delete {
             repo: ctx.repo.clone(),
-            id: id.clone(),
+            id: id_str.clone(),
             reason: args.reason.clone(),
             meta: ctx.mutation_meta(),
         };
@@ -25,7 +26,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
 
         results.push(DeleteResult {
             status: "deleted",
-            issue_id: id,
+            issue_id: id_str,
         });
     }
 

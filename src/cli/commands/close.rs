@@ -7,7 +7,7 @@ pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Close {
         repo: ctx.repo.clone(),
-        id: id.clone(),
+        id: id.as_str().to_string(),
         reason: args.reason.clone(),
         on_branch: None,
         meta: ctx.mutation_meta(),
@@ -16,6 +16,6 @@ pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
     if ctx.json {
         return print_ok(&ok, true);
     }
-    println!("✓ Closed {}: {}", id, reason_str);
+    println!("✓ Closed {}: {}", id.as_str(), reason_str);
     Ok(())
 }

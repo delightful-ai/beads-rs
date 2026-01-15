@@ -14,8 +14,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
                 })?;
             let req = Request::AddDep {
                 repo: ctx.repo.clone(),
-                from,
-                to,
+                from: from.as_str().to_string(),
+                to: to.as_str().to_string(),
                 kind,
                 meta: ctx.mutation_meta(),
             };
@@ -32,8 +32,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
                 })?;
             let req = Request::RemoveDep {
                 repo: ctx.repo.clone(),
-                from,
-                to,
+                from: from.as_str().to_string(),
+                to: to.as_str().to_string(),
                 kind,
                 meta: ctx.mutation_meta(),
             };
@@ -44,7 +44,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
             let id = normalize_bead_id(&id)?;
             let req = Request::DepTree {
                 repo: ctx.repo.clone(),
-                id,
+                id: id.as_str().to_string(),
                 read: ctx.read_consistency(),
             };
             let ok = send(&req)?;

@@ -11,6 +11,7 @@ use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
+    let id_str = id.as_str().to_string();
     let mut patch = BeadPatch::default();
     let close_reason = normalize_reason(args.reason);
     let status_closed = matches!(args.status.as_deref(), Some("closed"));
@@ -35,7 +36,9 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         {
             Some(None)
         } else {
-            Some(Some(normalize_bead_id_for("parent", v)?))
+            Some(Some(
+                normalize_bead_id_for("parent", v)?.as_str().to_string(),
+            ))
         }
     } else {
         None
@@ -82,7 +85,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         patch.validate()?;
         let req = Request::Update {
             repo: ctx.repo.clone(),
-            id: id.clone(),
+            id: id_str.clone(),
             patch,
             cas: None,
             meta: ctx.mutation_meta(),
@@ -93,7 +96,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if !add_labels.is_empty() {
         let req = Request::AddLabels {
             repo: ctx.repo.clone(),
-            id: id.clone(),
+            id: id_str.clone(),
             labels: add_labels,
             meta: ctx.mutation_meta(),
         };
@@ -103,7 +106,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if !remove_labels.is_empty() {
         let req = Request::RemoveLabels {
             repo: ctx.repo.clone(),
-            id: id.clone(),
+            id: id_str.clone(),
             labels: remove_labels,
             meta: ctx.mutation_meta(),
         };
@@ -114,7 +117,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if let Some(new_parent) = parent_action {
         let req = Request::SetParent {
             repo: ctx.repo.clone(),
-            id: id.clone(),
+            id: id_str.clone(),
             parent: new_parent,
             meta: ctx.mutation_meta(),
         };
@@ -132,7 +135,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             };
             let _ = send(&Request::AddDep {
                 repo: ctx.repo.clone(),
-                from: id.clone(),
+                from: id_str.clone(),
                 to,
                 kind,
                 meta: ctx.mutation_meta(),
@@ -144,7 +147,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if let Some(content) = args.notes {
         let note = Request::AddNote {
             repo: ctx.repo.clone(),
-            id: id.clone(),
+            id: id_str.clone(),
             content,
             meta: ctx.mutation_meta(),
         };
@@ -156,12 +159,12 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         if assignee == "none" || assignee == "-" || assignee == "unassigned" {
             let req = Request::Unclaim {
                 repo: ctx.repo.clone(),
-                id: id.clone(),
+                id: id_str.clone(),
                 meta: ctx.mutation_meta(),
             };
             let _ = send(&req)?;
         } else {
-            let current = current_actor_string();
+            let current = current_actor_string()?;
             if !assignee.is_empty() && assignee != "me" && assignee != "self" && assignee != current
             {
                 return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
@@ -171,7 +174,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             }
             let req = Request::Claim {
                 repo: ctx.repo.clone(),
-                id: id.clone(),
+                id: id_str.clone(),
                 lease_secs: 3600,
                 meta: ctx.mutation_meta(),
             };
@@ -182,7 +185,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if status_closed && close_reason.is_some() {
         let req = Request::Close {
             repo: ctx.repo.clone(),
-            id: id.clone(),
+            id: id_str.clone(),
             reason: close_reason,
             on_branch: None,
             meta: ctx.mutation_meta(),

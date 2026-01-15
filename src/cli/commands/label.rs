@@ -26,9 +26,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             let (ids, label) = split_label_batch(batch)?;
             let mut results: Vec<LabelChange> = Vec::new();
             for id in ids {
+                let id_str = id.as_str().to_string();
                 let req = Request::AddLabels {
                     repo: ctx.repo.clone(),
-                    id: id.clone(),
+                    id: id_str.clone(),
                     labels: vec![label.clone()],
                     meta: ctx.mutation_meta(),
                 };
@@ -36,7 +37,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
 
                 results.push(LabelChange {
                     status: "added",
-                    issue_id: id,
+                    issue_id: id_str,
                     label: label.clone(),
                 });
             }
@@ -59,9 +60,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             let (ids, label) = split_label_batch(batch)?;
             let mut results: Vec<LabelChange> = Vec::new();
             for id in ids {
+                let id_str = id.as_str().to_string();
                 let req = Request::RemoveLabels {
                     repo: ctx.repo.clone(),
-                    id: id.clone(),
+                    id: id_str.clone(),
                     labels: vec![label.clone()],
                     meta: ctx.mutation_meta(),
                 };
@@ -69,7 +71,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
 
                 results.push(LabelChange {
                     status: "removed",
-                    issue_id: id,
+                    issue_id: id_str,
                     label: label.clone(),
                 });
             }
@@ -138,7 +140,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
     }
 }
 
-fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<String>, String)> {
+fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {
     if batch.args.len() < 2 {
         return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
             field: "label".into(),
@@ -160,7 +162,7 @@ fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<String>, String)> {
                 reason: e.to_string(),
             })
         })?;
-        ids.push(parsed.as_str().to_string());
+        ids.push(parsed);
     }
     Ok((ids, label))
 }
@@ -190,6 +192,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(label, "bug");
+        let ids = ids
+            .into_iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
         assert_eq!(ids, vec!["bd-1".to_string(), "bd-2".to_string()]);
     }
 }

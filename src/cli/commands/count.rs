@@ -1,5 +1,6 @@
-use super::super::{CountArgs, Ctx, apply_common_filters, parse_time_ms_opt, print_ok, send};
-use crate::core::BeadId;
+use super::super::{
+    CountArgs, Ctx, apply_common_filters, normalize_bead_id_for, parse_time_ms_opt, print_ok, send,
+};
 use crate::daemon::ipc::Request;
 use crate::daemon::query::Filters;
 use crate::{Error, Result};
@@ -33,7 +34,7 @@ pub(crate) fn handle(ctx: &Ctx, args: CountArgs) -> Result<()> {
             if s.is_empty() {
                 continue;
             }
-            ids.push(BeadId::parse(s)?);
+            ids.push(normalize_bead_id_for("id", s)?);
         }
         if !ids.is_empty() {
             filters.ids = Some(ids);

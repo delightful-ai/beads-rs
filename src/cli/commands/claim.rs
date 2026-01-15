@@ -6,7 +6,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ClaimArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Claim {
         repo: ctx.repo.clone(),
-        id,
+        id: id.as_str().to_string(),
         lease_secs: args.lease_secs,
         meta: ctx.mutation_meta(),
     };

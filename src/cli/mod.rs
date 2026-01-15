@@ -12,7 +12,9 @@ use clap::{ArgAction, Args, Parser, Subcommand, builder::BoolishValueParser};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
 
-use crate::core::{BeadId, BeadType, DepKind, Priority};
+use crate::core::{
+    ActorId, BeadId, BeadSlug, BeadType, ClientRequestId, DepKind, NamespaceId, Priority,
+};
 use crate::daemon::ipc::{
     MutationMeta, ReadConsistency, Request, Response, ResponsePayload, send_request,
 };
@@ -1017,6 +1019,10 @@ pub fn run(cli: Cli) -> Result<()> {
         crate::upgrade::maybe_spawn_auto_upgrade();
     }
 
+    if let Some(actor) = cli.actor.as_deref() {
+        validate_actor_id(actor)?;
+    }
+
     match cli.command {
         Commands::Daemon { cmd } => match cmd {
             DaemonCmd::Run => crate::daemon::run_daemon(),
@@ -1041,9 +1047,11 @@ pub fn run(cli: Cli) -> Result<()> {
             let ctx = Ctx {
                 repo,
                 json: cli.json,
-                namespace: cli.namespace.clone(),
+                namespace: normalize_optional_namespace(cli.namespace.as_deref())?,
                 durability: cli.durability.clone(),
-                client_request_id: cli.client_request_id.clone(),
+                client_request_id: normalize_optional_client_request_id(
+                    cli.client_request_id.as_deref(),
+                )?,
             };
 
             match cmd {
@@ -1093,24 +1101,24 @@ pub fn run(cli: Cli) -> Result<()> {
 struct Ctx {
     repo: PathBuf,
     json: bool,
-    namespace: Option<String>,
+    namespace: Option<NamespaceId>,
     durability: Option<String>,
-    client_request_id: Option<String>,
+    client_request_id: Option<ClientRequestId>,
 }
 
 impl Ctx {
     fn mutation_meta(&self) -> MutationMeta {
         MutationMeta {
-            namespace: self.namespace.clone(),
+            namespace: self.namespace.as_ref().map(|ns| ns.as_str().to_string()),
             durability: self.durability.clone(),
-            client_request_id: self.client_request_id.clone(),
+            client_request_id: self.client_request_id.as_ref().map(|id| id.to_string()),
             actor_id: None,
         }
     }
 
     fn read_consistency(&self) -> ReadConsistency {
         ReadConsistency {
-            namespace: self.namespace.clone(),
+            namespace: self.namespace.as_ref().map(|ns| ns.as_str().to_string()),
             require_min_seen: None,
             wait_timeout_ms: None,
         }
@@ -1139,22 +1147,30 @@ fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(&abs).unwrap_or(abs))
 }
 
-pub(super) fn normalize_bead_id(id: &str) -> Result<String> {
+pub(super) fn normalize_bead_id(id: &str) -> Result<BeadId> {
     normalize_bead_id_for("id", id)
 }
 
-pub(super) fn normalize_bead_id_for(field: &str, id: &str) -> Result<String> {
-    let parsed = BeadId::parse(id).map_err(|e| {
+pub(super) fn normalize_bead_id_for(field: &str, id: &str) -> Result<BeadId> {
+    BeadId::parse(id).map_err(|e| {
         Error::Op(crate::daemon::OpError::ValidationFailed {
             field: field.into(),
             reason: e.to_string(),
         })
-    })?;
-    Ok(parsed.as_str().to_string())
+    })
 }
 
-pub(super) fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<String>> {
+pub(super) fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<BeadId>> {
     ids.into_iter().map(|id| normalize_bead_id(&id)).collect()
+}
+
+pub(super) fn normalize_bead_slug_for(field: &str, slug: &str) -> Result<BeadSlug> {
+    BeadSlug::parse(slug).map_err(|e| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: field.into(),
+            reason: e.to_string(),
+        })
+    })
 }
 
 pub(super) fn resolve_description(
@@ -1177,6 +1193,65 @@ pub(super) fn resolve_description(
         (None, Some(b)) => Ok(Some(b)),
         (None, None) => Ok(None),
     }
+}
+
+fn normalize_optional_namespace(raw: Option<&str>) -> Result<Option<NamespaceId>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "namespace".into(),
+            reason: "namespace cannot be empty".into(),
+        }));
+    }
+    NamespaceId::parse(trimmed.to_string()).map(Some).map_err(|e| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "namespace".into(),
+            reason: e.to_string(),
+        })
+    })
+}
+
+fn normalize_optional_client_request_id(raw: Option<&str>) -> Result<Option<ClientRequestId>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "client_request_id".into(),
+            reason: "client_request_id cannot be empty".into(),
+        }));
+    }
+    ClientRequestId::parse_str(trimmed).map(Some).map_err(|e| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "client_request_id".into(),
+            reason: e.to_string(),
+        })
+    })
+}
+
+fn validate_actor_id(raw: &str) -> Result<ActorId> {
+    let trimmed = raw.trim();
+    ActorId::new(trimmed).map_err(|e| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "actor".into(),
+            reason: e.to_string(),
+        })
+    })
+}
+
+pub(super) fn current_actor_id() -> Result<ActorId> {
+    if let Ok(actor) = std::env::var("BD_ACTOR")
+        && !actor.trim().is_empty()
+    {
+        return validate_actor_id(&actor);
+    }
+    let username = whoami::username();
+    let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
+    validate_actor_id(&format!("{}@{}", username, hostname))
 }
 
 pub(super) fn apply_common_filters(
@@ -1244,10 +1319,10 @@ fn send(req: &Request) -> Result<ResponsePayload> {
     }
 }
 
-fn fetch_issue(ctx: &Ctx, id: &str) -> Result<crate::api::Issue> {
+fn fetch_issue(ctx: &Ctx, id: &BeadId) -> Result<crate::api::Issue> {
     let req = Request::Show {
         repo: ctx.repo.clone(),
-        id: id.to_string(),
+        id: id.as_str().to_string(),
         read: ctx.read_consistency(),
     };
     match send(&req)? {
@@ -1433,7 +1508,7 @@ fn parse_dep_edge(
     kind_flag: Option<DepKind>,
     from_raw: &str,
     to_raw: &str,
-) -> std::result::Result<(DepKind, String, String), String> {
+) -> std::result::Result<(DepKind, BeadId, BeadId), String> {
     let (kind_from, from_raw) = split_kind_id(from_raw)?;
     let (kind_to, to_raw) = split_kind_id(to_raw)?;
 
@@ -1442,14 +1517,9 @@ fn parse_dep_edge(
         .or(kind_to)
         .unwrap_or(DepKind::Blocks);
 
-    let from = BeadId::parse(&from_raw)
-        .map_err(|e| format!("invalid from id {from_raw:?}: {e}"))?
-        .as_str()
-        .to_string();
-    let to = BeadId::parse(&to_raw)
-        .map_err(|e| format!("invalid to id {to_raw:?}: {e}"))?
-        .as_str()
-        .to_string();
+    let from =
+        BeadId::parse(&from_raw).map_err(|e| format!("invalid from id {from_raw:?}: {e}"))?;
+    let to = BeadId::parse(&to_raw).map_err(|e| format!("invalid to id {to_raw:?}: {e}"))?;
 
     Ok((kind, from, to))
 }
@@ -1462,13 +1532,6 @@ fn split_kind_id(raw: &str) -> std::result::Result<(Option<DepKind>, String), St
     }
 }
 
-fn current_actor_string() -> String {
-    if let Ok(a) = std::env::var("BD_ACTOR")
-        && !a.is_empty()
-    {
-        return a;
-    }
-    let username = whoami::username();
-    let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
-    format!("{}@{}", username, hostname)
+fn current_actor_string() -> Result<String> {
+    Ok(current_actor_id()?.as_str().to_string())
 }

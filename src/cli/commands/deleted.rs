@@ -11,7 +11,12 @@ pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
         Some(parse_since_ms(&args.since)?)
     };
 
-    let id = args.id.as_deref().map(normalize_bead_id).transpose()?;
+    let id = args
+        .id
+        .as_deref()
+        .map(normalize_bead_id)
+        .transpose()?
+        .map(|id| id.as_str().to_string());
     let req = Request::Deleted {
         repo: ctx.repo.clone(),
         since_ms,

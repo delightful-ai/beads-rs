@@ -8,7 +8,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Show {
         repo: ctx.repo.clone(),
-        id,
+        id: id.as_str().to_string(),
         read: ctx.read_consistency(),
     };
     let ok = send(&req)?;

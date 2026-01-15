@@ -52,8 +52,8 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
 
     let req = Request::Create {
         repo: ctx.repo.clone(),
-        id,
-        parent,
+        id: id.as_ref().map(|id| id.as_str().to_string()),
+        parent: parent.as_ref().map(|id| id.as_str().to_string()),
         title,
         bead_type,
         priority,
@@ -69,26 +69,22 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     };
 
     let created_payload = send(&req)?;
-    let (created_id, issue) = match &created_payload {
+    let issue = match &created_payload {
         ResponsePayload::Op(op) => match &op.result {
-            OpResult::Created { id } => (id.as_str().to_string(), op.issue.clone()),
+            OpResult::Created { id } => match &op.issue {
+                Some(issue) => issue.clone(),
+                None => fetch_issue(ctx, id)?,
+            },
             _ => {
                 print_ok(&created_payload, ctx.json)?;
                 return Ok(());
             }
         },
-        ResponsePayload::Query(QueryResult::Issue(attached)) => {
-            (attached.id.clone(), Some(attached.clone()))
-        }
+        ResponsePayload::Query(QueryResult::Issue(attached)) => attached.clone(),
         _ => {
             print_ok(&created_payload, ctx.json)?;
             return Ok(());
         }
-    };
-
-    let issue = match issue {
-        Some(issue) => issue,
-        None => fetch_issue(ctx, &created_id)?,
     };
 
     // Print warning to stderr (visible even in --json mode)
@@ -176,7 +172,7 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
             Response::Ok {
                 ok: ResponsePayload::Op(op),
             } => match op.result {
-                OpResult::Created { id } => id.as_str().to_string(),
+                OpResult::Created { id } => id,
                 _ => {
                     failed.push(t.title.clone());
                     tracing::warn!(

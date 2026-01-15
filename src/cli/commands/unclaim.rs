@@ -6,7 +6,7 @@ pub(crate) fn handle(ctx: &Ctx, id: String) -> Result<()> {
     let id = normalize_bead_id(&id)?;
     let req = Request::Unclaim {
         repo: ctx.repo.clone(),
-        id,
+        id: id.as_str().to_string(),
         meta: ctx.mutation_meta(),
     };
     let ok = send(&req)?;

@@ -17,7 +17,7 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
                 })
             })?;
             let id_for_render = normalize_bead_id(&id)?;
-            let id = id_for_render.clone();
+            let id = id_for_render.as_str().to_string();
             let req = Request::Notes {
                 repo: ctx.repo.clone(),
                 id,
@@ -30,7 +30,10 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
             match ok {
                 ResponsePayload::Query(QueryResult::Notes(notes)) => {
                     // Render like beads-go: "Comments on <id>:" + entries.
-                    println!("{}", render::render_comments_list(&id_for_render, &notes));
+                    println!(
+                        "{}",
+                        render::render_comments_list(id_for_render.as_str(), &notes)
+                    );
                     Ok(())
                 }
                 other => print_ok(&other, false),
@@ -54,7 +57,7 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
     let id = normalize_bead_id(&args.id)?;
     let req = Request::AddNote {
         repo: ctx.repo.clone(),
-        id,
+        id: id.as_str().to_string(),
         content,
         meta: ctx.mutation_meta(),
     };

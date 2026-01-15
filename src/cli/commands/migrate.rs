@@ -1,4 +1,4 @@
-use super::super::{Ctx, MigrateCmd, current_actor_string};
+use super::super::{Ctx, MigrateCmd, current_actor_id, normalize_bead_slug_for};
 use crate::core::{ActorId, FormatVersion};
 use crate::daemon::ipc::{Request, send_request};
 use crate::{Error, Result};
@@ -32,9 +32,15 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
 
             use crate::git::SyncProcess;
 
-            let actor = ActorId::new(current_actor_string())?;
+            let actor = current_actor_id()?;
+            let root_slug = args
+                .root_slug
+                .as_deref()
+                .map(|slug| normalize_bead_slug_for("root_slug", slug))
+                .transpose()?
+                .map(|slug| slug.as_str().to_string());
             let (imported, report) =
-                crate::migrate::import_go_export(&args.input, &actor, args.root_slug.clone())?;
+                crate::migrate::import_go_export(&args.input, &actor, root_slug)?;
 
             if args.dry_run {
                 let payload = serde_json::json!({
