@@ -1,5 +1,5 @@
 use super::super::{Ctx, MigrateCmd, current_actor_id, normalize_bead_slug_for};
-use crate::core::{ActorId, FormatVersion};
+use crate::core::FormatVersion;
 use crate::daemon::ipc::{Request, send_request};
 use crate::{Error, Result};
 

@@ -1535,3 +1535,69 @@ fn split_kind_id(raw: &str) -> std::result::Result<(Option<DepKind>, String), St
 fn current_actor_string() -> Result<String> {
     Ok(current_actor_id()?.as_str().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::OpError;
+
+    fn assert_validation_failed(err: Error, field: &str) {
+        match err {
+            Error::Op(OpError::ValidationFailed { field: got, .. }) => {
+                assert_eq!(got, field);
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_bead_id_rejects_empty() {
+        let err = normalize_bead_id("").unwrap_err();
+        assert_validation_failed(err, "id");
+    }
+
+    #[test]
+    fn normalize_bead_id_canonicalizes() {
+        let id = normalize_bead_id("BeAd-ABC123").expect("valid bead id");
+        assert_eq!(id.as_str(), "bead-abc123");
+    }
+
+    #[test]
+    fn normalize_bead_slug_rejects_invalid() {
+        let err = normalize_bead_slug_for("root_slug", "-bad-").unwrap_err();
+        assert_validation_failed(err, "root_slug");
+    }
+
+    #[test]
+    fn normalize_optional_namespace_rejects_empty() {
+        let err = normalize_optional_namespace(Some("   ")).unwrap_err();
+        assert_validation_failed(err, "namespace");
+    }
+
+    #[test]
+    fn normalize_optional_namespace_accepts_core() {
+        let ns = normalize_optional_namespace(Some("core")).expect("valid namespace");
+        assert_eq!(ns.unwrap().as_str(), "core");
+    }
+
+    #[test]
+    fn normalize_optional_client_request_id_rejects_empty() {
+        let err = normalize_optional_client_request_id(Some("")).unwrap_err();
+        assert_validation_failed(err, "client_request_id");
+    }
+
+    #[test]
+    fn normalize_optional_client_request_id_accepts_uuid() {
+        let id = normalize_optional_client_request_id(Some(
+            "00000000-0000-0000-0000-000000000000",
+        ))
+        .expect("valid client request id");
+        assert!(id.is_some());
+    }
+
+    #[test]
+    fn validate_actor_id_rejects_blank() {
+        let err = validate_actor_id("   ").unwrap_err();
+        assert_validation_failed(err, "actor");
+    }
+}
