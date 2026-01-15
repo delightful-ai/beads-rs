@@ -2887,7 +2887,7 @@ pub(crate) fn insert_store_for_tests(
     )
     .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
     daemon.stores.insert(store_id, open.runtime);
-    daemon.remote_to_store_id.insert(remote, store_id);
+    daemon.remote_to_store_id.insert(remote.clone(), store_id);
     daemon.path_to_store_id.insert(repo_path.to_owned(), store_id);
     daemon.path_to_remote.insert(repo_path.to_owned(), remote);
     daemon.register_default_checkpoint_groups(store_id)?;
