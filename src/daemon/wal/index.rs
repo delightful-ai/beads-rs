@@ -27,6 +27,8 @@ pub enum WalIndexError {
         #[source]
         source: std::io::Error,
     },
+    #[error("path is a symlink: {path:?}")]
+    Symlink { path: PathBuf },
     #[error("index schema version mismatch: expected {expected}, got {got}")]
     SchemaVersionMismatch { expected: u32, got: u32 },
     #[error("missing meta key: {key}")]
@@ -236,11 +238,14 @@ impl SqliteWalIndex {
         mode: IndexDurabilityMode,
     ) -> Result<Self, WalIndexError> {
         let index_dir = store_dir.join("index");
+        reject_symlink(&index_dir)?;
         std::fs::create_dir_all(&index_dir).map_err(|source| WalIndexError::Io {
             path: index_dir.clone(),
             source,
         })?;
+        reject_symlink(&index_dir)?;
         let db_path = index_dir.join("wal.sqlite");
+        reject_symlink(&db_path)?;
 
         let conn = open_connection(&db_path, mode, true)?;
         let is_new = !table_exists(&conn, "meta")?;
@@ -1059,6 +1064,20 @@ fn ensure_permissions(path: &Path) -> Result<(), WalIndexError> {
         )?;
     }
     Ok(())
+}
+
+fn reject_symlink(path: &Path) -> Result<(), WalIndexError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(WalIndexError::Symlink {
+            path: path.to_path_buf(),
+        }),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(WalIndexError::Io {
+            path: path.to_path_buf(),
+            source: err,
+        }),
+    }
 }
 
 fn open_connection(
