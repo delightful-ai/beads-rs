@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -36,6 +37,20 @@ const STORE_FORMAT_VERSION: u32 = 1;
 const WAL_FORMAT_VERSION: u32 = 2;
 const REPLICATION_PROTOCOL_VERSION: u32 = 1;
 const INDEX_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct StoreConfig {
+    index_durability_mode: IndexDurabilityMode,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            index_durability_mode: IndexDurabilityMode::Cache,
+        }
+    }
+}
 
 pub struct StoreRuntime {
     pub(crate) primary_remote: RemoteUrl,
@@ -107,7 +122,9 @@ impl StoreRuntime {
         }
 
         let store_dir = paths::store_dir(store_id);
-        let (mut wal_index, needs_rebuild) = open_wal_index(store_id, &store_dir, &meta)?;
+        let store_config = load_store_config(store_id, true)?;
+        let (mut wal_index, needs_rebuild) =
+            open_wal_index(store_id, &store_dir, &meta, store_config.index_durability_mode)?;
         let replay_stats = if needs_rebuild {
             rebuild_index(&store_dir, &meta, &wal_index, limits)?
         } else {
@@ -115,8 +132,11 @@ impl StoreRuntime {
                 Ok(stats) => stats,
                 Err(WalReplayError::IndexOffsetInvalid { .. }) => {
                     remove_wal_index_files(store_id)?;
-                    wal_index =
-                        SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache)?;
+                    wal_index = SqliteWalIndex::open(
+                        &store_dir,
+                        &meta,
+                        store_config.index_durability_mode,
+                    )?;
                     rebuild_index(&store_dir, &meta, &wal_index, limits)?
                 }
                 Err(err) => return Err(StoreRuntimeError::WalReplay(Box::new(err))),
@@ -296,6 +316,32 @@ pub enum StoreRuntimeError {
         #[source]
         source: ReplicaRosterError,
     },
+    #[error("store config path is a symlink: {path:?}")]
+    StoreConfigSymlink { path: Box<std::path::PathBuf> },
+    #[error("store config read failed at {path:?}: {source}")]
+    StoreConfigRead {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: io::Error,
+    },
+    #[error("store config parse failed at {path:?}: {source}")]
+    StoreConfigParse {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("store config serialize failed at {path:?}: {source}")]
+    StoreConfigSerialize {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: toml::ser::Error,
+    },
+    #[error("store config write failed at {path:?}: {source}")]
+    StoreConfigWrite {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: io::Error,
+    },
     #[error(transparent)]
     WalIndex(#[from] WalIndexError),
     #[error(transparent)]
@@ -320,20 +366,81 @@ fn open_wal_index(
     store_id: StoreId,
     store_dir: &Path,
     meta: &StoreMeta,
+    mode: IndexDurabilityMode,
 ) -> Result<(SqliteWalIndex, bool), StoreRuntimeError> {
     let db_path = paths::wal_index_path(store_id);
     let mut needs_rebuild = !db_path.exists();
 
-    match SqliteWalIndex::open(store_dir, meta, IndexDurabilityMode::Cache) {
+    match SqliteWalIndex::open(store_dir, meta, mode) {
         Ok(index) => Ok((index, needs_rebuild)),
         Err(WalIndexError::SchemaVersionMismatch { .. }) => {
             needs_rebuild = true;
             remove_wal_index_files(store_id)?;
-            let index = SqliteWalIndex::open(store_dir, meta, IndexDurabilityMode::Cache)?;
+            let index = SqliteWalIndex::open(store_dir, meta, mode)?;
             Ok((index, needs_rebuild))
         }
         Err(err) => Err(StoreRuntimeError::WalIndex(err)),
     }
+}
+
+fn load_store_config(
+    store_id: StoreId,
+    write_default: bool,
+) -> Result<StoreConfig, StoreRuntimeError> {
+    let path = paths::store_config_path(store_id);
+    match read_secure_store_file(&path) {
+        Ok(Some(raw)) => toml::from_str(&raw).map_err(|source| StoreRuntimeError::StoreConfigParse {
+            path: Box::new(path),
+            source,
+        }),
+        Ok(None) => {
+            let config = StoreConfig::default();
+            if write_default {
+                write_store_config(&path, &config)?;
+            }
+            Ok(config)
+        }
+        Err(StoreConfigFileError::Symlink { path }) => {
+            Err(StoreRuntimeError::StoreConfigSymlink {
+                path: Box::new(path),
+            })
+        }
+        Err(StoreConfigFileError::Read { path, source }) => {
+            Err(StoreRuntimeError::StoreConfigRead {
+                path: Box::new(path),
+                source,
+            })
+        }
+    }
+}
+
+pub(crate) fn store_index_durability_mode(
+    store_id: StoreId,
+) -> Result<IndexDurabilityMode, StoreRuntimeError> {
+    Ok(load_store_config(store_id, false)?.index_durability_mode)
+}
+
+fn write_store_config(path: &Path, config: &StoreConfig) -> Result<(), StoreRuntimeError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| StoreRuntimeError::StoreConfigWrite {
+            path: Box::new(path.to_path_buf()),
+            source,
+        })?;
+    }
+    let contents =
+        toml::to_string_pretty(config).map_err(|source| StoreRuntimeError::StoreConfigSerialize {
+            path: Box::new(path.to_path_buf()),
+            source,
+        })?;
+    fs::write(path, contents).map_err(|source| StoreRuntimeError::StoreConfigWrite {
+        path: Box::new(path.to_path_buf()),
+        source,
+    })?;
+    ensure_secure_file_permissions(path).map_err(|source| StoreRuntimeError::StoreConfigWrite {
+        path: Box::new(path.to_path_buf()),
+        source,
+    })?;
+    Ok(())
 }
 
 fn remove_wal_index_files(store_id: StoreId) -> Result<(), StoreRuntimeError> {
@@ -707,6 +814,70 @@ mod tests {
             result,
             Err(StoreRuntimeError::WatermarkInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn store_config_defaults_to_cache_and_persists() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([30u8; 16]));
+        let wal = Wal::new(temp.path()).expect("wal");
+        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let runtime = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            Arc::new(wal),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        assert_eq!(
+            runtime.wal_index.durability_mode(),
+            IndexDurabilityMode::Cache
+        );
+
+        let raw = std::fs::read_to_string(paths::store_config_path(store_id))
+            .expect("read store config");
+        let config: StoreConfig = toml::from_str(&raw).expect("parse store config");
+        assert_eq!(config.index_durability_mode, IndexDurabilityMode::Cache);
+    }
+
+    #[test]
+    fn store_config_durable_mode_applies() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([31u8; 16]));
+        let config_path = paths::store_config_path(store_id);
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).expect("create store dir");
+        }
+        std::fs::write(&config_path, "index_durability_mode = \"durable\"")
+            .expect("write store config");
+
+        let wal = Wal::new(temp.path()).expect("wal");
+        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let runtime = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            Arc::new(wal),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        assert_eq!(
+            runtime.wal_index.durability_mode(),
+            IndexDurabilityMode::Durable
+        );
     }
 
     #[cfg(unix)]

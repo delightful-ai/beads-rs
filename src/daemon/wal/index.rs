@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use minicbor::{Decoder, Encoder};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -211,7 +212,8 @@ pub struct HlcRow {
     pub last_logical: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IndexDurabilityMode {
     Cache,
     Durable,
@@ -260,6 +262,10 @@ impl SqliteWalIndex {
         drop(conn);
 
         Ok(Self { db_path, mode })
+    }
+
+    pub fn durability_mode(&self) -> IndexDurabilityMode {
+        self.mode
     }
 }
 

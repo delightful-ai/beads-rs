@@ -132,6 +132,11 @@ pub fn replicas_path(store_id: StoreId) -> PathBuf {
     store_dir(store_id).join("replicas.toml")
 }
 
+/// Store configuration path (store_config.toml).
+pub fn store_config_path(store_id: StoreId) -> PathBuf {
+    store_dir(store_id).join("store_config.toml")
+}
+
 /// Root WAL directory for a store.
 pub fn wal_dir(store_id: StoreId) -> PathBuf {
     store_dir(store_id).join("wal")
