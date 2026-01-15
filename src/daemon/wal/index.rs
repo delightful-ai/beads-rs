@@ -1256,7 +1256,10 @@ mod tests {
         let db_path = index_dir.join("wal.sqlite");
         symlink(&target, &db_path).unwrap();
 
-        let err = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap_err();
+        let err = match SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache) {
+            Ok(_) => panic!("expected symlink rejection"),
+            Err(err) => err,
+        };
         assert!(matches!(err, WalIndexError::Symlink { .. }));
     }
 
@@ -1270,7 +1273,10 @@ mod tests {
         let index_dir = temp.path().join("index");
         symlink(&target, &index_dir).unwrap();
 
-        let err = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap_err();
+        let err = match SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache) {
+            Ok(_) => panic!("expected symlink rejection"),
+            Err(err) => err,
+        };
         assert!(matches!(err, WalIndexError::Symlink { .. }));
     }
 

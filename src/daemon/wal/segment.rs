@@ -579,14 +579,16 @@ mod tests {
         let ns_dir = wal_dir.join(namespace.as_str());
         symlink(&target, &ns_dir).unwrap();
 
-        let err = SegmentWriter::open(
+        let err = match SegmentWriter::open(
             temp.path(),
             &meta,
             &namespace,
             10,
             SegmentConfig::new(1024, 1024, 60_000),
-        )
-        .unwrap_err();
+        ) {
+            Ok(_) => panic!("expected symlink rejection"),
+            Err(err) => err,
+        };
         assert!(matches!(err, EventWalError::Symlink { .. }));
     }
 
