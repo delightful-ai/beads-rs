@@ -87,10 +87,7 @@ impl ConfigLayer {
         }
         if let Some(checkpoint_groups) = &self.checkpoint_groups {
             for (group, override_cfg) in checkpoint_groups {
-                let entry = base
-                    .checkpoint_groups
-                    .entry(group.clone())
-                    .or_default();
+                let entry = base.checkpoint_groups.entry(group.clone()).or_default();
                 override_cfg.apply_to(entry);
             }
         }

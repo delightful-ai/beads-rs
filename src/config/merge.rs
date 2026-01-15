@@ -14,11 +14,18 @@ pub fn merge_layers(user: Option<ConfigLayer>, repo: Option<ConfigLayer>) -> Con
 }
 
 pub fn apply_env_overrides(config: &mut Config) {
-    if std::env::var("BD_NO_AUTO_UPGRADE").is_ok() {
+    apply_env_overrides_from(config, |key| std::env::var(key).ok());
+}
+
+fn apply_env_overrides_from<F>(config: &mut Config, mut lookup: F)
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if lookup("BD_NO_AUTO_UPGRADE").is_some() {
         config.auto_upgrade = false;
     }
 
-    if let Ok(raw) = std::env::var("BD_ACTOR") {
+    if let Some(raw) = lookup("BD_ACTOR") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             match ActorId::new(trimmed) {
@@ -32,14 +39,14 @@ pub fn apply_env_overrides(config: &mut Config) {
         }
     }
 
-    if let Ok(raw) = std::env::var("BD_REPL_LISTEN_ADDR") {
+    if let Some(raw) = lookup("BD_REPL_LISTEN_ADDR") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             config.replication.listen_addr = trimmed.to_string();
         }
     }
 
-    if let Ok(raw) = std::env::var("BD_REPL_MAX_CONNECTIONS") {
+    if let Some(raw) = lookup("BD_REPL_MAX_CONNECTIONS") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             match trimmed.parse::<usize>() {
@@ -58,52 +65,7 @@ pub fn apply_env_overrides(config: &mut Config) {
 mod tests {
     use super::*;
 
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
     use crate::core::NamespaceId;
-
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock")
-    }
-
-    struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        prev: Vec<(String, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        fn new(vars: &[(&str, &str)]) -> Self {
-            let lock = env_lock();
-            let mut prev = Vec::with_capacity(vars.len());
-            for (key, value) in vars {
-                let key_string = (*key).to_string();
-                let prior = std::env::var(key).ok();
-                prev.push((key_string.clone(), prior));
-                unsafe {
-                    std::env::set_var(key, value);
-                }
-            }
-            Self { _lock: lock, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.prev.drain(..) {
-                match value {
-                    Some(val) => unsafe {
-                        std::env::set_var(&key, val);
-                    },
-                    None => unsafe {
-                        std::env::remove_var(&key);
-                    },
-                }
-            }
-        }
-    }
 
     #[test]
     fn merge_layers_respects_precedence() {
@@ -125,15 +87,18 @@ mod tests {
 
     #[test]
     fn env_overrides_apply() {
-        let _guard = EnvGuard::new(&[
-            ("BD_NO_AUTO_UPGRADE", "1"),
-            ("BD_ACTOR", "alice@example.com"),
-            ("BD_REPL_LISTEN_ADDR", "127.0.0.1:9999"),
-            ("BD_REPL_MAX_CONNECTIONS", "12"),
-        ]);
+        let lookup = |key: &str| -> Option<String> {
+            match key {
+                "BD_NO_AUTO_UPGRADE" => Some("1".to_string()),
+                "BD_ACTOR" => Some("alice@example.com".to_string()),
+                "BD_REPL_LISTEN_ADDR" => Some("127.0.0.1:9999".to_string()),
+                "BD_REPL_MAX_CONNECTIONS" => Some("12".to_string()),
+                _ => None,
+            }
+        };
 
         let mut config = Config::default();
-        apply_env_overrides(&mut config);
+        apply_env_overrides_from(&mut config, lookup);
 
         assert!(!config.auto_upgrade);
         assert_eq!(
