@@ -238,16 +238,19 @@ impl Daemon {
             let repo_state = self.repo_state(&proof)?;
             repo_state.state.get_or_default(&namespace)
         };
-        let draft = engine.plan(
-            &state_snapshot,
-            self.clock_mut(),
-            store,
-            origin_replica_id,
-            origin_seq,
-            id_ctx.as_ref(),
-            ctx.clone(),
-            request.clone(),
-        )?;
+        let draft = {
+            let clock = self.clock_for_actor_mut(&ctx.actor_id);
+            engine.plan(
+                &state_snapshot,
+                clock,
+                store,
+                origin_replica_id,
+                origin_seq,
+                id_ctx.as_ref(),
+                ctx.clone(),
+                request.clone(),
+            )
+        }?;
 
         let span = tracing::info_span!(
             "mutation",

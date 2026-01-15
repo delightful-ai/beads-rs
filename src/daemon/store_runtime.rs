@@ -23,8 +23,8 @@ use crate::daemon::repl::PeerAckTable;
 use crate::daemon::repo::{RepoState, WalTailTruncatedRecord};
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
 use crate::daemon::wal::{
-    EventWal, IndexDurabilityMode, ReplayStats, SqliteWalIndex, Wal, WalIndex, WalIndexError,
-    WalReplayError, catch_up_index, rebuild_index,
+    EventWal, HlcRow, IndexDurabilityMode, ReplayStats, SqliteWalIndex, Wal, WalIndex,
+    WalIndexError, WalReplayError, catch_up_index, rebuild_index,
 };
 use crate::git::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, CheckpointSnapshot, CheckpointSnapshotError,
@@ -203,6 +203,10 @@ impl StoreRuntime {
             .into_iter()
             .find(|row| row.actor_id == *actor)
             .map(|row| WriteStamp::new(row.last_physical_ms, row.last_logical)))
+    }
+
+    pub fn hlc_rows(&self) -> Result<Vec<HlcRow>, StoreRuntimeError> {
+        Ok(self.wal_index.reader().load_hlc()?)
     }
 
     pub fn checkpoint_snapshot(
