@@ -1,17 +1,18 @@
 //! Local checkpoint cache helpers.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use super::json_canon::CanonJsonError;
 use super::layout::{MANIFEST_FILE, META_FILE};
-use super::{CheckpointExport, CheckpointManifest, CheckpointMeta};
-use crate::core::{ContentHash, StoreId};
+use super::{CheckpointExport, CheckpointManifest, CheckpointMeta, CheckpointShardPayload};
+use crate::core::{ContentHash, StoreId, sha256_bytes};
 use crate::paths;
 
 pub const DEFAULT_CHECKPOINT_CACHE_KEEP: usize = 3;
@@ -166,6 +167,42 @@ impl CheckpointCache {
             dir: checkpoint_dir,
             meta,
             manifest,
+        }))
+    }
+
+    pub fn load_current_export(&self) -> Result<Option<CheckpointExport>, CheckpointCacheError> {
+        let Some(entry) = self.load_current()? else {
+            return Ok(None);
+        };
+        let mut files = BTreeMap::new();
+        for (path, manifest_entry) in &entry.manifest.files {
+            let file_path = entry.dir.join(path);
+            let bytes = fs::read(&file_path).map_err(|source| io_err(&file_path, source))?;
+            if bytes.len() as u64 != manifest_entry.bytes {
+                return Err(CheckpointCacheError::InvalidEntry {
+                    path: file_path,
+                    reason: "manifest byte count mismatch".to_string(),
+                });
+            }
+            let hash = ContentHash::from_bytes(sha256_bytes(&bytes).0);
+            if hash != manifest_entry.sha256 {
+                return Err(CheckpointCacheError::InvalidEntry {
+                    path: file_path,
+                    reason: "manifest hash mismatch".to_string(),
+                });
+            }
+            files.insert(
+                path.clone(),
+                CheckpointShardPayload {
+                    path: path.clone(),
+                    bytes: Bytes::from(bytes),
+                },
+            );
+        }
+        Ok(Some(CheckpointExport {
+            manifest: entry.manifest,
+            meta: entry.meta,
+            files,
         }))
     }
 
@@ -427,6 +464,7 @@ mod tests {
             created_by_replica_id: origin,
             policy_hash: ContentHash::from_bytes([9u8; 32]),
             roster_hash: None,
+            dirty_shards: None,
             state: &state,
             watermarks_durable: &watermarks,
         })
@@ -488,6 +526,25 @@ mod tests {
         assert_eq!(loaded.checkpoint_id, entry.checkpoint_id);
         assert_eq!(loaded.meta, entry.meta);
         assert_eq!(loaded.manifest, entry.manifest);
+    }
+
+    #[test]
+    fn cache_load_current_export_roundtrips() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([6u8; 16]));
+        let export = build_export(store_id, 1_700_000_000_000);
+        let cache = CheckpointCache::new(store_id, export.meta.checkpoint_group.clone());
+        cache.publish(&export).expect("publish");
+
+        let loaded = cache
+            .load_current_export()
+            .expect("load current export")
+            .expect("export entry");
+        assert_eq!(loaded.meta, export.meta);
+        assert_eq!(loaded.manifest, export.manifest);
+        assert_eq!(loaded.files, export.files);
     }
 
     #[test]
