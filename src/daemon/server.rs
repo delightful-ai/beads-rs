@@ -1400,7 +1400,7 @@ mod tests {
     fn stream_event_decode_failure_is_wal_corrupt() {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
-        let event_id = EventId::new(origin, namespace, Seq1::from_u64(1).unwrap());
+        let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).unwrap());
         let bytes = EventBytes::<Opaque>::new(Bytes::from(vec![0x01]));
         let event = BroadcastEvent::new(event_id, Sha256([0u8; 32]), None, bytes);
 
