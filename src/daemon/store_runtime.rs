@@ -76,6 +76,7 @@ pub struct StoreRuntime {
     #[allow(dead_code)]
     pub(crate) wal_index: Arc<SqliteWalIndex>,
     pub(crate) last_wal_checkpoint: Option<Instant>,
+    pub(crate) last_lock_heartbeat: Option<Instant>,
     #[allow(dead_code)]
     lock: StoreLock,
 }
@@ -176,6 +177,7 @@ impl StoreRuntime {
         }
 
         let event_wal = EventWal::new(store_dir.clone(), meta.clone(), limits);
+        let now = Instant::now();
         let runtime = Self {
             primary_remote,
             meta,
@@ -193,6 +195,7 @@ impl StoreRuntime {
             event_wal,
             wal_index: Arc::new(wal_index),
             last_wal_checkpoint: None,
+            last_lock_heartbeat: Some(now),
             lock,
         };
 
@@ -249,6 +252,33 @@ impl StoreRuntime {
 
     pub(crate) fn mark_wal_checkpoint(&mut self, now: Instant) {
         self.last_wal_checkpoint = Some(now);
+    }
+
+    pub(crate) fn lock_heartbeat_deadline(
+        &self,
+        now: Instant,
+        interval: Duration,
+    ) -> Option<Instant> {
+        if interval == Duration::ZERO {
+            return None;
+        }
+        Some(match self.last_lock_heartbeat {
+            Some(last) => last + interval,
+            None => now,
+        })
+    }
+
+    pub(crate) fn lock_heartbeat_due(&self, now: Instant, interval: Duration) -> bool {
+        self.lock_heartbeat_deadline(now, interval)
+            .is_some_and(|deadline| deadline <= now)
+    }
+
+    pub(crate) fn mark_lock_heartbeat(&mut self, now: Instant) {
+        self.last_lock_heartbeat = Some(now);
+    }
+
+    pub(crate) fn update_lock_heartbeat(&mut self, now_ms: u64) -> Result<(), StoreLockError> {
+        self.lock.update_heartbeat(now_ms)
     }
 
     pub fn hlc_state_for_actor(

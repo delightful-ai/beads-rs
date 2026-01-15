@@ -101,6 +101,7 @@ pub fn run_state_loop(
         let next_sync = daemon.next_sync_deadline();
         let next_checkpoint = daemon.next_checkpoint_deadline();
         let next_wal_checkpoint = daemon.next_wal_checkpoint_deadline();
+        let next_lock_heartbeat = daemon.next_lock_heartbeat_deadline();
         let next_read_gate = read_gate_waiters.iter().map(|waiter| waiter.deadline).min();
         let next_durability = durability_waiters
             .iter()
@@ -111,6 +112,7 @@ pub fn run_state_loop(
             next_sync,
             next_checkpoint,
             next_wal_checkpoint,
+            next_lock_heartbeat,
             next_read_gate,
             next_durability,
         ]
@@ -268,6 +270,7 @@ pub fn run_state_loop(
                         daemon.fire_due_syncs(&git_tx);
                         daemon.fire_due_checkpoints(&git_tx);
                         daemon.fire_due_wal_checkpoints();
+                        daemon.fire_due_lock_heartbeats();
                         flush_sync_waiters(&daemon, &mut sync_waiters);
                         flush_read_gate_waiters(
                             &mut daemon,
@@ -290,6 +293,7 @@ pub fn run_state_loop(
                 daemon.fire_due_syncs(&git_tx);
                 daemon.fire_due_checkpoints(&git_tx);
                 daemon.fire_due_wal_checkpoints();
+                daemon.fire_due_lock_heartbeats();
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,
@@ -308,6 +312,7 @@ pub fn run_state_loop(
                     daemon.fire_due_syncs(&git_tx);
                     daemon.fire_due_checkpoints(&git_tx);
                     daemon.fire_due_wal_checkpoints();
+                    daemon.fire_due_lock_heartbeats();
                     flush_sync_waiters(&daemon, &mut sync_waiters);
                     flush_read_gate_waiters(
                         &mut daemon,
@@ -338,6 +343,7 @@ pub fn run_state_loop(
                 daemon.fire_due_syncs(&git_tx);
                 daemon.fire_due_checkpoints(&git_tx);
                 daemon.fire_due_wal_checkpoints();
+                daemon.fire_due_lock_heartbeats();
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,

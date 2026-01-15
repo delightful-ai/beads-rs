@@ -171,6 +171,7 @@ use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::sync::SyncOutcome;
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
+const STORE_LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const LOAD_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REPL_MAX_CONNECTIONS: usize = 32;
 
@@ -2178,6 +2179,17 @@ impl Daemon {
             .min()
     }
 
+    pub fn next_lock_heartbeat_deadline(&mut self) -> Option<Instant> {
+        self.next_lock_heartbeat_deadline_at(Instant::now())
+    }
+
+    fn next_lock_heartbeat_deadline_at(&self, now: Instant) -> Option<Instant> {
+        self.stores
+            .values()
+            .filter_map(|store| store.lock_heartbeat_deadline(now, STORE_LOCK_HEARTBEAT_INTERVAL))
+            .min()
+    }
+
     pub fn fire_due_wal_checkpoints(&mut self) {
         self.fire_due_wal_checkpoints_at(Instant::now());
     }
@@ -2204,6 +2216,38 @@ impl Daemon {
                         "wal sqlite checkpoint failed"
                     );
                     store.mark_wal_checkpoint(now);
+                }
+            }
+        }
+    }
+
+    pub fn fire_due_lock_heartbeats(&mut self) {
+        self.fire_due_lock_heartbeats_at(
+            Instant::now(),
+            STORE_LOCK_HEARTBEAT_INTERVAL,
+            WallClock::now().0,
+        );
+    }
+
+    fn fire_due_lock_heartbeats_at(&mut self, now: Instant, interval: Duration, now_ms: u64) {
+        if interval == Duration::ZERO {
+            return;
+        }
+        for (store_id, store) in self.stores.iter_mut() {
+            if !store.lock_heartbeat_due(now, interval) {
+                continue;
+            }
+            match store.update_lock_heartbeat(now_ms) {
+                Ok(()) => {
+                    store.mark_lock_heartbeat(now);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        store_id = %store_id,
+                        error = ?err,
+                        "store lock heartbeat update failed"
+                    );
+                    store.mark_lock_heartbeat(now);
                 }
             }
         }
@@ -3828,6 +3872,7 @@ mod tests {
             .expect("next");
         assert_eq!(next, now + Duration::from_millis(10));
     }
+
 
     #[test]
     fn checkpoint_roster_hash_mismatch_warns() {
