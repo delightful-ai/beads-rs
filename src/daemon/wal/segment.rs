@@ -570,9 +570,14 @@ mod tests {
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
             client_request_id: header.client_request_id,
-            kind: crate::core::EventKindV1::TxnV1,
-            delta: crate::core::TxnDeltaV1::new(),
-            hlc_max: None,
+            kind: crate::core::EventKindV1::TxnV1(crate::core::TxnV1 {
+                delta: crate::core::TxnDeltaV1::new(),
+                hlc_max: crate::core::HlcMax {
+                    actor_id: crate::core::ActorId::new("alice").unwrap(),
+                    physical_ms: header.event_time_ms,
+                    logical: 0,
+                },
+            }),
         };
         VerifiedRecord::new(header, payload, &body).expect("verified record")
     }

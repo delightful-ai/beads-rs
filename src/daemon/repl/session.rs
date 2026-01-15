@@ -1053,8 +1053,8 @@ mod tests {
 
     use crate::core::{
         ActorId, EventBody, EventBytes, EventFrameV1, EventKindV1, HlcMax, NamespaceId, ReplicaId,
-        Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, encode_event_body_canonical,
-        hash_event_body,
+        Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
+        encode_event_body_canonical, hash_event_body,
     };
 
     #[derive(Clone, Debug)]
@@ -1186,12 +1186,13 @@ mod tests {
             event_time_ms: 10,
             txn_id: TxnId::new(Uuid::from_bytes([seq as u8; 16])),
             client_request_id: None,
-            kind: EventKindV1::TxnV1,
-            delta: TxnDeltaV1::new(),
-            hlc_max: Some(HlcMax {
-                actor_id: ActorId::new("alice").unwrap(),
-                physical_ms: 10,
-                logical: 0,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta: TxnDeltaV1::new(),
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice").unwrap(),
+                    physical_ms: 10,
+                    logical: 0,
+                },
             }),
         };
         let bytes = encode_event_body_canonical(&body).unwrap();

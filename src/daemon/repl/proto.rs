@@ -1504,8 +1504,8 @@ mod tests {
     use super::*;
     use crate::core::{
         ActorId, BeadId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId,
-        NoteAppendV1, ReplicaId, StoreIdentity, TxnDeltaV1, TxnId, WireBeadPatch, WireNoteV1,
-        WireStamp, encode_event_body_canonical, hash_event_body,
+        NoteAppendV1, ReplicaId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1, WireBeadPatch,
+        WireNoteV1, WireStamp, encode_event_body_canonical, hash_event_body,
     };
     use uuid::Uuid;
 
@@ -1548,12 +1548,13 @@ mod tests {
             event_time_ms: 123,
             txn_id,
             client_request_id: Some(client_request_id),
-            kind: EventKindV1::TxnV1,
-            delta,
-            hlc_max: Some(HlcMax {
-                actor_id: ActorId::new("alice".to_string()).unwrap(),
-                physical_ms: 123,
-                logical: 1,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta,
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice".to_string()).unwrap(),
+                    physical_ms: 123,
+                    logical: 1,
+                },
             }),
         }
     }

@@ -31,8 +31,8 @@ use super::wal::{
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     Applied, BeadId, BeadType, CanonicalState, DepKind, DurabilityClass, DurabilityReceipt,
-    Durable, EventBody, EventBytes, EventId, HeadStatus, Limits, NamespaceId, NoteId, Priority,
-    ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark,
+    Durable, EventBody, EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId,
+    Priority, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark,
     WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
     hash_event_body,
 };
@@ -358,11 +358,8 @@ impl Daemon {
             )
             .map_err(wal_index_to_op)?;
         }
-        let hlc_max = draft
-            .event_body
-            .hlc_max
-            .as_ref()
-            .ok_or(OpError::Internal("event missing hlc_max"))?;
+        let EventKindV1::TxnV1(txn_body) = &draft.event_body.kind;
+        let hlc_max = &txn_body.hlc_max;
         txn.update_hlc(&HlcRow {
             actor_id: hlc_max.actor_id.clone(),
             last_physical_ms: hlc_max.physical_ms,
@@ -477,7 +474,7 @@ impl Daemon {
             .map_err(wal_index_to_op)?;
         watermark_txn.commit().map_err(wal_index_to_op)?;
 
-        let result = op_result_from_delta(&request, &draft.event_body.delta)?;
+        let result = op_result_from_delta(&request, &txn_body.delta)?;
         let receipt = DurabilityReceipt::local_fsync(
             store,
             draft.event_body.txn_id,
@@ -856,7 +853,8 @@ fn try_reuse_idempotent_response(
         return Err(OpError::Internal("idempotency row missing event id"));
     };
     let event_body = load_event_body(store_dir, wal_index, event_id, limits)?;
-    let result = op_result_from_delta(request, &event_body.delta)?;
+    let EventKindV1::TxnV1(txn) = &event_body.kind;
+    let result = op_result_from_delta(request, &txn.delta)?;
     let receipt = DurabilityReceipt::local_fsync(
         store,
         row.txn_id,

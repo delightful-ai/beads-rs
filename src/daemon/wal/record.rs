@@ -409,7 +409,10 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EventKindV1, NamespaceId, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1};
+    use crate::core::{
+        ActorId, EventKindV1, HlcMax, NamespaceId, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1,
+        TxnV1,
+    };
 
     fn event_body_for_header(header: &RecordHeader) -> EventBody {
         EventBody {
@@ -421,9 +424,14 @@ mod tests {
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
             client_request_id: header.client_request_id,
-            kind: EventKindV1::TxnV1,
-            delta: TxnDeltaV1::new(),
-            hlc_max: None,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta: TxnDeltaV1::new(),
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice").unwrap(),
+                    physical_ms: header.event_time_ms,
+                    logical: 0,
+                },
+            }),
         }
     }
 

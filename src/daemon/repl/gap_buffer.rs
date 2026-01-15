@@ -325,7 +325,7 @@ mod tests {
 
     use crate::core::{
         ActorId, EventBody, EventBytes, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-        StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId,
+        StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
     };
 
     fn sample_body(seq: u64) -> EventBody {
@@ -343,12 +343,13 @@ mod tests {
             event_time_ms: 123,
             txn_id,
             client_request_id: None,
-            kind: EventKindV1::TxnV1,
-            delta: TxnDeltaV1::new(),
-            hlc_max: Some(HlcMax {
-                actor_id: ActorId::new("alice").unwrap(),
-                physical_ms: 123,
-                logical: 0,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta: TxnDeltaV1::new(),
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice").unwrap(),
+                    physical_ms: 123,
+                    logical: 0,
+                },
             }),
         }
     }

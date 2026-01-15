@@ -11,9 +11,9 @@ use crate::core::{
     ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKey, DepKind, DepSpec,
     EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1,
     NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TxnDeltaError, TxnDeltaV1,
-    TxnId, TxnOpV1, WallClock, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch,
-    WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical, sha256_bytes,
-    to_canon_json_bytes,
+    TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1,
+    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
+    sha256_bytes, to_canon_json_bytes,
 };
 
 #[derive(Clone, Debug)]
@@ -233,12 +233,13 @@ impl MutationEngine {
             event_time_ms: write_stamp.wall_ms,
             txn_id: txn_id_for_stamp(&store, &write_stamp),
             client_request_id,
-            kind: EventKindV1::TxnV1,
-            delta: planned.delta,
-            hlc_max: Some(HlcMax {
-                actor_id,
-                physical_ms: write_stamp.wall_ms,
-                logical: write_stamp.counter,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta: planned.delta,
+                hlc_max: HlcMax {
+                    actor_id,
+                    physical_ms: write_stamp.wall_ms,
+                    logical: write_stamp.counter,
+                },
             }),
         };
 
@@ -1969,7 +1970,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(draft_a.request_sha256, draft_b.request_sha256);
-        assert_eq!(draft_a.event_body.delta, draft_b.event_body.delta);
+        let EventKindV1::TxnV1(txn_a) = &draft_a.event_body.kind;
+        let EventKindV1::TxnV1(txn_b) = &draft_b.event_body.kind;
+        assert_eq!(txn_a.delta, txn_b.delta);
     }
 
     #[test]

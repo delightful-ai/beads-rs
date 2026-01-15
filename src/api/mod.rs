@@ -600,6 +600,11 @@ pub struct EventBody {
 
 impl From<&crate::core::EventBody> for EventBody {
     fn from(body: &crate::core::EventBody) -> Self {
+        let (delta, hlc_max) = match &body.kind {
+            crate::core::EventKindV1::TxnV1(txn) => {
+                (txn.delta.clone(), Some(EventHlcMax::from(&txn.hlc_max)))
+            }
+        };
         Self {
             envelope_v: body.envelope_v,
             store: body.store,
@@ -610,8 +615,8 @@ impl From<&crate::core::EventBody> for EventBody {
             txn_id: body.txn_id,
             client_request_id: body.client_request_id,
             kind: body.kind.as_str().to_string(),
-            delta: body.delta.clone(),
-            hlc_max: body.hlc_max.as_ref().map(EventHlcMax::from),
+            delta,
+            hlc_max,
         }
     }
 }

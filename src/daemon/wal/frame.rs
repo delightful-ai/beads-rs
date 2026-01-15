@@ -133,8 +133,8 @@ pub fn encode_frame(
 mod tests {
     use super::*;
     use crate::core::{
-        ClientRequestId, EventBody, EventKindV1, NamespaceId, ReplicaId, Seq1, StoreEpoch,
-        StoreId, StoreIdentity, TxnDeltaV1, TxnId, sha256_bytes,
+        ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
+        StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1, sha256_bytes,
     };
     use crate::daemon::wal::record::{RecordHeader, VerifiedRecord};
     use bytes::Bytes;
@@ -151,9 +151,14 @@ mod tests {
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
             client_request_id: header.client_request_id,
-            kind: EventKindV1::TxnV1,
-            delta: TxnDeltaV1::new(),
-            hlc_max: None,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta: TxnDeltaV1::new(),
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice").unwrap(),
+                    physical_ms: header.event_time_ms,
+                    logical: 0,
+                },
+            }),
         }
     }
 

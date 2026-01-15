@@ -155,7 +155,7 @@ struct StorePathMap {
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
     ActorId, Applied, ApplyError, BeadId, CanonicalState, ClientRequestId, ContentHash, CoreError,
-    DurabilityClass, ErrorCode, EventBody, EventId, HeadStatus, Limits, NamespaceId,
+    DurabilityClass, ErrorCode, EventBody, EventId, EventKindV1, HeadStatus, Limits, NamespaceId,
     NamespacePolicy, PrevVerified, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp,
     StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark,
     WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
@@ -1382,13 +1382,12 @@ impl Daemon {
     ) -> Result<IngestOutcome, Box<ErrorPayload>> {
         let actor_stamps: Vec<(ActorId, WriteStamp)> = batch
             .iter()
-            .filter_map(|event| {
-                event.body.hlc_max.as_ref().map(|hlc_max| {
-                    (
-                        hlc_max.actor_id.clone(),
-                        WriteStamp::new(hlc_max.physical_ms, hlc_max.logical),
-                    )
-                })
+            .map(|event| {
+                let EventKindV1::TxnV1(txn) = &event.body.kind;
+                (
+                    txn.hlc_max.actor_id.clone(),
+                    WriteStamp::new(txn.hlc_max.physical_ms, txn.hlc_max.logical),
+                )
             })
             .collect();
         let store = self.stores.get_mut(&store_id).ok_or_else(|| {
@@ -1530,14 +1529,13 @@ impl Daemon {
             )
             .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
 
-            if let Some(hlc_max) = &event.body.hlc_max {
-                txn.update_hlc(&HlcRow {
-                    actor_id: hlc_max.actor_id.clone(),
-                    last_physical_ms: hlc_max.physical_ms,
-                    last_logical: hlc_max.logical,
-                })
-                .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
-            }
+            let EventKindV1::TxnV1(txn_body) = &event.body.kind;
+            txn.update_hlc(&HlcRow {
+                actor_id: txn_body.hlc_max.actor_id.clone(),
+                last_physical_ms: txn_body.hlc_max.physical_ms,
+                last_logical: txn_body.hlc_max.logical,
+            })
+            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
         }
 
         txn.commit()
@@ -1565,10 +1563,10 @@ impl Daemon {
                 };
                 store.record_checkpoint_dirty_shards(&namespace, &outcome);
 
-                if let Some(hlc_max) = &event.body.hlc_max {
-                    let stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
-                    max_stamp = max_write_stamp(max_stamp, Some(stamp));
-                }
+                let EventKindV1::TxnV1(txn_body) = &event.body.kind;
+                let stamp =
+                    WriteStamp::new(txn_body.hlc_max.physical_ms, txn_body.hlc_max.logical);
+                max_stamp = max_write_stamp(max_stamp, Some(stamp));
 
                 let event_id = event_id_for(origin, namespace.clone(), event.body.origin_seq);
                 let prev_sha = event.prev.prev.map(|sha| Sha256(sha.0));
@@ -3619,9 +3617,9 @@ mod tests {
         ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Labels,
         Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority,
         ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
-        TxnOpV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp,
-        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1,
+        TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
+        WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -3914,12 +3912,13 @@ mod tests {
             event_time_ms,
             txn_id: TxnId::new(Uuid::from_bytes([seq as u8; 16])),
             client_request_id: None,
-            kind: EventKindV1::TxnV1,
-            delta,
-            hlc_max: Some(HlcMax {
-                actor_id: ActorId::new("alice").unwrap(),
-                physical_ms: event_time_ms,
-                logical: 0,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta,
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice").unwrap(),
+                    physical_ms: event_time_ms,
+                    logical: 0,
+                },
             }),
         };
         let bytes = encode_event_body_canonical(&body).unwrap();
