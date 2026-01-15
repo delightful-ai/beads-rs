@@ -316,6 +316,18 @@ impl Daemon {
         );
         let event_ids = vec![event_id];
         txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
+        if let Some(sealed) = append.sealed.as_ref() {
+            let sealed_row = SegmentRow {
+                namespace: namespace.clone(),
+                segment_id: sealed.segment_id,
+                segment_path: segment_rel_path(&store_dir, &sealed.path),
+                created_at_ms: sealed.created_at_ms,
+                last_indexed_offset: sealed.final_len,
+                sealed: true,
+                final_len: Some(sealed.final_len),
+            };
+            txn.upsert_segment(&sealed_row).map_err(wal_index_to_op)?;
+        }
         txn.record_event(
             &namespace,
             &event_ids[0],

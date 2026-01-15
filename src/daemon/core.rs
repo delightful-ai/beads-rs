@@ -1092,6 +1092,19 @@ impl Daemon {
 
             txn.upsert_segment(&segment_row)
                 .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            if let Some(sealed) = append.sealed.as_ref() {
+                let sealed_row = SegmentRow {
+                    namespace: namespace.clone(),
+                    segment_id: sealed.segment_id,
+                    segment_path: segment_rel_path(&store_dir, &sealed.path),
+                    created_at_ms: sealed.created_at_ms,
+                    last_indexed_offset: sealed.final_len,
+                    sealed: true,
+                    final_len: Some(sealed.final_len),
+                };
+                txn.upsert_segment(&sealed_row)
+                    .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            }
             txn.record_event(
                 &namespace,
                 &event_id_for(origin, namespace.clone(), event.body.origin_seq),
@@ -2945,14 +2958,20 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    use bytes::Bytes;
+    use uuid::Uuid;
+
     use crate::core::{
-        Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, HeadStatus,
-        Labels, Lww, NamespaceId, Priority, Seq0, Stamp, WallClock, Watermarks, Workflow,
-        WriteStamp,
+        ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
+        EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId, PrevVerified,
+        Priority, ReplicaId, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
+        StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, VerifiedEvent, WallClock,
+        Watermarks, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::store_runtime::StoreRuntime;
-    use crate::daemon::wal::Wal;
+    use crate::daemon::wal::frame::encode_frame;
+    use crate::daemon::wal::{Record, RecordHeader, SegmentHeader, Wal};
     use tempfile::TempDir;
 
     fn test_actor() -> ActorId {
@@ -3009,6 +3028,57 @@ mod tests {
         daemon.remote_to_store_id.insert(remote.clone(), store_id);
         daemon.stores.insert(store_id, runtime);
         store_id
+    }
+
+    fn verified_event_for_seq(
+        store: StoreIdentity,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        prev: Option<Sha256>,
+    ) -> VerifiedEvent<PrevVerified> {
+        let event_time_ms = 1_700_000_000_000 + seq;
+        let body = EventBody {
+            envelope_v: 1,
+            store,
+            namespace: namespace.clone(),
+            origin_replica_id: origin,
+            origin_seq: Seq1::from_u64(seq).unwrap(),
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([seq as u8; 16])),
+            client_request_id: None,
+            kind: EventKindV1::TxnV1,
+            delta: TxnDeltaV1::new(),
+            hlc_max: Some(HlcMax {
+                actor_id: ActorId::new("alice").unwrap(),
+                physical_ms: event_time_ms,
+                logical: 0,
+            }),
+        };
+        let bytes = encode_event_body_canonical(&body).unwrap();
+        let sha256 = hash_event_body(&bytes);
+        VerifiedEvent {
+            body,
+            bytes: bytes.into(),
+            sha256,
+            prev: PrevVerified { prev },
+        }
+    }
+
+    fn record_for_event(event: &VerifiedEvent<PrevVerified>) -> Record {
+        Record {
+            header: RecordHeader {
+                origin_replica_id: event.body.origin_replica_id,
+                origin_seq: event.body.origin_seq.get(),
+                event_time_ms: event.body.event_time_ms,
+                txn_id: event.body.txn_id,
+                client_request_id: event.body.client_request_id,
+                request_sha256: None,
+                sha256: event.sha256.0,
+                prev_sha256: event.prev.prev.map(|sha| sha.0),
+            },
+            payload: Bytes::copy_from_slice(event.bytes.as_ref()),
+        }
     }
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
@@ -3465,6 +3535,70 @@ mod tests {
         let id = BeadId::parse("bd-abc").unwrap();
         let merged = repo_state.state.get_live(&id).unwrap();
         assert_eq!(merged.core.created(), winner.core.created());
+    }
+
+    #[test]
+    fn ingest_rotation_seals_previous_segment() {
+        let tmp = TempStoreDir::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+
+        let event1 = verified_event_for_seq(store, &namespace, origin, 1, None);
+        let record1 = record_for_event(&event1);
+
+        let versions = StoreMetaVersions::new(1, 2, 3, 4, 5);
+        let meta = StoreMeta::new(
+            store,
+            ReplicaId::new(Uuid::from_bytes([8u8; 16])),
+            versions,
+            now_ms,
+        );
+        let header_len = SegmentHeader::new(
+            &meta,
+            namespace.clone(),
+            now_ms,
+            SegmentId::new(Uuid::nil()),
+        )
+        .encode()
+        .unwrap()
+        .len() as u64;
+
+        let mut limits = Limits::default();
+        let frame_len = encode_frame(&record1, limits.max_wal_record_bytes)
+            .unwrap()
+            .len() as u64;
+        limits.wal_segment_max_bytes = (header_len + frame_len + 1) as usize;
+
+        let wal = Wal::new(tmp.data_dir()).unwrap();
+        let mut daemon = Daemon::new_with_limits(test_actor(), wal, limits.clone());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+
+        let event2 = verified_event_for_seq(store, &namespace, origin, 2, Some(event1.sha256));
+        daemon
+            .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event1, event2], now_ms)
+            .expect("ingest");
+
+        let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
+        let segments = store_runtime
+            .wal_index
+            .reader()
+            .list_segments(&namespace)
+            .expect("segments");
+        assert_eq!(segments.len(), 2);
+
+        let sealed = segments.iter().find(|row| row.sealed).expect("sealed");
+        assert!(segments.iter().any(|row| !row.sealed));
+        let sealed_path = paths::store_dir(store_id).join(&sealed.segment_path);
+        let sealed_len = std::fs::metadata(&sealed_path)
+            .expect("sealed segment metadata")
+            .len();
+        assert_eq!(sealed.final_len, Some(sealed_len));
     }
 
     #[test]
