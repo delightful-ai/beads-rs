@@ -28,7 +28,7 @@ rand = "0.9"
 sha2 = "0.10"
 hex = "0.4"
 crc32c = "0.6"
-git2 = "0.20"
+git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
 crossbeam = "0.8"
 signal-hook = "0.3"
 whoami = "1.4"
