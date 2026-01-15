@@ -274,6 +274,8 @@ pub enum StoreRuntimeError {
         #[source]
         source: io::Error,
     },
+    #[error("namespace policies path is a symlink: {path:?}")]
+    NamespacePoliciesSymlink { path: Box<std::path::PathBuf> },
     #[error("namespace policies parse failed at {path:?}: {source}")]
     NamespacePoliciesParse {
         path: Box<std::path::PathBuf>,
@@ -345,15 +347,18 @@ pub(crate) fn load_namespace_policies(
     defaults: &BTreeMap<NamespaceId, NamespacePolicy>,
 ) -> Result<BTreeMap<NamespaceId, NamespacePolicy>, StoreRuntimeError> {
     let path = paths::namespaces_path(store_id);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Ok(defaults.clone());
+    let raw = match read_secure_store_file(&path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return Ok(defaults.clone()),
+        Err(StoreConfigFileError::Symlink { path }) => {
+            return Err(StoreRuntimeError::NamespacePoliciesSymlink {
+                path: Box::new(path),
+            });
         }
-        Err(err) => {
+        Err(StoreConfigFileError::Read { path, source }) => {
             return Err(StoreRuntimeError::NamespacePoliciesRead {
                 path: Box::new(path),
-                source: err,
+                source,
             });
         }
     };
@@ -497,6 +502,57 @@ fn write_store_meta(path: &Path, meta: &StoreMeta) -> Result<(), StoreRuntimeErr
         source,
     })?;
     ensure_file_permissions(path)?;
+    Ok(())
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum StoreConfigFileError {
+    #[error("config path is a symlink: {path:?}")]
+    Symlink { path: PathBuf },
+    #[error("config read failed at {path:?}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+pub(crate) fn read_secure_store_file(
+    path: &Path,
+) -> Result<Option<String>, StoreConfigFileError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(StoreConfigFileError::Symlink {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(StoreConfigFileError::Read {
+                path: path.to_path_buf(),
+                source: err,
+            });
+        }
+    }
+
+    let raw = fs::read_to_string(path).map_err(|source| StoreConfigFileError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    ensure_secure_file_permissions(path).map_err(|source| StoreConfigFileError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(Some(raw))
+}
+
+fn ensure_secure_file_permissions(path: &Path) -> Result<(), io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
