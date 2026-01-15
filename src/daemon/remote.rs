@@ -154,20 +154,20 @@ fn normalize_file_url(rest: &str) -> String {
 }
 
 fn normalize_host(host: &str) -> String {
-    if host.starts_with('[') {
-        if let Some((inner, port)) = host.split_once(']') {
-            let inner = inner.trim_start_matches('[').to_lowercase();
-            if let Some(port) = port.strip_prefix(':') {
-                return format!("[{}]:{}", inner, port);
-            }
-            return format!("[{}]", inner);
+    if host.starts_with('[')
+        && let Some((inner, port)) = host.split_once(']')
+    {
+        let inner = inner.trim_start_matches('[').to_lowercase();
+        if let Some(port) = port.strip_prefix(':') {
+            return format!("[{}]:{}", inner, port);
         }
+        return format!("[{}]", inner);
     }
 
-    if host.matches(':').count() == 1 {
-        if let Some((host_part, port)) = host.rsplit_once(':') {
-            return format!("{}:{}", host_part.to_lowercase(), port);
-        }
+    if host.matches(':').count() == 1
+        && let Some((host_part, port)) = host.rsplit_once(':')
+    {
+        return format!("{}:{}", host_part.to_lowercase(), port);
     }
 
     host.to_lowercase()
@@ -231,6 +231,22 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(b, c);
         assert_eq!(c, d);
+    }
+
+    #[test]
+    fn normalize_https_userinfo_matches_host_only() {
+        assert_eq!(
+            normalize_url("https://user@github.com/foo/bar.git"),
+            "github.com/foo/bar"
+        );
+    }
+
+    #[test]
+    fn normalize_file_url_with_host_preserves_host() {
+        assert_eq!(
+            normalize_url("file://server/share/repo.git"),
+            "//server/share/repo"
+        );
     }
 
     #[test]
