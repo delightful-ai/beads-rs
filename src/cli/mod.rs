@@ -14,8 +14,8 @@ use time::{Date, OffsetDateTime, Time};
 
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{
-    ActorId, Applied, BeadId, BeadSlug, BeadType, ClientRequestId, DepKind, NamespaceId, Priority,
-    Watermarks,
+    ActorId, Applied, BeadId, BeadSlug, BeadType, ClientRequestId, DepKind, DurabilityClass,
+    NamespaceId, Priority, Watermarks,
 };
 use crate::daemon::ipc::{
     MutationMeta, ReadConsistency, Request, Response, ResponsePayload, send_request,
@@ -1060,7 +1060,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 repo,
                 json: cli.json,
                 namespace: resolve_namespace(cli.namespace.as_deref(), &config)?,
-                durability: resolve_durability(cli.durability.as_deref(), &config),
+                durability: resolve_durability(cli.durability.as_deref(), &config)?,
                 client_request_id: normalize_optional_client_request_id(
                     cli.client_request_id.as_deref(),
                 )?,
@@ -1199,10 +1199,20 @@ fn resolve_namespace(cli_value: Option<&str>, config: &Config) -> Result<Option<
     }
 }
 
-fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Option<String> {
-    cli_value
+fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Result<Option<String>> {
+    let raw = cli_value
         .map(str::to_string)
-        .or_else(|| config.defaults.durability.as_ref().map(ToString::to_string))
+        .or_else(|| config.defaults.durability.as_ref().map(ToString::to_string));
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let parsed = DurabilityClass::parse(&raw).map_err(|err| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "durability".into(),
+            reason: err.to_string(),
+        })
+    })?;
+    Ok(Some(parsed.to_string()))
 }
 
 pub(super) fn normalize_bead_id(id: &str) -> Result<BeadId> {
@@ -1673,7 +1683,7 @@ mod tests {
 
         let namespace = resolve_namespace(None, &config).expect("namespace");
         assert_eq!(namespace, Some(NamespaceId::parse("wf").unwrap()));
-        let durability = resolve_durability(None, &config);
+        let durability = resolve_durability(None, &config).expect("durability");
         assert_eq!(durability, Some("replicated_fsync(2)".to_string()));
     }
 
@@ -1688,7 +1698,8 @@ mod tests {
 
         let namespace = resolve_namespace(Some("core"), &config).expect("namespace");
         assert_eq!(namespace, Some(NamespaceId::core()));
-        let durability = resolve_durability(Some("replicated_fsync(3)"), &config);
+        let durability =
+            resolve_durability(Some("replicated_fsync(3)"), &config).expect("durability");
         assert_eq!(durability, Some("replicated_fsync(3)".to_string()));
     }
 

@@ -25,6 +25,54 @@ impl fmt::Display for DurabilityClass {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum DurabilityParseError {
+    #[error("durability cannot be empty")]
+    Empty,
+
+    #[error("unsupported durability class: {raw}")]
+    Unsupported { raw: String },
+}
+
+impl DurabilityClass {
+    pub fn parse(raw: &str) -> Result<Self, DurabilityParseError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(DurabilityParseError::Empty);
+        }
+        let value = trimmed.to_lowercase();
+        if value == "local_fsync" || value == "local-fsync" {
+            return Ok(DurabilityClass::LocalFsync);
+        }
+        if let Some(rest) = value.strip_prefix("replicated_fsync") {
+            let rest = rest.trim();
+            let rest = rest
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .or_else(|| rest.strip_prefix(':'))
+                .or_else(|| rest.strip_prefix('='))
+                .map(str::trim);
+            if let Some(k_raw) = rest {
+                let k = k_raw.parse::<u32>().ok().and_then(NonZeroU32::new);
+                if let Some(k) = k {
+                    return Ok(DurabilityClass::ReplicatedFsync { k });
+                }
+            }
+        }
+
+        Err(DurabilityParseError::Unsupported {
+            raw: trimmed.to_string(),
+        })
+    }
+
+    pub fn parse_optional(raw: Option<&str>) -> Result<Self, DurabilityParseError> {
+        match raw {
+            None => Ok(DurabilityClass::LocalFsync),
+            Some(raw) => DurabilityClass::parse(raw),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalFsyncProof {
     pub at_ms: u64,
@@ -337,6 +385,52 @@ mod tests {
         let json = serde_json::to_string(&receipt).unwrap();
         let parsed: DurabilityReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(receipt, parsed);
+    }
+
+    #[test]
+    fn durability_parse_accepts_variants() {
+        assert_eq!(
+            DurabilityClass::parse("local_fsync").unwrap(),
+            DurabilityClass::LocalFsync
+        );
+        assert_eq!(
+            DurabilityClass::parse("local-fsync").unwrap(),
+            DurabilityClass::LocalFsync
+        );
+        assert_eq!(
+            DurabilityClass::parse("replicated_fsync(2)").unwrap(),
+            DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).unwrap()
+            }
+        );
+        assert_eq!(
+            DurabilityClass::parse("replicated_fsync:3").unwrap(),
+            DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(3).unwrap()
+            }
+        );
+        assert_eq!(
+            DurabilityClass::parse("replicated_fsync=4").unwrap(),
+            DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(4).unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn durability_parse_rejects_invalid() {
+        assert!(matches!(
+            DurabilityClass::parse(""),
+            Err(DurabilityParseError::Empty)
+        ));
+        assert!(matches!(
+            DurabilityClass::parse("replicated_fsync(0)"),
+            Err(DurabilityParseError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            DurabilityClass::parse("weird"),
+            Err(DurabilityParseError::Unsupported { .. })
+        ));
     }
 
     #[test]

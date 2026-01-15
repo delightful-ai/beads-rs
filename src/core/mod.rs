@@ -46,8 +46,8 @@ pub use crdt::Lww;
 pub use dep::{DepEdge, DepKey, DepLife, DepSpec};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
-    DurabilityClass, DurabilityOutcome, DurabilityProofV1, DurabilityReceipt, LocalFsyncProof,
-    ReceiptMergeError, ReplicatedProof,
+    DurabilityClass, DurabilityOutcome, DurabilityParseError, DurabilityProofV1, DurabilityReceipt,
+    LocalFsyncProof, ReceiptMergeError, ReplicatedProof,
 };
 pub use error::{
     CollisionError, CoreError, ErrorCode, ErrorPayload, InvalidDependency, InvalidId, InvalidLabel,
