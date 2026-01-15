@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::core::{NamespaceId, SegmentId, StoreEpoch, StoreId, StoreMeta};
 
 use super::frame::encode_frame;
-use super::record::Record;
+use super::record::VerifiedRecord;
 use super::{EventWalError, EventWalResult};
 
 pub(crate) const SEGMENT_MAGIC: &[u8; 5] = b"BDWAL";
@@ -291,7 +291,11 @@ impl SegmentWriter {
         self.header.created_at_ms
     }
 
-    pub fn append(&mut self, record: &Record, now_ms: u64) -> EventWalResult<AppendOutcome> {
+    pub fn append(
+        &mut self,
+        record: &VerifiedRecord,
+        now_ms: u64,
+    ) -> EventWalResult<AppendOutcome> {
         let frame = encode_frame(record, self.config.max_record_bytes)?;
 
         let rotated = self.should_rotate(now_ms, frame.len() as u64);
@@ -542,7 +546,8 @@ mod tests {
         )
     }
 
-    fn test_record() -> Record {
+    fn test_record_with_payload(payload: Bytes) -> VerifiedRecord {
+        let sha = crate::core::sha256_bytes(payload.as_ref()).0;
         let header = crate::daemon::wal::record::RecordHeader {
             origin_replica_id: crate::core::ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: crate::core::Seq1::from_u64(1).unwrap(),
@@ -550,13 +555,30 @@ mod tests {
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,
             request_sha256: None,
-            sha256: [7u8; 32],
+            sha256: sha,
             prev_sha256: None,
         };
-        Record {
-            header,
-            payload: Bytes::from_static(b"event"),
-        }
+        let body = crate::core::EventBody {
+            envelope_v: 1,
+            store: crate::core::StoreIdentity::new(
+                crate::core::StoreId::new(Uuid::from_bytes([9u8; 16])),
+                crate::core::StoreEpoch::new(1),
+            ),
+            namespace: NamespaceId::core(),
+            origin_replica_id: header.origin_replica_id,
+            origin_seq: header.origin_seq,
+            event_time_ms: header.event_time_ms,
+            txn_id: header.txn_id,
+            client_request_id: header.client_request_id,
+            kind: crate::core::EventKindV1::TxnV1,
+            delta: crate::core::TxnDeltaV1::new(),
+            hlc_max: None,
+        };
+        VerifiedRecord::new(header, payload, &body).expect("verified record")
+    }
+
+    fn test_record() -> VerifiedRecord {
+        test_record_with_payload(Bytes::from_static(b"event"))
     }
 
     fn take_sync_mode() -> Option<SyncMode> {
@@ -696,8 +718,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut record = test_record();
-        record.payload = Bytes::from_static(b"this is too large");
+        let record = test_record_with_payload(Bytes::from_static(b"this is too large"));
 
         let err = writer.append(&record, 10).unwrap_err();
         assert!(matches!(err, EventWalError::RecordTooLarge { .. }));

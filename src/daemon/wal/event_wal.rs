@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::core::{Limits, NamespaceId, StoreMeta};
 
-use super::{AppendOutcome, EventWalResult, Record, SegmentConfig, SegmentWriter};
+use super::{AppendOutcome, EventWalResult, SegmentConfig, SegmentWriter, VerifiedRecord};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentSnapshot {
@@ -34,7 +34,7 @@ impl EventWal {
     pub fn append(
         &mut self,
         namespace: &NamespaceId,
-        record: &Record,
+        record: &VerifiedRecord,
         now_ms: u64,
     ) -> EventWalResult<AppendOutcome> {
         let writer = self.writer_mut(namespace, now_ms)?;
@@ -103,7 +103,9 @@ mod tests {
         )
     }
 
-    fn test_record() -> Record {
+    fn test_record() -> VerifiedRecord {
+        let payload = Bytes::from_static(b"event");
+        let sha = crate::core::sha256_bytes(payload.as_ref()).0;
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: Seq1::from_u64(1).unwrap(),
@@ -111,16 +113,29 @@ mod tests {
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,
             request_sha256: None,
-            sha256: [7u8; 32],
+            sha256: sha,
             prev_sha256: None,
         };
-        Record {
-            header,
-            payload: Bytes::from_static(b"event"),
-        }
+        let body = crate::core::EventBody {
+            envelope_v: 1,
+            store: crate::core::StoreIdentity::new(
+                StoreId::new(Uuid::from_bytes([9u8; 16])),
+                StoreEpoch::new(1),
+            ),
+            namespace: NamespaceId::core(),
+            origin_replica_id: header.origin_replica_id,
+            origin_seq: header.origin_seq,
+            event_time_ms: header.event_time_ms,
+            txn_id: header.txn_id,
+            client_request_id: header.client_request_id,
+            kind: crate::core::EventKindV1::TxnV1,
+            delta: crate::core::TxnDeltaV1::new(),
+            hlc_max: None,
+        };
+        VerifiedRecord::new(header, payload, &body).expect("verified record")
     }
 
-    fn frame_len(record: &Record, max_record_bytes: usize) -> u64 {
+    fn frame_len(record: &VerifiedRecord, max_record_bytes: usize) -> u64 {
         encode_frame(record, max_record_bytes).expect("frame").len() as u64
     }
 

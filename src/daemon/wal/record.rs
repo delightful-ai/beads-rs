@@ -1,10 +1,11 @@
 //! WAL record header encoding/decoding (v0.5 framing).
 
 use bytes::Bytes;
+use std::marker::PhantomData;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::core::{ClientRequestId, EventBody, ReplicaId, Seq1, TxnId};
+use crate::core::{ClientRequestId, EventBody, ReplicaId, Seq1, TxnId, sha256_bytes};
 
 use super::{EventWalError, EventWalResult};
 
@@ -275,24 +276,93 @@ pub fn validate_header_matches_body(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Record {
-    pub header: RecordHeader,
-    pub payload: Bytes,
+pub struct Unverified;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Verified;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Record<State> {
+    header: RecordHeader,
+    payload: Bytes,
+    _state: PhantomData<State>,
 }
 
-impl Record {
+pub type UnverifiedRecord = Record<Unverified>;
+pub type VerifiedRecord = Record<Verified>;
+
+impl<State> Record<State> {
+    pub fn header(&self) -> &RecordHeader {
+        &self.header
+    }
+
+    pub fn payload(&self) -> &Bytes {
+        &self.payload
+    }
+
+    pub fn payload_bytes(&self) -> &[u8] {
+        self.payload.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum RecordVerifyError {
+    #[error(transparent)]
+    HeaderMismatch(#[from] RecordHeaderMismatch),
+    #[error("record sha256 mismatch (expected {expected:?}, got {got:?})")]
+    ShaMismatch { expected: [u8; 32], got: [u8; 32] },
+}
+
+impl Record<Unverified> {
+    pub(crate) fn new(header: RecordHeader, payload: Bytes) -> Self {
+        Self {
+            header,
+            payload,
+            _state: PhantomData,
+        }
+    }
+
+    pub fn decode_body(body: &[u8]) -> EventWalResult<Self> {
+        let (header, header_len) = RecordHeader::decode(body)?;
+        let payload = Bytes::copy_from_slice(&body[header_len..]);
+        Ok(Self::new(header, payload))
+    }
+
+    pub fn verify_with_event_body(
+        self,
+        body: &EventBody,
+    ) -> Result<Record<Verified>, RecordVerifyError> {
+        validate_header_matches_body(&self.header, body)?;
+        let expected = sha256_bytes(self.payload.as_ref()).0;
+        if expected != self.header.sha256 {
+            return Err(RecordVerifyError::ShaMismatch {
+                expected,
+                got: self.header.sha256,
+            });
+        }
+        Ok(Record {
+            header: self.header,
+            payload: self.payload,
+            _state: PhantomData,
+        })
+    }
+}
+
+impl Record<Verified> {
+    pub(crate) fn new(
+        header: RecordHeader,
+        payload: Bytes,
+        event_body: &EventBody,
+    ) -> Result<Self, RecordVerifyError> {
+        Record::<Unverified>::new(header, payload).verify_with_event_body(event_body)
+    }
+
     pub fn encode_body(&self) -> EventWalResult<Vec<u8>> {
         let header = self.header.encode()?;
         let mut buf = Vec::with_capacity(header.len() + self.payload.len());
         buf.extend_from_slice(&header);
         buf.extend_from_slice(self.payload.as_ref());
         Ok(buf)
-    }
-
-    pub fn decode_body(body: &[u8]) -> EventWalResult<Self> {
-        let (header, header_len) = RecordHeader::decode(body)?;
-        let payload = Bytes::copy_from_slice(&body[header_len..]);
-        Ok(Self { header, payload })
     }
 }
 
@@ -339,9 +409,28 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{EventKindV1, NamespaceId, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1};
+
+    fn event_body_for_header(header: &RecordHeader) -> EventBody {
+        EventBody {
+            envelope_v: 1,
+            store: StoreIdentity::new(StoreId::new(Uuid::from_bytes([9u8; 16])), StoreEpoch::ZERO),
+            namespace: NamespaceId::core(),
+            origin_replica_id: header.origin_replica_id,
+            origin_seq: header.origin_seq,
+            event_time_ms: header.event_time_ms,
+            txn_id: header.txn_id,
+            client_request_id: header.client_request_id,
+            kind: EventKindV1::TxnV1,
+            delta: TxnDeltaV1::new(),
+            hlc_max: None,
+        }
+    }
 
     #[test]
     fn record_roundtrip_with_optional_fields() {
+        let payload = Bytes::from_static(b"hello");
+        let sha = sha256_bytes(payload.as_ref()).0;
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: Seq1::from_u64(42).unwrap(),
@@ -349,18 +438,17 @@ mod tests {
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([3u8; 16]))),
             request_sha256: Some([4u8; 32]),
-            sha256: [5u8; 32],
+            sha256: sha,
             prev_sha256: Some([6u8; 32]),
         };
-        let record = Record {
-            header: header.clone(),
-            payload: Bytes::from_static(b"hello"),
-        };
+        let event_body = event_body_for_header(&header);
+        let record = VerifiedRecord::new(header.clone(), payload.clone(), &event_body).unwrap();
 
         let body = record.encode_body().unwrap();
-        let decoded = Record::decode_body(&body).unwrap();
-        assert_eq!(decoded.header, header);
-        assert_eq!(decoded.payload, record.payload);
+        let decoded = UnverifiedRecord::decode_body(&body).unwrap();
+        let verified = decoded.verify_with_event_body(&event_body).unwrap();
+        assert_eq!(verified.header(), &header);
+        assert_eq!(verified.payload(), &payload);
     }
 
     #[test]
@@ -398,5 +486,47 @@ mod tests {
 
         let err = RecordHeader::decode(&bytes).unwrap_err();
         assert!(matches!(err, EventWalError::RecordHeaderInvalid { .. }));
+    }
+
+    #[test]
+    fn record_decode_rejects_seq0() {
+        let origin = Uuid::from_bytes([1u8; 16]);
+        let txn_id = Uuid::from_bytes([2u8; 16]);
+        let header_len = u16::try_from(RECORD_HEADER_BASE_LEN).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&RECORD_HEADER_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(origin.as_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&1_700_000_000_000u64.to_le_bytes());
+        bytes.extend_from_slice(txn_id.as_bytes());
+        bytes.extend_from_slice(&[5u8; 32]);
+
+        let err = RecordHeader::decode(&bytes).unwrap_err();
+        assert!(matches!(err, EventWalError::RecordHeaderInvalid { .. }));
+    }
+
+    #[test]
+    fn record_verify_rejects_header_mismatch() {
+        let payload = Bytes::from_static(b"payload");
+        let sha = sha256_bytes(payload.as_ref()).0;
+        let header = RecordHeader {
+            origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            origin_seq: Seq1::from_u64(1).unwrap(),
+            event_time_ms: 1_700_000_000_000,
+            txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
+            client_request_id: None,
+            request_sha256: None,
+            sha256: sha,
+            prev_sha256: None,
+        };
+        let mut event_body = event_body_for_header(&header);
+        event_body.txn_id = TxnId::new(Uuid::from_bytes([3u8; 16]));
+
+        let record = UnverifiedRecord::new(header, payload);
+        let err = record.verify_with_event_body(&event_body).unwrap_err();
+        assert!(matches!(err, RecordVerifyError::HeaderMismatch(_)));
     }
 }

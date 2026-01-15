@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use crc32c::crc32c;
 
 use super::{EventWalError, EventWalResult};
-use crate::daemon::wal::record::Record;
+use crate::daemon::wal::record::{UnverifiedRecord, VerifiedRecord};
 
 pub(crate) const FRAME_MAGIC: u32 = 0x4244_5232; // "BDR2"
 pub(crate) const FRAME_HEADER_LEN: usize = 12;
@@ -23,7 +23,7 @@ impl<R: Read> FrameReader<R> {
         }
     }
 
-    pub fn read_next(&mut self) -> EventWalResult<Option<Record>> {
+    pub fn read_next(&mut self) -> EventWalResult<Option<UnverifiedRecord>> {
         let mut header = [0u8; FRAME_HEADER_LEN];
         let mut read = 0usize;
         while read < header.len() {
@@ -77,7 +77,7 @@ impl<R: Read> FrameReader<R> {
             });
         }
 
-        let record = Record::decode_body(&body)?;
+        let record = UnverifiedRecord::decode_body(&body)?;
         Ok(Some(record))
     }
 }
@@ -95,7 +95,7 @@ impl<W: Write> FrameWriter<W> {
         }
     }
 
-    pub fn write_record(&mut self, record: &Record) -> EventWalResult<usize> {
+    pub fn write_record(&mut self, record: &VerifiedRecord) -> EventWalResult<usize> {
         let frame = encode_frame(record, self.max_record_bytes)?;
         self.writer
             .write_all(&frame)
@@ -104,7 +104,10 @@ impl<W: Write> FrameWriter<W> {
     }
 }
 
-pub fn encode_frame(record: &Record, max_record_bytes: usize) -> EventWalResult<Vec<u8>> {
+pub fn encode_frame(
+    record: &VerifiedRecord,
+    max_record_bytes: usize,
+) -> EventWalResult<Vec<u8>> {
     let body = record.encode_body()?;
     if body.len() > max_record_bytes {
         return Err(EventWalError::RecordTooLarge {
@@ -129,13 +132,34 @@ pub fn encode_frame(record: &Record, max_record_bytes: usize) -> EventWalResult<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{ClientRequestId, ReplicaId, Seq1, TxnId};
-    use crate::daemon::wal::record::RecordHeader;
+    use crate::core::{
+        ClientRequestId, EventBody, EventKindV1, NamespaceId, ReplicaId, Seq1, StoreEpoch,
+        StoreId, StoreIdentity, TxnDeltaV1, TxnId, sha256_bytes,
+    };
+    use crate::daemon::wal::record::{RecordHeader, VerifiedRecord};
     use bytes::Bytes;
     use std::io::Cursor;
     use uuid::Uuid;
 
-    fn sample_record() -> Record {
+    fn sample_event_body(header: &RecordHeader) -> EventBody {
+        EventBody {
+            envelope_v: 1,
+            store: StoreIdentity::new(StoreId::new(Uuid::from_bytes([9u8; 16])), StoreEpoch::ZERO),
+            namespace: NamespaceId::core(),
+            origin_replica_id: header.origin_replica_id,
+            origin_seq: header.origin_seq,
+            event_time_ms: header.event_time_ms,
+            txn_id: header.txn_id,
+            client_request_id: header.client_request_id,
+            kind: EventKindV1::TxnV1,
+            delta: TxnDeltaV1::new(),
+            hlc_max: None,
+        }
+    }
+
+    fn sample_record() -> VerifiedRecord {
+        let payload = Bytes::from_static(b"payload");
+        let sha = sha256_bytes(payload.as_ref()).0;
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: Seq1::from_u64(7).unwrap(),
@@ -143,13 +167,11 @@ mod tests {
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([3u8; 16]))),
             request_sha256: Some([4u8; 32]),
-            sha256: [5u8; 32],
+            sha256: sha,
             prev_sha256: Some([6u8; 32]),
         };
-        Record {
-            header,
-            payload: Bytes::from_static(b"payload"),
-        }
+        let body = sample_event_body(&header);
+        VerifiedRecord::new(header, payload, &body).expect("verified record")
     }
 
     #[test]
@@ -159,7 +181,11 @@ mod tests {
 
         let mut reader = FrameReader::new(Cursor::new(frame), 1024);
         let decoded = reader.read_next().unwrap().unwrap();
-        assert_eq!(decoded, record);
+        let body = sample_event_body(record.header());
+        let verified = decoded
+            .verify_with_event_body(&body)
+            .expect("verify record");
+        assert_eq!(verified, record);
     }
 
     #[test]

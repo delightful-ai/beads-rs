@@ -19,7 +19,10 @@ pub use index::{
     SegmentRow, SqliteWalIndex, WalIndex, WalIndexError, WalIndexReader, WalIndexTxn,
     WalIndexWriter, WatermarkRow,
 };
-pub use record::{Record, RecordFlags, RecordHeader, RecordHeaderMismatch};
+pub use record::{
+    Record, RecordFlags, RecordHeader, RecordHeaderMismatch, RecordVerifyError, Unverified,
+    UnverifiedRecord, Verified, VerifiedRecord,
+};
 pub use replay::{
     RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
 };
