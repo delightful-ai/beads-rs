@@ -10,9 +10,9 @@ pub use crate::core::DurabilityReceipt;
 
 use crate::core::{
     ActorId, Applied, Bead, Claim, ClientRequestId, ContentHash, DepEdge as CoreDepEdge,
-    DepKey as CoreDepKey, Durable, EventId, HlcMax, NamespaceId, ReplicaId, SegmentId, Seq1,
-    StoreId, StoreIdentity, Tombstone as CoreTombstone, TxnDeltaV1, TxnId, WallClock, Watermarks,
-    Workflow, WriteStamp, ReplicaRole,
+    DepKey as CoreDepKey, Durable, EventId, HlcMax, NamespaceId, ReplicaId, ReplicaRole, SegmentId,
+    Seq1, StoreId, StoreIdentity, Tombstone as CoreTombstone, TxnDeltaV1, TxnId, WallClock,
+    Watermarks, Workflow, WriteStamp,
 };
 
 // =============================================================================

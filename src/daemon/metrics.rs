@@ -176,7 +176,11 @@ pub fn wal_fsync_err(duration: Duration) {
 }
 
 pub fn wal_index_checkpoint_ok(duration: Duration) {
-    emit("wal_index_checkpoint_ok", MetricValue::Counter(1), Vec::new());
+    emit(
+        "wal_index_checkpoint_ok",
+        MetricValue::Counter(1),
+        Vec::new(),
+    );
     emit(
         "wal_index_checkpoint_duration",
         MetricValue::Histogram(duration_ms(duration)),
@@ -185,7 +189,11 @@ pub fn wal_index_checkpoint_ok(duration: Duration) {
 }
 
 pub fn wal_index_checkpoint_err(duration: Duration) {
-    emit("wal_index_checkpoint_err", MetricValue::Counter(1), Vec::new());
+    emit(
+        "wal_index_checkpoint_err",
+        MetricValue::Counter(1),
+        Vec::new(),
+    );
     emit(
         "wal_index_checkpoint_duration",
         MetricValue::Histogram(duration_ms(duration)),

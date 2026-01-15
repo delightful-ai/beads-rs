@@ -116,8 +116,8 @@ pub fn run_state_loop(
             next_read_gate,
             next_durability,
         ]
-            .into_iter()
-            .flatten()
+        .into_iter()
+        .flatten()
         {
             next_deadline = Some(match next_deadline {
                 Some(current) => std::cmp::min(current, deadline),

@@ -789,7 +789,7 @@ Modules impacted:
 - event delta schema (created_by fields remain strings)
 
 What must be true to proceed safely:
-- Decide how daemon selects ActorId by default (currently passed to Daemon::new(actor, wal)).
+- Decide how daemon selects ActorId by default (currently passed to Daemon::new(actor)).
   This remains; replication must not treat actor strings as replica identity.
 
 ### 0.18 Top 5 lock-now list

@@ -1675,10 +1675,7 @@ fn decode_hlc_max(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<Hl
     })
 }
 
-fn ensure_unique_key<'a>(
-    seen: &mut BTreeSet<&'a str>,
-    key: &'a str,
-) -> Result<(), DecodeError> {
+fn ensure_unique_key<'a>(seen: &mut BTreeSet<&'a str>, key: &'a str) -> Result<(), DecodeError> {
     if seen.insert(key) {
         Ok(())
     } else {
@@ -2283,10 +2280,7 @@ mod tests {
         F: FnOnce(&mut Encoder<&mut Vec<u8>>),
     {
         let header = bytes[0];
-        assert!(
-            (0xa0..=0xb7).contains(&header),
-            "expected small map header"
-        );
+        assert!((0xa0..=0xb7).contains(&header), "expected small map header");
         let len = header - 0xa0;
         assert!(len < 23, "map too large for duplicate helper");
         bytes[0] = 0xa0 + len + 1;

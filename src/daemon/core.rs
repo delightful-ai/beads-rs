@@ -156,9 +156,9 @@ use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
     ActorId, Applied, ApplyError, BeadId, CanonicalState, ClientRequestId, ContentHash, CoreError,
     DurabilityClass, ErrorCode, EventBody, EventId, HeadStatus, Limits, NamespaceId,
-    NamespacePolicy, PrevVerified, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1,
-    Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock,
-    Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
+    NamespacePolicy, PrevVerified, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp,
+    StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark,
+    WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
@@ -3630,8 +3630,8 @@ mod tests {
     use crate::daemon::wal::frame::encode_frame;
     use crate::daemon::wal::{HlcRow, Record, RecordHeader, SegmentHeader};
     use crate::git::checkpoint::{
-        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointSnapshotInput,
-        CheckpointStoreMeta, CheckpointImport, IncludedWatermarks, build_snapshot,
+        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointImport,
+        CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks, build_snapshot,
         export_checkpoint, policy_hash, publish_checkpoint, store_state_from_legacy,
     };
     use tempfile::TempDir;
@@ -3740,9 +3740,7 @@ mod tests {
         assert_eq!(deadline, now);
 
         daemon.fire_due_wal_checkpoints_at(now);
-        let next = daemon
-            .next_wal_checkpoint_deadline_at(now)
-            .expect("next");
+        let next = daemon.next_wal_checkpoint_deadline_at(now).expect("next");
         assert_eq!(next, now + Duration::from_millis(10));
     }
 
@@ -3766,7 +3764,6 @@ mod tests {
             .expect("lock meta");
         assert_eq!(after.last_heartbeat_ms, Some(now_ms));
     }
-
 
     #[test]
     fn checkpoint_roster_hash_mismatch_warns() {
@@ -3803,8 +3800,8 @@ mod tests {
             );
         });
 
-        let logs = String::from_utf8(buffer.lock().expect("log buffer").clone())
-            .expect("utf8 logs");
+        let logs =
+            String::from_utf8(buffer.lock().expect("log buffer").clone()).expect("utf8 logs");
         assert!(logs.contains("checkpoint roster hash mismatch"));
     }
 
