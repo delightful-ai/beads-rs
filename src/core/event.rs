@@ -313,6 +313,14 @@ pub fn decode_event_body(
     if matches!(body.kind, EventKindV1::TxnV1) && body.hlc_max.is_none() {
         return Err(DecodeError::MissingField("hlc_max"));
     }
+    if let Some(hlc_max) = &body.hlc_max
+        && hlc_max.physical_ms != body.event_time_ms
+    {
+        return Err(DecodeError::InvalidField {
+            field: "hlc_max.physical_ms",
+            reason: "must match event_time_ms".into(),
+        });
+    }
     Ok((
         EventBytes::<Opaque>::new(Bytes::copy_from_slice(bytes)),
         body,
@@ -328,6 +336,7 @@ pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcM
     let mut dec = Decoder::new(bytes);
     let map_len = decode_map_len(&mut dec, limits, 0)?;
     let mut hlc_max = None;
+    let mut event_time_ms = None;
     let mut kind: Option<EventKindV1> = None;
     for _ in 0..map_len {
         let key = decode_text(&mut dec, limits)?;
@@ -335,6 +344,9 @@ pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcM
             "kind" => {
                 let raw = decode_text(&mut dec, limits)?;
                 kind = EventKindV1::parse(raw);
+            }
+            "event_time_ms" => {
+                event_time_ms = Some(decode_u64(&mut dec, "event_time_ms")?);
             }
             "hlc_max" => {
                 hlc_max = Some(decode_hlc_max(&mut dec, limits, 1)?);
@@ -349,6 +361,15 @@ pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcM
     }
     if matches!(kind, Some(EventKindV1::TxnV1)) && hlc_max.is_none() {
         return Err(DecodeError::MissingField("hlc_max"));
+    }
+    if let Some(hlc_max) = &hlc_max {
+        let event_time_ms = event_time_ms.ok_or(DecodeError::MissingField("event_time_ms"))?;
+        if hlc_max.physical_ms != event_time_ms {
+            return Err(DecodeError::InvalidField {
+                field: "hlc_max.physical_ms",
+                reason: "must match event_time_ms".into(),
+            });
+        }
     }
     Ok(hlc_max)
 }
