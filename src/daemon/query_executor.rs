@@ -13,8 +13,8 @@ use super::ipc::{ReadConsistency, Response, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use crate::api::{
-    BlockedIssue, CountGroup, CountResult, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
-    Note, StatusOutput, StatusSummary, SyncStatus, SyncWarning, Tombstone,
+    BlockedIssue, CountGroup, CountResult, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
+    IssueSummary, Note, StatusOutput, StatusSummary, SyncStatus, SyncWarning, Tombstone,
 };
 use crate::core::{BeadId, CanonicalState, DepKind, DepLife, WallClock};
 
@@ -1075,6 +1075,39 @@ impl Daemon {
             warnings: errors,
         }))
     }
+
+    /// Dependency cycles.
+    pub fn query_dep_cycles(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+            Ok(r) => r,
+            Err(e) => return Response::err(e),
+        };
+        let read = match self.normalize_read_consistency(&remote, read) {
+            Ok(read) => read,
+            Err(e) => return Response::err(e),
+        };
+        if let Err(err) = self.check_read_gate(&remote, &read) {
+            return Response::err(err);
+        }
+        let repo_state = match self.repo_state(&remote) {
+            Ok(repo_state) => repo_state,
+            Err(e) => return Response::err(e),
+        };
+
+        let empty_state = CanonicalState::new();
+        let state = repo_state
+            .state
+            .get(read.namespace())
+            .unwrap_or(&empty_state);
+
+        let cycles = dep_cycles_from_state(state);
+        Response::ok(ResponsePayload::Query(QueryResult::DepCycles(cycles)))
+    }
 }
 
 fn compute_blocked_by(state: &CanonicalState) -> std::collections::BTreeMap<BeadId, Vec<BeadId>> {
@@ -1105,6 +1138,15 @@ fn compute_blocked_by(state: &CanonicalState) -> std::collections::BTreeMap<Bead
     }
 
     blocked
+}
+
+fn dep_cycles_from_state(state: &CanonicalState) -> DepCycles {
+    let cycles = state
+        .dependency_cycles()
+        .into_iter()
+        .map(|cycle| cycle.into_iter().map(|id| id.as_str().to_string()).collect())
+        .collect();
+    DepCycles { cycles }
 }
 
 fn compute_epic_statuses(state: &CanonicalState, eligible_only: bool) -> Vec<EpicStatus> {
@@ -1172,9 +1214,9 @@ fn sort_ready_issues(issues: &mut [IssueSummary]) {
 
 #[cfg(test)]
 mod tests {
-    use super::sort_ready_issues;
+    use super::{dep_cycles_from_state, sort_ready_issues};
     use crate::api::IssueSummary;
-    use crate::core::WriteStamp;
+    use crate::core::{ActorId, CanonicalState, DepEdge, DepKey, DepKind, Stamp, WriteStamp};
 
     fn issue_summary(id: &str, priority: u8, created_at_ms: u64) -> IssueSummary {
         let stamp = WriteStamp::new(created_at_ms, 0);
@@ -1213,5 +1255,34 @@ mod tests {
 
         let ids: Vec<&str> = issues.iter().map(|issue| issue.id.as_str()).collect();
         assert_eq!(ids, vec!["d", "b", "c", "a"]);
+    }
+
+    #[test]
+    fn dep_cycles_from_state_reports_cycle() {
+        let mut state = CanonicalState::new();
+        let actor = ActorId::new("alice").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(1000, 0), actor);
+
+        let a = "bd-aaa";
+        let b = "bd-bbb";
+
+        let ab = DepKey::new(
+            crate::core::BeadId::parse(a).unwrap(),
+            crate::core::BeadId::parse(b).unwrap(),
+            DepKind::Blocks,
+        )
+        .expect("dep key");
+        let ba = DepKey::new(
+            crate::core::BeadId::parse(b).unwrap(),
+            crate::core::BeadId::parse(a).unwrap(),
+            DepKind::Blocks,
+        )
+        .expect("dep key");
+
+        state.insert_dep(ab, DepEdge::new(stamp.clone()));
+        state.insert_dep(ba, DepEdge::new(stamp));
+
+        let cycles = dep_cycles_from_state(&state);
+        assert_eq!(cycles.cycles, vec![vec![a.to_string(), b.to_string(), a.to_string()]]);
     }
 }

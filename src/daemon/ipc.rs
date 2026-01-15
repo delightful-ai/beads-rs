@@ -264,6 +264,13 @@ pub enum Request {
         read: ReadConsistency,
     },
 
+    /// Get dependency cycles.
+    DepCycles {
+        repo: PathBuf,
+        #[serde(default, flatten)]
+        read: ReadConsistency,
+    },
+
     /// Get dependencies.
     Deps {
         repo: PathBuf,
@@ -2968,6 +2975,19 @@ mod tests {
                 checkpoint_groups: vec!["core".to_string()],
             };
             let resp = Response::ok(ResponsePayload::Query(QueryResult::AdminFlush(output)));
+            roundtrip_response(resp);
+        }
+
+        #[test]
+        fn query_dep_cycles() {
+            let cycles = crate::api::DepCycles {
+                cycles: vec![vec![
+                    "bd-aaa".to_string(),
+                    "bd-bbb".to_string(),
+                    "bd-aaa".to_string(),
+                ]],
+            };
+            let resp = Response::ok(ResponsePayload::Query(QueryResult::DepCycles(cycles)));
             roundtrip_response(resp);
         }
 

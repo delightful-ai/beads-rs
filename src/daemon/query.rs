@@ -19,9 +19,9 @@ use crate::api::{
     AdminRotateReplicaIdOutput as ApiAdminRotateReplicaIdOutput,
     AdminScrubOutput as ApiAdminScrubOutput, AdminStatusOutput as ApiAdminStatusOutput,
     BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo,
-    DeletedLookup as ApiDeletedLookup, DepEdge as ApiDepEdge, EpicStatus as ApiEpicStatus, Issue,
-    IssueSummary, Note as ApiNote, ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput,
-    Tombstone as ApiTombstone,
+    DeletedLookup as ApiDeletedLookup, DepCycles as ApiDepCycles, DepEdge as ApiDepEdge,
+    EpicStatus as ApiEpicStatus, Issue, IssueSummary, Note as ApiNote,
+    ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput, Tombstone as ApiTombstone,
 };
 use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
 
@@ -461,6 +461,9 @@ pub enum QueryResult {
         incoming: Vec<ApiDepEdge>,
         outgoing: Vec<ApiDepEdge>,
     },
+
+    /// Dependency cycles.
+    DepCycles(ApiDepCycles),
 
     /// Notes for a bead.
     Notes(Vec<ApiNote>),

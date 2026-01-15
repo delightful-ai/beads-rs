@@ -482,6 +482,7 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::Issues(views) => render_issue_list(views),
         QueryResult::DepTree { root, edges } => render_dep_tree(root.as_str(), edges),
         QueryResult::Deps { incoming, outgoing } => render_deps(incoming, outgoing),
+        QueryResult::DepCycles(out) => render_dep_cycles(out),
         QueryResult::Notes(notes) => render_notes(notes),
         QueryResult::Status(out) => render_status(out),
         QueryResult::Blocked(blocked) => render_blocked(blocked),
@@ -512,6 +513,17 @@ fn render_query(q: &QueryResult) -> String {
             }
         }
     }
+}
+
+fn render_dep_cycles(out: &crate::api::DepCycles) -> String {
+    if out.cycles.is_empty() {
+        return "no dependency cycles found".into();
+    }
+    let mut lines = Vec::new();
+    for cycle in &out.cycles {
+        lines.push(format!("cycle: {}", cycle.join(" -> ")));
+    }
+    lines.join("\n")
 }
 
 fn render_daemon_info(info: &DaemonInfo) -> String {

@@ -648,6 +648,11 @@ pub struct DepEdge {
     pub deleted_by: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepCycles {
+    pub cycles: Vec<Vec<String>>,
+}
+
 impl From<(&CoreDepKey, &CoreDepEdge)> for DepEdge {
     fn from((key, edge): (&CoreDepKey, &CoreDepEdge)) -> Self {
         Self {

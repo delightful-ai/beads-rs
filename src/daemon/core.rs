@@ -2619,6 +2619,8 @@ impl Daemon {
                 self.query_dep_tree(&repo, &id, read, git_tx).into()
             }
 
+            Request::DepCycles { repo, read } => self.query_dep_cycles(&repo, read, git_tx).into(),
+
             Request::Deps { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
