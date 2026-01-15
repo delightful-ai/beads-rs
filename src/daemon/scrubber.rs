@@ -10,13 +10,13 @@ use crate::api::{
     AdminHealthReport, AdminHealthRisk, AdminHealthSeverity, AdminHealthStats, AdminHealthStatus,
     AdminHealthSummary,
 };
-use crate::core::{Limits, NamespaceId, ReplicaId, SegmentId, Seq0, decode_event_body, sha256_bytes};
+use crate::core::{Limits, NamespaceId, ReplicaId, SegmentId, Seq0, decode_event_body};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::store_runtime::StoreRuntime;
 use crate::daemon::wal::WalIndex;
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
-use crate::daemon::wal::record::{Record, validate_header_matches_body};
+use crate::daemon::wal::record::{RecordVerifyError, UnverifiedRecord};
 use crate::daemon::wal::segment::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use crate::git::checkpoint::CheckpointCache;
 use crate::paths;
@@ -577,7 +577,7 @@ fn scan_segment_records(
             break;
         }
 
-        let record = match Record::decode_body(&body) {
+        let record = match UnverifiedRecord::decode_body(&body) {
             Ok(record) => record,
             Err(err) => {
                 builder.record_issue(
@@ -600,7 +600,8 @@ fn scan_segment_records(
             }
         };
 
-        let (_, event_body) = match decode_event_body(record.payload.as_ref(), limits) {
+        let header = record.header();
+        let (_, event_body) = match decode_event_body(record.payload_bytes(), limits) {
             Ok(decoded) => decoded,
             Err(err) => {
                 builder.record_issue(
@@ -612,8 +613,8 @@ fn scan_segment_records(
                         message: format!("wal event body decode failed: {err}"),
                         path: Some(segment.path.display().to_string()),
                         namespace: Some(segment.namespace.clone()),
-                        origin: Some(record.header.origin_replica_id),
-                        seq: Some(record.header.origin_seq.get()),
+                        origin: Some(header.origin_replica_id),
+                        seq: Some(header.origin_seq.get()),
                         offset: Some(offset),
                         segment_id: Some(segment.segment_id),
                     },
@@ -623,45 +624,46 @@ fn scan_segment_records(
             }
         };
 
-        if let Err(err) = validate_header_matches_body(&record.header, &event_body) {
-            builder.record_issue(
-                AdminHealthCheckId::WalHashes,
-                AdminHealthStatus::Fail,
-                AdminHealthSeverity::High,
-                AdminHealthEvidence {
-                    code: AdminHealthEvidenceCode::RecordHeaderMismatch,
-                    message: format!("wal record header mismatch: {err}"),
-                    path: Some(segment.path.display().to_string()),
-                    namespace: Some(segment.namespace.clone()),
-                    origin: Some(record.header.origin_replica_id),
-                    seq: Some(record.header.origin_seq.get()),
-                    offset: Some(offset),
-                    segment_id: Some(segment.segment_id),
-                },
-                Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
-            );
-            break;
-        }
-
-        let expected_sha = sha256_bytes(record.payload.as_ref()).0;
-        if expected_sha != record.header.sha256 {
-            builder.record_issue(
-                AdminHealthCheckId::WalHashes,
-                AdminHealthStatus::Fail,
-                AdminHealthSeverity::High,
-                AdminHealthEvidence {
-                    code: AdminHealthEvidenceCode::RecordShaMismatch,
-                    message: "wal record sha256 mismatch".to_string(),
-                    path: Some(segment.path.display().to_string()),
-                    namespace: Some(segment.namespace.clone()),
-                    origin: Some(record.header.origin_replica_id),
-                    seq: Some(record.header.origin_seq.get()),
-                    offset: Some(offset),
-                    segment_id: Some(segment.segment_id),
-                },
-                Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
-            );
-            break;
+        match record.verify_with_event_body(&event_body) {
+            Ok(_) => {}
+            Err(RecordVerifyError::HeaderMismatch(err)) => {
+                builder.record_issue(
+                    AdminHealthCheckId::WalHashes,
+                    AdminHealthStatus::Fail,
+                    AdminHealthSeverity::High,
+                    AdminHealthEvidence {
+                        code: AdminHealthEvidenceCode::RecordHeaderMismatch,
+                        message: format!("wal record header mismatch: {err}"),
+                        path: Some(segment.path.display().to_string()),
+                        namespace: Some(segment.namespace.clone()),
+                        origin: Some(header.origin_replica_id),
+                        seq: Some(header.origin_seq.get()),
+                        offset: Some(offset),
+                        segment_id: Some(segment.segment_id),
+                    },
+                    Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
+                );
+                break;
+            }
+            Err(RecordVerifyError::ShaMismatch { .. }) => {
+                builder.record_issue(
+                    AdminHealthCheckId::WalHashes,
+                    AdminHealthStatus::Fail,
+                    AdminHealthSeverity::High,
+                    AdminHealthEvidence {
+                        code: AdminHealthEvidenceCode::RecordShaMismatch,
+                        message: "wal record sha256 mismatch".to_string(),
+                        path: Some(segment.path.display().to_string()),
+                        namespace: Some(segment.namespace.clone()),
+                        origin: Some(header.origin_replica_id),
+                        seq: Some(header.origin_seq.get()),
+                        offset: Some(offset),
+                        segment_id: Some(segment.segment_id),
+                    },
+                    Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
+                );
+                break;
+            }
         }
 
         builder.stats.records_checked = builder.stats.records_checked.saturating_add(1);
@@ -985,7 +987,7 @@ fn verify_index_offset(
         return;
     }
 
-    if let Err(err) = Record::decode_body(&body) {
+    if let Err(err) = UnverifiedRecord::decode_body(&body) {
         builder.record_issue(
             AdminHealthCheckId::IndexOffsets,
             AdminHealthStatus::Fail,

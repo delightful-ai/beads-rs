@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    Limits, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreMeta, decode_event_body, sha256_bytes,
+    Limits, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreMeta, decode_event_body,
 };
 use crate::daemon::store_runtime::store_index_durability_mode;
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
-use crate::daemon::wal::record::{Record, validate_header_matches_body};
+use crate::daemon::wal::record::{RecordVerifyError, UnverifiedRecord};
 use crate::daemon::wal::{
     EventWalError, SegmentHeader, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
     rebuild_index,
@@ -498,7 +498,7 @@ fn scan_segment(
             break;
         }
 
-        let record = match Record::decode_body(&body) {
+        let record = match UnverifiedRecord::decode_body(&body) {
             Ok(record) => record,
             Err(err) => {
                 builder.record_issue(
@@ -530,7 +530,8 @@ fn scan_segment(
             }
         };
 
-        let (_, event_body) = match decode_event_body(record.payload.as_ref(), limits) {
+        let header = record.header();
+        let (_, event_body) = match decode_event_body(record.payload_bytes(), limits) {
             Ok(decoded) => decoded,
             Err(err) => {
                 builder.record_issue(
@@ -542,8 +543,8 @@ fn scan_segment(
                         message: format!("event body decode failed: {err}"),
                         path: Some(segment.path.clone()),
                         namespace: Some(segment.namespace.clone()),
-                        origin: Some(record.header.origin_replica_id),
-                        seq: Some(record.header.origin_seq.get()),
+                        origin: Some(header.origin_replica_id),
+                        seq: Some(header.origin_seq.get()),
                         offset: Some(offset),
                     },
                     Some("run `bd store fsck --repair` to quarantine corrupted segments"),
@@ -561,60 +562,62 @@ fn scan_segment(
                 break;
             }
         };
-        if let Err(err) = validate_header_matches_body(&record.header, &event_body) {
-            builder.record_issue(
-                FsckCheckId::RecordHashes,
-                FsckStatus::Fail,
-                FsckSeverity::High,
-                FsckEvidence {
-                    code: FsckEvidenceCode::RecordHeaderMismatch,
-                    message: format!("record header mismatch: {err}"),
-                    path: Some(segment.path.clone()),
-                    namespace: Some(segment.namespace.clone()),
-                    origin: Some(record.header.origin_replica_id),
-                    seq: Some(record.header.origin_seq.get()),
-                    offset: Some(offset),
-                },
-                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
-            );
-            if repair {
-                drop(file);
-                let quarantined_path = quarantine_segment(&segment.path)?;
-                builder.repairs.push(FsckRepair {
-                    kind: FsckRepairKind::QuarantineSegment,
-                    path: Some(quarantined_path),
-                    detail: "quarantined segment with header/body mismatch".to_string(),
-                });
-                quarantined = true;
+        let verify = record.verify_with_event_body(&event_body);
+        match verify {
+            Ok(_) => {}
+            Err(RecordVerifyError::HeaderMismatch(err)) => {
+                builder.record_issue(
+                    FsckCheckId::RecordHashes,
+                    FsckStatus::Fail,
+                    FsckSeverity::High,
+                    FsckEvidence {
+                        code: FsckEvidenceCode::RecordHeaderMismatch,
+                        message: format!("record header mismatch: {err}"),
+                        path: Some(segment.path.clone()),
+                        namespace: Some(segment.namespace.clone()),
+                        origin: Some(header.origin_replica_id),
+                        seq: Some(header.origin_seq.get()),
+                        offset: Some(offset),
+                    },
+                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                );
+                if repair {
+                    drop(file);
+                    let quarantined_path = quarantine_segment(&segment.path)?;
+                    builder.repairs.push(FsckRepair {
+                        kind: FsckRepairKind::QuarantineSegment,
+                        path: Some(quarantined_path),
+                        detail: "quarantined segment with header/body mismatch".to_string(),
+                    });
+                    quarantined = true;
+                }
+                break;
             }
-            break;
-        }
-
-        let expected_sha = sha256_bytes(record.payload.as_ref()).0;
-        if expected_sha != record.header.sha256 {
-            builder.record_issue(
-                FsckCheckId::RecordHashes,
-                FsckStatus::Fail,
-                FsckSeverity::High,
-                FsckEvidence {
-                    code: FsckEvidenceCode::RecordShaMismatch,
-                    message: "record sha256 mismatch".to_string(),
-                    path: Some(segment.path.clone()),
-                    namespace: Some(segment.namespace.clone()),
-                    origin: Some(record.header.origin_replica_id),
-                    seq: Some(record.header.origin_seq.get()),
-                    offset: Some(offset),
-                },
-                Some("rebuild WAL from source of truth or restore from backup"),
-            );
+            Err(RecordVerifyError::ShaMismatch { .. }) => {
+                builder.record_issue(
+                    FsckCheckId::RecordHashes,
+                    FsckStatus::Fail,
+                    FsckSeverity::High,
+                    FsckEvidence {
+                        code: FsckEvidenceCode::RecordShaMismatch,
+                        message: "record sha256 mismatch".to_string(),
+                        path: Some(segment.path.clone()),
+                        namespace: Some(segment.namespace.clone()),
+                        origin: Some(header.origin_replica_id),
+                        seq: Some(header.origin_seq.get()),
+                        offset: Some(offset),
+                    },
+                    Some("rebuild WAL from source of truth or restore from backup"),
+                );
+            }
         }
 
         let context = RecordContext {
             namespace: &segment.namespace,
-            origin: record.header.origin_replica_id,
-            seq: record.header.origin_seq.get(),
-            sha: record.header.sha256,
-            prev_sha: record.header.prev_sha256,
+            origin: header.origin_replica_id,
+            seq: header.origin_seq.get(),
+            sha: header.sha256,
+            prev_sha: header.prev_sha256,
             path: &segment.path,
             offset,
         };
