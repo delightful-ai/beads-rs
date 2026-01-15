@@ -284,6 +284,8 @@ pub enum DecodeError {
     UnsupportedDeltaVersion(u64),
     #[error("duplicate op: {0}")]
     DuplicateOp(String),
+    #[error("duplicate map key: {0}")]
+    DuplicateKey(String),
     #[error("trailing bytes after event body")]
     TrailingBytes,
     #[error("cbor decode: {0}")]
@@ -2244,6 +2246,93 @@ mod tests {
         buf
     }
 
+    fn append_duplicate_map_entry<F>(mut bytes: Vec<u8>, key: &str, encode_value: F) -> Vec<u8>
+    where
+        F: FnOnce(&mut Encoder<&mut Vec<u8>>),
+    {
+        let header = bytes[0];
+        assert!(
+            (0xa0..=0xb7).contains(&header),
+            "expected small map header"
+        );
+        let len = header - 0xa0;
+        assert!(len < 23, "map too large for duplicate helper");
+        bytes[0] = 0xa0 + len + 1;
+
+        let mut extra = Vec::new();
+        let mut enc = Encoder::new(&mut extra);
+        enc.str(key).unwrap();
+        encode_value(&mut enc);
+        bytes.extend(extra);
+        bytes
+    }
+
+    fn encode_body_with_custom_delta_and_hlc<F, G>(
+        body: &EventBody,
+        encode_delta: F,
+        encode_hlc: G,
+    ) -> Vec<u8>
+    where
+        F: FnOnce(&mut Encoder<&mut Vec<u8>>),
+        G: FnOnce(&mut Encoder<&mut Vec<u8>>),
+    {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+
+        let mut len = 10;
+        if body.client_request_id.is_some() {
+            len += 1;
+        }
+        if body.hlc_max.is_some() {
+            len += 1;
+        }
+
+        enc.map(len as u64).unwrap();
+
+        if let Some(client_request_id) = &body.client_request_id {
+            enc.str("client_request_id").unwrap();
+            enc.str(&client_request_id.as_uuid().to_string()).unwrap();
+        }
+
+        enc.str("delta").unwrap();
+        encode_delta(&mut enc);
+
+        enc.str("envelope_v").unwrap();
+        enc.u32(body.envelope_v).unwrap();
+
+        enc.str("event_time_ms").unwrap();
+        enc.u64(body.event_time_ms).unwrap();
+
+        if body.hlc_max.is_some() {
+            enc.str("hlc_max").unwrap();
+            encode_hlc(&mut enc);
+        }
+
+        enc.str("kind").unwrap();
+        enc.str(body.kind.as_str()).unwrap();
+
+        enc.str("namespace").unwrap();
+        enc.str(body.namespace.as_str()).unwrap();
+
+        enc.str("origin_replica_id").unwrap();
+        enc.str(&body.origin_replica_id.as_uuid().to_string())
+            .unwrap();
+
+        enc.str("origin_seq").unwrap();
+        enc.u64(body.origin_seq.get()).unwrap();
+
+        enc.str("store_epoch").unwrap();
+        enc.u64(body.store.store_epoch.get()).unwrap();
+
+        enc.str("store_id").unwrap();
+        enc.str(&body.store.store_id.as_uuid().to_string()).unwrap();
+
+        enc.str("txn_id").unwrap();
+        enc.str(&body.txn_id.as_uuid().to_string()).unwrap();
+
+        buf
+    }
+
     fn replace_value_bytes(
         mut bytes: Vec<u8>,
         key: &str,
@@ -2333,6 +2422,62 @@ mod tests {
         let encoded = encode_body_with_unknown_fields(&body);
         let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
         assert_eq!(body, decoded);
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_event_body_keys() {
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let bytes = append_duplicate_map_entry(encoded.as_ref().to_vec(), "namespace", |enc| {
+            enc.str(body.namespace.as_str()).unwrap();
+        });
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(err, DecodeError::DuplicateKey(key) if key == "namespace"));
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_txn_delta_keys() {
+        let body = sample_body();
+        let bytes = encode_body_with_custom_delta_and_hlc(
+            &body,
+            |enc| {
+                enc.map(2).unwrap();
+                enc.str("v").unwrap();
+                enc.u32(1).unwrap();
+                enc.str("v").unwrap();
+                enc.u32(1).unwrap();
+            },
+            |enc| {
+                encode_hlc_max(enc, body.hlc_max.as_ref().unwrap()).unwrap();
+            },
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(err, DecodeError::DuplicateKey(key) if key == "v"));
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_hlc_max_keys() {
+        let body = sample_body();
+        let hlc = body.hlc_max.as_ref().unwrap();
+        let bytes = encode_body_with_custom_delta_and_hlc(
+            &body,
+            |enc| {
+                encode_txn_delta(enc, &body.delta).unwrap();
+            },
+            |enc| {
+                enc.map(4).unwrap();
+                enc.str("actor_id").unwrap();
+                enc.str(hlc.actor_id.as_str()).unwrap();
+                enc.str("logical").unwrap();
+                enc.u32(hlc.logical).unwrap();
+                enc.str("physical_ms").unwrap();
+                enc.u64(hlc.physical_ms).unwrap();
+                enc.str("logical").unwrap();
+                enc.u32(hlc.logical).unwrap();
+            },
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(err, DecodeError::DuplicateKey(key) if key == "logical"));
     }
 
     #[test]
