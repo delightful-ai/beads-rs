@@ -333,7 +333,7 @@ fn build_namespace_shards(
 
     for (key, tombstone) in state.iter_tombstones() {
         let TombstoneKey { id, .. } = key;
-        let shard = shard_for_tombstone(id);
+        let shard = shard_for_tombstone(&id);
         let path = shard_path(namespace, CheckpointFileKind::Tombstones, &shard);
         let wire = wire_tombstone(tombstone);
         push_jsonl_line(&mut payloads, path, &wire)?;
@@ -547,7 +547,9 @@ mod tests {
         let dep_to = BeadId::parse("beads-rs-abc2").unwrap();
 
         let bead = make_bead(&bead_id, &stamp);
-        let tombstone = Tombstone::new(bead_id.clone(), stamp.clone(), Some("bye".into()));
+        let collision_lineage = make_stamp(0, 0, "loser");
+        let tombstone =
+            Tombstone::new_collision(bead_id.clone(), stamp.clone(), collision_lineage, Some("bye".into()));
         let dep_key = DepKey::new(bead_id.clone(), dep_to.clone(), DepKind::Blocks).unwrap();
         let dep_edge = DepEdge::new(stamp.clone());
 

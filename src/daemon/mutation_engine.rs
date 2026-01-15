@@ -1536,7 +1536,7 @@ fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpEr
     for id in state
         .iter_live()
         .map(|(id, _)| id)
-        .chain(state.iter_tombstones().map(|(k, _)| &k.id))
+        .chain(state.iter_tombstones().map(|(_, t)| &t.id))
     {
         let Some(rest) = id.as_str().strip_prefix(&prefix) else {
             continue;
@@ -1816,7 +1816,7 @@ fn infer_bead_slug(state: &CanonicalState) -> Result<BeadSlug, OpError> {
     for id in state
         .iter_live()
         .map(|(id, _)| id)
-        .chain(state.iter_tombstones().map(|(k, _)| &k.id))
+        .chain(state.iter_tombstones().map(|(_, t)| &t.id))
     {
         *counts.entry(id.slug_value()).or_default() += 1;
     }
