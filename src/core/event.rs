@@ -2513,6 +2513,68 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_duplicate_bead_patch_keys() {
+        let body = sample_body();
+        let bytes = encode_body_with_custom_delta_and_hlc(
+            &body,
+            |enc| {
+                enc.map(2).unwrap();
+                enc.str("bead_upserts").unwrap();
+                enc.array(1).unwrap();
+                enc.map(1).unwrap();
+                enc.str("bead").unwrap();
+                enc.map(2).unwrap();
+                enc.str("id").unwrap();
+                enc.str("bd-test1").unwrap();
+                enc.str("id").unwrap();
+                enc.str("bd-test1").unwrap();
+                enc.str("v").unwrap();
+                enc.u32(1).unwrap();
+            },
+            |enc| {
+                encode_hlc_max(enc, body.hlc_max.as_ref().unwrap()).unwrap();
+            },
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(err, DecodeError::DuplicateKey(key) if key == "id"));
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_note_keys() {
+        let body = sample_body();
+        let bytes = encode_body_with_custom_delta_and_hlc(
+            &body,
+            |enc| {
+                enc.map(2).unwrap();
+                enc.str("note_appends").unwrap();
+                enc.array(1).unwrap();
+                enc.map(2).unwrap();
+                enc.str("bead_id").unwrap();
+                enc.str("bd-test1").unwrap();
+                enc.str("note").unwrap();
+                enc.map(5).unwrap();
+                enc.str("at").unwrap();
+                encode_wire_stamp(enc, &WireStamp(10, 1)).unwrap();
+                enc.str("author").unwrap();
+                enc.str(actor_id("alice").as_str()).unwrap();
+                enc.str("content").unwrap();
+                enc.str("note").unwrap();
+                enc.str("id").unwrap();
+                enc.str("note-1").unwrap();
+                enc.str("id").unwrap();
+                enc.str("note-1").unwrap();
+                enc.str("v").unwrap();
+                enc.u32(1).unwrap();
+            },
+            |enc| {
+                encode_hlc_max(enc, body.hlc_max.as_ref().unwrap()).unwrap();
+            },
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(err, DecodeError::DuplicateKey(key) if key == "id"));
+    }
+
+    #[test]
     fn decode_rejects_overlong_u32() {
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
