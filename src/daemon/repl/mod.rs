@@ -3,6 +3,7 @@
 pub mod frame;
 pub mod gap_buffer;
 pub mod manager;
+mod pending;
 pub mod peer_acks;
 pub mod proto;
 pub mod runtime;
