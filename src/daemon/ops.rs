@@ -746,6 +746,7 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
         | WalIndexError::HlcRowDecode(_)
         | WalIndexError::SegmentRowDecode(_)
         | WalIndexError::WatermarkRowDecode(_)
+        | WalIndexError::ReplicaLivenessRowDecode(_)
         | WalIndexError::CborDecode(_)
         | WalIndexError::CborEncode(_)
         | WalIndexError::OriginSeqOverflow { .. } => ErrorCode::IndexCorrupt,

@@ -11,6 +11,7 @@ use crate::api::{
     BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
     Note, StatusOutput, SyncWarning, Tombstone,
 };
+use crate::core::ReplicaRole;
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
 use crate::daemon::query::QueryResult;
@@ -578,6 +579,30 @@ fn render_admin_status(status: &AdminStatusOutput) -> String {
         }
     }
 
+    if !status.replica_liveness.is_empty() {
+        out.push_str("\nReplica Liveness:\n");
+        for entry in &status.replica_liveness {
+            let last_seen = if entry.last_seen_ms == 0 {
+                "never".to_string()
+            } else {
+                fmt_wall_ms(entry.last_seen_ms)
+            };
+            let last_handshake = if entry.last_handshake_ms == 0 {
+                "never".to_string()
+            } else {
+                fmt_wall_ms(entry.last_handshake_ms)
+            };
+            out.push_str(&format!(
+                "  {} (role={}, durability_eligible={}, last_seen={}, last_handshake={})\n",
+                entry.replica_id,
+                replica_role_str(entry.role),
+                entry.durability_eligible,
+                last_seen,
+                last_handshake
+            ));
+        }
+    }
+
     if !status.checkpoints.is_empty() {
         out.push_str("\nCheckpoints:\n");
         for group in &status.checkpoints {
@@ -936,6 +961,14 @@ fn fingerprint_kind_str(kind: &AdminFingerprintKind) -> &'static str {
 fn clock_anomaly_kind_str(kind: &AdminClockAnomalyKind) -> &'static str {
     match kind {
         AdminClockAnomalyKind::ForwardJumpClamped => "forward_jump_clamped",
+    }
+}
+
+fn replica_role_str(role: ReplicaRole) -> &'static str {
+    match role {
+        ReplicaRole::Anchor => "anchor",
+        ReplicaRole::Peer => "peer",
+        ReplicaRole::Observer => "observer",
     }
 }
 

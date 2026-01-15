@@ -12,7 +12,7 @@ use crate::core::{
     ActorId, Applied, Bead, Claim, ClientRequestId, ContentHash, DepEdge as CoreDepEdge,
     DepKey as CoreDepKey, Durable, EventId, HlcMax, NamespaceId, ReplicaId, SegmentId, Seq1,
     StoreId, StoreIdentity, Tombstone as CoreTombstone, TxnDeltaV1, TxnId, WallClock, Watermarks,
-    Workflow, WriteStamp,
+    Workflow, WriteStamp, ReplicaRole,
 };
 
 // =============================================================================
@@ -41,6 +41,7 @@ pub struct AdminStatusOutput {
     pub last_clock_anomaly: Option<AdminClockAnomaly>,
     pub wal: Vec<AdminWalNamespace>,
     pub replication: Vec<AdminReplicationPeer>,
+    pub replica_liveness: Vec<AdminReplicaLiveness>,
     pub checkpoints: Vec<AdminCheckpointGroup>,
 }
 
@@ -86,6 +87,15 @@ pub struct AdminReplicationPeer {
     pub lag_by_namespace: Vec<AdminReplicationNamespace>,
     pub watermarks_durable: Watermarks<Durable>,
     pub watermarks_applied: Watermarks<Applied>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminReplicaLiveness {
+    pub replica_id: ReplicaId,
+    pub last_seen_ms: u64,
+    pub last_handshake_ms: u64,
+    pub role: ReplicaRole,
+    pub durability_eligible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

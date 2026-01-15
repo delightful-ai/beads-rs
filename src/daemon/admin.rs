@@ -12,9 +12,9 @@ use crate::api::{
     AdminFlushSegment, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
     AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
     AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
-    AdminReloadPoliciesOutput, AdminReplicationNamespace, AdminReplicationPeer,
-    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalNamespace,
-    AdminWalSegment,
+    AdminReloadPoliciesOutput, AdminReplicaLiveness, AdminReplicationNamespace,
+    AdminReplicationPeer, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
+    AdminWalNamespace, AdminWalSegment,
 };
 use crate::core::{
     NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, WallClock, Watermarks,
@@ -61,6 +61,7 @@ impl Daemon {
             Err(err) => return Response::err(err),
         };
         let replication = build_replication_status(store, &namespaces);
+        let replica_liveness = build_replica_liveness(store);
         let checkpoints =
             build_checkpoint_status(self.checkpoint_group_snapshots(store.meta.store_id()));
 
@@ -73,6 +74,7 @@ impl Daemon {
             last_clock_anomaly: clock_anomaly_output(self.clock().last_anomaly()),
             wal,
             replication,
+            replica_liveness,
             checkpoints,
         };
 
@@ -615,6 +617,32 @@ fn build_replication_status(
                 watermarks_durable: snapshot.durable,
                 watermarks_applied: snapshot.applied,
             }
+        })
+        .collect()
+}
+
+fn build_replica_liveness(
+    store: &crate::daemon::store_runtime::StoreRuntime,
+) -> Vec<AdminReplicaLiveness> {
+    let mut rows = match store.wal_index.reader().load_replica_liveness() {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(
+                "replica liveness load failed for {}: {err}",
+                store.meta.store_id()
+            );
+            return Vec::new();
+        }
+    };
+
+    rows.sort_by(|a, b| a.replica_id.cmp(&b.replica_id));
+    rows.into_iter()
+        .map(|row| AdminReplicaLiveness {
+            replica_id: row.replica_id,
+            last_seen_ms: row.last_seen_ms,
+            last_handshake_ms: row.last_handshake_ms,
+            role: row.role,
+            durability_eligible: row.durability_eligible,
         })
         .collect()
 }

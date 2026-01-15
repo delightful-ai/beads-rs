@@ -408,6 +408,7 @@ fn admin_clock_anomaly_serializes_in_status_and_doctor() {
         last_clock_anomaly: Some(anomaly.clone()),
         wal: Vec::new(),
         replication: Vec::new(),
+        replica_liveness: Vec::new(),
         checkpoints: Vec::new(),
     };
     let status_json = serde_json::to_value(status).expect("serialize status");

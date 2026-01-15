@@ -7,7 +7,7 @@ use uuid::Uuid;
 use beads_rs::Limits;
 use beads_rs::core::{
     Applied, Durable, EventFrameV1, EventId, EventShaLookupError, HeadStatus, NamespaceId,
-    ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark,
+    ReplicaId, ReplicaRole, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark,
 };
 use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
 use beads_rs::daemon::repl::{
@@ -109,6 +109,17 @@ impl SessionStore for MockStore {
             .insert(*origin, applied);
 
         Ok(IngestOutcome { durable, applied })
+    }
+
+    fn update_replica_liveness(
+        &mut self,
+        _replica_id: ReplicaId,
+        _last_seen_ms: u64,
+        _last_handshake_ms: u64,
+        _role: ReplicaRole,
+        _durability_eligible: bool,
+    ) -> Result<(), beads_rs::daemon::wal::WalIndexError> {
+        Ok(())
     }
 }
 
