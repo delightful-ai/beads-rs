@@ -179,6 +179,45 @@ impl CheckpointScheduler {
         }
     }
 
+    pub fn force_checkpoint_for_namespace(
+        &mut self,
+        store_id: StoreId,
+        namespace: &NamespaceId,
+    ) -> Vec<String> {
+        let now = Instant::now();
+        let keys: Vec<CheckpointGroupKey> = self
+            .groups
+            .iter()
+            .filter(|(key, state)| {
+                key.store_id == store_id && state.config.includes_namespace(namespace)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        let mut scheduled = Vec::new();
+        for key in keys {
+            let max_events = self
+                .groups
+                .get(&key)
+                .map(|state| state.config.max_events)
+                .unwrap_or(0);
+            if let Some(state) = self.groups.get_mut(&key) {
+                state.record_event(now, max_events);
+            }
+            self.schedule_if_needed(&key, now);
+            let in_flight = self
+                .groups
+                .get(&key)
+                .map(|state| state.in_flight)
+                .unwrap_or(false);
+            if in_flight || self.pending.contains_key(&key) {
+                scheduled.push(key.group.clone());
+            }
+        }
+        scheduled.sort();
+        scheduled
+    }
+
     pub fn next_deadline(&mut self) -> Option<Instant> {
         self.pop_stale();
         self.heap.peek().map(|Reverse((t, _))| *t)
