@@ -1449,3 +1449,67 @@ fn fmt_duration_ms(ms: u64) -> String {
     let hours = mins / 60.0;
     format!("{hours:.1}h")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    use crate::core::{Applied, Durable, NamespaceId, ReplicaId, Seq0, StoreId};
+
+    #[test]
+    fn render_admin_status_includes_watermarks() {
+        let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+        let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+
+        let mut applied = Watermarks::<Applied>::new();
+        applied
+            .observe_at_least(
+                &NamespaceId::core(),
+                &origin,
+                Seq0::new(1),
+                HeadStatus::Known([1u8; 32]),
+            )
+            .expect("applied watermark");
+
+        let mut durable = Watermarks::<Durable>::new();
+        durable
+            .observe_at_least(
+                &NamespaceId::core(),
+                &origin,
+                Seq0::new(2),
+                HeadStatus::Known([2u8; 32]),
+            )
+            .expect("durable watermark");
+
+        let status = AdminStatusOutput {
+            store_id,
+            replica_id,
+            namespaces: vec![NamespaceId::core()],
+            watermarks_applied: applied,
+            watermarks_durable: durable,
+            last_clock_anomaly: None,
+            wal: Vec::new(),
+            replication: Vec::new(),
+            replica_liveness: Vec::new(),
+            checkpoints: Vec::new(),
+        };
+
+        let output = render_admin_status(&status);
+        let expected = concat!(
+            "Admin Status\n",
+            "============\n\n",
+            "Store:   01010101-0101-0101-0101-010101010101\n",
+            "Replica: 02020202-0202-0202-0202-020202020202\n",
+            "Namespaces: core\n",
+            "\nWatermarks (applied):\n",
+            "  core:\n",
+            "    03030303-0303-0303-0303-030303030303: seq=1 head=known\n",
+            "\nWatermarks (durable):\n",
+            "  core:\n",
+            "    03030303-0303-0303-0303-030303030303: seq=2 head=known",
+        );
+        assert_eq!(output, expected);
+    }
+}
