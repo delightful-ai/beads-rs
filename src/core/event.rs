@@ -47,7 +47,8 @@ impl<S> EventBytes<S> {
 }
 
 impl EventBytes<Canonical> {
-    pub fn new(bytes: Bytes) -> Self {
+    /// Construct canonical bytes without validation; only use with encoder output.
+    pub(crate) fn new_unchecked(bytes: Bytes) -> Self {
         Self {
             bytes,
             _state: PhantomData,
@@ -293,7 +294,7 @@ pub fn encode_event_body_canonical(body: &EventBody) -> Result<EventBytes<Canoni
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
     encode_event_body_map(&mut enc, body)?;
-    Ok(EventBytes::<Canonical>::new(Bytes::from(buf)))
+    Ok(EventBytes::<Canonical>::new_unchecked(Bytes::from(buf)))
 }
 
 pub fn decode_event_body(
