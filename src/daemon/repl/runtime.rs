@@ -15,11 +15,14 @@ use crate::core::error::details::{
 };
 use crate::core::{
     ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, EventShaLookupError, Limits,
-    NamespaceId, Opaque, PrevVerified, ReplicaId, SegmentId, Sha256, StoreId, VerifiedEvent,
+    NamespaceId, Opaque, PrevVerified, ReplicaId, ReplicaRole, SegmentId, Sha256, StoreId,
+    VerifiedEvent,
 };
 use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
 use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
-use crate::daemon::wal::{EventWalError, FrameReader, Record, WalIndex, WalIndexError};
+use crate::daemon::wal::{
+    EventWalError, FrameReader, Record, ReplicaLivenessRow, WalIndex, WalIndexError,
+};
 use crate::paths;
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 100;
@@ -180,6 +183,25 @@ impl SessionStore for ReplSessionStore {
                 true,
             )))
         })
+    }
+
+    fn update_replica_liveness(
+        &mut self,
+        replica_id: ReplicaId,
+        last_seen_ms: u64,
+        last_handshake_ms: u64,
+        role: ReplicaRole,
+        durability_eligible: bool,
+    ) -> Result<(), WalIndexError> {
+        let mut txn = self.wal_index.writer().begin_txn()?;
+        txn.upsert_replica_liveness(&ReplicaLivenessRow {
+            replica_id,
+            last_seen_ms,
+            last_handshake_ms,
+            role,
+            durability_eligible,
+        })?;
+        txn.commit()
     }
 }
 

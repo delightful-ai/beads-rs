@@ -4,8 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use super::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::core::{
-    EventId, EventShaLookupError, NamespaceId, PrevVerified, ReplicaId, Sha256, VerifiedEvent,
+    EventId, EventShaLookupError, NamespaceId, PrevVerified, ReplicaId, ReplicaRole, Sha256,
+    VerifiedEvent,
 };
+use crate::daemon::wal::WalIndexError;
 
 pub struct SharedSessionStore<S> {
     inner: Arc<Mutex<S>>,
@@ -53,5 +55,22 @@ impl<S: SessionStore> SessionStore for SharedSessionStore<S> {
     ) -> Result<IngestOutcome, Box<crate::core::ErrorPayload>> {
         self.lock()
             .ingest_remote_batch(namespace, origin, batch, now_ms)
+    }
+
+    fn update_replica_liveness(
+        &mut self,
+        replica_id: ReplicaId,
+        last_seen_ms: u64,
+        last_handshake_ms: u64,
+        role: ReplicaRole,
+        durability_eligible: bool,
+    ) -> Result<(), WalIndexError> {
+        self.lock().update_replica_liveness(
+            replica_id,
+            last_seen_ms,
+            last_handshake_ms,
+            role,
+            durability_eligible,
+        )
     }
 }

@@ -336,6 +336,9 @@ where
     let role = roster_entry
         .map(|entry| entry.role)
         .unwrap_or(ReplicaRole::Peer);
+    let durability_eligible = roster_entry
+        .map(|entry| entry.durability_eligible)
+        .unwrap_or(role != ReplicaRole::Observer);
     let allowed_namespaces = roster_entry.and_then(|entry| entry.allowed_namespaces.clone());
     let eligible = eligible_namespaces(&runtime.policies, role, allowed_namespaces.as_ref());
 
@@ -348,6 +351,7 @@ where
     let offered_namespaces = hello.offered_namespaces.clone();
     let mut session = Session::new(SessionRole::Inbound, config, limits.clone(), admission);
     let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
+    let mut handshake_at_ms = None;
     let now_ms_val = now_ms();
     keepalive.note_recv(now_ms_val);
     let actions = session.handle_message(ReplMessage::Hello(hello), &mut store, now_ms_val);
@@ -392,6 +396,16 @@ where
     {
         accepted_set = peer.accepted_namespaces.iter().cloned().collect();
         live_stream_enabled = peer.live_stream_enabled;
+        handshake_at_ms = Some(now_ms_val);
+        if let Err(err) = store.update_replica_liveness(
+            peer_replica_id,
+            now_ms_val,
+            now_ms_val,
+            role,
+            durability_eligible,
+        ) {
+            tracing::warn!("replica liveness update failed: {err}");
+        }
         tracing::info!(
             target: "repl",
             direction = "inbound",
@@ -448,6 +462,18 @@ where
                                     update_peer_ack(&store, &peer_acks, peer_replica_id, ack)
                             {
                                 tracing::warn!("peer ack update failed: {err}");
+                            }
+                            if let SessionAction::PeerAck(_) = &action
+                                && let Some(handshake_ms) = handshake_at_ms
+                                && let Err(err) = store.update_replica_liveness(
+                                    peer_replica_id,
+                                    now_ms,
+                                    handshake_ms,
+                                    role,
+                                    durability_eligible,
+                                )
+                            {
+                                tracing::warn!("replica liveness update failed: {err}");
                             }
 
                             if let SessionAction::PeerWant(want) = &action {
@@ -521,6 +547,19 @@ where
 
         if !streaming && session.phase() == SessionPhase::Streaming {
             streaming = true;
+            if handshake_at_ms.is_none() {
+                let now_ms = now_ms();
+                handshake_at_ms = Some(now_ms);
+                if let Err(err) = store.update_replica_liveness(
+                    peer_replica_id,
+                    now_ms,
+                    now_ms,
+                    role,
+                    durability_eligible,
+                ) {
+                    tracing::warn!("replica liveness update failed: {err}");
+                }
+            }
         }
         if streaming && !pending_events.is_empty() {
             let frames = pending_events
@@ -996,6 +1035,17 @@ mod tests {
                 durable: watermark,
                 applied,
             })
+        }
+
+        fn update_replica_liveness(
+            &mut self,
+            _replica_id: ReplicaId,
+            _last_seen_ms: u64,
+            _last_handshake_ms: u64,
+            _role: ReplicaRole,
+            _durability_eligible: bool,
+        ) -> Result<(), crate::daemon::wal::WalIndexError> {
+            Ok(())
         }
     }
 
