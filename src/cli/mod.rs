@@ -797,6 +797,8 @@ pub enum AdminCmd {
     /// Run admin scrub now checks.
     #[command(name = "scrub")]
     Scrub(AdminScrubArgs),
+    /// Flush WAL for a namespace.
+    Flush(AdminFlushArgs),
     /// Show admin fingerprint for divergence detection.
     Fingerprint(AdminFingerprintArgs),
     /// Reload namespace policies from namespaces.toml.
@@ -838,6 +840,13 @@ pub struct AdminScrubArgs {
     /// Verify checkpoint cache entries.
     #[arg(long)]
     pub verify_checkpoint_cache: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminFlushArgs {
+    /// Trigger checkpoint immediately for matching groups.
+    #[arg(long = "checkpoint-now")]
+    pub checkpoint_now: bool,
 }
 
 #[derive(Args, Debug)]

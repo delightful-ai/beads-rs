@@ -5,7 +5,8 @@
 
 use crate::api::{
     AdminClockAnomalyKind, AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode,
-    AdminFingerprintOutput, AdminFingerprintSample, AdminHealthReport, AdminHealthStatus,
+    AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput, AdminHealthReport,
+    AdminHealthStatus,
     AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
     AdminReloadPoliciesOutput, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
     BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
@@ -497,6 +498,7 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::AdminMetrics(metrics) => render_admin_metrics(metrics),
         QueryResult::AdminDoctor(out) => render_admin_doctor(out),
         QueryResult::AdminScrub(out) => render_admin_scrub(out),
+        QueryResult::AdminFlush(out) => render_admin_flush(out),
         QueryResult::AdminFingerprint(out) => render_admin_fingerprint(out),
         QueryResult::AdminReloadPolicies(out) => render_admin_reload_policies(out),
         QueryResult::AdminRotateReplicaId(out) => render_admin_rotate_replica_id(out),
@@ -659,6 +661,41 @@ fn render_admin_doctor(out: &AdminDoctorOutput) -> String {
 
 fn render_admin_scrub(out: &AdminScrubOutput) -> String {
     render_admin_health("Admin Scrub", &out.report)
+}
+
+fn render_admin_flush(out: &AdminFlushOutput) -> String {
+    let mut out_str = String::new();
+    out_str.push_str("Admin Flush\n");
+    out_str.push_str("===========\n\n");
+    out_str.push_str(&format!("Namespace: {}\n", out.namespace.as_str()));
+    out_str.push_str(&format!(
+        "Flushed at: {}\n",
+        fmt_wall_ms(out.flushed_at_ms)
+    ));
+    match &out.segment {
+        Some(segment) => {
+            out_str.push_str("Segment:\n");
+            out_str.push_str(&format!("  id:         {}\n", segment.segment_id));
+            out_str.push_str(&format!(
+                "  created_at: {}\n",
+                fmt_wall_ms(segment.created_at_ms)
+            ));
+            out_str.push_str(&format!("  path:       {}\n", segment.path));
+        }
+        None => out_str.push_str("Segment: none\n"),
+    }
+    if out.checkpoint_now {
+        out_str.push_str("Checkpoint now: yes\n");
+    } else {
+        out_str.push_str("Checkpoint now: no\n");
+    }
+    if !out.checkpoint_groups.is_empty() {
+        out_str.push_str("Checkpoint groups:\n");
+        for group in &out.checkpoint_groups {
+            out_str.push_str(&format!("  {group}\n"));
+        }
+    }
+    out_str.trim_end().into()
 }
 
 fn render_admin_fingerprint(out: &AdminFingerprintOutput) -> String {

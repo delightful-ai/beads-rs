@@ -41,6 +41,15 @@ pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
+        AdminCmd::Flush(args) => {
+            let req = Request::AdminFlush {
+                repo: ctx.repo.clone(),
+                namespace: ctx.namespace.as_ref().map(|ns| ns.as_str().to_string()),
+                checkpoint_now: args.checkpoint_now,
+            };
+            let ok = send(&req)?;
+            print_ok(&ok, ctx.json)
+        }
         AdminCmd::Fingerprint(args) => {
             let (mode, sample) = match args.sample {
                 Some(shard_count) => {
