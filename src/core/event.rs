@@ -2037,6 +2037,79 @@ mod tests {
         body
     }
 
+    fn encode_body_with_unknown_fields(body: &EventBody) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+
+        let mut len = 10;
+        if body.client_request_id.is_some() {
+            len += 1;
+        }
+        if body.hlc_max.is_some() {
+            len += 1;
+        }
+        len += 1;
+
+        enc.map(len as u64).unwrap();
+
+        enc.str("future_field").unwrap();
+        enc.map(1).unwrap();
+        enc.str("nested").unwrap();
+        enc.u64(42).unwrap();
+
+        if let Some(client_request_id) = &body.client_request_id {
+            enc.str("client_request_id").unwrap();
+            enc.str(&client_request_id.as_uuid().to_string()).unwrap();
+        }
+
+        enc.str("delta").unwrap();
+        encode_txn_delta(&mut enc, &body.delta).unwrap();
+
+        enc.str("envelope_v").unwrap();
+        enc.u32(body.envelope_v).unwrap();
+
+        enc.str("event_time_ms").unwrap();
+        enc.u64(body.event_time_ms).unwrap();
+
+        if let Some(hlc_max) = &body.hlc_max {
+            enc.str("hlc_max").unwrap();
+            enc.map(4).unwrap();
+            enc.str("actor_id").unwrap();
+            enc.str(hlc_max.actor_id.as_str()).unwrap();
+            enc.str("logical").unwrap();
+            enc.u32(hlc_max.logical).unwrap();
+            enc.str("physical_ms").unwrap();
+            enc.u64(hlc_max.physical_ms).unwrap();
+            enc.str("future_hlc").unwrap();
+            enc.u64(999).unwrap();
+        }
+
+        enc.str("kind").unwrap();
+        enc.str(body.kind.as_str()).unwrap();
+
+        enc.str("namespace").unwrap();
+        enc.str(body.namespace.as_str()).unwrap();
+
+        enc.str("origin_replica_id").unwrap();
+        enc.str(&body.origin_replica_id.as_uuid().to_string())
+            .unwrap();
+
+        enc.str("origin_seq").unwrap();
+        enc.u64(body.origin_seq.get()).unwrap();
+
+        enc.str("store_epoch").unwrap();
+        enc.u64(body.store.store_epoch.get()).unwrap();
+
+        enc.str("store_id").unwrap();
+        enc.str(&body.store.store_id.as_uuid().to_string())
+            .unwrap();
+
+        enc.str("txn_id").unwrap();
+        enc.str(&body.txn_id.as_uuid().to_string()).unwrap();
+
+        buf
+    }
+
     fn sample_body_with_seq(seq: u64) -> EventBody {
         let mut body = sample_body();
         body.origin_seq = Seq1::from_u64(seq).unwrap();
@@ -2087,6 +2160,14 @@ mod tests {
     fn decode_roundtrip_event_body_with_ops() {
         let body = sample_body_with_ops();
         let encoded = encode_event_body_canonical(&body).unwrap();
+        let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
+        assert_eq!(body, decoded);
+    }
+
+    #[test]
+    fn decode_accepts_unknown_event_body_fields() {
+        let body = sample_body();
+        let encoded = encode_body_with_unknown_fields(&body);
         let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
         assert_eq!(body, decoded);
     }
