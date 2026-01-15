@@ -99,12 +99,12 @@ pub struct Want {
     pub want: WatermarkMap,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ping {
     pub nonce: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pong {
     pub nonce: u64,
 }

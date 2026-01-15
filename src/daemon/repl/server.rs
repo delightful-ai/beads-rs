@@ -347,9 +347,9 @@ where
     let offered_namespaces = hello.offered_namespaces.clone();
     let mut session = Session::new(SessionRole::Inbound, config, limits.clone(), admission);
     let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
-    let now_ms = now_ms();
-    keepalive.note_recv(now_ms);
-    let actions = session.handle_message(ReplMessage::Hello(hello), &mut store, now_ms);
+    let now_ms_val = now_ms();
+    keepalive.note_recv(now_ms_val);
+    let actions = session.handle_message(ReplMessage::Hello(hello), &mut store, now_ms_val);
 
     for action in actions {
         if let SessionAction::PeerAck(ack) = &action
