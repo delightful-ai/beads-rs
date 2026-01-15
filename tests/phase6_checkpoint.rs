@@ -76,7 +76,7 @@ fn phase6_checkpoint_round_trip_preserves_state_and_manifest() {
     let imported = import_checkpoint(temp.path(), &beads_rs::Limits::default()).expect("import");
     assert_store_state_stats(&store_state, &imported.state);
 
-    let imported_state = imported.state.get(&core).expect("core state present");
+    assert!(imported.state.get(&core).is_some(), "core state present");
     let imported_watermarks =
         watermarks_from_included(&imported.included, imported.included_heads.as_ref());
 
@@ -89,7 +89,7 @@ fn phase6_checkpoint_round_trip_preserves_state_and_manifest() {
         expected_export.meta.created_by_replica_id,
         expected_export.meta.policy_hash,
         expected_export.meta.roster_hash,
-        imported_state,
+        &imported.state,
         &imported_watermarks,
     );
     let export_again = export_checkpoint(CheckpointExportInput {
@@ -175,7 +175,7 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
         origin,
         ContentHash::from_bytes([9u8; 32]),
         None,
-        &state,
+        &store_state,
         &watermarks,
     );
     let export = export_checkpoint(CheckpointExportInput {
@@ -196,7 +196,7 @@ fn build_snapshot_from_state(
     created_by_replica_id: ReplicaId,
     policy_hash: ContentHash,
     roster_hash: Option<ContentHash>,
-    state: &CanonicalState,
+    state: &StoreState,
     watermarks: &Watermarks<Durable>,
 ) -> beads_rs::git::checkpoint::CheckpointSnapshot {
     beads_rs::git::checkpoint::build_snapshot(CheckpointSnapshotInput {
