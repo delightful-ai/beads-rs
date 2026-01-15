@@ -180,6 +180,13 @@ impl Session {
         self.peer.as_ref()
     }
 
+    pub fn negotiated_max_frame_bytes(&self) -> usize {
+        self.peer
+            .as_ref()
+            .map(|peer| peer.max_frame_bytes as usize)
+            .unwrap_or(self.config.max_frame_bytes as usize)
+    }
+
     pub fn begin_handshake(
         &mut self,
         store: &impl SessionStore,

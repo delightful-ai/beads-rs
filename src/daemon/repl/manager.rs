@@ -535,7 +535,7 @@ fn send_payload(
         .unwrap_or(PROTOCOL_VERSION_V1);
     let envelope = ReplEnvelope { version, message };
     let bytes = encode_envelope(&envelope)?;
-    writer.write_frame(&bytes)?;
+    writer.write_frame_with_limit(&bytes, session.negotiated_max_frame_bytes())?;
     Ok(())
 }
 
@@ -549,6 +549,7 @@ fn send_events(
         return Ok(());
     }
 
+    let max_frame_bytes = session.negotiated_max_frame_bytes();
     let mut batch = Vec::new();
     let mut batch_bytes = 0usize;
 
@@ -567,8 +568,31 @@ fn send_events(
             batch = Vec::new();
             batch_bytes = 0;
         }
+
         batch_bytes = batch_bytes.saturating_add(frame_bytes);
         batch.push(frame);
+
+        let envelope_bytes = events_envelope_len(session, &batch)?;
+        if envelope_bytes > max_frame_bytes {
+            let frame = batch.pop().expect("batch not empty");
+            if !batch.is_empty() {
+                metrics::repl_events_out(batch.len());
+                send_payload(
+                    writer,
+                    session,
+                    ReplMessage::Events(Events { events: batch }),
+                )?;
+            }
+            batch = vec![frame];
+            batch_bytes = frame_bytes;
+            let single_len = events_envelope_len(session, &batch)?;
+            if single_len > max_frame_bytes {
+                return Err(PeerError::Frame(FrameError::FrameTooLarge {
+                    max_frame_bytes,
+                    got_bytes: single_len,
+                }));
+            }
+        }
     }
 
     if !batch.is_empty() {
@@ -581,6 +605,21 @@ fn send_events(
     }
 
     Ok(())
+}
+
+fn events_envelope_len(session: &Session, batch: &[EventFrameV1]) -> Result<usize, PeerError> {
+    let version = session
+        .peer()
+        .map(|peer| peer.protocol_version)
+        .unwrap_or(PROTOCOL_VERSION_V1);
+    let envelope = ReplEnvelope {
+        version,
+        message: ReplMessage::Events(Events {
+            events: batch.to_vec(),
+        }),
+    };
+    let bytes = encode_envelope(&envelope)?;
+    Ok(bytes.len())
 }
 
 fn send_hot_cache(
@@ -790,17 +829,18 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use crossbeam::channel::Receiver;
-    use std::net::TcpListener;
-    use std::time::Instant;
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Canonical, Durable, ErrorCode, ErrorPayload, EventId, HeadStatus, NamespacePolicy,
-        Seq0, Seq1, Sha256, Watermark,
+        Applied, Canonical, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId,
+        HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch,
+        StoreId, StoreIdentity, Watermark,
     };
     use crate::daemon::repl::IngestOutcome;
     use crate::daemon::repl::WatermarkSnapshot;
-    use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
+    use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap, Welcome};
 
     #[derive(Default)]
     struct TestStore;
@@ -1082,6 +1122,106 @@ mod tests {
         assert_eq!(events.events[0].eid.namespace, NamespaceId::core());
 
         handle.shutdown();
+    }
+
+    #[test]
+    fn send_events_respects_negotiated_max_frame_bytes() {
+        let limits = test_limits();
+        let local_store = StoreIdentity::new(
+            StoreId::new(Uuid::from_bytes([20u8; 16])),
+            StoreEpoch::ZERO,
+        );
+        let local_replica = ReplicaId::new(Uuid::from_bytes([21u8; 16]));
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
+
+        let mut config = SessionConfig::new(local_store, local_replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()];
+        config.offered_namespaces = vec![NamespaceId::core()];
+        let mut session = Session::new(
+            SessionRole::Outbound,
+            config,
+            limits.clone(),
+            AdmissionController::new(&limits),
+        );
+        let _ = session.begin_handshake(&TestStore::default(), now_ms());
+        let welcome = Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: local_store.store_id,
+            store_epoch: local_store.store_epoch,
+            receiver_replica_id: peer_replica,
+            welcome_nonce: 1,
+            accepted_namespaces: vec![NamespaceId::core()],
+            receiver_seen_durable: WatermarkMap::new(),
+            receiver_seen_durable_heads: None,
+            receiver_seen_applied: None,
+            receiver_seen_applied_heads: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 200,
+        };
+        session.handle_message(ReplMessage::Welcome(welcome), &mut TestStore::default(), now_ms());
+        assert!(matches!(session.phase(), SessionPhase::Streaming));
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = crossbeam::channel::bounded(1);
+
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = FrameReader::new(stream, 1024 * 1024);
+            let mut counts = Vec::new();
+            while let Ok(Some(frame)) = reader.read_next() {
+                let envelope =
+                    decode_envelope(&frame, &crate::core::Limits::default()).expect("decode");
+                if let ReplMessage::Events(events) = envelope.message {
+                    counts.push(events.events.len());
+                    if counts.len() == 2 {
+                        break;
+                    }
+                }
+            }
+            let _ = tx.send(counts);
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect");
+        let mut writer = FrameWriter::new(stream, limits.max_frame_bytes);
+
+        let origin = ReplicaId::new(Uuid::from_bytes([23u8; 16]));
+        let namespace = NamespaceId::core();
+        let max_frame = session.negotiated_max_frame_bytes();
+        let mut payload_len = 10usize;
+        let (frame1, frame2) = loop {
+            let f1 = make_frame(namespace.clone(), origin, 1, payload_len);
+            let f2 = make_frame(namespace.clone(), origin, 2, payload_len);
+            let len_single = events_envelope_len(&session, &[f1.clone()]).expect("len");
+            let len_double = events_envelope_len(&session, &[f1.clone(), f2.clone()]).expect("len");
+            if len_single < max_frame && len_double > max_frame {
+                break (f1, f2);
+            }
+            payload_len = payload_len.saturating_add(10);
+            if payload_len > 10_000 {
+                panic!("unable to craft frame sizes");
+            }
+        };
+
+        send_events(&mut writer, &session, vec![frame1, frame2], &limits).expect("send");
+
+        let counts = rx.recv_timeout(Duration::from_secs(1)).expect("counts");
+        assert_eq!(counts, vec![1, 1]);
+    }
+
+    fn make_frame(
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        payload_len: usize,
+    ) -> EventFrameV1 {
+        let bytes = EventBytes::<Opaque>::new(Bytes::from(vec![0u8; payload_len.max(1)]));
+        EventFrameV1 {
+            eid: EventId::new(origin, namespace, Seq1::from_u64(seq).unwrap()),
+            sha256: Sha256([seq as u8; 32]),
+            prev_sha256: None,
+            bytes,
+        }
     }
 
     #[test]

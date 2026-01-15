@@ -602,7 +602,7 @@ fn send_payload(
         .unwrap_or(PROTOCOL_VERSION_V1);
     let envelope = ReplEnvelope { version, message };
     let bytes = encode_envelope(&envelope)?;
-    writer.write_frame(&bytes)?;
+    writer.write_frame_with_limit(&bytes, session.negotiated_max_frame_bytes())?;
     Ok(())
 }
 
@@ -629,6 +629,7 @@ fn send_events(
         return Ok(());
     }
 
+    let max_frame_bytes = session.negotiated_max_frame_bytes();
     let mut batch = Vec::new();
     let mut batch_bytes = 0usize;
 
@@ -649,6 +650,28 @@ fn send_events(
         }
         batch_bytes = batch_bytes.saturating_add(frame_bytes);
         batch.push(frame);
+
+        let envelope_bytes = events_envelope_len(session, &batch)?;
+        if envelope_bytes > max_frame_bytes {
+            let frame = batch.pop().expect("batch not empty");
+            if !batch.is_empty() {
+                metrics::repl_events_out(batch.len());
+                send_payload(
+                    writer,
+                    session,
+                    ReplMessage::Events(Events { events: batch }),
+                )?;
+            }
+            batch = vec![frame];
+            batch_bytes = frame_bytes;
+            let single_len = events_envelope_len(session, &batch)?;
+            if single_len > max_frame_bytes {
+                return Err(ConnectionError::Frame(FrameError::FrameTooLarge {
+                    max_frame_bytes,
+                    got_bytes: single_len,
+                }));
+            }
+        }
     }
 
     if !batch.is_empty() {
@@ -661,6 +684,21 @@ fn send_events(
     }
 
     Ok(())
+}
+
+fn events_envelope_len(session: &Session, batch: &[EventFrameV1]) -> Result<usize, ConnectionError> {
+    let version = session
+        .peer()
+        .map(|peer| peer.protocol_version)
+        .unwrap_or(PROTOCOL_VERSION_V1);
+    let envelope = ReplEnvelope {
+        version,
+        message: ReplMessage::Events(Events {
+            events: batch.to_vec(),
+        }),
+    };
+    let bytes = encode_envelope(&envelope)?;
+    Ok(bytes.len())
 }
 
 fn send_hot_cache(

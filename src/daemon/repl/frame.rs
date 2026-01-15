@@ -136,6 +136,16 @@ impl<W: Write> FrameWriter<W> {
         self.writer.write_all(&frame)?;
         Ok(frame.len())
     }
+
+    pub fn write_frame_with_limit(
+        &mut self,
+        payload: &[u8],
+        max_frame_bytes: usize,
+    ) -> Result<usize, FrameError> {
+        let frame = encode_frame(payload, max_frame_bytes)?;
+        self.writer.write_all(&frame)?;
+        Ok(frame.len())
+    }
 }
 
 pub fn encode_frame(payload: &[u8], max_frame_bytes: usize) -> Result<Vec<u8>, FrameError> {
