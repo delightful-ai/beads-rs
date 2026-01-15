@@ -6,12 +6,13 @@
 //! - LLM-robust parsing (aliases, boolish flags, case/dash tolerance)
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Args, Parser, Subcommand, builder::BoolishValueParser};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
 
+use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{
     ActorId, BeadId, BeadSlug, BeadType, ClientRequestId, DepKind, NamespaceId, Priority,
 };
@@ -1053,11 +1054,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Upgrade(args) => commands::upgrade::handle(cli.json, args.background),
         cmd => {
             let repo = resolve_repo(cli.repo)?;
+            let config = load_cli_config(&repo);
             let ctx = Ctx {
                 repo,
                 json: cli.json,
-                namespace: normalize_optional_namespace(cli.namespace.as_deref())?,
-                durability: cli.durability.clone(),
+                namespace: resolve_namespace(cli.namespace.as_deref(), &config)?,
+                durability: resolve_durability(cli.durability.as_deref(), &config),
                 client_request_id: normalize_optional_client_request_id(
                     cli.client_request_id.as_deref(),
                 )?,
@@ -1154,6 +1156,32 @@ fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
     };
 
     Ok(std::fs::canonicalize(&abs).unwrap_or(abs))
+}
+
+fn load_cli_config(repo: &Path) -> Config {
+    match load_for_repo(Some(repo)) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::warn!("config load failed, using defaults: {err}");
+            let mut cfg = Config::default();
+            apply_env_overrides(&mut cfg);
+            cfg
+        }
+    }
+}
+
+fn resolve_namespace(cli_value: Option<&str>, config: &Config) -> Result<Option<NamespaceId>> {
+    if let Some(raw) = cli_value {
+        normalize_optional_namespace(Some(raw))
+    } else {
+        Ok(config.defaults.namespace.clone())
+    }
+}
+
+fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Option<String> {
+    cli_value
+        .map(str::to_string)
+        .or_else(|| config.defaults.durability.as_ref().map(ToString::to_string))
 }
 
 pub(super) fn normalize_bead_id(id: &str) -> Result<BeadId> {
@@ -1550,7 +1578,10 @@ fn current_actor_string() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DefaultsConfig;
+    use crate::core::DurabilityClass;
     use crate::daemon::OpError;
+    use std::num::NonZeroU32;
 
     fn assert_validation_failed(err: Error, field: &str) {
         match err {
@@ -1589,6 +1620,38 @@ mod tests {
     fn normalize_optional_namespace_accepts_core() {
         let ns = normalize_optional_namespace(Some("core")).expect("valid namespace");
         assert_eq!(ns.unwrap().as_str(), "core");
+    }
+
+    #[test]
+    fn resolve_defaults_use_config_when_no_flags() {
+        let mut config = Config::default();
+        config.defaults = DefaultsConfig {
+            namespace: Some(NamespaceId::parse("wf").unwrap()),
+            durability: Some(DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).unwrap(),
+            }),
+            ..DefaultsConfig::default()
+        };
+
+        let namespace = resolve_namespace(None, &config).expect("namespace");
+        assert_eq!(namespace, Some(NamespaceId::parse("wf").unwrap()));
+        let durability = resolve_durability(None, &config);
+        assert_eq!(durability, Some("replicated_fsync(2)".to_string()));
+    }
+
+    #[test]
+    fn resolve_defaults_cli_overrides_config() {
+        let mut config = Config::default();
+        config.defaults = DefaultsConfig {
+            namespace: Some(NamespaceId::parse("wf").unwrap()),
+            durability: Some(DurabilityClass::LocalFsync),
+            ..DefaultsConfig::default()
+        };
+
+        let namespace = resolve_namespace(Some("core"), &config).expect("namespace");
+        assert_eq!(namespace, Some(NamespaceId::core()));
+        let durability = resolve_durability(Some("replicated_fsync(3)"), &config);
+        assert_eq!(durability, Some("replicated_fsync(3)".to_string()));
     }
 
     #[test]
