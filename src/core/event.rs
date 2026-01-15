@@ -2226,6 +2226,29 @@ mod tests {
         buf
     }
 
+    fn replace_value_bytes(
+        mut bytes: Vec<u8>,
+        key: &str,
+        original_len: usize,
+        replacement: &[u8],
+    ) -> Vec<u8> {
+        let key_bytes = key.as_bytes();
+        assert!(key_bytes.len() <= 23, "key length must fit in single CBOR byte");
+        let mut marker = Vec::with_capacity(1 + key_bytes.len());
+        marker.push(0x60 + key_bytes.len() as u8);
+        marker.extend_from_slice(key_bytes);
+        let Some(pos) = bytes.windows(marker.len()).position(|win| win == marker) else {
+            panic!("key {key} not found in encoded bytes");
+        };
+        let value_pos = pos + marker.len();
+        assert!(
+            value_pos + original_len <= bytes.len(),
+            "value bytes out of range"
+        );
+        bytes.splice(value_pos..value_pos + original_len, replacement.iter().copied());
+        bytes
+    }
+
     fn sample_body_with_seq(seq: u64) -> EventBody {
         let mut body = sample_body();
         body.origin_seq = Seq1::from_u64(seq).unwrap();
@@ -2286,6 +2309,56 @@ mod tests {
         let encoded = encode_body_with_unknown_fields(&body);
         let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
         assert_eq!(body, decoded);
+    }
+
+    #[test]
+    fn decode_rejects_overlong_u32() {
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let bytes = replace_value_bytes(encoded.as_ref().to_vec(), "envelope_v", 1, &[0x18, 0x01]);
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::InvalidField {
+                field: "envelope_v",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_overlong_u64() {
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let bytes = replace_value_bytes(
+            encoded.as_ref().to_vec(),
+            "event_time_ms",
+            2,
+            &[0x19, 0x00, 0x7b],
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::InvalidField {
+                field: "event_time_ms",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_tagged_integer() {
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let bytes = replace_value_bytes(encoded.as_ref().to_vec(), "envelope_v", 1, &[0xc0, 0x01]);
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::InvalidField {
+                field: "envelope_v",
+                ..
+            }
+        ));
     }
 
     #[test]
