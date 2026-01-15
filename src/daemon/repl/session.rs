@@ -19,8 +19,8 @@ use crate::daemon::metrics;
 
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
-    Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplMessage, Want, WatermarkHeads,
-    WatermarkMap,
+    Ack, Capabilities, Events, Hello, Ping, Pong, PROTOCOL_VERSION_V1, ReplMessage, Want,
+    WatermarkHeads, WatermarkMap,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,6 +212,8 @@ impl Session {
             ReplMessage::Events(msg) => self.handle_events(msg, store, now_ms),
             ReplMessage::Ack(msg) => self.handle_ack(msg),
             ReplMessage::Want(msg) => self.handle_want(msg),
+            ReplMessage::Ping(msg) => self.handle_ping(msg),
+            ReplMessage::Pong(msg) => self.handle_pong(msg),
             ReplMessage::Error(msg) => self.handle_peer_error(msg),
         }
     }
@@ -232,6 +234,20 @@ impl Session {
             return self.invalid_request("WANT before handshake");
         }
         vec![SessionAction::PeerWant(want)]
+    }
+
+    fn handle_ping(&mut self, ping: Ping) -> Vec<SessionAction> {
+        if self.phase != SessionPhase::Streaming {
+            return self.invalid_request("PING before handshake");
+        }
+        vec![SessionAction::Send(ReplMessage::Pong(Pong { nonce: ping.nonce }))]
+    }
+
+    fn handle_pong(&mut self, _pong: Pong) -> Vec<SessionAction> {
+        if self.phase != SessionPhase::Streaming {
+            return self.invalid_request("PONG before handshake");
+        }
+        Vec::new()
     }
 
     fn handle_peer_error(&mut self, payload: ErrorPayload) -> Vec<SessionAction> {

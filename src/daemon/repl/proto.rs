@@ -35,6 +35,8 @@ pub enum ReplMessage {
     Events(Events),
     Ack(Ack),
     Want(Want),
+    Ping(Ping),
+    Pong(Pong),
     Error(ErrorPayload),
 }
 
@@ -97,6 +99,16 @@ pub struct Want {
     pub want: WatermarkMap,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ping {
+    pub nonce: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pong {
+    pub nonce: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MessageType {
     Hello,
@@ -104,6 +116,8 @@ enum MessageType {
     Events,
     Ack,
     Want,
+    Ping,
+    Pong,
     Error,
 }
 
@@ -115,6 +129,8 @@ impl MessageType {
             MessageType::Events => "EVENTS",
             MessageType::Ack => "ACK",
             MessageType::Want => "WANT",
+            MessageType::Ping => "PING",
+            MessageType::Pong => "PONG",
             MessageType::Error => "ERROR",
         }
     }
@@ -126,6 +142,8 @@ impl MessageType {
             "EVENTS" => Some(MessageType::Events),
             "ACK" => Some(MessageType::Ack),
             "WANT" => Some(MessageType::Want),
+            "PING" => Some(MessageType::Ping),
+            "PONG" => Some(MessageType::Pong),
             "ERROR" => Some(MessageType::Error),
             _ => None,
         }
@@ -140,6 +158,8 @@ impl ReplMessage {
             ReplMessage::Events(_) => MessageType::Events,
             ReplMessage::Ack(_) => MessageType::Ack,
             ReplMessage::Want(_) => MessageType::Want,
+            ReplMessage::Ping(_) => MessageType::Ping,
+            ReplMessage::Pong(_) => MessageType::Pong,
             ReplMessage::Error(_) => MessageType::Error,
         }
     }
@@ -339,6 +359,8 @@ fn encode_message_body(
         ReplMessage::Events(msg) => encode_events(enc, msg),
         ReplMessage::Ack(msg) => encode_ack(enc, msg),
         ReplMessage::Want(msg) => encode_want(enc, msg),
+        ReplMessage::Ping(msg) => encode_ping(enc, msg),
+        ReplMessage::Pong(msg) => encode_pong(enc, msg),
         ReplMessage::Error(msg) => encode_error_payload(enc, msg),
     }
 }
@@ -356,6 +378,8 @@ fn decode_message_body(
         MessageType::Events => ReplMessage::Events(decode_events(&mut dec, limits)?),
         MessageType::Ack => ReplMessage::Ack(decode_ack(&mut dec, limits)?),
         MessageType::Want => ReplMessage::Want(decode_want(&mut dec, limits)?),
+        MessageType::Ping => ReplMessage::Ping(decode_ping(&mut dec, limits)?),
+        MessageType::Pong => ReplMessage::Pong(decode_pong(&mut dec, limits)?),
         MessageType::Error => ReplMessage::Error(decode_error_payload(&mut dec, limits)?),
     };
 
@@ -791,6 +815,60 @@ fn decode_want(dec: &mut Decoder, limits: &Limits) -> Result<Want, ProtoDecodeEr
     }
     Ok(Want {
         want: want.ok_or(ProtoDecodeError::MissingField("want"))?,
+    })
+}
+
+fn encode_ping(enc: &mut Encoder<&mut Vec<u8>>, ping: &Ping) -> Result<(), ProtoEncodeError> {
+    enc.map(1)?;
+    enc.str("nonce")?;
+    enc.u64(ping.nonce)?;
+    Ok(())
+}
+
+fn decode_ping(dec: &mut Decoder, limits: &Limits) -> Result<Ping, ProtoDecodeError> {
+    let map_len = decode_map_len(dec, limits, 0)?;
+    let mut nonce = None;
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        match key {
+            "nonce" => nonce = Some(dec.u64()?),
+            _ => {
+                if is_indefinite(dec)? {
+                    return Err(ProtoDecodeError::IndefiniteLength);
+                }
+                dec.skip()?;
+            }
+        }
+    }
+    Ok(Ping {
+        nonce: nonce.ok_or(ProtoDecodeError::MissingField("nonce"))?,
+    })
+}
+
+fn encode_pong(enc: &mut Encoder<&mut Vec<u8>>, pong: &Pong) -> Result<(), ProtoEncodeError> {
+    enc.map(1)?;
+    enc.str("nonce")?;
+    enc.u64(pong.nonce)?;
+    Ok(())
+}
+
+fn decode_pong(dec: &mut Decoder, limits: &Limits) -> Result<Pong, ProtoDecodeError> {
+    let map_len = decode_map_len(dec, limits, 0)?;
+    let mut nonce = None;
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        match key {
+            "nonce" => nonce = Some(dec.u64()?),
+            _ => {
+                if is_indefinite(dec)? {
+                    return Err(ProtoDecodeError::IndefiniteLength);
+                }
+                dec.skip()?;
+            }
+        }
+    }
+    Ok(Pong {
+        nonce: nonce.ok_or(ProtoDecodeError::MissingField("nonce"))?,
     })
 }
 
@@ -1592,6 +1670,28 @@ mod tests {
             message: ReplMessage::Want(Want {
                 want: WatermarkMap::new(),
             }),
+        };
+        let bytes = encode_envelope(&envelope).unwrap();
+        let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn repl_message_roundtrip_ping() {
+        let envelope = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Ping(Ping { nonce: 7 }),
+        };
+        let bytes = encode_envelope(&envelope).unwrap();
+        let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn repl_message_roundtrip_pong() {
+        let envelope = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Pong(Pong { nonce: 9 }),
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
