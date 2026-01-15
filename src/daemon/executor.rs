@@ -318,6 +318,7 @@ impl Daemon {
             last_logical: hlc_max.logical,
         })
         .map_err(wal_index_to_op)?;
+        crate::daemon::test_hooks::maybe_pause("wal_before_index_commit");
         txn.commit().map_err(wal_index_to_op)?;
 
         let (

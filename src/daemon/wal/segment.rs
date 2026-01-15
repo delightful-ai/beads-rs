@@ -251,6 +251,7 @@ impl SegmentWriter {
                 path: Some(self.path.clone()),
                 source,
             })?;
+        crate::daemon::test_hooks::maybe_pause("wal_after_write");
         self.file.sync_data().map_err(|source| EventWalError::Io {
             path: Some(self.path.clone()),
             source,
