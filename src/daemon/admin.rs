@@ -241,19 +241,21 @@ impl Daemon {
             Ok(namespace) => namespace,
             Err(err) => return Response::err(err),
         };
-        let store = match self.store_runtime_mut(&proof) {
-            Ok(store) => store,
+        let flushed_at_ms = WallClock::now().0;
+        let (segment, store_id) = match self.store_runtime_mut(&proof) {
+            Ok(store) => {
+                let store_id = store.meta.store_id();
+                let segment = match store.event_wal.flush(&namespace) {
+                    Ok(segment) => segment,
+                    Err(err) => return Response::err(OpError::EventWal(Box::new(err))),
+                };
+                (segment, store_id)
+            }
             Err(err) => return Response::err(err),
         };
 
-        let flushed_at_ms = WallClock::now().0;
-        let segment = match store.event_wal.flush(&namespace) {
-            Ok(segment) => segment,
-            Err(err) => return Response::err(OpError::EventWal(Box::new(err))),
-        };
-
         let checkpoint_groups = if checkpoint_now {
-            self.force_checkpoint_for_namespace(store.meta.store_id(), &namespace)
+            self.force_checkpoint_for_namespace(store_id, &namespace)
         } else {
             Vec::new()
         };
