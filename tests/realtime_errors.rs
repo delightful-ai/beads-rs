@@ -26,3 +26,21 @@ fn parse_error_codes(doc: &str) -> BTreeSet<String> {
     }
     codes
 }
+
+#[test]
+fn realtime_error_codes_are_known() {
+    let doc = include_str!("../REALTIME_ERRORS.md");
+    let codes = parse_error_codes(doc);
+    assert!(!codes.is_empty(), "no error codes parsed from REALTIME_ERRORS.md");
+
+    let unknown: Vec<String> = codes
+        .iter()
+        .filter(|code| matches!(ErrorCode::parse(code), ErrorCode::Unknown(_)))
+        .cloned()
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "unrecognized error codes in REALTIME_ERRORS.md: {}",
+        unknown.join(", ")
+    );
+}
