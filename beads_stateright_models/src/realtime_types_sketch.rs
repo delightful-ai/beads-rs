@@ -105,7 +105,7 @@ impl Default for Limits {
 
             wal_group_commit_max_latency_ms: 2,
             wal_group_commit_max_events: 64,
-            wal_group_commit_max_bytes: 1 * 1024 * 1024,
+            wal_group_commit_max_bytes: 1024 * 1024,
             wal_sqlite_checkpoint_interval_ms: 3_600_000,
 
             max_repl_ingest_queue_bytes: 32 * 1024 * 1024,
@@ -119,7 +119,7 @@ impl Default for Limits {
             event_hot_cache_max_events: 200_000,
 
             max_events_per_origin_per_batch: 1024,
-            max_bytes_per_origin_per_batch: 1 * 1024 * 1024,
+            max_bytes_per_origin_per_batch: 1024 * 1024,
 
             max_snapshot_bytes: 512 * 1024 * 1024,
             max_snapshot_entries: 200_000,
@@ -244,11 +244,11 @@ impl TryFrom<&str> for NamespaceId {
         if b.is_empty() || b.len() > 32 {
             return Err(NamespaceIdError::Invalid(s));
         }
-        if !(b'a'..=b'z').contains(&b[0]) {
+        if !b[0].is_ascii_lowercase() {
             return Err(NamespaceIdError::Invalid(s));
         }
         for &c in b.iter().skip(1) {
-            let ok = (b'a'..=b'z').contains(&c) || (b'0'..=b'9').contains(&c) || c == b'_';
+            let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_';
             if !ok {
                 return Err(NamespaceIdError::Invalid(s));
             }
@@ -298,6 +298,10 @@ impl<S> EventBytes<S> {
 
     pub fn len(&self) -> usize {
         self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
     }
 }
 
@@ -599,15 +603,11 @@ pub struct WireNoteV1 {
     pub at: StampV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum NotesPatch {
+    #[default]
     Omitted,
     AtLeast(Vec<WireNoteV1>),
-}
-impl Default for NotesPatch {
-    fn default() -> Self {
-        NotesPatch::Omitted
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -848,7 +848,7 @@ pub fn validate_event_kind_limits(kind: &EventKindV1, limits: &Limits) -> Result
                         }
                         if let NotesPatch::AtLeast(notes) = &up.notes {
                             for n in notes {
-                                let bytes = n.content.as_bytes().len();
+                                let bytes = n.content.len();
                                 if bytes > limits.max_note_bytes {
                                     return Err(ValidationError::NoteTooLarge {
                                         bytes,
@@ -859,7 +859,7 @@ pub fn validate_event_kind_limits(kind: &EventKindV1, limits: &Limits) -> Result
                         }
                     }
                     TxnOpV1::NoteAppend(na) => {
-                        let bytes = na.note.content.as_bytes().len();
+                        let bytes = na.note.content.len();
                         if bytes > limits.max_note_bytes {
                             return Err(ValidationError::NoteTooLarge {
                                 bytes,

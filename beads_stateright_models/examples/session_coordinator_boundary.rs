@@ -73,15 +73,17 @@ impl Model for SessionCoordinator {
 
         match action {
             Action::DeliverEvent(seq) => {
-                // If an ingest is in-flight, we only buffer and/or ignore.
-                if next.pending_ingest.is_some() {
+                // If an ingest or ack is in-flight, we only buffer and/or ignore.
+                if next.pending_ingest.is_some() || next.pending_ack.is_some() {
                     if seq <= next.session_durable {
                         return Some(next);
                     }
-                    let expected = next.session_durable + 1;
-                    if seq == expected {
-                        // This is the same head we're already sending; treat as dup.
-                        return Some(next);
+                    if next.pending_ingest.is_some() {
+                        let expected = next.session_durable + 1;
+                        if seq == expected {
+                            // This is the same head we're already sending; treat as dup.
+                            return Some(next);
+                        }
                     }
                     if next.buffered.len() >= MAX_BUFFER_EVENTS {
                         // In the real system we'd close. Here we just drop to keep the model small.
@@ -238,4 +240,33 @@ fn main() -> Result<(), pico_args::Error> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_ingest_trace_regression() {
+        let model = SessionCoordinator;
+        let mut state = model.init_states().into_iter().next().unwrap();
+        let trace = [
+            Action::DeliverEvent(3),
+            Action::DeliverEvent(2),
+            Action::DeliverEvent(1),
+            Action::CoordinatorIngest,
+            Action::DeliverEvent(1),
+            Action::DeliverEvent(2),
+            Action::DeliverAck,
+        ];
+
+        for action in trace {
+            state = model.next_state(&state, action).expect("next state");
+            if let Some(batch) = &state.pending_ingest {
+                let expected = state.session_durable + 1;
+                assert_eq!(batch.first().copied(), Some(expected));
+                assert!(batch.windows(2).all(|w| w[1] == w[0] + 1));
+            }
+        }
+    }
 }
