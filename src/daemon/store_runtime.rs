@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
     ActorId, Applied, Durable, ErrorCode, ErrorPayload, HeadStatus, Limits, NamespaceId,
-    NamespacePolicies, NamespacePolicy, ReplicaId, Seq0, StoreEpoch, StoreId, StoreIdentity,
-    StoreMeta, StoreMetaVersions, WatermarkError, Watermarks, WriteStamp,
+    NamespacePolicies, NamespacePolicy, ReplicaId, ReplicaRosterError, Seq0, StoreEpoch, StoreId,
+    StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks, WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
@@ -281,6 +281,20 @@ pub enum StoreRuntimeError {
         path: Box<std::path::PathBuf>,
         #[source]
         source: crate::core::NamespacePoliciesError,
+    },
+    #[error("replica roster path is a symlink: {path:?}")]
+    ReplicaRosterSymlink { path: Box<std::path::PathBuf> },
+    #[error("replica roster read failed at {path:?}: {source}")]
+    ReplicaRosterRead {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: io::Error,
+    },
+    #[error("replica roster parse failed at {path:?}: {source}")]
+    ReplicaRosterParse {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: ReplicaRosterError,
     },
     #[error(transparent)]
     WalIndex(#[from] WalIndexError),

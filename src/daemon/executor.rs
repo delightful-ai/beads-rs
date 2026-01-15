@@ -142,7 +142,8 @@ impl Daemon {
                 store_runtime.watermarks_applied.clone(),
             )
         };
-        let roster = load_replica_roster(proof.store_id())?;
+        let roster = load_replica_roster(proof.store_id())
+            .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
         let coordinator =
             DurabilityCoordinator::new(origin_replica_id, policies, roster, peer_acks);
         let wait_timeout = Duration::from_millis(limits.dead_ms);

@@ -42,7 +42,9 @@ use super::repo::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
 };
 use super::scheduler::SyncScheduler;
-use super::store_runtime::{StoreRuntime, StoreRuntimeError};
+use super::store_runtime::{
+    StoreConfigFileError, StoreRuntime, StoreRuntimeError, read_secure_store_file,
+};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, Wal, WalEntry, WalIndex,
     WalIndexError, WalReplayError,
@@ -1197,7 +1199,8 @@ impl Daemon {
         let session_store =
             SharedSessionStore::new(ReplSessionStore::new(store_id, wal_index, ingest_tx));
 
-        let roster = load_replica_roster(store_id)?;
+        let roster = load_replica_roster(store_id)
+            .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
         let peers = self.replication_peers();
 
         let manager_config = ReplicationManagerConfig {
@@ -3377,25 +3380,32 @@ fn resolve_checkpoint_git_ref(store_id: StoreId, group: &str, git_ref: Option<&s
         .replace("{group}", group)
 }
 
-pub(crate) fn load_replica_roster(store_id: StoreId) -> Result<Option<ReplicaRoster>, OpError> {
+pub(crate) fn load_replica_roster(
+    store_id: StoreId,
+) -> Result<Option<ReplicaRoster>, StoreRuntimeError> {
     let path = paths::replicas_path(store_id);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(OpError::ValidationFailed {
-                field: "replicas".into(),
-                reason: format!("failed to read {}: {err}", path.display()),
+    let raw = match read_secure_store_file(&path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return Ok(None),
+        Err(StoreConfigFileError::Symlink { path }) => {
+            return Err(StoreRuntimeError::ReplicaRosterSymlink {
+                path: Box::new(path),
+            });
+        }
+        Err(StoreConfigFileError::Read { path, source }) => {
+            return Err(StoreRuntimeError::ReplicaRosterRead {
+                path: Box::new(path),
+                source,
             });
         }
     };
 
-    ReplicaRoster::from_toml_str(&raw)
-        .map(Some)
-        .map_err(|err| OpError::ValidationFailed {
-            field: "replicas".into(),
-            reason: format!("replica roster parse failed: {err}"),
-        })
+    ReplicaRoster::from_toml_str(&raw).map(Some).map_err(|source| {
+        StoreRuntimeError::ReplicaRosterParse {
+            path: Box::new(path),
+            source,
+        }
+    })
 }
 
 fn event_id_for(origin: ReplicaId, namespace: NamespaceId, origin_seq: Seq1) -> EventId {
