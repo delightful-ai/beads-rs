@@ -3374,15 +3374,17 @@ pub(crate) fn insert_store_for_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use git2::Repository;
     use uuid::Uuid;
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId,
+        Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId,
         NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaId, SegmentId, Seq0,
         Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
         TxnDeltaV1, TxnId, TxnOpV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1,
@@ -3393,6 +3395,11 @@ mod tests {
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
     use crate::daemon::wal::{Record, RecordHeader, SegmentHeader, Wal};
+    use crate::git::checkpoint::{
+        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointSnapshotInput,
+        CheckpointStoreMeta, build_snapshot, export_checkpoint, policy_hash, publish_checkpoint,
+        store_state_from_legacy,
+    };
     use tempfile::TempDir;
 
     fn test_actor() -> ActorId {
@@ -3784,6 +3791,117 @@ mod tests {
         daemon.complete_refresh(&unknown, result);
         // Just verify no panic and daemon is still valid
         assert!(daemon.stores.is_empty());
+    }
+
+    #[test]
+    fn load_from_checkpoint_ref_sets_watermarks() {
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new(test_actor(), wal);
+        let remote = test_remote();
+
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init(repo_dir.path()).unwrap();
+
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), repo_dir.path())
+            .expect("store init");
+
+        let bead = make_bead("bd-checkpoint1", 1_700_000_000_000, "checkpoint@test");
+        let bead_id = bead.core.id.clone();
+        let mut legacy_state = CanonicalState::new();
+        legacy_state.insert_live(bead);
+        let store_state = store_state_from_legacy(legacy_state);
+
+        let origin = daemon
+            .stores
+            .get(&store_id)
+            .expect("store runtime")
+            .meta
+            .replica_id;
+        let mut watermarks = Watermarks::<Durable>::new();
+        let head = [7u8; 32];
+        watermarks
+            .observe_at_least(&NamespaceId::core(), &origin, Seq0::new(3), HeadStatus::Known(head))
+            .expect("watermark");
+
+        let mut policies = BTreeMap::new();
+        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        let policy_hash = policy_hash(&policies).expect("policy hash");
+
+        let snapshot = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![NamespaceId::core()],
+            store_id,
+            store_epoch: StoreEpoch::ZERO,
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash,
+            roster_hash: None,
+            state: &store_state,
+            watermarks_durable: &watermarks,
+        })
+        .expect("checkpoint snapshot");
+
+        let export = export_checkpoint(CheckpointExportInput {
+            snapshot: &snapshot,
+            previous: None,
+        })
+        .expect("checkpoint export");
+
+        let git_ref = format!("refs/beads/{store_id}/core");
+        let mut checkpoint_groups = BTreeMap::new();
+        checkpoint_groups.insert("core".to_string(), git_ref.clone());
+        let store_meta = CheckpointStoreMeta::new(
+            store_id,
+            StoreEpoch::ZERO,
+            CHECKPOINT_FORMAT_VERSION,
+            checkpoint_groups,
+        );
+        publish_checkpoint(&repo, &export, &git_ref, &store_meta).expect("checkpoint publish");
+
+        let loaded = LoadResult {
+            state: CanonicalState::new(),
+            root_slug: None,
+            needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
+            force_push: None,
+        };
+        daemon
+            .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), loaded)
+            .expect("load repo");
+
+        let store = daemon.stores.get(&store_id).expect("store runtime");
+        let core = store
+            .repo_state
+            .state
+            .get(&NamespaceId::core())
+            .expect("core state");
+        assert!(core.get_live(&bead_id).is_some());
+
+        let durable = store
+            .watermarks_durable
+            .get(&NamespaceId::core(), &origin)
+            .copied()
+            .expect("durable watermark");
+        assert_eq!(durable.seq().get(), 3);
+        assert_eq!(durable.head(), HeadStatus::Known(head));
+
+        let applied = store
+            .watermarks_applied
+            .get(&NamespaceId::core(), &origin)
+            .copied()
+            .expect("applied watermark");
+        assert_eq!(applied.seq().get(), 3);
+        assert_eq!(applied.head(), HeadStatus::Known(head));
+
+        let mut txn = store.wal_index.writer().begin_txn().expect("wal txn");
+        let next_seq = txn
+            .next_origin_seq(&NamespaceId::core(), &origin)
+            .expect("next seq");
+        txn.rollback().expect("rollback");
+        assert_eq!(next_seq, 4);
     }
 
     #[test]
