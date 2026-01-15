@@ -3750,6 +3750,7 @@ mod tests {
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
+    use crate::daemon::store_lock::read_lock_meta;
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
     use crate::daemon::wal::{HlcRow, Record, RecordHeader, SegmentHeader, Wal};
@@ -3871,6 +3872,27 @@ mod tests {
             .next_wal_checkpoint_deadline_at(now)
             .expect("next");
         assert_eq!(next, now + Duration::from_millis(10));
+    }
+
+    #[test]
+    fn store_lock_heartbeat_updates_metadata() {
+        let (_tmp, wal) = test_wal();
+        let mut daemon = Daemon::new_with_limits(test_actor(), wal, Limits::default());
+        let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
+        let before = read_lock_meta(store_id)
+            .expect("read lock meta")
+            .expect("lock meta");
+        let previous = before.last_heartbeat_ms.unwrap_or(0);
+        let now = Instant::now() + Duration::from_millis(5);
+        let now_ms = previous.saturating_add(1);
+
+        daemon.fire_due_lock_heartbeats_at(now, Duration::from_millis(1), now_ms);
+
+        let after = read_lock_meta(store_id)
+            .expect("read lock meta")
+            .expect("lock meta");
+        assert_eq!(after.last_heartbeat_ms, Some(now_ms));
     }
 
 
