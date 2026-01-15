@@ -23,8 +23,8 @@ use crate::daemon::repl::PeerAckTable;
 use crate::daemon::repo::{RepoState, WalTailTruncatedRecord};
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
 use crate::daemon::wal::{
-    IndexDurabilityMode, ReplayStats, SqliteWalIndex, Wal, WalIndex, WalIndexError, WalReplayError,
-    catch_up_index, rebuild_index,
+    EventWal, IndexDurabilityMode, ReplayStats, SqliteWalIndex, Wal, WalIndex, WalIndexError,
+    WalReplayError, catch_up_index, rebuild_index,
 };
 use crate::git::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, CheckpointSnapshot, CheckpointSnapshotError,
@@ -52,6 +52,7 @@ pub struct StoreRuntime {
     pub(crate) peer_acks: Arc<Mutex<PeerAckTable>>,
     #[allow(dead_code)]
     pub(crate) wal: Arc<Wal>,
+    pub(crate) event_wal: EventWal,
     #[allow(dead_code)]
     pub(crate) wal_index: Arc<SqliteWalIndex>,
     #[allow(dead_code)]
@@ -143,6 +144,7 @@ impl StoreRuntime {
             });
         }
 
+        let event_wal = EventWal::new(store_dir.clone(), meta.clone(), limits);
         let runtime = Self {
             primary_remote,
             meta,
@@ -155,6 +157,7 @@ impl StoreRuntime {
             maintenance_mode: false,
             peer_acks,
             wal,
+            event_wal,
             wal_index: Arc::new(wal_index),
             lock,
         };
