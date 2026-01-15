@@ -1064,18 +1064,32 @@ mod tests {
         let unverified =
             SegmentDescriptor::<Unverified>::load(writer.current_path().to_path_buf()).unwrap();
         let verified = unverified.verify(&meta, &namespace).unwrap();
-        let sha_offset = verified.header_len + FRAME_HEADER_LEN as u64 + 56;
+        let frame_offset = verified.header_len;
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(writer.current_path())
             .unwrap();
-        file.seek(SeekFrom::Start(sha_offset)).unwrap();
-        let mut byte = [0u8; 1];
-        file.read_exact(&mut byte).unwrap();
-        byte[0] ^= 0xFF;
-        file.seek(SeekFrom::Start(sha_offset)).unwrap();
-        file.write_all(&byte).unwrap();
+        file.seek(SeekFrom::Start(frame_offset)).unwrap();
+        let mut frame_header = [0u8; FRAME_HEADER_LEN];
+        file.read_exact(&mut frame_header).unwrap();
+        let length = u32::from_le_bytes([
+            frame_header[4],
+            frame_header[5],
+            frame_header[6],
+            frame_header[7],
+        ]) as usize;
+        let body_offset = frame_offset + FRAME_HEADER_LEN as u64;
+        let mut body = vec![0u8; length];
+        file.seek(SeekFrom::Start(body_offset)).unwrap();
+        file.read_exact(&mut body).unwrap();
+        assert!(body.len() > 56);
+        body[56] ^= 0xFF;
+        file.seek(SeekFrom::Start(body_offset)).unwrap();
+        file.write_all(&body).unwrap();
+        let crc = crc32c(&body);
+        file.seek(SeekFrom::Start(frame_offset + 8)).unwrap();
+        file.write_all(&crc.to_le_bytes()).unwrap();
         let max_record_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
         let err = match scan_segment(
             &verified,
