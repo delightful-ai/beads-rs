@@ -88,7 +88,7 @@ impl CheckpointCache {
                 fs::remove_dir_all(&tmp_dir).map_err(|source| io_err(&tmp_dir, source))?;
             }
             fs::create_dir_all(&tmp_dir).map_err(|source| io_err(&tmp_dir, source))?;
-            write_checkpoint_tree(&tmp_dir, export, throttle.as_deref_mut())?;
+            write_checkpoint_tree(&tmp_dir, export, &mut throttle)?;
             fs::rename(&tmp_dir, &final_dir).map_err(|source| io_err(&final_dir, source))?;
             fsync_dir(&group_dir)?;
         }
@@ -199,36 +199,33 @@ pub enum CheckpointCacheError {
 fn write_checkpoint_tree(
     dir: &Path,
     export: &CheckpointExport,
-    mut throttle: Option<&mut dyn FnMut(u64)>,
+    throttle: &mut Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CheckpointCacheError> {
     let meta_bytes = export.meta.canon_bytes()?;
-    write_bytes(&dir.join(META_FILE), &meta_bytes, throttle.as_deref_mut())?;
+    maybe_throttle(throttle, meta_bytes.len());
+    write_bytes(&dir.join(META_FILE), &meta_bytes)?;
     let manifest_bytes = export.manifest.canon_bytes()?;
-    write_bytes(
-        &dir.join(MANIFEST_FILE),
-        &manifest_bytes,
-        throttle.as_deref_mut(),
-    )?;
+    maybe_throttle(throttle, manifest_bytes.len());
+    write_bytes(&dir.join(MANIFEST_FILE), &manifest_bytes)?;
 
     for (path, payload) in &export.files {
         let file_path = dir.join(path);
-        write_bytes(&file_path, payload.bytes.as_ref(), throttle.as_deref_mut())?;
+        maybe_throttle(throttle, payload.bytes.len());
+        write_bytes(&file_path, payload.bytes.as_ref())?;
     }
 
     Ok(())
 }
 
-fn write_bytes(
-    path: &Path,
-    bytes: &[u8],
-    mut throttle: Option<&mut dyn FnMut(u64)>,
-) -> Result<(), CheckpointCacheError> {
+fn maybe_throttle(throttle: &mut Option<&mut dyn FnMut(u64)>, bytes: usize) {
+    if let Some(throttle) = throttle.as_deref_mut() {
+        throttle(bytes as u64);
+    }
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), CheckpointCacheError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| io_err(parent, source))?;
-    }
-
-    if let Some(throttle) = throttle.as_mut() {
-        throttle(bytes.len() as u64);
     }
 
     let mut file = File::create(path).map_err(|source| io_err(path, source))?;
