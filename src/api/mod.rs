@@ -128,6 +128,24 @@ pub struct AdminScrubOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminFlushOutput {
+    pub namespace: NamespaceId,
+    pub flushed_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment: Option<AdminFlushSegment>,
+    pub checkpoint_now: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub checkpoint_groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminFlushSegment {
+    pub segment_id: SegmentId,
+    pub created_at_ms: u64,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminHealthReport {
     pub checked_at_ms: u64,
     pub stats: AdminHealthStats,
