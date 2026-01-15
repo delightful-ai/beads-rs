@@ -17,6 +17,7 @@ pub mod durability_coordinator;
 pub mod executor;
 pub mod fingerprint;
 pub mod git_worker;
+pub(crate) mod io_budget;
 pub mod ipc;
 pub mod metrics;
 pub mod migration;
