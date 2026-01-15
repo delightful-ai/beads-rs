@@ -340,7 +340,7 @@ pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcM
                 hlc_max = Some(decode_hlc_max(&mut dec, limits, 1)?);
             }
             _ => {
-                dec.skip()?;
+                skip_value(&mut dec, limits, 1)?;
             }
         }
     }
@@ -485,11 +485,8 @@ fn decode_event_body_map(
                 let raw = decode_text(dec, limits)?;
                 txn_id = Some(parse_uuid_field("txn_id", raw)?);
             }
-            other => {
-                return Err(DecodeError::InvalidField {
-                    field: "event_body",
-                    reason: format!("unknown key {other}"),
-                });
+            _ => {
+                skip_value(dec, limits, depth + 1)?;
             }
         }
     }
@@ -1617,11 +1614,8 @@ fn decode_hlc_max(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<Hl
             "physical_ms" => {
                 physical_ms = Some(dec.u64()?);
             }
-            other => {
-                return Err(DecodeError::InvalidField {
-                    field: "hlc_max",
-                    reason: format!("unknown key {other}"),
-                });
+            _ => {
+                skip_value(dec, limits, depth + 1)?;
             }
         }
     }
@@ -1661,6 +1655,71 @@ fn decode_array_len(
     usize::try_from(len).map_err(|_| DecodeError::DecodeLimit("max_cbor_array_entries"))
 }
 
+fn skip_value(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<(), DecodeError> {
+    let ty = dec.datatype()?;
+    match ty {
+        Type::Bool => {
+            let _ = dec.bool()?;
+        }
+        Type::Null => {
+            dec.null()?;
+        }
+        Type::Undefined => {
+            dec.undefined()?;
+        }
+        Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64
+        | Type::I8
+        | Type::I16
+        | Type::I32
+        | Type::I64
+        | Type::Int => {
+            let _ = dec.int()?;
+        }
+        Type::F16 | Type::F32 | Type::F64 => {
+            let _ = dec.f64()?;
+        }
+        Type::Simple => {
+            let _ = dec.simple()?;
+        }
+        Type::Bytes => {
+            let _ = decode_bytes(dec, limits)?;
+        }
+        Type::String => {
+            let _ = decode_text(dec, limits)?;
+        }
+        Type::BytesIndef | Type::StringIndef | Type::ArrayIndef | Type::MapIndef | Type::Break => {
+            return Err(DecodeError::IndefiniteLength);
+        }
+        Type::Array => {
+            let len = decode_array_len(dec, limits, depth + 1)?;
+            for _ in 0..len {
+                skip_value(dec, limits, depth + 1)?;
+            }
+        }
+        Type::Map => {
+            let len = decode_map_len(dec, limits, depth + 1)?;
+            for _ in 0..len {
+                skip_value(dec, limits, depth + 1)?;
+                skip_value(dec, limits, depth + 1)?;
+            }
+        }
+        Type::Tag => {
+            let _ = dec.tag()?;
+            skip_value(dec, limits, depth)?;
+        }
+        Type::Unknown(_) => {
+            return Err(minicbor::decode::Error::message(format!(
+                "unknown cbor type {ty}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn decode_text<'a>(dec: &mut Decoder<'a>, limits: &Limits) -> Result<&'a str, DecodeError> {
     let ty = dec.datatype()?;
     if matches!(ty, Type::StringIndef) {
@@ -1671,6 +1730,18 @@ fn decode_text<'a>(dec: &mut Decoder<'a>, limits: &Limits) -> Result<&'a str, De
         return Err(DecodeError::DecodeLimit("max_cbor_text_string_len"));
     }
     Ok(s)
+}
+
+fn decode_bytes<'a>(dec: &mut Decoder<'a>, limits: &Limits) -> Result<&'a [u8], DecodeError> {
+    let ty = dec.datatype()?;
+    if matches!(ty, Type::BytesIndef) {
+        return Err(DecodeError::IndefiniteLength);
+    }
+    let bytes = dec.bytes()?;
+    if bytes.len() > limits.max_cbor_bytes_string_len {
+        return Err(DecodeError::DecodeLimit("max_cbor_bytes_string_len"));
+    }
+    Ok(bytes)
 }
 
 fn decode_u32(dec: &mut Decoder, field: &'static str) -> Result<u32, DecodeError> {
