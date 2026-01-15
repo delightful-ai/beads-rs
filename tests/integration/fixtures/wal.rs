@@ -15,8 +15,8 @@ use beads_rs::core::{
 };
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
-    EventWalError, EventWalResult, IndexDurabilityMode, Record, RecordHeader, SegmentConfig,
-    SegmentHeader, SegmentWriter, SqliteWalIndex, WalIndexError,
+    EventWalError, EventWalResult, IndexDurabilityMode, RecordHeader, SegmentConfig, SegmentHeader,
+    SegmentWriter, SqliteWalIndex, UnverifiedRecord, VerifiedRecord, WalIndexError,
 };
 
 const WAL_FORMAT_VERSION: u32 = 2;
@@ -97,7 +97,7 @@ impl TempWalDir {
         &self,
         namespace: &NamespaceId,
         now_ms: u64,
-        records: &[Record],
+        records: &[VerifiedRecord],
     ) -> EventWalResult<SegmentFixture> {
         let mut writer = self.open_segment_writer(namespace, now_ms)?;
         let mut frame_offsets = Vec::with_capacity(records.len());
@@ -130,7 +130,7 @@ pub struct SegmentFixture {
     pub header_len: u64,
     pub frame_offsets: Vec<u64>,
     pub frame_lens: Vec<u32>,
-    pub records: Vec<Record>,
+    pub records: Vec<VerifiedRecord>,
 }
 
 impl SegmentFixture {
@@ -147,7 +147,7 @@ impl SegmentFixture {
     }
 }
 
-fn event_body_bytes(
+fn event_body(
     meta: &StoreMeta,
     namespace: &NamespaceId,
     origin: ReplicaId,
@@ -155,8 +155,8 @@ fn event_body_bytes(
     event_time_ms: u64,
     txn_id: TxnId,
     client_request_id: Option<ClientRequestId>,
-) -> Bytes {
-    let body = EventBody {
+) -> EventBody {
+    EventBody {
         envelope_v: 1,
         store: StoreIdentity::new(meta.store_id(), meta.store_epoch()),
         namespace: namespace.clone(),
@@ -172,9 +172,19 @@ fn event_body_bytes(
             physical_ms: event_time_ms,
             logical: 1,
         }),
-    };
-    let bytes = encode_event_body_canonical(&body).expect("encode event body");
+    }
+}
+
+fn event_body_bytes(body: &EventBody) -> Bytes {
+    let bytes = encode_event_body_canonical(body).expect("encode event body");
     Bytes::copy_from_slice(bytes.as_ref())
+}
+
+fn verified_record(header: RecordHeader, payload: Bytes, body: &EventBody) -> VerifiedRecord {
+    let mut bytes = header.encode().expect("encode record header");
+    bytes.extend_from_slice(payload.as_ref());
+    let record = UnverifiedRecord::decode_body(&bytes).expect("decode record");
+    record.verify_with_event_body(body).expect("verify record")
 }
 
 pub fn record_for_seq(
@@ -183,10 +193,19 @@ pub fn record_for_seq(
     origin: ReplicaId,
     seq: u64,
     prev_sha: Option<[u8; 32]>,
-) -> Record {
+) -> VerifiedRecord {
     let event_time_ms = 1_700_000_000_000 + seq;
     let txn_id = TxnId::new(Uuid::from_bytes([seq as u8; 16]));
-    let payload = event_body_bytes(meta, namespace, origin, seq, event_time_ms, txn_id, None);
+    let body = event_body(
+        meta,
+        namespace,
+        origin,
+        seq,
+        event_time_ms,
+        txn_id,
+        None,
+    );
+    let payload = event_body_bytes(&body);
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
         origin_replica_id: origin,
@@ -198,10 +217,10 @@ pub fn record_for_seq(
         sha256: sha,
         prev_sha256: prev_sha,
     };
-    Record { header, payload }
+    verified_record(header, payload, &body)
 }
 
-pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Record {
+pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> VerifiedRecord {
     let origin = ReplicaId::new(Uuid::from_bytes([seed; 16]));
     let origin_seq = seed as u64 + 1;
     let event_time_ms = 1_700_000_000_000 + seed as u64;
@@ -209,7 +228,7 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Rec
     let client_request_id = Some(ClientRequestId::new(Uuid::from_bytes(
         [seed.wrapping_add(2); 16],
     )));
-    let payload = event_body_bytes(
+    let body = event_body(
         meta,
         namespace,
         origin,
@@ -218,6 +237,7 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Rec
         txn_id,
         client_request_id,
     );
+    let payload = event_body_bytes(&body);
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
         origin_replica_id: origin,
@@ -229,15 +249,15 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Rec
         sha256: sha,
         prev_sha256: None,
     };
-    Record { header, payload }
+    verified_record(header, payload, &body)
 }
 
-pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Record {
+pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> VerifiedRecord {
     let origin = ReplicaId::new(Uuid::from_bytes([seed; 16]));
     let origin_seq = seed as u64 + 1;
     let event_time_ms = 1_700_000_000_000 + seed as u64;
     let txn_id = TxnId::new(Uuid::from_bytes([seed; 16]));
-    let payload = event_body_bytes(
+    let body = event_body(
         meta,
         namespace,
         origin,
@@ -246,6 +266,7 @@ pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Rec
         txn_id,
         None,
     );
+    let payload = event_body_bytes(&body);
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
         origin_replica_id: origin,
@@ -257,10 +278,10 @@ pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Rec
         sha256: sha,
         prev_sha256: None,
     };
-    Record { header, payload }
+    verified_record(header, payload, &body)
 }
 
-pub fn frame_bytes(record: &Record) -> EventWalResult<Vec<u8>> {
+pub fn frame_bytes(record: &VerifiedRecord) -> EventWalResult<Vec<u8>> {
     encode_frame(record, DEFAULT_MAX_RECORD_BYTES)
 }
 

@@ -5,11 +5,13 @@ use std::fs;
 use std::io::{Seek, SeekFrom};
 
 use beads_rs::daemon::wal::{FrameReader, WalReplayError, rebuild_index};
-use beads_rs::{Limits, NamespaceId, ReplicaId, Seq1};
+use beads_rs::{Limits, NamespaceId, ReplicaId, decode_event_body};
 use uuid::Uuid;
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq, sample_record};
-use crate::fixtures::wal_corrupt::{corrupt_frame_body, truncated_segment};
+use crate::fixtures::wal_corrupt::{
+    corrupt_frame_body, corrupt_record_header_event_time, truncated_segment,
+};
 
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
@@ -30,7 +32,12 @@ fn wal_framing_roundtrips_records() {
         .read_next()
         .expect("read frame")
         .expect("record present");
-    assert_eq!(decoded, record);
+    let (_, event_body) =
+        decode_event_body(decoded.payload_bytes(), &Limits::default()).expect("decode event body");
+    let verified = decoded
+        .verify_with_event_body(&event_body)
+        .expect("verify record");
+    assert_eq!(verified, record);
 }
 
 #[test]
@@ -82,10 +89,11 @@ fn wal_replay_rejects_header_mismatch() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([42u8; 16]));
-    let mut record = record_for_seq(temp.meta(), &namespace, origin, 1, None);
-    record.header.origin_seq = Seq1::from_u64(2).expect("seq1");
-    temp.write_segment(&namespace, 1_700_000_000_000, &[record])
+    let record = record_for_seq(temp.meta(), &namespace, origin, 1, None);
+    let segment = temp
+        .write_segment(&namespace, 1_700_000_000_000, &[record])
         .expect("write segment");
+    corrupt_record_header_event_time(&segment, 0).expect("corrupt header");
     let index = temp.open_index().expect("open wal index");
     let limits = Limits::default();
 

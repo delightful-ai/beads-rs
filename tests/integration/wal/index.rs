@@ -6,7 +6,7 @@ use std::fs::{self, OpenOptions};
 use uuid::Uuid;
 
 use beads_rs::daemon::wal::{
-    FrameWriter, Record, WalIndex, WalReplayError, catch_up_index, rebuild_index,
+    FrameWriter, VerifiedRecord, WalIndex, WalReplayError, catch_up_index, rebuild_index,
 };
 use beads_rs::{Limits, NamespaceId, ReplicaId, Seq0, Seq1, StoreMeta};
 
@@ -37,8 +37,8 @@ fn index_rebuild_populates_watermarks_and_segments() {
         .expect("watermark row");
     assert_eq!(row.applied_seq, 2);
     assert_eq!(row.durable_seq, 2);
-    assert_eq!(row.applied_head_sha, Some(records[1].header.sha256));
-    assert_eq!(row.durable_head_sha, Some(records[1].header.sha256));
+    assert_eq!(row.applied_head_sha, Some(records[1].header().sha256));
+    assert_eq!(row.durable_head_sha, Some(records[1].header().sha256));
 
     let segments = index.reader().list_segments(&namespace).expect("segments");
     assert_eq!(segments.len(), 1);
@@ -75,7 +75,7 @@ fn index_catch_up_scans_new_frames() {
         &namespace,
         origin,
         3,
-        Some(records[1].header.sha256),
+        Some(records[1].header().sha256),
     );
     let (_offset, len) = append_record(&segment, &record3);
     records.push(record3);
@@ -117,7 +117,7 @@ fn index_marks_sealed_segments() {
         &namespace,
         origin,
         2,
-        Some(record1.header.sha256),
+        Some(record1.header().sha256),
     );
     let segment1 = temp
         .write_segment(&namespace, 1_700_000_000_000, &[record1])
@@ -160,7 +160,7 @@ fn index_replay_rejects_sealed_len_mismatch() {
         &namespace,
         origin,
         2,
-        Some(record1.header.sha256),
+        Some(record1.header().sha256),
     );
     let segment1 = temp
         .write_segment(&namespace, 1_700_000_000_000, &[record1])
@@ -198,19 +198,19 @@ fn record_chain(
     origin: ReplicaId,
     start_seq: u64,
     count: usize,
-) -> Vec<Record> {
+) -> Vec<VerifiedRecord> {
     let mut records = Vec::with_capacity(count);
     let mut prev_sha = None;
     for i in 0..count {
         let seq = start_seq + i as u64;
         let record = record_for_seq(meta, namespace, origin, seq, prev_sha);
-        prev_sha = Some(record.header.sha256);
+        prev_sha = Some(record.header().sha256);
         records.push(record);
     }
     records
 }
 
-fn append_record(segment: &SegmentFixture, record: &Record) -> (u64, u32) {
+fn append_record(segment: &SegmentFixture, record: &VerifiedRecord) -> (u64, u32) {
     let mut file = OpenOptions::new()
         .append(true)
         .open(&segment.path)

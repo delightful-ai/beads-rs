@@ -3,7 +3,7 @@
 
 use uuid::Uuid;
 
-use beads_rs::daemon::wal::{Record, WalIndex, rebuild_index};
+use beads_rs::daemon::wal::{VerifiedRecord, WalIndex, rebuild_index};
 use beads_rs::{Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
@@ -70,13 +70,13 @@ fn record_chain(
     origin: ReplicaId,
     start_seq: u64,
     count: usize,
-) -> Vec<Record> {
+) -> Vec<VerifiedRecord> {
     let mut records = Vec::with_capacity(count);
     let mut prev_sha = None;
     for i in 0..count {
         let seq = start_seq + i as u64;
         let record = record_for_seq(meta, namespace, origin, seq, prev_sha);
-        prev_sha = Some(record.header.sha256);
+        prev_sha = Some(record.header().sha256);
         records.push(record);
     }
     records
