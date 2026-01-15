@@ -1,6 +1,5 @@
 #![cfg(feature = "slow-tests")]
 
-mod fixtures;
 
 use std::fs;
 use std::fs::OpenOptions;

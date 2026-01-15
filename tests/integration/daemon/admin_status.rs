@@ -1,6 +1,5 @@
-//! Phase 7 tests: admin.status correctness under load.
+//! Admin status correctness under load.
 
-mod fixtures;
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,7 +14,7 @@ use crate::fixtures::load_gen::{LoadGenerator, LoadReport};
 use crate::fixtures::realtime::RealtimeFixture;
 
 #[test]
-fn phase7_admin_status_monotonic_under_load() {
+fn admin_status_monotonic_under_load() {
     let fixture = RealtimeFixture::new();
     fixture.start_daemon();
 
@@ -47,7 +46,7 @@ fn phase7_admin_status_monotonic_under_load() {
 }
 
 #[test]
-fn phase7_admin_status_segment_stats_match_files() {
+fn admin_status_segment_stats_match_files() {
     let fixture = RealtimeFixture::new();
     fixture.start_daemon();
 

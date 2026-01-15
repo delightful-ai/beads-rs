@@ -631,7 +631,7 @@ impl Session {
         for (namespace, origins) in wants.iter_mut() {
             origins.retain(|origin, seq| {
                 if let Some(want_from) = self.gap_buffer.want_from(namespace, origin) {
-                    *seq = want_from.get();
+                    *seq = want_from;
                     true
                 } else {
                     false
@@ -765,13 +765,13 @@ fn watermark_state_from_snapshot<K>(
                 .and_then(|origins| origins.get(origin))
                 .map(|sha| HeadStatus::Known(sha.0))
                 .unwrap_or_else(|| {
-                    if *seq == 0 {
+                    if *seq == Seq0::ZERO {
                         HeadStatus::Genesis
                     } else {
                         HeadStatus::Unknown
                     }
                 });
-            if let Ok(watermark) = Watermark::new(Seq0::new(*seq), head) {
+            if let Ok(watermark) = Watermark::new(*seq, head) {
                 ns_map.insert(*origin, watermark);
             }
         }
@@ -783,11 +783,11 @@ fn insert_want(want: &mut WatermarkMap, namespace: NamespaceId, origin: ReplicaI
     let ns = want.entry(namespace).or_default();
     ns.entry(origin)
         .and_modify(|seq| {
-            if from.get() < *seq {
-                *seq = from.get();
+            if from < *seq {
+                *seq = from;
             }
         })
-        .or_insert_with(|| from.get());
+        .or_insert(from);
 }
 
 fn update_watermark<K>(
@@ -835,7 +835,7 @@ fn watermark_maps_from_state<K>(
         let ns_map = map.entry(namespace.clone()).or_default();
         let ns_heads = heads.entry(namespace.clone()).or_default();
         for (origin, watermark) in origins {
-            ns_map.insert(*origin, watermark.seq().get());
+            ns_map.insert(*origin, watermark.seq());
             if let HeadStatus::Known(head) = watermark.head() {
                 ns_heads.insert(*origin, Sha256(head));
             }
@@ -1074,7 +1074,7 @@ mod tests {
                     let ns_map = durable.entry(ns.clone()).or_default();
                     let ns_heads = durable_heads.entry(ns.clone()).or_default();
                     for (origin, wm) in origins {
-                        ns_map.insert(*origin, wm.seq().get());
+                        ns_map.insert(*origin, wm.seq());
                         if let HeadStatus::Known(head) = wm.head() {
                             ns_heads.insert(*origin, Sha256(head));
                         }
@@ -1084,7 +1084,7 @@ mod tests {
                     let ns_map = applied.entry(ns.clone()).or_default();
                     let ns_heads = applied_heads.entry(ns.clone()).or_default();
                     for (origin, wm) in origins {
-                        ns_map.insert(*origin, wm.seq().get());
+                        ns_map.insert(*origin, wm.seq());
                         if let HeadStatus::Known(head) = wm.head() {
                             ns_heads.insert(*origin, Sha256(head));
                         }
@@ -1344,8 +1344,8 @@ mod tests {
             .get(&NamespaceId::core())
             .and_then(|m| m.get(&origin))
             .copied()
-            .unwrap_or_default();
-        assert_eq!(seq, 2);
+            .unwrap_or(Seq0::ZERO);
+        assert_eq!(seq, Seq0::new(2));
         let heads = ack.durable_heads.as_ref().expect("heads");
         let head = heads
             .get(&NamespaceId::core())
@@ -1410,8 +1410,8 @@ mod tests {
             .get(&NamespaceId::core())
             .and_then(|m| m.get(&origin))
             .copied()
-            .unwrap_or_default();
-        assert_eq!(seq, 0);
+            .unwrap_or(Seq0::ZERO);
+        assert_eq!(seq, Seq0::ZERO);
     }
 
     #[test]
@@ -1487,8 +1487,8 @@ mod tests {
             .get(&NamespaceId::core())
             .and_then(|m| m.get(&origin))
             .copied()
-            .unwrap_or_default();
-        assert_eq!(seq, 2);
+            .unwrap_or(Seq0::ZERO);
+        assert_eq!(seq, Seq0::new(2));
     }
 
     #[test]

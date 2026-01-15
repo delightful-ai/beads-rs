@@ -1,6 +1,5 @@
-//! Phase 7 tests: streaming subscriptions.
+//! IPC streaming subscriptions.
 
-mod fixtures;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -14,7 +13,7 @@ use crate::fixtures::load_gen::{LoadGenerator, LoadReport};
 use crate::fixtures::realtime::RealtimeFixture;
 
 #[test]
-fn phase7_subscribe_streams_events_in_order() {
+fn subscribe_streams_events_in_order() {
     let fixture = RealtimeFixture::new();
     fixture.start_daemon();
 
@@ -51,7 +50,7 @@ fn phase7_subscribe_streams_events_in_order() {
 }
 
 #[test]
-fn phase7_subscribe_gates_on_require_min_seen() {
+fn subscribe_gates_on_require_min_seen() {
     let fixture = RealtimeFixture::new();
     fixture.start_daemon();
 
@@ -108,7 +107,7 @@ fn phase7_subscribe_gates_on_require_min_seen() {
 }
 
 #[test]
-fn phase7_subscribe_multiple_clients_receive_same_events() {
+fn subscribe_multiple_clients_receive_same_events() {
     let fixture = RealtimeFixture::new();
     fixture.start_daemon();
 

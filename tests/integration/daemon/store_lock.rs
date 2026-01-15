@@ -1,3 +1,4 @@
+//! Store paths + lock behavior.
 
 use std::fs;
 

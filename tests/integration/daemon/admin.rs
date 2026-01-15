@@ -1,6 +1,5 @@
-//! Phase 7 tests: admin status and metrics IPC ops.
+//! Admin IPC ops: status and metrics.
 
-mod fixtures;
 
 use std::collections::BTreeMap;
 use std::fs;

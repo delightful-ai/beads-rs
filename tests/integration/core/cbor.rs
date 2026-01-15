@@ -1,6 +1,5 @@
-//! Phase 2 tests: canonical CBOR hashing + decode bounds.
+//! Core CBOR hashing + decode bounds.
 
-mod fixtures;
 
 use beads_rs::{DecodeError, Limits, decode_event_body, encode_event_body_canonical};
 

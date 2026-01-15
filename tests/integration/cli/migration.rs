@@ -2,7 +2,6 @@
 //!
 //! Tests importing issues.jsonl from Go beads export format.
 
-mod fixtures;
 
 use std::fs;
 

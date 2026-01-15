@@ -14,12 +14,12 @@ use crate::core::error::details::{
 };
 use crate::core::{
     ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, Limits, NamespaceId, Opaque,
-    ReplicaId, Seq1, Sha256, StoreEpoch, StoreId,
+    ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
 };
 
 pub const PROTOCOL_VERSION_V1: u32 = 1;
 
-pub type WatermarkMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, u64>>;
+pub type WatermarkMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Seq0>>;
 pub type WatermarkHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Sha256>>;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1076,7 +1076,7 @@ fn encode_watermark_map(
         enc.map(origins.len() as u64)?;
         for (origin, seq) in origins {
             encode_replica_id(enc, origin)?;
-            enc.u64(*seq)?;
+            enc.u64(seq.get())?;
         }
     }
     Ok(())
@@ -1097,7 +1097,7 @@ fn decode_watermark_map(
         for _ in 0..inner_len {
             let origin = decode_replica_id(dec, limits, "origin_replica_id")?;
             let seq = dec.u64()?;
-            origins.insert(origin, seq);
+            origins.insert(origin, Seq0::new(seq));
         }
         out.insert(namespace, origins);
     }

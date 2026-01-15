@@ -43,7 +43,7 @@ impl MockStore {
                 let ns_map = durable.entry(ns.clone()).or_default();
                 let ns_heads = durable_heads.entry(ns.clone()).or_default();
                 for (origin, wm) in origins {
-                    ns_map.insert(*origin, wm.seq().get());
+                    ns_map.insert(*origin, wm.seq());
                     if let HeadStatus::Known(head) = wm.head() {
                         ns_heads.insert(*origin, Sha256(head));
                     }
@@ -53,7 +53,7 @@ impl MockStore {
                 let ns_map = applied.entry(ns.clone()).or_default();
                 let ns_heads = applied_heads.entry(ns.clone()).or_default();
                 for (origin, wm) in origins {
-                    ns_map.insert(*origin, wm.seq().get());
+                    ns_map.insert(*origin, wm.seq());
                     if let HeadStatus::Known(head) = wm.head() {
                         ns_heads.insert(*origin, Sha256(head));
                     }

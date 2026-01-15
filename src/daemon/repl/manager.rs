@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::core::error::details::{BootstrapRequiredDetails, SnapshotRangeReason};
 use crate::core::{
     ErrorCode, ErrorPayload, EventFrameV1, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRole,
-    ReplicaRoster, ReplicateMode, StoreIdentity,
+    ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
@@ -781,8 +781,11 @@ fn emit_peer_lag(peer: ReplicaId, local: &WatermarkMap, ack: &WatermarkMap) {
         let mut max_lag = 0u64;
         let acked = ack.get(namespace);
         for (origin, local_seq) in origins {
-            let acked_seq = acked.and_then(|map| map.get(origin)).copied().unwrap_or(0);
-            let lag = local_seq.saturating_sub(acked_seq);
+            let acked_seq = acked
+                .and_then(|map| map.get(origin))
+                .copied()
+                .unwrap_or(Seq0::ZERO);
+            let lag = local_seq.get().saturating_sub(acked_seq.get());
             max_lag = max_lag.max(lag);
         }
         metrics::set_repl_peer_lag(peer, namespace, max_lag);

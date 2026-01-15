@@ -1,6 +1,5 @@
-//! Phase 3 tests: origin_seq allocation.
+//! WAL origin_seq allocation.
 
-mod fixtures;
 
 use uuid::Uuid;
 
@@ -10,7 +9,7 @@ use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
 
 #[test]
-fn phase3_seq_allocation_is_monotonic() {
+fn seq_allocation_is_monotonic() {
     let temp = TempWalDir::new();
     let index = temp.open_index().expect("open wal index");
     let namespace = NamespaceId::core();
@@ -45,7 +44,7 @@ fn phase3_seq_allocation_is_monotonic() {
 }
 
 #[test]
-fn phase3_seq_allocation_resumes_after_replay() {
+fn seq_allocation_resumes_after_replay() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([13u8; 16]));

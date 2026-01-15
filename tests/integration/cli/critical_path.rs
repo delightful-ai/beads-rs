@@ -2,7 +2,6 @@
 //!
 //! These tests run the actual `bd` binary against temp git repos.
 
-mod fixtures;
 
 use std::fs;
 #[cfg(feature = "slow-tests")]

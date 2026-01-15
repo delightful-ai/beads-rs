@@ -1,6 +1,5 @@
-//! Phase 5 tests: replication ACK/WANT semantics.
+//! Replication ACK/WANT semantics.
 
-mod fixtures;
 
 use std::sync::Arc;
 
@@ -17,8 +16,8 @@ use beads_rs::daemon::wal::{
 use beads_rs::paths;
 use beads_rs::{
     ActorId, ErrorCode, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
-    NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
-    StoreMetaVersions, TxnDeltaV1, TxnId, encode_event_body_canonical, hash_event_body,
+    NamespaceId, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
+    StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, encode_event_body_canonical, hash_event_body,
 };
 
 use crate::fixtures::repl_frames;
@@ -85,7 +84,7 @@ fn event_frame_with_txn(
 }
 
 #[test]
-fn phase5_repl_ack_advances_watermarks() {
+fn repl_ack_advances_watermarks() {
     let (mut session, mut store, identity) = inbound_session();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
@@ -114,8 +113,8 @@ fn phase5_repl_ack_advances_watermarks() {
         .get(&namespace)
         .and_then(|m| m.get(&origin))
         .copied()
-        .unwrap_or_default();
-    assert_eq!(seq, 2);
+        .unwrap_or(Seq0::ZERO);
+    assert_eq!(seq, Seq0::new(2));
 
     let head = ack
         .durable_heads
@@ -131,7 +130,7 @@ fn phase5_repl_ack_advances_watermarks() {
 }
 
 #[test]
-fn phase5_repl_gap_triggers_want() {
+fn repl_gap_triggers_want() {
     let (mut session, mut store, identity) = inbound_session();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
@@ -158,12 +157,12 @@ fn phase5_repl_gap_triggers_want() {
         .get(&namespace)
         .and_then(|m| m.get(&origin))
         .copied()
-        .unwrap_or_default();
-    assert_eq!(seq, 0);
+        .unwrap_or(Seq0::ZERO);
+    assert_eq!(seq, Seq0::ZERO);
 }
 
 #[test]
-fn phase5_repl_equivocation_errors() {
+fn repl_equivocation_errors() {
     let (mut session, mut store, identity) = inbound_session();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
@@ -196,7 +195,7 @@ fn phase5_repl_equivocation_errors() {
 }
 
 #[test]
-fn phase5_repl_prev_sha_mismatch_rejects() {
+fn repl_prev_sha_mismatch_rejects() {
     let (mut session, mut store, identity) = inbound_session();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
@@ -230,7 +229,7 @@ fn phase5_repl_prev_sha_mismatch_rejects() {
 }
 
 #[test]
-fn phase5_repl_want_reads_from_wal() {
+fn repl_want_reads_from_wal() {
     let _temp_store = TempStoreDir::new().expect("temp store dir");
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));

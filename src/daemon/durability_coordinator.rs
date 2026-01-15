@@ -230,7 +230,7 @@ fn role_allows_policy(role: ReplicaRole, mode: ReplicateMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{NamespaceId, StoreEpoch, StoreId, StoreIdentity};
+    use crate::core::{NamespaceId, Seq0, StoreEpoch, StoreId, StoreIdentity};
     use crate::daemon::repl::proto::WatermarkMap;
     use uuid::Uuid;
 
@@ -300,7 +300,7 @@ mod tests {
         durable
             .entry(namespace.clone())
             .or_default()
-            .insert(local, 2);
+            .insert(local, Seq0::new(2));
         peer_acks
             .lock()
             .unwrap()

@@ -1,6 +1,5 @@
-//! Phase 4 tests: idempotency mapping + request hash reuse.
+//! WAL idempotency mapping + request hash reuse.
 
-mod fixtures;
 
 use uuid::Uuid;
 
@@ -12,7 +11,7 @@ use crate::fixtures::mutation;
 use crate::fixtures::wal::TempWalDir;
 
 #[test]
-fn phase4_idempotency_mapping_reuses_txn_and_event_ids() {
+fn idempotency_mapping_reuses_txn_and_event_ids() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = temp.meta().replica_id;
@@ -70,7 +69,7 @@ fn phase4_idempotency_mapping_reuses_txn_and_event_ids() {
 }
 
 #[test]
-fn phase4_request_sha_mismatch_returns_error() {
+fn request_sha_mismatch_returns_error() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = temp.meta().replica_id;

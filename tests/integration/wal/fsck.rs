@@ -1,6 +1,5 @@
-//! Phase 3 tests: offline fsck verification + repair.
+//! WAL fsck verification + repair.
 
-mod fixtures;
 
 use std::fs;
 
@@ -16,7 +15,7 @@ use crate::fixtures::wal::{TempWalDir, record_for_seq};
 use crate::fixtures::wal_corrupt::{corrupt_frame_body, truncate_frame_mid_body};
 
 #[test]
-fn phase3_fsck_clean_segment_passes() {
+fn fsck_clean_segment_passes() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
@@ -42,7 +41,7 @@ fn phase3_fsck_clean_segment_passes() {
 }
 
 #[test]
-fn phase3_fsck_repair_truncates_tail() {
+fn fsck_repair_truncates_tail() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
@@ -71,7 +70,7 @@ fn phase3_fsck_repair_truncates_tail() {
 }
 
 #[test]
-fn phase3_fsck_repair_quarantines_mid_file_corruption() {
+fn fsck_repair_quarantines_mid_file_corruption() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
@@ -108,7 +107,7 @@ fn phase3_fsck_repair_quarantines_mid_file_corruption() {
 }
 
 #[test]
-fn phase3_fsck_reports_header_mismatch() {
+fn fsck_reports_header_mismatch() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
@@ -138,7 +137,7 @@ fn phase3_fsck_reports_header_mismatch() {
 }
 
 #[test]
-fn phase3_fsck_reports_sealed_len_mismatch() {
+fn fsck_reports_sealed_len_mismatch() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));

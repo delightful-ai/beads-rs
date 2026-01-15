@@ -1,6 +1,5 @@
-//! Phase 3 tests: WAL framing + tail truncation.
+//! WAL framing + tail truncation.
 
-mod fixtures;
 
 use std::fs;
 use std::io::{Seek, SeekFrom};
@@ -15,7 +14,7 @@ use crate::fixtures::wal_corrupt::{corrupt_frame_body, truncated_segment};
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 #[test]
-fn phase3_wal_framing_roundtrips_records() {
+fn wal_framing_roundtrips_records() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let record = sample_record(temp.meta(), &namespace, 1);
@@ -35,7 +34,7 @@ fn phase3_wal_framing_roundtrips_records() {
 }
 
 #[test]
-fn phase3_wal_tail_truncation_repairs_partial_record() {
+fn wal_tail_truncation_repairs_partial_record() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let segment =
@@ -57,7 +56,7 @@ fn phase3_wal_tail_truncation_repairs_partial_record() {
 }
 
 #[test]
-fn phase3_wal_mid_file_corruption_fails_fast() {
+fn wal_mid_file_corruption_fails_fast() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let record_a = sample_record(temp.meta(), &namespace, 1);
@@ -79,7 +78,7 @@ fn phase3_wal_mid_file_corruption_fails_fast() {
 }
 
 #[test]
-fn phase3_wal_replay_rejects_header_mismatch() {
+fn wal_replay_rejects_header_mismatch() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([42u8; 16]));

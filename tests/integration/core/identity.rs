@@ -1,6 +1,5 @@
-//! Phase 1 tests: identity persistence, namespace validation, and lock behavior.
+//! Core identity: persistence, namespace validation, and lock behavior.
 
-mod fixtures;
 
 use std::fs;
 use std::io;

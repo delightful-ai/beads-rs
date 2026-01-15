@@ -1591,7 +1591,7 @@ mod tests {
         durable
             .entry(namespace.clone())
             .or_default()
-            .insert(local, 2);
+            .insert(local, Seq0::new(2));
         peer_acks
             .lock()
             .unwrap()

@@ -109,11 +109,11 @@ impl SessionStore for ReplSessionStore {
             durable
                 .entry(ns.clone())
                 .or_default()
-                .insert(origin, row.durable_seq);
+                .insert(origin, Seq0::new(row.durable_seq));
             applied
                 .entry(ns.clone())
                 .or_default()
-                .insert(origin, row.applied_seq);
+                .insert(origin, Seq0::new(row.applied_seq));
 
             if let Some(head) = row.durable_head_sha {
                 durable_heads

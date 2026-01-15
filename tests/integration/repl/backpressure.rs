@@ -1,6 +1,5 @@
-//! Phase 5 tests: replication backpressure behavior.
+//! Replication backpressure behavior.
 
-mod fixtures;
 
 use uuid::Uuid;
 
@@ -32,7 +31,7 @@ fn inbound_session_with_limits(limits: Limits) -> (Session, MockStore, StoreIden
 }
 
 #[test]
-fn phase5_repl_backpressure_overload_emits_error() {
+fn repl_backpressure_overload_emits_error() {
     let mut limits = Limits::default();
     limits.max_repl_ingest_queue_bytes = 1;
     limits.max_repl_ingest_queue_events = 1;

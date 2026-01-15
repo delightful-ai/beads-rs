@@ -1,6 +1,5 @@
-//! Phase 2 tests: apply semantics + LWW determinism.
+//! Core apply semantics + LWW determinism.
 
-mod fixtures;
 
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{

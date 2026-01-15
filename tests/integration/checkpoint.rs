@@ -1,6 +1,5 @@
-//! Phase 6 tests: checkpoint export/import determinism.
+//! Checkpoint export/import determinism.
 
-mod fixtures;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -24,7 +23,7 @@ use crate::fixtures::checkpoint::{
 };
 
 #[test]
-fn phase6_checkpoint_export_is_deterministic() {
+fn checkpoint_export_is_deterministic() {
     let fixture = fixture_small_state();
     let export = &fixture.export;
     let export_again = export_checkpoint(CheckpointExportInput {
@@ -42,14 +41,14 @@ fn phase6_checkpoint_export_is_deterministic() {
 }
 
 #[test]
-fn phase6_checkpoint_manifest_hashes_match_files() {
+fn checkpoint_manifest_hashes_match_files() {
     let fixture = fixture_small_state();
     assert_manifest_files(&fixture.export.manifest, &fixture.export.files);
     assert_meta_hashes(&fixture.export.meta, &fixture.export.manifest);
 }
 
 #[test]
-fn phase6_checkpoint_import_rejects_corrupt_files() {
+fn checkpoint_import_rejects_corrupt_files() {
     let fixture = fixture_small_state();
     let temp = TempDir::new().expect("temp checkpoint dir");
     write_checkpoint_tree(temp.path(), &fixture.export).expect("write checkpoint");
@@ -66,7 +65,7 @@ fn phase6_checkpoint_import_rejects_corrupt_files() {
 }
 
 #[test]
-fn phase6_checkpoint_round_trip_preserves_state_and_manifest() {
+fn checkpoint_round_trip_preserves_state_and_manifest() {
     let core = NamespaceId::core();
     let (store_state, _watermarks, expected_export) = build_core_store_state();
 
@@ -110,7 +109,7 @@ fn phase6_checkpoint_round_trip_preserves_state_and_manifest() {
 }
 
 #[test]
-fn phase6_checkpoint_multi_namespace_includes_all_namespaces() {
+fn checkpoint_multi_namespace_includes_all_namespaces() {
     let fixture = fixture_multi_namespace();
     let mut namespaces = fixture.export.manifest.namespaces.clone();
     namespaces.sort();
@@ -123,7 +122,7 @@ fn phase6_checkpoint_multi_namespace_includes_all_namespaces() {
 }
 
 #[test]
-fn phase6_checkpoint_included_watermarks_match() {
+fn checkpoint_included_watermarks_match() {
     let core = NamespaceId::core();
     let (store_state, watermarks, export) = build_core_store_state();
 

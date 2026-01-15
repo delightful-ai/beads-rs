@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::core::{EventFrameV1, Limits, NamespaceId, ReplicaId, Seq0};
+use crate::core::{EventFrameV1, Limits, NamespaceId, ReplicaId, Seq0, Seq1};
 use crate::daemon::broadcast::BroadcastEvent;
 use crate::daemon::repl::proto::Want;
 use crate::daemon::repl::runtime::{WalRangeError, WalRangeReader};
@@ -15,13 +15,13 @@ pub(crate) enum WantFramesOutcome {
 }
 
 struct WantState {
-    next_seq: u64,
+    next_seq: Seq1,
     frames: VecDeque<EventFrameV1>,
     stopped: bool,
 }
 
 impl WantState {
-    fn new(next_seq: u64) -> Self {
+    fn new(next_seq: Seq1) -> Self {
         Self {
             next_seq,
             frames: VecDeque::new(),
@@ -46,7 +46,7 @@ pub(crate) fn build_want_frames(
     limits: &Limits,
     allowed_set: Option<&BTreeSet<NamespaceId>>,
 ) -> Result<WantFramesOutcome, WalRangeError> {
-    let mut needed: BTreeMap<WantKey, u64> = BTreeMap::new();
+    let mut needed: BTreeMap<WantKey, Seq0> = BTreeMap::new();
     for (namespace, origins) in &want.want {
         if let Some(allowed) = allowed_set
             && !allowed.contains(namespace)
@@ -64,7 +64,7 @@ pub(crate) fn build_want_frames(
 
     let mut states: BTreeMap<WantKey, WantState> = needed
         .iter()
-        .map(|(key, seq)| (key.clone(), WantState::new(seq.saturating_add(1))))
+        .map(|(key, seq)| (key.clone(), WantState::new(seq.next())))
         .collect();
 
     for event in cache {
@@ -75,13 +75,13 @@ pub(crate) fn build_want_frames(
         if state.stopped {
             continue;
         }
-        let seq = event.event_id.origin_seq.get();
+        let seq = event.event_id.origin_seq;
         if seq < state.next_seq {
             continue;
         }
         if seq == state.next_seq {
             state.frames.push_back(broadcast_to_frame(event));
-            state.next_seq = state.next_seq.saturating_add(1);
+            state.next_seq = state.next_seq.next();
         } else if !state.frames.is_empty() {
             state.stopped = true;
         }
@@ -94,12 +94,7 @@ pub(crate) fn build_want_frames(
                 continue;
             }
             let (namespace, origin) = key;
-            match wal_reader.read_range(
-                namespace,
-                origin,
-                Seq0::new(*want_seq),
-                limits.max_event_batch_bytes,
-            )
+            match wal_reader.read_range(namespace, origin, *want_seq, limits.max_event_batch_bytes)
             {
                 Ok(wal_frames) => {
                     state.frames = VecDeque::from(wal_frames);
@@ -147,7 +142,7 @@ mod tests {
     use bytes::Bytes;
     use uuid::Uuid;
 
-    use crate::core::{EventBytes, EventId, Opaque, Seq1, Sha256};
+    use crate::core::{EventBytes, EventId, Opaque, Seq0, Seq1, Sha256};
     use crate::daemon::repl::proto::WatermarkMap;
 
     fn make_event(namespace: NamespaceId, origin: ReplicaId, seq: u64) -> BroadcastEvent {
@@ -165,7 +160,10 @@ mod tests {
     fn make_want(entries: Vec<(NamespaceId, ReplicaId, u64)>) -> Want {
         let mut want_map = WatermarkMap::new();
         for (namespace, origin, seq) in entries {
-            want_map.entry(namespace).or_default().insert(origin, seq);
+            want_map
+                .entry(namespace)
+                .or_default()
+                .insert(origin, Seq0::new(seq));
         }
         Want { want: want_map }
     }

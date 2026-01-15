@@ -1,6 +1,5 @@
-//! Phase 4 tests: receipt semantics + origin_seq persistence.
+//! Durability receipts + origin_seq persistence.
 
-mod fixtures;
 
 use uuid::Uuid;
 
@@ -15,7 +14,7 @@ use crate::fixtures::receipt;
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
 
 #[test]
-fn phase4_receipt_min_seen_is_monotonic() {
+fn receipt_min_seen_is_monotonic() {
     let store = StoreIdentity::new(
         StoreId::new(Uuid::from_bytes([1u8; 16])),
         StoreEpoch::new(1),
@@ -62,7 +61,7 @@ fn phase4_receipt_min_seen_is_monotonic() {
 }
 
 #[test]
-fn phase4_receipt_survives_restart() {
+fn receipt_survives_restart() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = temp.meta().replica_id;
@@ -125,7 +124,7 @@ fn phase4_receipt_survives_restart() {
 }
 
 #[test]
-fn phase4_origin_seq_after_restart_is_max_plus_one() {
+fn origin_seq_after_restart_is_max_plus_one() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([33u8; 16]));

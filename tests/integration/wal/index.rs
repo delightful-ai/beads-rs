@@ -1,6 +1,5 @@
-//! Phase 3 tests: WAL index rebuild + catch-up.
+//! WAL index rebuild + catch-up.
 
-mod fixtures;
 
 use std::fs::{self, OpenOptions};
 
@@ -16,7 +15,7 @@ use crate::fixtures::wal::{SegmentFixture, TempWalDir, record_for_seq};
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 #[test]
-fn phase3_index_rebuild_populates_watermarks_and_segments() {
+fn index_rebuild_populates_watermarks_and_segments() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
@@ -58,7 +57,7 @@ fn phase3_index_rebuild_populates_watermarks_and_segments() {
 }
 
 #[test]
-fn phase3_index_catch_up_scans_new_frames() {
+fn index_catch_up_scans_new_frames() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
@@ -108,7 +107,7 @@ fn phase3_index_catch_up_scans_new_frames() {
 }
 
 #[test]
-fn phase3_index_marks_sealed_segments() {
+fn index_marks_sealed_segments() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([14u8; 16]));
@@ -151,7 +150,7 @@ fn phase3_index_marks_sealed_segments() {
 }
 
 #[test]
-fn phase3_index_replay_rejects_sealed_len_mismatch() {
+fn index_replay_rejects_sealed_len_mismatch() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([15u8; 16]));
