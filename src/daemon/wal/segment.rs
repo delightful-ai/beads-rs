@@ -525,7 +525,7 @@ mod tests {
     use bytes::Bytes;
     use tempfile::TempDir;
     #[cfg(unix)]
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = crate::core::StoreIdentity::new(store_id, store_epoch);
@@ -606,6 +606,31 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, EventWalError::Symlink { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn segment_open_sets_dir_permissions() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([4u8; 16]));
+        let meta = test_meta(store_id, StoreEpoch::new(1));
+        let namespace = NamespaceId::core();
+        let _writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::new(1024, 1024, 60_000),
+        )
+        .unwrap();
+
+        let wal_dir = temp.path().join("wal");
+        let wal_mode = fs::metadata(&wal_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(wal_mode, 0o700);
+
+        let ns_dir = wal_dir.join(namespace.as_str());
+        let ns_mode = fs::metadata(&ns_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(ns_mode, 0o700);
     }
 
     #[test]

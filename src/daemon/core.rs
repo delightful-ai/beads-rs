@@ -3543,6 +3543,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use bytes::Bytes;
     use git2::Repository;
@@ -3551,10 +3553,11 @@ mod tests {
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
         Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId,
-        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaId, SegmentId, Seq0,
-        Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
-        TxnDeltaV1, TxnId, TxnOpV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
-        WireNoteV1, WireStamp, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry, ReplicaId,
+        ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
+        StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, VerifiedEvent,
+        WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -3624,6 +3627,56 @@ mod tests {
         daemon.remote_to_store_id.insert(remote.clone(), store_id);
         daemon.stores.insert(store_id, runtime);
         store_id
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replica_roster_enforces_permissions() {
+        let _tmp = TempStoreDir::new();
+        let store_id = StoreId::new(Uuid::from_bytes([44u8; 16]));
+        let path = paths::replicas_path(store_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create store dir");
+        }
+
+        let roster = ReplicaRoster {
+            replicas: vec![ReplicaEntry {
+                replica_id: ReplicaId::new(Uuid::from_bytes([45u8; 16])),
+                name: "alpha".to_string(),
+                role: ReplicaRole::Anchor,
+                durability_eligible: true,
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            }],
+        };
+        let toml = toml::to_string(&roster).expect("encode roster");
+        std::fs::write(&path, toml).expect("write replicas.toml");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod replicas.toml");
+
+        let roster = load_replica_roster(store_id).expect("load roster");
+        assert!(roster.is_some());
+
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replica_roster_rejects_symlink() {
+        let tmp = TempStoreDir::new();
+        let store_id = StoreId::new(Uuid::from_bytes([46u8; 16]));
+        let path = paths::replicas_path(store_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create store dir");
+        }
+
+        let target = tmp.data_dir().join("replicas-target.toml");
+        std::fs::write(&target, b"").expect("write target");
+        symlink(&target, &path).expect("symlink replicas.toml");
+
+        let err = load_replica_roster(store_id).unwrap_err();
+        assert!(matches!(err, StoreRuntimeError::ReplicaRosterSymlink { .. }));
     }
 
     fn verified_event_with_delta(

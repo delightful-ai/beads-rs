@@ -594,6 +594,8 @@ mod tests {
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, Wal, WalIndex};
     use crate::paths;
     use std::sync::Arc;
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn write_meta_for(store_id: StoreId, replica_id: ReplicaId, now_ms: u64) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
@@ -704,6 +706,57 @@ mod tests {
         assert!(matches!(
             result,
             Err(StoreRuntimeError::WatermarkInvalid { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn namespace_policies_enforce_permissions() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([42u8; 16]));
+        let path = paths::namespaces_path(store_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create store dir");
+        }
+
+        let mut namespaces = BTreeMap::new();
+        namespaces.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        let policies = NamespacePolicies { namespaces };
+        let toml = toml::to_string(&policies).expect("toml encode");
+        fs::write(&path, toml).expect("write namespaces.toml");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("chmod namespaces.toml");
+
+        let defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        load_namespace_policies(store_id, &defaults).expect("load policies");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn namespace_policies_reject_symlink() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([43u8; 16]));
+        let path = paths::namespaces_path(store_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create store dir");
+        }
+
+        let target = temp.path().join("namespaces-target.toml");
+        fs::write(&target, b"").expect("write target");
+        symlink(&target, &path).expect("symlink namespaces.toml");
+
+        let defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let err = load_namespace_policies(store_id, &defaults).unwrap_err();
+        assert!(matches!(
+            err,
+            StoreRuntimeError::NamespacePoliciesSymlink { .. }
         ));
     }
 }
