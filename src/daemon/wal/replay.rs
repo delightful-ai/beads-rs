@@ -1,6 +1,6 @@
 //! WAL segment replay and SQLite index rebuild/catch-up.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
@@ -216,7 +216,9 @@ fn replay_index(
 
     let namespaces = list_namespaces(&wal_dir)?;
     for namespace in namespaces {
-        let segments = list_segments(&wal_dir.join(namespace.as_str()))?;
+        let namespace_dir = wal_dir.join(namespace.as_str());
+        cleanup_orphan_tmp_segments(store_dir, &namespace, &namespace_dir, index)?;
+        let segments = list_segments(&namespace_dir)?;
         let mut segments = verify_segments(segments, meta, &namespace)?;
         segments.sort_by_key(|segment| (segment.header.created_at_ms, segment.header.segment_id));
         let last_segment_id = segments.last().map(|segment| segment.header.segment_id);
@@ -501,6 +503,72 @@ fn list_segments(dir: &Path) -> Result<Vec<SegmentDescriptor<Unverified>>, WalRe
         segments.push(SegmentDescriptor::load(path)?);
     }
     Ok(segments)
+}
+
+fn cleanup_orphan_tmp_segments(
+    store_dir: &Path,
+    namespace: &NamespaceId,
+    namespace_dir: &Path,
+    index: &dyn WalIndex,
+) -> Result<(), WalReplayError> {
+    reject_symlink(namespace_dir)?;
+    let referenced: BTreeSet<PathBuf> = match index.reader().list_segments(namespace) {
+        Ok(rows) => rows.into_iter().map(|row| row.segment_path).collect(),
+        Err(err) => {
+            tracing::warn!(
+                namespace = %namespace,
+                "failed to list wal segments for tmp cleanup: {err}"
+            );
+            return Ok(());
+        }
+    };
+
+    let entries = match fs::read_dir(namespace_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(WalReplayError::Io {
+                path: namespace_dir.to_path_buf(),
+                source: err,
+            });
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|source| WalReplayError::Io {
+            path: namespace_dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".wal.tmp") {
+            continue;
+        }
+        let rel_path = segment_rel_path(store_dir, &path);
+        if referenced.contains(&rel_path) {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    namespace = %namespace,
+                    path = %rel_path.display(),
+                    "deleted orphan wal temp segment"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    namespace = %namespace,
+                    path = %rel_path.display(),
+                    "failed to delete orphan wal temp segment: {err}"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn reject_symlink(path: &Path) -> Result<(), WalReplayError> {
@@ -872,13 +940,14 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, Seq1, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+        ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, SegmentId, Seq1,
+        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
         encode_event_body_canonical,
     };
     use crate::daemon::wal::SegmentConfig;
     use crate::daemon::wal::record::RecordHeader;
     use crate::daemon::wal::segment::SegmentWriter;
+    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex};
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, store_epoch);
@@ -1016,6 +1085,43 @@ mod tests {
             }
             other => panic!("expected RecordShaMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cleanup_orphan_tmp_segments_removes_unreferenced() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+
+        let namespace = NamespaceId::core();
+        let wal_dir = temp.path().join("wal");
+        let namespace_dir = wal_dir.join(namespace.as_str());
+        std::fs::create_dir_all(&namespace_dir).unwrap();
+
+        let keep = namespace_dir.join("keep.wal.tmp");
+        let orphan = namespace_dir.join("orphan.wal.tmp");
+        std::fs::write(&keep, b"keep").unwrap();
+        std::fs::write(&orphan, b"orphan").unwrap();
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        let segment_row = SegmentRow {
+            namespace: namespace.clone(),
+            segment_id: SegmentId::new(Uuid::from_bytes([1u8; 16])),
+            segment_path: segment_rel_path(temp.path(), &keep),
+            created_at_ms: 1,
+            last_indexed_offset: 0,
+            sealed: false,
+            final_len: None,
+        };
+        txn.upsert_segment(&segment_row).unwrap();
+        txn.commit().unwrap();
+
+        cleanup_orphan_tmp_segments(temp.path(), &namespace, &namespace_dir, &index).unwrap();
+
+        assert!(keep.exists());
+        assert!(!orphan.exists());
     }
 }
 
