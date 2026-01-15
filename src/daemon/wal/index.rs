@@ -10,8 +10,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::{
-    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq1, StoreId, StoreMeta,
-    TxnId,
+    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, ReplicaRole, SegmentId, Seq1,
+    StoreId, StoreMeta, TxnId,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = 1;
@@ -74,6 +74,8 @@ pub enum WalIndexError {
     SegmentRowDecode(String),
     #[error("watermark row decode failed: {0}")]
     WatermarkRowDecode(String),
+    #[error("replica liveness row decode failed: {0}")]
+    ReplicaLivenessRowDecode(String),
 }
 
 pub trait WalIndex: Send + Sync {
@@ -134,6 +136,7 @@ pub trait WalIndexTxn {
         event_ids: &[EventId],
         created_at_ms: u64,
     ) -> Result<(), WalIndexError>;
+    fn upsert_replica_liveness(&mut self, row: &ReplicaLivenessRow) -> Result<(), WalIndexError>;
     fn commit(self: Box<Self>) -> Result<(), WalIndexError>;
     fn rollback(self: Box<Self>) -> Result<(), WalIndexError>;
 }
@@ -147,6 +150,7 @@ pub trait WalIndexReader {
     fn list_segments(&self, ns: &NamespaceId) -> Result<Vec<SegmentRow>, WalIndexError>;
     fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError>;
     fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError>;
+    fn load_replica_liveness(&self) -> Result<Vec<ReplicaLivenessRow>, WalIndexError>;
     fn iter_from(
         &self,
         ns: &NamespaceId,
@@ -210,6 +214,15 @@ pub struct HlcRow {
     pub actor_id: ActorId,
     pub last_physical_ms: u64,
     pub last_logical: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplicaLivenessRow {
+    pub replica_id: ReplicaId,
+    pub last_seen_ms: u64,
+    pub last_handshake_ms: u64,
+    pub role: ReplicaRole,
+    pub durability_eligible: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,6 +587,36 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         Ok(())
     }
 
+    fn upsert_replica_liveness(&mut self, row: &ReplicaLivenessRow) -> Result<(), WalIndexError> {
+        let replica_blob = uuid_blob(row.replica_id.as_uuid());
+        let last_seen_ms = i64::try_from(row.last_seen_ms).map_err(|_| {
+            WalIndexError::ReplicaLivenessRowDecode("last_seen_ms out of range".to_string())
+        })?;
+        let last_handshake_ms = i64::try_from(row.last_handshake_ms).map_err(|_| {
+            WalIndexError::ReplicaLivenessRowDecode("last_handshake_ms out of range".to_string())
+        })?;
+        let role = replica_role_str(row.role);
+        let durability_eligible = if row.durability_eligible { 1 } else { 0 };
+
+        self.conn.execute(
+            "INSERT INTO replica_liveness (replica_id, last_seen_ms, last_handshake_ms, role, durability_eligible) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(replica_id) DO UPDATE SET \
+               last_seen_ms = MAX(replica_liveness.last_seen_ms, excluded.last_seen_ms), \
+               last_handshake_ms = MAX(replica_liveness.last_handshake_ms, excluded.last_handshake_ms), \
+               role = excluded.role, \
+               durability_eligible = excluded.durability_eligible",
+            params![
+                replica_blob,
+                last_seen_ms,
+                last_handshake_ms,
+                role,
+                durability_eligible,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn commit(mut self: Box<Self>) -> Result<(), WalIndexError> {
         self.conn.execute_batch("COMMIT")?;
         self.committed = true;
@@ -753,6 +796,45 @@ impl WalIndexReader for SqliteWalIndexReader {
                 });
             }
             Ok(hlc_rows)
+        })
+    }
+
+    fn load_replica_liveness(&self) -> Result<Vec<ReplicaLivenessRow>, WalIndexError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT replica_id, last_seen_ms, last_handshake_ms, role, durability_eligible \
+                 FROM replica_liveness",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let replica_id: Vec<u8> = row.get(0)?;
+                let last_seen_ms: i64 = row.get(1)?;
+                let last_handshake_ms: i64 = row.get(2)?;
+                let role: String = row.get(3)?;
+                let durability_eligible: i64 = row.get(4)?;
+
+                let replica_uuid = blob_uuid(replica_id)
+                    .map_err(|err| WalIndexError::ReplicaLivenessRowDecode(err.to_string()))?;
+                let last_seen_ms = u64::try_from(last_seen_ms).map_err(|_| {
+                    WalIndexError::ReplicaLivenessRowDecode("last_seen_ms out of range".to_string())
+                })?;
+                let last_handshake_ms = u64::try_from(last_handshake_ms).map_err(|_| {
+                    WalIndexError::ReplicaLivenessRowDecode(
+                        "last_handshake_ms out of range".to_string(),
+                    )
+                })?;
+                let role = parse_replica_role(&role)?;
+
+                out.push(ReplicaLivenessRow {
+                    replica_id: ReplicaId::new(replica_uuid),
+                    last_seen_ms,
+                    last_handshake_ms,
+                    role,
+                    durability_eligible: durability_eligible != 0,
+                });
+            }
+            Ok(out)
         })
     }
 
@@ -1138,6 +1220,25 @@ fn blob_32(blob: Vec<u8>) -> Result<[u8; 32], WalIndexError> {
     Ok(bytes)
 }
 
+fn replica_role_str(role: ReplicaRole) -> &'static str {
+    match role {
+        ReplicaRole::Anchor => "anchor",
+        ReplicaRole::Peer => "peer",
+        ReplicaRole::Observer => "observer",
+    }
+}
+
+fn parse_replica_role(value: &str) -> Result<ReplicaRole, WalIndexError> {
+    match value {
+        "anchor" => Ok(ReplicaRole::Anchor),
+        "peer" => Ok(ReplicaRole::Peer),
+        "observer" => Ok(ReplicaRole::Observer),
+        other => Err(WalIndexError::ReplicaLivenessRowDecode(format!(
+            "unknown replica role {other}"
+        ))),
+    }
+}
+
 pub(crate) fn encode_event_ids(event_ids: &[EventId]) -> Result<Vec<u8>, WalIndexError> {
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
@@ -1361,6 +1462,50 @@ mod tests {
         assert_eq!(req.event_ids, vec![event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
         assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), 1);
+    }
+
+    #[test]
+    fn sqlite_index_round_trips_replica_liveness() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+
+        let replica_id = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let first = ReplicaLivenessRow {
+            replica_id,
+            last_seen_ms: 100,
+            last_handshake_ms: 90,
+            role: ReplicaRole::Anchor,
+            durability_eligible: true,
+        };
+        let second = ReplicaLivenessRow {
+            replica_id,
+            last_seen_ms: 80,
+            last_handshake_ms: 110,
+            role: ReplicaRole::Peer,
+            durability_eligible: false,
+        };
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.upsert_replica_liveness(&first).unwrap();
+        txn.commit().unwrap();
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.upsert_replica_liveness(&second).unwrap();
+        txn.commit().unwrap();
+
+        let rows = index.reader().load_replica_liveness().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            ReplicaLivenessRow {
+                replica_id,
+                last_seen_ms: 100,
+                last_handshake_ms: 110,
+                role: ReplicaRole::Peer,
+                durability_eligible: false,
+            }
+        );
     }
 
     #[test]

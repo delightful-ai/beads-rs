@@ -17,8 +17,9 @@ pub use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError, default_wa
 pub use event_wal::{EventWal, SegmentSnapshot};
 pub use frame::{FrameReader, FrameWriter};
 pub use index::{
-    ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem, SegmentRow, SqliteWalIndex,
-    WalIndex, WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
+    ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow,
+    SegmentRow, SqliteWalIndex, WalIndex, WalIndexError, WalIndexReader, WalIndexTxn,
+    WalIndexWriter, WatermarkRow,
 };
 pub use record::{Record, RecordFlags, RecordHeader, RecordHeaderMismatch};
 pub use replay::{
