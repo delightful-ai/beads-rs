@@ -335,6 +335,10 @@ impl SegmentWriter {
         })
     }
 
+    pub fn flush(&mut self) -> EventWalResult<()> {
+        sync_segment(&self.file, &self.path, SyncMode::All)
+    }
+
     fn should_rotate(&self, now_ms: u64, next_len: u64) -> bool {
         if self.config.max_segment_bytes > 0
             && self.bytes_written.saturating_add(next_len) > self.config.max_segment_bytes

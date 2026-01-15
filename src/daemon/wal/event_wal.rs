@@ -49,6 +49,18 @@ impl EventWal {
         })
     }
 
+    pub fn flush(&mut self, namespace: &NamespaceId) -> EventWalResult<Option<SegmentSnapshot>> {
+        let Some(writer) = self.writers.get_mut(namespace) else {
+            return Ok(None);
+        };
+        writer.flush()?;
+        Ok(Some(SegmentSnapshot {
+            segment_id: writer.current_segment_id(),
+            created_at_ms: writer.current_created_at_ms(),
+            path: writer.current_path().to_path_buf(),
+        }))
+    }
+
     fn writer_mut(
         &mut self,
         namespace: &NamespaceId,
