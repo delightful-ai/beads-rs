@@ -29,9 +29,8 @@ fn phase7_subscribe_streams_events_in_order() {
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
-    let mut client =
-        StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
-            .expect("subscribe");
+    let mut client = StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
+        .expect("subscribe");
 
     let report = run_load(repo, 5, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
@@ -63,7 +62,9 @@ fn phase7_subscribe_gates_on_require_min_seen() {
         read,
     };
 
-    let mut stream = ipc_client.subscribe_stream(&request).expect("subscribe stream");
+    let mut stream = ipc_client
+        .subscribe_stream(&request)
+        .expect("subscribe stream");
     let response = stream
         .read_response()
         .expect("read response")
@@ -84,9 +85,8 @@ fn phase7_subscribe_gates_on_require_min_seen() {
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
-    let mut client =
-        StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
-            .expect("subscribe");
+    let mut client = StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
+        .expect("subscribe");
 
     let report = run_load(repo, 1, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);

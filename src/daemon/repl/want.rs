@@ -94,12 +94,8 @@ pub(crate) fn build_want_frames(
                 continue;
             }
             let (namespace, origin) = key;
-            match wal_reader.read_range(
-                namespace,
-                origin,
-                *want_seq,
-                limits.max_event_batch_bytes,
-            ) {
+            match wal_reader.read_range(namespace, origin, *want_seq, limits.max_event_batch_bytes)
+            {
                 Ok(wal_frames) => {
                     state.frames = VecDeque::from(wal_frames);
                 }
@@ -112,8 +108,7 @@ pub(crate) fn build_want_frames(
     }
 
     if states.values().any(|state| state.frames.is_empty()) {
-        let namespaces: BTreeSet<NamespaceId> =
-            needed.keys().map(|(ns, _)| ns.clone()).collect();
+        let namespaces: BTreeSet<NamespaceId> = needed.keys().map(|(ns, _)| ns.clone()).collect();
         return Ok(WantFramesOutcome::BootstrapRequired { namespaces });
     }
 
@@ -165,10 +160,7 @@ mod tests {
     fn make_want(entries: Vec<(NamespaceId, ReplicaId, u64)>) -> Want {
         let mut want_map = WatermarkMap::new();
         for (namespace, origin, seq) in entries {
-            want_map
-                .entry(namespace)
-                .or_default()
-                .insert(origin, seq);
+            want_map.entry(namespace).or_default().insert(origin, seq);
         }
         Want { want: want_map }
     }

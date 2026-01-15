@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-pub mod frame;
 pub mod event_wal;
+pub mod frame;
 pub mod fsck;
 pub mod index;
 pub mod record;
@@ -14,8 +14,8 @@ pub mod segment;
 
 pub use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError, default_wal_base_dir};
 
-pub use frame::{FrameReader, FrameWriter};
 pub use event_wal::{EventWal, SegmentSnapshot};
+pub use frame::{FrameReader, FrameWriter};
 pub use index::{
     ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem, SegmentRow, SqliteWalIndex,
     WalIndex, WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,

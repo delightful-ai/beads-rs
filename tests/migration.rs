@@ -7,9 +7,9 @@ mod fixtures;
 use std::fs;
 
 use assert_cmd::Command;
+use fixtures::daemon_runtime::shutdown_daemon;
 use predicates::prelude::*;
 use tempfile::TempDir;
-use fixtures::daemon_runtime::shutdown_daemon;
 
 fn data_dir_for_runtime(runtime_dir: &std::path::Path) -> std::path::PathBuf {
     let dir = runtime_dir.join("data");

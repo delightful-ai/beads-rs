@@ -20,14 +20,15 @@ use crate::daemon::broadcast::{
     BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
 };
 use crate::daemon::metrics;
-use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap};
+use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
+use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap};
+use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, Session, SessionAction,
     SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore, WalRangeReader,
     decode_envelope, encode_envelope,
 };
-use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 
 #[derive(Clone, Debug)]
 pub struct PeerConfig {
@@ -325,9 +326,10 @@ where
     config.offered_namespaces = plan.offered_namespaces.clone();
 
     let mut session = Session::new(SessionRole::Outbound, config, limits.clone(), admission);
+    let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
 
     if let Some(action) = session.begin_handshake(&store, now_ms()) {
-        apply_action(&mut writer, &session, action)?;
+        apply_action(&mut writer, &session, action, &mut keepalive)?;
     }
 
     let mut accepted_set = BTreeSet::new();
@@ -351,7 +353,9 @@ where
 
                 match msg {
                     InboundMessage::Message(msg) => {
-                        let actions = session.handle_message(msg, &mut store, now_ms());
+                        let now_ms = now_ms();
+                        keepalive.note_recv(now_ms);
+                        let actions = session.handle_message(msg, &mut store, now_ms);
                         for action in actions {
                             if let SessionAction::PeerAck(ack) = &action
                                 && let Err(err) =
@@ -369,18 +373,24 @@ where
                                     runtime.wal_reader.as_ref(),
                                     &limits,
                                     Some(&accepted_set),
+                                    &mut keepalive,
                                 ) {
                                     tracing::warn!("peer want handling failed: {err}");
                                     return Err(err);
                                 }
-                            } else if apply_action(&mut writer, &session, action)? {
+                            } else if apply_action(&mut writer, &session, action, &mut keepalive)? {
                                 return Ok(());
                             }
                         }
                     }
                     InboundMessage::Terminated { payload } => {
                         if let Some(payload) = payload {
-                            send_payload(&mut writer, &session, ReplMessage::Error(payload))?;
+                            send_payload(
+                                &mut writer,
+                                &session,
+                                ReplMessage::Error(payload),
+                                &mut keepalive,
+                            )?;
                         }
                         break;
                     }
@@ -418,7 +428,7 @@ where
                     continue;
                 }
                 let frame = broadcast_to_frame(event);
-                send_events(&mut writer, &session, vec![frame], &limits)?;
+                send_events(&mut writer, &session, vec![frame], &limits, &mut keepalive)?;
             }
             recv(tick) -> _ => {}
         }
@@ -447,11 +457,43 @@ where
                 .filter(|event| accepted_set.contains(&event.namespace))
                 .map(broadcast_to_frame)
                 .collect::<Vec<_>>();
-            send_events(&mut writer, &session, frames, &limits)?;
+            send_events(&mut writer, &session, frames, &limits, &mut keepalive)?;
         }
         if streaming && !sent_hot_cache {
-            send_hot_cache(&mut writer, &session, &broadcaster, &accepted_set, &limits)?;
+            send_hot_cache(
+                &mut writer,
+                &session,
+                &broadcaster,
+                &accepted_set,
+                &limits,
+                &mut keepalive,
+            )?;
             sent_hot_cache = true;
+        }
+
+        if session.phase() == SessionPhase::Streaming {
+            let now_ms = now_ms();
+            if let Some(decision) = keepalive.poll(now_ms) {
+                match decision {
+                    KeepaliveDecision::SendPing(ping) => {
+                        send_payload(
+                            &mut writer,
+                            &session,
+                            ReplMessage::Ping(ping),
+                            &mut keepalive,
+                        )?;
+                    }
+                    KeepaliveDecision::Close => {
+                        tracing::warn!(
+                            target: "repl",
+                            direction = "outbound",
+                            peer_replica_id = %plan.replica_id,
+                            "replication keepalive timeout"
+                        );
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -526,15 +568,16 @@ fn apply_action(
     writer: &mut FrameWriter<TcpStream>,
     session: &Session,
     action: SessionAction,
+    keepalive: &mut KeepaliveTracker,
 ) -> Result<bool, PeerError> {
     match action {
         SessionAction::Send(message) => {
-            send_payload(writer, session, message)?;
+            send_payload(writer, session, message, keepalive)?;
             Ok(false)
         }
         SessionAction::Close { error } => {
             if let Some(error) = error {
-                send_payload(writer, session, ReplMessage::Error(error))?;
+                send_payload(writer, session, ReplMessage::Error(error), keepalive)?;
             }
             Ok(true)
         }
@@ -548,6 +591,7 @@ fn send_payload(
     writer: &mut FrameWriter<TcpStream>,
     session: &Session,
     message: ReplMessage,
+    keepalive: &mut KeepaliveTracker,
 ) -> Result<(), PeerError> {
     let version = session
         .peer()
@@ -556,6 +600,7 @@ fn send_payload(
     let envelope = ReplEnvelope { version, message };
     let bytes = encode_envelope(&envelope)?;
     writer.write_frame_with_limit(&bytes, session.negotiated_max_frame_bytes())?;
+    keepalive.note_send(now_ms());
     Ok(())
 }
 
@@ -564,6 +609,7 @@ fn send_events(
     session: &Session,
     frames: Vec<EventFrameV1>,
     limits: &crate::core::Limits,
+    keepalive: &mut KeepaliveTracker,
 ) -> Result<(), PeerError> {
     if frames.is_empty() {
         return Ok(());
@@ -584,6 +630,7 @@ fn send_events(
                 writer,
                 session,
                 ReplMessage::Events(Events { events: batch }),
+                keepalive,
             )?;
             batch = Vec::new();
             batch_bytes = 0;
@@ -601,6 +648,7 @@ fn send_events(
                     writer,
                     session,
                     ReplMessage::Events(Events { events: batch }),
+                    keepalive,
                 )?;
             }
             batch = vec![frame];
@@ -621,6 +669,7 @@ fn send_events(
             writer,
             session,
             ReplMessage::Events(Events { events: batch }),
+            keepalive,
         )?;
     }
 
@@ -648,6 +697,7 @@ fn send_hot_cache(
     broadcaster: &EventBroadcaster,
     allowed_set: &BTreeSet<NamespaceId>,
     limits: &crate::core::Limits,
+    keepalive: &mut KeepaliveTracker,
 ) -> Result<(), PeerError> {
     let cache = broadcaster.hot_cache()?;
     let frames = cache
@@ -655,7 +705,7 @@ fn send_hot_cache(
         .filter(|event| allowed_set.contains(&event.namespace))
         .map(broadcast_to_frame)
         .collect::<Vec<_>>();
-    send_events(writer, session, frames, limits)
+    send_events(writer, session, frames, limits, keepalive)
 }
 
 fn update_peer_ack(
@@ -701,6 +751,7 @@ fn handle_want(
     wal_reader: Option<&WalRangeReader>,
     limits: &crate::core::Limits,
     allowed_set: Option<&BTreeSet<NamespaceId>>,
+    keepalive: &mut KeepaliveTracker,
 ) -> Result<(), PeerError> {
     if want.want.is_empty() {
         return Ok(());
@@ -711,13 +762,15 @@ fn handle_want(
         Ok(outcome) => outcome,
         Err(err) => {
             let payload = err.as_error_payload();
-            send_payload(writer, session, ReplMessage::Error(payload))?;
+            send_payload(writer, session, ReplMessage::Error(payload), keepalive)?;
             return Ok(());
         }
     };
 
     match outcome {
-        WantFramesOutcome::Frames(frames) => send_events(writer, session, frames, limits),
+        WantFramesOutcome::Frames(frames) => {
+            send_events(writer, session, frames, limits, keepalive)
+        }
         WantFramesOutcome::BootstrapRequired { namespaces } => {
             let payload =
                 ErrorPayload::new(ErrorCode::BootstrapRequired, "bootstrap required", false)
@@ -725,7 +778,7 @@ fn handle_want(
                         namespaces: namespaces.into_iter().collect(),
                         reason: SnapshotRangeReason::RangeMissing,
                     });
-            send_payload(writer, session, ReplMessage::Error(payload))?;
+            send_payload(writer, session, ReplMessage::Error(payload), keepalive)?;
             Ok(())
         }
     }
@@ -784,6 +837,7 @@ mod tests {
     };
     use crate::daemon::repl::IngestOutcome;
     use crate::daemon::repl::WatermarkSnapshot;
+    use crate::daemon::repl::keepalive::KeepaliveTracker;
     use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap, Welcome};
 
     #[derive(Default)]
@@ -1071,10 +1125,8 @@ mod tests {
     #[test]
     fn send_events_respects_negotiated_max_frame_bytes() {
         let limits = test_limits();
-        let local_store = StoreIdentity::new(
-            StoreId::new(Uuid::from_bytes([20u8; 16])),
-            StoreEpoch::ZERO,
-        );
+        let local_store =
+            StoreIdentity::new(StoreId::new(Uuid::from_bytes([20u8; 16])), StoreEpoch::ZERO);
         let local_replica = ReplicaId::new(Uuid::from_bytes([21u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
 
@@ -1102,7 +1154,11 @@ mod tests {
             live_stream_enabled: true,
             max_frame_bytes: 200,
         };
-        session.handle_message(ReplMessage::Welcome(welcome), &mut TestStore::default(), now_ms());
+        session.handle_message(
+            ReplMessage::Welcome(welcome),
+            &mut TestStore::default(),
+            now_ms(),
+        );
         assert!(matches!(session.phase(), SessionPhase::Streaming));
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1147,7 +1203,15 @@ mod tests {
             }
         };
 
-        send_events(&mut writer, &session, vec![frame1, frame2], &limits).expect("send");
+        let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
+        send_events(
+            &mut writer,
+            &session,
+            vec![frame1, frame2],
+            &limits,
+            &mut keepalive,
+        )
+        .expect("send");
 
         let counts = rx.recv_timeout(Duration::from_secs(1)).expect("counts");
         assert_eq!(counts, vec![1, 1]);

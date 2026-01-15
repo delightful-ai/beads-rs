@@ -1,10 +1,10 @@
 //! WAL segment header and append/rotation logic.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::cell::Cell;
 
 use crc32c::crc32c;
 use rand::RngCore;

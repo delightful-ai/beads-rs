@@ -52,7 +52,9 @@ pub enum DrainError {
         expected: Option<Sha256>,
         got: Option<Sha256>,
     },
-    PrevUnknown { seq: Seq1 },
+    PrevUnknown {
+        seq: Seq1,
+    },
 }
 
 impl OriginStreamState {
@@ -156,7 +158,7 @@ impl OriginStreamState {
             HeadStatus::Unknown => {
                 return Err(DrainError::PrevUnknown {
                     seq: self.durable.seq().next(),
-                })
+                });
             }
         };
 

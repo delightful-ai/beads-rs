@@ -43,7 +43,7 @@ fn daemon_pid(runtime_dir: &Path) -> u32 {
 }
 
 fn kill_daemon(pid: u32) {
-    use nix::sys::signal::{kill, Signal};
+    use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
     let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
@@ -104,7 +104,8 @@ fn latest_wal_segment(store_dir: &Path, namespace: &NamespaceId) -> PathBuf {
 fn segment_header_len(path: &Path) -> u64 {
     let mut file = fs::File::open(path).expect("open wal segment");
     let mut prefix = [0u8; 13];
-    file.read_exact(&mut prefix).expect("read wal header prefix");
+    file.read_exact(&mut prefix)
+        .expect("read wal header prefix");
     u32::from_le_bytes([prefix[9], prefix[10], prefix[11], prefix[12]]) as u64
 }
 
@@ -184,13 +185,16 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
 
     fixture
         .bd()
-        .args(["store", "unlock", "--store-id", store_id.to_string().as_str()])
+        .args([
+            "store",
+            "unlock",
+            "--store-id",
+            store_id.to_string().as_str(),
+        ])
         .assert()
         .success();
 
-    let len_before = fs::metadata(&wal_segment)
-        .expect("segment metadata")
-        .len();
+    let len_before = fs::metadata(&wal_segment).expect("segment metadata").len();
     let output = fixture
         .bd()
         .args(["status", "--json"])
@@ -253,7 +257,12 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
     let store_id = store_id_from_data_dir(fixture.data_dir());
     fixture
         .bd()
-        .args(["store", "unlock", "--store-id", store_id.to_string().as_str()])
+        .args([
+            "store",
+            "unlock",
+            "--store-id",
+            store_id.to_string().as_str(),
+        ])
         .assert()
         .success();
 

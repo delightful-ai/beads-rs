@@ -65,7 +65,10 @@ pub fn normalize_url(url: &str) -> String {
     }
 
     if let Some((user_host, path)) = split_user_host_path(raw) {
-        let host = user_host.rsplit_once('@').map(|(_, h)| h).unwrap_or(user_host);
+        let host = user_host
+            .rsplit_once('@')
+            .map(|(_, h)| h)
+            .unwrap_or(user_host);
         let path = normalize_repo_path(path, false);
         if !host.is_empty() && !path.is_empty() {
             return format!("{}/{}", normalize_host(host), path);

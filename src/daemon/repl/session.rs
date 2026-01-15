@@ -19,7 +19,7 @@ use crate::daemon::metrics;
 
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
-    Ack, Capabilities, Events, Hello, Ping, Pong, PROTOCOL_VERSION_V1, ReplMessage, Want,
+    Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want,
     WatermarkHeads, WatermarkMap,
 };
 
@@ -240,7 +240,9 @@ impl Session {
         if self.phase != SessionPhase::Streaming {
             return self.invalid_request("PING before handshake");
         }
-        vec![SessionAction::Send(ReplMessage::Pong(Pong { nonce: ping.nonce }))]
+        vec![SessionAction::Send(ReplMessage::Pong(Pong {
+            nonce: ping.nonce,
+        }))]
     }
 
     fn handle_pong(&mut self, _pong: Pong) -> Vec<SessionAction> {
@@ -398,7 +400,7 @@ impl Session {
             None => {
                 return self.fail(internal_error(
                     "missing peer metadata while handling events",
-                ))
+                ));
             }
         };
 
@@ -447,13 +449,9 @@ impl Session {
                     ) {
                         return self.fail(*payload);
                     }
-                    if let Err(payload) = self.drain_gap_ready(
-                        store,
-                        &namespace,
-                        &origin,
-                        now_ms,
-                        &mut updates,
-                    ) {
+                    if let Err(payload) =
+                        self.drain_gap_ready(store, &namespace, &origin, now_ms, &mut updates)
+                    {
                         return self.fail(*payload);
                     }
                 }
@@ -592,18 +590,8 @@ impl Session {
         update_watermark(&mut self.durable, namespace, origin, outcome.durable);
         update_watermark(&mut self.applied, namespace, origin, outcome.applied);
 
-        update_watermark(
-            updates.ack_updates,
-            namespace,
-            origin,
-            outcome.durable,
-        );
-        update_watermark(
-            updates.applied_updates,
-            namespace,
-            origin,
-            outcome.applied,
-        );
+        update_watermark(updates.ack_updates, namespace, origin, outcome.durable);
+        update_watermark(updates.applied_updates, namespace, origin, outcome.applied);
 
         Ok(())
     }
@@ -624,14 +612,7 @@ impl Session {
             let Some(batch) = batch else {
                 return Ok(());
             };
-            self.ingest_contiguous_batch(
-                store,
-                namespace,
-                origin,
-                &batch,
-                now_ms,
-                updates,
-            )?;
+            self.ingest_contiguous_batch(store, namespace, origin, &batch, now_ms, updates)?;
         }
     }
 
@@ -1002,9 +983,8 @@ fn drain_error_payload(err: DrainError) -> ErrorPayload {
     match err {
         DrainError::PrevMismatch { expected, got } => {
             let reason = format!("prev_sha256 mismatch (expected {expected:?}, got {got:?})");
-            ErrorPayload::new(ErrorCode::Corruption, "prev_sha256 mismatch", false).with_details(
-                CorruptionDetails { reason },
-            )
+            ErrorPayload::new(ErrorCode::Corruption, "prev_sha256 mismatch", false)
+                .with_details(CorruptionDetails { reason })
         }
         DrainError::PrevUnknown { seq } => internal_error(format!(
             "missing durable head while draining buffered events for seq {}",
@@ -1324,10 +1304,9 @@ mod tests {
         );
 
         assert!(
-            !actions.iter().any(|action| matches!(
-                action,
-                SessionAction::Send(ReplMessage::Want(_))
-            )),
+            !actions
+                .iter()
+                .any(|action| matches!(action, SessionAction::Send(ReplMessage::Want(_)))),
             "contiguous batch should not emit WANT"
         );
 
@@ -1451,30 +1430,26 @@ mod tests {
         let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
 
         let actions = session.handle_message(
-            ReplMessage::Events(Events {
-                events: vec![e2],
-            }),
+            ReplMessage::Events(Events { events: vec![e2] }),
             &mut store,
             10,
         );
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            SessionAction::Send(ReplMessage::Want(_))
-        )));
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, SessionAction::Send(ReplMessage::Want(_))))
+        );
 
         let actions = session.handle_message(
-            ReplMessage::Events(Events {
-                events: vec![e1],
-            }),
+            ReplMessage::Events(Events { events: vec![e1] }),
             &mut store,
             11,
         );
 
         assert!(
-            !actions.iter().any(|action| matches!(
-                action,
-                SessionAction::Send(ReplMessage::Want(_))
-            )),
+            !actions
+                .iter()
+                .any(|action| matches!(action, SessionAction::Send(ReplMessage::Want(_)))),
             "drained batch should not re-emit WANT"
         );
 

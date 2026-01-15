@@ -1077,9 +1077,7 @@ impl Daemon {
     }
 }
 
-fn compute_blocked_by(
-    state: &CanonicalState,
-) -> std::collections::BTreeMap<BeadId, Vec<BeadId>> {
+fn compute_blocked_by(state: &CanonicalState) -> std::collections::BTreeMap<BeadId, Vec<BeadId>> {
     let mut blocked: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
 
@@ -1109,10 +1107,7 @@ fn compute_blocked_by(
     blocked
 }
 
-fn compute_epic_statuses(
-    state: &CanonicalState,
-    eligible_only: bool,
-) -> Vec<EpicStatus> {
+fn compute_epic_statuses(state: &CanonicalState, eligible_only: bool) -> Vec<EpicStatus> {
     // Build epic -> children mapping from parent edges.
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();

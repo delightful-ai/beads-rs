@@ -18,8 +18,8 @@ use beads_rs::{
     Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicateMode,
     StoreId, Watermarks,
 };
-use uuid::Uuid;
 use fixtures::daemon_runtime::shutdown_daemon;
+use uuid::Uuid;
 
 struct AdminFixture {
     runtime_dir: TempDir,

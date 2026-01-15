@@ -33,9 +33,9 @@ pub mod scrubber;
 pub mod server;
 pub mod store_lock;
 pub mod store_runtime;
+pub(crate) mod test_hooks;
 pub mod wal;
 mod wal_legacy_snapshot;
-pub(crate) mod test_hooks;
 
 pub use core::{Daemon, LoadedStore};
 

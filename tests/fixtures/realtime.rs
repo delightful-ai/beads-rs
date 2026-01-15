@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
+use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use assert_cmd::Command;
 use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;

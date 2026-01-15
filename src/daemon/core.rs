@@ -905,11 +905,7 @@ impl Daemon {
         Ok(())
     }
 
-    fn load_checkpoint_imports(
-        &self,
-        store_id: StoreId,
-        repo: &Path,
-    ) -> Vec<CheckpointImport> {
+    fn load_checkpoint_imports(&self, store_id: StoreId, repo: &Path) -> Vec<CheckpointImport> {
         let groups = self.checkpoint_group_snapshots(store_id);
         if groups.is_empty() {
             return Vec::new();
@@ -1319,16 +1315,17 @@ impl Daemon {
                     )));
                 }
             };
-            let segment_snapshot = store
-                .event_wal
-                .segment_snapshot(&namespace)
-                .ok_or_else(|| {
-                    Box::new(ErrorPayload::new(
-                        ErrorCode::Internal,
-                        "missing active wal segment",
-                        false,
-                    ))
-                })?;
+            let segment_snapshot =
+                store
+                    .event_wal
+                    .segment_snapshot(&namespace)
+                    .ok_or_else(|| {
+                        Box::new(ErrorPayload::new(
+                            ErrorCode::Internal,
+                            "missing active wal segment",
+                            false,
+                        ))
+                    })?;
             let last_indexed_offset = append.offset + append.len as u64;
             let segment_row = SegmentRow {
                 namespace: namespace.clone(),
@@ -1920,12 +1917,7 @@ impl Daemon {
 
         let result = f(&mut next_state, stamp)?;
 
-        let entry = WalEntry::new(
-            next_state.clone(),
-            root_slug,
-            sequence,
-            wall_ms,
-        );
+        let entry = WalEntry::new(next_state.clone(), root_slug, sequence, wall_ms);
         self.wal
             .write_with_limits(proof.remote(), &entry, self.limits())?;
 
@@ -2190,11 +2182,7 @@ impl Daemon {
     /// Handle a request from IPC.
     ///
     /// Dispatches to appropriate handler based on request type.
-    pub(crate) fn handle_request(
-        &mut self,
-        req: Request,
-        git_tx: &Sender<GitOp>,
-    ) -> HandleOutcome {
+    pub(crate) fn handle_request(&mut self, req: Request, git_tx: &Sender<GitOp>) -> HandleOutcome {
         match req {
             // Mutations - delegate to executor module
             Request::Create {
@@ -2213,26 +2201,24 @@ impl Daemon {
                 labels,
                 dependencies,
                 meta,
-            } => {
-                self.apply_create(
-                    &repo,
-                    meta,
-                    id,
-                    parent,
-                    title,
-                    bead_type,
-                    priority,
-                    description,
-                    design,
-                    acceptance_criteria,
-                    assignee,
-                    external_ref,
-                    estimated_minutes,
-                    labels,
-                    dependencies,
-                    git_tx,
-                )
-            }
+            } => self.apply_create(
+                &repo,
+                meta,
+                id,
+                parent,
+                title,
+                bead_type,
+                priority,
+                description,
+                design,
+                acceptance_criteria,
+                assignee,
+                external_ref,
+                estimated_minutes,
+                labels,
+                dependencies,
+                git_tx,
+            ),
 
             Request::Update {
                 repo,
@@ -2849,12 +2835,8 @@ fn apply_checkpoint_watermarks(
     for import in imports {
         for (namespace, origin_map) in &import.included {
             for (origin, seq) in origin_map {
-                let head = checkpoint_head_status(
-                    import.included_heads.as_ref(),
-                    namespace,
-                    origin,
-                    *seq,
-                );
+                let head =
+                    checkpoint_head_status(import.included_heads.as_ref(), namespace, origin, *seq);
                 store
                     .watermarks_applied
                     .observe_at_least(namespace, origin, Seq0::new(*seq), head)
@@ -3427,11 +3409,11 @@ mod tests {
         Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId,
         NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaId, SegmentId, Seq0,
         Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
-        TxnDeltaV1, TxnId, TxnOpV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1,
-        WireStamp, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        TxnDeltaV1, TxnId, TxnOpV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
+        WireNoteV1, WireStamp, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
-    use crate::daemon::ops::OpResult;
     use crate::daemon::git_worker::LoadResult;
+    use crate::daemon::ops::OpResult;
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
     use crate::daemon::wal::{HlcRow, Record, RecordHeader, SegmentHeader, Wal};
@@ -3542,14 +3524,7 @@ mod tests {
         seq: u64,
         prev: Option<Sha256>,
     ) -> VerifiedEvent<PrevVerified> {
-        verified_event_with_delta(
-            store,
-            namespace,
-            origin,
-            seq,
-            prev,
-            TxnDeltaV1::new(),
-        )
+        verified_event_with_delta(store, namespace, origin, seq, prev, TxnDeltaV1::new())
     }
 
     fn record_for_event(event: &VerifiedEvent<PrevVerified>) -> Record {
@@ -3862,7 +3837,12 @@ mod tests {
         let mut watermarks = Watermarks::<Durable>::new();
         let head = [7u8; 32];
         watermarks
-            .observe_at_least(&NamespaceId::core(), &origin, Seq0::new(3), HeadStatus::Known(head))
+            .observe_at_least(
+                &NamespaceId::core(),
+                &origin,
+                Seq0::new(3),
+                HeadStatus::Known(head),
+            )
             .expect("watermark");
 
         let mut policies = BTreeMap::new();
@@ -4269,9 +4249,7 @@ mod tests {
         let mut patch = WireBeadPatch::new(bead_id.clone());
         patch.title = Some("replicated".to_string());
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .unwrap();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         let event = verified_event_with_delta(store, &namespace, origin, 1, None, delta);
 
         let wal = Wal::new(tmp.data_dir()).unwrap();
@@ -4302,10 +4280,7 @@ mod tests {
         assert!(outcome.is_ok());
 
         let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
-        let state = repo_state
-            .state
-            .get(&namespace)
-            .expect("namespace state");
+        let state = repo_state.state.get(&namespace).expect("namespace state");
         assert!(state.get_live(&bead_id).is_some());
     }
 
@@ -4397,7 +4372,13 @@ mod tests {
 
         let event2 = verified_event_for_seq(store, &namespace, origin, 2, Some(event1.sha256));
         daemon
-            .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event1, event2], now_ms)
+            .ingest_remote_batch(
+                store_id,
+                namespace.clone(),
+                origin,
+                vec![event1, event2],
+                now_ms,
+            )
             .expect("ingest");
 
         let store_runtime = daemon.stores.get(&store_id).expect("store runtime");

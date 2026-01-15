@@ -27,8 +27,8 @@ use super::mutation_engine::{IdContext, MutationContext, MutationEngine, Mutatio
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::store_runtime::StoreRuntimeError;
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, WalIndex,
-    WalIndexError, WalReplayError,
+    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, WalIndex, WalIndexError,
+    WalReplayError,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{

@@ -42,9 +42,7 @@ impl KeepaliveTracker {
         if self.dead_ms > 0 && now_ms.saturating_sub(self.last_recv_ms) >= self.dead_ms {
             return Some(KeepaliveDecision::Close);
         }
-        if self.keepalive_ms > 0
-            && now_ms.saturating_sub(self.last_send_ms) >= self.keepalive_ms
-        {
+        if self.keepalive_ms > 0 && now_ms.saturating_sub(self.last_send_ms) >= self.keepalive_ms {
             let nonce = self.next_nonce;
             self.next_nonce = self.next_nonce.saturating_add(1);
             return Some(KeepaliveDecision::SendPing(Ping { nonce }));

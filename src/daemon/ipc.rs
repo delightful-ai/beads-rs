@@ -1883,7 +1883,8 @@ fn verify_daemon_version(
     if let Some(meta) = read_daemon_meta_at(socket)
         && daemon_pid_alive(meta.pid)
     {
-        if meta.protocol_version == IPC_PROTOCOL_VERSION && meta.version == env!("CARGO_PKG_VERSION")
+        if meta.protocol_version == IPC_PROTOCOL_VERSION
+            && meta.version == env!("CARGO_PKG_VERSION")
         {
             return Ok(());
         }
@@ -2142,10 +2143,7 @@ pub fn wait_for_daemon_ready(expected_version: &str) -> Result<(), IpcError> {
 }
 
 /// Wait for daemon to be ready and responding with expected version.
-pub fn wait_for_daemon_ready_at(
-    socket: &PathBuf,
-    expected_version: &str,
-) -> Result<(), IpcError> {
+pub fn wait_for_daemon_ready_at(socket: &PathBuf, expected_version: &str) -> Result<(), IpcError> {
     let deadline = SystemTime::now() + Duration::from_secs(30);
     let mut backoff = Duration::from_millis(50);
 
@@ -2669,7 +2667,13 @@ mod tests {
         let reader_stream = writer.try_clone().expect("clone stream");
         let mut reader = BufReader::new(reader_stream);
         let err = verify_daemon_version(&socket, &mut writer, &mut reader).unwrap_err();
-        assert!(matches!(err, IpcError::DaemonVersionMismatch { daemon: Some(_), .. }));
+        assert!(matches!(
+            err,
+            IpcError::DaemonVersionMismatch {
+                daemon: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

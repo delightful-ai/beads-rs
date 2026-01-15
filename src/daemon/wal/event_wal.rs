@@ -55,13 +55,8 @@ impl EventWal {
         now_ms: u64,
     ) -> EventWalResult<&mut SegmentWriter> {
         if !self.writers.contains_key(namespace) {
-            let writer = SegmentWriter::open(
-                &self.store_dir,
-                &self.meta,
-                namespace,
-                now_ms,
-                self.config,
-            )?;
+            let writer =
+                SegmentWriter::open(&self.store_dir, &self.meta, namespace, now_ms, self.config)?;
             self.writers.insert(namespace.clone(), writer);
         }
         Ok(self
@@ -78,10 +73,12 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::core::{
+        ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, StoreMetaVersions,
+    };
+    use crate::daemon::wal::RecordHeader;
     use crate::daemon::wal::frame::encode_frame;
     use crate::daemon::wal::segment::SegmentHeader;
-    use crate::daemon::wal::RecordHeader;
-    use crate::core::{ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, StoreMetaVersions};
 
     fn test_meta(store_id: StoreId) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));
@@ -112,9 +109,7 @@ mod tests {
     }
 
     fn frame_len(record: &Record, max_record_bytes: usize) -> u64 {
-        encode_frame(record, max_record_bytes)
-            .expect("frame")
-            .len() as u64
+        encode_frame(record, max_record_bytes).expect("frame").len() as u64
     }
 
     #[test]
@@ -125,10 +120,11 @@ mod tests {
         let namespace = NamespaceId::core();
         let record = test_record();
 
-        let header_len = SegmentHeader::new(&meta, namespace.clone(), 10, SegmentId::new(Uuid::nil()))
-            .encode()
-            .unwrap()
-            .len() as u64;
+        let header_len =
+            SegmentHeader::new(&meta, namespace.clone(), 10, SegmentId::new(Uuid::nil()))
+                .encode()
+                .unwrap()
+                .len() as u64;
         let mut limits = Limits::default();
         limits.wal_segment_max_bytes =
             (header_len + frame_len(&record, limits.max_wal_record_bytes) * 10) as usize;
@@ -155,10 +151,11 @@ mod tests {
         let namespace = NamespaceId::core();
         let record = test_record();
 
-        let header_len = SegmentHeader::new(&meta, namespace.clone(), 10, SegmentId::new(Uuid::nil()))
-            .encode()
-            .unwrap()
-            .len() as u64;
+        let header_len =
+            SegmentHeader::new(&meta, namespace.clone(), 10, SegmentId::new(Uuid::nil()))
+                .encode()
+                .unwrap()
+                .len() as u64;
         let mut limits = Limits::default();
         let frame_len = frame_len(&record, limits.max_wal_record_bytes);
         limits.wal_segment_max_bytes = (header_len + frame_len + 1) as usize;

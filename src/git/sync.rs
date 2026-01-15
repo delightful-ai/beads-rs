@@ -566,8 +566,7 @@ impl SyncProcess<Merged> {
                 None => Some(parent_stamp),
             };
         }
-        let checksums =
-            wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
         let meta_bytes =
             wire::serialize_meta(root_slug.as_deref(), meta_last_stamp.as_ref(), &checksums)?;
 
@@ -1155,8 +1154,7 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
         let state_bytes = wire::serialize_state(&state)?;
         let tombs_bytes = wire::serialize_tombstones(&state)?;
         let deps_bytes = wire::serialize_deps(&state)?;
-        let checksums =
-            wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
         let meta_bytes = wire::serialize_meta(Some(&root_slug), None, &checksums)?;
 
         // Write blobs
@@ -1300,10 +1298,9 @@ mod tests {
         let state_bytes = wire::serialize_state(&state).unwrap();
         let tombs_bytes = wire::serialize_tombstones(&state).unwrap();
         let deps_bytes = wire::serialize_deps(&state).unwrap();
-        let checksums =
-            wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
-        let meta_bytes = wire::serialize_meta(Some("test"), last_stamp.as_ref(), &checksums)
-            .unwrap();
+        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let meta_bytes =
+            wire::serialize_meta(Some("test"), last_stamp.as_ref(), &checksums).unwrap();
 
         let state_oid = repo.blob(&state_bytes).unwrap();
         let tombs_oid = repo.blob(&tombs_bytes).unwrap();
@@ -1398,11 +1395,7 @@ mod tests {
         let id = BeadId::parse("bd-dead").unwrap();
         let deleted = make_stamp(1, "alice");
         let mut local_state = CanonicalState::new();
-        local_state.insert_tombstone(Tombstone::new(
-            id.clone(),
-            deleted,
-            Some("gone".into()),
-        ));
+        local_state.insert_tombstone(Tombstone::new(id.clone(), deleted, Some("gone".into())));
 
         let fetched = SyncProcess {
             repo_path: PathBuf::new(),

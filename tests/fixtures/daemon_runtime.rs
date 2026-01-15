@@ -14,7 +14,9 @@ use beads_rs::daemon::ipc::{Request, Response};
 pub fn shutdown_daemon(runtime_dir: &Path) {
     let socket = socket_path(runtime_dir);
     let meta = meta_path(runtime_dir);
-    let _ = poll_until(Duration::from_millis(200), || socket.exists() || meta.exists());
+    let _ = poll_until(Duration::from_millis(200), || {
+        socket.exists() || meta.exists()
+    });
 
     if socket.exists() {
         if let Ok(mut stream) = UnixStream::connect(&socket) {
@@ -60,7 +62,7 @@ fn wait_for_socket_removal(socket: &Path, timeout: Duration) {
 }
 
 fn terminate_process(pid: u32, timeout: Duration) {
-    use nix::sys::signal::{kill, Signal};
+    use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
     let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);

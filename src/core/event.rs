@@ -1745,10 +1745,7 @@ fn skip_value(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<(), De
             });
         }
         Type::Unknown(_) => {
-            return Err(minicbor::decode::Error::message(format!(
-                "unknown cbor type {ty}"
-            ))
-            .into());
+            return Err(minicbor::decode::Error::message(format!("unknown cbor type {ty}")).into());
         }
     }
     Ok(())
@@ -2238,8 +2235,7 @@ mod tests {
         enc.u64(body.store.store_epoch.get()).unwrap();
 
         enc.str("store_id").unwrap();
-        enc.str(&body.store.store_id.as_uuid().to_string())
-            .unwrap();
+        enc.str(&body.store.store_id.as_uuid().to_string()).unwrap();
 
         enc.str("txn_id").unwrap();
         enc.str(&body.txn_id.as_uuid().to_string()).unwrap();
@@ -2254,7 +2250,10 @@ mod tests {
         replacement: &[u8],
     ) -> Vec<u8> {
         let key_bytes = key.as_bytes();
-        assert!(key_bytes.len() <= 23, "key length must fit in single CBOR byte");
+        assert!(
+            key_bytes.len() <= 23,
+            "key length must fit in single CBOR byte"
+        );
         let mut marker = Vec::with_capacity(1 + key_bytes.len());
         marker.push(0x60 + key_bytes.len() as u8);
         marker.extend_from_slice(key_bytes);
@@ -2266,7 +2265,10 @@ mod tests {
             value_pos + original_len <= bytes.len(),
             "value bytes out of range"
         );
-        bytes.splice(value_pos..value_pos + original_len, replacement.iter().copied());
+        bytes.splice(
+            value_pos..value_pos + original_len,
+            replacement.iter().copied(),
+        );
         bytes
     }
 

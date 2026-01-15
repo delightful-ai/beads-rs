@@ -395,11 +395,7 @@ pub struct ParsedMeta {
 pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
     let content = parse_utf8(bytes)?;
     let meta: WireMeta = serde_json::from_str(content)?;
-    let checksums = match (
-        meta.state_sha256,
-        meta.tombstones_sha256,
-        meta.deps_sha256,
-    ) {
+    let checksums = match (meta.state_sha256, meta.tombstones_sha256, meta.deps_sha256) {
         (None, None, None) => None,
         (Some(state), Some(tombstones), Some(deps)) => Some(StoreChecksums {
             state,

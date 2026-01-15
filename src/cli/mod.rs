@@ -1206,12 +1206,14 @@ fn normalize_optional_namespace(raw: Option<&str>) -> Result<Option<NamespaceId>
             reason: "namespace cannot be empty".into(),
         }));
     }
-    NamespaceId::parse(trimmed.to_string()).map(Some).map_err(|e| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "namespace".into(),
-            reason: e.to_string(),
+    NamespaceId::parse(trimmed.to_string())
+        .map(Some)
+        .map_err(|e| {
+            Error::Op(crate::daemon::OpError::ValidationFailed {
+                field: "namespace".into(),
+                reason: e.to_string(),
+            })
         })
-    })
 }
 
 fn normalize_optional_client_request_id(raw: Option<&str>) -> Result<Option<ClientRequestId>> {
@@ -1588,10 +1590,8 @@ mod tests {
 
     #[test]
     fn normalize_optional_client_request_id_accepts_uuid() {
-        let id = normalize_optional_client_request_id(Some(
-            "00000000-0000-0000-0000-000000000000",
-        ))
-        .expect("valid client request id");
+        let id = normalize_optional_client_request_id(Some("00000000-0000-0000-0000-000000000000"))
+            .expect("valid client request id");
         assert!(id.is_some());
     }
 

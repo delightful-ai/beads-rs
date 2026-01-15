@@ -64,16 +64,14 @@ impl PendingEvents {
 
         let mut dropped_events = 0;
         let mut dropped_bytes = 0;
-        while self.events.len() >= self.max_events || self.total_bytes + event_bytes > self.max_bytes
+        while self.events.len() >= self.max_events
+            || self.total_bytes + event_bytes > self.max_bytes
         {
             let Some(dropped) = self.events.pop_front() else {
                 break;
             };
             let dropped_len = dropped.bytes.len();
-            debug_assert!(
-                self.total_bytes >= dropped_len,
-                "pending bytes underflow"
-            );
+            debug_assert!(self.total_bytes >= dropped_len, "pending bytes underflow");
             self.total_bytes -= dropped_len;
             dropped_events += 1;
             dropped_bytes += dropped_len;
@@ -116,9 +114,7 @@ impl PendingEvents {
         self.max_bytes
     }
 
-    pub(super) fn drain(
-        &mut self,
-    ) -> std::collections::vec_deque::Drain<'_, BroadcastEvent> {
+    pub(super) fn drain(&mut self) -> std::collections::vec_deque::Drain<'_, BroadcastEvent> {
         self.total_bytes = 0;
         self.events.drain(..)
     }
