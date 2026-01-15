@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::core::{
-    Durable, HeadStatus, Limits, NamespaceId, ReplicaId, Seq0, Seq1, VerifiedEvent,
-    VerifiedEventAny, Watermark, WatermarkError,
+    Durable, HeadStatus, Limits, NamespaceId, PrevVerified, ReplicaId, Seq0, Seq1, Sha256,
+    VerifiedEvent, VerifiedEventAny, Watermark, WatermarkError,
 };
 
 #[derive(Clone, Debug)]
@@ -44,6 +44,15 @@ pub enum IngestDecision {
     BufferedNeedWant { want_from: Seq0 },
     DuplicateNoop,
     Reject { code: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DrainError {
+    PrevMismatch {
+        expected: Option<Sha256>,
+        got: Option<Sha256>,
+    },
+    PrevUnknown { seq: Seq1 },
 }
 
 impl OriginStreamState {
@@ -138,6 +147,67 @@ impl OriginStreamState {
         Ok(())
     }
 
+    pub fn drain_ready(
+        &mut self,
+    ) -> Result<Option<Vec<VerifiedEvent<crate::core::PrevVerified>>>, DrainError> {
+        let mut head = match self.durable.head() {
+            HeadStatus::Genesis => None,
+            HeadStatus::Known(head) => Some(Sha256(head)),
+            HeadStatus::Unknown => {
+                return Err(DrainError::PrevUnknown {
+                    seq: self.durable.seq().next(),
+                })
+            }
+        };
+
+        let mut batch = Vec::new();
+        let mut next = self.durable.seq().next();
+
+        while let Some(buffered) = self.gap.buffered.remove(&next) {
+            let bytes_len = buffered.bytes_len();
+            self.gap.buffered_bytes = self.gap.buffered_bytes.saturating_sub(bytes_len);
+            let verified = match buffered {
+                VerifiedEventAny::Contiguous(ev) => {
+                    if head != ev.prev.prev {
+                        return Err(DrainError::PrevMismatch {
+                            expected: head,
+                            got: ev.prev.prev,
+                        });
+                    }
+                    ev
+                }
+                VerifiedEventAny::Deferred(ev) => {
+                    if head != Some(ev.prev.prev) {
+                        return Err(DrainError::PrevMismatch {
+                            expected: head,
+                            got: Some(ev.prev.prev),
+                        });
+                    }
+                    VerifiedEvent {
+                        body: ev.body,
+                        bytes: ev.bytes,
+                        sha256: ev.sha256,
+                        prev: PrevVerified { prev: head },
+                    }
+                }
+            };
+
+            head = Some(verified.sha256);
+            batch.push(verified);
+            next = next.next();
+        }
+
+        if self.gap.buffered.is_empty() {
+            self.gap.started_at_ms = None;
+        }
+
+        if batch.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(batch))
+    }
+
     fn buffer_gap(&mut self, ev: VerifiedEventAny, now_ms: u64) -> IngestDecision {
         if let Some(start) = self.gap.started_at_ms {
             if now_ms.saturating_sub(start) > self.gap.timeout_ms {
@@ -209,6 +279,30 @@ impl GapBufferByNsOrigin {
             return Ok(());
         };
         state.advance_durable_batch(batch)
+    }
+
+    pub fn drain_ready(
+        &mut self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+    ) -> Result<Option<Vec<VerifiedEvent<crate::core::PrevVerified>>>, DrainError> {
+        let Some(origins) = self.by_ns.get_mut(namespace) else {
+            return Ok(None);
+        };
+        let Some(state) = origins.get_mut(origin) else {
+            return Ok(None);
+        };
+        state.drain_ready()
+    }
+
+    pub fn want_from(&self, namespace: &NamespaceId, origin: &ReplicaId) -> Option<Seq0> {
+        let origins = self.by_ns.get(namespace)?;
+        let state = origins.get(origin)?;
+        if state.gap.buffered.is_empty() {
+            None
+        } else {
+            Some(state.durable.seq())
+        }
     }
 
     fn ensure_origin(

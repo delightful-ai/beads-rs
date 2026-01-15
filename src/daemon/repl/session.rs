@@ -16,7 +16,7 @@ use crate::core::{
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::metrics;
 
-use super::gap_buffer::{GapBufferByNsOrigin, IngestDecision};
+use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
     Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplMessage, Want, WatermarkHeads,
     WatermarkMap,
@@ -128,6 +128,11 @@ pub enum SessionAction {
 
 type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
 type SessionResult<T> = Result<T, Box<ErrorPayload>>;
+
+struct IngestUpdates<'a> {
+    ack_updates: &'a mut WatermarkState<Durable>,
+    applied_updates: &'a mut WatermarkState<Applied>,
+}
 
 #[derive(Debug)]
 pub struct Session {
@@ -360,6 +365,10 @@ impl Session {
         let mut ack_updates: WatermarkState<Durable> = BTreeMap::new();
         let mut applied_updates: WatermarkState<Applied> = BTreeMap::new();
         let mut wants: WatermarkMap = BTreeMap::new();
+        let mut updates = IngestUpdates {
+            ack_updates: &mut ack_updates,
+            applied_updates: &mut applied_updates,
+        };
 
         for frame in events.events {
             let namespace = frame.eid.namespace.clone();
@@ -393,26 +402,25 @@ impl Session {
                 .ingest(namespace.clone(), origin, durable, verified, now_ms)
             {
                 IngestDecision::ForwardContiguousBatch(batch) => {
-                    let outcome =
-                        match store.ingest_remote_batch(&namespace, &origin, &batch, now_ms) {
-                            Ok(outcome) => outcome,
-                            Err(payload) => return self.fail(*payload),
-                        };
-
-                    if let Err(err) = self
-                        .gap_buffer
-                        .advance_durable_batch(&namespace, &origin, &batch)
-                    {
-                        return self.fail(internal_error(format!(
-                            "gap buffer watermark advance failed: {err}"
-                        )));
+                    if let Err(payload) = self.ingest_contiguous_batch(
+                        store,
+                        &namespace,
+                        &origin,
+                        &batch,
+                        now_ms,
+                        &mut updates,
+                    ) {
+                        return self.fail(*payload);
                     }
-
-                    update_watermark(&mut self.durable, &namespace, &origin, outcome.durable);
-                    update_watermark(&mut self.applied, &namespace, &origin, outcome.applied);
-
-                    update_watermark(&mut ack_updates, &namespace, &origin, outcome.durable);
-                    update_watermark(&mut applied_updates, &namespace, &origin, outcome.applied);
+                    if let Err(payload) = self.drain_gap_ready(
+                        store,
+                        &namespace,
+                        &origin,
+                        now_ms,
+                        &mut updates,
+                    ) {
+                        return self.fail(*payload);
+                    }
                 }
                 IngestDecision::BufferedNeedWant { want_from } => {
                     insert_want(&mut wants, namespace, origin, want_from);
@@ -425,6 +433,8 @@ impl Session {
         }
 
         drop(permit);
+
+        self.reconcile_wants(&mut wants);
 
         let mut actions = Vec::new();
         if let Some(ack) = build_ack(&ack_updates, &applied_updates) {
@@ -521,6 +531,92 @@ impl Session {
                 "missing durable head for {namespace} {origin} seq {}",
                 durable.seq().get()
             )))),
+        }
+    }
+
+    fn ingest_contiguous_batch(
+        &mut self,
+        store: &mut impl SessionStore,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+        batch: &[VerifiedEvent<PrevVerified>],
+        now_ms: u64,
+        updates: &mut IngestUpdates<'_>,
+    ) -> SessionResult<()> {
+        let outcome = store.ingest_remote_batch(namespace, origin, batch, now_ms)?;
+
+        if let Err(err) = self
+            .gap_buffer
+            .advance_durable_batch(namespace, origin, batch)
+        {
+            return Err(Box::new(internal_error(format!(
+                "gap buffer watermark advance failed: {err}"
+            ))));
+        }
+
+        update_watermark(&mut self.durable, namespace, origin, outcome.durable);
+        update_watermark(&mut self.applied, namespace, origin, outcome.applied);
+
+        update_watermark(
+            updates.ack_updates,
+            namespace,
+            origin,
+            outcome.durable,
+        );
+        update_watermark(
+            updates.applied_updates,
+            namespace,
+            origin,
+            outcome.applied,
+        );
+
+        Ok(())
+    }
+
+    fn drain_gap_ready(
+        &mut self,
+        store: &mut impl SessionStore,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+        now_ms: u64,
+        updates: &mut IngestUpdates<'_>,
+    ) -> SessionResult<()> {
+        loop {
+            let batch = match self.gap_buffer.drain_ready(namespace, origin) {
+                Ok(batch) => batch,
+                Err(err) => return Err(Box::new(drain_error_payload(err))),
+            };
+            let Some(batch) = batch else {
+                return Ok(());
+            };
+            self.ingest_contiguous_batch(
+                store,
+                namespace,
+                origin,
+                &batch,
+                now_ms,
+                updates,
+            )?;
+        }
+    }
+
+    fn reconcile_wants(&self, wants: &mut WatermarkMap) {
+        let mut empty = Vec::new();
+        for (namespace, origins) in wants.iter_mut() {
+            origins.retain(|origin, seq| {
+                if let Some(want_from) = self.gap_buffer.want_from(namespace, origin) {
+                    *seq = want_from.get();
+                    true
+                } else {
+                    false
+                }
+            });
+            if origins.is_empty() {
+                empty.push(namespace.clone());
+            }
+        }
+        for namespace in empty {
+            wants.remove(&namespace);
         }
     }
 
@@ -854,6 +950,21 @@ fn event_frame_error_payload(
     }
 }
 
+fn drain_error_payload(err: DrainError) -> ErrorPayload {
+    match err {
+        DrainError::PrevMismatch { expected, got } => {
+            let reason = format!("prev_sha256 mismatch (expected {expected:?}, got {got:?})");
+            ErrorPayload::new(ErrorCode::Corruption, "prev_sha256 mismatch", false).with_details(
+                CorruptionDetails { reason },
+            )
+        }
+        DrainError::PrevUnknown { seq } => internal_error(format!(
+            "missing durable head while draining buffered events for seq {}",
+            seq.get()
+        )),
+    }
+}
+
 fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) -> ErrorPayload {
     match err {
         DecodeError::DecodeLimit(reason)
@@ -1164,6 +1275,14 @@ mod tests {
             10,
         );
 
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                SessionAction::Send(ReplMessage::Want(_))
+            )),
+            "contiguous batch should not emit WANT"
+        );
+
         let ack = actions
             .iter()
             .find_map(|action| match action {
@@ -1245,6 +1364,87 @@ mod tests {
             .copied()
             .unwrap_or_default();
         assert_eq!(seq, 0);
+    }
+
+    #[test]
+    fn events_gap_drains_when_missing_event_arrives() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()];
+        config.offered_namespaces = vec![NamespaceId::core()];
+
+        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
+            hello_nonce: 10,
+            max_frame_bytes: 1024,
+            requested_namespaces: vec![NamespaceId::core()],
+            offered_namespaces: vec![NamespaceId::core()],
+            seen_durable: BTreeMap::new(),
+            seen_durable_heads: None,
+            seen_applied: None,
+            seen_applied_heads: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        };
+        session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+
+        let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
+        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
+
+        let actions = session.handle_message(
+            ReplMessage::Events(Events {
+                events: vec![e2],
+            }),
+            &mut store,
+            10,
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            SessionAction::Send(ReplMessage::Want(_))
+        )));
+
+        let actions = session.handle_message(
+            ReplMessage::Events(Events {
+                events: vec![e1],
+            }),
+            &mut store,
+            11,
+        );
+
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                SessionAction::Send(ReplMessage::Want(_))
+            )),
+            "drained batch should not re-emit WANT"
+        );
+
+        let ack = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Ack(ack)) => Some(ack),
+                _ => None,
+            })
+            .expect("ack");
+
+        let seq = ack
+            .durable
+            .get(&NamespaceId::core())
+            .and_then(|m| m.get(&origin))
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(seq, 2);
     }
 
     #[test]
