@@ -577,13 +577,25 @@ mod tests {
     }
 
     #[test]
-    fn render_fsck_human_smoke() {
+    fn render_fsck_human_golden() {
         let report = sample_fsck_report();
         let output = render_fsck_human(&report);
-        assert!(output.contains("Store fsck:"));
-        assert!(output.contains("summary: risk=High"));
-        assert!(output.contains("repairs:"));
-        assert!(output.contains("SegmentFrames"));
+        let expected = concat!(
+            "Store fsck:\n",
+            "  store_id: 09090909-0909-0909-0909-090909090909\n",
+            "  checked_at_ms: 12345\n",
+            "  stats: namespaces=1 segments=2 records=3\n",
+            "  summary: risk=High safe_to_accept_writes=false safe_to_prune_wal=false safe_to_rebuild_index=true\n",
+            "  repairs:\n",
+            "    - TruncateTail: truncated tail corruption (/tmp/wal/segment-1)\n",
+            "  checks:\n",
+            "    - SegmentFrames: Fail (severity=High, issues=1)\n",
+            "      * FrameCrcMismatch: crc mismatch path=/tmp/wal/segment-1 namespace=core origin=07070707-0707-0707-0707-070707070707 seq=5 offset=128\n",
+            "      actions:\n",
+            "        - run `bd store fsck --repair` to truncate tail corruption\n",
+            "    - IndexOffsets: Pass (severity=Low, issues=0)\n",
+        );
+        assert_eq!(output, expected);
     }
 
     fn with_test_data_dir<F>(f: F)
