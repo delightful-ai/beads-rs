@@ -258,7 +258,7 @@ pub struct Daemon {
 
     /// Realtime safety limits.
     limits: Limits,
-    /// Replication settings loaded from config (env overrides applied at use sites).
+    /// Replication settings loaded from config (env overrides applied during load).
     replication: crate::config::ReplicationConfig,
     /// Default checkpoint group specs from config.
     checkpoint_groups: BTreeMap<String, ConfigCheckpointGroup>,
@@ -3421,29 +3421,15 @@ fn parse_durability(raw: Option<String>) -> Result<DurabilityClass, OpError> {
 }
 
 fn replication_listen_addr(config: &crate::config::ReplicationConfig) -> String {
-    std::env::var("BD_REPL_LISTEN_ADDR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            let trimmed = config.listen_addr.trim();
-            if trimmed.is_empty() {
-                "127.0.0.1:0".to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
+    let trimmed = config.listen_addr.trim();
+    if trimmed.is_empty() {
+        "127.0.0.1:0".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn replication_max_connections(config: &crate::config::ReplicationConfig) -> Option<NonZeroUsize> {
-    if let Ok(raw) = std::env::var("BD_REPL_MAX_CONNECTIONS") {
-        match raw.trim().parse::<usize>() {
-            Ok(parsed) => return NonZeroUsize::new(parsed),
-            Err(err) => {
-                tracing::warn!("invalid BD_REPL_MAX_CONNECTIONS: {err}");
-            }
-        }
-    }
     match config.max_connections {
         Some(0) => None,
         Some(value) => NonZeroUsize::new(value),

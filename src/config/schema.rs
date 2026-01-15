@@ -358,7 +358,7 @@ pub struct ReplicationPeerConfig {
     pub replica_id: ReplicaId,
     pub addr: String,
     pub role: Option<ReplicaRole>,
-    pub allowed_namespaces: Option<Vec<NamespaceId>>,    
+    pub allowed_namespaces: Option<Vec<NamespaceId>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

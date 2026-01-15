@@ -70,18 +70,18 @@ pub fn run_daemon() -> Result<()> {
     let (git_tx, git_rx) = crossbeam::channel::unbounded();
     let (git_result_tx, git_result_rx) = crossbeam::channel::unbounded::<GitResult>();
 
-    // Create actor ID (allow override via BD_ACTOR).
-    let username = whoami::username();
-    let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
-    let default_actor = format!("{}@{}", username, hostname);
-    let actor_raw = std::env::var("BD_ACTOR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(default_actor);
-    let actor = ActorId::new(actor_raw)?;
-
     // Load config (limits, upgrade policy, etc).
     let config = crate::config::load_or_init();
+    // Resolve actor ID (config/env override, fallback to username@hostname).
+    let actor = match config.defaults.actor.clone() {
+        Some(actor) => actor,
+        None => {
+            let username = whoami::username();
+            let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
+            let default_actor = format!("{}@{}", username, hostname);
+            ActorId::new(default_actor)?
+        }
+    };
     let limits = Arc::new(config.limits.clone());
 
     // Create daemon core and git worker.
