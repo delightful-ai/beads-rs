@@ -175,6 +175,24 @@ pub fn wal_fsync_err(duration: Duration) {
     );
 }
 
+pub fn wal_index_checkpoint_ok(duration: Duration) {
+    emit("wal_index_checkpoint_ok", MetricValue::Counter(1), Vec::new());
+    emit(
+        "wal_index_checkpoint_duration",
+        MetricValue::Histogram(duration_ms(duration)),
+        Vec::new(),
+    );
+}
+
+pub fn wal_index_checkpoint_err(duration: Duration) {
+    emit("wal_index_checkpoint_err", MetricValue::Counter(1), Vec::new());
+    emit(
+        "wal_index_checkpoint_duration",
+        MetricValue::Histogram(duration_ms(duration)),
+        Vec::new(),
+    );
+}
+
 pub fn apply_ok(duration: Duration) {
     emit("apply_ok", MetricValue::Counter(1), Vec::new());
     emit(
@@ -461,6 +479,7 @@ mod tests {
 
         wal_append_ok(Duration::from_millis(12));
         wal_fsync_err(Duration::from_millis(7));
+        wal_index_checkpoint_ok(Duration::from_millis(5));
         apply_ok(Duration::from_millis(3));
         set_checkpoint_queue_depth(4);
         repl_ingest_throttle(Duration::from_millis(5), 1024);
@@ -470,6 +489,12 @@ mod tests {
         assert!(events.iter().any(|e| e.name == "wal_append_ok"));
         assert!(events.iter().any(|e| e.name == "wal_append_duration"));
         assert!(events.iter().any(|e| e.name == "wal_fsync_err"));
+        assert!(events.iter().any(|e| e.name == "wal_index_checkpoint_ok"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.name == "wal_index_checkpoint_duration")
+        );
         assert!(events.iter().any(|e| e.name == "apply_ok"));
         assert!(events.iter().any(|e| e.name == "apply_duration"));
         assert!(events.iter().any(|e| e.name == "checkpoint_queue_depth"));

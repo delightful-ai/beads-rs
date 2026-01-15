@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,7 @@ pub struct StoreRuntime {
     pub(crate) event_wal: EventWal,
     #[allow(dead_code)]
     pub(crate) wal_index: Arc<SqliteWalIndex>,
+    pub(crate) last_wal_checkpoint: Option<Instant>,
     #[allow(dead_code)]
     lock: StoreLock,
 }
@@ -190,6 +192,7 @@ impl StoreRuntime {
             wal,
             event_wal,
             wal_index: Arc::new(wal_index),
+            last_wal_checkpoint: None,
             lock,
         };
 
@@ -223,6 +226,29 @@ impl StoreRuntime {
                 .copied()
                 .map(|watermark| watermark.head()),
         )
+    }
+
+    pub(crate) fn wal_checkpoint_deadline(
+        &self,
+        now: Instant,
+        interval: Duration,
+    ) -> Option<Instant> {
+        if interval == Duration::ZERO {
+            return None;
+        }
+        Some(match self.last_wal_checkpoint {
+            Some(last) => last + interval,
+            None => now,
+        })
+    }
+
+    pub(crate) fn wal_checkpoint_due(&self, now: Instant, interval: Duration) -> bool {
+        self.wal_checkpoint_deadline(now, interval)
+            .is_some_and(|deadline| deadline <= now)
+    }
+
+    pub(crate) fn mark_wal_checkpoint(&mut self, now: Instant) {
+        self.last_wal_checkpoint = Some(now);
     }
 
     pub fn hlc_state_for_actor(

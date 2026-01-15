@@ -100,13 +100,20 @@ pub fn run_state_loop(
     loop {
         let next_sync = daemon.next_sync_deadline();
         let next_checkpoint = daemon.next_checkpoint_deadline();
+        let next_wal_checkpoint = daemon.next_wal_checkpoint_deadline();
         let next_read_gate = read_gate_waiters.iter().map(|waiter| waiter.deadline).min();
         let next_durability = durability_waiters
             .iter()
             .map(|waiter| waiter.deadline)
             .min();
         let mut next_deadline = None;
-        for deadline in [next_sync, next_checkpoint, next_read_gate, next_durability]
+        for deadline in [
+            next_sync,
+            next_checkpoint,
+            next_wal_checkpoint,
+            next_read_gate,
+            next_durability,
+        ]
             .into_iter()
             .flatten()
         {
@@ -260,6 +267,7 @@ pub fn run_state_loop(
 
                         daemon.fire_due_syncs(&git_tx);
                         daemon.fire_due_checkpoints(&git_tx);
+                        daemon.fire_due_wal_checkpoints();
                         flush_sync_waiters(&daemon, &mut sync_waiters);
                         flush_read_gate_waiters(
                             &mut daemon,
@@ -281,6 +289,7 @@ pub fn run_state_loop(
             recv(tick) -> _ => {
                 daemon.fire_due_syncs(&git_tx);
                 daemon.fire_due_checkpoints(&git_tx);
+                daemon.fire_due_wal_checkpoints();
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,
@@ -298,6 +307,7 @@ pub fn run_state_loop(
                     daemon.handle_repl_ingest(request);
                     daemon.fire_due_syncs(&git_tx);
                     daemon.fire_due_checkpoints(&git_tx);
+                    daemon.fire_due_wal_checkpoints();
                     flush_sync_waiters(&daemon, &mut sync_waiters);
                     flush_read_gate_waiters(
                         &mut daemon,
@@ -327,6 +337,7 @@ pub fn run_state_loop(
                 }
                 daemon.fire_due_syncs(&git_tx);
                 daemon.fire_due_checkpoints(&git_tx);
+                daemon.fire_due_wal_checkpoints();
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,

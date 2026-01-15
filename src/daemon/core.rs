@@ -2077,6 +2077,58 @@ impl Daemon {
         self.checkpoint_scheduler.next_deadline()
     }
 
+    pub fn next_wal_checkpoint_deadline(&mut self) -> Option<Instant> {
+        self.next_wal_checkpoint_deadline_at(Instant::now())
+    }
+
+    fn next_wal_checkpoint_deadline_at(&self, now: Instant) -> Option<Instant> {
+        let interval = self.wal_checkpoint_interval()?;
+        self.stores
+            .values()
+            .filter_map(|store| store.wal_checkpoint_deadline(now, interval))
+            .min()
+    }
+
+    pub fn fire_due_wal_checkpoints(&mut self) {
+        self.fire_due_wal_checkpoints_at(Instant::now());
+    }
+
+    fn fire_due_wal_checkpoints_at(&mut self, now: Instant) {
+        let Some(interval) = self.wal_checkpoint_interval() else {
+            return;
+        };
+        for (store_id, store) in self.stores.iter_mut() {
+            if !store.wal_checkpoint_due(now, interval) {
+                continue;
+            }
+            let start = Instant::now();
+            match store.wal_index.checkpoint_truncate() {
+                Ok(()) => {
+                    metrics::wal_index_checkpoint_ok(start.elapsed());
+                    store.mark_wal_checkpoint(now);
+                }
+                Err(err) => {
+                    metrics::wal_index_checkpoint_err(start.elapsed());
+                    tracing::warn!(
+                        store_id = %store_id,
+                        error = ?err,
+                        "wal sqlite checkpoint failed"
+                    );
+                    store.mark_wal_checkpoint(now);
+                }
+            }
+        }
+    }
+
+    fn wal_checkpoint_interval(&self) -> Option<Duration> {
+        let interval_ms = self.limits.wal_sqlite_checkpoint_interval_ms;
+        if interval_ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(interval_ms))
+        }
+    }
+
     pub fn fire_due_syncs(&mut self, git_tx: &Sender<GitOp>) {
         let due = self.scheduler.drain_due(Instant::now());
         for remote in due {
@@ -3573,6 +3625,7 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use bytes::Bytes;
     use git2::Repository;
@@ -3655,6 +3708,28 @@ mod tests {
         daemon.remote_to_store_id.insert(remote.clone(), store_id);
         daemon.stores.insert(store_id, runtime);
         store_id
+    }
+
+    #[test]
+    fn wal_checkpoint_deadline_tracks_interval() {
+        let (_tmp, wal) = test_wal();
+        let mut limits = Limits::default();
+        limits.wal_sqlite_checkpoint_interval_ms = 10;
+        let mut daemon = Daemon::new_with_limits(test_actor(), wal, limits);
+        let remote = test_remote();
+        insert_store(&mut daemon, &remote);
+
+        let now = Instant::now();
+        let deadline = daemon
+            .next_wal_checkpoint_deadline_at(now)
+            .expect("deadline");
+        assert_eq!(deadline, now);
+
+        daemon.fire_due_wal_checkpoints_at(now);
+        let next = daemon
+            .next_wal_checkpoint_deadline_at(now)
+            .expect("next");
+        assert_eq!(next, now + Duration::from_millis(10));
     }
 
     #[cfg(unix)]
