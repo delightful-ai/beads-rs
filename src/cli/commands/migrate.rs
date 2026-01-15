@@ -1,4 +1,4 @@
-use super::super::{Ctx, MigrateCmd, current_actor_id, normalize_bead_slug_for};
+use super::super::{Ctx, MigrateCmd, normalize_bead_slug_for};
 use crate::core::FormatVersion;
 use crate::daemon::ipc::{Request, send_request};
 use crate::{Error, Result};
@@ -32,7 +32,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
 
             use crate::git::SyncProcess;
 
-            let actor = current_actor_id()?;
+            let actor = ctx.actor_id()?;
             let root_slug = args
                 .root_slug
                 .as_deref()

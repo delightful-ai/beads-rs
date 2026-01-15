@@ -53,7 +53,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub repo: Option<PathBuf>,
 
-    /// Actor identity (applies when daemon starts).
+    /// Actor identity (overrides BD_ACTOR for this invocation).
     #[arg(long, global = true, value_name = "ACTOR")]
     pub actor: Option<String>,
 
@@ -1029,9 +1029,7 @@ pub fn run(cli: Cli) -> Result<()> {
         crate::upgrade::maybe_spawn_auto_upgrade();
     }
 
-    if let Some(actor) = cli.actor.as_deref() {
-        validate_actor_id(actor)?;
-    }
+    let actor_override = resolve_actor_override(cli.actor.as_deref())?;
 
     match cli.command {
         Commands::Daemon { cmd } => match cmd {
@@ -1063,6 +1061,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 client_request_id: normalize_optional_client_request_id(
                     cli.client_request_id.as_deref(),
                 )?,
+                actor_id: actor_override.clone(),
             };
 
             match cmd {
@@ -1115,6 +1114,7 @@ struct Ctx {
     namespace: Option<NamespaceId>,
     durability: Option<String>,
     client_request_id: Option<ClientRequestId>,
+    actor_id: Option<ActorId>,
 }
 
 impl Ctx {
@@ -1123,7 +1123,10 @@ impl Ctx {
             namespace: self.namespace.as_ref().map(|ns| ns.as_str().to_string()),
             durability: self.durability.clone(),
             client_request_id: self.client_request_id.as_ref().map(|id| id.to_string()),
-            actor_id: None,
+            actor_id: self
+                .actor_id
+                .as_ref()
+                .map(|actor| actor.as_str().to_string()),
         }
     }
 
@@ -1133,6 +1136,17 @@ impl Ctx {
             require_min_seen: None,
             wait_timeout_ms: None,
         }
+    }
+
+    fn actor_id(&self) -> Result<ActorId> {
+        self.actor_id
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(current_actor_id)
+    }
+
+    fn actor_string(&self) -> Result<String> {
+        Ok(self.actor_id()?.as_str().to_string())
     }
 }
 
@@ -1280,6 +1294,13 @@ fn validate_actor_id(raw: &str) -> Result<ActorId> {
             reason: e.to_string(),
         })
     })
+}
+
+fn resolve_actor_override(raw: Option<&str>) -> Result<Option<ActorId>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    validate_actor_id(raw).map(Some)
 }
 
 pub(super) fn current_actor_id() -> Result<ActorId> {
@@ -1571,10 +1592,6 @@ fn split_kind_id(raw: &str) -> std::result::Result<(Option<DepKind>, String), St
     }
 }
 
-fn current_actor_string() -> Result<String> {
-    Ok(current_actor_id()?.as_str().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1582,6 +1599,7 @@ mod tests {
     use crate::core::DurabilityClass;
     use crate::daemon::OpError;
     use std::num::NonZeroU32;
+    use std::path::PathBuf;
 
     fn assert_validation_failed(err: Error, field: &str) {
         match err {
@@ -1671,5 +1689,26 @@ mod tests {
     fn validate_actor_id_rejects_blank() {
         let err = validate_actor_id("   ").unwrap_err();
         assert_validation_failed(err, "actor");
+    }
+
+    #[test]
+    fn resolve_actor_override_accepts_actor() {
+        let actor = resolve_actor_override(Some("alice@example.com")).expect("actor");
+        assert_eq!(actor, Some(ActorId::new("alice@example.com").unwrap()));
+    }
+
+    #[test]
+    fn mutation_meta_includes_actor_override() {
+        let actor = ActorId::new("alice@example.com").unwrap();
+        let ctx = Ctx {
+            repo: PathBuf::from("/tmp/beads"),
+            json: false,
+            namespace: None,
+            durability: None,
+            client_request_id: None,
+            actor_id: Some(actor.clone()),
+        };
+        let meta = ctx.mutation_meta();
+        assert_eq!(meta.actor_id, Some(actor.as_str().to_string()));
     }
 }

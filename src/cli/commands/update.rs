@@ -1,7 +1,7 @@
 use super::super::render;
 use super::super::{
-    Ctx, UpdateArgs, current_actor_string, fetch_issue, normalize_bead_id, normalize_bead_id_for,
-    normalize_dep_specs, print_ok, resolve_description, send,
+    Ctx, UpdateArgs, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs,
+    print_ok, resolve_description, send,
 };
 use crate::core::DepKind;
 use crate::daemon::ipc::{Request, ResponsePayload};
@@ -164,7 +164,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             };
             let _ = send(&req)?;
         } else {
-            let current = current_actor_string()?;
+            let current = ctx.actor_string()?;
             if !assignee.is_empty() && assignee != "me" && assignee != "self" && assignee != current
             {
                 return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
