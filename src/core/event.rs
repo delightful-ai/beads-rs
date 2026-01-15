@@ -2383,6 +2383,42 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_hlc_physical_mismatch() {
+        let mut body = sample_body();
+        let Some(ref mut hlc_max) = body.hlc_max else {
+            panic!("expected hlc_max for sample_body");
+        };
+        hlc_max.physical_ms = body.event_time_ms + 1;
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let err = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::InvalidField {
+                field: "hlc_max.physical_ms",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_event_hlc_max_rejects_physical_mismatch() {
+        let mut body = sample_body();
+        let Some(ref mut hlc_max) = body.hlc_max else {
+            panic!("expected hlc_max for sample_body");
+        };
+        hlc_max.physical_ms = body.event_time_ms + 1;
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let err = decode_event_hlc_max(encoded.as_ref(), &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::InvalidField {
+                field: "hlc_max.physical_ms",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn decode_event_hlc_max_extracts() {
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
