@@ -7,13 +7,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom};
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use crossbeam::channel::Sender;
-use git2::{ErrorCode as GitErrorCode, Repository};
+use git2::{ErrorCode as GitErrorCode, ObjectType, Oid, Repository, TreeWalkMode, TreeWalkResult};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -127,6 +127,20 @@ enum StoreDiscoveryError {
     MultipleStoreIds { ids: Vec<StoreId> },
 }
 
+#[derive(Debug, Error)]
+enum CheckpointTreeError {
+    #[error("checkpoint tree git error: {0}")]
+    Git(#[from] git2::Error),
+    #[error("checkpoint tree io error at {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("checkpoint tree invalid path {path}")]
+    InvalidPath { path: String },
+}
+
 #[derive(Debug, Deserialize)]
 struct StoreMetaRef {
     store_id: StoreId,
@@ -141,14 +155,16 @@ struct StorePathMap {
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
     ActorId, Applied, ApplyError, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
-    DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, Limits, NamespaceId, PrevVerified,
-    ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
-    StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks,
-    WriteStamp, apply_event, decode_event_body,
+    DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, HeadStatus, Limits, NamespaceId,
+    PrevVerified, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp,
+    StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark,
+    WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
-    CheckpointPublishError, CheckpointPublishOutcome, merge_store_states, store_state_from_legacy,
+    CheckpointCache, CheckpointImport, CheckpointImportError, CheckpointPublishError,
+    CheckpointPublishOutcome, IncludedHeads, import_checkpoint, merge_store_states,
+    store_state_from_legacy,
 };
 use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::sync::SyncOutcome;
@@ -586,7 +602,6 @@ impl Daemon {
             }
             self.stores.insert(store_id, runtime);
             self.register_default_checkpoint_groups(store_id)?;
-            self.register_default_checkpoint_groups(store_id)?;
 
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
             git_tx
@@ -673,6 +688,7 @@ impl Daemon {
                 self.clock.receive(&hlc_state);
             }
             self.stores.insert(store_id, runtime);
+            self.register_default_checkpoint_groups(store_id)?;
 
             // Blocking load from git (fetches remote first in GitWorker).
             let timeout = load_timeout();
@@ -732,6 +748,24 @@ impl Daemon {
         let mut needs_sync = loaded.needs_sync;
         let mut state = store_state_from_legacy(loaded.state);
         let mut root_slug = loaded.root_slug;
+        let checkpoint_imports = self.load_checkpoint_imports(store_id, repo);
+        for import in &checkpoint_imports {
+            match merge_store_states(&state, &import.state) {
+                Ok(merged) => state = merged,
+                Err(CheckpointImportError::Merge(errors)) => {
+                    tracing::warn!(
+                        store_id = %store_id,
+                        errors = ?errors,
+                        "checkpoint merge failed"
+                    );
+                    return Err(OpError::Internal("checkpoint merge failed"));
+                }
+                Err(err) => {
+                    tracing::warn!(store_id = %store_id, error = ?err, "checkpoint merge failed");
+                    return Err(OpError::Internal("checkpoint merge failed"));
+                }
+            }
+        }
 
         // WAL recovery: merge any state from legacy snapshot WAL
         match crate::daemon::migration::import_legacy_snapshot_wal(&self.wal, remote) {
@@ -790,7 +824,18 @@ impl Daemon {
             needs_sync = true;
         }
 
+        if !checkpoint_imports.is_empty() {
+            let store = self
+                .stores
+                .get_mut(&store_id)
+                .ok_or(OpError::Internal("loaded store missing from state"))?;
+            apply_checkpoint_watermarks(store, &checkpoint_imports)?;
+        }
+
         last_seen_stamp = max_write_stamp(last_seen_stamp, state.max_write_stamp());
+        if let Some(max_stamp) = last_seen_stamp.as_ref() {
+            self.clock.receive(max_stamp);
+        }
 
         let now_wall_ms = WallClock::now().0;
         let clock_skew = last_seen_stamp
@@ -838,6 +883,173 @@ impl Daemon {
             tracing::warn!("replication runtime init failed for {store_id}: {err}");
         }
         Ok(())
+    }
+
+    fn load_checkpoint_imports(
+        &self,
+        store_id: StoreId,
+        repo: &Path,
+    ) -> Vec<CheckpointImport> {
+        let groups = self.checkpoint_group_snapshots(store_id);
+        if groups.is_empty() {
+            return Vec::new();
+        }
+
+        let repo_handle = match Repository::open(repo) {
+            Ok(repo) => Some(repo),
+            Err(err) => {
+                tracing::warn!(
+                    store_id = %store_id,
+                    path = %repo.display(),
+                    error = ?err,
+                    "checkpoint import skipped: repo open failed"
+                );
+                None
+            }
+        };
+
+        let mut imports = Vec::new();
+        for group in groups {
+            if let Some(import) = self.import_checkpoint_from_cache(store_id, &group) {
+                imports.push(import);
+                continue;
+            }
+            if let Some(repo) = repo_handle.as_ref() {
+                if let Some(import) = self.import_checkpoint_from_git(repo, &group) {
+                    imports.push(import);
+                }
+            }
+        }
+
+        imports
+    }
+
+    fn import_checkpoint_from_cache(
+        &self,
+        store_id: StoreId,
+        group: &CheckpointGroupSnapshot,
+    ) -> Option<CheckpointImport> {
+        let cache = CheckpointCache::new(store_id, group.group.clone());
+        match cache.load_current() {
+            Ok(Some(entry)) => match import_checkpoint(&entry.dir, self.limits()) {
+                Ok(import) => {
+                    tracing::info!(
+                        store_id = %store_id,
+                        checkpoint_group = %group.group,
+                        checkpoint_id = %entry.checkpoint_id,
+                        "checkpoint cache import succeeded"
+                    );
+                    Some(import)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        store_id = %store_id,
+                        checkpoint_group = %group.group,
+                        error = ?err,
+                        "checkpoint cache import failed"
+                    );
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(
+                    store_id = %store_id,
+                    checkpoint_group = %group.group,
+                    error = ?err,
+                    "checkpoint cache load failed"
+                );
+                None
+            }
+        }
+    }
+
+    fn import_checkpoint_from_git(
+        &self,
+        repo: &Repository,
+        group: &CheckpointGroupSnapshot,
+    ) -> Option<CheckpointImport> {
+        let oid = match checkpoint_ref_oid(repo, &group.git_ref) {
+            Ok(Some(oid)) => oid,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(
+                    checkpoint_group = %group.group,
+                    git_ref = %group.git_ref,
+                    error = ?err,
+                    "checkpoint ref lookup failed"
+                );
+                return None;
+            }
+        };
+        let commit = match repo.find_commit(oid) {
+            Ok(commit) => commit,
+            Err(err) => {
+                tracing::warn!(
+                    checkpoint_group = %group.group,
+                    git_ref = %group.git_ref,
+                    error = ?err,
+                    "checkpoint ref is not a commit"
+                );
+                return None;
+            }
+        };
+
+        let tree = match commit.tree() {
+            Ok(tree) => tree,
+            Err(err) => {
+                tracing::warn!(
+                    checkpoint_group = %group.group,
+                    git_ref = %group.git_ref,
+                    error = ?err,
+                    "checkpoint tree read failed"
+                );
+                return None;
+            }
+        };
+
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(err) => {
+                tracing::warn!(
+                    checkpoint_group = %group.group,
+                    git_ref = %group.git_ref,
+                    error = ?err,
+                    "checkpoint tempdir creation failed"
+                );
+                return None;
+            }
+        };
+
+        if let Err(err) = write_checkpoint_tree(repo, &tree, temp.path()) {
+            tracing::warn!(
+                checkpoint_group = %group.group,
+                git_ref = %group.git_ref,
+                error = ?err,
+                "checkpoint tree export failed"
+            );
+            return None;
+        }
+
+        match import_checkpoint(temp.path(), self.limits()) {
+            Ok(import) => {
+                tracing::info!(
+                    checkpoint_group = %group.group,
+                    git_ref = %group.git_ref,
+                    "checkpoint git import succeeded"
+                );
+                Some(import)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    checkpoint_group = %group.group,
+                    git_ref = %group.git_ref,
+                    error = ?err,
+                    "checkpoint git import failed"
+                );
+                None
+            }
+        }
     }
 
     fn ensure_replication_runtime(&mut self, store_id: StoreId) -> Result<(), OpError> {
@@ -2584,6 +2796,226 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
         (None, Some(b)) => Some(b),
         (None, None) => None,
     }
+}
+
+fn apply_checkpoint_watermarks(
+    store: &mut StoreRuntime,
+    imports: &[CheckpointImport],
+) -> Result<(), StoreRuntimeError> {
+    if imports.is_empty() {
+        return Ok(());
+    }
+
+    let mut origins: BTreeMap<NamespaceId, BTreeMap<ReplicaId, u64>> = BTreeMap::new();
+    for import in imports {
+        for (namespace, origin_map) in &import.included {
+            for (origin, seq) in origin_map {
+                let head = checkpoint_head_status(
+                    import.included_heads.as_ref(),
+                    namespace,
+                    origin,
+                    *seq,
+                );
+                store
+                    .watermarks_applied
+                    .observe_at_least(namespace, origin, Seq0::new(*seq), head)
+                    .map_err(|source| StoreRuntimeError::WatermarkInvalid {
+                        kind: "applied",
+                        namespace: namespace.clone(),
+                        origin: *origin,
+                        source,
+                    })?;
+                store
+                    .watermarks_durable
+                    .observe_at_least(namespace, origin, Seq0::new(*seq), head)
+                    .map_err(|source| StoreRuntimeError::WatermarkInvalid {
+                        kind: "durable",
+                        namespace: namespace.clone(),
+                        origin: *origin,
+                        source,
+                    })?;
+                origins
+                    .entry(namespace.clone())
+                    .or_default()
+                    .insert(*origin, *seq);
+            }
+        }
+    }
+
+    if origins.is_empty() {
+        return Ok(());
+    }
+
+    let wal_index = store.wal_index.clone();
+    let mut max_event_seq: BTreeMap<(NamespaceId, ReplicaId), u64> = BTreeMap::new();
+    for (namespace, origin_map) in &origins {
+        for origin in origin_map.keys() {
+            let max_seq = wal_index.reader().max_origin_seq(namespace, origin)?;
+            max_event_seq.insert((namespace.clone(), *origin), max_seq);
+        }
+    }
+
+    let mut txn = wal_index.writer().begin_txn()?;
+    for (namespace, origin_map) in origins {
+        for (origin, _) in origin_map {
+            let durable = store
+                .watermarks_durable
+                .get(&namespace, &origin)
+                .copied()
+                .unwrap_or_else(Watermark::genesis);
+            let applied = store
+                .watermarks_applied
+                .get(&namespace, &origin)
+                .copied()
+                .unwrap_or_else(Watermark::genesis);
+
+            let max_seq = max_event_seq
+                .get(&(namespace.clone(), origin))
+                .copied()
+                .unwrap_or(0);
+            let next_base = durable.seq().get().max(max_seq);
+            let next_seq =
+                next_base
+                    .checked_add(1)
+                    .ok_or_else(|| WalIndexError::OriginSeqOverflow {
+                        namespace: namespace.to_string(),
+                        origin,
+                    })?;
+            txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
+
+            if durable.seq().get() == 0 {
+                txn.update_watermark(&namespace, &origin, 0, 0, None, None)?;
+                continue;
+            }
+
+            let applied_head = head_sha(applied.head());
+            let durable_head = head_sha(durable.head());
+            if let (Some(applied_head), Some(durable_head)) = (applied_head, durable_head) {
+                txn.update_watermark(
+                    &namespace,
+                    &origin,
+                    applied.seq().get(),
+                    durable.seq().get(),
+                    Some(applied_head),
+                    Some(durable_head),
+                )?;
+            }
+        }
+    }
+    txn.commit()?;
+    Ok(())
+}
+
+fn checkpoint_head_status(
+    included_heads: Option<&IncludedHeads>,
+    namespace: &NamespaceId,
+    origin: &ReplicaId,
+    seq: u64,
+) -> HeadStatus {
+    if seq == 0 {
+        return HeadStatus::Genesis;
+    }
+    if let Some(heads) = included_heads
+        && let Some(origins) = heads.get(namespace)
+        && let Some(head) = origins.get(origin)
+    {
+        return HeadStatus::Known(*head.as_bytes());
+    }
+    HeadStatus::Unknown
+}
+
+fn head_sha(head: HeadStatus) -> Option<[u8; 32]> {
+    match head {
+        HeadStatus::Known(sha) => Some(sha),
+        _ => None,
+    }
+}
+
+fn checkpoint_ref_oid(repo: &Repository, git_ref: &str) -> Result<Option<Oid>, git2::Error> {
+    if let Some(oid) = refname_to_id_optional(repo, git_ref)? {
+        return Ok(Some(oid));
+    }
+    let Some(remote_ref) = checkpoint_remote_tracking_ref(git_ref) else {
+        return Ok(None);
+    };
+    refname_to_id_optional(repo, &remote_ref)
+}
+
+fn checkpoint_remote_tracking_ref(git_ref: &str) -> Option<String> {
+    let suffix = git_ref.strip_prefix("refs/")?;
+    Some(format!("refs/remotes/origin/{suffix}"))
+}
+
+fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, git2::Error> {
+    match repo.refname_to_id(name) {
+        Ok(oid) => Ok(Some(oid)),
+        Err(err) if err.code() == GitErrorCode::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn write_checkpoint_tree(
+    repo: &Repository,
+    tree: &git2::Tree,
+    dir: &Path,
+) -> Result<(), CheckpointTreeError> {
+    let mut outcome: Result<(), CheckpointTreeError> = Ok(());
+    tree.walk(TreeWalkMode::PreOrder, |root, entry| {
+        if outcome.is_err() {
+            return TreeWalkResult::Abort;
+        }
+        if entry.kind() != Some(ObjectType::Blob) {
+            return TreeWalkResult::Ok;
+        }
+        let name = match entry.name() {
+            Some(name) => name,
+            None => {
+                outcome = Err(CheckpointTreeError::InvalidPath {
+                    path: root.to_string(),
+                });
+                return TreeWalkResult::Abort;
+            }
+        };
+        let rel_path = Path::new(root).join(name);
+        if rel_path.components().any(|component| {
+            matches!(
+                component,
+                Component::Prefix(_) | Component::RootDir | Component::ParentDir
+            )
+        }) {
+            outcome = Err(CheckpointTreeError::InvalidPath {
+                path: rel_path.display().to_string(),
+            });
+            return TreeWalkResult::Abort;
+        }
+        let full_path = dir.join(&rel_path);
+        if let Some(parent) = full_path.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                outcome = Err(CheckpointTreeError::Io {
+                    path: parent.to_path_buf(),
+                    source: err,
+                });
+                return TreeWalkResult::Abort;
+            }
+        }
+        let blob = match repo.find_blob(entry.id()) {
+            Ok(blob) => blob,
+            Err(err) => {
+                outcome = Err(CheckpointTreeError::Git(err));
+                return TreeWalkResult::Abort;
+            }
+        };
+        if let Err(err) = fs::write(&full_path, blob.content()) {
+            outcome = Err(CheckpointTreeError::Io {
+                path: full_path,
+                source: err,
+            });
+            return TreeWalkResult::Abort;
+        }
+        TreeWalkResult::Ok
+    })?;
+
+    outcome
 }
 
 fn replay_event_wal(
