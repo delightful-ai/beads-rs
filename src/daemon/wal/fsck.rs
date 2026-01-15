@@ -530,7 +530,7 @@ fn scan_segment(
             }
         };
 
-        let header = record.header();
+        let header = record.header().clone();
         let (_, event_body) = match decode_event_body(record.payload_bytes(), limits) {
             Ok(decoded) => decoded,
             Err(err) => {

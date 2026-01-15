@@ -21,7 +21,7 @@ use crate::core::{
 use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
 use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
-    EventWalError, FrameReader, ReplicaLivenessRow, UnverifiedRecord, VerifiedRecord, WalIndex,
+    EventWalError, FrameReader, ReplicaLivenessRow, VerifiedRecord, WalIndex,
     WalIndexError,
 };
 use crate::paths;

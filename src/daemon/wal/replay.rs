@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::core::{
     DecodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq1, StoreMeta,
-    decode_event_body, decode_event_hlc_max, sha256_bytes,
+    decode_event_body, decode_event_hlc_max,
 };
 
 use super::EventWalError;
@@ -20,6 +20,11 @@ use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use super::index::{HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow};
 use super::record::{RecordHeaderMismatch, RecordVerifyError, UnverifiedRecord, VerifiedRecord};
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
+
+#[cfg(test)]
+use std::io::Write;
+#[cfg(test)]
+use crate::core::sha256_bytes;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplayStats {
@@ -812,7 +817,7 @@ where
                     source,
                 }
             })?;
-        let header = record.header();
+        let header = record.header().clone();
         let record = record.verify_with_event_body(&event_body).map_err(|err| match err {
             RecordVerifyError::HeaderMismatch(source) => WalReplayError::RecordHeaderMismatch {
                 path: segment.path.clone(),
