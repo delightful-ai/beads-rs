@@ -854,6 +854,12 @@ impl From<OpError> for ErrorPayload {
                         max_wal_record_bytes: *max_bytes as u64,
                         estimated_bytes: *got_bytes as u64,
                     }),
+                EventWalError::Symlink { path } => {
+                    ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable)
+                        .with_details(error_details::PathSymlinkRejectedDetails {
+                            path: path.display().to_string(),
+                        })
+                }
                 _ => ErrorPayload::new(event_wal_error_code(e.as_ref()), message, retryable)
                     .with_details(error_details::WalErrorDetails {
                         message: e.to_string(),
@@ -983,6 +989,13 @@ fn wal_replay_error_payload(
     retryable: bool,
 ) -> ErrorPayload {
     match err {
+        WalReplayError::Symlink { path } => {
+            ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable).with_details(
+                error_details::PathSymlinkRejectedDetails {
+                    path: path.display().to_string(),
+                },
+            )
+        }
         WalReplayError::RecordShaMismatch(info) => {
             let info = info.as_ref();
             ErrorPayload::new(ErrorCode::HashMismatch, message, retryable).with_details(
@@ -1068,6 +1081,13 @@ fn wal_replay_error_payload(
 
 fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool) -> ErrorPayload {
     match err {
+        WalIndexError::Symlink { path } => {
+            ErrorPayload::new(ErrorCode::PathSymlinkRejected, message, retryable).with_details(
+                error_details::PathSymlinkRejectedDetails {
+                    path: path.display().to_string(),
+                },
+            )
+        }
         WalIndexError::SchemaVersionMismatch { expected, got } => ErrorPayload::new(
             ErrorCode::IndexRebuildRequired,
             message,
@@ -1181,6 +1201,7 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
         WalIndexError::ClientRequestIdReuseMismatch { .. } => {
             ErrorCode::ClientRequestIdReuseMismatch
         }
+        WalIndexError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
         WalIndexError::MetaMismatch { key, .. } => match *key {
             "store_id" => ErrorCode::WrongStore,
             "store_epoch" => ErrorCode::StoreEpochMismatch,
@@ -1207,6 +1228,7 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
 
 fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
     match err {
+        WalReplayError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
         WalReplayError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ErrorCode::PermissionDenied
@@ -1238,6 +1260,7 @@ fn event_wal_error_code(err: &EventWalError) -> ErrorCode {
     match err {
         EventWalError::RecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
         EventWalError::SegmentHeaderUnsupportedVersion { .. } => wal_segment_header_error_code(err),
+        EventWalError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
         EventWalError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ErrorCode::PermissionDenied

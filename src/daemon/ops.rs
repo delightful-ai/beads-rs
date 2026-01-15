@@ -570,6 +570,7 @@ fn event_wal_error_code(err: &EventWalError) -> ErrorCode {
     match err {
         EventWalError::RecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
         EventWalError::SegmentHeaderUnsupportedVersion { .. } => wal_segment_header_error_code(err),
+        EventWalError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
         EventWalError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ErrorCode::PermissionDenied
@@ -583,6 +584,7 @@ fn event_wal_error_code(err: &EventWalError) -> ErrorCode {
 
 fn event_wal_transience(err: &EventWalError) -> Transience {
     match err {
+        EventWalError::Symlink { .. } => Transience::Permanent,
         EventWalError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 Transience::Permanent
@@ -685,6 +687,7 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
         WalIndexError::ClientRequestIdReuseMismatch { .. } => {
             ErrorCode::ClientRequestIdReuseMismatch
         }
+        WalIndexError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
         WalIndexError::MetaMismatch { key, .. } => match *key {
             "store_id" => ErrorCode::WrongStore,
             "store_epoch" => ErrorCode::StoreEpochMismatch,
@@ -711,6 +714,7 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
 
 fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
     match err {
+        WalReplayError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
         WalReplayError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ErrorCode::PermissionDenied
@@ -747,6 +751,7 @@ fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
 
 fn wal_index_transience(err: &WalIndexError) -> Transience {
     match err {
+        WalIndexError::Symlink { .. } => Transience::Permanent,
         WalIndexError::SchemaVersionMismatch { .. } => Transience::Retryable,
         WalIndexError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
@@ -769,6 +774,7 @@ fn wal_index_transience(err: &WalIndexError) -> Transience {
 
 fn wal_replay_transience(err: &WalReplayError) -> Transience {
     match err {
+        WalReplayError::Symlink { .. } => Transience::Permanent,
         WalReplayError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 Transience::Permanent
