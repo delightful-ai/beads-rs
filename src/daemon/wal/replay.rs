@@ -65,6 +65,8 @@ pub enum WalReplayError {
         #[source]
         source: std::io::Error,
     },
+    #[error("path is a symlink: {path:?}")]
+    Symlink { path: PathBuf },
     #[error("segment header decode failed at {path:?}: {source}")]
     SegmentHeader {
         path: PathBuf,
@@ -430,6 +432,7 @@ fn index_record(
 }
 
 fn list_namespaces(wal_dir: &Path) -> Result<Vec<NamespaceId>, WalReplayError> {
+    reject_symlink(wal_dir)?;
     let entries = match fs::read_dir(wal_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -448,7 +451,14 @@ fn list_namespaces(wal_dir: &Path) -> Result<Vec<NamespaceId>, WalReplayError> {
             source,
         })?;
         let path = entry.path();
-        if !path.is_dir() {
+        let entry_type = entry.file_type().map_err(|source| WalReplayError::Io {
+            path: wal_dir.to_path_buf(),
+            source,
+        })?;
+        if entry_type.is_symlink() {
+            return Err(WalReplayError::Symlink { path });
+        }
+        if !entry_type.is_dir() {
             continue;
         }
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
@@ -466,6 +476,7 @@ fn list_namespaces(wal_dir: &Path) -> Result<Vec<NamespaceId>, WalReplayError> {
 }
 
 fn list_segments(dir: &Path) -> Result<Vec<SegmentDescriptor<Unverified>>, WalReplayError> {
+    reject_symlink(dir)?;
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -490,6 +501,20 @@ fn list_segments(dir: &Path) -> Result<Vec<SegmentDescriptor<Unverified>>, WalRe
         segments.push(SegmentDescriptor::load(path)?);
     }
     Ok(segments)
+}
+
+fn reject_symlink(path: &Path) -> Result<(), WalReplayError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(WalReplayError::Symlink {
+            path: path.to_path_buf(),
+        }),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(WalReplayError::Io {
+            path: path.to_path_buf(),
+            source: err,
+        }),
+    }
 }
 
 fn verify_segments(

@@ -769,6 +769,7 @@ fn list_namespaces(
     wal_dir: &Path,
     builder: &mut FsckReportBuilder,
 ) -> Result<Vec<NamespaceId>, FsckError> {
+    reject_symlink(wal_dir)?;
     let entries = match fs::read_dir(wal_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -787,7 +788,20 @@ fn list_namespaces(
             source,
         })?;
         let path = entry.path();
-        if !path.is_dir() {
+        let entry_type = entry.file_type().map_err(|source| FsckError::Io {
+            path: wal_dir.to_path_buf(),
+            source,
+        })?;
+        if entry_type.is_symlink() {
+            return Err(FsckError::Io {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "wal namespace path is a symlink",
+                ),
+            });
+        }
+        if !entry_type.is_dir() {
             continue;
         }
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
@@ -824,6 +838,7 @@ fn list_segments(
     repair: bool,
 ) -> Result<Vec<SegmentInfo>, FsckError> {
     let dir = wal_dir.join(namespace.as_str());
+    reject_symlink(&dir)?;
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -937,6 +952,24 @@ fn list_segments(
 
     segments.sort_by_key(|segment| (segment.header.created_at_ms, segment.header.segment_id));
     Ok(segments)
+}
+
+fn reject_symlink(path: &Path) -> Result<(), FsckError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(FsckError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "wal path is a symlink",
+            ),
+        }),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(FsckError::Io {
+            path: path.to_path_buf(),
+            source: err,
+        }),
+    }
 }
 
 fn read_segment_header(path: &Path) -> Result<(SegmentHeader, u64, u64), FsckError> {
