@@ -51,6 +51,14 @@ impl CheckpointCache {
         &self,
         export: &CheckpointExport,
     ) -> Result<CheckpointCacheEntry, CheckpointCacheError> {
+        self.publish_with_throttle(export, None)
+    }
+
+    pub fn publish_with_throttle(
+        &self,
+        export: &CheckpointExport,
+        mut throttle: Option<&mut dyn FnMut(u64)>,
+    ) -> Result<CheckpointCacheEntry, CheckpointCacheError> {
         if export.meta.checkpoint_group != self.checkpoint_group {
             return Err(CheckpointCacheError::GroupMismatch {
                 expected: self.checkpoint_group.clone(),
@@ -80,7 +88,7 @@ impl CheckpointCache {
                 fs::remove_dir_all(&tmp_dir).map_err(|source| io_err(&tmp_dir, source))?;
             }
             fs::create_dir_all(&tmp_dir).map_err(|source| io_err(&tmp_dir, source))?;
-            write_checkpoint_tree(&tmp_dir, export)?;
+            write_checkpoint_tree(&tmp_dir, export, throttle.as_deref_mut())?;
             fs::rename(&tmp_dir, &final_dir).map_err(|source| io_err(&final_dir, source))?;
             fsync_dir(&group_dir)?;
         }
@@ -191,23 +199,36 @@ pub enum CheckpointCacheError {
 fn write_checkpoint_tree(
     dir: &Path,
     export: &CheckpointExport,
+    mut throttle: Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CheckpointCacheError> {
     let meta_bytes = export.meta.canon_bytes()?;
-    write_bytes(&dir.join(META_FILE), &meta_bytes)?;
+    write_bytes(&dir.join(META_FILE), &meta_bytes, throttle.as_deref_mut())?;
     let manifest_bytes = export.manifest.canon_bytes()?;
-    write_bytes(&dir.join(MANIFEST_FILE), &manifest_bytes)?;
+    write_bytes(
+        &dir.join(MANIFEST_FILE),
+        &manifest_bytes,
+        throttle.as_deref_mut(),
+    )?;
 
     for (path, payload) in &export.files {
         let file_path = dir.join(path);
-        write_bytes(&file_path, payload.bytes.as_ref())?;
+        write_bytes(&file_path, payload.bytes.as_ref(), throttle.as_deref_mut())?;
     }
 
     Ok(())
 }
 
-fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), CheckpointCacheError> {
+fn write_bytes(
+    path: &Path,
+    bytes: &[u8],
+    mut throttle: Option<&mut dyn FnMut(u64)>,
+) -> Result<(), CheckpointCacheError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| io_err(parent, source))?;
+    }
+
+    if let Some(throttle) = throttle.as_mut() {
+        throttle(bytes.len() as u64);
     }
 
     let mut file = File::create(path).map_err(|source| io_err(path, source))?;

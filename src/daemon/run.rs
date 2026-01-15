@@ -97,7 +97,7 @@ pub fn run_daemon() -> Result<()> {
 
     // Create daemon core and git worker.
     let daemon = Daemon::new_with_limits(actor, wal, (*limits).clone());
-    let git_worker = GitWorker::new(git_result_tx);
+    let git_worker = GitWorker::new(git_result_tx, (*limits).clone());
 
     // Spawn state thread.
     let state_handle = std::thread::spawn(move || {

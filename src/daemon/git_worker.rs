@@ -12,6 +12,7 @@ use git2::{ErrorCode, Oid, Repository};
 
 use super::remote::RemoteUrl;
 use crate::core::{ActorId, CanonicalState, Stamp, StoreId, WriteStamp};
+use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::git::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, CheckpointCache, CheckpointExportInput, CheckpointPublishError,
@@ -106,14 +107,19 @@ pub struct GitWorker {
 
     /// Channel to send results back to state thread.
     result_tx: Sender<GitResult>,
+
+    limits: crate::core::Limits,
+    background_io: HashMap<StoreId, TokenBucket>,
 }
 
 impl GitWorker {
     /// Create a new GitWorker.
-    pub fn new(result_tx: Sender<GitResult>) -> Self {
+    pub fn new(result_tx: Sender<GitResult>, limits: crate::core::Limits) -> Self {
         GitWorker {
             repos: HashMap::new(),
             result_tx,
+            limits,
+            background_io: HashMap::new(),
         }
     }
 
@@ -127,6 +133,13 @@ impl GitWorker {
                 Ok(entry.insert(repo))
             }
         }
+    }
+
+    fn background_budget(&mut self, store_id: StoreId) -> &mut TokenBucket {
+        let rate = self.limits.max_background_io_bytes_per_sec as u64;
+        self.background_io
+            .entry(store_id)
+            .or_insert_with(|| TokenBucket::new(rate))
     }
 
     /// Load state from beads/store ref.
@@ -259,7 +272,14 @@ impl GitWorker {
         })?;
 
         let cache = CheckpointCache::new(snapshot.store_id, snapshot.checkpoint_group.clone());
-        if let Err(err) = cache.publish(&export) {
+        let budget = self.background_budget(snapshot.store_id);
+        let mut throttle = |bytes: u64| {
+            let wait = budget.throttle(bytes);
+            if !wait.is_zero() {
+                metrics::background_io_throttle(wait, bytes);
+            }
+        };
+        if let Err(err) = cache.publish_with_throttle(&export, Some(&mut throttle)) {
             tracing::warn!(error = ?err, "checkpoint cache publish failed");
         }
 

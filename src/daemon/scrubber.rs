@@ -11,6 +11,8 @@ use crate::api::{
     AdminHealthSummary,
 };
 use crate::core::{Limits, NamespaceId, ReplicaId, SegmentId, decode_event_body, sha256_bytes};
+use crate::daemon::io_budget::TokenBucket;
+use crate::daemon::metrics;
 use crate::daemon::store_runtime::StoreRuntime;
 use crate::daemon::wal::WalIndex;
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
@@ -71,6 +73,7 @@ pub fn scrub_store(
     let store_id = store.meta.store_id();
     let store_dir = paths::store_dir(store_id);
     let wal_dir = store_dir.join("wal");
+    let mut io_budget = TokenBucket::new(limits.max_background_io_bytes_per_sec as u64);
 
     let mut builder = ScrubReportBuilder::new(checked_at_ms);
     let namespaces = collect_namespaces(store, &wal_dir, &mut builder);
@@ -82,6 +85,7 @@ pub fn scrub_store(
             &segments,
             limits,
             options.max_records_per_namespace,
+            &mut io_budget,
             &mut builder,
         );
         scrub_index_offsets(
@@ -345,6 +349,7 @@ fn scrub_wal_segments(
     segments: &[SegmentInfo],
     limits: &Limits,
     max_records: usize,
+    io_budget: &mut TokenBucket,
     builder: &mut ScrubReportBuilder,
 ) {
     let mut remaining = max_records;
@@ -353,7 +358,7 @@ fn scrub_wal_segments(
             break;
         }
         builder.stats.segments_checked = builder.stats.segments_checked.saturating_add(1);
-        let checked = scan_segment_records(segment, limits, remaining, builder);
+        let checked = scan_segment_records(segment, limits, remaining, io_budget, builder);
         remaining = remaining.saturating_sub(checked);
     }
 }
@@ -362,6 +367,7 @@ fn scan_segment_records(
     segment: &SegmentInfo,
     limits: &Limits,
     max_records: usize,
+    io_budget: &mut TokenBucket,
     builder: &mut ScrubReportBuilder,
 ) -> usize {
     let mut file = match File::open(&segment.path) {
@@ -539,6 +545,13 @@ fn scan_segment_records(
                 Some("run `bd admin maintenance on` then `bd store fsck --repair` to truncate tail corruption"),
             );
             break;
+        }
+
+        if frame_len > 0 {
+            let wait = io_budget.throttle(frame_len);
+            if !wait.is_zero() {
+                metrics::background_io_throttle(wait, frame_len);
+            }
         }
 
         let actual_crc = crc32c::crc32c(&body);
