@@ -46,8 +46,7 @@ impl TokenBucket {
 
         let deficit = bytes.saturating_sub(self.available);
         self.available = 0;
-        let wait_ms = ((deficit as u128) * 1000 + (self.rate_bytes_per_sec as u128 - 1))
-            / self.rate_bytes_per_sec as u128;
+        let wait_ms = ((deficit as u128) * 1000).div_ceil(self.rate_bytes_per_sec as u128);
         let wait_ms = wait_ms.min(u64::MAX as u128) as u64;
         let wait = Duration::from_millis(wait_ms);
         self.last_refill = now + wait;
