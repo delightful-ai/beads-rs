@@ -195,7 +195,7 @@ fn require_min_seen(
     let head = if seq == 0 {
         HeadStatus::Genesis
     } else {
-        HeadStatus::Unknown
+        HeadStatus::Known([seq as u8; 32])
     };
     required
         .observe_at_least(namespace, &origin, Seq0::new(seq), head)

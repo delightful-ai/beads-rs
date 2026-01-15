@@ -236,17 +236,14 @@ fn watermarks_from_included(
     let mut watermarks = Watermarks::<Durable>::new();
     for (namespace, origins) in included {
         for (origin, seq) in origins {
-            let head = heads
+            let head = match heads
                 .and_then(|heads| heads.get(namespace))
                 .and_then(|origin_heads| origin_heads.get(origin))
-                .map(|hash| HeadStatus::Known(*hash.as_bytes()))
-                .unwrap_or_else(|| {
-                    if *seq == 0 {
-                        HeadStatus::Genesis
-                    } else {
-                        HeadStatus::Unknown
-                    }
-                });
+            {
+                Some(hash) => HeadStatus::Known(*hash.as_bytes()),
+                None if *seq == 0 => HeadStatus::Genesis,
+                None => panic!("missing head for {namespace} {origin} seq {seq}"),
+            };
             watermarks
                 .observe_at_least(namespace, origin, Seq0::new(*seq), head)
                 .expect("watermark");

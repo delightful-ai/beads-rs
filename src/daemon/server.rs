@@ -1250,7 +1250,12 @@ mod tests {
     }
 
     fn watermark(seq: u64) -> Watermark<Applied> {
-        Watermark::new(Seq0::new(seq), HeadStatus::Unknown).expect("watermark")
+        let head = if seq == 0 {
+            HeadStatus::Genesis
+        } else {
+            HeadStatus::Known([seq as u8; 32])
+        };
+        Watermark::new(Seq0::new(seq), head).expect("watermark")
     }
 
     #[test]
@@ -1259,12 +1264,14 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
 
         let mut required = Watermarks::<Applied>::new();
+        let required_wm = watermark(2);
         required
-            .observe_at_least(&namespace, &origin, watermark(2).seq(), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, required_wm.seq(), required_wm.head())
             .unwrap();
         let mut applied = Watermarks::<Applied>::new();
+        let applied_wm = watermark(4);
         applied
-            .observe_at_least(&namespace, &origin, watermark(4).seq(), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, applied_wm.seq(), applied_wm.head())
             .unwrap();
 
         let frame3 = frame(origin, namespace.clone(), 3);
@@ -1307,12 +1314,14 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
 
         let mut required = Watermarks::<Applied>::new();
+        let required_wm = watermark(1);
         required
-            .observe_at_least(&namespace, &origin, watermark(1).seq(), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, required_wm.seq(), required_wm.head())
             .unwrap();
         let mut applied = Watermarks::<Applied>::new();
+        let applied_wm = watermark(2);
         applied
-            .observe_at_least(&namespace, &origin, watermark(2).seq(), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, applied_wm.seq(), applied_wm.head())
             .unwrap();
 
         let reader = FakeWalReader::default().with_response(
@@ -1351,12 +1360,14 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
 
         let mut required = Watermarks::<Applied>::new();
+        let required_wm = watermark(1);
         required
-            .observe_at_least(&namespace, &origin, watermark(1).seq(), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, required_wm.seq(), required_wm.head())
             .unwrap();
         let mut applied = Watermarks::<Applied>::new();
+        let applied_wm = watermark(2);
         applied
-            .observe_at_least(&namespace, &origin, watermark(2).seq(), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, applied_wm.seq(), applied_wm.head())
             .unwrap();
 
         let reader = FakeWalReader::default().with_response(
@@ -1412,8 +1423,9 @@ mod tests {
         let namespace = NamespaceId::core();
 
         let mut required = Watermarks::<Applied>::new();
+        let required_wm = watermark(1);
         required
-            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, required_wm.seq(), required_wm.head())
             .unwrap();
 
         let read = ReadConsistency {
@@ -1454,11 +1466,12 @@ mod tests {
         assert_eq!(waiters.len(), 1);
         assert!(respond_rx.try_recv().is_err());
 
+        let applied_wm = watermark(1);
         env.daemon
             .store_runtime_mut(&loaded)
             .unwrap()
             .watermarks_applied
-            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, applied_wm.seq(), applied_wm.head())
             .unwrap();
 
         flush_read_gate_waiters(
@@ -1488,8 +1501,9 @@ mod tests {
         let namespace = NamespaceId::core();
 
         let mut required = Watermarks::<Applied>::new();
+        let required_wm = watermark(1);
         required
-            .observe_at_least(&namespace, &origin, Seq0::new(1), HeadStatus::Unknown)
+            .observe_at_least(&namespace, &origin, required_wm.seq(), required_wm.head())
             .unwrap();
 
         let read = ReadConsistency {
