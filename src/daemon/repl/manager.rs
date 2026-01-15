@@ -365,16 +365,16 @@ where
                             }
 
                             if let SessionAction::PeerWant(want) = &action {
-                                if let Err(err) = handle_want(
-                                    &mut writer,
-                                    &session,
-                                    want,
-                                    &broadcaster,
-                                    runtime.wal_reader.as_ref(),
-                                    &limits,
-                                    Some(&accepted_set),
-                                    &mut keepalive,
-                                ) {
+                                let mut ctx = WantContext {
+                                    writer: &mut writer,
+                                    session: &session,
+                                    broadcaster: &broadcaster,
+                                    wal_reader: runtime.wal_reader.as_ref(),
+                                    limits: &limits,
+                                    allowed_set: Some(&accepted_set),
+                                    keepalive: &mut keepalive,
+                                };
+                                if let Err(err) = handle_want(want, &mut ctx) {
                                     tracing::warn!("peer want handling failed: {err}");
                                     return Err(err);
                                 }
@@ -743,33 +743,40 @@ fn emit_peer_lag(peer: ReplicaId, local: &WatermarkMap, ack: &WatermarkMap) {
     }
 }
 
-fn handle_want(
-    writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
-    want: &Want,
-    broadcaster: &EventBroadcaster,
-    wal_reader: Option<&WalRangeReader>,
-    limits: &crate::core::Limits,
-    allowed_set: Option<&BTreeSet<NamespaceId>>,
-    keepalive: &mut KeepaliveTracker,
-) -> Result<(), PeerError> {
+struct WantContext<'a> {
+    writer: &'a mut FrameWriter<TcpStream>,
+    session: &'a Session,
+    broadcaster: &'a EventBroadcaster,
+    wal_reader: Option<&'a WalRangeReader>,
+    limits: &'a crate::core::Limits,
+    allowed_set: Option<&'a BTreeSet<NamespaceId>>,
+    keepalive: &'a mut KeepaliveTracker,
+}
+
+fn handle_want(want: &Want, ctx: &mut WantContext<'_>) -> Result<(), PeerError> {
     if want.want.is_empty() {
         return Ok(());
     }
 
-    let cache = broadcaster.hot_cache()?;
-    let outcome = match build_want_frames(want, cache, wal_reader, limits, allowed_set) {
+    let cache = ctx.broadcaster.hot_cache()?;
+    let outcome = match build_want_frames(want, cache, ctx.wal_reader, ctx.limits, ctx.allowed_set)
+    {
         Ok(outcome) => outcome,
         Err(err) => {
             let payload = err.as_error_payload();
-            send_payload(writer, session, ReplMessage::Error(payload), keepalive)?;
+            send_payload(
+                ctx.writer,
+                ctx.session,
+                ReplMessage::Error(payload),
+                ctx.keepalive,
+            )?;
             return Ok(());
         }
     };
 
     match outcome {
         WantFramesOutcome::Frames(frames) => {
-            send_events(writer, session, frames, limits, keepalive)
+            send_events(ctx.writer, ctx.session, frames, ctx.limits, ctx.keepalive)
         }
         WantFramesOutcome::BootstrapRequired { namespaces } => {
             let payload =
@@ -778,7 +785,12 @@ fn handle_want(
                         namespaces: namespaces.into_iter().collect(),
                         reason: SnapshotRangeReason::RangeMissing,
                     });
-            send_payload(writer, session, ReplMessage::Error(payload), keepalive)?;
+            send_payload(
+                ctx.writer,
+                ctx.session,
+                ReplMessage::Error(payload),
+                ctx.keepalive,
+            )?;
             Ok(())
         }
     }
