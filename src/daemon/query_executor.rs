@@ -1219,7 +1219,7 @@ fn sort_ready_issues(issues: &mut [IssueSummary]) {
 #[cfg(test)]
 mod tests {
     use super::{dep_cycles_from_state, sort_ready_issues};
-    use crate::api::IssueSummary;
+    use crate::api::{Issue, IssueSummary};
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge,
         DepKey, DepKind, Labels, Lww, NamespaceId, Priority, Stamp, Workflow, WriteStamp,
@@ -1296,6 +1296,18 @@ mod tests {
         let summary = IssueSummary::from_bead(&namespace, &bead);
 
         assert_eq!(summary.namespace, namespace);
+    }
+
+    #[test]
+    fn issue_view_uses_read_namespace() {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(2_000, 0), actor);
+        let bead = make_bead("bd-456", &stamp);
+        let namespace = NamespaceId::parse("wf").unwrap();
+
+        let issue = Issue::from_bead(&namespace, &bead);
+
+        assert_eq!(issue.namespace, namespace);
     }
 
     #[test]
