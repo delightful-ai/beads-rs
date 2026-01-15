@@ -274,7 +274,11 @@ pub fn render_show(
     notes: &[Note],
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("\n{}: {}\n", bead.id, bead.title));
+    out.push_str(&format!(
+        "\n{}: {}\n",
+        fmt_issue_ref(&bead.namespace, &bead.id),
+        bead.title
+    ));
     out.push_str(&format!("Namespace: {}\n", bead.namespace.as_str()));
     out.push_str(&format!("Status: {}\n", bead.status));
     out.push_str(&format!("Priority: P{}\n", bead.priority));
@@ -1354,7 +1358,11 @@ fn render_issue_summary_opts(v: &IssueSummary, show_labels: bool) -> String {
 fn render_issue_detail(v: &Issue) -> String {
     // Default detail renderer (used for `show --json=false` fallback).
     let mut out = String::new();
-    out.push_str(&format!("\n{}: {}\n", v.id, v.title));
+    out.push_str(&format!(
+        "\n{}: {}\n",
+        fmt_issue_ref(&v.namespace, &v.id),
+        v.title
+    ));
     out.push_str(&format!("Namespace: {}\n", v.namespace.as_str()));
     out.push_str(&format!("Status: {}\n", v.status));
     out.push_str(&format!("Priority: P{}\n", v.priority));
@@ -1623,7 +1631,7 @@ mod tests {
 
         let output = render_show(&issue, &[], &incoming, &[]);
         let expected = concat!(
-            "\nbd-123: Title\n",
+            "\nwf/bd-123: Title\n",
             "Namespace: wf\n",
             "Status: open\n",
             "Priority: P1\n",
