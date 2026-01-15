@@ -17,7 +17,7 @@ use bytes::Bytes;
 use crossbeam::channel::Sender;
 
 use super::broadcast::BroadcastEvent;
-use super::core::{Daemon, HandleOutcome, NormalizedMutationMeta, detect_clock_skew};
+use super::core::{Daemon, HandleOutcome, ParsedMutationMeta, detect_clock_skew};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
 use super::ipc::{MutationMeta, OpResponse, Response, ResponsePayload};
@@ -105,7 +105,7 @@ impl Daemon {
         }
 
         let proof = self.ensure_repo_loaded_strict(repo, git_tx)?;
-        let meta = self.normalize_mutation_meta(&proof, meta)?;
+        let meta = self.parse_mutation_meta(&proof, meta)?;
         if self.store_runtime(&proof)?.maintenance_mode {
             return Err(OpError::MaintenanceMode {
                 reason: Some("maintenance mode enabled".into()),
@@ -117,7 +117,7 @@ impl Daemon {
         let limits = self.limits().clone();
         let engine = MutationEngine::new(limits.clone());
 
-        let NormalizedMutationMeta {
+        let ParsedMutationMeta {
             namespace,
             durability,
             client_request_id,

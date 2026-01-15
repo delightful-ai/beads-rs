@@ -175,7 +175,7 @@ const LOAD_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REPL_MAX_CONNECTIONS: usize = 32;
 
 #[derive(Clone, Debug)]
-pub(crate) struct NormalizedMutationMeta {
+pub(crate) struct ParsedMutationMeta {
     pub(crate) namespace: NamespaceId,
     pub(crate) durability: DurabilityClass,
     pub(crate) client_request_id: Option<ClientRequestId>,
@@ -2255,32 +2255,17 @@ impl Daemon {
             .map(|(id, store)| (id, &mut store.repo_state))
     }
 
-    pub(crate) fn normalize_mutation_meta(
+    pub(crate) fn parse_mutation_meta(
         &self,
         proof: &LoadedStore,
         meta: MutationMeta,
-    ) -> Result<NormalizedMutationMeta, OpError> {
+    ) -> Result<ParsedMutationMeta, OpError> {
         let namespace = self.normalize_namespace(proof, meta.namespace)?;
-        let durability = parse_durability(meta.durability)?;
-        let client_request_id =
-            match trim_non_empty(meta.client_request_id) {
-                None => None,
-                Some(raw) => Some(ClientRequestId::parse_str(&raw).map_err(|err| {
-                    OpError::InvalidRequest {
-                        field: Some("client_request_id".into()),
-                        reason: err.to_string(),
-                    }
-                })?),
-            };
-        let actor_id = match trim_non_empty(meta.actor_id) {
-            None => self.actor.clone(),
-            Some(raw) => ActorId::new(raw).map_err(|err| OpError::InvalidRequest {
-                field: Some("actor_id".into()),
-                reason: err.to_string(),
-            })?,
-        };
+        let durability = parse_durability_meta(meta.durability)?;
+        let client_request_id = parse_optional_client_request_id(meta.client_request_id)?;
+        let actor_id = parse_optional_actor_id(meta.actor_id, &self.actor)?;
 
-        Ok(NormalizedMutationMeta {
+        Ok(ParsedMutationMeta {
             namespace,
             durability,
             client_request_id,
@@ -2350,12 +2335,15 @@ impl Daemon {
         proof: &LoadedStore,
         raw: Option<String>,
     ) -> Result<NamespaceId, OpError> {
-        let namespace = match trim_non_empty(raw) {
+        let namespace = match raw {
             None => NamespaceId::core(),
             Some(value) => {
-                NamespaceId::parse(value.clone()).map_err(|err| OpError::NamespaceInvalid {
-                    namespace: value,
-                    reason: err.to_string(),
+                let trimmed = value.trim();
+                NamespaceId::parse(trimmed.to_string()).map_err(|err| {
+                    OpError::NamespaceInvalid {
+                        namespace: trimmed.to_string(),
+                        reason: err.to_string(),
+                    }
                 })?
             }
         };
@@ -3392,44 +3380,48 @@ fn load_event_body_at(
     Ok(event_body)
 }
 
-fn trim_non_empty(raw: Option<String>) -> Option<String> {
-    raw.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
+fn parse_optional_client_request_id(
+    raw: Option<String>,
+) -> Result<Option<ClientRequestId>, OpError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(OpError::InvalidRequest {
+            field: Some("client_request_id".into()),
+            reason: "client_request_id cannot be empty".into(),
+        });
+    }
+    ClientRequestId::parse_str(trimmed)
+        .map(Some)
+        .map_err(|err| OpError::InvalidRequest {
+            field: Some("client_request_id".into()),
+            reason: err.to_string(),
+        })
+}
+
+fn parse_optional_actor_id(raw: Option<String>, fallback: &ActorId) -> Result<ActorId, OpError> {
+    let Some(raw) = raw else {
+        return Ok(fallback.clone());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(OpError::InvalidRequest {
+            field: Some("actor_id".into()),
+            reason: "actor_id cannot be empty".into(),
+        });
+    }
+    ActorId::new(trimmed.to_string()).map_err(|err| OpError::InvalidRequest {
+        field: Some("actor_id".into()),
+        reason: err.to_string(),
     })
 }
 
-fn parse_durability(raw: Option<String>) -> Result<DurabilityClass, OpError> {
-    let Some(raw) = trim_non_empty(raw) else {
-        return Ok(DurabilityClass::LocalFsync);
-    };
-    let value = raw.trim().to_lowercase();
-    if value == "local_fsync" || value == "local-fsync" {
-        return Ok(DurabilityClass::LocalFsync);
-    }
-    if let Some(rest) = value.strip_prefix("replicated_fsync") {
-        let rest = rest.trim();
-        let rest = rest
-            .strip_prefix('(')
-            .and_then(|s| s.strip_suffix(')'))
-            .or_else(|| rest.strip_prefix(':'))
-            .or_else(|| rest.strip_prefix('='))
-            .map(str::trim);
-        if let Some(k_raw) = rest {
-            let k = k_raw.parse::<u32>().ok().and_then(NonZeroU32::new);
-            if let Some(k) = k {
-                return Ok(DurabilityClass::ReplicatedFsync { k });
-            }
-        }
-    }
-
-    Err(OpError::InvalidRequest {
+fn parse_durability_meta(raw: Option<String>) -> Result<DurabilityClass, OpError> {
+    DurabilityClass::parse_optional(raw.as_deref()).map_err(|err| OpError::InvalidRequest {
         field: Some("durability".into()),
-        reason: format!("unsupported durability class: {raw}"),
+        reason: err.to_string(),
     })
 }
 
@@ -3615,12 +3607,12 @@ mod tests {
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        ContentHash, Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww,
-        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry,
-        ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1,
-        VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
-        WriteStamp, encode_event_body_canonical, hash_event_body,
+        ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Labels,
+        Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority,
+        ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp,
+        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+        TxnOpV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp,
+        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -3637,6 +3629,15 @@ mod tests {
 
     fn test_actor() -> ActorId {
         ActorId::new("test@host".to_string()).unwrap()
+    }
+
+    fn assert_err_code(outcome: HandleOutcome, expected: ErrorCode) {
+        match outcome {
+            HandleOutcome::Response(Response::Err { err }) => {
+                assert_eq!(err.code, expected);
+            }
+            other => panic!("expected error response, got {other:?}"),
+        }
     }
 
     fn test_remote() -> RemoteUrl {
@@ -4421,6 +4422,77 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(core_count, 0);
         assert_eq!(tmp_count, 1);
+    }
+
+    #[test]
+    fn mutation_meta_rejects_invalid_fields() {
+        let tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+
+        let base_request = |meta| Request::Create {
+            repo: repo_path.clone(),
+            id: None,
+            parent: None,
+            title: "bad".to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            meta,
+        };
+
+        assert_err_code(
+            daemon.handle_request(
+                base_request(MutationMeta {
+                    durability: Some("nope".into()),
+                    ..MutationMeta::default()
+                }),
+                &git_tx,
+            ),
+            ErrorCode::InvalidRequest,
+        );
+        assert_err_code(
+            daemon.handle_request(
+                base_request(MutationMeta {
+                    client_request_id: Some("not-a-uuid".into()),
+                    ..MutationMeta::default()
+                }),
+                &git_tx,
+            ),
+            ErrorCode::InvalidRequest,
+        );
+        assert_err_code(
+            daemon.handle_request(
+                base_request(MutationMeta {
+                    actor_id: Some("   ".into()),
+                    ..MutationMeta::default()
+                }),
+                &git_tx,
+            ),
+            ErrorCode::InvalidRequest,
+        );
+        assert_err_code(
+            daemon.handle_request(
+                base_request(MutationMeta {
+                    namespace: Some("BAD".into()),
+                    ..MutationMeta::default()
+                }),
+                &git_tx,
+            ),
+            ErrorCode::NamespaceInvalid,
+        );
     }
 
     #[test]
