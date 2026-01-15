@@ -249,6 +249,32 @@ pub fn checkpoint_export_err(duration: Duration) {
     );
 }
 
+pub fn repl_ingest_throttle(wait: Duration, bytes: u64) {
+    emit(
+        "repl_ingest_throttle_ms",
+        MetricValue::Histogram(duration_ms(wait)),
+        Vec::new(),
+    );
+    emit(
+        "repl_ingest_throttle_bytes",
+        MetricValue::Counter(bytes),
+        Vec::new(),
+    );
+}
+
+pub fn background_io_throttle(wait: Duration, bytes: u64) {
+    emit(
+        "background_io_throttle_ms",
+        MetricValue::Histogram(duration_ms(wait)),
+        Vec::new(),
+    );
+    emit(
+        "background_io_throttle_bytes",
+        MetricValue::Counter(bytes),
+        Vec::new(),
+    );
+}
+
 pub fn set_ipc_inflight(value: usize) {
     emit("ipc_inflight", MetricValue::Gauge(value as u64), Vec::new());
 }
@@ -437,6 +463,8 @@ mod tests {
         wal_fsync_err(Duration::from_millis(7));
         apply_ok(Duration::from_millis(3));
         set_checkpoint_queue_depth(4);
+        repl_ingest_throttle(Duration::from_millis(5), 1024);
+        background_io_throttle(Duration::from_millis(7), 2048);
 
         let events = sink.events.lock().expect("metrics lock");
         assert!(events.iter().any(|e| e.name == "wal_append_ok"));
@@ -445,6 +473,18 @@ mod tests {
         assert!(events.iter().any(|e| e.name == "apply_ok"));
         assert!(events.iter().any(|e| e.name == "apply_duration"));
         assert!(events.iter().any(|e| e.name == "checkpoint_queue_depth"));
+        assert!(events.iter().any(|e| e.name == "repl_ingest_throttle_ms"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.name == "repl_ingest_throttle_bytes")
+        );
+        assert!(events.iter().any(|e| e.name == "background_io_throttle_ms"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.name == "background_io_throttle_bytes")
+        );
     }
 
     #[test]
