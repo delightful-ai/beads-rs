@@ -14,7 +14,8 @@ use time::{Date, OffsetDateTime, Time};
 
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{
-    ActorId, BeadId, BeadSlug, BeadType, ClientRequestId, DepKind, NamespaceId, Priority,
+    ActorId, Applied, BeadId, BeadSlug, BeadType, ClientRequestId, DepKind, NamespaceId, Priority,
+    Watermarks,
 };
 use crate::daemon::ipc::{
     MutationMeta, ReadConsistency, Request, Response, ResponsePayload, send_request,
@@ -68,6 +69,14 @@ pub struct Cli {
     /// Client request id (UUID) for idempotency on retries.
     #[arg(long, global = true, value_name = "UUID")]
     pub client_request_id: Option<String>,
+
+    /// Require applied watermarks before serving reads (JSON).
+    #[arg(long = "require-min-seen", global = true, value_name = "JSON")]
+    pub require_min_seen: Option<String>,
+
+    /// Optional wait timeout for require-min-seen (ms).
+    #[arg(long = "wait-timeout-ms", global = true, value_name = "MS")]
+    pub wait_timeout_ms: Option<u64>,
 
     /// Errors only.
     #[arg(
@@ -585,16 +594,8 @@ pub struct DeletedArgs {
     pub all: bool,
 }
 
-#[derive(Args, Debug)]
-pub struct SubscribeArgs {
-    /// Require applied watermarks before streaming (JSON).
-    #[arg(long = "require-min-seen", value_name = "JSON")]
-    pub require_min_seen: Option<String>,
-
-    /// Optional wait timeout for require-min-seen (ms).
-    #[arg(long = "wait-timeout-ms", value_name = "MS")]
-    pub wait_timeout_ms: Option<u64>,
-}
+#[derive(Args, Debug, Default)]
+pub struct SubscribeArgs {}
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -1063,6 +1064,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 client_request_id: normalize_optional_client_request_id(
                     cli.client_request_id.as_deref(),
                 )?,
+                require_min_seen: parse_require_min_seen(cli.require_min_seen.as_deref())?,
+                wait_timeout_ms: cli.wait_timeout_ms,
                 actor_id: actor_override.clone(),
             };
 
@@ -1116,6 +1119,8 @@ struct Ctx {
     namespace: Option<NamespaceId>,
     durability: Option<String>,
     client_request_id: Option<ClientRequestId>,
+    require_min_seen: Option<Watermarks<Applied>>,
+    wait_timeout_ms: Option<u64>,
     actor_id: Option<ActorId>,
 }
 
@@ -1135,8 +1140,8 @@ impl Ctx {
     fn read_consistency(&self) -> ReadConsistency {
         ReadConsistency {
             namespace: self.namespace.as_ref().map(|ns| ns.as_str().to_string()),
-            require_min_seen: None,
-            wait_timeout_ms: None,
+            require_min_seen: self.require_min_seen.clone(),
+            wait_timeout_ms: self.wait_timeout_ms,
         }
     }
 
@@ -1284,6 +1289,18 @@ fn normalize_optional_client_request_id(raw: Option<&str>) -> Result<Option<Clie
         Error::Op(crate::daemon::OpError::ValidationFailed {
             field: "client_request_id".into(),
             reason: e.to_string(),
+        })
+    })
+}
+
+fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied>>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    serde_json::from_str(raw).map(Some).map_err(|err| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "require_min_seen".into(),
+            reason: err.to_string(),
         })
     })
 }
@@ -1708,6 +1725,8 @@ mod tests {
             namespace: None,
             durability: None,
             client_request_id: None,
+            require_min_seen: None,
+            wait_timeout_ms: None,
             actor_id: Some(actor.clone()),
         };
         let meta = ctx.mutation_meta();

@@ -1,18 +1,10 @@
 use super::super::{Ctx, SubscribeArgs, print_ok};
-use crate::core::{Applied, ErrorPayload, Watermarks};
-use crate::daemon::OpError;
+use crate::core::ErrorPayload;
 use crate::daemon::ipc::{Request, Response, subscribe_stream};
-use crate::{Error, Result};
+use crate::Result;
 
-pub(crate) fn handle(ctx: &Ctx, args: SubscribeArgs) -> Result<()> {
-    let require_min_seen = match args.require_min_seen.as_deref() {
-        Some(raw) => Some(parse_require_min_seen(raw)?),
-        None => None,
-    };
-
-    let mut read = ctx.read_consistency();
-    read.require_min_seen = require_min_seen;
-    read.wait_timeout_ms = args.wait_timeout_ms;
+pub(crate) fn handle(ctx: &Ctx, _args: SubscribeArgs) -> Result<()> {
+    let read = ctx.read_consistency();
 
     let req = Request::Subscribe {
         repo: ctx.repo.clone(),
@@ -34,15 +26,6 @@ pub(crate) fn handle(ctx: &Ctx, args: SubscribeArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn parse_require_min_seen(raw: &str) -> Result<Watermarks<Applied>> {
-    serde_json::from_str(raw).map_err(|err| {
-        Error::Op(OpError::ValidationFailed {
-            field: "require_min_seen".into(),
-            reason: err.to_string(),
-        })
-    })
 }
 
 fn handle_response(response: Response, json: bool) -> Result<bool> {
