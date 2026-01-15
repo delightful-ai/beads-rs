@@ -1606,15 +1606,20 @@ mod tests {
             .entry(namespace.clone())
             .or_default()
             .insert(local, Seq0::new(2));
+        let mut durable_heads = WatermarkHeads::new();
+        durable_heads
+            .entry(namespace.clone())
+            .or_default()
+            .insert(local, crate::core::Sha256([2u8; 32]));
         peer_acks
             .lock()
             .unwrap()
-            .update_peer(peer_a, &durable, None, None, None, 10)
+            .update_peer(peer_a, &durable, Some(&durable_heads), None, None, 10)
             .unwrap();
         peer_acks
             .lock()
             .unwrap()
-            .update_peer(peer_b, &durable, None, None, None, 12)
+            .update_peer(peer_b, &durable, Some(&durable_heads), None, None, 12)
             .unwrap();
 
         let store = StoreIdentity::new(StoreId::new(Uuid::from_u128(10)), StoreEpoch::ZERO);
