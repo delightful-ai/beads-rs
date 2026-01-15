@@ -178,7 +178,7 @@ impl Daemon {
                 .state
                 .get(&namespace)
                 .unwrap_or(&empty_state);
-            attach_issue_if_created(state, outcome.response_mut());
+            attach_issue_if_created(&namespace, state, outcome.response_mut());
             return Ok(outcome);
         }
 
@@ -545,7 +545,7 @@ impl Daemon {
             .state
             .get(&namespace)
             .unwrap_or(&empty_state);
-        attach_issue_if_created(state, outcome.response_mut());
+        attach_issue_if_created(&namespace, state, outcome.response_mut());
         Ok(outcome)
     }
 
@@ -1069,7 +1069,11 @@ fn op_result_from_delta(
     }
 }
 
-fn attach_issue_if_created(state: &CanonicalState, response: &mut OpResponse) {
+fn attach_issue_if_created(
+    namespace: &NamespaceId,
+    state: &CanonicalState,
+    response: &mut OpResponse,
+) {
     if response.issue.is_some() {
         return;
     }
@@ -1077,7 +1081,7 @@ fn attach_issue_if_created(state: &CanonicalState, response: &mut OpResponse) {
         return;
     };
     if let Some(bead) = state.get(id) {
-        response.issue = Some(crate::api::Issue::from_bead(bead));
+        response.issue = Some(crate::api::Issue::from_bead(namespace, bead));
     }
 }
 
@@ -1248,7 +1252,7 @@ mod tests {
             },
             receipt,
         );
-        attach_issue_if_created(&state, &mut response);
+        attach_issue_if_created(&NamespaceId::core(), &state, &mut response);
         let issue = response.issue.expect("issue attached");
         assert_eq!(issue.id, "bd-123");
     }

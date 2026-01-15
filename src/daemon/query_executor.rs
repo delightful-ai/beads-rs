@@ -51,7 +51,7 @@ impl Daemon {
 
         match state.require_live(id).map_live_err(id) {
             Ok(bead) => {
-                let issue = Issue::from_bead(bead);
+                let issue = Issue::from_bead(read.namespace(), bead);
                 Response::ok(ResponsePayload::Query(QueryResult::Issue(issue)))
             }
             Err(e) => Response::err(e),
@@ -95,7 +95,7 @@ impl Daemon {
                 Err(_) => continue, // Skip invalid IDs silently
             };
             if let Ok(bead) = state.require_live(&id) {
-                summaries.push(IssueSummary::from_bead(bead));
+                summaries.push(IssueSummary::from_bead(read.namespace(), bead));
             }
         }
 
@@ -158,7 +158,7 @@ impl Daemon {
                 }
                 filters.matches(bead)
             })
-            .map(|(_, bead)| IssueSummary::from_bead(bead))
+            .map(|(_, bead)| IssueSummary::from_bead(read.namespace(), bead))
             .collect();
 
         // Sort
@@ -279,7 +279,7 @@ impl Daemon {
                 }
                 true
             })
-            .map(|(_, bead)| IssueSummary::from_bead(bead))
+            .map(|(_, bead)| IssueSummary::from_bead(read.namespace(), bead))
             .collect();
 
         // Sort by priority (low to high), then created_at (oldest first).
@@ -515,7 +515,7 @@ impl Daemon {
             }
         }
 
-        let epics_eligible_for_closure = compute_epic_statuses(state, true).len();
+        let epics_eligible_for_closure = compute_epic_statuses(read.namespace(), state, true).len();
 
         let summary = StatusSummary {
             total_issues: state.live_count(),
@@ -640,7 +640,7 @@ impl Daemon {
             blocked_by_ids.dedup();
 
             out.push(BlockedIssue {
-                issue: IssueSummary::from_bead(bead),
+                issue: IssueSummary::from_bead(read.namespace(), bead),
                 blocked_by_count: blocked_by_ids.len(),
                 blocked_by: blocked_by_ids,
             });
@@ -738,7 +738,7 @@ impl Daemon {
                 }
             }
 
-            out.push(IssueSummary::from_bead(bead));
+            out.push(IssueSummary::from_bead(read.namespace(), bead));
         }
 
         // Stalest first (oldest updated_at).
@@ -989,7 +989,7 @@ impl Daemon {
             .get(read.namespace())
             .unwrap_or(&empty_state);
 
-        let statuses = compute_epic_statuses(state, eligible_only);
+        let statuses = compute_epic_statuses(read.namespace(), state, eligible_only);
         Response::ok(ResponsePayload::Query(QueryResult::EpicStatus(statuses)))
     }
 
@@ -1149,7 +1149,11 @@ fn dep_cycles_from_state(state: &CanonicalState) -> DepCycles {
     DepCycles { cycles }
 }
 
-fn compute_epic_statuses(state: &CanonicalState, eligible_only: bool) -> Vec<EpicStatus> {
+fn compute_epic_statuses(
+    namespace: &crate::core::NamespaceId,
+    state: &CanonicalState,
+    eligible_only: bool,
+) -> Vec<EpicStatus> {
     // Build epic -> children mapping from parent edges.
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
@@ -1193,7 +1197,7 @@ fn compute_epic_statuses(state: &CanonicalState, eligible_only: bool) -> Vec<Epi
         }
 
         out.push(EpicStatus {
-            epic: IssueSummary::from_bead(bead),
+            epic: IssueSummary::from_bead(namespace, bead),
             total_children,
             closed_children,
             eligible_for_close,
@@ -1216,12 +1220,15 @@ fn sort_ready_issues(issues: &mut [IssueSummary]) {
 mod tests {
     use super::{dep_cycles_from_state, sort_ready_issues};
     use crate::api::IssueSummary;
-    use crate::core::{ActorId, CanonicalState, DepEdge, DepKey, DepKind, Stamp, WriteStamp};
+    use crate::core::{
+        ActorId, CanonicalState, DepEdge, DepKey, DepKind, NamespaceId, Stamp, WriteStamp,
+    };
 
     fn issue_summary(id: &str, priority: u8, created_at_ms: u64) -> IssueSummary {
         let stamp = WriteStamp::new(created_at_ms, 0);
         IssueSummary {
             id: id.to_string(),
+            namespace: NamespaceId::core(),
             title: format!("title-{id}"),
             description: "desc".to_string(),
             design: None,

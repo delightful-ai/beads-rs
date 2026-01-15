@@ -698,6 +698,7 @@ impl From<&CoreTombstone> for Tombstone {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
+    pub namespace: NamespaceId,
     pub title: String,
     pub description: String,
     pub design: Option<String>,
@@ -748,6 +749,7 @@ pub struct Issue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueSummary {
     pub id: String,
+    pub namespace: NamespaceId,
     pub title: String,
     pub description: String,
     pub design: Option<String>,
@@ -777,7 +779,7 @@ pub struct IssueSummary {
 }
 
 impl Issue {
-    pub fn from_bead(bead: &Bead) -> Self {
+    pub fn from_bead(namespace: &NamespaceId, bead: &Bead) -> Self {
         let updated = bead.updated_stamp();
 
         let (assignee, assignee_at, assignee_expires) = match &bead.fields.claim.value {
@@ -804,6 +806,7 @@ impl Issue {
 
         Self {
             id: bead.core.id.as_str().to_string(),
+            namespace: namespace.clone(),
             title: bead.fields.title.value.clone(),
             description: bead.fields.description.value.clone(),
             design: bead.fields.design.value.clone(),
@@ -842,10 +845,11 @@ impl Issue {
 }
 
 impl IssueSummary {
-    pub fn from_bead(bead: &Bead) -> Self {
+    pub fn from_bead(namespace: &NamespaceId, bead: &Bead) -> Self {
         let updated = bead.updated_stamp();
         Self {
             id: bead.core.id.as_str().to_string(),
+            namespace: namespace.clone(),
             title: bead.fields.title.value.clone(),
             description: bead.fields.description.value.clone(),
             design: bead.fields.design.value.clone(),
@@ -880,6 +884,7 @@ impl IssueSummary {
     pub fn from_issue(issue: &Issue) -> Self {
         Self {
             id: issue.id.clone(),
+            namespace: issue.namespace.clone(),
             title: issue.title.clone(),
             description: issue.description.clone(),
             design: issue.design.clone(),
