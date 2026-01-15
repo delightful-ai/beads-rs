@@ -75,14 +75,20 @@ pub struct CheckpointScheduler {
     groups: HashMap<CheckpointGroupKey, GroupState>,
     pending: HashMap<CheckpointGroupKey, Instant>,
     heap: BinaryHeap<Reverse<(Instant, CheckpointGroupKey)>>,
+    max_queue_per_store: usize,
 }
 
 impl CheckpointScheduler {
     pub fn new() -> Self {
+        Self::new_with_queue_limit(usize::MAX)
+    }
+
+    pub fn new_with_queue_limit(max_queue_per_store: usize) -> Self {
         Self {
             groups: HashMap::new(),
             pending: HashMap::new(),
             heap: BinaryHeap::new(),
+            max_queue_per_store,
         }
     }
 
@@ -209,6 +215,7 @@ impl CheckpointScheduler {
             state.complete_in_flight(wall_ms);
         }
         self.schedule_if_needed(key, now);
+        self.schedule_available_for_store(key.store_id, now);
     }
 
     pub fn complete_failure(&mut self, key: &CheckpointGroupKey, now: Instant) {
@@ -216,6 +223,7 @@ impl CheckpointScheduler {
             state.fail_in_flight(now);
         }
         self.schedule_if_needed(key, now);
+        self.schedule_available_for_store(key.store_id, now);
     }
 
     fn schedule_if_needed(&mut self, key: &CheckpointGroupKey, now: Instant) {
@@ -227,8 +235,50 @@ impl CheckpointScheduler {
             return;
         };
 
+        if !self.pending.contains_key(key) {
+            if self.max_queue_per_store == 0 {
+                return;
+            }
+            let depth = self.queue_depth_for_store(key.store_id);
+            if depth >= self.max_queue_per_store {
+                return;
+            }
+        }
         self.pending.insert(key.clone(), deadline);
         self.heap.push(Reverse((deadline, key.clone())));
+    }
+
+    fn queue_depth_for_store(&self, store_id: StoreId) -> usize {
+        let pending = self
+            .pending
+            .keys()
+            .filter(|key| key.store_id == store_id)
+            .count();
+        let in_flight = self
+            .groups
+            .iter()
+            .filter(|(key, state)| key.store_id == store_id && state.in_flight)
+            .count();
+        pending + in_flight
+    }
+
+    fn schedule_available_for_store(&mut self, store_id: StoreId, now: Instant) {
+        if self.max_queue_per_store == 0 {
+            return;
+        }
+        let mut keys: Vec<CheckpointGroupKey> = self
+            .groups
+            .keys()
+            .filter(|key| key.store_id == store_id)
+            .cloned()
+            .collect();
+        keys.sort();
+        for key in keys {
+            if self.queue_depth_for_store(store_id) >= self.max_queue_per_store {
+                break;
+            }
+            self.schedule_if_needed(&key, now);
+        }
     }
 
     fn pop_stale(&mut self) {
@@ -426,5 +476,38 @@ mod tests {
             scheduler.next_deadline(),
             Some(base + Duration::from_millis(22))
         );
+    }
+
+    #[test]
+    fn queue_limit_coalesces_by_group() {
+        let store_id = StoreId::new(Uuid::from_bytes([9u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let mut scheduler = CheckpointScheduler::new_with_queue_limit(1);
+        let ns_a = NamespaceId::parse("a").unwrap();
+        let ns_b = NamespaceId::parse("b").unwrap();
+
+        let mut config_a = config_with_limits(store_id, replica_id);
+        config_a.group = "a".to_string();
+        config_a.namespaces = vec![ns_a.clone()];
+        config_a.git_ref = format!("refs/beads/{store_id}/a");
+        let key_a = scheduler.register_group(config_a);
+
+        let mut config_b = config_with_limits(store_id, replica_id);
+        config_b.group = "b".to_string();
+        config_b.namespaces = vec![ns_b.clone()];
+        config_b.git_ref = format!("refs/beads/{store_id}/b");
+        let key_b = scheduler.register_group(config_b);
+
+        let base = Instant::now();
+        scheduler.mark_dirty_for_namespace_at(store_id, &ns_a, 3, base);
+        scheduler.mark_dirty_for_namespace_at(store_id, &ns_b, 3, base);
+
+        assert_eq!(scheduler.queue_depth(), 1);
+        assert_eq!(scheduler.drain_due(base), vec![key_a.clone()]);
+
+        scheduler.start_in_flight(&key_a, base);
+        scheduler.complete_success(&key_a, base, 1_700_000_000_000);
+
+        assert_eq!(scheduler.drain_due(base), vec![key_b]);
     }
 }
