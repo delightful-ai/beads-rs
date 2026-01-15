@@ -22,6 +22,7 @@ use crate::daemon::broadcast::{
 };
 use crate::daemon::metrics;
 use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap};
+use crate::daemon::repl::pending::PendingEvents;
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, Session, SessionAction,
     SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore, WalRangeReader,
@@ -332,7 +333,8 @@ where
     let mut accepted_set = BTreeSet::new();
     let mut streaming = false;
     let mut sent_hot_cache = false;
-    let mut pending_events: Vec<BroadcastEvent> = Vec::new();
+    let mut pending_events =
+        PendingEvents::new(limits.max_event_batch_events, limits.max_event_batch_bytes);
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -391,7 +393,25 @@ where
                 };
 
                 if !streaming {
-                    pending_events.push(event);
+                    let drop = pending_events.push(event);
+                    if drop.dropped_any() {
+                        let dropped_events = drop.total_events();
+                        let dropped_bytes = drop.total_bytes();
+                        metrics::repl_pending_dropped_events("outbound", dropped_events);
+                        metrics::repl_pending_dropped_bytes("outbound", dropped_bytes);
+                        tracing::warn!(
+                            target: "repl",
+                            direction = "outbound",
+                            dropped_events,
+                            dropped_bytes,
+                            dropped_new_event = drop.dropped_new_event(),
+                            pending_events = pending_events.len(),
+                            pending_bytes = pending_events.bytes(),
+                            max_events = pending_events.max_events(),
+                            max_bytes = pending_events.max_bytes(),
+                            "replication pending queue overflow; dropping events"
+                        );
+                    }
                     continue;
                 }
                 if !accepted_set.contains(&event.namespace) {
@@ -423,7 +443,7 @@ where
         }
         if streaming && !pending_events.is_empty() {
             let frames = pending_events
-                .drain(..)
+                .drain()
                 .filter(|event| accepted_set.contains(&event.namespace))
                 .map(broadcast_to_frame)
                 .collect::<Vec<_>>();
