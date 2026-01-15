@@ -11,7 +11,7 @@ use crate::api::{
     BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
     Note, StatusOutput, SyncWarning, Tombstone,
 };
-use crate::core::ReplicaRole;
+use crate::core::{HeadStatus, ReplicaRole, Watermarks};
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
 use crate::daemon::query::QueryResult;
@@ -547,6 +547,8 @@ fn render_admin_status(status: &AdminStatusOutput) -> String {
             .join(", ");
         out.push_str(&format!("Namespaces: {}\n", ns));
     }
+    render_watermarks_section("applied", &status.watermarks_applied, &mut out);
+    render_watermarks_section("durable", &status.watermarks_durable, &mut out);
     if let Some(anomaly) = &status.last_clock_anomaly {
         out.push_str(&format!(
             "Clock anomaly: {} delta={}ms at {}\n",
@@ -630,6 +632,32 @@ fn render_admin_status(status: &AdminStatusOutput) -> String {
     }
 
     out.trim_end().into()
+}
+
+fn render_watermarks_section<K>(label: &str, watermarks: &Watermarks<K>, out: &mut String) {
+    if watermarks.namespaces().next().is_none() {
+        return;
+    }
+    out.push_str(&format!("\nWatermarks ({label}):\n"));
+    for namespace in watermarks.namespaces() {
+        out.push_str(&format!("  {}:\n", namespace.as_str()));
+        for (origin, watermark) in watermarks.origins(namespace) {
+            out.push_str(&format!(
+                "    {}: seq={} head={}\n",
+                origin,
+                watermark.seq().get(),
+                head_status_str(watermark.head())
+            ));
+        }
+    }
+}
+
+fn head_status_str(head: HeadStatus) -> &'static str {
+    match head {
+        HeadStatus::Genesis => "genesis",
+        HeadStatus::Known(_) => "known",
+        HeadStatus::Unknown => "unknown",
+    }
 }
 
 fn render_admin_metrics(metrics: &AdminMetricsOutput) -> String {
