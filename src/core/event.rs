@@ -444,7 +444,7 @@ fn decode_event_body_map(
                 envelope_v = Some(decode_u32(dec, "envelope_v")?);
             }
             "event_time_ms" => {
-                event_time_ms = Some(dec.u64()?);
+                event_time_ms = Some(decode_u64(dec, "event_time_ms")?);
             }
             "hlc_max" => {
                 hlc_max = Some(decode_hlc_max(dec, limits, depth + 1)?);
@@ -465,7 +465,7 @@ fn decode_event_body_map(
                 origin_replica_id = Some(parse_uuid_field("origin_replica_id", raw)?);
             }
             "origin_seq" => {
-                let value = dec.u64()?;
+                let value = decode_u64(dec, "origin_seq")?;
                 origin_seq =
                     Some(
                         Seq1::from_u64(value).ok_or_else(|| DecodeError::InvalidField {
@@ -475,7 +475,7 @@ fn decode_event_body_map(
                     );
             }
             "store_epoch" => {
-                store_epoch = Some(dec.u64()?);
+                store_epoch = Some(decode_u64(dec, "store_epoch")?);
             }
             "store_id" => {
                 let raw = decode_text(dec, limits)?;
@@ -1446,7 +1446,7 @@ fn decode_wire_stamp(
             reason: "expected array length 2".into(),
         });
     }
-    let wall_ms = dec.u64()?;
+    let wall_ms = decode_u64(dec, "stamp.wall_ms")?;
     let counter = decode_u32(dec, "stamp.counter")?;
     Ok(WireStamp(wall_ms, counter))
 }
@@ -1559,7 +1559,10 @@ fn decode_wire_patch_wallclock(
             dec.null()?;
             Ok(WirePatch::Clear)
         }
-        _ => Ok(WirePatch::Set(super::time::WallClock(dec.u64()?))),
+        _ => Ok(WirePatch::Set(super::time::WallClock(decode_u64(
+            dec,
+            "patch.wallclock",
+        )?))),
     }
 }
 
@@ -1612,7 +1615,7 @@ fn decode_hlc_max(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<Hl
                 logical = Some(decode_u32(dec, "logical")?);
             }
             "physical_ms" => {
-                physical_ms = Some(dec.u64()?);
+                physical_ms = Some(decode_u64(dec, "hlc_max.physical_ms")?);
             }
             _ => {
                 skip_value(dec, limits, depth + 1)?;
@@ -1629,10 +1632,14 @@ fn decode_hlc_max(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<Hl
 
 fn decode_map_len(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<usize, DecodeError> {
     ensure_depth(depth, limits)?;
+    let first = current_byte(dec)?;
     let len = dec.map()?;
     let Some(len) = len else {
         return Err(DecodeError::IndefiniteLength);
     };
+    if !canonical_len(first, len, 0xa0) {
+        return Err(non_canonical_integer("map_len"));
+    }
     if len > limits.max_cbor_map_entries as u64 {
         return Err(DecodeError::DecodeLimit("max_cbor_map_entries"));
     }
@@ -1645,10 +1652,14 @@ fn decode_array_len(
     depth: usize,
 ) -> Result<usize, DecodeError> {
     ensure_depth(depth, limits)?;
+    let first = current_byte(dec)?;
     let len = dec.array()?;
     let Some(len) = len else {
         return Err(DecodeError::IndefiniteLength);
     };
+    if !canonical_len(first, len, 0x80) {
+        return Err(non_canonical_integer("array_len"));
+    }
     if len > limits.max_cbor_array_entries as u64 {
         return Err(DecodeError::DecodeLimit("max_cbor_array_entries"));
     }
@@ -1676,7 +1687,7 @@ fn skip_value(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<(), De
         | Type::I32
         | Type::I64
         | Type::Int => {
-            let _ = dec.int()?;
+            decode_canonical_int(dec, "cbor")?;
         }
         Type::F16 | Type::F32 | Type::F64 => {
             let _ = dec.f64()?;
@@ -1707,8 +1718,10 @@ fn skip_value(dec: &mut Decoder, limits: &Limits, depth: usize) -> Result<(), De
             }
         }
         Type::Tag => {
-            let _ = dec.tag()?;
-            skip_value(dec, limits, depth)?;
+            return Err(DecodeError::InvalidField {
+                field: "cbor",
+                reason: "tags not allowed".into(),
+            });
         }
         Type::Unknown(_) => {
             return Err(minicbor::decode::Error::message(format!(
@@ -1744,12 +1757,115 @@ fn decode_bytes<'a>(dec: &mut Decoder<'a>, limits: &Limits) -> Result<&'a [u8], 
     Ok(bytes)
 }
 
+fn current_byte(dec: &Decoder) -> Result<u8, DecodeError> {
+    dec.input()
+        .get(dec.position())
+        .copied()
+        .ok_or_else(|| minicbor::decode::Error::end_of_input().into())
+}
+
+fn canonical_unsigned(first: u8, value: u64) -> bool {
+    match value {
+        0..=23 => first == value as u8,
+        24..=0xff => first == 0x18,
+        0x100..=0xffff => first == 0x19,
+        0x1_0000..=0xffff_ffff => first == 0x1a,
+        _ => first == 0x1b,
+    }
+}
+
+fn canonical_negative(first: u8, n: u64) -> bool {
+    match n {
+        0..=23 => first == 0x20 + n as u8,
+        24..=0xff => first == 0x38,
+        0x100..=0xffff => first == 0x39,
+        0x1_0000..=0xffff_ffff => first == 0x3a,
+        _ => first == 0x3b,
+    }
+}
+
+fn canonical_len(first: u8, len: u64, base: u8) -> bool {
+    match len {
+        0..=23 => first == base + len as u8,
+        24..=0xff => first == base + 24,
+        0x100..=0xffff => first == base + 25,
+        0x1_0000..=0xffff_ffff => first == base + 26,
+        _ => first == base + 27,
+    }
+}
+
+fn non_canonical_integer(field: &'static str) -> DecodeError {
+    DecodeError::InvalidField {
+        field,
+        reason: "non-canonical integer encoding".into(),
+    }
+}
+
+fn decode_u64(dec: &mut Decoder, field: &'static str) -> Result<u64, DecodeError> {
+    let first = current_byte(dec)?;
+    match dec.datatype()? {
+        Type::U8 | Type::U16 | Type::U32 | Type::U64 => {
+            let value = dec.u64()?;
+            if !canonical_unsigned(first, value) {
+                return Err(non_canonical_integer(field));
+            }
+            Ok(value)
+        }
+        Type::Tag => Err(DecodeError::InvalidField {
+            field,
+            reason: "tagged integer not allowed".into(),
+        }),
+        other => Err(DecodeError::InvalidField {
+            field,
+            reason: format!("expected unsigned integer, got {other:?}"),
+        }),
+    }
+}
+
 fn decode_u32(dec: &mut Decoder, field: &'static str) -> Result<u32, DecodeError> {
-    let value = dec.u64()?;
+    let value = decode_u64(dec, field)?;
     u32::try_from(value).map_err(|_| DecodeError::InvalidField {
         field,
         reason: format!("value {value} out of range for u32"),
     })
+}
+
+fn decode_canonical_int(dec: &mut Decoder, field: &'static str) -> Result<(), DecodeError> {
+    let first = current_byte(dec)?;
+    match dec.datatype()? {
+        Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64
+        | Type::I8
+        | Type::I16
+        | Type::I32
+        | Type::I64
+        | Type::Int => {
+            let value = dec.int()?;
+            let value = i128::from(value);
+            if value >= 0 {
+                let value = u64::try_from(value).expect("positive int fits in u64");
+                if !canonical_unsigned(first, value) {
+                    return Err(non_canonical_integer(field));
+                }
+            } else {
+                let n = (-1i128 - value) as u64;
+                if !canonical_negative(first, n) {
+                    return Err(non_canonical_integer(field));
+                }
+            }
+            Ok(())
+        }
+        Type::Tag => Err(DecodeError::InvalidField {
+            field,
+            reason: "tagged integer not allowed".into(),
+        }),
+        other => Err(DecodeError::InvalidField {
+            field,
+            reason: format!("expected integer, got {other:?}"),
+        }),
+    }
 }
 
 fn ensure_depth(depth: usize, limits: &Limits) -> Result<(), DecodeError> {
