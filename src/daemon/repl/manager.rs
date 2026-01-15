@@ -19,6 +19,7 @@ use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
     BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
 };
+use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
@@ -510,6 +511,7 @@ fn run_reader_loop(
     shutdown: Arc<AtomicBool>,
     limits: crate::core::Limits,
 ) {
+    let mut ingest_budget = TokenBucket::new(limits.max_repl_ingest_bytes_per_sec as u64);
     loop {
         if shutdown.load(Ordering::Relaxed) {
             let _ = inbound_tx.send(InboundMessage::Terminated { payload: None });
@@ -519,6 +521,19 @@ fn run_reader_loop(
         match reader.read_next() {
             Ok(Some(bytes)) => match decode_envelope(&bytes, &limits) {
                 Ok(envelope) => {
+                    if let ReplMessage::Events(events) = &envelope.message {
+                        let total_bytes = events
+                            .events
+                            .iter()
+                            .map(|frame| frame.bytes.len() as u64)
+                            .sum();
+                        if total_bytes > 0 {
+                            let wait = ingest_budget.throttle(total_bytes);
+                            if !wait.is_zero() {
+                                metrics::repl_ingest_throttle(wait, total_bytes);
+                            }
+                        }
+                    }
                     let _ = inbound_tx.send(InboundMessage::Message(envelope.message));
                 }
                 Err(err) => {
