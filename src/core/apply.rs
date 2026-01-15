@@ -55,9 +55,7 @@ pub fn apply_event(
     state: &mut CanonicalState,
     body: &EventBody,
 ) -> Result<ApplyOutcome, ApplyError> {
-    let txn = match &body.kind {
-        EventKindV1::TxnV1(txn) => txn,
-    };
+    let EventKindV1::TxnV1(txn) = &body.kind;
 
     let stamp = event_stamp(body, txn);
     let mut outcome = ApplyOutcome::default();
