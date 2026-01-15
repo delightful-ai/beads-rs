@@ -36,6 +36,8 @@ pub enum EventWalError {
         #[source]
         source: std::io::Error,
     },
+    #[error("path is a symlink: {path:?}")]
+    Symlink { path: PathBuf },
     #[error("record exceeds max bytes {max_bytes} (got {got_bytes})")]
     RecordTooLarge { max_bytes: usize, got_bytes: usize },
     #[error("frame magic mismatch: got {got:#x}")]

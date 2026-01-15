@@ -248,11 +248,21 @@ impl SegmentWriter {
         now_ms: u64,
         config: SegmentConfig,
     ) -> EventWalResult<Self> {
-        let dir = store_dir.join("wal").join(namespace.as_str());
+        let wal_dir = store_dir.join("wal");
+        reject_symlink(&wal_dir)?;
+        fs::create_dir_all(&wal_dir).map_err(|source| EventWalError::Io {
+            path: Some(wal_dir.clone()),
+            source,
+        })?;
+        reject_symlink(&wal_dir)?;
+
+        let dir = wal_dir.join(namespace.as_str());
+        reject_symlink(&dir)?;
         fs::create_dir_all(&dir).map_err(|source| EventWalError::Io {
             path: Some(dir.clone()),
             source,
         })?;
+        reject_symlink(&dir)?;
 
         let header = SegmentHeader::new(meta, namespace.clone(), now_ms, new_segment_id());
         let (file, path, header_len) = create_segment(&dir, &header)?;
@@ -357,6 +367,7 @@ impl SegmentWriter {
 }
 
 fn create_segment(dir: &Path, header: &SegmentHeader) -> EventWalResult<(File, PathBuf, u64)> {
+    reject_symlink(dir)?;
     let file_name = segment_file_name(header.created_at_ms, header.segment_id);
     let tmp_name = format!("{file_name}.tmp");
     let tmp_path = dir.join(&tmp_name);
@@ -409,6 +420,20 @@ fn fsync_dir(dir: &Path) -> EventWalResult<()> {
         source,
     })?;
     Ok(())
+}
+
+fn reject_symlink(path: &Path) -> EventWalResult<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(EventWalError::Symlink {
+            path: path.to_path_buf(),
+        }),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(EventWalError::Io {
+            path: Some(path.to_path_buf()),
+            source: err,
+        }),
+    }
 }
 
 fn segment_file_name(created_at_ms: u64, segment_id: SegmentId) -> String {
