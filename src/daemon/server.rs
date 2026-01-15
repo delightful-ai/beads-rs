@@ -1127,9 +1127,9 @@ mod tests {
 
     use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
-        ActorId, Applied, BeadId, Canonical, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
-        EventBytes, EventFrameV1, EventId, HeadStatus, NamespacePolicy, Opaque, ReplicaRole,
-        ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermarks,
+        ActorId, Applied, BeadId, DurabilityClass, DurabilityOutcome, DurabilityReceipt, EventBytes,
+        EventFrameV1, EventId, HeadStatus, NamespacePolicy, Opaque, ReplicaRole, ReplicaRoster,
+        Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermarks,
     };
     use crate::daemon::core::insert_store_for_tests;
     use crate::daemon::ipc::OpResponse;
@@ -1373,7 +1373,7 @@ mod tests {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
         let event_id = EventId::new(origin, namespace, Seq1::from_u64(1).unwrap());
-        let bytes = EventBytes::<Canonical>::new(Bytes::from(vec![0x01]));
+        let bytes = EventBytes::<Opaque>::new(Bytes::from(vec![0x01]));
         let event = BroadcastEvent::new(event_id, Sha256([0u8; 32]), None, bytes);
 
         let response = stream_event_response(event, &Limits::default());

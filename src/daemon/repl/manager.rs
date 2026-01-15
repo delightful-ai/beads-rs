@@ -858,9 +858,9 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Canonical, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId,
-        HeadStatus, NamespaceId, NamespacePolicy, Opaque, ReplicaId, Seq0, Seq1, Sha256,
-        StoreEpoch, StoreId, StoreIdentity, Watermark,
+        Applied, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, HeadStatus,
+        NamespaceId, NamespacePolicy, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
+        StoreIdentity, Watermark,
     };
     use crate::daemon::repl::IngestOutcome;
     use crate::daemon::repl::WatermarkSnapshot;
@@ -1120,13 +1120,13 @@ mod tests {
             ),
             Sha256([1u8; 32]),
             None,
-            EventBytes::<Canonical>::new(Bytes::from_static(b"core")),
+            EventBytes::<Opaque>::new(Bytes::from_static(b"core")),
         );
         let tmp_event = BroadcastEvent::new(
             EventId::new(local_replica, tmp.clone(), Seq1::from_u64(2).unwrap()),
             Sha256([2u8; 32]),
             None,
-            EventBytes::<Canonical>::new(Bytes::from_static(b"tmp")),
+            EventBytes::<Opaque>::new(Bytes::from_static(b"tmp")),
         );
 
         broadcaster.publish(core_event).unwrap();
@@ -1314,13 +1314,13 @@ mod tests {
             ),
             Sha256([10u8; 32]),
             None,
-            EventBytes::<Canonical>::new(Bytes::from_static(b"core")),
+            EventBytes::<Opaque>::new(Bytes::from_static(b"core")),
         );
         let tmp_event = BroadcastEvent::new(
             EventId::new(local_replica, tmp.clone(), Seq1::from_u64(2).unwrap()),
             Sha256([20u8; 32]),
             None,
-            EventBytes::<Canonical>::new(Bytes::from_static(b"tmp")),
+            EventBytes::<Opaque>::new(Bytes::from_static(b"tmp")),
         );
 
         broadcaster.publish(core_event).unwrap();

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::core::{EventBytes, EventFrameV1, Limits, NamespaceId, Opaque, ReplicaId};
+use crate::core::{EventFrameV1, Limits, NamespaceId, ReplicaId};
 use crate::daemon::broadcast::BroadcastEvent;
 use crate::daemon::repl::proto::Want;
 use crate::daemon::repl::runtime::{WalRangeError, WalRangeReader};
@@ -35,7 +35,7 @@ pub(crate) fn broadcast_to_frame(event: BroadcastEvent) -> EventFrameV1 {
         eid: event.event_id,
         sha256: event.sha256,
         prev_sha256: event.prev_sha256,
-        bytes: EventBytes::<Opaque>::from(event.bytes),
+        bytes: event.bytes,
     }
 }
 
@@ -142,7 +142,7 @@ mod tests {
     use bytes::Bytes;
     use uuid::Uuid;
 
-    use crate::core::{Canonical, EventBytes, EventId, Seq1, Sha256};
+    use crate::core::{EventBytes, EventId, Opaque, Seq1, Sha256};
     use crate::daemon::repl::proto::WatermarkMap;
 
     fn make_event(namespace: NamespaceId, origin: ReplicaId, seq: u64) -> BroadcastEvent {
@@ -153,7 +153,7 @@ mod tests {
             event_id,
             sha,
             None,
-            EventBytes::<Canonical>::new(Bytes::from_static(b"x")),
+            EventBytes::<Opaque>::new(Bytes::from_static(b"x")),
         )
     }
 

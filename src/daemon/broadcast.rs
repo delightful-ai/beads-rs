@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam::channel::{Receiver, Sender, TryRecvError, TrySendError};
 use thiserror::Error;
 
-use crate::core::{Canonical, EventBytes, EventId, Limits, NamespaceId, Sha256};
+use crate::core::{EventBytes, EventId, Limits, NamespaceId, Opaque, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BroadcastEvent {
@@ -15,7 +15,7 @@ pub struct BroadcastEvent {
     pub namespace: NamespaceId,
     pub sha256: Sha256,
     pub prev_sha256: Option<Sha256>,
-    pub bytes: EventBytes<Canonical>,
+    pub bytes: EventBytes<Opaque>,
 }
 
 impl BroadcastEvent {
@@ -23,7 +23,7 @@ impl BroadcastEvent {
         event_id: EventId,
         sha256: Sha256,
         prev_sha256: Option<Sha256>,
-        bytes: EventBytes<Canonical>,
+        bytes: EventBytes<Opaque>,
     ) -> Self {
         let namespace = event_id.namespace.clone();
         Self {
@@ -277,14 +277,14 @@ mod tests {
     use bytes::Bytes;
     use uuid::Uuid;
 
-    use crate::core::{NamespaceId, ReplicaId, Seq1};
+    use crate::core::{NamespaceId, Opaque, ReplicaId, Seq1};
 
     fn event(seq: u64, bytes: usize) -> BroadcastEvent {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
         let event_id = EventId::new(origin, namespace, Seq1::from_u64(seq).unwrap());
         let payload = vec![42u8; bytes.max(1)];
-        let bytes = EventBytes::<Canonical>::new(Bytes::from(payload));
+        let bytes = EventBytes::<Opaque>::new(Bytes::from(payload));
         let sha256 = Sha256([seq as u8; 32]);
         BroadcastEvent::new(event_id, sha256, None, bytes)
     }

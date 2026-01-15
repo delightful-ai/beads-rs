@@ -157,8 +157,8 @@ struct StorePathMap {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, Applied, ApplyError, BeadId, Canonical, CanonicalState, ClientRequestId, CoreError,
-    DurabilityClass, ErrorCode, EventBody, EventBytes, EventId, HeadStatus, Limits, NamespaceId,
+    ActorId, Applied, ApplyError, BeadId, CanonicalState, ClientRequestId, CoreError,
+    DurabilityClass, ErrorCode, EventBody, EventId, HeadStatus, Limits, NamespaceId,
     NamespacePolicy, PrevVerified, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1,
     Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock,
     Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
@@ -1524,7 +1524,7 @@ impl Daemon {
                     event_id,
                     event.sha256,
                     prev_sha,
-                    EventBytes::<Canonical>::new(Bytes::copy_from_slice(event.bytes.as_ref())),
+                    event.bytes.clone(),
                 );
                 if let Err(err) = store.broadcaster.publish(broadcast) {
                     tracing::warn!("event broadcast failed: {err}");

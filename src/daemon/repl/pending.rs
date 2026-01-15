@@ -126,7 +126,7 @@ mod tests {
     use bytes::Bytes;
     use uuid::Uuid;
 
-    use crate::core::{Canonical, EventBytes, EventId, NamespaceId, ReplicaId, Seq1, Sha256};
+    use crate::core::{EventBytes, EventId, NamespaceId, Opaque, ReplicaId, Seq1, Sha256};
 
     fn event(seq: u64, bytes: usize) -> BroadcastEvent {
         let replica = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
@@ -134,7 +134,7 @@ mod tests {
             EventId::new(replica, NamespaceId::core(), Seq1::from_u64(seq).unwrap()),
             Sha256([seq as u8; 32]),
             None,
-            EventBytes::<Canonical>::new(Bytes::from(vec![0u8; bytes])),
+            EventBytes::<Opaque>::new(Bytes::from(vec![0u8; bytes])),
         )
     }
 

@@ -33,9 +33,10 @@ use super::wal::{
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     Applied, BeadId, BeadType, CanonicalState, DepKind, DurabilityClass, DurabilityReceipt,
-    Durable, EventBody, EventId, HeadStatus, Limits, NamespaceId, NoteId, Priority, ReplicaId,
-    Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark, WatermarkError,
-    Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body, hash_event_body,
+    Durable, EventBody, EventBytes, EventId, HeadStatus, Limits, NamespaceId, NoteId, Priority,
+    ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark,
+    WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
+    hash_event_body,
 };
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
@@ -323,7 +324,7 @@ impl Daemon {
             event_id.clone(),
             sha,
             broadcast_prev,
-            draft.event_bytes.clone(),
+            EventBytes::from(draft.event_bytes.clone()),
         );
         let event_ids = vec![event_id];
         txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
