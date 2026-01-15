@@ -120,9 +120,18 @@ global flags:
 --json             Machine-readable output
 --repo <path>      Repository path (default: current dir)
 --actor <string>   Actor identity (default: $BD_ACTOR or user@hostname)
+--namespace <ns>   Namespace for mutation/query requests (default: core)
+--durability <d>   Durability class (default: local_fsync)
+--client-request-id <uuid>  Client request id for idempotent retries
+--require-min-seen <json>   Read gating: applied watermarks to satisfy before reads
+--wait-timeout-ms <ms>      Optional wait for require-min-seen (0/omit = no wait)
 -q, --quiet        Errors only
 -v, --verbose      Debug output
 --version
+
+require-min-seen JSON example (copy from admin status for accuracy):
+
+`{"core":{"00000000-0000-0000-0000-000000000000":{"seq":42,"head":"Unknown"}}}`
 
 
 additional commands:
