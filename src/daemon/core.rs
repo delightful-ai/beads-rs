@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom};
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
