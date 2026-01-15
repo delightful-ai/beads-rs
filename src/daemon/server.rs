@@ -1160,7 +1160,6 @@ mod tests {
         repo_path: PathBuf,
         git_tx: Sender<GitOp>,
         daemon: Daemon,
-        store_id: StoreId,
     }
 
     impl TestEnv {
@@ -1184,7 +1183,6 @@ mod tests {
                 repo_path,
                 git_tx,
                 daemon,
-                store_id,
             }
         }
     }
