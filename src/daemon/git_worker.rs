@@ -15,9 +15,9 @@ use crate::core::{ActorId, CanonicalState, Stamp, StoreId, WriteStamp};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::git::checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, CheckpointCache, CheckpointExportInput, CheckpointPublishError,
-    CheckpointPublishOutcome, CheckpointSnapshot, CheckpointStoreMeta, export_checkpoint,
-    publish_checkpoint as publish_checkpoint_git,
+    CHECKPOINT_FORMAT_VERSION, CheckpointCache, CheckpointExport, CheckpointExportError,
+    CheckpointExportInput, CheckpointPublishError, CheckpointPublishOutcome, CheckpointSnapshot,
+    CheckpointStoreMeta, export_checkpoint, publish_checkpoint as publish_checkpoint_git,
 };
 use crate::git::error::SyncError;
 use crate::git::sync::{DivergenceInfo, SyncOutcome, SyncProcess, init_beads_ref, sync_with_retry};
@@ -110,6 +110,7 @@ pub struct GitWorker {
 
     limits: crate::core::Limits,
     background_io: HashMap<StoreId, TokenBucket>,
+    checkpoint_exports: HashMap<(StoreId, String), CheckpointExport>,
 }
 
 impl GitWorker {
@@ -120,6 +121,7 @@ impl GitWorker {
             result_tx,
             limits,
             background_io: HashMap::new(),
+            checkpoint_exports: HashMap::new(),
         }
     }
 
@@ -265,10 +267,60 @@ impl GitWorker {
         git_ref: &str,
         checkpoint_groups: BTreeMap<String, String>,
     ) -> CheckpointResult {
-        let export = export_checkpoint(CheckpointExportInput {
-            snapshot,
-            previous: None,
-        })?;
+        let key = (snapshot.store_id, snapshot.checkpoint_group.clone());
+        let mut drop_in_memory_previous = false;
+        let export = {
+            let previous_from_map = self.checkpoint_exports.get(&key);
+            let mut cache_previous = None;
+            let previous = match previous_from_map {
+                Some(previous) => Some(previous),
+                None => {
+                    let cache =
+                        CheckpointCache::new(snapshot.store_id, snapshot.checkpoint_group.clone());
+                    match cache.load_current_export() {
+                        Ok(Some(export)) => {
+                            cache_previous = Some(export);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!(error = ?err, "checkpoint cache load failed");
+                        }
+                    }
+                    cache_previous.as_ref()
+                }
+            };
+
+            match previous {
+                Some(previous) => match export_checkpoint(CheckpointExportInput {
+                    snapshot,
+                    previous: Some(previous),
+                }) {
+                    Ok(export) => export,
+                    Err(err) if is_previous_mismatch(&err) => {
+                        if previous_from_map.is_some() {
+                            drop_in_memory_previous = true;
+                        }
+                        export_checkpoint(CheckpointExportInput {
+                            snapshot,
+                            previous: None,
+                        })?
+                    }
+                    Err(err) => return Err(err.into()),
+                },
+                None => export_checkpoint(CheckpointExportInput {
+                    snapshot,
+                    previous: None,
+                })?,
+            }
+        };
+        if drop_in_memory_previous {
+            self.checkpoint_exports.remove(&key);
+        }
+        self.checkpoint_exports.insert(key.clone(), export);
+        let export = self
+            .checkpoint_exports
+            .get(&key)
+            .expect("checkpoint export missing after insert");
 
         let cache = CheckpointCache::new(snapshot.store_id, snapshot.checkpoint_group.clone());
         {
@@ -292,7 +344,7 @@ impl GitWorker {
             checkpoint_groups,
         );
 
-        publish_checkpoint_git(repo, &export, git_ref, &store_meta)
+        publish_checkpoint_git(repo, export, git_ref, &store_meta)
     }
 
     /// Initialize beads ref.
@@ -386,6 +438,16 @@ impl GitWorker {
         }
         true // Continue processing
     }
+}
+
+fn is_previous_mismatch(err: &CheckpointExportError) -> bool {
+    matches!(
+        err,
+        CheckpointExportError::PreviousStoreId { .. }
+            | CheckpointExportError::PreviousStoreEpoch { .. }
+            | CheckpointExportError::PreviousGroup { .. }
+            | CheckpointExportError::PreviousNamespaces { .. }
+    )
 }
 
 struct LoadResultInputs {
