@@ -82,7 +82,9 @@ mod tests {
                 let key_string = (*key).to_string();
                 let prior = std::env::var(key).ok();
                 prev.push((key_string.clone(), prior));
-                std::env::set_var(key, value);
+                unsafe {
+                    std::env::set_var(key, value);
+                }
             }
             Self { _lock: lock, prev }
         }
@@ -92,8 +94,12 @@ mod tests {
         fn drop(&mut self) {
             for (key, value) in self.prev.drain(..) {
                 match value {
-                    Some(val) => std::env::set_var(&key, val),
-                    None => std::env::remove_var(&key),
+                    Some(val) => unsafe {
+                        std::env::set_var(&key, val);
+                    },
+                    None => unsafe {
+                        std::env::remove_var(&key);
+                    },
                 }
             }
         }
