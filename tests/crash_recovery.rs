@@ -6,7 +6,6 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,44 +14,6 @@ use beads_rs::core::{BeadType, NamespaceId, Priority, StoreId, StoreMeta};
 use beads_rs::daemon::ipc::{IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload};
 use beads_rs::daemon::query::QueryResult;
 use fixtures::realtime::RealtimeFixture;
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned")
-}
-
-fn set_hang_env(stage: &str, dir: &Path) -> (Option<String>, Option<String>, Option<String>) {
-    let prev_stage = std::env::var("BD_TEST_WAL_HANG_STAGE").ok();
-    let prev_dir = std::env::var("BD_TEST_WAL_HANG_DIR").ok();
-    let prev_timeout = std::env::var("BD_TEST_WAL_HANG_TIMEOUT_MS").ok();
-
-    std::env::set_var("BD_TEST_WAL_HANG_STAGE", stage);
-    std::env::set_var("BD_TEST_WAL_HANG_DIR", dir);
-    std::env::set_var("BD_TEST_WAL_HANG_TIMEOUT_MS", "30000");
-
-    (prev_stage, prev_dir, prev_timeout)
-}
-
-fn restore_hang_env(prev: (Option<String>, Option<String>, Option<String>)) {
-    let (prev_stage, prev_dir, prev_timeout) = prev;
-    if let Some(value) = prev_stage {
-        std::env::set_var("BD_TEST_WAL_HANG_STAGE", value);
-    } else {
-        std::env::remove_var("BD_TEST_WAL_HANG_STAGE");
-    }
-    if let Some(value) = prev_dir {
-        std::env::set_var("BD_TEST_WAL_HANG_DIR", value);
-    } else {
-        std::env::remove_var("BD_TEST_WAL_HANG_DIR");
-    }
-    if let Some(value) = prev_timeout {
-        std::env::set_var("BD_TEST_WAL_HANG_TIMEOUT_MS", value);
-    } else {
-        std::env::remove_var("BD_TEST_WAL_HANG_TIMEOUT_MS");
-    }
-}
 
 fn marker_path(dir: &Path, stage: &str) -> PathBuf {
     dir.join(format!("beads-wal-hang-{stage}"))
@@ -186,15 +147,23 @@ fn create_request(repo: &Path, id: &str, title: &str) -> Request {
     }
 }
 
+fn start_daemon_with_hang(fixture: &RealtimeFixture, stage: &str, hang_dir: &Path) {
+    fixture
+        .bd()
+        .env("BD_TEST_WAL_HANG_STAGE", stage)
+        .env("BD_TEST_WAL_HANG_DIR", hang_dir)
+        .env("BD_TEST_WAL_HANG_TIMEOUT_MS", "30000")
+        .arg("init")
+        .assert()
+        .success();
+}
+
 #[test]
 fn crash_recovery_truncates_tail_and_resets_origin_seq() {
-    let _lock = env_lock();
     let fixture = RealtimeFixture::new();
     let hang_dir = fixture.runtime_dir().join("hang");
     fs::create_dir_all(&hang_dir).expect("create hang dir");
-    let prev_env = set_hang_env("wal_after_write", &hang_dir);
-
-    fixture.start_daemon();
+    start_daemon_with_hang(&fixture, "wal_after_write", &hang_dir);
 
     let request = create_request(fixture.repo_path(), "bd-crash-tail", "crash tail");
     let client = IpcClient::for_runtime_dir(fixture.runtime_dir()).with_autostart(false);
@@ -208,7 +177,6 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
     let pid = daemon_pid(fixture.runtime_dir());
     kill_daemon(pid);
     let _ = handle.join();
-    restore_hang_env(prev_env);
 
     let store_id = store_id_from_data_dir(fixture.data_dir());
     let store_dir = store_dir_from_data_dir(fixture.data_dir());
@@ -265,13 +233,10 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
 
 #[test]
 fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
-    let _lock = env_lock();
     let fixture = RealtimeFixture::new();
     let hang_dir = fixture.runtime_dir().join("hang");
     fs::create_dir_all(&hang_dir).expect("create hang dir");
-    let prev_env = set_hang_env("wal_before_index_commit", &hang_dir);
-
-    fixture.start_daemon();
+    start_daemon_with_hang(&fixture, "wal_before_index_commit", &hang_dir);
 
     let request = create_request(fixture.repo_path(), "bd-crash-index", "crash index");
     let client = IpcClient::for_runtime_dir(fixture.runtime_dir()).with_autostart(false);
@@ -285,7 +250,6 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
     let pid = daemon_pid(fixture.runtime_dir());
     kill_daemon(pid);
     let _ = handle.join();
-    restore_hang_env(prev_env);
 
     let store_id = store_id_from_data_dir(fixture.data_dir());
     fixture
