@@ -44,8 +44,8 @@ use super::repo::{
 use super::scheduler::SyncScheduler;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentConfig, SegmentRow,
-    SegmentWriter, Wal, WalEntry, WalIndex, WalIndexError, WalReplayError,
+    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, Wal, WalEntry, WalIndex,
+    WalIndexError, WalReplayError,
 };
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
@@ -999,7 +999,6 @@ impl Daemon {
         batch: Vec<VerifiedEvent<PrevVerified>>,
         now_ms: u64,
     ) -> Result<IngestOutcome, Box<ErrorPayload>> {
-        let limits = self.limits().clone();
         let store = self.stores.get_mut(&store_id).ok_or_else(|| {
             Box::new(ErrorPayload::new(
                 ErrorCode::Internal,
@@ -1023,14 +1022,6 @@ impl Daemon {
         }
 
         let store_dir = paths::store_dir(store_id);
-        let mut writer = SegmentWriter::open(
-            &store_dir,
-            &store.meta,
-            &namespace,
-            now_ms,
-            SegmentConfig::from_limits(&limits),
-        )
-        .map_err(|err| Box::new(event_wal_error_payload(&namespace, None, None, err)))?;
 
         let wal_index = Arc::clone(&store.wal_index);
         let mut txn = wal_index
@@ -1062,7 +1053,7 @@ impl Daemon {
             };
 
             let append_start = Instant::now();
-            let append = match writer.append(&record, now_ms) {
+            let append = match store.event_wal.append(&namespace, &record, now_ms) {
                 Ok(append) => {
                     let elapsed = append_start.elapsed();
                     metrics::wal_append_ok(elapsed);
@@ -1078,12 +1069,22 @@ impl Daemon {
                     )));
                 }
             };
+            let segment_snapshot = store
+                .event_wal
+                .segment_snapshot(&namespace)
+                .ok_or_else(|| {
+                    Box::new(ErrorPayload::new(
+                        ErrorCode::Internal,
+                        "missing active wal segment",
+                        false,
+                    ))
+                })?;
             let last_indexed_offset = append.offset + append.len as u64;
             let segment_row = SegmentRow {
                 namespace: namespace.clone(),
                 segment_id: append.segment_id,
-                segment_path: segment_rel_path(&store_dir, writer.current_path()),
-                created_at_ms: writer.current_created_at_ms(),
+                segment_path: segment_rel_path(&store_dir, &segment_snapshot.path),
+                created_at_ms: segment_snapshot.created_at_ms,
                 last_indexed_offset,
                 sealed: false,
                 final_len: None,

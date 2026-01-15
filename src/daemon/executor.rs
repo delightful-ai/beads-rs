@@ -27,8 +27,8 @@ use super::mutation_engine::{IdContext, MutationContext, MutationEngine, Mutatio
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::store_runtime::StoreRuntimeError;
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentConfig, SegmentRow,
-    SegmentWriter, WalIndex, WalIndexError, WalReplayError,
+    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, WalIndex,
+    WalIndexError, WalReplayError,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
@@ -126,7 +126,6 @@ impl Daemon {
         let (
             origin_replica_id,
             wal_index,
-            store_meta,
             peer_acks,
             policies,
             durable_watermarks_snapshot,
@@ -136,7 +135,6 @@ impl Daemon {
             (
                 store_runtime.meta.replica_id,
                 Arc::clone(&store_runtime.wal_index),
-                store_runtime.meta.clone(),
                 store_runtime.peer_acks.clone(),
                 store_runtime.policies.clone(),
                 store_runtime.watermarks_durable.clone(),
@@ -274,34 +272,35 @@ impl Daemon {
         };
 
         let now_ms = draft.event_body.event_time_ms;
-        let mut writer = SegmentWriter::open(
-            &store_dir,
-            &store_meta,
-            &namespace,
-            now_ms,
-            SegmentConfig::from_limits(&limits),
-        )?;
-        let append_start = Instant::now();
-        let append = match writer.append(&record, now_ms) {
-            Ok(append) => {
-                let elapsed = append_start.elapsed();
-                metrics::wal_append_ok(elapsed);
-                metrics::wal_fsync_ok(elapsed);
-                append
-            }
-            Err(err) => {
-                let elapsed = append_start.elapsed();
-                metrics::wal_append_err(elapsed);
-                metrics::wal_fsync_err(elapsed);
-                return Err(err.into());
-            }
+        let (append, segment_snapshot) = {
+            let store_runtime = self.store_runtime_mut(&proof)?;
+            let append_start = Instant::now();
+            let append = match store_runtime.event_wal.append(&namespace, &record, now_ms) {
+                Ok(append) => {
+                    let elapsed = append_start.elapsed();
+                    metrics::wal_append_ok(elapsed);
+                    metrics::wal_fsync_ok(elapsed);
+                    append
+                }
+                Err(err) => {
+                    let elapsed = append_start.elapsed();
+                    metrics::wal_append_err(elapsed);
+                    metrics::wal_fsync_err(elapsed);
+                    return Err(err.into());
+                }
+            };
+            let snapshot = store_runtime
+                .event_wal
+                .segment_snapshot(&namespace)
+                .ok_or(OpError::Internal("missing active wal segment"))?;
+            (append, snapshot)
         };
         let last_indexed_offset = append.offset + append.len as u64;
         let segment_row = SegmentRow {
             namespace: namespace.clone(),
             segment_id: append.segment_id,
-            segment_path: segment_rel_path(&store_dir, writer.current_path()),
-            created_at_ms: now_ms,
+            segment_path: segment_rel_path(&store_dir, &segment_snapshot.path),
+            created_at_ms: segment_snapshot.created_at_ms,
             last_indexed_offset,
             sealed: false,
             final_len: None,
@@ -1112,7 +1111,9 @@ mod tests {
         WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::daemon::Clock;
-    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, rebuild_index};
+    use crate::daemon::wal::{
+        IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
+    };
 
     fn bead_id(id: &str) -> BeadId {
         BeadId::parse(id).unwrap()
