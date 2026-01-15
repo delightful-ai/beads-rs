@@ -25,8 +25,8 @@ use super::mutation_engine::{IdContext, MutationContext, MutationEngine, Mutatio
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::store_runtime::{StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, WalIndex, WalIndexError,
-    WalReplayError,
+    EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
+    WalIndexError, WalReplayError,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
@@ -256,8 +256,8 @@ impl Daemon {
         let sha_bytes = sha.0;
         let request_sha256 = draft.client_request_id.map(|_| draft.request_sha256);
 
-        let record = Record {
-            header: RecordHeader {
+        let record = VerifiedRecord::new(
+            RecordHeader {
                 origin_replica_id,
                 origin_seq,
                 event_time_ms: draft.event_body.event_time_ms,
@@ -267,8 +267,13 @@ impl Daemon {
                 sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
-            payload: Bytes::copy_from_slice(draft.event_bytes.as_ref()),
-        };
+            Bytes::copy_from_slice(draft.event_bytes.as_ref()),
+            &draft.event_body,
+        )
+        .map_err(|err| {
+            tracing::error!(error = ?err, "record verification failed");
+            OpError::Internal("record verification failed")
+        })?;
 
         let now_ms = draft.event_body.event_time_ms;
         let (append, segment_snapshot) = {
@@ -984,7 +989,7 @@ fn load_event_body(
             })
         })?;
 
-    let (_, event_body) = decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
+    let (_, event_body) = decode_event_body(record.payload_bytes(), limits).map_err(|source| {
         OpError::from(StoreRuntimeError::WalReplay(Box::new(
             WalReplayError::EventBodyDecode {
                 path: path.clone(),
@@ -1356,8 +1361,8 @@ mod tests {
             .unwrap();
 
         let sha = hash_event_body(&draft.event_bytes).0;
-        let record = Record {
-            header: RecordHeader {
+        let record = VerifiedRecord::new(
+            RecordHeader {
                 origin_replica_id: replica_id,
                 origin_seq,
                 event_time_ms: draft.event_body.event_time_ms,
@@ -1367,8 +1372,10 @@ mod tests {
                 sha256: sha,
                 prev_sha256: None,
             },
-            payload: Bytes::copy_from_slice(draft.event_bytes.as_ref()),
-        };
+            Bytes::copy_from_slice(draft.event_bytes.as_ref()),
+            &draft.event_body,
+        )
+        .unwrap();
 
         let mut writer = SegmentWriter::open(
             &store_dir,

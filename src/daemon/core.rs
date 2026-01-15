@@ -43,8 +43,8 @@ use super::repo::{
 use super::scheduler::SyncScheduler;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, WalIndex, WalIndexError,
-    WalReplayError,
+    EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
+    WalIndexError, WalReplayError,
 };
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
@@ -1438,8 +1438,8 @@ impl Daemon {
             .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
 
         for event in &batch {
-            let record = Record {
-                header: RecordHeader {
+            let record = VerifiedRecord::new(
+                RecordHeader {
                     origin_replica_id: origin,
                     origin_seq: event.body.origin_seq,
                     event_time_ms: event.body.event_time_ms,
@@ -1449,8 +1449,17 @@ impl Daemon {
                     sha256: event.sha256.0,
                     prev_sha256: event.prev.prev.map(|sha| sha.0),
                 },
-                payload: Bytes::copy_from_slice(event.bytes.as_ref()),
-            };
+                Bytes::copy_from_slice(event.bytes.as_ref()),
+                &event.body,
+            )
+            .map_err(|err| {
+                tracing::error!(error = ?err, "record verification failed");
+                Box::new(ErrorPayload::new(
+                    ErrorCode::Internal,
+                    "record verification failed",
+                    false,
+                ))
+            })?;
 
             let append_start = Instant::now();
             let append = match store.event_wal.append(&namespace, &record, now_ms) {
@@ -3370,7 +3379,7 @@ fn load_event_body_at(
             }))
         })?;
 
-    let (_, event_body) = decode_event_body(record.payload.as_ref(), limits).map_err(|source| {
+    let (_, event_body) = decode_event_body(record.payload_bytes(), limits).map_err(|source| {
         StoreRuntimeError::WalReplay(Box::new(WalReplayError::EventBodyDecode {
             path: path.to_path_buf(),
             offset,
@@ -3619,7 +3628,7 @@ mod tests {
     use crate::daemon::store_lock::read_lock_meta;
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
-    use crate::daemon::wal::{HlcRow, Record, RecordHeader, SegmentHeader};
+    use crate::daemon::wal::{HlcRow, RecordHeader, SegmentHeader, VerifiedRecord};
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointImport,
         CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks, build_snapshot,
@@ -3933,9 +3942,9 @@ mod tests {
         verified_event_with_delta(store, namespace, origin, seq, prev, TxnDeltaV1::new())
     }
 
-    fn record_for_event(event: &VerifiedEvent<PrevVerified>) -> Record {
-        Record {
-            header: RecordHeader {
+    fn record_for_event(event: &VerifiedEvent<PrevVerified>) -> VerifiedRecord {
+        VerifiedRecord::new(
+            RecordHeader {
                 origin_replica_id: event.body.origin_replica_id,
                 origin_seq: event.body.origin_seq,
                 event_time_ms: event.body.event_time_ms,
@@ -3945,8 +3954,10 @@ mod tests {
                 sha256: event.sha256.0,
                 prev_sha256: event.prev.prev.map(|sha| sha.0),
             },
-            payload: Bytes::copy_from_slice(event.bytes.as_ref()),
-        }
+            Bytes::copy_from_slice(event.bytes.as_ref()),
+            &event.body,
+        )
+        .expect("verified record")
     }
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
