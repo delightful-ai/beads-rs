@@ -439,8 +439,14 @@ fn store_lock_error(err: StoreLockError) -> Error {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::path::PathBuf;
     use tempfile::TempDir;
     use uuid::Uuid;
+    use crate::core::{NamespaceId, ReplicaId};
+    use crate::daemon::wal::fsck::{
+        FsckCheck, FsckCheckId, FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRepairKind,
+        FsckRisk, FsckSeverity, FsckStats, FsckSummary,
+    };
 
     #[test]
     fn unlock_decision_stale_pid_removes() {
@@ -517,6 +523,67 @@ mod tests {
                 }
             ));
         });
+    }
+
+    fn sample_fsck_report() -> FsckReport {
+        let store_id = StoreId::new(Uuid::from_bytes([9u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
+        FsckReport {
+            store_id,
+            checked_at_ms: 12345,
+            stats: FsckStats {
+                namespaces: 1,
+                segments: 2,
+                records: 3,
+            },
+            summary: FsckSummary {
+                risk: FsckRisk::High,
+                safe_to_accept_writes: false,
+                safe_to_prune_wal: false,
+                safe_to_rebuild_index: true,
+            },
+            repairs: vec![FsckRepair {
+                kind: FsckRepairKind::TruncateTail,
+                path: Some(PathBuf::from("/tmp/wal/segment-1")),
+                detail: "truncated tail corruption".to_string(),
+            }],
+            checks: vec![
+                FsckCheck {
+                    id: FsckCheckId::SegmentFrames,
+                    status: FsckStatus::Fail,
+                    severity: FsckSeverity::High,
+                    evidence: vec![FsckEvidence {
+                        code: FsckEvidenceCode::FrameCrcMismatch,
+                        message: "crc mismatch".to_string(),
+                        path: Some(PathBuf::from("/tmp/wal/segment-1")),
+                        namespace: Some(NamespaceId::core()),
+                        origin: Some(replica_id),
+                        seq: Some(5),
+                        offset: Some(128),
+                    }],
+                    suggested_actions: vec![
+                        "run `bd store fsck --repair` to truncate tail corruption".to_string(),
+                    ],
+                },
+                FsckCheck {
+                    id: FsckCheckId::IndexOffsets,
+                    status: FsckStatus::Pass,
+                    severity: FsckSeverity::Low,
+                    evidence: Vec::new(),
+                    suggested_actions: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn render_fsck_human_smoke() {
+        let report = sample_fsck_report();
+        let output = render_fsck_human(&report);
+        assert!(output.contains("Store fsck:"));
+        assert!(output.contains("summary: risk=High"));
+        assert!(output.contains("repairs:"));
+        assert!(output.contains("SegmentFrames"));
     }
 
     fn with_test_data_dir<F>(f: F)
