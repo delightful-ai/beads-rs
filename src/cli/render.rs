@@ -11,7 +11,7 @@ use crate::api::{
     BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
     Note, StatusOutput, SyncWarning, Tombstone,
 };
-use crate::core::{HeadStatus, ReplicaRole, Watermarks};
+use crate::core::{HeadStatus, NamespaceId, ReplicaRole, Watermarks};
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
 use crate::daemon::query::QueryResult;
@@ -66,7 +66,7 @@ pub fn render_ready(views: &[IssueSummary], blocked_count: usize, closed_count: 
                 "{}. [P{}] {}: {}\n",
                 i + 1,
                 v.priority,
-                v.id,
+                fmt_issue_ref(&v.namespace, &v.id),
                 v.title
             ));
             if let Some(m) = v.estimated_minutes {
@@ -113,7 +113,7 @@ pub fn render_stale(issues: &[IssueSummary], threshold_days: u32) -> String {
             "{}. [P{}] {}: {}\n",
             i + 1,
             issue.priority,
-            issue.id,
+            fmt_issue_ref(&issue.namespace, &issue.id),
             issue.title
         ));
         out.push_str(&format!(
@@ -222,7 +222,11 @@ pub fn render_epic_statuses(statuses: &[EpicStatus]) -> String {
             0
         };
         let icon = if s.eligible_for_close { "✓" } else { "○" };
-        out.push_str(&format!("{icon} {} {}\n", s.epic.id, s.epic.title));
+        out.push_str(&format!(
+            "{icon} {} {}\n",
+            fmt_issue_ref(&s.epic.namespace, &s.epic.id),
+            s.epic.title
+        ));
         out.push_str(&format!(
             "   Progress: {}/{} children closed ({}%)\n",
             s.closed_children, s.total_children, pct
@@ -239,7 +243,11 @@ pub fn render_epic_statuses(statuses: &[EpicStatus]) -> String {
 pub fn render_epic_close_dry_run(statuses: &[EpicStatus]) -> String {
     let mut out = format!("Would close {} epic(s):\n", statuses.len());
     for s in statuses {
-        out.push_str(&format!("  - {}: {}\n", s.epic.id, s.epic.title));
+        out.push_str(&format!(
+            "  - {}: {}\n",
+            fmt_issue_ref(&s.epic.namespace, &s.epic.id),
+            s.epic.title
+        ));
     }
     out
 }
@@ -267,6 +275,7 @@ pub fn render_show(
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("\n{}: {}\n", bead.id, bead.title));
+    out.push_str(&format!("Namespace: {}\n", bead.namespace.as_str()));
     out.push_str(&format!("Status: {}\n", bead.status));
     out.push_str(&format!("Priority: P{}\n", bead.priority));
     out.push_str(&format!("Type: {}\n", bead.issue_type));
@@ -307,7 +316,9 @@ pub fn render_show(
         for dep in outgoing {
             out.push_str(&format!(
                 "  → {}: {} [P{}]\n",
-                dep.id, dep.title, dep.priority
+                fmt_issue_ref(&dep.namespace, &dep.id),
+                dep.title,
+                dep.priority
             ));
         }
     }
@@ -321,7 +332,9 @@ pub fn render_show(
             for dep in &incoming.children {
                 out.push_str(&format!(
                     "  ↳ {}: {} [P{}]\n",
-                    dep.id, dep.title, dep.priority
+                    fmt_issue_ref(&dep.namespace, &dep.id),
+                    dep.title,
+                    dep.priority
                 ));
             }
         }
@@ -331,7 +344,9 @@ pub fn render_show(
         for dep in &incoming.blocks {
             out.push_str(&format!(
                 "  ← {}: {} [P{}]\n",
-                dep.id, dep.title, dep.priority
+                fmt_issue_ref(&dep.namespace, &dep.id),
+                dep.title,
+                dep.priority
             ));
         }
     }
@@ -340,7 +355,9 @@ pub fn render_show(
         for dep in &incoming.related {
             out.push_str(&format!(
                 "  ↔ {}: {} [P{}]\n",
-                dep.id, dep.title, dep.priority
+                fmt_issue_ref(&dep.namespace, &dep.id),
+                dep.title,
+                dep.priority
             ));
         }
     }
@@ -349,7 +366,9 @@ pub fn render_show(
         for dep in &incoming.discovered {
             out.push_str(&format!(
                 "  ◊ {}: {} [P{}]\n",
-                dep.id, dep.title, dep.priority
+                fmt_issue_ref(&dep.namespace, &dep.id),
+                dep.title,
+                dep.priority
             ));
         }
     }
@@ -425,7 +444,11 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
                 .unwrap_or_default();
             out.push_str(&format!(
                 " {}[P{}] {}: {}{}\n",
-                status_marker, child.priority, child.id, child.title, assignee
+                status_marker,
+                child.priority,
+                fmt_issue_ref(&child.namespace, &child.id),
+                child.title,
+                assignee
             ));
         }
     }
@@ -433,7 +456,11 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     if !done.is_empty() {
         out.push_str(&format!("\nDone ({}):\n", done.len()));
         for child in &done {
-            out.push_str(&format!("  [x] {}: {}\n", child.id, child.title));
+            out.push_str(&format!(
+                "  [x] {}: {}\n",
+                fmt_issue_ref(&child.namespace, &child.id),
+                child.title
+            ));
         }
     }
 }
@@ -1190,7 +1217,9 @@ fn render_blocked(blocked: &[BlockedIssue]) -> String {
     for b in blocked {
         out.push_str(&format!(
             "[P{}] {}: {}\n",
-            b.issue.priority, b.issue.id, b.issue.title
+            b.issue.priority,
+            fmt_issue_ref(&b.issue.namespace, &b.issue.id),
+            b.issue.title
         ));
         out.push_str(&format!(
             "  Blocked by {} open dependencies: {:?}\n\n",
@@ -1298,8 +1327,18 @@ pub fn render_issue_list_opts(views: &[IssueSummary], show_labels: bool) -> Stri
     out.trim_end().into()
 }
 
+fn fmt_issue_ref(namespace: &NamespaceId, id: &str) -> String {
+    format!("{}/{}", namespace.as_str(), id)
+}
+
 fn render_issue_summary_opts(v: &IssueSummary, show_labels: bool) -> String {
-    let mut s = format!("{} [P{}] [{}] {}", v.id, v.priority, v.issue_type, v.status);
+    let mut s = format!(
+        "{} [P{}] [{}] {}",
+        fmt_issue_ref(&v.namespace, &v.id),
+        v.priority,
+        v.issue_type,
+        v.status
+    );
     if let Some(a) = &v.assignee
         && !a.is_empty()
     {
@@ -1316,6 +1355,7 @@ fn render_issue_detail(v: &Issue) -> String {
     // Default detail renderer (used for `show --json=false` fallback).
     let mut out = String::new();
     out.push_str(&format!("\n{}: {}\n", v.id, v.title));
+    out.push_str(&format!("Namespace: {}\n", v.namespace.as_str()));
     out.push_str(&format!("Status: {}\n", v.status));
     out.push_str(&format!("Priority: P{}\n", v.priority));
     out.push_str(&format!("Type: {}\n", v.issue_type));
@@ -1455,7 +1495,65 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    use crate::core::{Applied, Durable, NamespaceId, ReplicaId, Seq0, StoreId};
+    use crate::core::{Applied, Durable, NamespaceId, ReplicaId, Seq0, StoreId, WriteStamp};
+
+    fn sample_issue(namespace: &str, id: &str) -> Issue {
+        Issue {
+            id: id.to_string(),
+            namespace: NamespaceId::parse(namespace).expect("namespace"),
+            title: "Title".to_string(),
+            description: String::new(),
+            design: None,
+            acceptance_criteria: None,
+            status: "open".to_string(),
+            priority: 1,
+            issue_type: "task".to_string(),
+            labels: Vec::new(),
+            assignee: None,
+            assignee_at: None,
+            assignee_expires: None,
+            created_at: WriteStamp::new(0, 0),
+            created_by: "tester".to_string(),
+            created_on_branch: None,
+            updated_at: WriteStamp::new(0, 0),
+            updated_by: "tester".to_string(),
+            closed_at: None,
+            closed_by: None,
+            closed_reason: None,
+            closed_on_branch: None,
+            external_ref: None,
+            source_repo: None,
+            estimated_minutes: None,
+            content_hash: "hash".to_string(),
+            notes: Vec::new(),
+            deps_incoming: Vec::new(),
+            deps_outgoing: Vec::new(),
+        }
+    }
+
+    fn sample_summary(namespace: &str, id: &str) -> IssueSummary {
+        IssueSummary {
+            id: id.to_string(),
+            namespace: NamespaceId::parse(namespace).expect("namespace"),
+            title: "Title".to_string(),
+            description: String::new(),
+            design: None,
+            acceptance_criteria: None,
+            status: "open".to_string(),
+            priority: 1,
+            issue_type: "task".to_string(),
+            labels: Vec::new(),
+            assignee: None,
+            assignee_expires: None,
+            created_at: WriteStamp::new(0, 0),
+            created_by: "tester".to_string(),
+            updated_at: WriteStamp::new(0, 0),
+            updated_by: "tester".to_string(),
+            estimated_minutes: None,
+            content_hash: "hash".to_string(),
+            note_count: 0,
+        }
+    }
 
     #[test]
     fn render_admin_status_includes_watermarks() {
@@ -1512,4 +1610,49 @@ mod tests {
         );
         assert_eq!(output, expected);
     }
+
+    #[test]
+    fn render_show_includes_namespace() {
+        let issue = sample_issue("wf", "bd-123");
+        let incoming = IncomingGroups {
+            children: Vec::new(),
+            blocks: Vec::new(),
+            related: Vec::new(),
+            discovered: Vec::new(),
+        };
+
+        let output = render_show(&issue, &[], &incoming, &[]);
+        let expected = concat!(
+            "\nbd-123: Title\n",
+            "Namespace: wf\n",
+            "Status: open\n",
+            "Priority: P1\n",
+            "Type: task\n",
+            "Created: 1970-01-01 00:00\n",
+            "Updated: 1970-01-01 00:00\n",
+            "\n",
+        );
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn render_issue_list_includes_namespace() {
+        let summary = sample_summary("wf", "bd-123");
+        let output = render_issue_list_opts(&[summary], false);
+        assert_eq!(output, "wf/bd-123 [P1] [task] open - Title");
+    }
+
+    #[test]
+    fn render_ready_includes_namespace() {
+        let summary = sample_summary("wf", "bd-123");
+        let output = render_ready(&[summary], 0, 0);
+        let expected = concat!(
+            "\n📋 Ready work (1 issues with no blockers):\n\n",
+            "1. [P1] wf/bd-123: Title\n",
+            "\n",
+            "0 blocked, 0 closed — run `bd blocked` to see what's stuck\n",
+        );
+        assert_eq!(output, expected);
+    }
+
 }
