@@ -17,15 +17,13 @@ use bytes::Bytes;
 use crossbeam::channel::Sender;
 
 use super::broadcast::BroadcastEvent;
-use super::core::{
-    Daemon, HandleOutcome, NormalizedMutationMeta, detect_clock_skew, load_replica_roster,
-};
+use super::core::{Daemon, HandleOutcome, NormalizedMutationMeta, detect_clock_skew};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
 use super::ipc::{MutationMeta, OpResponse, Response, ResponsePayload};
 use super::mutation_engine::{IdContext, MutationContext, MutationEngine, MutationRequest};
 use super::ops::{BeadPatch, OpError, OpResult};
-use super::store_runtime::StoreRuntimeError;
+use super::store_runtime::{StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, WalIndex, WalIndexError,
     WalReplayError,

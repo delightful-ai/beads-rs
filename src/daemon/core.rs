@@ -42,9 +42,7 @@ use super::repo::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
 };
 use super::scheduler::SyncScheduler;
-use super::store_runtime::{
-    StoreConfigFileError, StoreRuntime, StoreRuntimeError, read_secure_store_file,
-};
+use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, Record, RecordHeader, SegmentRow, Wal, WalEntry, WalIndex,
     WalIndexError, WalReplayError,
@@ -157,17 +155,17 @@ struct StorePathMap {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, Applied, ApplyError, BeadId, CanonicalState, ClientRequestId, CoreError,
+    ActorId, Applied, ApplyError, BeadId, CanonicalState, ClientRequestId, ContentHash, CoreError,
     DurabilityClass, ErrorCode, EventBody, EventId, HeadStatus, Limits, NamespaceId,
-    NamespacePolicy, PrevVerified, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1,
+    NamespacePolicy, PrevVerified, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1,
     Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock,
     Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
     CheckpointCache, CheckpointImport, CheckpointImportError, CheckpointPublishError,
-    CheckpointPublishOutcome, IncludedHeads, import_checkpoint, merge_store_states,
-    store_state_from_legacy,
+    CheckpointPublishOutcome, IncludedHeads, import_checkpoint, merge_store_states, policy_hash,
+    roster_hash, store_state_from_legacy,
 };
 use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::sync::SyncOutcome;
@@ -1029,6 +1027,9 @@ impl Daemon {
             return Vec::new();
         }
 
+        let local_policy_hash = self.local_policy_hash(store_id);
+        let local_roster_hash = self.local_roster_hash(store_id);
+
         let repo_handle = match Repository::open(repo) {
             Ok(repo) => Some(repo),
             Err(err) => {
@@ -1045,17 +1046,105 @@ impl Daemon {
         let mut imports = Vec::new();
         for group in groups {
             if let Some(import) = self.import_checkpoint_from_cache(store_id, &group) {
+                self.warn_on_checkpoint_hash_mismatch(
+                    store_id,
+                    &import,
+                    local_policy_hash,
+                    local_roster_hash,
+                );
                 imports.push(import);
                 continue;
             }
             if let Some(repo) = repo_handle.as_ref()
                 && let Some(import) = self.import_checkpoint_from_git(repo, &group)
             {
+                self.warn_on_checkpoint_hash_mismatch(
+                    store_id,
+                    &import,
+                    local_policy_hash,
+                    local_roster_hash,
+                );
                 imports.push(import);
             }
         }
 
         imports
+    }
+
+    fn local_policy_hash(&self, store_id: StoreId) -> Option<ContentHash> {
+        let store = self.stores.get(&store_id)?;
+        match policy_hash(&store.policies) {
+            Ok(hash) => Some(hash),
+            Err(err) => {
+                tracing::warn!(
+                    store_id = %store_id,
+                    error = ?err,
+                    "policy hash computation failed"
+                );
+                None
+            }
+        }
+    }
+
+    fn local_roster_hash(&self, store_id: StoreId) -> Option<ContentHash> {
+        let roster = match load_replica_roster(store_id) {
+            Ok(Some(roster)) => roster,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(
+                    store_id = %store_id,
+                    error = ?err,
+                    "replica roster load failed for checkpoint hash"
+                );
+                return None;
+            }
+        };
+
+        match roster_hash(&roster) {
+            Ok(hash) => Some(hash),
+            Err(err) => {
+                tracing::warn!(
+                    store_id = %store_id,
+                    error = ?err,
+                    "replica roster hash computation failed"
+                );
+                None
+            }
+        }
+    }
+
+    fn warn_on_checkpoint_hash_mismatch(
+        &self,
+        store_id: StoreId,
+        import: &CheckpointImport,
+        local_policy_hash: Option<ContentHash>,
+        local_roster_hash: Option<ContentHash>,
+    ) {
+        if let Some(local_policy_hash) = local_policy_hash
+            && import.policy_hash != local_policy_hash
+        {
+            let checkpoint_policy_hash = import.policy_hash.to_hex();
+            let local_policy_hash = local_policy_hash.to_hex();
+            tracing::warn!(
+                store_id = %store_id,
+                checkpoint_group = %import.checkpoint_group,
+                local_policy_hash = %local_policy_hash,
+                checkpoint_policy_hash = %checkpoint_policy_hash,
+                "checkpoint policy hash mismatch"
+            );
+        }
+
+        if import.roster_hash.is_some() && import.roster_hash != local_roster_hash {
+            let checkpoint_roster_hash = import.roster_hash.map(|hash| hash.to_hex());
+            let local_roster_hash = local_roster_hash.map(|hash| hash.to_hex());
+            tracing::warn!(
+                store_id = %store_id,
+                checkpoint_group = %import.checkpoint_group,
+                local_roster_hash = ?local_roster_hash,
+                checkpoint_roster_hash = ?checkpoint_roster_hash,
+                "checkpoint roster hash mismatch"
+            );
+        }
     }
 
     fn import_checkpoint_from_cache(
@@ -3460,34 +3549,6 @@ fn resolve_checkpoint_git_ref(store_id: StoreId, group: &str, git_ref: Option<&s
         .replace("{group}", group)
 }
 
-pub(crate) fn load_replica_roster(
-    store_id: StoreId,
-) -> Result<Option<ReplicaRoster>, StoreRuntimeError> {
-    let path = paths::replicas_path(store_id);
-    let raw = match read_secure_store_file(&path) {
-        Ok(Some(raw)) => raw,
-        Ok(None) => return Ok(None),
-        Err(StoreConfigFileError::Symlink { path }) => {
-            return Err(StoreRuntimeError::ReplicaRosterSymlink {
-                path: Box::new(path),
-            });
-        }
-        Err(StoreConfigFileError::Read { path, source }) => {
-            return Err(StoreRuntimeError::ReplicaRosterRead {
-                path: Box::new(path),
-                source,
-            });
-        }
-    };
-
-    ReplicaRoster::from_toml_str(&raw)
-        .map(Some)
-        .map_err(|source| StoreRuntimeError::ReplicaRosterParse {
-            path: Box::new(path),
-            source,
-        })
-}
-
 fn event_id_for(origin: ReplicaId, namespace: NamespaceId, origin_seq: Seq1) -> EventId {
     EventId::new(origin, namespace, origin_seq)
 }
@@ -3621,24 +3682,27 @@ pub(crate) fn insert_store_for_tests(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use bytes::Bytes;
     use git2::Repository;
+    use tracing::{Dispatch, Level};
+    use tracing_subscriber::fmt::MakeWriter;
     use uuid::Uuid;
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww, NamespaceId,
-        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry, ReplicaId,
-        ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
-        StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, VerifiedEvent,
-        WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
-        encode_event_body_canonical, hash_event_body,
+        ContentHash, Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Labels, Limits, Lww,
+        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry,
+        ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
+        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1,
+        VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
+        WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -3647,8 +3711,8 @@ mod tests {
     use crate::daemon::wal::{HlcRow, Record, RecordHeader, SegmentHeader, Wal};
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointSnapshotInput,
-        CheckpointStoreMeta, build_snapshot, export_checkpoint, policy_hash, publish_checkpoint,
-        store_state_from_legacy,
+        CheckpointStoreMeta, CheckpointImport, IncludedWatermarks, build_snapshot,
+        export_checkpoint, policy_hash, publish_checkpoint, store_state_from_legacy,
     };
     use tempfile::TempDir;
 
@@ -3658,6 +3722,39 @@ mod tests {
 
     fn test_remote() -> RemoteUrl {
         RemoteUrl("example.com/test/repo".into())
+    }
+
+    #[derive(Clone)]
+    struct TestWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct TestWriterGuard {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl<'a> MakeWriter<'a> for TestWriter {
+        type Writer = TestWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            TestWriterGuard {
+                buffer: self.buffer.clone(),
+            }
+        }
+    }
+
+    impl Write for TestWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer
+                .lock()
+                .expect("log buffer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     struct TempStoreDir {
@@ -3730,6 +3827,46 @@ mod tests {
             .next_wal_checkpoint_deadline_at(now)
             .expect("next");
         assert_eq!(next, now + Duration::from_millis(10));
+    }
+
+    #[test]
+    fn checkpoint_roster_hash_mismatch_warns() {
+        let (_tmp, wal) = test_wal();
+        let daemon = Daemon::new_with_limits(test_actor(), wal, Limits::default());
+        let store_id = StoreId::new(Uuid::from_bytes([99u8; 16]));
+        let import = CheckpointImport {
+            checkpoint_group: "core".to_string(),
+            policy_hash: ContentHash::from_bytes([1u8; 32]),
+            roster_hash: Some(ContentHash::from_bytes([2u8; 32])),
+            state: StoreState::new(),
+            included: IncludedWatermarks::new(),
+            included_heads: None,
+        };
+        let local_policy_hash = Some(ContentHash::from_bytes([1u8; 32]));
+        let local_roster_hash = Some(ContentHash::from_bytes([3u8; 32]));
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(TestWriter {
+                buffer: buffer.clone(),
+            })
+            .with_max_level(Level::WARN)
+            .with_ansi(false)
+            .finish();
+
+        let dispatch = Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, || {
+            daemon.warn_on_checkpoint_hash_mismatch(
+                store_id,
+                &import,
+                local_policy_hash,
+                local_roster_hash,
+            );
+        });
+
+        let logs = String::from_utf8(buffer.lock().expect("log buffer").clone())
+            .expect("utf8 logs");
+        assert!(logs.contains("checkpoint roster hash mismatch"));
     }
 
     #[cfg(unix)]
