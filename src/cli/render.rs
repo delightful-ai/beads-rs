@@ -6,8 +6,7 @@
 use crate::api::{
     AdminClockAnomalyKind, AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode,
     AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput, AdminHealthReport,
-    AdminHealthStatus,
-    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminHealthStatus, AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
     AdminReloadPoliciesOutput, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
     BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
     Note, StatusOutput, SyncWarning, Tombstone,
@@ -668,10 +667,7 @@ fn render_admin_flush(out: &AdminFlushOutput) -> String {
     out_str.push_str("Admin Flush\n");
     out_str.push_str("===========\n\n");
     out_str.push_str(&format!("Namespace: {}\n", out.namespace.as_str()));
-    out_str.push_str(&format!(
-        "Flushed at: {}\n",
-        fmt_wall_ms(out.flushed_at_ms)
-    ));
+    out_str.push_str(&format!("Flushed at: {}\n", fmt_wall_ms(out.flushed_at_ms)));
     match &out.segment {
         Some(segment) => {
             out_str.push_str("Segment:\n");

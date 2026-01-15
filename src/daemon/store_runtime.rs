@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
-    ActorId, ApplyOutcome, Applied, Durable, ErrorCode, ErrorPayload, HeadStatus, Limits,
+    ActorId, Applied, ApplyOutcome, Durable, ErrorCode, ErrorPayload, HeadStatus, Limits,
     NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicaRosterError, Seq0,
     StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, WatermarkError, Watermarks,
     WriteStamp,
@@ -127,8 +127,12 @@ impl StoreRuntime {
 
         let store_dir = paths::store_dir(store_id);
         let store_config = load_store_config(store_id, true)?;
-        let (mut wal_index, needs_rebuild) =
-            open_wal_index(store_id, &store_dir, &meta, store_config.index_durability_mode)?;
+        let (mut wal_index, needs_rebuild) = open_wal_index(
+            store_id,
+            &store_dir,
+            &meta,
+            store_config.index_durability_mode,
+        )?;
         let replay_stats = if needs_rebuild {
             rebuild_index(&store_dir, &meta, &wal_index, limits)?
         } else {
@@ -513,10 +517,12 @@ fn load_store_config(
 ) -> Result<StoreConfig, StoreRuntimeError> {
     let path = paths::store_config_path(store_id);
     match read_secure_store_file(&path) {
-        Ok(Some(raw)) => toml::from_str(&raw).map_err(|source| StoreRuntimeError::StoreConfigParse {
-            path: Box::new(path),
-            source,
-        }),
+        Ok(Some(raw)) => {
+            toml::from_str(&raw).map_err(|source| StoreRuntimeError::StoreConfigParse {
+                path: Box::new(path),
+                source,
+            })
+        }
         Ok(None) => {
             let config = StoreConfig::default();
             if write_default {
@@ -524,11 +530,9 @@ fn load_store_config(
             }
             Ok(config)
         }
-        Err(StoreConfigFileError::Symlink { path }) => {
-            Err(StoreRuntimeError::StoreConfigSymlink {
-                path: Box::new(path),
-            })
-        }
+        Err(StoreConfigFileError::Symlink { path }) => Err(StoreRuntimeError::StoreConfigSymlink {
+            path: Box::new(path),
+        }),
         Err(StoreConfigFileError::Read { path, source }) => {
             Err(StoreRuntimeError::StoreConfigRead {
                 path: Box::new(path),
@@ -551,11 +555,12 @@ fn write_store_config(path: &Path, config: &StoreConfig) -> Result<(), StoreRunt
             source,
         })?;
     }
-    let contents =
-        toml::to_string_pretty(config).map_err(|source| StoreRuntimeError::StoreConfigSerialize {
+    let contents = toml::to_string_pretty(config).map_err(|source| {
+        StoreRuntimeError::StoreConfigSerialize {
             path: Box::new(path.to_path_buf()),
             source,
-        })?;
+        }
+    })?;
     fs::write(path, contents).map_err(|source| StoreRuntimeError::StoreConfigWrite {
         path: Box::new(path.to_path_buf()),
         source,
@@ -762,9 +767,7 @@ pub(crate) enum StoreConfigFileError {
     },
 }
 
-pub(crate) fn read_secure_store_file(
-    path: &Path,
-) -> Result<Option<String>, StoreConfigFileError> {
+pub(crate) fn read_secure_store_file(path: &Path) -> Result<Option<String>, StoreConfigFileError> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
             return Err(StoreConfigFileError::Symlink {
@@ -832,9 +835,9 @@ mod tests {
     use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, Wal, WalIndex};
     use crate::paths;
-    use std::sync::Arc;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::sync::Arc;
 
     fn write_meta_for(store_id: StoreId, replica_id: ReplicaId, now_ms: u64) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
@@ -875,7 +878,9 @@ mod tests {
         txn.commit().expect("commit watermark");
 
         let wal = Wal::new(temp.path()).expect("wal");
-        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
@@ -931,7 +936,9 @@ mod tests {
         txn.commit().expect("commit watermark");
 
         let wal = Wal::new(temp.path()).expect("wal");
-        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
         let result = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
@@ -955,7 +962,9 @@ mod tests {
 
         let store_id = StoreId::new(Uuid::from_bytes([30u8; 16]));
         let wal = Wal::new(temp.path()).expect("wal");
-        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
@@ -973,8 +982,8 @@ mod tests {
             IndexDurabilityMode::Cache
         );
 
-        let raw = std::fs::read_to_string(paths::store_config_path(store_id))
-            .expect("read store config");
+        let raw =
+            std::fs::read_to_string(paths::store_config_path(store_id)).expect("read store config");
         let config: StoreConfig = toml::from_str(&raw).expect("parse store config");
         assert_eq!(config.index_durability_mode, IndexDurabilityMode::Cache);
     }
@@ -993,7 +1002,9 @@ mod tests {
             .expect("write store config");
 
         let wal = Wal::new(temp.path()).expect("wal");
-        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
@@ -1019,7 +1030,9 @@ mod tests {
 
         let store_id = StoreId::new(Uuid::from_bytes([50u8; 16]));
         let wal = Wal::new(temp.path()).expect("wal");
-        let namespace_defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
         let mut runtime = StoreRuntime::open(
             store_id,
             RemoteUrl("example.com/test/repo".to_string()),
@@ -1132,7 +1145,9 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
             .expect("chmod namespaces.toml");
 
-        let defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
         load_namespace_policies(store_id, &defaults).expect("load policies");
 
         let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
@@ -1155,7 +1170,9 @@ mod tests {
         fs::write(&target, b"").expect("write target");
         symlink(&target, &path).expect("symlink namespaces.toml");
 
-        let defaults = crate::config::Config::default().namespace_defaults.namespaces;
+        let defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
         let err = load_namespace_policies(store_id, &defaults).unwrap_err();
         assert!(matches!(
             err,

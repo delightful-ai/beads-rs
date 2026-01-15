@@ -316,11 +316,7 @@ impl GitWorker {
         if drop_in_memory_previous {
             self.checkpoint_exports.remove(&key);
         }
-        self.checkpoint_exports.insert(key.clone(), export);
-        let export = self
-            .checkpoint_exports
-            .get(&key)
-            .expect("checkpoint export missing after insert");
+        self.checkpoint_exports.insert(key, export.clone());
 
         let cache = CheckpointCache::new(snapshot.store_id, snapshot.checkpoint_group.clone());
         {
@@ -344,7 +340,7 @@ impl GitWorker {
             checkpoint_groups,
         );
 
-        publish_checkpoint_git(repo, export, git_ref, &store_meta)
+        publish_checkpoint_git(repo, &export, git_ref, &store_meta)
     }
 
     /// Initialize beads ref.

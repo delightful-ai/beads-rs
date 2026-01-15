@@ -8,9 +8,9 @@ use crossbeam::channel::Sender;
 
 use crate::api::{
     AdminCheckpointGroup, AdminClockAnomaly, AdminClockAnomalyKind, AdminDoctorOutput,
-    AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample,
-    AdminFlushOutput, AdminFlushSegment, AdminMaintenanceModeOutput, AdminMetricHistogram,
-    AdminMetricLabel, AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
+    AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput,
+    AdminFlushSegment, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
+    AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
     AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
     AdminReloadPoliciesOutput, AdminReplicationNamespace, AdminReplicationPeer,
     AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalNamespace,

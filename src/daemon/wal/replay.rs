@@ -866,9 +866,9 @@ fn read_segment_header(path: &Path) -> Result<(SegmentHeader, u64), WalReplayErr
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use tempfile::TempDir;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
     use uuid::Uuid;
 
     use crate::core::{

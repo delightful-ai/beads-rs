@@ -502,8 +502,7 @@ impl Daemon {
             let mut config = CheckpointGroupConfig::core_default(store_id, local_replica_id);
             config.group = group.clone();
             config.namespaces = namespaces;
-            config.git_ref =
-                resolve_checkpoint_git_ref(store_id, group, spec.git_ref.as_deref());
+            config.git_ref = resolve_checkpoint_git_ref(store_id, group, spec.git_ref.as_deref());
             config.checkpoint_writers = if spec.checkpoint_writers.is_empty() {
                 vec![local_replica_id]
             } else {
@@ -1211,8 +1210,8 @@ impl Daemon {
         let session_store =
             SharedSessionStore::new(ReplSessionStore::new(store_id, wal_index, ingest_tx));
 
-        let roster = load_replica_roster(store_id)
-            .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
+        let roster =
+            load_replica_roster(store_id).map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
         let peers = self.replication_peers();
 
         let manager_config = ReplicationManagerConfig {
@@ -1526,12 +1525,8 @@ impl Daemon {
 
                 let event_id = event_id_for(origin, namespace.clone(), event.body.origin_seq);
                 let prev_sha = event.prev.prev.map(|sha| Sha256(sha.0));
-                let broadcast = BroadcastEvent::new(
-                    event_id,
-                    event.sha256,
-                    prev_sha,
-                    event.bytes.clone(),
-                );
+                let broadcast =
+                    BroadcastEvent::new(event_id, event.sha256, prev_sha, event.bytes.clone());
                 if let Err(err) = store.broadcaster.publish(broadcast) {
                     tracing::warn!("event broadcast failed: {err}");
                 }
@@ -2667,7 +2662,9 @@ impl Daemon {
                 repo,
                 namespace,
                 checkpoint_now,
-            } => self.admin_flush(&repo, namespace, checkpoint_now, git_tx).into(),
+            } => self
+                .admin_flush(&repo, namespace, checkpoint_now, git_tx)
+                .into(),
 
             Request::AdminFingerprint {
                 repo,
@@ -3377,9 +3374,7 @@ fn replication_listen_addr(config: &crate::config::ReplicationConfig) -> String 
         })
 }
 
-fn replication_max_connections(
-    config: &crate::config::ReplicationConfig,
-) -> Option<NonZeroUsize> {
+fn replication_max_connections(config: &crate::config::ReplicationConfig) -> Option<NonZeroUsize> {
     if let Ok(raw) = std::env::var("BD_REPL_MAX_CONNECTIONS") {
         match raw.trim().parse::<usize>() {
             Ok(parsed) => return NonZeroUsize::new(parsed),
@@ -3433,12 +3428,12 @@ pub(crate) fn load_replica_roster(
         }
     };
 
-    ReplicaRoster::from_toml_str(&raw).map(Some).map_err(|source| {
-        StoreRuntimeError::ReplicaRosterParse {
+    ReplicaRoster::from_toml_str(&raw)
+        .map(Some)
+        .map_err(|source| StoreRuntimeError::ReplicaRosterParse {
             path: Box::new(path),
             source,
-        }
-    })
+        })
 }
 
 fn event_id_for(origin: ReplicaId, namespace: NamespaceId, origin_seq: Seq1) -> EventId {
@@ -3574,10 +3569,10 @@ pub(crate) fn insert_store_for_tests(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use bytes::Bytes;
     use git2::Repository;
@@ -3690,7 +3685,11 @@ mod tests {
         let roster = load_replica_roster(store_id).expect("load roster");
         assert!(roster.is_some());
 
-        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
     }
 
@@ -3709,7 +3708,10 @@ mod tests {
         symlink(&target, &path).expect("symlink replicas.toml");
 
         let err = load_replica_roster(store_id).unwrap_err();
-        assert!(matches!(err, StoreRuntimeError::ReplicaRosterSymlink { .. }));
+        assert!(matches!(
+            err,
+            StoreRuntimeError::ReplicaRosterSymlink { .. }
+        ));
     }
 
     #[test]
@@ -3722,8 +3724,7 @@ mod tests {
 
         let store_id = StoreId::new(Uuid::from_bytes([55u8; 16]));
         let remote = RemoteUrl("example.com/test/repo".into());
-        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path)
-            .expect("insert store");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
 
         let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
         let response = daemon.admin_flush(&repo_path, None, true, &git_tx);

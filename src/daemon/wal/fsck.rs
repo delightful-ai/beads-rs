@@ -11,9 +11,9 @@ use thiserror::Error;
 use crate::core::{
     Limits, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreMeta, decode_event_body, sha256_bytes,
 };
+use crate::daemon::store_runtime::store_index_durability_mode;
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use crate::daemon::wal::record::{Record, validate_header_matches_body};
-use crate::daemon::store_runtime::store_index_durability_mode;
 use crate::daemon::wal::{
     EventWalError, SegmentHeader, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
     rebuild_index,
@@ -961,10 +961,7 @@ fn reject_symlink(path: &Path) -> Result<(), FsckError> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(FsckError::Io {
             path: path.to_path_buf(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "wal path is a symlink",
-            ),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "wal path is a symlink"),
         }),
         Ok(_) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),

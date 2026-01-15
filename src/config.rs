@@ -230,22 +230,26 @@ mod tests {
     #[test]
     fn config_defaults_match_plan() {
         let cfg = Config::default();
-        assert!(cfg
-            .namespace_defaults
-            .namespaces
-            .contains_key(&NamespaceId::core()));
-        assert!(cfg
-            .namespace_defaults
-            .namespaces
-            .contains_key(&NamespaceId::parse("sys").unwrap()));
-        assert!(cfg
-            .namespace_defaults
-            .namespaces
-            .contains_key(&NamespaceId::parse("wf").unwrap()));
-        assert!(cfg
-            .namespace_defaults
-            .namespaces
-            .contains_key(&NamespaceId::parse("tmp").unwrap()));
+        assert!(
+            cfg.namespace_defaults
+                .namespaces
+                .contains_key(&NamespaceId::core())
+        );
+        assert!(
+            cfg.namespace_defaults
+                .namespaces
+                .contains_key(&NamespaceId::parse("sys").unwrap())
+        );
+        assert!(
+            cfg.namespace_defaults
+                .namespaces
+                .contains_key(&NamespaceId::parse("wf").unwrap())
+        );
+        assert!(
+            cfg.namespace_defaults
+                .namespaces
+                .contains_key(&NamespaceId::parse("tmp").unwrap())
+        );
         assert!(cfg.checkpoint_groups.contains_key("core"));
     }
 }

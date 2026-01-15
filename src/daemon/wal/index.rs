@@ -1180,9 +1180,9 @@ fn decode_event_ids(bytes: &[u8]) -> Result<Vec<EventId>, WalIndexError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
 
     fn test_meta() -> StoreMeta {
         let store_id = crate::core::StoreId::new(Uuid::from_bytes([7u8; 16]));

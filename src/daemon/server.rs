@@ -1127,9 +1127,9 @@ mod tests {
 
     use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
-        ActorId, Applied, BeadId, DurabilityClass, DurabilityOutcome, DurabilityReceipt, EventBytes,
-        EventFrameV1, EventId, HeadStatus, NamespacePolicy, Opaque, ReplicaRole, ReplicaRoster,
-        Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermarks,
+        ActorId, Applied, BeadId, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
+        EventBytes, EventFrameV1, EventId, HeadStatus, NamespacePolicy, Opaque, ReplicaRole,
+        ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermarks,
     };
     use crate::daemon::core::insert_store_for_tests;
     use crate::daemon::ipc::OpResponse;

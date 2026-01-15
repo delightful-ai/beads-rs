@@ -527,9 +527,9 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use tempfile::TempDir;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use tempfile::TempDir;
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = crate::core::StoreIdentity::new(store_id, store_epoch);
