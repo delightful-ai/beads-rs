@@ -313,7 +313,9 @@ impl Daemon {
             actor_clocks: BTreeMap::new(),
             actor,
             scheduler: SyncScheduler::new(),
-            checkpoint_scheduler: CheckpointScheduler::new(),
+            checkpoint_scheduler: CheckpointScheduler::new_with_queue_limit(
+                limits.max_checkpoint_job_queue,
+            ),
             wal: Arc::new(wal),
             export_ctx,
             limits,
