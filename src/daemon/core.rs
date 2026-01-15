@@ -2636,6 +2636,12 @@ impl Daemon {
                 )
                 .into(),
 
+            Request::AdminFlush {
+                repo,
+                namespace,
+                checkpoint_now,
+            } => self.admin_flush(&repo, namespace, checkpoint_now, git_tx).into(),
+
             Request::AdminFingerprint {
                 repo,
                 read,

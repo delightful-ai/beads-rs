@@ -9,13 +9,16 @@ use crossbeam::channel::Sender;
 use crate::api::{
     AdminCheckpointGroup, AdminClockAnomaly, AdminClockAnomalyKind, AdminDoctorOutput,
     AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample,
-    AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel, AdminMetricSample,
-    AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff, AdminRebuildIndexOutput,
-    AdminRebuildIndexStats, AdminRebuildIndexTruncation, AdminReloadPoliciesOutput,
-    AdminReplicationNamespace, AdminReplicationPeer, AdminRotateReplicaIdOutput, AdminScrubOutput,
-    AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
+    AdminFlushOutput, AdminFlushSegment, AdminMaintenanceModeOutput, AdminMetricHistogram,
+    AdminMetricLabel, AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
+    AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
+    AdminReloadPoliciesOutput, AdminReplicationNamespace, AdminReplicationPeer,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalNamespace,
+    AdminWalSegment,
 };
-use crate::core::{NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, Watermarks};
+use crate::core::{
+    NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, WallClock, Watermarks,
+};
 use crate::daemon::clock::{ClockAnomaly, ClockAnomalyKind};
 use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_namespaces};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
@@ -221,6 +224,58 @@ impl Daemon {
 
         let output = AdminScrubOutput { report };
         Response::ok(ResponsePayload::Query(QueryResult::AdminScrub(output)))
+    }
+
+    pub fn admin_flush(
+        &mut self,
+        repo: &Path,
+        namespace: Option<String>,
+        checkpoint_now: bool,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => return Response::err(err),
+        };
+        let namespace = match self.normalize_namespace(&proof, namespace) {
+            Ok(namespace) => namespace,
+            Err(err) => return Response::err(err),
+        };
+        let store = match self.store_runtime_mut(&proof) {
+            Ok(store) => store,
+            Err(err) => return Response::err(err),
+        };
+
+        let flushed_at_ms = WallClock::now().0;
+        let segment = match store.event_wal.flush(&namespace) {
+            Ok(segment) => segment,
+            Err(err) => return Response::err(OpError::EventWal(Box::new(err))),
+        };
+
+        let checkpoint_groups = if checkpoint_now {
+            let groups = self
+                .checkpoint_scheduler
+                .force_checkpoint_for_namespace(store.meta.store_id(), &namespace);
+            self.emit_checkpoint_queue_depth();
+            groups
+        } else {
+            Vec::new()
+        };
+
+        let segment = segment.map(|segment| AdminFlushSegment {
+            segment_id: segment.segment_id,
+            created_at_ms: segment.created_at_ms,
+            path: segment.path.display().to_string(),
+        });
+
+        let output = AdminFlushOutput {
+            namespace,
+            flushed_at_ms,
+            segment,
+            checkpoint_now,
+            checkpoint_groups,
+        };
+        Response::ok(ResponsePayload::Query(QueryResult::AdminFlush(output)))
     }
 
     pub fn admin_fingerprint(

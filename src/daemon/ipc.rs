@@ -388,6 +388,15 @@ pub enum Request {
         verify_checkpoint_cache: bool,
     },
 
+    /// Admin flush WAL namespace.
+    AdminFlush {
+        repo: PathBuf,
+        #[serde(default)]
+        namespace: Option<String>,
+        #[serde(default)]
+        checkpoint_now: bool,
+    },
+
     /// Admin fingerprint report.
     AdminFingerprint {
         repo: PathBuf,
