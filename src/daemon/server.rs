@@ -986,8 +986,11 @@ fn stream_event_response_from_parts(
         Ok(body) => body,
         Err(err) => {
             return Response::err(
-                ErrorPayload::new(ErrorCode::Corruption, "event body decode failed", false)
-                    .with_details(error_details::CorruptionDetails {
+                ErrorPayload::new(ErrorCode::WalCorrupt, "event body decode failed", false)
+                    .with_details(error_details::WalCorruptDetails {
+                        namespace: event_id.namespace.clone(),
+                        segment_id: None,
+                        offset: None,
                         reason: err.to_string(),
                     }),
             );
@@ -1390,11 +1393,11 @@ mod tests {
             &Limits::default(),
         )
         .unwrap_err();
-        assert_eq!(err.code, ErrorCode::Corruption);
+        assert_eq!(err.code, ErrorCode::WalCorrupt);
     }
 
     #[test]
-    fn stream_event_decode_failure_is_corruption() {
+    fn stream_event_decode_failure_is_wal_corrupt() {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
         let event_id = EventId::new(origin, namespace, Seq1::from_u64(1).unwrap());
@@ -1405,11 +1408,12 @@ mod tests {
         let Response::Err { err } = response else {
             panic!("expected corruption error");
         };
-        assert_eq!(err.code, ErrorCode::Corruption);
+        assert_eq!(err.code, ErrorCode::WalCorrupt);
         let details = err
-            .details_as::<error_details::CorruptionDetails>()
+            .details_as::<error_details::WalCorruptDetails>()
             .unwrap()
             .expect("details");
+        assert_eq!(details.namespace, namespace);
         assert!(!details.reason.is_empty());
     }
 

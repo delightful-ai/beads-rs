@@ -3,16 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::error::details::{
-    CorruptionDetails, FrameTooLargeDetails, InternalErrorDetails, InvalidRequestDetails,
-    NamespacePolicyViolationDetails, NonCanonicalDetails, ReplicaIdCollisionDetails,
-    StoreEpochMismatchDetails, SubscriberLaggedDetails, VersionIncompatibleDetails,
-    WrongStoreDetails,
+    EventIdDetails, FrameTooLargeDetails, HashMismatchDetails, InternalErrorDetails,
+    InvalidRequestDetails, NamespacePolicyViolationDetails, NonCanonicalDetails,
+    PrevShaMismatchDetails, ReplicaIdCollisionDetails, StoreEpochMismatchDetails,
+    SubscriberLaggedDetails, VersionIncompatibleDetails, WrongStoreDetails,
 };
 use crate::core::{
     Applied, DecodeError, Durable, ErrorCode, ErrorPayload, EventFrameError, EventFrameV1, EventId,
     EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, PrevVerified, ReplicaId,
     ReplicaRole, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEvent, Watermark,
-    WatermarkError, verify_event_frame,
+    WatermarkError, hash_event_body, verify_event_frame,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::metrics;
@@ -425,6 +425,12 @@ impl Session {
                 return self.fail(namespace_policy_violation_payload(&namespace));
             }
             let durable = self.durable_for(&namespace, &origin);
+            let head_seq = durable.seq().get();
+            let head_sha = match durable.head() {
+                HeadStatus::Genesis => None,
+                HeadStatus::Known(head) => Some(Sha256(head)),
+                HeadStatus::Unknown => None,
+            };
 
             let expected_prev =
                 match self.expected_prev_head(durable, frame.eid.origin_seq) {
@@ -443,7 +449,13 @@ impl Session {
                 ) {
                     Ok(event) => event,
                     Err(err) => {
-                        return self.fail(event_frame_error_payload(&frame, &self.limits, err));
+                        return self.fail(event_frame_error_payload(
+                            &frame,
+                            &self.limits,
+                            err,
+                            head_sha,
+                            head_seq,
+                        ));
                     }
                 }
             };
@@ -947,10 +959,28 @@ fn internal_error(message: impl Into<String>) -> ErrorPayload {
     )
 }
 
+fn event_id_details(eid: &EventId) -> EventIdDetails {
+    EventIdDetails {
+        namespace: eid.namespace.clone(),
+        origin_replica_id: eid.origin_replica_id,
+        origin_seq: eid.origin_seq.get(),
+    }
+}
+
+fn sha256_hex(value: Sha256) -> String {
+    hex::encode(value.as_bytes())
+}
+
+fn sha256_hex_or_zero(value: Option<Sha256>) -> String {
+    sha256_hex(value.unwrap_or(Sha256([0u8; 32])))
+}
+
 fn event_frame_error_payload(
     frame: &EventFrameV1,
     limits: &Limits,
     err: EventFrameError,
+    head_sha: Option<Sha256>,
+    head_seq: u64,
 ) -> ErrorPayload {
     match err {
         EventFrameError::WrongStore { expected, got } => {
@@ -974,18 +1004,23 @@ fn event_frame_error_payload(
             reason: Some("event_id does not match decoded body".to_string()),
         }),
         EventFrameError::HashMismatch => {
-            ErrorPayload::new(ErrorCode::Corruption, "event sha256 mismatch", false).with_details(
-                CorruptionDetails {
-                    reason: "event sha256 mismatch".to_string(),
+            let expected = hash_event_body(&frame.bytes);
+            ErrorPayload::new(ErrorCode::HashMismatch, "event sha256 mismatch", false).with_details(
+                HashMismatchDetails {
+                    eid: event_id_details(&frame.eid),
+                    expected_sha256: sha256_hex(expected),
+                    got_sha256: sha256_hex(frame.sha256),
                 },
             )
         }
         EventFrameError::PrevMismatch => {
-            ErrorPayload::new(ErrorCode::Corruption, "prev_sha256 mismatch", false).with_details(
-                CorruptionDetails {
-                    reason: "prev_sha256 mismatch".to_string(),
-                },
-            )
+            ErrorPayload::new(ErrorCode::PrevShaMismatch, "prev_sha256 mismatch", false)
+                .with_details(PrevShaMismatchDetails {
+                    eid: event_id_details(&frame.eid),
+                    expected_prev_sha256: sha256_hex_or_zero(head_sha),
+                    got_prev_sha256: sha256_hex_or_zero(frame.prev_sha256),
+                    head_seq,
+                })
         }
         EventFrameError::Validation(err) => {
             ErrorPayload::new(ErrorCode::InvalidRequest, err.to_string(), false).with_details(
@@ -1005,11 +1040,24 @@ fn event_frame_error_payload(
 
 fn drain_error_payload(err: DrainError) -> ErrorPayload {
     match err {
-        DrainError::PrevMismatch { expected, got } => {
-            let reason = format!("prev_sha256 mismatch (expected {expected:?}, got {got:?})");
-            ErrorPayload::new(ErrorCode::Corruption, "prev_sha256 mismatch", false)
-                .with_details(CorruptionDetails { reason })
-        }
+        DrainError::PrevMismatch {
+            namespace,
+            origin,
+            seq,
+            expected,
+            got,
+            head_seq,
+        } => ErrorPayload::new(ErrorCode::PrevShaMismatch, "prev_sha256 mismatch", false)
+            .with_details(PrevShaMismatchDetails {
+                eid: EventIdDetails {
+                    namespace,
+                    origin_replica_id: origin,
+                    origin_seq: seq.get(),
+                },
+                expected_prev_sha256: sha256_hex_or_zero(expected),
+                got_prev_sha256: sha256_hex_or_zero(got),
+                head_seq,
+            }),
     }
 }
 
@@ -1615,6 +1663,8 @@ mod tests {
             &frame,
             &limits,
             EventFrameError::Decode(DecodeError::IndefiniteLength),
+            None,
+            0,
         );
         assert_eq!(payload.code, ErrorCode::NonCanonical);
         let details = payload
@@ -1635,6 +1685,8 @@ mod tests {
             &frame,
             &limits,
             EventFrameError::Decode(DecodeError::DecodeLimit("max_wal_record_bytes")),
+            None,
+            0,
         );
         assert_eq!(payload.code, ErrorCode::FrameTooLarge);
         let details = payload
@@ -1657,6 +1709,8 @@ mod tests {
                 field: "store_id",
                 reason: "bad".to_string(),
             }),
+            None,
+            0,
         );
         assert_eq!(payload.code, ErrorCode::InvalidRequest);
         let details = payload
@@ -1669,5 +1723,74 @@ mod tests {
                 .unwrap_or_default()
                 .contains("invalid field store_id")
         );
+    }
+
+    #[test]
+    fn hash_mismatch_maps_to_hash_mismatch_details() {
+        let (_store, identity, origin) = base_store();
+        let mut frame = make_event(identity, NamespaceId::core(), origin, 1, None);
+        frame.sha256 = Sha256([9u8; 32]);
+
+        let payload = event_frame_error_payload(
+            &frame,
+            &Limits::default(),
+            EventFrameError::HashMismatch,
+            None,
+            0,
+        );
+
+        assert_eq!(payload.code, ErrorCode::HashMismatch);
+        let details = payload
+            .details_as::<HashMismatchDetails>()
+            .unwrap()
+            .expect("hash mismatch details");
+        assert_eq!(details.eid.namespace, frame.eid.namespace);
+        assert_eq!(details.eid.origin_replica_id, frame.eid.origin_replica_id);
+        assert_eq!(details.eid.origin_seq, frame.eid.origin_seq.get());
+        assert_eq!(
+            details.expected_sha256,
+            hex::encode(hash_event_body(&frame.bytes).as_bytes())
+        );
+        assert_eq!(
+            details.got_sha256,
+            hex::encode(frame.sha256.as_bytes())
+        );
+    }
+
+    #[test]
+    fn prev_mismatch_maps_to_prev_sha_mismatch_details() {
+        let (_store, identity, origin) = base_store();
+        let expected_prev = Sha256([1u8; 32]);
+        let got_prev = Sha256([2u8; 32]);
+        let frame = make_event(
+            identity,
+            NamespaceId::core(),
+            origin,
+            2,
+            Some(got_prev),
+        );
+
+        let payload = event_frame_error_payload(
+            &frame,
+            &Limits::default(),
+            EventFrameError::PrevMismatch,
+            Some(expected_prev),
+            1,
+        );
+
+        assert_eq!(payload.code, ErrorCode::PrevShaMismatch);
+        let details = payload
+            .details_as::<PrevShaMismatchDetails>()
+            .unwrap()
+            .expect("prev mismatch details");
+        assert_eq!(details.eid.namespace, frame.eid.namespace);
+        assert_eq!(details.eid.origin_replica_id, frame.eid.origin_replica_id);
+        assert_eq!(details.eid.origin_seq, frame.eid.origin_seq.get());
+        assert_eq!(
+            details.expected_prev_sha256,
+            hex::encode(expected_prev.as_bytes())
+        );
+        assert_eq!(details.got_prev_sha256, hex::encode(got_prev.as_bytes()));
+        assert_eq!(details.head_seq, 1);
     }
 }

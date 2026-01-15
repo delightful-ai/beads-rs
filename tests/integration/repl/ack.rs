@@ -13,6 +13,7 @@ use beads_rs::daemon::repl::{
 use beads_rs::daemon::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
 };
+use beads_rs::core::error::details as error_details;
 use beads_rs::paths;
 use beads_rs::{
     ActorId, ErrorCode, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
@@ -227,7 +228,17 @@ fn repl_prev_sha_mismatch_rejects() {
         })
         .expect("error");
 
-    assert_eq!(error.code, ErrorCode::Corruption);
+    assert_eq!(error.code, ErrorCode::PrevShaMismatch);
+    let details = error
+        .details_as::<error_details::PrevShaMismatchDetails>()
+        .unwrap()
+        .expect("details");
+    assert_eq!(details.eid.namespace, namespace);
+    assert_eq!(details.eid.origin_replica_id, origin);
+    assert_eq!(details.eid.origin_seq, 2);
+    assert_eq!(details.expected_prev_sha256, hex::encode(e1.sha256.as_bytes()));
+    assert_eq!(details.got_prev_sha256, hex::encode(bad_prev.as_bytes()));
+    assert_eq!(details.head_seq, 1);
 }
 
 #[test]

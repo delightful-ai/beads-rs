@@ -344,7 +344,7 @@ impl WalRangeError {
                 segment_id,
                 offset,
                 reason,
-            } => ErrorPayload::new(ErrorCode::Corruption, "wal corrupt", false).with_details(
+            } => ErrorPayload::new(ErrorCode::WalCorrupt, "wal corrupt", false).with_details(
                 WalCorruptDetails {
                     namespace: namespace.clone(),
                     segment_id: *segment_id,
@@ -353,7 +353,7 @@ impl WalRangeError {
                 },
             ),
             WalRangeError::Index(err) => {
-                ErrorPayload::new(ErrorCode::Corruption, "index corrupt", false).with_details(
+                ErrorPayload::new(ErrorCode::IndexCorrupt, "index corrupt", false).with_details(
                     IndexCorruptDetails {
                         reason: err.to_string(),
                     },

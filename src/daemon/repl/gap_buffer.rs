@@ -49,8 +49,12 @@ pub enum IngestDecision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DrainError {
     PrevMismatch {
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
         expected: Option<Sha256>,
         got: Option<Sha256>,
+        head_seq: u64,
     },
 }
 
@@ -165,8 +169,12 @@ impl OriginStreamState {
                 VerifiedEventAny::Contiguous(ev) => {
                     if head != ev.prev.prev {
                         return Err(DrainError::PrevMismatch {
+                            namespace: self.namespace.clone(),
+                            origin: self.origin,
+                            seq: next,
                             expected: head,
                             got: ev.prev.prev,
+                            head_seq: next.get().saturating_sub(1),
                         });
                     }
                     ev
@@ -174,8 +182,12 @@ impl OriginStreamState {
                 VerifiedEventAny::Deferred(ev) => {
                     if head != Some(ev.prev.prev) {
                         return Err(DrainError::PrevMismatch {
+                            namespace: self.namespace.clone(),
+                            origin: self.origin,
+                            seq: next,
                             expected: head,
                             got: Some(ev.prev.prev),
+                            head_seq: next.get().saturating_sub(1),
                         });
                     }
                     VerifiedEvent {
