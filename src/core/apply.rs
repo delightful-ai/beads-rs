@@ -10,7 +10,7 @@ use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::{DepEdge, DepKey, DepLife};
 use super::domain::{BeadType, Priority};
-use super::event::{EventBody, EventKindV1};
+use super::event::{EventBody, EventKindV1, TxnV1};
 use super::identity::{ActorId, BeadId, NoteId};
 use super::state::CanonicalState;
 use super::time::{Stamp, WriteStamp};
@@ -35,8 +35,6 @@ pub struct ApplyOutcome {
 
 #[derive(Debug, Error)]
 pub enum ApplyError {
-    #[error("event missing hlc_max for stamp derivation")]
-    MissingHlcMax,
     #[error("unsupported event kind: {0}")]
     UnsupportedKind(String),
     #[error("bead {id} missing creation stamp")]
@@ -57,14 +55,14 @@ pub fn apply_event(
     state: &mut CanonicalState,
     body: &EventBody,
 ) -> Result<ApplyOutcome, ApplyError> {
-    if !matches!(body.kind, EventKindV1::TxnV1) {
-        return Err(ApplyError::UnsupportedKind(body.kind.as_str().to_string()));
-    }
+    let txn = match &body.kind {
+        EventKindV1::TxnV1(txn) => txn,
+    };
 
-    let stamp = event_stamp(body)?;
+    let stamp = event_stamp(body, txn);
     let mut outcome = ApplyOutcome::default();
 
-    for op in body.delta.iter() {
+    for op in txn.delta.iter() {
         match op {
             TxnOpV1::BeadUpsert(patch) => {
                 apply_bead_upsert(state, patch, &stamp, &mut outcome)?;
@@ -87,12 +85,12 @@ pub fn apply_event(
     Ok(outcome)
 }
 
-fn event_stamp(body: &EventBody) -> Result<Stamp, ApplyError> {
-    let hlc = body.hlc_max.as_ref().ok_or(ApplyError::MissingHlcMax)?;
-    Ok(Stamp::new(
+fn event_stamp(body: &EventBody, txn: &TxnV1) -> Stamp {
+    let hlc = &txn.hlc_max;
+    Stamp::new(
         WriteStamp::new(body.event_time_ms, hlc.logical),
         hlc.actor_id.clone(),
-    ))
+    )
 }
 
 fn creation_stamp(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<Stamp, ApplyError> {
@@ -624,24 +622,24 @@ mod tests {
             event_time_ms: 100,
             txn_id,
             client_request_id: Some(client_request_id),
-            kind: EventKindV1::TxnV1,
-            delta,
-            hlc_max: Some(HlcMax {
-                actor_id: actor_id("alice"),
-                physical_ms: 100,
-                logical: 5,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta,
+                hlc_max: HlcMax {
+                    actor_id: actor_id("alice"),
+                    physical_ms: 100,
+                    logical: 5,
+                },
             }),
         }
     }
 
     fn event_with_delta(delta: TxnDeltaV1, wall_ms: u64) -> EventBody {
         let mut event = sample_event("note");
-        event.delta = delta;
+        let EventKindV1::TxnV1(txn) = &mut event.kind;
+        txn.delta = delta;
+        txn.hlc_max.physical_ms = wall_ms;
+        txn.hlc_max.logical = 0;
         event.event_time_ms = wall_ms;
-        if let Some(hlc) = &mut event.hlc_max {
-            hlc.physical_ms = wall_ms;
-            hlc.logical = 0;
-        }
         event
     }
 

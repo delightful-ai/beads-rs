@@ -56,7 +56,7 @@ pub use error::{
 pub use event::{
     Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventFrameError, EventFrameV1,
     EventKindV1, EventShaLookup, EventShaLookupError, EventValidationError, HlcMax, Opaque,
-    PrevDeferred, PrevVerified, Sha256, VerifiedEvent, VerifiedEventAny, decode_event_body,
+    PrevDeferred, PrevVerified, Sha256, TxnV1, VerifiedEvent, VerifiedEventAny, decode_event_body,
     decode_event_hlc_max, encode_event_body_canonical, hash_event_body, sha256_bytes,
     validate_event_body_limits, verify_event_frame,
 };

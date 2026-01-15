@@ -108,21 +108,34 @@ pub struct HlcMax {
     pub logical: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxnV1 {
+    pub hlc_max: HlcMax,
+    pub delta: TxnDeltaV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventKindV1 {
+    TxnV1(TxnV1),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventKindTag {
     TxnV1,
 }
 
 impl EventKindV1 {
     pub fn as_str(&self) -> &'static str {
         match self {
-            EventKindV1::TxnV1 => "txn_v1",
+            EventKindV1::TxnV1(_) => "txn_v1",
         }
     }
+}
 
-    pub fn parse(raw: &str) -> Option<Self> {
+impl EventKindTag {
+    fn parse(raw: &str) -> Option<Self> {
         match raw {
-            "txn_v1" => Some(EventKindV1::TxnV1),
+            "txn_v1" => Some(EventKindTag::TxnV1),
             _ => None,
         }
     }
@@ -139,8 +152,6 @@ pub struct EventBody {
     pub txn_id: TxnId,
     pub client_request_id: Option<ClientRequestId>,
     pub kind: EventKindV1,
-    pub delta: TxnDeltaV1,
-    pub hlc_max: Option<HlcMax>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -314,17 +325,6 @@ pub fn decode_event_body(
     if dec.datatype().is_ok() {
         return Err(DecodeError::TrailingBytes);
     }
-    if matches!(body.kind, EventKindV1::TxnV1) && body.hlc_max.is_none() {
-        return Err(DecodeError::MissingField("hlc_max"));
-    }
-    if let Some(hlc_max) = &body.hlc_max
-        && hlc_max.physical_ms != body.event_time_ms
-    {
-        return Err(DecodeError::InvalidField {
-            field: "hlc_max.physical_ms",
-            reason: "must match event_time_ms".into(),
-        });
-    }
     Ok((
         EventBytes::<Opaque>::new(Bytes::copy_from_slice(bytes)),
         body,
@@ -342,14 +342,14 @@ pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcM
     let mut seen_keys = BTreeSet::new();
     let mut hlc_max = None;
     let mut event_time_ms = None;
-    let mut kind: Option<EventKindV1> = None;
+    let mut kind: Option<EventKindTag> = None;
     for _ in 0..map_len {
         let key = decode_text(&mut dec, limits)?;
         ensure_unique_key(&mut seen_keys, key)?;
         match key {
             "kind" => {
                 let raw = decode_text(&mut dec, limits)?;
-                kind = EventKindV1::parse(raw);
+                kind = EventKindTag::parse(raw);
             }
             "event_time_ms" => {
                 event_time_ms = Some(decode_u64(&mut dec, "event_time_ms")?);
@@ -365,7 +365,7 @@ pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcM
     if dec.datatype().is_ok() {
         return Err(DecodeError::TrailingBytes);
     }
-    if matches!(kind, Some(EventKindV1::TxnV1)) && hlc_max.is_none() {
+    if matches!(kind, Some(EventKindTag::TxnV1)) && hlc_max.is_none() {
         return Err(DecodeError::MissingField("hlc_max"));
     }
     if let Some(hlc_max) = &hlc_max {
@@ -384,12 +384,14 @@ fn encode_event_body_map(
     enc: &mut Encoder<&mut Vec<u8>>,
     body: &EventBody,
 ) -> Result<(), EncodeError> {
-    let mut len = 10;
+    let mut len = 9;
     if body.client_request_id.is_some() {
         len += 1;
     }
-    if body.hlc_max.is_some() {
-        len += 1;
+    match &body.kind {
+        EventKindV1::TxnV1(_) => {
+            len += 2;
+        }
     }
 
     enc.map(len as u64)?;
@@ -399,8 +401,12 @@ fn encode_event_body_map(
         enc.str(&client_request_id.as_uuid().to_string())?;
     }
 
-    enc.str("delta")?;
-    encode_txn_delta(enc, &body.delta)?;
+    match &body.kind {
+        EventKindV1::TxnV1(txn) => {
+            enc.str("delta")?;
+            encode_txn_delta(enc, &txn.delta)?;
+        }
+    }
 
     enc.str("envelope_v")?;
     enc.u32(body.envelope_v)?;
@@ -408,9 +414,11 @@ fn encode_event_body_map(
     enc.str("event_time_ms")?;
     enc.u64(body.event_time_ms)?;
 
-    if let Some(hlc_max) = &body.hlc_max {
-        enc.str("hlc_max")?;
-        encode_hlc_max(enc, hlc_max)?;
+    match &body.kind {
+        EventKindV1::TxnV1(txn) => {
+            enc.str("hlc_max")?;
+            encode_hlc_max(enc, &txn.hlc_max)?;
+        }
     }
 
     enc.str("kind")?;
@@ -454,7 +462,7 @@ fn decode_event_body_map(
     let mut event_time_ms = None;
     let mut txn_id: Option<TxnId> = None;
     let mut client_request_id: Option<ClientRequestId> = None;
-    let mut kind: Option<EventKindV1> = None;
+    let mut kind: Option<EventKindTag> = None;
     let mut delta: Option<TxnDeltaV1> = None;
     let mut hlc_max: Option<HlcMax> = None;
 
@@ -481,7 +489,7 @@ fn decode_event_body_map(
             "kind" => {
                 let raw = decode_text(dec, limits)?;
                 kind = Some(
-                    EventKindV1::parse(raw)
+                    EventKindTag::parse(raw)
                         .ok_or_else(|| DecodeError::UnsupportedKind(raw.to_string()))?,
                 );
             }
@@ -530,7 +538,19 @@ fn decode_event_body_map(
     let event_time_ms = event_time_ms.ok_or(DecodeError::MissingField("event_time_ms"))?;
     let txn_id = txn_id.ok_or(DecodeError::MissingField("txn_id"))?;
     let kind = kind.ok_or(DecodeError::MissingField("kind"))?;
-    let delta = delta.ok_or(DecodeError::MissingField("delta"))?;
+    let kind = match kind {
+        EventKindTag::TxnV1 => {
+            let delta = delta.ok_or(DecodeError::MissingField("delta"))?;
+            let hlc_max = hlc_max.ok_or(DecodeError::MissingField("hlc_max"))?;
+            if hlc_max.physical_ms != event_time_ms {
+                return Err(DecodeError::InvalidField {
+                    field: "hlc_max.physical_ms",
+                    reason: "must match event_time_ms".into(),
+                });
+            }
+            EventKindV1::TxnV1(TxnV1 { hlc_max, delta })
+        }
+    };
 
     if envelope_v != 1 {
         return Err(DecodeError::InvalidField {
@@ -549,8 +569,6 @@ fn decode_event_body_map(
         txn_id,
         client_request_id,
         kind,
-        delta,
-        hlc_max,
     })
 }
 
@@ -1979,7 +1997,9 @@ pub fn validate_event_body_limits(
     body: &EventBody,
     limits: &Limits,
 ) -> Result<(), EventValidationError> {
-    let delta = &body.delta;
+    let delta = match &body.kind {
+        EventKindV1::TxnV1(txn) => &txn.delta,
+    };
     let ops = delta.total_ops();
     if ops > limits.max_ops_per_txn {
         return Err(EventValidationError::TooManyOps {
@@ -2121,6 +2141,18 @@ mod tests {
         ActorId::new(actor).unwrap()
     }
 
+    fn txn(body: &EventBody) -> &TxnV1 {
+        match &body.kind {
+            EventKindV1::TxnV1(txn) => txn,
+        }
+    }
+
+    fn txn_mut(body: &mut EventBody) -> &mut TxnV1 {
+        match &mut body.kind {
+            EventKindV1::TxnV1(txn) => txn,
+        }
+    }
+
     fn sample_body() -> EventBody {
         let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let store = StoreIdentity::new(store_id, StoreEpoch::new(2));
@@ -2145,20 +2177,21 @@ mod tests {
             event_time_ms: 123,
             txn_id,
             client_request_id: Some(client_request_id),
-            kind: EventKindV1::TxnV1,
-            delta,
-            hlc_max: Some(HlcMax {
-                actor_id: actor_id("alice"),
-                physical_ms: 123,
-                logical: 7,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta,
+                hlc_max: HlcMax {
+                    actor_id: actor_id("alice"),
+                    physical_ms: 123,
+                    logical: 7,
+                },
             }),
         }
     }
 
     fn sample_body_with_ops() -> EventBody {
         let mut body = sample_body();
-        let mut delta = body.delta;
-        delta
+        let txn = txn_mut(&mut body);
+        txn.delta
             .insert(TxnOpV1::BeadDelete(WireTombstoneV1 {
                 id: BeadId::parse("bd-delete").unwrap(),
                 deleted_at: WireStamp(20, 1),
@@ -2168,7 +2201,7 @@ mod tests {
                 lineage_created_by: Some(actor_id("bob")),
             }))
             .unwrap();
-        delta
+        txn.delta
             .insert(TxnOpV1::DepUpsert(WireDepV1 {
                 from: BeadId::parse("bd-test1").unwrap(),
                 to: BeadId::parse("bd-dep").unwrap(),
@@ -2179,7 +2212,7 @@ mod tests {
                 deleted_by: Some(actor_id("carol")),
             }))
             .unwrap();
-        delta
+        txn.delta
             .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
                 from: BeadId::parse("bd-test1").unwrap(),
                 to: BeadId::parse("bd-dep2").unwrap(),
@@ -2188,7 +2221,7 @@ mod tests {
                 deleted_by: actor_id("alice"),
             }))
             .unwrap();
-        delta
+        txn.delta
             .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
                 bead_id: BeadId::parse("bd-test1").unwrap(),
                 note: WireNoteV1 {
@@ -2199,7 +2232,6 @@ mod tests {
                 },
             }))
             .unwrap();
-        body.delta = delta;
         body
     }
 
@@ -2207,13 +2239,11 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = Encoder::new(&mut buf);
 
-        let mut len = 10;
+        let mut len = 9;
         if body.client_request_id.is_some() {
             len += 1;
         }
-        if body.hlc_max.is_some() {
-            len += 1;
-        }
+        len += 2;
         len += 1;
 
         enc.map(len as u64).unwrap();
@@ -2228,8 +2258,9 @@ mod tests {
             enc.str(&client_request_id.as_uuid().to_string()).unwrap();
         }
 
+        let txn = txn(body);
         enc.str("delta").unwrap();
-        encode_txn_delta(&mut enc, &body.delta).unwrap();
+        encode_txn_delta(&mut enc, &txn.delta).unwrap();
 
         enc.str("envelope_v").unwrap();
         enc.u32(body.envelope_v).unwrap();
@@ -2237,18 +2268,16 @@ mod tests {
         enc.str("event_time_ms").unwrap();
         enc.u64(body.event_time_ms).unwrap();
 
-        if let Some(hlc_max) = &body.hlc_max {
-            enc.str("hlc_max").unwrap();
-            enc.map(4).unwrap();
-            enc.str("actor_id").unwrap();
-            enc.str(hlc_max.actor_id.as_str()).unwrap();
-            enc.str("logical").unwrap();
-            enc.u32(hlc_max.logical).unwrap();
-            enc.str("physical_ms").unwrap();
-            enc.u64(hlc_max.physical_ms).unwrap();
-            enc.str("future_hlc").unwrap();
-            enc.u64(999).unwrap();
-        }
+        enc.str("hlc_max").unwrap();
+        enc.map(4).unwrap();
+        enc.str("actor_id").unwrap();
+        enc.str(txn.hlc_max.actor_id.as_str()).unwrap();
+        enc.str("logical").unwrap();
+        enc.u32(txn.hlc_max.logical).unwrap();
+        enc.str("physical_ms").unwrap();
+        enc.u64(txn.hlc_max.physical_ms).unwrap();
+        enc.str("future_hlc").unwrap();
+        enc.u64(999).unwrap();
 
         enc.str("kind").unwrap();
         enc.str(body.kind.as_str()).unwrap();
@@ -2309,9 +2338,7 @@ mod tests {
         if body.client_request_id.is_some() {
             len += 1;
         }
-        if body.hlc_max.is_some() {
-            len += 1;
-        }
+        len += 1;
 
         enc.map(len as u64).unwrap();
 
@@ -2329,10 +2356,58 @@ mod tests {
         enc.str("event_time_ms").unwrap();
         enc.u64(body.event_time_ms).unwrap();
 
-        if body.hlc_max.is_some() {
-            enc.str("hlc_max").unwrap();
-            encode_hlc(&mut enc);
+        enc.str("hlc_max").unwrap();
+        encode_hlc(&mut enc);
+
+        enc.str("kind").unwrap();
+        enc.str(body.kind.as_str()).unwrap();
+
+        enc.str("namespace").unwrap();
+        enc.str(body.namespace.as_str()).unwrap();
+
+        enc.str("origin_replica_id").unwrap();
+        enc.str(&body.origin_replica_id.as_uuid().to_string())
+            .unwrap();
+
+        enc.str("origin_seq").unwrap();
+        enc.u64(body.origin_seq.get()).unwrap();
+
+        enc.str("store_epoch").unwrap();
+        enc.u64(body.store.store_epoch.get()).unwrap();
+
+        enc.str("store_id").unwrap();
+        enc.str(&body.store.store_id.as_uuid().to_string()).unwrap();
+
+        enc.str("txn_id").unwrap();
+        enc.str(&body.txn_id.as_uuid().to_string()).unwrap();
+
+        buf
+    }
+
+    fn encode_body_without_hlc_max(body: &EventBody) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+
+        let mut len = 10;
+        if body.client_request_id.is_some() {
+            len += 1;
         }
+
+        enc.map(len as u64).unwrap();
+
+        if let Some(client_request_id) = &body.client_request_id {
+            enc.str("client_request_id").unwrap();
+            enc.str(&client_request_id.as_uuid().to_string()).unwrap();
+        }
+
+        enc.str("delta").unwrap();
+        encode_txn_delta(&mut enc, &txn(body).delta).unwrap();
+
+        enc.str("envelope_v").unwrap();
+        enc.u32(body.envelope_v).unwrap();
+
+        enc.str("event_time_ms").unwrap();
+        enc.u64(body.event_time_ms).unwrap();
 
         enc.str("kind").unwrap();
         enc.str(body.kind.as_str()).unwrap();
@@ -2464,6 +2539,7 @@ mod tests {
     #[test]
     fn decode_rejects_duplicate_txn_delta_keys() {
         let body = sample_body();
+        let txn = txn(&body);
         let bytes = encode_body_with_custom_delta_and_hlc(
             &body,
             |enc| {
@@ -2474,7 +2550,7 @@ mod tests {
                 enc.u32(1).unwrap();
             },
             |enc| {
-                encode_hlc_max(enc, body.hlc_max.as_ref().unwrap()).unwrap();
+                encode_hlc_max(enc, &txn.hlc_max).unwrap();
             },
         );
         let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
@@ -2484,11 +2560,11 @@ mod tests {
     #[test]
     fn decode_rejects_duplicate_hlc_max_keys() {
         let body = sample_body();
-        let hlc = body.hlc_max.as_ref().unwrap();
+        let hlc = &txn(&body).hlc_max;
         let bytes = encode_body_with_custom_delta_and_hlc(
             &body,
             |enc| {
-                encode_txn_delta(enc, &body.delta).unwrap();
+                encode_txn_delta(enc, &txn(&body).delta).unwrap();
             },
             |enc| {
                 enc.map(4).unwrap();
@@ -2509,6 +2585,7 @@ mod tests {
     #[test]
     fn decode_rejects_duplicate_bead_patch_keys() {
         let body = sample_body();
+        let txn = txn(&body);
         let bytes = encode_body_with_custom_delta_and_hlc(
             &body,
             |enc| {
@@ -2526,7 +2603,7 @@ mod tests {
                 enc.u32(1).unwrap();
             },
             |enc| {
-                encode_hlc_max(enc, body.hlc_max.as_ref().unwrap()).unwrap();
+                encode_hlc_max(enc, &txn.hlc_max).unwrap();
             },
         );
         let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
@@ -2536,6 +2613,7 @@ mod tests {
     #[test]
     fn decode_rejects_duplicate_note_keys() {
         let body = sample_body();
+        let txn = txn(&body);
         let bytes = encode_body_with_custom_delta_and_hlc(
             &body,
             |enc| {
@@ -2561,7 +2639,7 @@ mod tests {
                 enc.u32(1).unwrap();
             },
             |enc| {
-                encode_hlc_max(enc, body.hlc_max.as_ref().unwrap()).unwrap();
+                encode_hlc_max(enc, &txn.hlc_max).unwrap();
             },
         );
         let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
@@ -2621,9 +2699,7 @@ mod tests {
     #[test]
     fn decode_rejects_hlc_physical_mismatch() {
         let mut body = sample_body();
-        let Some(ref mut hlc_max) = body.hlc_max else {
-            panic!("expected hlc_max for sample_body");
-        };
+        let hlc_max = &mut txn_mut(&mut body).hlc_max;
         hlc_max.physical_ms = body.event_time_ms + 1;
         let encoded = encode_event_body_canonical(&body).unwrap();
         let err = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap_err();
@@ -2639,9 +2715,7 @@ mod tests {
     #[test]
     fn decode_event_hlc_max_rejects_physical_mismatch() {
         let mut body = sample_body();
-        let Some(ref mut hlc_max) = body.hlc_max else {
-            panic!("expected hlc_max for sample_body");
-        };
+        let hlc_max = &mut txn_mut(&mut body).hlc_max;
         hlc_max.physical_ms = body.event_time_ms + 1;
         let encoded = encode_event_body_canonical(&body).unwrap();
         let err = decode_event_hlc_max(encoded.as_ref(), &Limits::default()).unwrap_err();
@@ -2659,14 +2733,13 @@ mod tests {
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
         let hlc = decode_event_hlc_max(encoded.as_ref(), &Limits::default()).unwrap();
-        assert_eq!(hlc, body.hlc_max);
+        assert_eq!(hlc, Some(txn(&body).hlc_max.clone()));
     }
 
     #[test]
     fn decode_rejects_missing_hlc_max_for_txn() {
-        let mut body = sample_body();
-        body.hlc_max = None;
-        let encoded = encode_event_body_canonical(&body).unwrap();
+        let body = sample_body();
+        let encoded = encode_body_without_hlc_max(&body);
         let err = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap_err();
         assert!(matches!(err, DecodeError::MissingField("hlc_max")));
     }
