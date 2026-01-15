@@ -241,6 +241,8 @@ pub struct Daemon {
 
     /// HLC clock for generating timestamps.
     clock: Clock,
+    /// Per-actor clocks for non-daemon actors.
+    actor_clocks: BTreeMap<ActorId, Clock>,
 
     /// Actor identity (username@hostname).
     actor: ActorId,
@@ -308,6 +310,7 @@ impl Daemon {
             remote_to_store_id: HashMap::new(),
             path_to_remote: HashMap::new(),
             clock: Clock::new_with_max_forward_drift(limits.hlc_max_forward_drift_ms),
+            actor_clocks: BTreeMap::new(),
             actor,
             scheduler: SyncScheduler::new(),
             checkpoint_scheduler: CheckpointScheduler::new(),
@@ -330,7 +333,7 @@ impl Daemon {
         &self.actor
     }
 
-    /// Get the clock (for creating stamps).
+    /// Get the clock (for creating stamps) for the daemon actor.
     pub fn clock(&self) -> &Clock {
         &self.clock
     }
@@ -363,9 +366,28 @@ impl Daemon {
         self.repl_ingest_tx = Some(tx);
     }
 
-    /// Get mutable clock.
+    /// Get mutable clock for the daemon actor.
     pub fn clock_mut(&mut self) -> &mut Clock {
         &mut self.clock
+    }
+
+    pub(crate) fn clock_for_actor_mut(&mut self, actor: &ActorId) -> &mut Clock {
+        if *actor == self.actor {
+            return &mut self.clock;
+        }
+        let max_drift_ms = self.limits.hlc_max_forward_drift_ms;
+        self.actor_clocks
+            .entry(actor.clone())
+            .or_insert_with(|| Clock::new_with_max_forward_drift(max_drift_ms))
+    }
+
+    fn seed_actor_clocks(&mut self, runtime: &StoreRuntime) -> Result<(), OpError> {
+        let rows = runtime.hlc_rows()?;
+        for row in rows {
+            let stamp = WriteStamp::new(row.last_physical_ms, row.last_logical);
+            self.clock_for_actor_mut(&row.actor_id).receive(&stamp);
+        }
+        Ok(())
     }
 
     fn ipc_inflight_total(&self) -> usize {
@@ -597,9 +619,7 @@ impl Daemon {
                 self.limits(),
             )?;
             let runtime = open.runtime;
-            if let Some(hlc_state) = runtime.hlc_state_for_actor(&self.actor)? {
-                self.clock.receive(&hlc_state);
-            }
+            self.seed_actor_clocks(&runtime)?;
             self.stores.insert(store_id, runtime);
             self.register_default_checkpoint_groups(store_id)?;
 
@@ -684,9 +704,7 @@ impl Daemon {
                 self.limits(),
             )?;
             let runtime = open.runtime;
-            if let Some(hlc_state) = runtime.hlc_state_for_actor(&self.actor)? {
-                self.clock.receive(&hlc_state);
-            }
+            self.seed_actor_clocks(&runtime)?;
             self.stores.insert(store_id, runtime);
             self.register_default_checkpoint_groups(store_id)?;
 
@@ -1210,6 +1228,17 @@ impl Daemon {
         batch: Vec<VerifiedEvent<PrevVerified>>,
         now_ms: u64,
     ) -> Result<IngestOutcome, Box<ErrorPayload>> {
+        let actor_stamps: Vec<(ActorId, WriteStamp)> = batch
+            .iter()
+            .filter_map(|event| {
+                event.body.hlc_max.as_ref().map(|hlc_max| {
+                    (
+                        hlc_max.actor_id.clone(),
+                        WriteStamp::new(hlc_max.physical_ms, hlc_max.logical),
+                    )
+                })
+            })
+            .collect();
         let store = self.stores.get_mut(&store_id).ok_or_else(|| {
             Box::new(ErrorPayload::new(
                 ErrorCode::Internal,
@@ -1425,6 +1454,10 @@ impl Daemon {
                 durable_head,
             )
         };
+
+        for (actor_id, stamp) in actor_stamps {
+            self.clock_for_actor_mut(&actor_id).receive(&stamp);
+        }
 
         if let Some(stamp) = max_stamp.clone() {
             self.clock.receive(&stamp);
@@ -1865,15 +1898,19 @@ impl Daemon {
             )
         };
 
-        if let Some(floor) = last_seen_stamp.as_ref() {
-            self.clock.receive(floor);
-        }
         let now_wall_ms = WallClock::now().0;
         let clock_skew = last_seen_stamp
             .as_ref()
             .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
-
-        let write_stamp = self.clock_mut().tick();
+        let (write_stamp, wall_ms) = {
+            let clock = self.clock_for_actor_mut(actor);
+            if let Some(floor) = last_seen_stamp.as_ref() {
+                clock.receive(floor);
+            }
+            let write_stamp = clock.tick();
+            let wall_ms = clock.wall_ms();
+            (write_stamp, wall_ms)
+        };
         let stamp = Stamp {
             at: write_stamp.clone(),
             by: actor.clone(),
@@ -1885,7 +1922,7 @@ impl Daemon {
             next_state.clone(),
             root_slug,
             sequence,
-            self.clock.wall_ms(),
+            wall_ms,
         );
         self.wal
             .write_with_limits(proof.remote(), &entry, self.limits())?;
@@ -3361,6 +3398,7 @@ pub(crate) fn insert_store_for_tests(
         daemon.limits(),
     )
     .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
+    daemon.seed_actor_clocks(&open.runtime)?;
     daemon.stores.insert(store_id, open.runtime);
     daemon.remote_to_store_id.insert(remote.clone(), store_id);
     daemon
@@ -3394,7 +3432,7 @@ mod tests {
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
-    use crate::daemon::wal::{Record, RecordHeader, SegmentHeader, Wal};
+    use crate::daemon::wal::{HlcRow, Record, RecordHeader, SegmentHeader, Wal};
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointSnapshotInput,
         CheckpointStoreMeta, build_snapshot, export_checkpoint, policy_hash, publish_checkpoint,
@@ -3453,6 +3491,7 @@ mod tests {
         )
         .unwrap()
         .runtime;
+        daemon.seed_actor_clocks(&runtime).unwrap();
         daemon.remote_to_store_id.insert(remote.clone(), store_id);
         daemon.stores.insert(store_id, runtime);
         store_id
@@ -4141,6 +4180,78 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(core_count, 0);
         assert_eq!(tmp_count, 1);
+    }
+
+    #[test]
+    fn restores_hlc_state_for_non_daemon_actor() {
+        let (tmp, wal) = test_wal();
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let store_id = store_id_from_remote(&remote);
+        let actor = ActorId::new("alice").unwrap();
+        let future_ms = WallClock::now().0 + 60_000;
+
+        {
+            let mut daemon = Daemon::new(test_actor(), wal);
+            insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path).unwrap();
+
+            let runtime = daemon.stores.get(&store_id).unwrap();
+            let mut txn = runtime.wal_index.writer().begin_txn().unwrap();
+            txn.update_hlc(&HlcRow {
+                actor_id: actor.clone(),
+                last_physical_ms: future_ms,
+                last_logical: 0,
+            })
+            .unwrap();
+            txn.commit().unwrap();
+        }
+
+        let wal = Wal::new(tmp.data_dir()).unwrap();
+        let mut daemon = Daemon::new(test_actor(), wal);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path).unwrap();
+
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let response = daemon.handle_request(
+            Request::Create {
+                repo: repo_path.clone(),
+                id: None,
+                parent: None,
+                title: "hlc".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+                meta: MutationMeta {
+                    actor_id: Some(actor.as_str().to_string()),
+                    ..MutationMeta::default()
+                },
+            },
+            &git_tx,
+        );
+
+        match response {
+            HandleOutcome::Response(Response::Ok {
+                ok: ResponsePayload::Op(_),
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let runtime = daemon.stores.get(&store_id).unwrap();
+        let rows = runtime.wal_index.reader().load_hlc().unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.actor_id == actor)
+            .expect("hlc row for actor");
+        let restored = WriteStamp::new(row.last_physical_ms, row.last_logical);
+        let persisted = WriteStamp::new(future_ms, 0);
+        assert!(restored > persisted);
     }
 
     #[test]
