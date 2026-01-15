@@ -2,6 +2,7 @@
 #
 # beads-rs (bd) installation script
 # Usage: curl -fsSL https://raw.githubusercontent.com/delightful-ai/beads-rs/main/scripts/install.sh | bash
+#        curl -fsSL https://raw.githubusercontent.com/delightful-ai/beads-rs/main/scripts/install.sh | bash -s -- --version v0.1.26
 #
 # Prebuilt binaries: x86_64 Linux, Apple Silicon
 # Other platforms: auto-fallback to cargo install
@@ -20,6 +21,120 @@ log_info() { echo -e "${BLUE}==>${NC} $1"; }
 log_success() { echo -e "${GREEN}==>${NC} $1"; }
 log_warning() { echo -e "${YELLOW}==>${NC} $1"; }
 log_error() { echo -e "${RED}Error:${NC} $1" >&2; }
+
+BD_VERSION="${BD_VERSION:-}"
+
+usage() {
+    cat <<EOF
+beads-rs (bd) installer
+
+Usage:
+  install.sh [--version <tag>]
+
+Examples:
+  ./install.sh
+  ./install.sh --version v0.1.26
+  BD_VERSION=v0.1.26 ./install.sh
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --version)
+                if [ -z "${2:-}" ]; then
+                    log_error "--version requires a value"
+                    usage
+                    exit 1
+                fi
+                BD_VERSION="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                log_error "Unknown argument: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+}
+
+download_file() {
+    local url=$1
+    local dest=$2
+
+    if command -v curl &> /dev/null; then
+        curl -fsSL -o "$dest" "$url"
+        return $?
+    fi
+
+    if command -v wget &> /dev/null; then
+        wget -q -O "$dest" "$url"
+        return $?
+    fi
+
+    log_error "Neither curl nor wget found"
+    return 1
+}
+
+sha256_file() {
+    local path=$1
+    if command -v sha256sum &> /dev/null; then
+        sha256sum "$path" | awk '{print $1}'
+        return 0
+    fi
+    if command -v shasum &> /dev/null; then
+        shasum -a 256 "$path" | awk '{print $1}'
+        return 0
+    fi
+    log_error "sha256sum/shasum not found; cannot verify checksums"
+    return 1
+}
+
+parse_checksum() {
+    local checksum_path=$1
+    local archive_name=$2
+
+    awk -v file="$archive_name" '
+        $1 ~ /^[0-9a-fA-F]{64}$/ {
+            if (NF == 1) {
+                print tolower($1);
+                exit;
+            }
+            if (NF >= 2) {
+                name=$2;
+                sub(/^.*\//, "", name);
+                if (name == file) {
+                    print tolower($1);
+                    exit;
+                }
+            }
+        }
+    ' "$checksum_path"
+}
+
+resolve_latest_tag() {
+    local latest_url="https://github.com/delightful-ai/beads-rs/releases/latest"
+
+    if command -v curl &> /dev/null; then
+        curl -fsSL -o /dev/null -w "%{url_effective}" "$latest_url" | sed 's#.*/##'
+        return 0
+    fi
+
+    if command -v wget &> /dev/null; then
+        wget -qSO- --max-redirect=0 "$latest_url" 2>&1 \
+            | awk '/^  Location:/ {print $2}' \
+            | tail -n 1 \
+            | sed 's#.*/##'
+        return 0
+    fi
+
+    return 1
+}
 
 # Re-sign binary for macOS to avoid slow Gatekeeper checks
 resign_for_macos() {
@@ -63,41 +178,58 @@ install_from_release() {
     local platform=$1
     local tmp_dir
     tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
 
-    log_info "Fetching latest release..."
-    local latest_url="https://api.github.com/repos/delightful-ai/beads-rs/releases/latest"
     local version
-
-    if command -v curl &> /dev/null; then
-        version=$(curl -fsSL "$latest_url" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
-    elif command -v wget &> /dev/null; then
-        version=$(wget -qO- "$latest_url" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
+    local base_url
+    if [ -n "$BD_VERSION" ]; then
+        version="$BD_VERSION"
+        log_info "Using pinned version: $version"
+        base_url="https://github.com/delightful-ai/beads-rs/releases/download/${version}"
     else
-        log_error "Neither curl nor wget found"
-        return 1
+        log_info "Using latest release"
+        version=$(resolve_latest_tag || true)
+        if [ -n "$version" ]; then
+            log_info "Resolved version: $version"
+        fi
+        base_url="https://github.com/delightful-ai/beads-rs/releases/latest/download"
     fi
-
-    if [ -z "$version" ]; then
-        log_error "Failed to fetch latest version"
-        return 1
-    fi
-
-    log_info "Latest version: $version"
 
     local archive_name="beads-rs-${platform}.tar.gz"
-    local download_url="https://github.com/delightful-ai/beads-rs/releases/download/${version}/${archive_name}"
+    local checksum_name="${archive_name}.sha256"
+    local download_url="${base_url}/${archive_name}"
+    local checksum_url="${base_url}/${checksum_name}"
 
     log_info "Downloading $archive_name..."
 
     cd "$tmp_dir"
-    if command -v curl &> /dev/null; then
-        curl -fsSL -o "$archive_name" "$download_url" || { log_error "Download failed"; rm -rf "$tmp_dir"; return 1; }
-    else
-        wget -q -O "$archive_name" "$download_url" || { log_error "Download failed"; rm -rf "$tmp_dir"; return 1; }
+    if ! download_file "$download_url" "$archive_name"; then
+        log_error "Download failed"
+        return 1
+    fi
+
+    log_info "Downloading checksums..."
+    if ! download_file "$checksum_url" "$checksum_name"; then
+        log_error "Checksum download failed"
+        return 1
+    fi
+
+    log_info "Verifying checksum..."
+    local expected
+    expected=$(parse_checksum "$checksum_name" "$archive_name")
+    if [ -z "$expected" ]; then
+        log_error "Failed to parse checksum file"
+        return 1
+    fi
+    local actual
+    actual=$(sha256_file "$archive_name") || return 1
+    if [[ "$actual" != "$expected" ]]; then
+        log_error "Checksum mismatch: expected $expected, got $actual"
+        return 1
     fi
 
     log_info "Extracting..."
-    tar -xzf "$archive_name" || { log_error "Extraction failed"; rm -rf "$tmp_dir"; return 1; }
+    tar -xzf "$archive_name" || { log_error "Extraction failed"; return 1; }
 
     # Determine install location
     local install_dir
@@ -127,6 +259,7 @@ install_from_release() {
     fi
 
     cd - > /dev/null
+    trap - EXIT
     rm -rf "$tmp_dir"
 
     log_success "bd installed to $install_dir/bd"
@@ -140,7 +273,14 @@ install_with_cargo() {
     fi
 
     log_info "Building with cargo (this may take a minute)..."
-    if cargo install beads-rs; then
+    if [ -n "$BD_VERSION" ]; then
+        local cargo_version="${BD_VERSION#v}"
+        log_info "Using pinned version for cargo: $cargo_version"
+        if cargo install beads-rs --version "$cargo_version"; then
+            log_success "bd installed via cargo"
+            return 0
+        fi
+    elif cargo install beads-rs; then
         log_success "bd installed via cargo"
         return 0
     fi
@@ -170,6 +310,7 @@ verify_installation() {
 }
 
 main() {
+    parse_args "$@"
     echo ""
     echo "beads-rs (bd) Installer"
     echo ""
