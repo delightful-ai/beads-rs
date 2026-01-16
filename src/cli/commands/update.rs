@@ -6,7 +6,7 @@ use super::super::{
 use crate::core::{DepKind, WorkflowStatus};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
-use crate::daemon::query::QueryResult;
+use crate::api::QueryResult;
 use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {

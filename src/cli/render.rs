@@ -14,7 +14,7 @@ use crate::api::{
 use crate::core::{HeadStatus, NamespaceId, ReplicaRole, Watermarks};
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
-use crate::daemon::query::QueryResult;
+use crate::api::QueryResult;
 use std::sync::LazyLock;
 
 /// Render a daemon response for human output.

@@ -1,7 +1,7 @@
 use super::super::render;
 use super::super::{Ctx, DeletedArgs, normalize_bead_id, print_ok, send};
 use crate::daemon::ipc::{Request, ResponsePayload};
-use crate::daemon::query::QueryResult;
+use crate::api::QueryResult;
 use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {

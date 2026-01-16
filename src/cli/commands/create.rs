@@ -8,7 +8,7 @@ use super::super::{
 use crate::core::BeadType;
 use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
 use crate::daemon::ops::OpResult;
-use crate::daemon::query::QueryResult;
+use crate::api::QueryResult;
 use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {

@@ -20,7 +20,8 @@ use crate::core::{
 use crate::daemon::ipc::{
     MutationMeta, ReadConsistency, Request, Response, ResponsePayload, send_request,
 };
-use crate::daemon::query::{QueryResult, SortField};
+use crate::api::QueryResult;
+use crate::daemon::query::SortField;
 use crate::{Error, Result};
 
 mod commands;

@@ -8,7 +8,8 @@ use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request_no_aut
 use crate::daemon::store_lock::{StoreLockError, StoreLockMeta, read_lock_meta, remove_lock_file};
 use crate::daemon::store_runtime::StoreRuntimeError;
 use crate::daemon::wal::fsck::{FsckOptions, FsckReport, FsckStatus, fsck_store};
-use crate::daemon::{OpError, QueryResult};
+use crate::api::QueryResult;
+use crate::daemon::OpError;
 use crate::paths;
 use crate::{Error, Result};
 

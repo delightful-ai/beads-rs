@@ -4,7 +4,8 @@ use super::super::{
     parse_time_ms_opt, print_ok, send,
 };
 use crate::daemon::ipc::{Request, ResponsePayload};
-use crate::daemon::query::{Filters, QueryResult};
+use crate::daemon::query::Filters;
+use crate::api::QueryResult;
 use crate::{Error, Result};
 
 pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {

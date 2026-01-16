@@ -4,7 +4,7 @@ use super::super::render;
 use super::super::{Ctx, EpicCmd, print_ok, send};
 use crate::Result;
 use crate::daemon::ipc::{Request, ResponsePayload};
-use crate::daemon::query::QueryResult;
+use crate::api::QueryResult;
 
 #[derive(Debug, Serialize)]
 struct EpicCloseResult {
