@@ -931,6 +931,10 @@ fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &
                                 max_queue_events: Some(subscriber_limits.max_events as u64),
                             });
                     let _ = send_response(writer, &Response::err(payload));
+                } else {
+                    let payload =
+                        ErrorPayload::new(ErrorCode::Disconnected, "subscription closed", true);
+                    let _ = send_response(writer, &Response::err(payload));
                 }
                 return;
             }

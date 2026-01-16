@@ -100,10 +100,16 @@ fn subscribe_gates_on_require_min_seen() {
     let report = run_load(repo, 1, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
-    let expected_seq = required_seq + 1;
-    let event = client.next_event().expect("next event").expect("event");
-    assert_eq!(event.event_id.origin_replica_id, origin);
-    assert_eq!(event.event_id.origin_seq.get(), expected_seq);
+    let seqs = collect_origin_seqs(
+        &mut client,
+        origin,
+        required_seq,
+        1,
+        &repo,
+        &read,
+        &ipc_client,
+    );
+    assert_eq!(seqs, vec![required_seq + 1]);
 }
 
 #[test]
@@ -258,6 +264,26 @@ fn collect_origin_seqs(
                     ipc_client.clone(),
                 )
                 .expect("resubscribe");
+            }
+            Err(StreamClientError::Remote(err)) => {
+                if err.retryable && err.code == ErrorCode::Disconnected {
+                    reconnects += 1;
+                    if reconnects > MAX_RECONNECTS {
+                        panic!(
+                            "subscribe stream disconnected {} times (remote)",
+                            reconnects
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(50 * reconnects as u64));
+                    *client = StreamingClient::subscribe_with_client(
+                        repo.clone(),
+                        read.clone(),
+                        ipc_client.clone(),
+                    )
+                    .expect("resubscribe");
+                } else {
+                    panic!("stream event: {err:?}");
+                }
             }
             Err(err) => panic!("stream event: {err:?}"),
         }
