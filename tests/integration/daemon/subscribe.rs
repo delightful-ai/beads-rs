@@ -1,6 +1,7 @@
+#![cfg(feature = "slow-tests")]
 //! IPC streaming subscriptions.
-
-
+//!
+//! These tests exercise realtime streaming and include time-based waits.
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

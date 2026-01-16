@@ -1,6 +1,7 @@
+#![cfg(feature = "slow-tests")]
 //! Admin status correctness under load.
-
-
+//!
+//! These tests spawn the daemon and poll with time-based sleeps.
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
