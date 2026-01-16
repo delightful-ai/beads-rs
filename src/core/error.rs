@@ -1206,4 +1206,27 @@ mod tests {
         let json2 = serde_json::to_string(&parsed).unwrap();
         assert!(json2.contains("new_error_code"));
     }
+
+    #[test]
+    fn error_code_parse_distinguishes_protocol_and_cli() {
+        assert_eq!(
+            ErrorCode::parse("overloaded"),
+            ErrorCode::Protocol(ProtocolErrorCode::Overloaded)
+        );
+        assert_eq!(
+            ErrorCode::parse("not_found"),
+            ErrorCode::Cli(CliErrorCode::NotFound)
+        );
+    }
+
+    #[test]
+    fn error_code_serializes_to_string_values() {
+        let protocol = ErrorCode::from(ProtocolErrorCode::WalCorrupt);
+        let cli = ErrorCode::from(CliErrorCode::InvalidTransition);
+        assert_eq!(serde_json::to_string(&protocol).unwrap(), "\"wal_corrupt\"");
+        assert_eq!(
+            serde_json::to_string(&cli).unwrap(),
+            "\"invalid_transition\""
+        );
+    }
 }
