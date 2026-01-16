@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::core::error::details::ReplRejectReason;
 use crate::core::{
     Durable, HeadStatus, Limits, NamespaceId, PrevVerified, ReplicaId, Seq0, Seq1, Sha256,
     VerifiedEvent, VerifiedEventAny, Watermark, WatermarkError,
@@ -43,7 +44,7 @@ pub enum IngestDecision {
     ForwardContiguousBatch(Vec<VerifiedEvent<crate::core::PrevVerified>>),
     BufferedNeedWant { want_from: Seq0 },
     DuplicateNoop,
-    Reject { code: String },
+    Reject { reason: ReplRejectReason },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,7 +98,7 @@ impl OriginStreamState {
 
         let VerifiedEventAny::Contiguous(ev) = ev else {
             return IngestDecision::Reject {
-                code: "prev_unknown".to_string(),
+                reason: ReplRejectReason::PrevUnknown,
             };
         };
 
@@ -219,7 +220,7 @@ impl OriginStreamState {
         if let Some(start) = self.gap.started_at_ms {
             if now_ms.saturating_sub(start) > self.gap.timeout_ms {
                 return IngestDecision::Reject {
-                    code: "gap_timeout".to_string(),
+                    reason: ReplRejectReason::GapTimeout,
                 };
             }
         } else {
@@ -228,14 +229,14 @@ impl OriginStreamState {
 
         if self.gap.buffered.len() >= self.gap.max_events {
             return IngestDecision::Reject {
-                code: "gap_buffer_overflow".to_string(),
+                reason: ReplRejectReason::GapBufferOverflow,
             };
         }
 
         let bytes = ev.bytes_len();
         if self.gap.buffered_bytes + bytes > self.gap.max_bytes {
             return IngestDecision::Reject {
-                code: "gap_buffer_bytes_overflow".to_string(),
+                reason: ReplRejectReason::GapBufferBytesOverflow,
             };
         }
 
@@ -485,7 +486,9 @@ mod tests {
         let decision = state.ingest_one(contiguous_event(3), 100);
         assert!(matches!(
             decision,
-            IngestDecision::Reject { code } if code == "gap_buffer_overflow"
+            IngestDecision::Reject {
+                reason: ReplRejectReason::GapBufferOverflow
+            }
         ));
     }
 
@@ -499,7 +502,9 @@ mod tests {
         let decision = state.ingest_one(contiguous_event(3), 120);
         assert!(matches!(
             decision,
-            IngestDecision::Reject { code } if code == "gap_timeout"
+            IngestDecision::Reject {
+                reason: ReplRejectReason::GapTimeout
+            }
         ));
     }
 
@@ -510,8 +515,11 @@ mod tests {
         let mut state = state_with_limits(&limits);
 
         let decision = state.ingest_one(contiguous_event(2), 100);
-        assert!(
-            matches!(decision, IngestDecision::Reject { code } if code == "gap_buffer_bytes_overflow")
-        );
+        assert!(matches!(
+            decision,
+            IngestDecision::Reject {
+                reason: ReplRejectReason::GapBufferBytesOverflow
+            }
+        ));
     }
 }

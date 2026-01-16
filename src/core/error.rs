@@ -1008,7 +1008,18 @@ pub mod details {
     }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ReplRejectReason {
+        PrevUnknown,
+        GapTimeout,
+        GapBufferOverflow,
+        GapBufferBytesOverflow,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct SubscriberLaggedDetails {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub reason: Option<ReplRejectReason>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub max_queue_bytes: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
