@@ -9,19 +9,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{
-    AdminDoctorOutput as ApiAdminDoctorOutput, AdminFingerprintOutput as ApiAdminFingerprintOutput,
-    AdminFlushOutput as ApiAdminFlushOutput,
-    AdminMaintenanceModeOutput as ApiAdminMaintenanceModeOutput,
-    AdminMetricsOutput as ApiAdminMetricsOutput,
-    AdminRebuildIndexOutput as ApiAdminRebuildIndexOutput,
-    AdminReloadPoliciesOutput as ApiAdminReloadPoliciesOutput,
-    AdminRotateReplicaIdOutput as ApiAdminRotateReplicaIdOutput,
-    AdminScrubOutput as ApiAdminScrubOutput, AdminStatusOutput as ApiAdminStatusOutput,
-    BlockedIssue as ApiBlockedIssue, CountResult as ApiCountResult, DaemonInfo as ApiDaemonInfo,
-    DeletedLookup as ApiDeletedLookup, DepCycles as ApiDepCycles, DepEdge as ApiDepEdge,
-    EpicStatus as ApiEpicStatus, Issue, IssueSummary, Note as ApiNote,
-    ReadyResult as ApiReadyResult, StatusOutput as ApiStatusOutput, Tombstone as ApiTombstone,
+use super::query_model::{
+    AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput, AdminMaintenanceModeOutput,
+    AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadPoliciesOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult,
+    DaemonInfo, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue, IssueSummary, Note,
+    ReadyResult, StatusOutput, Tombstone,
 };
 use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
 
@@ -453,83 +446,84 @@ pub enum QueryResult {
     /// Dependency tree.
     DepTree {
         root: BeadId,
-        edges: Vec<ApiDepEdge>,
+        edges: Vec<DepEdge>,
     },
 
     /// Dependencies for a bead.
     Deps {
-        incoming: Vec<ApiDepEdge>,
-        outgoing: Vec<ApiDepEdge>,
+        incoming: Vec<DepEdge>,
+        outgoing: Vec<DepEdge>,
     },
 
     /// Dependency cycles.
-    DepCycles(ApiDepCycles),
+    DepCycles(DepCycles),
 
     /// Notes for a bead.
-    Notes(Vec<ApiNote>),
+    Notes(Vec<Note>),
 
     /// Issue database status (counts, etc).
-    Status(ApiStatusOutput),
+    Status(StatusOutput),
 
     /// Blocked issues.
-    Blocked(Vec<ApiBlockedIssue>),
+    Blocked(Vec<BlockedIssue>),
 
     /// Ready issues with summary counts.
-    Ready(ApiReadyResult),
+    Ready(ReadyResult),
 
     /// Stale issues.
     Stale(Vec<IssueSummary>),
 
     /// Count results.
-    Count(ApiCountResult),
+    Count(CountResult),
 
     /// Deleted issues (tombstones) list.
-    Deleted(Vec<ApiTombstone>),
+    Deleted(Vec<Tombstone>),
 
     /// Deleted issue lookup by id.
-    DeletedLookup(ApiDeletedLookup),
+    DeletedLookup(DeletedLookup),
 
     /// Epic completion status.
-    EpicStatus(Vec<ApiEpicStatus>),
+    EpicStatus(Vec<EpicStatus>),
 
     /// Validation result.
     Validation { warnings: Vec<String> },
 
     /// Daemon info (handshake).
-    DaemonInfo(ApiDaemonInfo),
+    DaemonInfo(DaemonInfo),
 
     /// Admin status snapshot.
-    AdminStatus(ApiAdminStatusOutput),
+    AdminStatus(AdminStatusOutput),
 
     /// Admin metrics snapshot.
-    AdminMetrics(ApiAdminMetricsOutput),
+    AdminMetrics(AdminMetricsOutput),
 
     /// Admin doctor report.
-    AdminDoctor(ApiAdminDoctorOutput),
+    AdminDoctor(AdminDoctorOutput),
 
     /// Admin scrub report.
-    AdminScrub(ApiAdminScrubOutput),
+    AdminScrub(AdminScrubOutput),
 
     /// Admin flush report.
-    AdminFlush(ApiAdminFlushOutput),
+    AdminFlush(AdminFlushOutput),
 
     /// Admin fingerprint report.
-    AdminFingerprint(ApiAdminFingerprintOutput),
+    AdminFingerprint(AdminFingerprintOutput),
 
     /// Admin reload policies report.
-    AdminReloadPolicies(ApiAdminReloadPoliciesOutput),
+    AdminReloadPolicies(AdminReloadPoliciesOutput),
 
     /// Admin rotate replica id report.
-    AdminRotateReplicaId(ApiAdminRotateReplicaIdOutput),
+    AdminRotateReplicaId(AdminRotateReplicaIdOutput),
 
     /// Maintenance mode toggle.
-    AdminMaintenanceMode(ApiAdminMaintenanceModeOutput),
+    AdminMaintenanceMode(AdminMaintenanceModeOutput),
 
     /// Rebuild index outcome.
-    AdminRebuildIndex(ApiAdminRebuildIndexOutput),
+    AdminRebuildIndex(AdminRebuildIndexOutput),
 }
 
-// NOTE: daemon IPC uses the canonical `crate::api` schemas for issues/notes/deps.
+// NOTE: daemon IPC uses the canonical `crate::api` schemas; query results are
+// converted at the IPC boundary.
 
 #[cfg(test)]
 mod tests {

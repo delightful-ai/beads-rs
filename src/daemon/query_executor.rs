@@ -12,7 +12,7 @@ use super::git_worker::GitOp;
 use super::ipc::{ReadConsistency, Response, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
-use crate::api::{
+use super::query_model::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
     IssueSummary, Note, StatusOutput, StatusSummary, SyncStatus, SyncWarning, Tombstone,
 };
@@ -52,7 +52,7 @@ impl Daemon {
         match state.require_live(id).map_live_err(id) {
             Ok(bead) => {
                 let issue = Issue::from_bead(read.namespace(), bead);
-                Response::ok(ResponsePayload::Query(QueryResult::Issue(issue)))
+                Response::ok(ResponsePayload::query(QueryResult::Issue(issue)))
             }
             Err(e) => Response::err(e),
         }
@@ -99,7 +99,7 @@ impl Daemon {
             }
         }
 
-        Response::ok(ResponsePayload::Query(QueryResult::Issues(summaries)))
+        Response::ok(ResponsePayload::query(QueryResult::Issues(summaries)))
     }
 
     /// List beads with optional filters.
@@ -216,7 +216,7 @@ impl Daemon {
             views.truncate(limit);
         }
 
-        Response::ok(ResponsePayload::Query(QueryResult::Issues(views)))
+        Response::ok(ResponsePayload::query(QueryResult::Issues(views)))
     }
 
     /// Get ready beads (no blockers, open status).
@@ -296,7 +296,7 @@ impl Daemon {
             closed_count,
         };
 
-        Response::ok(ResponsePayload::Query(QueryResult::Ready(result)))
+        Response::ok(ResponsePayload::query(QueryResult::Ready(result)))
     }
 
     /// Get dependency tree for a bead.
@@ -355,7 +355,7 @@ impl Daemon {
             }
         }
 
-        Response::ok(ResponsePayload::Query(QueryResult::DepTree {
+        Response::ok(ResponsePayload::query(QueryResult::DepTree {
             root: id.clone(),
             edges,
         }))
@@ -412,7 +412,7 @@ impl Daemon {
             }
         }
 
-        Response::ok(ResponsePayload::Query(QueryResult::Deps {
+        Response::ok(ResponsePayload::query(QueryResult::Deps {
             incoming,
             outgoing,
         }))
@@ -455,7 +455,7 @@ impl Daemon {
 
         let notes: Vec<Note> = bead.notes.sorted().into_iter().map(Note::from).collect();
 
-        Response::ok(ResponsePayload::Query(QueryResult::Notes(notes)))
+        Response::ok(ResponsePayload::query(QueryResult::Notes(notes)))
     }
 
     /// Get sync status for a repo.
@@ -591,7 +591,7 @@ impl Daemon {
             sync: Some(sync),
         };
 
-        Response::ok(ResponsePayload::Query(QueryResult::Status(out)))
+        Response::ok(ResponsePayload::query(QueryResult::Status(out)))
     }
 
     /// Get blocked issues.
@@ -654,7 +654,7 @@ impl Daemon {
                 .then_with(|| b.issue.updated_at.cmp(&a.issue.updated_at))
         });
 
-        Response::ok(ResponsePayload::Query(QueryResult::Blocked(out)))
+        Response::ok(ResponsePayload::query(QueryResult::Blocked(out)))
     }
 
     /// Get stale issues (not updated recently).
@@ -748,7 +748,7 @@ impl Daemon {
         let limit = limit.unwrap_or(50);
         out.truncate(limit);
 
-        Response::ok(ResponsePayload::Query(QueryResult::Stale(out)))
+        Response::ok(ResponsePayload::query(QueryResult::Stale(out)))
     }
 
     /// Count issues matching filters.
@@ -839,7 +839,7 @@ impl Daemon {
         }
 
         let Some(group_by) = group_by else {
-            return Response::ok(ResponsePayload::Query(QueryResult::Count(
+            return Response::ok(ResponsePayload::query(QueryResult::Count(
                 CountResult::Simple {
                     count: matched.len(),
                 },
@@ -895,7 +895,7 @@ impl Daemon {
             .map(|(group, count)| CountGroup { group, count })
             .collect();
 
-        Response::ok(ResponsePayload::Query(QueryResult::Count(
+        Response::ok(ResponsePayload::query(QueryResult::Count(
             CountResult::Grouped {
                 total: matched.len(),
                 groups,
@@ -941,7 +941,7 @@ impl Daemon {
                 id: id.as_str().to_string(),
                 record,
             };
-            return Response::ok(ResponsePayload::Query(QueryResult::DeletedLookup(out)));
+            return Response::ok(ResponsePayload::query(QueryResult::DeletedLookup(out)));
         }
 
         let cutoff_ms = since_ms.map(|d| self.clock().wall_ms().saturating_sub(d));
@@ -956,7 +956,7 @@ impl Daemon {
         // Most recent first.
         tombs.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
 
-        Response::ok(ResponsePayload::Query(QueryResult::Deleted(tombs)))
+        Response::ok(ResponsePayload::query(QueryResult::Deleted(tombs)))
     }
 
     /// Epic completion status.
@@ -990,7 +990,7 @@ impl Daemon {
             .unwrap_or(&empty_state);
 
         let statuses = compute_epic_statuses(read.namespace(), state, eligible_only);
-        Response::ok(ResponsePayload::Query(QueryResult::EpicStatus(statuses)))
+        Response::ok(ResponsePayload::query(QueryResult::EpicStatus(statuses)))
     }
 
     /// Validate state.
@@ -1071,7 +1071,7 @@ impl Daemon {
             }
         }
 
-        Response::ok(ResponsePayload::Query(QueryResult::Validation {
+        Response::ok(ResponsePayload::query(QueryResult::Validation {
             warnings: errors,
         }))
     }
@@ -1106,7 +1106,7 @@ impl Daemon {
             .unwrap_or(&empty_state);
 
         let cycles = dep_cycles_from_state(state);
-        Response::ok(ResponsePayload::Query(QueryResult::DepCycles(cycles)))
+        Response::ok(ResponsePayload::query(QueryResult::DepCycles(cycles)))
     }
 }
 

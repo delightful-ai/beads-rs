@@ -24,6 +24,7 @@ pub mod migration;
 pub mod mutation_engine;
 pub mod ops;
 pub mod query;
+pub mod query_model;
 pub mod query_executor;
 pub mod remote;
 pub mod repl;
