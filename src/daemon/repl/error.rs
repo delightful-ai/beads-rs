@@ -16,7 +16,7 @@ pub struct ReplError {
     pub code: ErrorCode,
     pub message: String,
     pub retryable: bool,
-    pub details: Option<ReplErrorDetails>,
+    pub details: Option<Box<ReplErrorDetails>>,
 }
 
 impl ReplError {
@@ -30,13 +30,13 @@ impl ReplError {
     }
 
     pub fn with_details(mut self, details: ReplErrorDetails) -> Self {
-        self.details = Some(details);
+        self.details = Some(Box::new(details));
         self
     }
 
     pub fn to_payload(&self) -> ErrorPayload {
         let payload = ErrorPayload::new(self.code.clone(), self.message.clone(), self.retryable);
-        match &self.details {
+        match self.details.as_deref() {
             None => payload,
             Some(details) => match details {
                 ReplErrorDetails::WrongStore(details) => payload.with_details(details.clone()),
