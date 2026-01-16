@@ -13,7 +13,7 @@ pub mod replay;
 pub mod segment;
 
 pub use event_wal::{EventWal, SegmentSnapshot};
-pub use frame::{FrameReader, FrameWriter};
+pub use frame::{FrameReader, FrameWriter, FRAME_CRC_OFFSET, FRAME_HEADER_LEN};
 pub use index::{
     ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow,
     SegmentRow, SqliteWalIndex, WalIndex, WalIndexError, WalIndexReader, WalIndexTxn,
@@ -26,7 +26,10 @@ pub use record::{
 pub use replay::{
     RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
 };
-pub use segment::{AppendOutcome, SegmentConfig, SegmentHeader, SegmentWriter};
+pub use segment::{
+    AppendOutcome, SegmentConfig, SegmentHeader, SegmentWriter, SEGMENT_HEADER_PREFIX_LEN,
+    WAL_FORMAT_VERSION,
+};
 
 pub type EventWalResult<T> = Result<T, EventWalError>;
 

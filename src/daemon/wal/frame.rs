@@ -8,7 +8,10 @@ use super::{EventWalError, EventWalResult};
 use crate::daemon::wal::record::{UnverifiedRecord, VerifiedRecord};
 
 pub(crate) const FRAME_MAGIC: u32 = 0x4244_5232; // "BDR2"
-pub(crate) const FRAME_HEADER_LEN: usize = 12;
+/// Frame header length in bytes for the WAL wire format.
+pub const FRAME_HEADER_LEN: usize = 12;
+/// Offset of the CRC field within the frame header.
+pub const FRAME_CRC_OFFSET: usize = 8;
 
 pub struct FrameReader<R> {
     reader: R,

@@ -17,8 +17,10 @@ use super::record::VerifiedRecord;
 use super::{EventWalError, EventWalResult};
 
 pub(crate) const SEGMENT_MAGIC: &[u8; 5] = b"BDWAL";
-pub(crate) const WAL_FORMAT_VERSION: u32 = 2;
-pub(crate) const SEGMENT_HEADER_PREFIX_LEN: usize = SEGMENT_MAGIC.len() + 8;
+/// Current WAL format version encoded in segment headers.
+pub const WAL_FORMAT_VERSION: u32 = 2;
+/// Bytes in the fixed prefix of the segment header.
+pub const SEGMENT_HEADER_PREFIX_LEN: usize = SEGMENT_MAGIC.len() + 8;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SegmentConfig {
