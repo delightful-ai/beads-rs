@@ -14,6 +14,24 @@ pub struct StoreMetaVersions {
 }
 
 impl StoreMetaVersions {
+    pub const STORE_FORMAT_VERSION: u32 = 1;
+    pub const WAL_FORMAT_VERSION: u32 = 2;
+    pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
+    pub const REPLICATION_PROTOCOL_VERSION: u32 = 1;
+    pub const INDEX_SCHEMA_VERSION: u32 = 1;
+
+    pub const CURRENT: StoreMetaVersions = StoreMetaVersions {
+        store_format_version: Self::STORE_FORMAT_VERSION,
+        wal_format_version: Self::WAL_FORMAT_VERSION,
+        checkpoint_format_version: Self::CHECKPOINT_FORMAT_VERSION,
+        replication_protocol_version: Self::REPLICATION_PROTOCOL_VERSION,
+        index_schema_version: Self::INDEX_SCHEMA_VERSION,
+    };
+
+    pub const fn current() -> Self {
+        Self::CURRENT
+    }
+
     pub fn new(
         store_format_version: u32,
         wal_format_version: u32,
@@ -70,6 +88,16 @@ impl StoreMeta {
     pub fn store_epoch(&self) -> StoreEpoch {
         self.identity.store_epoch
     }
+
+    pub fn versions(&self) -> StoreMetaVersions {
+        StoreMetaVersions::new(
+            self.store_format_version,
+            self.wal_format_version,
+            self.checkpoint_format_version,
+            self.replication_protocol_version,
+            self.index_schema_version,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -92,5 +120,21 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: StoreMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(meta, parsed);
+    }
+
+    #[test]
+    fn store_meta_versions_current_is_consistent() {
+        let current = StoreMetaVersions::current();
+        assert_eq!(current.store_format_version, StoreMetaVersions::STORE_FORMAT_VERSION);
+        assert_eq!(current.wal_format_version, StoreMetaVersions::WAL_FORMAT_VERSION);
+        assert_eq!(
+            current.checkpoint_format_version,
+            StoreMetaVersions::CHECKPOINT_FORMAT_VERSION
+        );
+        assert_eq!(
+            current.replication_protocol_version,
+            StoreMetaVersions::REPLICATION_PROTOCOL_VERSION
+        );
+        assert_eq!(current.index_schema_version, StoreMetaVersions::INDEX_SCHEMA_VERSION);
     }
 }

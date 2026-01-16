@@ -17,7 +17,7 @@ use crate::core::{
     ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
 };
 
-pub const PROTOCOL_VERSION_V1: u32 = 1;
+pub const PROTOCOL_VERSION_V1: u32 = crate::core::StoreMetaVersions::REPLICATION_PROTOCOL_VERSION;
 
 pub type WatermarkMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Seq0>>;
 pub type WatermarkHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Sha256>>;

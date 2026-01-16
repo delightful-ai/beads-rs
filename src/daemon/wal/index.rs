@@ -11,10 +11,10 @@ use uuid::Uuid;
 
 use crate::core::{
     ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, ReplicaRole, SegmentId, Seq0, Seq1,
-    StoreId, StoreMeta, TxnId,
+    StoreId, StoreMeta, StoreMetaVersions, TxnId,
 };
 
-const INDEX_SCHEMA_VERSION: u32 = 1;
+const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
 const BUSY_TIMEOUT_MS: u64 = 5_000;
 const CACHE_SIZE_KB: i64 = -16_000;
 

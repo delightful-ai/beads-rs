@@ -10,7 +10,7 @@ use crc32c::crc32c;
 use rand::RngCore;
 use uuid::Uuid;
 
-use crate::core::{NamespaceId, SegmentId, StoreEpoch, StoreId, StoreMeta};
+use crate::core::{NamespaceId, SegmentId, StoreEpoch, StoreId, StoreMeta, StoreMetaVersions};
 
 use super::frame::encode_frame;
 use super::record::VerifiedRecord;
@@ -18,7 +18,7 @@ use super::{EventWalError, EventWalResult};
 
 pub(crate) const SEGMENT_MAGIC: &[u8; 5] = b"BDWAL";
 /// Current WAL format version encoded in segment headers.
-pub const WAL_FORMAT_VERSION: u32 = 2;
+pub const WAL_FORMAT_VERSION: u32 = StoreMetaVersions::WAL_FORMAT_VERSION;
 /// Bytes in the fixed prefix of the segment header.
 pub const SEGMENT_HEADER_PREFIX_LEN: usize = SEGMENT_MAGIC.len() + 8;
 
