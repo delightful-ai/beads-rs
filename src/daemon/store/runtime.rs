@@ -17,7 +17,7 @@ use crate::core::{
     ActorId, Applied, ApplyOutcome, ContentHash, Durable, ErrorPayload, HeadStatus, Limits,
     NamespaceId, NamespacePolicies, NamespacePolicy, ProtocolErrorCode, ReplicaId, ReplicaRoster,
     ReplicaRosterError, Seq0, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
-    WatermarkError, Watermarks, WriteStamp,
+    StoreState, WatermarkError, Watermarks, WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
@@ -57,6 +57,7 @@ pub struct StoreRuntime {
     #[allow(dead_code)]
     pub(crate) policies: BTreeMap<NamespaceId, NamespacePolicy>,
     pub(crate) repo_state: GitLaneState,
+    pub(crate) state: StoreState,
     pub(crate) watermarks_applied: Watermarks<Applied>,
     pub(crate) watermarks_durable: Watermarks<Durable>,
     checkpoint_dirty_shards: BTreeMap<NamespaceId, BTreeSet<CheckpointShardPath>>,
@@ -178,6 +179,7 @@ impl StoreRuntime {
             meta,
             policies: load_namespace_policies(store_id, namespace_defaults)?,
             repo_state,
+            state: StoreState::new(),
             watermarks_applied,
             watermarks_durable,
             checkpoint_dirty_shards: BTreeMap::new(),
@@ -325,7 +327,7 @@ impl StoreRuntime {
             policy_hash,
             roster_hash,
             dirty_shards: None,
-            state: &self.repo_state.state,
+            state: &self.state,
             watermarks_durable: &self.watermarks_durable,
         })
     }
@@ -349,7 +351,7 @@ impl StoreRuntime {
             policy_hash,
             roster_hash,
             dirty_shards: Some(dirty_shards),
-            state: &self.repo_state.state,
+            state: &self.state,
             watermarks_durable: &self.watermarks_durable,
         });
         if snapshot.is_err() {
@@ -1208,7 +1210,7 @@ mod tests {
         core_state.insert_dep(dep_key.clone(), dep_edge);
         let mut store_state = StoreState::new();
         store_state.set_namespace_state(namespace.clone(), core_state);
-        runtime.repo_state.state = store_state;
+        runtime.state = store_state;
 
         let mut outcome = ApplyOutcome::default();
         outcome.changed_beads.insert(bead_id.clone());

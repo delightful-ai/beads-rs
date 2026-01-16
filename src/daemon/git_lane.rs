@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::core::{NamespaceId, SegmentId, StoreState, WriteStamp};
+use crate::core::{NamespaceId, SegmentId, WriteStamp};
 
 #[derive(Clone, Debug)]
 pub struct FetchErrorRecord {
@@ -45,9 +45,6 @@ pub struct WalTailTruncatedRecord {
 
 /// In-memory state for the legacy git checkpoint lane.
 pub struct GitLaneState {
-    /// The current namespaced canonical state (beads, tombstones, deps).
-    pub state: StoreState,
-
     /// Root slug for bead IDs (from meta.json).
     /// When set, new bead IDs will use this slug (e.g., "myproject-xxx").
     pub root_slug: Option<String>,
@@ -99,10 +96,9 @@ pub struct GitLaneState {
 }
 
 impl GitLaneState {
-    /// Create a new GitLaneState with empty state.
+    /// Create a new GitLaneState.
     pub fn new() -> Self {
         GitLaneState {
-            state: StoreState::new(),
             root_slug: None,
             known_paths: HashSet::new(),
             dirty: false,
@@ -122,36 +118,9 @@ impl GitLaneState {
         }
     }
 
-    /// Create a new GitLaneState with the given state.
-    pub fn with_state(state: StoreState) -> Self {
-        GitLaneState {
-            state,
-            root_slug: None,
-            known_paths: HashSet::new(),
-            dirty: false,
-            last_mutation: None,
-            sync_in_progress: false,
-            refresh_in_progress: false,
-            last_sync: None,
-            last_sync_wall_ms: None,
-            last_refresh: None,
-            consecutive_failures: 0,
-            last_seen_stamp: None,
-            last_fetch_error: None,
-            last_divergence: None,
-            last_force_push: None,
-            last_clock_skew: None,
-            last_wal_tail_truncated: None,
-        }
-    }
-
-    /// Create a new GitLaneState with state, root slug, and initial clone path.
-    pub fn with_state_and_path(
-        state: StoreState,
-        root_slug: Option<String>,
-        path: PathBuf,
-    ) -> Self {
-        let mut s = Self::with_state(state);
+    /// Create a new GitLaneState with root slug and initial clone path.
+    pub fn with_path(root_slug: Option<String>, path: PathBuf) -> Self {
+        let mut s = Self::new();
         s.root_slug = root_slug;
         s.known_paths.insert(path);
         s.last_refresh = Some(Instant::now());
@@ -199,8 +168,7 @@ impl GitLaneState {
     }
 
     /// Mark sync as completed successfully.
-    pub fn complete_sync(&mut self, synced_state: StoreState, wall_ms: u64) {
-        self.state = synced_state;
+    pub fn complete_sync(&mut self, wall_ms: u64) {
         self.sync_in_progress = false;
         let now = Instant::now();
         self.last_sync = Some(now);

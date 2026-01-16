@@ -39,16 +39,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         match state.require_live(id).map_live_err(id) {
             Ok(bead) => {
@@ -78,16 +75,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         let mut summaries = Vec::with_capacity(ids.len());
         for id_str in ids {
@@ -122,16 +116,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         // Build children set if parent filter is specified.
         // Parent deps: from=child, to=parent, kind=Parent.
@@ -239,16 +230,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         // Collect IDs that are blocked by *blocking* deps (kind=blocks).
         let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
@@ -319,16 +307,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         // Check if bead exists
         if let Err(e) = state.require_live(id).map_live_err(id) {
@@ -381,16 +366,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         // Check if bead exists
         if let Err(e) = state.require_live(id).map_live_err(id) {
@@ -438,16 +420,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         let bead = match state.get_live(id) {
             Some(b) => b,
@@ -477,16 +456,17 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
+            Err(e) => return Response::err(e),
+        };
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         let blocked_by = compute_blocked_by(state);
         let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
@@ -613,16 +593,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
         let blocked_by = compute_blocked_by(state);
         let mut out: Vec<BlockedIssue> = Vec::new();
 
@@ -679,8 +656,8 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
@@ -697,10 +674,7 @@ impl Daemon {
         }
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
         let blocked_by = compute_blocked_by(state);
         let cutoff_ms = self
             .clock()
@@ -772,16 +746,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
         let blocked_by = compute_blocked_by(state);
 
         let status_filter = filters
@@ -924,16 +895,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         if let Some(id) = id {
             let record = state.get_tombstone(id).map(Tombstone::from);
@@ -979,16 +947,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         let statuses = compute_epic_statuses(read.namespace(), state, eligible_only);
         Response::ok(ResponsePayload::query(QueryResult::EpicStatus(statuses)))
@@ -1012,16 +977,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         // Run validation checks
         let mut errors = Vec::new();
@@ -1095,16 +1057,13 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let repo_state = match self.repo_state(&remote) {
-            Ok(repo_state) => repo_state,
+        let store = match self.store_runtime(&remote) {
+            Ok(store) => store,
             Err(e) => return Response::err(e),
         };
 
         let empty_state = CanonicalState::new();
-        let state = repo_state
-            .state
-            .get(read.namespace())
-            .unwrap_or(&empty_state);
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         let cycles = dep_cycles_from_state(state);
         Response::ok(ResponsePayload::query(QueryResult::DepCycles(cycles)))

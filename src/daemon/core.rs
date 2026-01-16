@@ -757,7 +757,7 @@ impl Daemon {
             .as_ref()
             .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
 
-        let mut repo_state = GitLaneState::with_state_and_path(state, root_slug, repo.to_owned());
+        let mut repo_state = GitLaneState::with_path(root_slug, repo.to_owned());
         repo_state.last_seen_stamp = last_seen_stamp;
         repo_state.last_clock_skew = clock_skew;
         repo_state.last_fetch_error = loaded.fetch_error.map(|message| FetchErrorRecord {
@@ -786,6 +786,7 @@ impl Daemon {
             .stores
             .get_mut(&store_id)
             .ok_or(OpError::Internal("loaded store missing from state"))?;
+        store.state = state;
         store.repo_state = repo_state;
         if store.primary_remote != *remote {
             store.primary_remote = remote.clone();
@@ -1368,7 +1369,7 @@ impl Daemon {
             for event in &batch {
                 let apply_start = Instant::now();
                 let apply_result = {
-                    let state = store.repo_state.state.ensure_namespace(namespace.clone());
+                    let state = store.state.ensure_namespace(namespace.clone());
                     apply_event(state, &event.body)
                 };
                 let outcome = match apply_result {
@@ -1529,10 +1530,11 @@ impl Daemon {
             Some(id) => id,
             None => return,
         };
-        let repo_state = match self.stores.get_mut(&store_id) {
-            Some(store) => &mut store.repo_state,
+        let store = match self.stores.get_mut(&store_id) {
+            Some(store) => store,
             None => return,
         };
+        let repo_state = &mut store.repo_state;
 
         repo_state.refresh_in_progress = false;
 
@@ -1640,7 +1642,7 @@ impl Daemon {
         let _ = git_tx.send(GitOp::Sync {
             repo: path,
             remote: remote.clone(),
-            state: repo_state.state.get_or_default(&NamespaceId::core()),
+            state: store.state.get_or_default(&NamespaceId::core()),
             actor: self.actor.clone(),
         });
     }
@@ -1681,10 +1683,11 @@ impl Daemon {
                     }
                 };
 
-                let repo_state = match self.stores.get_mut(&store_id) {
-                    Some(store) => &mut store.repo_state,
+                let store = match self.stores.get_mut(&store_id) {
+                    Some(store) => store,
                     None => return,
                 };
+                let repo_state = &mut store.repo_state;
 
                 repo_state.last_seen_stamp =
                     max_write_stamp(repo_state.last_seen_stamp.clone(), outcome.last_seen_stamp);
@@ -1707,7 +1710,7 @@ impl Daemon {
 
                 // If mutations happened during sync, merge them
                 if repo_state.dirty {
-                    let local_state = repo_state.state.get_or_default(&NamespaceId::core());
+                    let local_state = store.state.get_or_default(&NamespaceId::core());
                     let merged = match CanonicalState::join(&synced_state, &local_state) {
                         Ok(merged) => Ok(merged),
                         Err(mut errs) => {
@@ -1735,9 +1738,10 @@ impl Daemon {
 
                     match merged {
                         Ok(merged) => {
-                            let mut next_state = repo_state.state.clone();
+                            let mut next_state = store.state.clone();
                             next_state.set_namespace_state(NamespaceId::core(), merged);
-                            repo_state.complete_sync(next_state, self.clock.wall_ms());
+                            store.state = next_state;
+                            repo_state.complete_sync(self.clock.wall_ms());
                             // Still dirty from mutations during sync - reschedule
                             repo_state.dirty = true;
                             self.scheduler.schedule(remote.clone());
@@ -1755,9 +1759,10 @@ impl Daemon {
                     }
                 } else {
                     // No mutations during sync - just take synced state
-                    let mut next_state = repo_state.state.clone();
+                    let mut next_state = store.state.clone();
                     next_state.set_namespace_state(NamespaceId::core(), synced_state);
-                    repo_state.complete_sync(next_state, self.clock.wall_ms());
+                    store.state = next_state;
+                    repo_state.complete_sync(self.clock.wall_ms());
 
                     sync_succeeded = true;
                 }
@@ -1839,10 +1844,8 @@ impl Daemon {
         let Some(store) = self.stores.get(&store_id) else {
             return;
         };
-        let repo_state = &store.repo_state;
-
         let empty_state = CanonicalState::new();
-        let export_state = repo_state
+        let export_state = store
             .state
             .get(&NamespaceId::core())
             .unwrap_or(&empty_state);
@@ -1857,7 +1860,7 @@ impl Daemon {
         };
 
         // Create/update symlinks in each clone
-        if let Err(e) = ensure_symlinks(&export_path, &repo_state.known_paths) {
+        if let Err(e) = ensure_symlinks(&export_path, &store.repo_state.known_paths) {
             tracing::warn!("Go-compat symlink update failed for {:?}: {}", remote, e);
         }
     }
@@ -4037,14 +4040,12 @@ mod tests {
             other => panic!("unexpected query response: {other:?}"),
         }
 
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
-        let core_count = repo_state
-            .state
+        let store_state = &daemon.stores.get(&store_id).unwrap().state;
+        let core_count = store_state
             .get(&NamespaceId::core())
             .map(|state| state.live_count())
             .unwrap_or(0);
-        let tmp_count = repo_state
-            .state
+        let tmp_count = store_state
             .get(&tmp_ns)
             .map(|state| state.live_count())
             .unwrap_or(0);
@@ -4236,8 +4237,13 @@ mod tests {
         let outcome = respond_rx.recv().expect("ingest response");
         assert!(outcome.is_ok());
 
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
-        let state = repo_state.state.get(&namespace).expect("namespace state");
+        let state = daemon
+            .stores
+            .get(&store_id)
+            .unwrap()
+            .state
+            .get(&namespace)
+            .expect("namespace state");
         assert!(state.get_live(&bead_id).is_some());
     }
 
@@ -4257,13 +4263,12 @@ mod tests {
         let mut local_state = CanonicalState::new();
         local_state.insert_live(loser);
 
-        let mut repo_state = GitLaneState::new();
-        repo_state
+        let store = daemon.stores.get_mut(&store_id).unwrap();
+        store
             .state
             .set_namespace_state(NamespaceId::core(), local_state);
-        repo_state.dirty = true;
-        repo_state.sync_in_progress = true;
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
+        store.repo_state.dirty = true;
+        store.repo_state.sync_in_progress = true;
 
         let outcome = SyncOutcome {
             last_seen_stamp: synced_state.max_write_stamp(),
@@ -4273,8 +4278,10 @@ mod tests {
         };
         daemon.complete_sync(&remote, Ok(outcome));
 
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
-        let core_state = repo_state
+        let core_state = daemon
+            .stores
+            .get(&store_id)
+            .unwrap()
             .state
             .get(&NamespaceId::core())
             .expect("core state");

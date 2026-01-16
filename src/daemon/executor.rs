@@ -179,7 +179,6 @@ impl Daemon {
             let empty_state = CanonicalState::new();
             let state = self
                 .store_runtime(&proof)?
-                .repo_state
                 .state
                 .get(&namespace)
                 .unwrap_or(&empty_state);
@@ -207,8 +206,8 @@ impl Daemon {
             .unwrap_or_else(Watermark::genesis);
 
         let state_snapshot = {
-            let repo_state = self.repo_state(&proof)?;
-            repo_state.state.get_or_default(&namespace)
+            let store = self.store_runtime(&proof)?;
+            store.state.get_or_default(&namespace)
         };
         let draft = {
             let clock = self.clock_for_actor_mut(&ctx.actor_id);
