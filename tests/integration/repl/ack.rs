@@ -171,7 +171,6 @@ fn repl_equivocation_errors() {
     let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
-    let expected_prev = e1.sha256;
     session.handle_message(
         ReplMessage::Events(Events { events: vec![e1] }),
         &mut store,
@@ -205,6 +204,7 @@ fn repl_prev_sha_mismatch_rejects() {
     let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
+    let expected_prev = e1.sha256;
     session.handle_message(
         ReplMessage::Events(Events { events: vec![e1] }),
         &mut store,
