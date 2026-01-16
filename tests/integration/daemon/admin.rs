@@ -1,6 +1,7 @@
 //! Admin IPC ops: status and metrics.
-
-
+//!
+//! These tests intentionally remain in the default suite: they start a daemon
+//! but avoid time-based sleeps to keep coverage fast and deterministic.
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
