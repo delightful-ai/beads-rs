@@ -3208,10 +3208,10 @@ fn replay_event_wal(
             if items.is_empty() {
                 return Err(StoreRuntimeError::WalReplay(Box::new(
                     WalReplayError::NonContiguousSeq {
-                        namespace: row.namespace.as_str().to_string(),
+                        namespace: row.namespace.clone(),
                         origin: row.origin,
-                        expected: from_seq_excl.get() + 1,
-                        got: 0,
+                        expected: from_seq_excl.next(),
+                        got: Seq0::ZERO,
                     },
                 )));
             }

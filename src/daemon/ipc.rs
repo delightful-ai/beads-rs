@@ -24,8 +24,7 @@ use super::store_runtime::StoreRuntimeError;
 use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
 use crate::core::error::details as error_details;
 use crate::core::{
-    Applied, BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, NamespaceId, Priority,
-    StoreId, Watermarks,
+    Applied, BeadType, DepKind, DurabilityReceipt, InvalidId, Limits, Priority, StoreId, Watermarks,
 };
 pub use crate::core::{ErrorCode, ErrorPayload};
 use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
@@ -1086,7 +1085,7 @@ fn wal_replay_error_payload(
                     eid: error_details::EventIdDetails {
                         namespace: info.namespace.clone(),
                         origin_replica_id: info.origin,
-                        origin_seq: info.seq,
+                        origin_seq: info.seq.get(),
                     },
                     expected_sha256: hex::encode(info.expected),
                     got_sha256: hex::encode(info.got),
@@ -1101,20 +1100,16 @@ fn wal_replay_error_payload(
             got_prev_sha256,
             head_seq,
         } => {
-            let namespace = match NamespaceId::parse(namespace.clone()) {
-                Ok(ns) => ns,
-                Err(_) => return ErrorPayload::new(wal_replay_error_code(err), message, retryable),
-            };
             ErrorPayload::new(ErrorCode::PrevShaMismatch, message, retryable).with_details(
                 error_details::PrevShaMismatchDetails {
                     eid: error_details::EventIdDetails {
-                        namespace,
+                        namespace: namespace.clone(),
                         origin_replica_id: *origin,
-                        origin_seq: *seq,
+                        origin_seq: seq.get(),
                     },
                     expected_prev_sha256: hex::encode(expected_prev_sha256),
                     got_prev_sha256: hex::encode(got_prev_sha256),
-                    head_seq: *head_seq,
+                    head_seq: head_seq.get(),
                 },
             )
         }
@@ -1124,17 +1119,13 @@ fn wal_replay_error_payload(
             expected,
             got,
         } => {
-            let namespace = match NamespaceId::parse(namespace.clone()) {
-                Ok(ns) => ns,
-                Err(_) => return ErrorPayload::new(wal_replay_error_code(err), message, retryable),
-            };
-            let durable_seen = expected.saturating_sub(1);
+            let durable_seen = expected.prev_seq0().get();
             ErrorPayload::new(ErrorCode::GapDetected, message, retryable).with_details(
                 error_details::GapDetectedDetails {
-                    namespace,
+                    namespace: namespace.clone(),
                     origin_replica_id: *origin,
                     durable_seen,
-                    got_seq: *got,
+                    got_seq: got.get(),
                 },
             )
         }
@@ -2396,8 +2387,8 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 mod tests {
     use super::*;
     use crate::core::{
-        DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, StoreEpoch, StoreId,
-        StoreIdentity, TxnId,
+        DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, Seq0, Seq1, StoreEpoch,
+        StoreId, StoreIdentity, TxnId,
     };
     use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
     use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo, WalIndexError, WalReplayError};
@@ -2541,7 +2532,7 @@ mod tests {
         let err = WalReplayError::RecordShaMismatch(Box::new(RecordShaMismatchInfo {
             namespace: namespace.clone(),
             origin,
-            seq: 7,
+            seq: Seq1::from_u64(7).unwrap(),
             expected: [3u8; 32],
             got: [4u8; 32],
             path: PathBuf::from("/tmp/segment.wal"),
@@ -2653,12 +2644,12 @@ mod tests {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
         let err = WalReplayError::PrevShaMismatch {
-            namespace: namespace.to_string(),
+            namespace: namespace.clone(),
             origin,
-            seq: 2,
+            seq: Seq1::from_u64(2).unwrap(),
             expected_prev_sha256: [3u8; 32],
             got_prev_sha256: [4u8; 32],
-            head_seq: 1,
+            head_seq: Seq0::new(1),
         };
 
         let store_err = StoreRuntimeError::WalReplay(Box::new(err));
