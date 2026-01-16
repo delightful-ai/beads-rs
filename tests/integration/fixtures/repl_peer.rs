@@ -11,8 +11,8 @@ use beads_rs::core::{
 };
 use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
 use beads_rs::daemon::repl::{
-    Ack, Events, IngestOutcome, Session, SessionAction, SessionConfig, SessionPhase, SessionRole,
-    SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
+    Ack, Events, IngestOutcome, ReplError, Session, SessionAction, SessionConfig, SessionPhase,
+    SessionRole, SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
 };
 
 use super::repl_frames;
@@ -85,7 +85,7 @@ impl SessionStore for MockStore {
         origin: &ReplicaId,
         batch: &[beads_rs::core::VerifiedEvent<beads_rs::core::PrevVerified>],
         _now_ms: u64,
-    ) -> Result<IngestOutcome, Box<beads_rs::ErrorPayload>> {
+    ) -> Result<IngestOutcome, ReplError> {
         for ev in batch {
             let eid = EventId::new(
                 ev.body.origin_replica_id,
