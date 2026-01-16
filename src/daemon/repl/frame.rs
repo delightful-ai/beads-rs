@@ -6,7 +6,7 @@ use crc32c::crc32c;
 use thiserror::Error;
 
 use crate::core::error::details::FrameTooLargeDetails;
-use crate::core::{ErrorCode, ErrorPayload};
+use crate::core::{ErrorPayload, ProtocolErrorCode};
 
 pub const FRAME_HEADER_LEN: usize = 8;
 

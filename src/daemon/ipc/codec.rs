@@ -9,7 +9,7 @@ use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
 use crate::daemon::store_runtime::StoreRuntimeError;
 use super::types::{Request, Response};
 use crate::core::error::details as error_details;
-use crate::core::{ErrorCode, ErrorPayload, InvalidId, Limits, StoreId};
+use crate::core::{CliErrorCode, ErrorCode, ErrorPayload, InvalidId, Limits, ProtocolErrorCode, StoreId};
 use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 use crate::git::error::{SyncError, WireError};

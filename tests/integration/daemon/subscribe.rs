@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use beads_rs::daemon::ipc::{IpcError, ReadConsistency, Request, Response};
-use beads_rs::{Applied, ErrorCode, HeadStatus, NamespaceId, Seq0, Watermarks};
+use beads_rs::{
+    Applied, CliErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, Watermarks,
+};
 
 use crate::fixtures::admin_status::StatusCollector;
 use crate::fixtures::ipc_stream::{StreamClientError, StreamingClient};

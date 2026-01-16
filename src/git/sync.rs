@@ -20,7 +20,7 @@ use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 use super::collision::{Collision, detect_collisions, resolve_collisions};
 use super::error::SyncError;
 use super::wire;
-use crate::core::{BeadId, CanonicalState, Stamp, WallClock, WriteStamp};
+use crate::core::{BeadId, CanonicalState, CliErrorCode, Stamp, WallClock, WriteStamp};
 
 // =============================================================================
 // Phase markers (zero-sized types for typestate)

@@ -7,7 +7,7 @@ use beads_rs::daemon::admission::AdmissionController;
 use beads_rs::daemon::repl::{
     Events, ReplMessage, Session, SessionAction, SessionConfig, SessionPhase, SessionRole,
 };
-use beads_rs::{ErrorCode, Limits, NamespaceId, ReplicaId, StoreIdentity};
+use beads_rs::{Limits, NamespaceId, ProtocolErrorCode, ReplicaId, StoreIdentity};
 
 use crate::fixtures::repl_frames;
 use crate::fixtures::repl_peer::MockStore;

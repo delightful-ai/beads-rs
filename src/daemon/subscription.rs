@@ -7,8 +7,8 @@ use crossbeam::channel::Sender;
 
 use crate::core::error::details as error_details;
 use crate::core::{
-    Applied, ErrorCode, ErrorPayload, EventFrameV1, Limits, NamespaceId, ReplicaId, Seq0,
-    Watermark, Watermarks,
+    Applied, ErrorCode, ErrorPayload, EventFrameV1, Limits, NamespaceId, ProtocolErrorCode,
+    ReplicaId, Seq0, Watermark, Watermarks,
 };
 use crate::daemon::broadcast::{BroadcastError, BroadcastEvent, EventSubscription, SubscriberLimits};
 use crate::daemon::core::Daemon;

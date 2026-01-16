@@ -14,7 +14,7 @@ use crate::core::error::details::{
 };
 use crate::core::{
     ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, Limits, NamespaceId, Opaque,
-    ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
+    ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
 };
 
 pub const PROTOCOL_VERSION_V1: u32 = crate::core::StoreMetaVersions::REPLICATION_PROTOCOL_VERSION;

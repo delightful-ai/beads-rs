@@ -10,7 +10,7 @@ use thiserror::Error;
 use super::export::{CheckpointExport, CheckpointExportError};
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{MANIFEST_FILE, META_FILE};
-use crate::core::{ContentHash, StoreEpoch, StoreId};
+use crate::core::{CliErrorCode, ContentHash, StoreEpoch, StoreId};
 use crate::git::error::SyncError;
 
 pub const STORE_META_REF: &str = "refs/beads/meta";

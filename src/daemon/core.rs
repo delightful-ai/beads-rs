@@ -155,11 +155,12 @@ struct StorePathMap {
 }
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
-    ActorId, Applied, ApplyError, BeadId, CanonicalState, ClientRequestId, ContentHash, CoreError,
-    DurabilityClass, ErrorCode, EventBody, EventId, EventKindV1, HeadStatus, Limits, NamespaceId,
-    NamespacePolicy, PrevVerified, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp,
-    StoreEpoch, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark,
-    WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
+    ActorId, Applied, ApplyError, BeadId, CanonicalState, CliErrorCode, ClientRequestId,
+    ContentHash, CoreError, DurabilityClass, ErrorCode, EventBody, EventId, EventKindV1,
+    HeadStatus, Limits, NamespaceId, NamespacePolicy, PrevVerified, ProtocolErrorCode, ReplicaId,
+    ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
+    StoreState, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
+    apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{

@@ -11,7 +11,7 @@ use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
 use super::remote::RemoteUrl;
-use crate::core::{ActorId, CanonicalState, Stamp, StoreId, WriteStamp};
+use crate::core::{ActorId, CanonicalState, CliErrorCode, Stamp, StoreId, WriteStamp};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::git::checkpoint::{

@@ -16,10 +16,10 @@ use beads_rs::daemon::wal::{
 use beads_rs::core::error::details as error_details;
 use beads_rs::paths;
 use beads_rs::{
-    ActorId, ErrorCode, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
-    NamespaceId, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
-    StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, encode_event_body_canonical,
-    hash_event_body,
+    ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
+    NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
+    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
+    encode_event_body_canonical, hash_event_body,
 };
 
 use crate::fixtures::repl_frames;

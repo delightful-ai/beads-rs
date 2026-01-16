@@ -98,7 +98,7 @@ pub enum ReplErrorDetails {
 mod tests {
     use super::{ReplError, ReplErrorDetails};
     use crate::core::error::details::WrongStoreDetails;
-    use crate::core::{ErrorCode, StoreId};
+    use crate::core::{CliErrorCode, ProtocolErrorCode, StoreId};
     use uuid::Uuid;
 
     #[test]

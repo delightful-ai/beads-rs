@@ -15,9 +15,9 @@ use uuid::Uuid;
 use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
     ActorId, Applied, ApplyOutcome, ContentHash, Durable, ErrorCode, ErrorPayload, HeadStatus,
-    Limits, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicaRoster,
-    ReplicaRosterError, Seq0, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
-    WatermarkError, Watermarks, WriteStamp,
+    Limits, NamespaceId, NamespacePolicies, NamespacePolicy, ProtocolErrorCode, ReplicaId,
+    ReplicaRoster, ReplicaRosterError, Seq0, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
+    StoreMetaVersions, WatermarkError, Watermarks, WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};

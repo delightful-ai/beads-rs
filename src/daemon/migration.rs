@@ -3,7 +3,7 @@
 use git2::{ErrorCode, Oid, Repository};
 use thiserror::Error;
 
-use crate::core::{StoreState, WriteStamp};
+use crate::core::{CliErrorCode, StoreState, WriteStamp};
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError};
 use crate::git::checkpoint::store_state_from_legacy;
