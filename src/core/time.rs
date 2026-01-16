@@ -4,6 +4,7 @@
 //! WallClock for TTL/lease (not ordering).
 
 use std::cmp::Ordering;
+use std::sync::{Arc, RwLock, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,15 +46,67 @@ impl Ord for WriteStamp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct WallClock(pub u64);
 
-impl WallClock {
-    pub fn now() -> Self {
+pub trait WallClockSource: Send + Sync {
+    fn now_ms(&self) -> u64;
+}
+
+struct SystemWallClockSource;
+
+impl WallClockSource for SystemWallClockSource {
+    fn now_ms(&self) -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let ms = SystemTime::now()
+        SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis() as u64;
-        Self(ms)
+            .as_millis() as u64
     }
+}
+
+fn wall_clock_source() -> &'static RwLock<Arc<dyn WallClockSource>> {
+    static SOURCE: OnceLock<RwLock<Arc<dyn WallClockSource>>> = OnceLock::new();
+    SOURCE.get_or_init(|| RwLock::new(Arc::new(SystemWallClockSource)))
+}
+
+impl WallClock {
+    pub fn now() -> Self {
+        let source = wall_clock_source()
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        Self(source.now_ms())
+    }
+}
+
+#[cfg(feature = "test-harness")]
+static WALL_CLOCK_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+
+#[cfg(feature = "test-harness")]
+pub struct WallClockGuard {
+    prev: Arc<dyn WallClockSource>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(feature = "test-harness")]
+impl Drop for WallClockGuard {
+    fn drop(&mut self) {
+        let mut guard = wall_clock_source()
+            .write()
+            .unwrap_or_else(|err| err.into_inner());
+        *guard = self.prev.clone();
+    }
+}
+
+#[cfg(feature = "test-harness")]
+pub fn set_wall_clock_source_for_tests(source: Arc<dyn WallClockSource>) -> WallClockGuard {
+    let lock = WALL_CLOCK_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let mut guard = wall_clock_source()
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
+    let prev = guard.clone();
+    *guard = source;
+    WallClockGuard { prev, _lock: lock }
 }
 
 /// Stamp = WriteStamp + attribution.

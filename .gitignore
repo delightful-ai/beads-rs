@@ -67,3 +67,6 @@ samply-*.json
 fuzz/artifacts/
 fuzz/corpus/
 fuzz/coverage/
+
+# Local test rigs
+tmp/

@@ -13,6 +13,8 @@ pub mod migrate;
 pub mod paths;
 pub mod repo;
 pub mod upgrade;
+#[cfg(feature = "test-harness")]
+pub mod test_harness;
 
 pub use error::{Effect, Error, Transience};
 pub type Result<T> = std::result::Result<T, Error>;

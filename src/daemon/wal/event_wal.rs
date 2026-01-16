@@ -23,10 +23,14 @@ pub struct EventWal {
 
 impl EventWal {
     pub fn new(store_dir: PathBuf, meta: StoreMeta, limits: &Limits) -> Self {
+        Self::new_with_config(store_dir, meta, SegmentConfig::from_limits(limits))
+    }
+
+    pub fn new_with_config(store_dir: PathBuf, meta: StoreMeta, config: SegmentConfig) -> Self {
         Self {
             store_dir,
             meta,
-            config: SegmentConfig::from_limits(limits),
+            config,
             writers: BTreeMap::new(),
         }
     }

@@ -480,6 +480,19 @@ impl Daemon {
             .ok_or(OpError::Internal("loaded store missing from state"))
     }
 
+    #[cfg(feature = "test-harness")]
+    pub(crate) fn store_runtime_by_id(&self, store_id: StoreId) -> Option<&StoreRuntime> {
+        self.stores.get(&store_id)
+    }
+
+    #[cfg(feature = "test-harness")]
+    pub(crate) fn store_runtime_by_id_mut(
+        &mut self,
+        store_id: StoreId,
+    ) -> Option<&mut StoreRuntime> {
+        self.stores.get_mut(&store_id)
+    }
+
     pub(crate) fn store_runtime_mut(
         &mut self,
         proof: &LoadedStore,
@@ -1535,6 +1548,18 @@ impl Daemon {
         Ok(IngestOutcome { durable, applied })
     }
 
+    #[cfg(feature = "test-harness")]
+    pub(crate) fn ingest_remote_batch_for_tests(
+        &mut self,
+        store_id: StoreId,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        batch: Vec<VerifiedEvent<PrevVerified>>,
+        now_ms: u64,
+    ) -> Result<IngestOutcome, ReplError> {
+        self.ingest_remote_batch(store_id, namespace, origin, batch, now_ms)
+    }
+
     pub fn complete_checkpoint(
         &mut self,
         store_id: StoreId,
@@ -2367,7 +2392,7 @@ fn watermark_error_payload(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-harness"))]
 pub(crate) fn insert_store_for_tests(
     daemon: &mut Daemon,
     store_id: StoreId,

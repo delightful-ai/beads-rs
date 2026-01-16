@@ -128,7 +128,7 @@ jj new
 # edit: ... 
 # ---
 
-bd finish bd-xyz            # bead done, all acceptance criteria met
+bd close bd-xyz            # bead done, all acceptance criteria met
 bd ready                    # next bead
 ```
 

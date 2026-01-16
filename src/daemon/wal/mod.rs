@@ -27,8 +27,8 @@ pub use replay::{
     RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
 };
 pub use segment::{
-    AppendOutcome, SegmentConfig, SegmentHeader, SegmentWriter, SEGMENT_HEADER_PREFIX_LEN,
-    WAL_FORMAT_VERSION,
+    AppendOutcome, SegmentConfig, SegmentHeader, SegmentSyncMode, SegmentWriter,
+    SEGMENT_HEADER_PREFIX_LEN, WAL_FORMAT_VERSION,
 };
 
 pub type EventWalResult<T> = Result<T, EventWalError>;

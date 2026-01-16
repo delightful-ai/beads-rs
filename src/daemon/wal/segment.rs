@@ -27,6 +27,7 @@ pub struct SegmentConfig {
     pub max_record_bytes: usize,
     pub max_segment_bytes: u64,
     pub max_segment_age_ms: u64,
+    pub sync_mode: SegmentSyncMode,
 }
 
 impl SegmentConfig {
@@ -35,6 +36,7 @@ impl SegmentConfig {
             max_record_bytes,
             max_segment_bytes,
             max_segment_age_ms,
+            sync_mode: SegmentSyncMode::Data,
         }
     }
 
@@ -43,8 +45,21 @@ impl SegmentConfig {
             max_record_bytes: limits.max_wal_record_bytes,
             max_segment_bytes: limits.wal_segment_max_bytes as u64,
             max_segment_age_ms: limits.wal_segment_max_age_ms,
+            sync_mode: SegmentSyncMode::Data,
         }
     }
+
+    pub fn with_sync_mode(mut self, sync_mode: SegmentSyncMode) -> Self {
+        self.sync_mode = sync_mode;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegmentSyncMode {
+    None,
+    Data,
+    All,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,31 +225,25 @@ pub struct SegmentWriter {
     bytes_written: u64,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SyncMode {
-    All,
-    Data,
-}
-
 #[cfg(test)]
 thread_local! {
-    static LAST_SYNC_MODE: Cell<Option<SyncMode>> = Cell::new(None);
+    static LAST_SYNC_MODE: Cell<Option<SegmentSyncMode>> = Cell::new(None);
 }
 
 #[cfg(test)]
-fn record_sync_mode(mode: SyncMode) {
+fn record_sync_mode(mode: SegmentSyncMode) {
     LAST_SYNC_MODE.with(|cell| cell.set(Some(mode)));
 }
 
 #[cfg(not(test))]
-fn record_sync_mode(_mode: SyncMode) {}
+fn record_sync_mode(_mode: SegmentSyncMode) {}
 
-fn sync_segment(file: &File, path: &Path, mode: SyncMode) -> EventWalResult<()> {
+fn sync_segment(file: &File, path: &Path, mode: SegmentSyncMode) -> EventWalResult<()> {
     record_sync_mode(mode);
     let result = match mode {
-        SyncMode::All => file.sync_all(),
-        SyncMode::Data => file.sync_data(),
+        SegmentSyncMode::All => file.sync_all(),
+        SegmentSyncMode::Data => file.sync_data(),
+        SegmentSyncMode::None => return Ok(()),
     };
     result.map_err(|source| EventWalError::Io {
         path: Some(path.to_path_buf()),
@@ -324,7 +333,7 @@ impl SegmentWriter {
             })?;
         crate::daemon::test_hooks::maybe_pause("wal_after_write");
         // LocalFsync: fsync record data; metadata fsync happens on segment creation/rotation.
-        sync_segment(&self.file, &self.path, SyncMode::Data)?;
+        sync_segment(&self.file, &self.path, self.config.sync_mode)?;
         self.bytes_written = self
             .bytes_written
             .checked_add(frame.len() as u64)
@@ -342,7 +351,7 @@ impl SegmentWriter {
     }
 
     pub fn flush(&mut self) -> EventWalResult<()> {
-        sync_segment(&self.file, &self.path, SyncMode::Data)
+        sync_segment(&self.file, &self.path, self.config.sync_mode)
     }
 
     fn should_rotate(&self, now_ms: u64, next_len: u64) -> bool {
@@ -588,7 +597,7 @@ mod tests {
         test_record_with_payload(Bytes::from_static(b"event"))
     }
 
-    fn take_sync_mode() -> Option<SyncMode> {
+    fn take_sync_mode() -> Option<SegmentSyncMode> {
         LAST_SYNC_MODE.with(|cell| cell.replace(None))
     }
 
@@ -610,7 +619,7 @@ mod tests {
         let record = test_record();
         let _ = take_sync_mode();
         writer.append(&record, 10).unwrap();
-        assert_eq!(take_sync_mode(), Some(SyncMode::Data));
+        assert_eq!(take_sync_mode(), Some(SegmentSyncMode::Data));
     }
 
     #[cfg(unix)]

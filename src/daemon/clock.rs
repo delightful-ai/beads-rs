@@ -3,8 +3,6 @@
 //! The clock generates monotonically increasing WriteStamps that form
 //! a total order across all actors.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 pub trait TimeSource: Send + Sync {
     fn now_ms(&self) -> u64;
 }
@@ -13,10 +11,7 @@ pub struct SystemTimeSource;
 
 impl TimeSource for SystemTimeSource {
     fn now_ms(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
+        crate::core::WallClock::now().0
     }
 }
 
