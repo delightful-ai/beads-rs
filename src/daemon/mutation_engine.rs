@@ -132,7 +132,7 @@ pub struct ParsedBeadPatch {
     pub external_ref: Patch<String>,
     pub source_repo: Patch<String>,
     pub estimated_minutes: Patch<u32>,
-    pub status: Patch<String>,
+    pub status: Patch<WorkflowStatus>,
 }
 
 impl ParsedBeadPatch {
@@ -1538,7 +1538,7 @@ struct CanonicalBeadPatch {
     #[serde(skip_serializing_if = "Patch::is_keep")]
     estimated_minutes: Patch<u32>,
     #[serde(skip_serializing_if = "Patch::is_keep")]
-    status: Patch<String>,
+    status: Patch<WorkflowStatus>,
 }
 
 fn request_sha256(ctx: &MutationContext, op: &CanonicalMutationOp) -> Result<[u8; 32], OpError> {
@@ -1754,17 +1754,7 @@ fn normalize_patch(
     wire.estimated_minutes = patch_to_wire_u32(&patch.estimated_minutes);
 
     if let Patch::Set(status) = &patch.status {
-        wire.status = Some(match status.as_str() {
-            "open" => WorkflowStatus::Open,
-            "in_progress" => WorkflowStatus::InProgress,
-            "closed" => WorkflowStatus::Closed,
-            other => {
-                return Err(OpError::ValidationFailed {
-                    field: "status".into(),
-                    reason: format!("unknown status {other:?}"),
-                });
-            }
-        });
+        wire.status = Some(*status);
     }
 
     let canonical = CanonicalBeadPatch {

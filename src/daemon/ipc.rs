@@ -2813,6 +2813,22 @@ mod tests {
     }
 
     #[test]
+    fn decode_request_rejects_invalid_status_value() {
+        let err = decode_request_with_limits(
+            r#"{"op":"update","repo":".","id":"bd-123","patch":{"status":"bad"}}"#,
+            &Limits::default(),
+        )
+        .unwrap_err();
+        let payload: ErrorPayload = err.into();
+        assert_eq!(payload.code, ErrorCode::InvalidRequest);
+        let details = payload
+            .details_as::<error_details::InvalidRequestDetails>()
+            .unwrap()
+            .expect("details");
+        assert!(details.reason.is_some());
+    }
+
+    #[test]
     fn decode_request_rejects_oversize_frames() {
         let limits = Limits {
             max_frame_bytes: 1,

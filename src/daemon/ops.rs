@@ -13,9 +13,9 @@ use thiserror::Error;
 
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    ActorId, Applied, BeadFields, BeadId, BeadType, ClientRequestId, Closure, DurabilityClass,
+    ActorId, Applied, BeadFields, BeadId, BeadType, ClientRequestId, DurabilityClass,
     DurabilityReceipt, ErrorCode, InvalidId, Label, Labels, Lww, NamespaceId, Priority, ReplicaId,
-    Stamp, WallClock, Watermarks, Workflow,
+    Stamp, WallClock, Watermarks, WorkflowStatus,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_lock::StoreLockError;
@@ -133,7 +133,7 @@ pub struct BeadPatch {
     pub estimated_minutes: Patch<u32>,
 
     #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub status: Patch<String>,
+    pub status: Patch<WorkflowStatus>,
 }
 
 impl BeadPatch {
@@ -232,20 +232,7 @@ impl BeadPatch {
             Patch::Keep => {}
         }
         if let Patch::Set(status) = &self.status {
-            match status.as_str() {
-                "open" => fields.workflow = Lww::new(Workflow::Open, stamp.clone()),
-                "in_progress" => fields.workflow = Lww::new(Workflow::InProgress, stamp.clone()),
-                "closed" => {
-                    let closure = Closure::new(None, None);
-                    fields.workflow = Lww::new(Workflow::Closed(closure), stamp.clone());
-                }
-                other => {
-                    return Err(OpError::ValidationFailed {
-                        field: "status".into(),
-                        reason: format!("unknown status {other:?}"),
-                    });
-                }
-            }
+            fields.workflow = Lww::new(status.into_workflow(None, None), stamp.clone());
         }
 
         Ok(())
