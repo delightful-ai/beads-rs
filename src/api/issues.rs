@@ -1,13 +1,12 @@
-//! Issue and query-related schemas.
+//! Issue and status schemas.
 
 use serde::{Deserialize, Serialize};
 
 use crate::api::deps::DepEdge;
 use crate::core::{
-    Bead, Claim, CoreError, NamespaceId, Tombstone as CoreTombstone, WallClock, Workflow,
+    Bead, Claim, NamespaceId, SegmentId, Tombstone as CoreTombstone, WallClock, Workflow,
     WriteStamp,
 };
-use crate::core::{SegmentId, Watermarks, Applied};
 
 // =============================================================================
 // Status / Stats
@@ -413,98 +412,4 @@ impl IssueSummary {
             note_count: issue.notes.len(),
         }
     }
-}
-
-// =============================================================================
-// Query results (IPC)
-// =============================================================================
-
-/// Result of a query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "result", content = "data", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)]
-pub enum QueryResult {
-    /// Single issue result.
-    Issue(Issue),
-
-    /// List of issues (summaries).
-    Issues(Vec<IssueSummary>),
-
-    /// Dependency tree.
-    DepTree {
-        root: crate::core::BeadId,
-        edges: Vec<DepEdge>,
-    },
-
-    /// Dependencies for a bead.
-    Deps {
-        incoming: Vec<DepEdge>,
-        outgoing: Vec<DepEdge>,
-    },
-
-    /// Dependency cycles.
-    DepCycles(crate::api::deps::DepCycles),
-
-    /// Notes for a bead.
-    Notes(Vec<Note>),
-
-    /// Issue database status (counts, etc).
-    Status(StatusOutput),
-
-    /// Blocked issues.
-    Blocked(Vec<BlockedIssue>),
-
-    /// Ready issues with summary counts.
-    Ready(ReadyResult),
-
-    /// Stale issues.
-    Stale(Vec<IssueSummary>),
-
-    /// Count results.
-    Count(CountResult),
-
-    /// Deleted issues (tombstones) list.
-    Deleted(Vec<Tombstone>),
-
-    /// Deleted issue lookup by id.
-    DeletedLookup(DeletedLookup),
-
-    /// Epic completion status.
-    EpicStatus(Vec<EpicStatus>),
-
-    /// Validation result.
-    Validation { warnings: Vec<String> },
-
-    /// Daemon info (handshake).
-    DaemonInfo(crate::api::admin::DaemonInfo),
-
-    /// Admin status snapshot.
-    AdminStatus(crate::api::admin::AdminStatusOutput),
-
-    /// Admin metrics snapshot.
-    AdminMetrics(crate::api::admin::AdminMetricsOutput),
-
-    /// Admin doctor report.
-    AdminDoctor(crate::api::admin::AdminDoctorOutput),
-
-    /// Admin scrub report.
-    AdminScrub(crate::api::admin::AdminScrubOutput),
-
-    /// Admin flush report.
-    AdminFlush(crate::api::admin::AdminFlushOutput),
-
-    /// Admin fingerprint report.
-    AdminFingerprint(crate::api::admin::AdminFingerprintOutput),
-
-    /// Admin reload policies report.
-    AdminReloadPolicies(crate::api::admin::AdminReloadPoliciesOutput),
-
-    /// Admin rotate replica id report.
-    AdminRotateReplicaId(crate::api::admin::AdminRotateReplicaIdOutput),
-
-    /// Maintenance mode toggle.
-    AdminMaintenanceMode(crate::api::admin::AdminMaintenanceModeOutput),
-
-    /// Rebuild index outcome.
-    AdminRebuildIndex(crate::api::admin::AdminRebuildIndexOutput),
 }
