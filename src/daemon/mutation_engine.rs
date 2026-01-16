@@ -31,6 +31,16 @@ pub struct IdContext {
 
 #[derive(Clone, Debug)]
 pub struct EventDraft {
+    pub delta: TxnDeltaV1,
+    pub hlc_max: HlcMax,
+    pub event_time_ms: u64,
+    pub txn_id: TxnId,
+    pub request_sha256: [u8; 32],
+    pub client_request_id: Option<ClientRequestId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SequencedEvent {
     pub event_body: EventBody,
     pub event_bytes: EventBytes<crate::core::Canonical>,
     pub request_sha256: [u8; 32],
@@ -406,8 +416,6 @@ impl MutationEngine {
         state: &CanonicalState,
         clock: &mut Clock,
         store: StoreIdentity,
-        origin_replica_id: ReplicaId,
-        origin_seq: Seq1,
         id_ctx: Option<&IdContext>,
         ctx: MutationContext,
         req: ParsedMutationRequest,
@@ -492,39 +500,57 @@ impl MutationEngine {
 
         let request_sha256 = request_sha256(&ctx, &planned.canonical)?;
         let MutationContext {
-            namespace,
             actor_id,
             client_request_id,
+            ..
         } = ctx;
 
+        Ok(EventDraft {
+            delta: planned.delta,
+            hlc_max: HlcMax {
+                actor_id,
+                physical_ms: write_stamp.wall_ms,
+                logical: write_stamp.counter,
+            },
+            event_time_ms: write_stamp.wall_ms,
+            txn_id: txn_id_for_stamp(&store, &write_stamp),
+            request_sha256,
+            client_request_id,
+        })
+    }
+
+    pub fn build_event(
+        &self,
+        draft: EventDraft,
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin_replica_id: ReplicaId,
+        origin_seq: Seq1,
+    ) -> Result<SequencedEvent, OpError> {
         let event_body = EventBody {
             envelope_v: 1,
             store,
             namespace,
             origin_replica_id,
             origin_seq,
-            event_time_ms: write_stamp.wall_ms,
-            txn_id: txn_id_for_stamp(&store, &write_stamp),
-            client_request_id,
+            event_time_ms: draft.event_time_ms,
+            txn_id: draft.txn_id,
+            client_request_id: draft.client_request_id,
             kind: EventKindV1::TxnV1(TxnV1 {
-                delta: planned.delta,
-                hlc_max: HlcMax {
-                    actor_id,
-                    physical_ms: write_stamp.wall_ms,
-                    logical: write_stamp.counter,
-                },
+                delta: draft.delta,
+                hlc_max: draft.hlc_max,
             }),
         };
 
         let event_bytes = encode_event_body_canonical(&event_body)
             .map_err(|_| OpError::Internal("event_body encode failed"))?;
-        self.enforce_record_size(&event_bytes, client_request_id)?;
+        self.enforce_record_size(&event_bytes, draft.client_request_id)?;
 
-        Ok(EventDraft {
+        Ok(SequencedEvent {
             event_body,
             event_bytes,
-            request_sha256,
-            client_request_id,
+            request_sha256: draft.request_sha256,
+            client_request_id: draft.client_request_id,
         })
     }
 
@@ -1977,7 +2003,6 @@ mod tests {
     use crate::core::{
         Bead, BeadCore, BeadFields, Claim, Lww, Stamp, StoreId, Workflow, WriteStamp,
     };
-    use std::num::NonZeroU64;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2035,8 +2060,6 @@ mod tests {
             client_request_id: None,
         };
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), 0.into());
-        let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
-        let seq = Seq1::new(NonZeroU64::new(1).unwrap());
         let state = make_state_with_bead("bd-123", &actor);
 
         let req_a = ParsedMutationRequest::parse(
@@ -2064,21 +2087,17 @@ mod tests {
                 &state,
                 &mut clock_a,
                 store,
-                origin,
-                seq,
                 None,
                 ctx.clone(),
                 req_a,
             )
             .unwrap();
         let draft_b = engine
-            .plan(&state, &mut clock_b, store, origin, seq, None, ctx, req_b)
+            .plan(&state, &mut clock_b, store, None, ctx, req_b)
             .unwrap();
 
         assert_eq!(draft_a.request_sha256, draft_b.request_sha256);
-        let EventKindV1::TxnV1(txn_a) = &draft_a.event_body.kind;
-        let EventKindV1::TxnV1(txn_b) = &draft_b.event_body.kind;
-        assert_eq!(txn_a.delta, txn_b.delta);
+        assert_eq!(draft_a.delta, draft_b.delta);
     }
 
     #[test]
@@ -2093,8 +2112,6 @@ mod tests {
             client_request_id: None,
         };
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([3u8; 16])), 0.into());
-        let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
-        let seq = Seq1::new(NonZeroU64::new(1).unwrap());
         let state = make_state_with_bead("bd-456", &actor);
 
         let req = ParsedMutationRequest::parse(
@@ -2108,7 +2125,7 @@ mod tests {
 
         let mut clock = fixed_clock(1_000);
         let err = engine
-            .plan(&state, &mut clock, store, origin, seq, None, ctx, req)
+            .plan(&state, &mut clock, store, None, ctx, req)
             .unwrap_err();
 
         assert!(matches!(err, OpError::NoteTooLarge { .. }));
@@ -2126,8 +2143,6 @@ mod tests {
             client_request_id: None,
         };
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([5u8; 16])), 0.into());
-        let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
-        let seq = Seq1::new(NonZeroU64::new(1).unwrap());
         let state = make_state_with_bead("bd-789", &actor);
 
         let req = ParsedMutationRequest::parse(
@@ -2141,7 +2156,7 @@ mod tests {
 
         let mut clock = fixed_clock(1_000);
         let err = engine
-            .plan(&state, &mut clock, store, origin, seq, None, ctx, req)
+            .plan(&state, &mut clock, store, None, ctx, req)
             .unwrap_err();
 
         assert!(matches!(err, OpError::OpsTooMany { .. }));
@@ -2157,8 +2172,6 @@ mod tests {
             client_request_id: None,
         };
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([7u8; 16])), 0.into());
-        let origin = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
-        let seq = Seq1::new(NonZeroU64::new(1).unwrap());
         let state = make_state_with_bead("bd-000", &actor);
         let before = serde_json::to_string(&state).unwrap();
 
@@ -2173,7 +2186,7 @@ mod tests {
 
         let mut clock = fixed_clock(1_000);
         let _ = engine
-            .plan(&state, &mut clock, store, origin, seq, None, ctx, req)
+            .plan(&state, &mut clock, store, None, ctx, req)
             .unwrap();
 
         let after = serde_json::to_string(&state).unwrap();
