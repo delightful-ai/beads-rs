@@ -359,7 +359,7 @@ fn process_request_message(
     if let Request::SyncWait { repo } = request {
         match daemon.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
             Ok(loaded) => {
-                let repo_state = match daemon.repo_state(&loaded) {
+                let repo_state = match daemon.git_lane_state(&loaded) {
                     Ok(repo_state) => repo_state,
                     Err(e) => {
                         let _ = respond.send(ServerReply::Response(Response::err(e)));
@@ -654,7 +654,7 @@ fn flush_sync_waiters(daemon: &Daemon, waiters: &mut HashMap<RemoteUrl, Vec<Send
         .keys()
         .filter(|remote| {
             daemon
-                .repo_state_by_url(remote)
+                .git_lane_state_by_url(remote)
                 .map(|s| !s.dirty && !s.sync_in_progress)
                 .unwrap_or(true)
         })

@@ -189,7 +189,7 @@ impl Daemon {
         coordinator.ensure_available(&namespace, durability)?;
 
         let id_ctx = if matches!(parsed_request, ParsedMutationRequest::Create { .. }) {
-            let repo_state = self.repo_state(&proof)?;
+            let repo_state = self.git_lane_state(&proof)?;
             Some(IdContext {
                 root_slug: repo_state.root_slug.clone(),
                 remote_url: proof.remote().clone(),
@@ -373,13 +373,10 @@ impl Daemon {
             applied_seq,
             durable_seq,
         ) = {
-            let store_runtime = self.store_runtime_mut(&proof)?;
+            let (store_runtime, repo_state) = self.store_and_lane_mut(&proof)?;
             let apply_start = Instant::now();
             let apply_result = {
-                let state = store_runtime
-                    .repo_state
-                    .state
-                    .ensure_namespace(namespace.clone());
+                let state = store_runtime.state.ensure_namespace(namespace.clone());
                 apply_event(state, &sequenced.event_body)
             };
             let outcome = match apply_result {
@@ -396,10 +393,9 @@ impl Daemon {
             store_runtime.record_checkpoint_dirty_shards(&namespace, &outcome);
             let write_stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
             let now_wall_ms = WallClock::now().0;
-            store_runtime.repo_state.last_seen_stamp = Some(write_stamp.clone());
-            store_runtime.repo_state.last_clock_skew =
-                detect_clock_skew(now_wall_ms, write_stamp.wall_ms);
-            store_runtime.repo_state.mark_dirty();
+            repo_state.last_seen_stamp = Some(write_stamp.clone());
+            repo_state.last_clock_skew = detect_clock_skew(now_wall_ms, write_stamp.wall_ms);
+            repo_state.mark_dirty();
             if let Err(err) = store_runtime.broadcaster.publish(broadcast_event.clone()) {
                 tracing::warn!("event broadcast failed: {err}");
             }
@@ -528,7 +524,6 @@ impl Daemon {
         let empty_state = CanonicalState::new();
         let state = self
             .store_runtime(&proof)?
-            .repo_state
             .state
             .get(&namespace)
             .unwrap_or(&empty_state);

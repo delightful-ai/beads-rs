@@ -456,8 +456,8 @@ impl Daemon {
         if let Err(err) = self.check_read_gate(&remote, &read) {
             return Response::err(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
+        let repo_state = match self.git_lane_state(&remote) {
+            Ok(repo_state) => repo_state,
             Err(e) => return Response::err(e),
         };
         let store = match self.store_runtime(&remote) {
@@ -536,7 +536,7 @@ impl Daemon {
                 at_wall_ms: skew.wall_ms,
             });
         }
-        if let Some(repair) = &repo_state.last_wal_tail_truncated {
+        if let Some(repair) = &store.last_wal_tail_truncated {
             warnings.push(SyncWarning::WalTailTruncated {
                 namespace: repair.namespace.clone(),
                 segment_id: repair.segment_id,

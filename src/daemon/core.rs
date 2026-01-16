@@ -168,6 +168,8 @@ impl From<Response> for HandleOutcome {
 pub struct Daemon {
     /// Per-store runtime, keyed by StoreId.
     stores: BTreeMap<StoreId, StoreRuntime>,
+    /// Per-store git/checkpoint lane state, keyed by StoreId.
+    git_lanes: BTreeMap<StoreId, GitLaneState>,
     /// Store discovery caches.
     store_caches: StoreCaches,
 
@@ -251,6 +253,7 @@ impl Daemon {
 
         Daemon {
             stores: BTreeMap::new(),
+            git_lanes: BTreeMap::new(),
             store_caches: StoreCaches::new(),
             clock: Clock::new_with_max_forward_drift(limits.hlc_max_forward_drift_ms),
             actor_clocks: BTreeMap::new(),
@@ -457,22 +460,20 @@ impl Daemon {
         configs
     }
 
-    /// Get repo state. Returns Internal if invariant is violated.
-    pub(crate) fn repo_state(&self, proof: &LoadedStore) -> Result<&GitLaneState, OpError> {
-        self.stores
+    /// Get git lane state. Returns Internal if invariant is violated.
+    pub(crate) fn git_lane_state(&self, proof: &LoadedStore) -> Result<&GitLaneState, OpError> {
+        self.git_lanes
             .get(&proof.store_id)
-            .map(|store| &store.repo_state)
             .ok_or(OpError::Internal("loaded store missing from state"))
     }
 
-    /// Get mutable repo state. Returns Internal if invariant is violated.
-    pub(crate) fn repo_state_mut(
+    /// Get mutable git lane state. Returns Internal if invariant is violated.
+    pub(crate) fn git_lane_state_mut(
         &mut self,
         proof: &LoadedStore,
     ) -> Result<&mut GitLaneState, OpError> {
-        self.stores
+        self.git_lanes
             .get_mut(&proof.store_id)
-            .map(|store| &mut store.repo_state)
             .ok_or(OpError::Internal("loaded store missing from state"))
     }
 
@@ -489,6 +490,22 @@ impl Daemon {
         self.stores
             .get_mut(&proof.store_id)
             .ok_or(OpError::Internal("loaded store missing from state"))
+    }
+
+    pub(crate) fn store_and_lane_mut(
+        &mut self,
+        proof: &LoadedStore,
+    ) -> Result<(&mut StoreRuntime, &mut GitLaneState), OpError> {
+        let store_id = proof.store_id();
+        let store = self
+            .stores
+            .get_mut(&store_id)
+            .ok_or(OpError::Internal("loaded store missing from state"))?;
+        let lane = self
+            .git_lanes
+            .get_mut(&store_id)
+            .ok_or(OpError::Internal("loaded store missing from state"))?;
+        Ok((store, lane))
     }
 
     pub(crate) fn checkpoint_group_snapshots(
@@ -510,13 +527,12 @@ impl Daemon {
         groups
     }
 
-    /// Get repo state by raw remote URL (for internal sync waiters, etc.).
+    /// Get git lane state by raw remote URL (for internal sync waiters, etc.).
     /// Returns None if not loaded.
-    pub(crate) fn repo_state_by_url(&self, remote: &RemoteUrl) -> Option<&GitLaneState> {
+    pub(crate) fn git_lane_state_by_url(&self, remote: &RemoteUrl) -> Option<&GitLaneState> {
         self.store_caches.remote_to_store_id
             .get(remote)
-            .and_then(|store_id| self.stores.get(store_id))
-            .map(|store| &store.repo_state)
+            .and_then(|store_id| self.git_lanes.get(store_id))
     }
 
     pub(crate) fn store_identity(&self, proof: &LoadedStore) -> Result<StoreIdentity, OpError> {
@@ -557,6 +573,7 @@ impl Daemon {
             let runtime = open.runtime;
             self.seed_actor_clocks(&runtime)?;
             self.stores.insert(store_id, runtime);
+            self.git_lanes.insert(store_id, GitLaneState::new());
             self.register_default_checkpoint_groups(store_id)?;
 
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
@@ -606,7 +623,12 @@ impl Daemon {
                 Err(_) => return Err(OpError::Internal("git thread died")),
             }
         } else if let Some(store) = self.stores.get_mut(&store_id) {
-            store.repo_state.register_path(repo.to_owned());
+            if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
+                repo_state.register_path(repo.to_owned());
+            } else {
+                let repo_state = GitLaneState::with_path(None, repo.to_owned());
+                self.git_lanes.insert(store_id, repo_state);
+            }
             if store.primary_remote != remote {
                 store.primary_remote = remote.clone();
             }
@@ -644,6 +666,7 @@ impl Daemon {
             let runtime = open.runtime;
             self.seed_actor_clocks(&runtime)?;
             self.stores.insert(store_id, runtime);
+            self.git_lanes.insert(store_id, GitLaneState::new());
             self.register_default_checkpoint_groups(store_id)?;
 
             // Blocking load from git (fetches remote first in GitWorker).
@@ -678,7 +701,12 @@ impl Daemon {
                 }
             }
         } else if let Some(store) = self.stores.get_mut(&store_id) {
-            store.repo_state.register_path(repo.to_owned());
+            if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
+                repo_state.register_path(repo.to_owned());
+            } else {
+                let repo_state = GitLaneState::with_path(None, repo.to_owned());
+                self.git_lanes.insert(store_id, repo_state);
+            }
             if store.primary_remote != remote {
                 store.primary_remote = remote.clone();
             }
@@ -787,7 +815,7 @@ impl Daemon {
             .get_mut(&store_id)
             .ok_or(OpError::Internal("loaded store missing from state"))?;
         store.state = state;
-        store.repo_state = repo_state;
+        self.git_lanes.insert(store_id, repo_state);
         if store.primary_remote != *remote {
             store.primary_remote = remote.clone();
         }
@@ -1230,7 +1258,11 @@ impl Daemon {
                 )
             })
             .collect();
-        let store = self.stores.get_mut(&store_id).ok_or_else(|| {
+        let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
+        let store = stores.get_mut(&store_id).ok_or_else(|| {
+            ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
+        })?;
+        let git_lane = git_lanes.get_mut(&store_id).ok_or_else(|| {
             ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
         })?;
 
@@ -1365,7 +1397,7 @@ impl Daemon {
             .map_err(|err| wal_index_error_payload(&err))?;
 
         let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
-            let mut max_stamp = store.repo_state.last_seen_stamp.clone();
+            let mut max_stamp = git_lane.last_seen_stamp.clone();
             for event in &batch {
                 let apply_start = Instant::now();
                 let apply_result = {
@@ -1409,10 +1441,10 @@ impl Daemon {
 
             if let Some(stamp) = max_stamp.clone() {
                 let now_wall_ms = WallClock::now().0;
-                store.repo_state.last_seen_stamp = Some(stamp.clone());
-                store.repo_state.last_clock_skew = detect_clock_skew(now_wall_ms, stamp.wall_ms);
+                git_lane.last_seen_stamp = Some(stamp.clone());
+                git_lane.last_clock_skew = detect_clock_skew(now_wall_ms, stamp.wall_ms);
             }
-            store.repo_state.mark_dirty();
+            git_lane.mark_dirty();
 
             let durable = store
                 .watermarks_durable
@@ -1487,7 +1519,7 @@ impl Daemon {
     ) -> Result<LoadedStore, OpError> {
         let loaded = self.ensure_repo_loaded(repo, git_tx)?;
 
-        let repo_state = self.repo_state(&loaded)?;
+        let repo_state = self.git_lane_state(&loaded)?;
         let needs_refresh = !repo_state.dirty
             && !repo_state.sync_in_progress
             && !repo_state.refresh_in_progress
@@ -1502,7 +1534,7 @@ impl Daemon {
 
             if let Some(refresh_path) = path {
                 // Mark refresh in progress before sending to avoid races
-                let repo_state = self.repo_state_mut(&loaded)?;
+                let repo_state = self.git_lane_state_mut(&loaded)?;
                 repo_state.refresh_in_progress = true;
 
                 // Kick off background refresh - don't wait for result
@@ -1530,11 +1562,15 @@ impl Daemon {
             Some(id) => id,
             None => return,
         };
-        let store = match self.stores.get_mut(&store_id) {
+        let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
+        let store = match stores.get_mut(&store_id) {
             Some(store) => store,
             None => return,
         };
-        let repo_state = &mut store.repo_state;
+        let repo_state = match git_lanes.get_mut(&store_id) {
+            Some(repo_state) => repo_state,
+            None => return,
+        };
 
         repo_state.refresh_in_progress = false;
 
@@ -1548,7 +1584,7 @@ impl Daemon {
                 // Only apply refresh if repo is still clean (no mutations happened
                 // during the refresh). If dirty, we'll sync soon anyway.
                 if !repo_state.dirty {
-                    repo_state
+                    store
                         .state
                         .set_namespace_state(NamespaceId::core(), fresh.state);
                     // Update root_slug if remote has one and we don't
@@ -1608,6 +1644,7 @@ impl Daemon {
 
         // Remove cached state so ensure_repo_loaded will do a fresh load
         self.stores.remove(&resolved.store_id);
+        self.git_lanes.remove(&resolved.store_id);
 
         // Now load fresh from git
         self.ensure_repo_loaded_strict(repo, git_tx)
@@ -1623,8 +1660,13 @@ impl Daemon {
             Some(id) => id,
             None => return,
         };
-        let repo_state = match self.stores.get_mut(&store_id) {
-            Some(store) => &mut store.repo_state,
+        let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
+        let store = match stores.get_mut(&store_id) {
+            Some(store) => store,
+            None => return,
+        };
+        let repo_state = match git_lanes.get_mut(&store_id) {
+            Some(repo_state) => repo_state,
             None => return,
         };
 
@@ -1683,11 +1725,15 @@ impl Daemon {
                     }
                 };
 
-                let store = match self.stores.get_mut(&store_id) {
+                let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
+                let store = match stores.get_mut(&store_id) {
                     Some(store) => store,
                     None => return,
                 };
-                let repo_state = &mut store.repo_state;
+                let repo_state = match git_lanes.get_mut(&store_id) {
+                    Some(repo_state) => repo_state,
+                    None => return,
+                };
 
                 repo_state.last_seen_stamp =
                     max_write_stamp(repo_state.last_seen_stamp.clone(), outcome.last_seen_stamp);
@@ -1769,8 +1815,8 @@ impl Daemon {
             }
             Err(e) => {
                 tracing::error!("sync failed for {:?}: {:?}", remote, e);
-                let repo_state = match self.stores.get_mut(&store_id) {
-                    Some(store) => &mut store.repo_state,
+                let repo_state = match self.git_lanes.get_mut(&store_id) {
+                    Some(repo_state) => repo_state,
                     None => return,
                 };
                 repo_state.fail_sync();
@@ -1860,7 +1906,9 @@ impl Daemon {
         };
 
         // Create/update symlinks in each clone
-        if let Err(e) = ensure_symlinks(&export_path, &store.repo_state.known_paths) {
+        if let Some(repo_state) = self.git_lanes.get(&store_id)
+            && let Err(e) = ensure_symlinks(&export_path, &repo_state.known_paths)
+        {
             tracing::warn!("Go-compat symlink update failed for {:?}: {}", remote, e);
         }
     }
@@ -2002,6 +2050,20 @@ impl Daemon {
             .checkpoint_groups_for_store(key.store_id);
 
         let (snapshot, repo_path) = {
+            let Some(path) = self
+                .git_lanes
+                .get(&key.store_id)
+                .and_then(|lane| lane.any_valid_path().cloned())
+            else {
+                tracing::warn!(
+                    store_id = %key.store_id,
+                    checkpoint_group = %config.group,
+                    "checkpoint repo path missing"
+                );
+                self.checkpoint_scheduler.complete_failure(key, now);
+                self.emit_checkpoint_queue_depth();
+                return;
+            };
             let store = match self.stores.get_mut(&key.store_id) {
                 Some(store) => store,
                 None => {
@@ -2014,16 +2076,6 @@ impl Daemon {
                     self.emit_checkpoint_queue_depth();
                     return;
                 }
-            };
-            let Some(path) = store.repo_state.any_valid_path().cloned() else {
-                tracing::warn!(
-                    store_id = %key.store_id,
-                    checkpoint_group = %config.group,
-                    "checkpoint repo path missing"
-                );
-                self.checkpoint_scheduler.complete_failure(key, now);
-                self.emit_checkpoint_queue_depth();
-                return;
             };
             let created_at_ms = WallClock::now().0;
             let snapshot =
@@ -2073,16 +2125,12 @@ impl Daemon {
 
     /// Get iterator over all stores.
     pub fn repos(&self) -> impl Iterator<Item = (&StoreId, &GitLaneState)> {
-        self.stores
-            .iter()
-            .map(|(id, store)| (id, &store.repo_state))
+        self.git_lanes.iter()
     }
 
     /// Get mutable iterator over all stores.
     pub fn repos_mut(&mut self) -> impl Iterator<Item = (&StoreId, &mut GitLaneState)> {
-        self.stores
-            .iter_mut()
-            .map(|(id, store)| (id, &mut store.repo_state))
+        self.git_lanes.iter_mut()
     }
 
     pub(crate) fn parse_mutation_meta(
@@ -3197,6 +3245,9 @@ pub(crate) fn insert_store_for_tests(
     daemon.seed_actor_clocks(&open.runtime)?;
     daemon.stores.insert(store_id, open.runtime);
     daemon
+        .git_lanes
+        .insert(store_id, GitLaneState::with_path(None, repo_path.to_owned()));
+    daemon
         .store_caches
         .remote_to_store_id
         .insert(remote.clone(), store_id);
@@ -3349,6 +3400,7 @@ mod tests {
             .remote_to_store_id
             .insert(remote.clone(), store_id);
         daemon.stores.insert(store_id, runtime);
+        daemon.git_lanes.insert(store_id, GitLaneState::new());
         store_id
     }
 
@@ -3617,7 +3669,7 @@ mod tests {
         // Manually insert a repo in refresh_in_progress state
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
+        daemon.git_lanes.insert(store_id, repo_state);
 
         // Complete refresh with success
         let result = Ok(LoadResult {
@@ -3631,7 +3683,7 @@ mod tests {
         });
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
+        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
         assert!(!repo_state.refresh_in_progress);
         assert!(repo_state.last_refresh.is_some());
     }
@@ -3731,13 +3783,13 @@ mod tests {
 
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
+        daemon.git_lanes.insert(store_id, repo_state);
 
         // Complete refresh with error
         let result = Err(SyncError::NoLocalRef("/test".to_string()));
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
+        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
         assert!(!repo_state.refresh_in_progress);
         // last_refresh should NOT be updated on error
         assert!(repo_state.last_refresh.is_none());
@@ -3753,7 +3805,7 @@ mod tests {
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = false; // Clean state
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
+        daemon.git_lanes.insert(store_id, repo_state);
 
         // Create fresh state with some content
         let fresh_state = CanonicalState::new();
@@ -3768,7 +3820,7 @@ mod tests {
         });
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
+        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
         assert_eq!(repo_state.root_slug, Some("fresh-slug".to_string()));
     }
 
@@ -3783,7 +3835,7 @@ mod tests {
         repo_state.refresh_in_progress = true;
         repo_state.dirty = true; // Dirty - mutations happened during refresh
         repo_state.root_slug = Some("original-slug".to_string());
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
+        daemon.git_lanes.insert(store_id, repo_state);
 
         // Try to apply refresh
         let result = Ok(LoadResult {
@@ -3797,7 +3849,7 @@ mod tests {
         });
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
+        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
         // Should keep original slug since dirty
         assert_eq!(repo_state.root_slug, Some("original-slug".to_string()));
         // But last_refresh should still be updated
@@ -3814,7 +3866,7 @@ mod tests {
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = false;
-        daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
+        daemon.git_lanes.insert(store_id, repo_state);
 
         // Refresh shows local has changes remote doesn't
         let result = Ok(LoadResult {
@@ -3828,7 +3880,7 @@ mod tests {
         });
         daemon.complete_refresh(&remote, result);
 
-        let repo_state = &daemon.stores.get(&store_id).unwrap().repo_state;
+        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
         // Should mark dirty to trigger sync
         assert!(repo_state.dirty);
         // And scheduler should have it pending
@@ -3943,7 +3995,6 @@ mod tests {
 
         let store = daemon.stores.get(&store_id).expect("store runtime");
         let core = store
-            .repo_state
             .state
             .get(&NamespaceId::core())
             .expect("core state");
@@ -4263,12 +4314,17 @@ mod tests {
         let mut local_state = CanonicalState::new();
         local_state.insert_live(loser);
 
-        let store = daemon.stores.get_mut(&store_id).unwrap();
-        store
-            .state
-            .set_namespace_state(NamespaceId::core(), local_state);
-        store.repo_state.dirty = true;
-        store.repo_state.sync_in_progress = true;
+        {
+            let store = daemon.stores.get_mut(&store_id).unwrap();
+            store
+                .state
+                .set_namespace_state(NamespaceId::core(), local_state);
+        }
+        {
+            let repo_state = daemon.git_lanes.get_mut(&store_id).unwrap();
+            repo_state.dirty = true;
+            repo_state.sync_in_progress = true;
+        }
 
         let outcome = SyncOutcome {
             last_seen_stamp: synced_state.max_write_stamp(),
