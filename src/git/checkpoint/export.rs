@@ -9,7 +9,8 @@ use thiserror::Error;
 use super::CHECKPOINT_FORMAT_VERSION;
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{
-    CheckpointFileKind, shard_for_bead, shard_for_dep, shard_for_tombstone, shard_path,
+    CheckpointFileKind, CheckpointShardPath, shard_for_bead, shard_for_dep, shard_for_tombstone,
+    shard_path,
 };
 use super::manifest::{CheckpointManifest, ManifestFile};
 use super::meta::{CheckpointMeta, IncludedHeads, IncludedWatermarks};
@@ -95,7 +96,7 @@ pub struct CheckpointSnapshotInput<'a> {
     pub created_by_replica_id: ReplicaId,
     pub policy_hash: ContentHash,
     pub roster_hash: Option<ContentHash>,
-    pub dirty_shards: Option<BTreeSet<String>>,
+    pub dirty_shards: Option<BTreeSet<CheckpointShardPath>>,
     pub state: &'a StoreState,
     pub watermarks_durable: &'a Watermarks<Durable>,
 }
@@ -127,7 +128,10 @@ pub fn build_snapshot(
 
     let included = included_watermarks(watermarks_durable, &namespaces);
     let included_heads = included_heads(watermarks_durable, &namespaces);
-    let dirty_shards = dirty_shards.unwrap_or_else(|| shards.keys().cloned().collect());
+    let dirty_shards = match dirty_shards {
+        Some(paths) => paths.into_iter().map(|path| path.to_path()).collect(),
+        None => shards.keys().cloned().collect(),
+    };
 
     Ok(CheckpointSnapshot {
         checkpoint_group,
@@ -651,14 +655,12 @@ mod tests {
                 HeadStatus::Known([4u8; 32]),
             )
             .unwrap();
-        let state_path = shard_path(
-            &namespace,
+        let mut expected_paths = BTreeSet::new();
+        expected_paths.insert(CheckpointShardPath::new(
+            namespace.clone(),
             CheckpointFileKind::State,
-            &shard_for_bead(&bead_id),
-        );
-
-        let mut expected = BTreeSet::new();
-        expected.insert(state_path.clone());
+            shard_for_bead(&bead_id),
+        ));
         let custom = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
             namespaces: vec![namespace.clone()],
@@ -668,13 +670,15 @@ mod tests {
             created_by_replica_id: origin,
             policy_hash: ContentHash::from_bytes([9u8; 32]),
             roster_hash: None,
-            dirty_shards: Some(expected.clone()),
+            dirty_shards: Some(expected_paths.clone()),
             state: &state,
             watermarks_durable: &watermarks,
         })
         .expect("snapshot");
 
-        assert_eq!(custom.dirty_shards, expected);
+        let expected_dirty: BTreeSet<String> =
+            expected_paths.iter().map(|path| path.to_path()).collect();
+        assert_eq!(custom.dirty_shards, expected_dirty);
     }
 
     #[test]
