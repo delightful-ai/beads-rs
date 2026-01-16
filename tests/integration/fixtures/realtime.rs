@@ -23,7 +23,8 @@ impl RealtimeFixture {
         let repo_dir = TempDir::new().expect("create repo dir");
         let remote_dir = TempDir::new().expect("create remote dir");
 
-        init_git_repo(repo_dir.path(), remote_dir.path());
+        init_git_repo(repo_dir.path(), remote_dir.path())
+            .unwrap_or_else(|err| panic!("git fixture init failed: {err}"));
 
         let data_dir = runtime_dir.path().join("data");
         fs::create_dir_all(&data_dir).expect("create test data dir");
@@ -73,34 +74,35 @@ impl Drop for RealtimeFixture {
     }
 }
 
-fn init_git_repo(repo_dir: &Path, remote_dir: &Path) {
-    StdCommand::new("git")
-        .args(["init", "--bare"])
-        .current_dir(remote_dir)
-        .output()
-        .expect("git init --bare");
+fn init_git_repo(repo_dir: &Path, remote_dir: &Path) -> Result<(), String> {
+    run_git(&["init", "--bare"], remote_dir)?;
+    run_git(&["init"], repo_dir)?;
+    run_git(&["config", "user.email", "test@test.com"], repo_dir)?;
+    run_git(&["config", "user.name", "Test"], repo_dir)?;
 
-    StdCommand::new("git")
-        .args(["init"])
-        .current_dir(repo_dir)
-        .output()
-        .expect("git init");
+    let remote = remote_dir
+        .to_str()
+        .ok_or_else(|| format!("remote dir path is not utf8: {remote_dir:?}"))?;
+    run_git(&["remote", "add", "origin", remote], repo_dir)?;
+    Ok(())
+}
 
-    StdCommand::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(repo_dir)
+fn run_git(args: &[&str], cwd: &Path) -> Result<(), String> {
+    let output = StdCommand::new("git")
+        .args(args)
+        .current_dir(cwd)
         .output()
-        .expect("git config email");
+        .map_err(|err| format!("git {:?} failed to start in {:?}: {err}", args, cwd))?;
+    if output.status.success() {
+        return Ok(());
+    }
 
-    StdCommand::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(repo_dir)
-        .output()
-        .expect("git config name");
-
-    StdCommand::new("git")
-        .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
-        .current_dir(repo_dir)
-        .output()
-        .expect("git remote add origin");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "git {:?} failed in {:?} (status {}): stdout: {stdout} stderr: {stderr}",
+        args,
+        cwd,
+        output.status
+    ))
 }
