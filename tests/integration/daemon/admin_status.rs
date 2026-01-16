@@ -28,6 +28,7 @@ fn admin_status_monotonic_under_load() {
     config.total_requests = 40;
     config.namespace = Some(namespace.as_str().to_string());
     config.autostart = false;
+    let timeout = load_timeout(config.total_requests, config.workers);
 
     let handle = thread::spawn(move || generator.run());
 
@@ -35,7 +36,7 @@ fn admin_status_monotonic_under_load() {
     collect_until_load_complete(
         &mut collector,
         &handle,
-        Duration::from_secs(3),
+        timeout,
         Duration::from_millis(25),
         3,
     );
@@ -131,4 +132,13 @@ fn collect_until_load_complete(
         collector.samples().len() >= min_samples,
         "expected at least {min_samples} status samples"
     );
+}
+
+fn load_timeout(total_requests: usize, workers: usize) -> Duration {
+    const PER_REQUEST_MS: u64 = 250;
+    let workers = workers.max(1) as u64;
+    let total_requests = total_requests.max(1) as u64;
+    let per_worker = (total_requests + workers - 1) / workers;
+    let budget_ms = PER_REQUEST_MS.saturating_mul(per_worker);
+    Duration::from_millis(budget_ms).saturating_add(Duration::from_secs(1))
 }
