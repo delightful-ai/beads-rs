@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn response_err() {
         let resp = Response::err(ErrorPayload::new(
-            crate::core::ErrorCode::NotFound,
+            crate::core::CliErrorCode::NotFound.into(),
             "bead not found",
             false,
         ));

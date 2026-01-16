@@ -502,7 +502,7 @@ fn build_load_result(inputs: LoadResultInputs) -> Result<LoadResult, SyncError> 
 fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, SyncError> {
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
-        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) if e.code() == CliErrorCode::NotFound.into() => Ok(None),
         Err(e) => Err(SyncError::Git(e)),
     }
 }

@@ -156,7 +156,7 @@ impl StoreRuntime {
         let mut repo_state = RepoState::new();
         for truncation in &replay_stats.tail_truncations {
             let payload =
-                ErrorPayload::new(ErrorCode::WalTailTruncated, "wal tail truncated", true)
+                ErrorPayload::new(ProtocolErrorCode::WalTailTruncated.into(), "wal tail truncated", true)
                     .with_details(WalTailTruncatedDetails {
                         namespace: truncation.namespace.clone(),
                         segment_id: Some(truncation.segment_id),

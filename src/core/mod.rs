@@ -50,8 +50,8 @@ pub use durability::{
     LocalFsyncProof, ReceiptMergeError, ReplicatedProof,
 };
 pub use error::{
-    CollisionError, CoreError, ErrorCode, ErrorPayload, InvalidDependency, InvalidId, InvalidLabel,
-    RangeError,
+    CliErrorCode, CollisionError, CoreError, ErrorCode, ErrorPayload, InvalidDependency, InvalidId,
+    InvalidLabel, ProtocolErrorCode, RangeError,
 };
 pub use event::{
     Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventFrameError, EventFrameV1,

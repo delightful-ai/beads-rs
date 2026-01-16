@@ -842,7 +842,7 @@ fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &
                     Some(DropReason::SubscriberLagged)
                 ) {
                     let payload =
-                        ErrorPayload::new(ErrorCode::SubscriberLagged, "subscriber lagged", true)
+                        ErrorPayload::new(ProtocolErrorCode::SubscriberLagged.into(), "subscriber lagged", true)
                             .with_details(error_details::SubscriberLaggedDetails {
                                 reason: None,
                                 max_queue_bytes: Some(subscriber_limits.max_bytes as u64),
@@ -851,7 +851,7 @@ fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &
                     let _ = send_response(writer, &Response::err(payload));
                 } else {
                     let payload =
-                        ErrorPayload::new(ErrorCode::Disconnected, "subscription closed", true);
+                        ErrorPayload::new(CliErrorCode::Disconnected.into(), "subscription closed", true);
                     let _ = send_response(writer, &Response::err(payload));
                 }
                 return;
@@ -909,7 +909,7 @@ fn stream_event_response_from_parts(
         Ok(body) => body,
         Err(err) => {
             return Response::err(
-                ErrorPayload::new(ErrorCode::WalCorrupt, "event body decode failed", false)
+                ErrorPayload::new(ProtocolErrorCode::WalCorrupt.into(), "event body decode failed", false)
                     .with_details(error_details::WalCorruptDetails {
                         namespace: event_id.namespace.clone(),
                         segment_id: None,
@@ -1018,7 +1018,7 @@ mod tests {
         let Response::Err { err } = response else {
             panic!("expected corruption error");
         };
-        assert_eq!(err.code, ErrorCode::WalCorrupt);
+        assert_eq!(err.code, ProtocolErrorCode::WalCorrupt.into());
         let details = err
             .details_as::<error_details::WalCorruptDetails>()
             .unwrap()
@@ -1165,7 +1165,7 @@ mod tests {
         let Response::Err { err } = response else {
             panic!("expected timeout error");
         };
-        assert_eq!(err.code, ErrorCode::RequireMinSeenTimeout);
+        assert_eq!(err.code, ProtocolErrorCode::RequireMinSeenTimeout.into());
     }
 
     fn replica(seed: u128) -> ReplicaId {
@@ -1386,7 +1386,7 @@ mod tests {
         let Response::Err { err } = response else {
             panic!("expected error");
         };
-        assert_eq!(err.code, ErrorCode::DurabilityTimeout);
+        assert_eq!(err.code, ProtocolErrorCode::DurabilityTimeout.into());
         let receipt = err
             .receipt_as::<DurabilityReceipt>()
             .unwrap()

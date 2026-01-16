@@ -194,7 +194,7 @@ fn repl_equivocation_errors() {
         })
         .expect("error");
 
-    assert_eq!(error.code, ErrorCode::Equivocation);
+    assert_eq!(error.code, ProtocolErrorCode::Equivocation.into());
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn repl_prev_sha_mismatch_rejects() {
         })
         .expect("error");
 
-    assert_eq!(error.code, ErrorCode::PrevShaMismatch);
+    assert_eq!(error.code, ProtocolErrorCode::PrevShaMismatch.into());
     let details = error
         .details_as::<error_details::PrevShaMismatchDetails>()
         .unwrap()

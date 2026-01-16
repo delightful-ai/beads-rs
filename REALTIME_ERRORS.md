@@ -273,7 +273,7 @@ ErrorPayload {
 #### `request_too_large` (deprecated)
 
 * **retryable:** false
-* **Meaning:** Legacy alias for `wal_record_too_large` (kept for compatibility).
+* **Meaning:** Compatibility alias for `wal_record_too_large` (kept for older clients).
 * **details:** `{ max_wal_record_bytes: u64, estimated_bytes: u64 }`
 
 #### `ops_too_many`
@@ -512,11 +512,12 @@ If you tell me what your current IPC error payload looks like (fields + existing
 
 ---
 
-## Legacy IPC / CLI error codes (beads v0.x)
+## CLI error codes (beads v0.x)
 
 These codes are retained for compatibility with the current CLI/IPC surface.
-They are not part of the realtime replication protocol, but remain stable until
-the legacy endpoints are retired.
+They are not part of the realtime replication protocol registry. Some may be
+promoted into the protocol namespace or renamed over time as the realtime
+surface stabilizes.
 
 | Code | Retryable | Meaning |
 |------|-----------|---------|
@@ -536,9 +537,9 @@ the legacy endpoints are retired.
 | `not_claimed_by_you` | no | unclaim attempted by non-claimer |
 | `dep_not_found` | no | dependency edge not found |
 | `load_timeout` | yes | initial fetch timed out |
-| `internal` | maybe | legacy internal error |
-| `parse_error` | no | legacy IPC parse error |
-| `io_error` | yes | legacy IPC I/O error |
+| `internal` | maybe | CLI internal error |
+| `parse_error` | no | CLI IPC parse error |
+| `io_error` | yes | CLI IPC I/O error |
 | `invalid_id` | no | identifier failed validation |
 | `disconnected` | yes | client disconnected |
 | `daemon_unavailable` | yes | daemon not reachable |

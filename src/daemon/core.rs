@@ -1309,7 +1309,7 @@ impl Daemon {
     pub(crate) fn handle_repl_ingest(&mut self, request: ReplIngestRequest) {
         if self.shutting_down {
             let error =
-                ReplError::new(ErrorCode::MaintenanceMode, "shutting down", true);
+                ReplError::new(ProtocolErrorCode::MaintenanceMode.into(), "shutting down", true);
             let _ = request.respond.send(Err(error));
             return;
         }
@@ -1317,7 +1317,7 @@ impl Daemon {
             if store.maintenance_mode {
                 Some(
                     ReplError::new(
-                        ErrorCode::MaintenanceMode,
+                        ProtocolErrorCode::MaintenanceMode.into(),
                         "maintenance mode enabled",
                         true,
                     )
@@ -1332,7 +1332,7 @@ impl Daemon {
                 if policy.replicate_mode == ReplicateMode::None {
                     Some(
                         ReplError::new(
-                            ErrorCode::NamespacePolicyViolation,
+                            ProtocolErrorCode::NamespacePolicyViolation.into(),
                             "namespace replication disabled by policy",
                             false,
                         )
@@ -1350,7 +1350,7 @@ impl Daemon {
             } else {
                 Some(
                     ReplError::new(
-                        ErrorCode::NamespaceUnknown,
+                        ProtocolErrorCode::NamespaceUnknown.into(),
                         "namespace not configured",
                         false,
                     )
@@ -1401,7 +1401,7 @@ impl Daemon {
             })
             .collect();
         let store = self.stores.get_mut(&store_id).ok_or_else(|| {
-            ReplError::new(ErrorCode::Internal, "store not loaded", true)
+            ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
         })?;
 
         if batch.is_empty() {
@@ -1421,7 +1421,7 @@ impl Daemon {
         for event in &batch {
             if event.body.namespace != namespace || event.body.origin_replica_id != origin {
                 return Err(ReplError::new(
-                    ErrorCode::Internal,
+                    CliErrorCode::Internal.into(),
                     "replication batch has mismatched origin",
                     false,
                 ));
@@ -1453,7 +1453,7 @@ impl Daemon {
             )
             .map_err(|err| {
                 tracing::error!(error = ?err, "record verification failed");
-                ReplError::new(ErrorCode::Internal, "record verification failed", false)
+                ReplError::new(CliErrorCode::Internal.into(), "record verification failed", false)
             })?;
 
             let append_start = Instant::now();
@@ -1477,7 +1477,7 @@ impl Daemon {
                     .segment_snapshot(&namespace)
                     .ok_or_else(|| {
                         ReplError::new(
-                            ErrorCode::Internal,
+                            CliErrorCode::Internal.into(),
                             "missing active wal segment",
                             false,
                         )
@@ -2673,7 +2673,7 @@ impl Daemon {
             Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx).into(),
 
             Request::Subscribe { .. } => Response::err(error_payload(
-                ErrorCode::InvalidRequest,
+                ProtocolErrorCode::InvalidRequest.into(),
                 "subscribe must be handled by the streaming IPC path",
                 false,
             ))
@@ -2713,7 +2713,7 @@ impl Daemon {
                     .is_err()
                 {
                     return Response::err(error_payload(
-                        ErrorCode::Internal,
+                        CliErrorCode::Internal.into(),
                         "git thread not responding",
                         false,
                     ))
@@ -2726,10 +2726,10 @@ impl Daemon {
                         Err(e) => Response::err(e),
                     },
                     Ok(Err(e)) => {
-                        Response::err(error_payload(ErrorCode::InitFailed, &e.to_string(), false))
+                        Response::err(error_payload(CliErrorCode::InitFailed.into(), &e.to_string(), false))
                     }
                     Err(_) => {
-                        Response::err(error_payload(ErrorCode::Internal, "git thread died", false))
+                        Response::err(error_payload(CliErrorCode::Internal.into(), "git thread died", false))
                     }
                 }
                 .into()
@@ -2759,7 +2759,7 @@ fn error_payload(code: ErrorCode, message: &str, retryable: bool) -> ErrorPayloa
 fn invalid_id_payload(err: CoreError) -> ErrorPayload {
     match err {
         CoreError::InvalidId(id) => IpcError::from(id).into(),
-        other => ErrorPayload::new(ErrorCode::InternalError, other.to_string(), false),
+        other => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), other.to_string(), false),
     }
 }
 
@@ -3404,7 +3404,7 @@ fn event_wal_error_payload(
     offset: Option<u64>,
     err: EventWalError,
 ) -> ReplError {
-    ReplError::new(ErrorCode::WalCorrupt, "wal error", true).with_details(
+    ReplError::new(ProtocolErrorCode::WalCorrupt.into(), "wal error", true).with_details(
         ReplErrorDetails::WalCorrupt(error_details::WalCorruptDetails {
             namespace: namespace.clone(),
             segment_id,
@@ -3420,7 +3420,7 @@ fn apply_event_error_payload(
     err: ApplyError,
 ) -> ReplError {
     let reason = format!("apply_event rejected for {namespace}/{origin}: {err}");
-    ReplError::new(ErrorCode::Corruption, "apply_event rejected", false).with_details(
+    ReplError::new(ProtocolErrorCode::Corruption.into(), "apply_event rejected", false).with_details(
         ReplErrorDetails::Corruption(error_details::CorruptionDetails { reason }),
     )
 }
@@ -3433,7 +3433,7 @@ fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
             seq,
             existing_sha256,
             new_sha256,
-        } => ReplError::new(ErrorCode::Equivocation, "equivocation", false).with_details(
+        } => ReplError::new(ProtocolErrorCode::Equivocation.into(), "equivocation", false).with_details(
             ReplErrorDetails::Equivocation(error_details::EquivocationDetails {
                 eid: error_details::EventIdDetails {
                     namespace: namespace.clone(),
@@ -3451,7 +3451,7 @@ fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
             got_request_sha256,
             ..
         } => ReplError::new(
-            ErrorCode::ClientRequestIdReuseMismatch,
+            ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
             "client_request_id reuse mismatch",
             false,
         )
@@ -3463,7 +3463,7 @@ fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
                 got_request_sha256: hex::encode(got_request_sha256),
             },
         )),
-        _ => ReplError::new(ErrorCode::IndexCorrupt, "index error", true).with_details(
+        _ => ReplError::new(ProtocolErrorCode::IndexCorrupt.into(), "index error", true).with_details(
             ReplErrorDetails::IndexCorrupt(error_details::IndexCorruptDetails {
                 reason: err.to_string(),
             }),
@@ -3479,7 +3479,7 @@ fn watermark_error_payload(
     match err {
         WatermarkError::NonContiguous { expected, got } => {
             let durable_seen = expected.prev_seq0().get();
-            ReplError::new(ErrorCode::GapDetected, "gap detected", false).with_details(
+            ReplError::new(ProtocolErrorCode::GapDetected.into(), "gap detected", false).with_details(
                 ReplErrorDetails::GapDetected(error_details::GapDetectedDetails {
                     namespace: namespace.clone(),
                     origin_replica_id: *origin,
@@ -3488,7 +3488,7 @@ fn watermark_error_payload(
                 }),
             )
         }
-        other => ReplError::new(ErrorCode::Internal, other.to_string(), false),
+        other => ReplError::new(CliErrorCode::Internal.into(), other.to_string(), false),
     }
 }
 
@@ -4395,7 +4395,7 @@ mod tests {
                 }),
                 &git_tx,
             ),
-            ErrorCode::InvalidRequest,
+            ProtocolErrorCode::InvalidRequest.into(),
         );
         assert_err_code(
             daemon.handle_request(
@@ -4405,7 +4405,7 @@ mod tests {
                 }),
                 &git_tx,
             ),
-            ErrorCode::InvalidRequest,
+            ProtocolErrorCode::InvalidRequest.into(),
         );
         assert_err_code(
             daemon.handle_request(
@@ -4415,7 +4415,7 @@ mod tests {
                 }),
                 &git_tx,
             ),
-            ErrorCode::InvalidRequest,
+            ProtocolErrorCode::InvalidRequest.into(),
         );
         assert_err_code(
             daemon.handle_request(
@@ -4425,7 +4425,7 @@ mod tests {
                 }),
                 &git_tx,
             ),
-            ErrorCode::NamespaceInvalid,
+            ProtocolErrorCode::NamespaceInvalid.into(),
         );
     }
 
@@ -4695,7 +4695,7 @@ mod tests {
         let err = daemon
             .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event], now_ms)
             .expect_err("apply failure should reject batch");
-        assert_eq!(err.code, ErrorCode::Corruption);
+        assert_eq!(err.code, ProtocolErrorCode::Corruption.into());
         let details = err
             .to_payload()
             .details_as::<error_details::CorruptionDetails>()

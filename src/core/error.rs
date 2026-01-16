@@ -109,11 +109,11 @@ impl CoreError {
 }
 
 // =============================================================================
-// Protocol error codes + payload
+// Error codes (protocol + CLI)
 // =============================================================================
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ErrorCode {
+pub enum ProtocolErrorCode {
     // Protocol and identity
     WrongStore,
     StoreEpochMismatch,
@@ -190,8 +190,178 @@ pub enum ErrorCode {
 
     // Generic internal
     InternalError,
+}
 
-    // Legacy IPC / CLI codes (pre-realtime)
+impl ProtocolErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            // Protocol and identity
+            ProtocolErrorCode::WrongStore => "wrong_store",
+            ProtocolErrorCode::StoreEpochMismatch => "store_epoch_mismatch",
+            ProtocolErrorCode::ReplicaIdCollision => "replica_id_collision",
+            ProtocolErrorCode::VersionIncompatible => "version_incompatible",
+            ProtocolErrorCode::Diverged => "diverged",
+            ProtocolErrorCode::AuthFailed => "auth_failed",
+            ProtocolErrorCode::UnknownReplica => "unknown_replica",
+
+            // Operational
+            ProtocolErrorCode::Overloaded => "overloaded",
+            ProtocolErrorCode::MaintenanceMode => "maintenance_mode",
+            ProtocolErrorCode::DurabilityTimeout => "durability_timeout",
+            ProtocolErrorCode::DurabilityUnavailable => "durability_unavailable",
+            ProtocolErrorCode::RequireMinSeenTimeout => "require_min_seen_timeout",
+            ProtocolErrorCode::RequireMinSeenUnsatisfied => "require_min_seen_unsatisfied",
+
+            // Replication
+            ProtocolErrorCode::SnapshotRequired => "snapshot_required",
+            ProtocolErrorCode::SnapshotExpired => "snapshot_expired",
+            ProtocolErrorCode::BootstrapRequired => "bootstrap_required",
+            ProtocolErrorCode::SubscriberLagged => "subscriber_lagged",
+
+            // Request / protocol framing
+            ProtocolErrorCode::InvalidRequest => "invalid_request",
+            ProtocolErrorCode::MalformedPayload => "malformed_payload",
+            ProtocolErrorCode::FrameTooLarge => "frame_too_large",
+            ProtocolErrorCode::BatchTooLarge => "batch_too_large",
+            ProtocolErrorCode::RateLimited => "rate_limited",
+
+            // Client request / mutation planning
+            ProtocolErrorCode::CasFailed => "cas_failed",
+            ProtocolErrorCode::ClientRequestIdReuseMismatch => "client_request_id_reuse_mismatch",
+            ProtocolErrorCode::PayloadTooLarge => "payload_too_large",
+            ProtocolErrorCode::WalRecordTooLarge => "wal_record_too_large",
+            ProtocolErrorCode::RequestTooLarge => "request_too_large",
+            ProtocolErrorCode::OpsTooMany => "ops_too_many",
+            ProtocolErrorCode::NoteTooLarge => "note_too_large",
+            ProtocolErrorCode::LabelsTooMany => "labels_too_many",
+
+            // Data integrity / contiguity
+            ProtocolErrorCode::Corruption => "corruption",
+            ProtocolErrorCode::NonCanonical => "non_canonical",
+            ProtocolErrorCode::HashMismatch => "hash_mismatch",
+            ProtocolErrorCode::PrevShaMismatch => "prev_sha_mismatch",
+            ProtocolErrorCode::GapDetected => "gap_detected",
+            ProtocolErrorCode::Equivocation => "equivocation",
+            ProtocolErrorCode::WalCorrupt => "wal_corrupt",
+            ProtocolErrorCode::WalTailTruncated => "wal_tail_truncated",
+            ProtocolErrorCode::SegmentHeaderMismatch => "segment_header_mismatch",
+            ProtocolErrorCode::WalFormatUnsupported => "wal_format_unsupported",
+            ProtocolErrorCode::IndexCorrupt => "index_corrupt",
+            ProtocolErrorCode::IndexRebuildRequired => "index_rebuild_required",
+
+            // Checkpoint / snapshot
+            ProtocolErrorCode::CheckpointHashMismatch => "checkpoint_hash_mismatch",
+            ProtocolErrorCode::CheckpointFormatUnsupported => "checkpoint_format_unsupported",
+            ProtocolErrorCode::SnapshotTooLarge => "snapshot_too_large",
+            ProtocolErrorCode::SnapshotCorrupt => "snapshot_corrupt",
+            ProtocolErrorCode::ArchiveUnsafe => "archive_unsafe",
+            ProtocolErrorCode::JsonlParseError => "jsonl_parse_error",
+
+            // Namespace / policy
+            ProtocolErrorCode::NamespaceInvalid => "namespace_invalid",
+            ProtocolErrorCode::NamespaceUnknown => "namespace_unknown",
+            ProtocolErrorCode::NamespacePolicyViolation => "namespace_policy_violation",
+            ProtocolErrorCode::CrossNamespaceDependency => "cross_namespace_dependency",
+
+            // Locking / filesystem safety
+            ProtocolErrorCode::LockHeld => "lock_held",
+            ProtocolErrorCode::LockStale => "lock_stale",
+            ProtocolErrorCode::PathSymlinkRejected => "path_symlink_rejected",
+            ProtocolErrorCode::PermissionDenied => "permission_denied",
+
+            // Generic internal
+            ProtocolErrorCode::InternalError => "internal_error",
+        }
+    }
+
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            // Protocol and identity
+            "wrong_store" => Some(ProtocolErrorCode::WrongStore),
+            "store_epoch_mismatch" => Some(ProtocolErrorCode::StoreEpochMismatch),
+            "replica_id_collision" => Some(ProtocolErrorCode::ReplicaIdCollision),
+            "version_incompatible" => Some(ProtocolErrorCode::VersionIncompatible),
+            "diverged" => Some(ProtocolErrorCode::Diverged),
+            "auth_failed" => Some(ProtocolErrorCode::AuthFailed),
+            "unknown_replica" => Some(ProtocolErrorCode::UnknownReplica),
+
+            // Operational
+            "overloaded" => Some(ProtocolErrorCode::Overloaded),
+            "maintenance_mode" => Some(ProtocolErrorCode::MaintenanceMode),
+            "durability_timeout" => Some(ProtocolErrorCode::DurabilityTimeout),
+            "durability_unavailable" => Some(ProtocolErrorCode::DurabilityUnavailable),
+            "require_min_seen_timeout" => Some(ProtocolErrorCode::RequireMinSeenTimeout),
+            "require_min_seen_unsatisfied" => Some(ProtocolErrorCode::RequireMinSeenUnsatisfied),
+
+            // Replication
+            "snapshot_required" => Some(ProtocolErrorCode::SnapshotRequired),
+            "snapshot_expired" => Some(ProtocolErrorCode::SnapshotExpired),
+            "bootstrap_required" => Some(ProtocolErrorCode::BootstrapRequired),
+            "subscriber_lagged" => Some(ProtocolErrorCode::SubscriberLagged),
+
+            // Request / protocol framing
+            "invalid_request" => Some(ProtocolErrorCode::InvalidRequest),
+            "malformed_payload" => Some(ProtocolErrorCode::MalformedPayload),
+            "frame_too_large" => Some(ProtocolErrorCode::FrameTooLarge),
+            "batch_too_large" => Some(ProtocolErrorCode::BatchTooLarge),
+            "rate_limited" => Some(ProtocolErrorCode::RateLimited),
+
+            // Client request / mutation planning
+            "cas_failed" => Some(ProtocolErrorCode::CasFailed),
+            "client_request_id_reuse_mismatch" => {
+                Some(ProtocolErrorCode::ClientRequestIdReuseMismatch)
+            }
+            "payload_too_large" => Some(ProtocolErrorCode::PayloadTooLarge),
+            "wal_record_too_large" => Some(ProtocolErrorCode::WalRecordTooLarge),
+            "request_too_large" => Some(ProtocolErrorCode::RequestTooLarge),
+            "ops_too_many" => Some(ProtocolErrorCode::OpsTooMany),
+            "note_too_large" => Some(ProtocolErrorCode::NoteTooLarge),
+            "labels_too_many" => Some(ProtocolErrorCode::LabelsTooMany),
+
+            // Data integrity / contiguity
+            "corruption" => Some(ProtocolErrorCode::Corruption),
+            "non_canonical" => Some(ProtocolErrorCode::NonCanonical),
+            "hash_mismatch" => Some(ProtocolErrorCode::HashMismatch),
+            "prev_sha_mismatch" => Some(ProtocolErrorCode::PrevShaMismatch),
+            "gap_detected" => Some(ProtocolErrorCode::GapDetected),
+            "equivocation" => Some(ProtocolErrorCode::Equivocation),
+            "wal_corrupt" => Some(ProtocolErrorCode::WalCorrupt),
+            "wal_tail_truncated" => Some(ProtocolErrorCode::WalTailTruncated),
+            "segment_header_mismatch" => Some(ProtocolErrorCode::SegmentHeaderMismatch),
+            "wal_format_unsupported" => Some(ProtocolErrorCode::WalFormatUnsupported),
+            "index_corrupt" => Some(ProtocolErrorCode::IndexCorrupt),
+            "index_rebuild_required" => Some(ProtocolErrorCode::IndexRebuildRequired),
+
+            // Checkpoint / snapshot
+            "checkpoint_hash_mismatch" => Some(ProtocolErrorCode::CheckpointHashMismatch),
+            "checkpoint_format_unsupported" => Some(ProtocolErrorCode::CheckpointFormatUnsupported),
+            "snapshot_too_large" => Some(ProtocolErrorCode::SnapshotTooLarge),
+            "snapshot_corrupt" => Some(ProtocolErrorCode::SnapshotCorrupt),
+            "archive_unsafe" => Some(ProtocolErrorCode::ArchiveUnsafe),
+            "jsonl_parse_error" => Some(ProtocolErrorCode::JsonlParseError),
+
+            // Namespace / policy
+            "namespace_invalid" => Some(ProtocolErrorCode::NamespaceInvalid),
+            "namespace_unknown" => Some(ProtocolErrorCode::NamespaceUnknown),
+            "namespace_policy_violation" => Some(ProtocolErrorCode::NamespacePolicyViolation),
+            "cross_namespace_dependency" => Some(ProtocolErrorCode::CrossNamespaceDependency),
+
+            // Locking / filesystem safety
+            "lock_held" => Some(ProtocolErrorCode::LockHeld),
+            "lock_stale" => Some(ProtocolErrorCode::LockStale),
+            "path_symlink_rejected" => Some(ProtocolErrorCode::PathSymlinkRejected),
+            "permission_denied" => Some(ProtocolErrorCode::PermissionDenied),
+
+            // Generic internal
+            "internal_error" => Some(ProtocolErrorCode::InternalError),
+
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CliErrorCode {
     NotFound,
     AlreadyExists,
     AlreadyClaimed,
@@ -216,227 +386,113 @@ pub enum ErrorCode {
     DaemonUnavailable,
     DaemonVersionMismatch,
     InitFailed,
+}
 
+impl CliErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CliErrorCode::NotFound => "not_found",
+            CliErrorCode::AlreadyExists => "already_exists",
+            CliErrorCode::AlreadyClaimed => "already_claimed",
+            CliErrorCode::CasMismatch => "cas_mismatch",
+            CliErrorCode::InvalidTransition => "invalid_transition",
+            CliErrorCode::ValidationFailed => "validation_failed",
+            CliErrorCode::NotAGitRepo => "not_a_git_repo",
+            CliErrorCode::NoRemote => "no_remote",
+            CliErrorCode::RepoNotInitialized => "repo_not_initialized",
+            CliErrorCode::SyncFailed => "sync_failed",
+            CliErrorCode::BeadDeleted => "bead_deleted",
+            CliErrorCode::WalError => "wal_error",
+            CliErrorCode::WalMergeConflict => "wal_merge_conflict",
+            CliErrorCode::NotClaimedByYou => "not_claimed_by_you",
+            CliErrorCode::DepNotFound => "dep_not_found",
+            CliErrorCode::LoadTimeout => "load_timeout",
+            CliErrorCode::Internal => "internal",
+            CliErrorCode::ParseError => "parse_error",
+            CliErrorCode::IoError => "io_error",
+            CliErrorCode::InvalidId => "invalid_id",
+            CliErrorCode::Disconnected => "disconnected",
+            CliErrorCode::DaemonUnavailable => "daemon_unavailable",
+            CliErrorCode::DaemonVersionMismatch => "daemon_version_mismatch",
+            CliErrorCode::InitFailed => "init_failed",
+        }
+    }
+
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            "not_found" => Some(CliErrorCode::NotFound),
+            "already_exists" => Some(CliErrorCode::AlreadyExists),
+            "already_claimed" => Some(CliErrorCode::AlreadyClaimed),
+            "cas_mismatch" => Some(CliErrorCode::CasMismatch),
+            "invalid_transition" => Some(CliErrorCode::InvalidTransition),
+            "validation_failed" => Some(CliErrorCode::ValidationFailed),
+            "not_a_git_repo" => Some(CliErrorCode::NotAGitRepo),
+            "no_remote" => Some(CliErrorCode::NoRemote),
+            "repo_not_initialized" => Some(CliErrorCode::RepoNotInitialized),
+            "sync_failed" => Some(CliErrorCode::SyncFailed),
+            "bead_deleted" => Some(CliErrorCode::BeadDeleted),
+            "wal_error" => Some(CliErrorCode::WalError),
+            "wal_merge_conflict" => Some(CliErrorCode::WalMergeConflict),
+            "not_claimed_by_you" => Some(CliErrorCode::NotClaimedByYou),
+            "dep_not_found" => Some(CliErrorCode::DepNotFound),
+            "load_timeout" => Some(CliErrorCode::LoadTimeout),
+            "internal" => Some(CliErrorCode::Internal),
+            "parse_error" => Some(CliErrorCode::ParseError),
+            "io_error" => Some(CliErrorCode::IoError),
+            "invalid_id" => Some(CliErrorCode::InvalidId),
+            "disconnected" => Some(CliErrorCode::Disconnected),
+            "daemon_unavailable" => Some(CliErrorCode::DaemonUnavailable),
+            "daemon_version_mismatch" => Some(CliErrorCode::DaemonVersionMismatch),
+            "init_failed" => Some(CliErrorCode::InitFailed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ErrorCode {
+    Protocol(ProtocolErrorCode),
+    Cli(CliErrorCode),
     Unknown(String),
 }
 
 impl ErrorCode {
     pub fn as_str(&self) -> &str {
         match self {
-            // Protocol and identity
-            ErrorCode::WrongStore => "wrong_store",
-            ErrorCode::StoreEpochMismatch => "store_epoch_mismatch",
-            ErrorCode::ReplicaIdCollision => "replica_id_collision",
-            ErrorCode::VersionIncompatible => "version_incompatible",
-            ErrorCode::Diverged => "diverged",
-            ErrorCode::AuthFailed => "auth_failed",
-            ErrorCode::UnknownReplica => "unknown_replica",
-
-            // Operational
-            ErrorCode::Overloaded => "overloaded",
-            ErrorCode::MaintenanceMode => "maintenance_mode",
-            ErrorCode::DurabilityTimeout => "durability_timeout",
-            ErrorCode::DurabilityUnavailable => "durability_unavailable",
-            ErrorCode::RequireMinSeenTimeout => "require_min_seen_timeout",
-            ErrorCode::RequireMinSeenUnsatisfied => "require_min_seen_unsatisfied",
-
-            // Replication
-            ErrorCode::SnapshotRequired => "snapshot_required",
-            ErrorCode::SnapshotExpired => "snapshot_expired",
-            ErrorCode::BootstrapRequired => "bootstrap_required",
-            ErrorCode::SubscriberLagged => "subscriber_lagged",
-
-            // Request / protocol framing
-            ErrorCode::InvalidRequest => "invalid_request",
-            ErrorCode::MalformedPayload => "malformed_payload",
-            ErrorCode::FrameTooLarge => "frame_too_large",
-            ErrorCode::BatchTooLarge => "batch_too_large",
-            ErrorCode::RateLimited => "rate_limited",
-
-            // Client request / mutation planning
-            ErrorCode::CasFailed => "cas_failed",
-            ErrorCode::ClientRequestIdReuseMismatch => "client_request_id_reuse_mismatch",
-            ErrorCode::PayloadTooLarge => "payload_too_large",
-            ErrorCode::WalRecordTooLarge => "wal_record_too_large",
-            ErrorCode::RequestTooLarge => "request_too_large",
-            ErrorCode::OpsTooMany => "ops_too_many",
-            ErrorCode::NoteTooLarge => "note_too_large",
-            ErrorCode::LabelsTooMany => "labels_too_many",
-
-            // Data integrity / contiguity
-            ErrorCode::Corruption => "corruption",
-            ErrorCode::NonCanonical => "non_canonical",
-            ErrorCode::HashMismatch => "hash_mismatch",
-            ErrorCode::PrevShaMismatch => "prev_sha_mismatch",
-            ErrorCode::GapDetected => "gap_detected",
-            ErrorCode::Equivocation => "equivocation",
-            ErrorCode::WalCorrupt => "wal_corrupt",
-            ErrorCode::WalTailTruncated => "wal_tail_truncated",
-            ErrorCode::SegmentHeaderMismatch => "segment_header_mismatch",
-            ErrorCode::WalFormatUnsupported => "wal_format_unsupported",
-            ErrorCode::IndexCorrupt => "index_corrupt",
-            ErrorCode::IndexRebuildRequired => "index_rebuild_required",
-
-            // Checkpoint / snapshot
-            ErrorCode::CheckpointHashMismatch => "checkpoint_hash_mismatch",
-            ErrorCode::CheckpointFormatUnsupported => "checkpoint_format_unsupported",
-            ErrorCode::SnapshotTooLarge => "snapshot_too_large",
-            ErrorCode::SnapshotCorrupt => "snapshot_corrupt",
-            ErrorCode::ArchiveUnsafe => "archive_unsafe",
-            ErrorCode::JsonlParseError => "jsonl_parse_error",
-
-            // Namespace / policy
-            ErrorCode::NamespaceInvalid => "namespace_invalid",
-            ErrorCode::NamespaceUnknown => "namespace_unknown",
-            ErrorCode::NamespacePolicyViolation => "namespace_policy_violation",
-            ErrorCode::CrossNamespaceDependency => "cross_namespace_dependency",
-
-            // Locking / filesystem safety
-            ErrorCode::LockHeld => "lock_held",
-            ErrorCode::LockStale => "lock_stale",
-            ErrorCode::PathSymlinkRejected => "path_symlink_rejected",
-            ErrorCode::PermissionDenied => "permission_denied",
-
-            // Generic internal
-            ErrorCode::InternalError => "internal_error",
-
-            // Legacy IPC / CLI codes
-            ErrorCode::NotFound => "not_found",
-            ErrorCode::AlreadyExists => "already_exists",
-            ErrorCode::AlreadyClaimed => "already_claimed",
-            ErrorCode::CasMismatch => "cas_mismatch",
-            ErrorCode::InvalidTransition => "invalid_transition",
-            ErrorCode::ValidationFailed => "validation_failed",
-            ErrorCode::NotAGitRepo => "not_a_git_repo",
-            ErrorCode::NoRemote => "no_remote",
-            ErrorCode::RepoNotInitialized => "repo_not_initialized",
-            ErrorCode::SyncFailed => "sync_failed",
-            ErrorCode::BeadDeleted => "bead_deleted",
-            ErrorCode::WalError => "wal_error",
-            ErrorCode::WalMergeConflict => "wal_merge_conflict",
-            ErrorCode::NotClaimedByYou => "not_claimed_by_you",
-            ErrorCode::DepNotFound => "dep_not_found",
-            ErrorCode::LoadTimeout => "load_timeout",
-            ErrorCode::Internal => "internal",
-            ErrorCode::ParseError => "parse_error",
-            ErrorCode::IoError => "io_error",
-            ErrorCode::InvalidId => "invalid_id",
-            ErrorCode::Disconnected => "disconnected",
-            ErrorCode::DaemonUnavailable => "daemon_unavailable",
-            ErrorCode::DaemonVersionMismatch => "daemon_version_mismatch",
-            ErrorCode::InitFailed => "init_failed",
-
+            ErrorCode::Protocol(code) => code.as_str(),
+            ErrorCode::Cli(code) => code.as_str(),
             ErrorCode::Unknown(code) => code.as_str(),
         }
     }
 
     pub fn parse(code: &str) -> Self {
-        match code {
-            // Protocol and identity
-            "wrong_store" => ErrorCode::WrongStore,
-            "store_epoch_mismatch" => ErrorCode::StoreEpochMismatch,
-            "replica_id_collision" => ErrorCode::ReplicaIdCollision,
-            "version_incompatible" => ErrorCode::VersionIncompatible,
-            "diverged" => ErrorCode::Diverged,
-            "auth_failed" => ErrorCode::AuthFailed,
-            "unknown_replica" => ErrorCode::UnknownReplica,
-
-            // Operational
-            "overloaded" => ErrorCode::Overloaded,
-            "maintenance_mode" => ErrorCode::MaintenanceMode,
-            "durability_timeout" => ErrorCode::DurabilityTimeout,
-            "durability_unavailable" => ErrorCode::DurabilityUnavailable,
-            "require_min_seen_timeout" => ErrorCode::RequireMinSeenTimeout,
-            "require_min_seen_unsatisfied" => ErrorCode::RequireMinSeenUnsatisfied,
-
-            // Replication
-            "snapshot_required" => ErrorCode::SnapshotRequired,
-            "snapshot_expired" => ErrorCode::SnapshotExpired,
-            "bootstrap_required" => ErrorCode::BootstrapRequired,
-            "subscriber_lagged" => ErrorCode::SubscriberLagged,
-
-            // Request / protocol framing
-            "invalid_request" => ErrorCode::InvalidRequest,
-            "malformed_payload" => ErrorCode::MalformedPayload,
-            "frame_too_large" => ErrorCode::FrameTooLarge,
-            "batch_too_large" => ErrorCode::BatchTooLarge,
-            "rate_limited" => ErrorCode::RateLimited,
-
-            // Client request / mutation planning
-            "cas_failed" => ErrorCode::CasFailed,
-            "client_request_id_reuse_mismatch" => ErrorCode::ClientRequestIdReuseMismatch,
-            "payload_too_large" => ErrorCode::PayloadTooLarge,
-            "wal_record_too_large" => ErrorCode::WalRecordTooLarge,
-            "request_too_large" => ErrorCode::RequestTooLarge,
-            "ops_too_many" => ErrorCode::OpsTooMany,
-            "note_too_large" => ErrorCode::NoteTooLarge,
-            "labels_too_many" => ErrorCode::LabelsTooMany,
-
-            // Data integrity / contiguity
-            "corruption" => ErrorCode::Corruption,
-            "non_canonical" => ErrorCode::NonCanonical,
-            "hash_mismatch" => ErrorCode::HashMismatch,
-            "prev_sha_mismatch" => ErrorCode::PrevShaMismatch,
-            "gap_detected" => ErrorCode::GapDetected,
-            "equivocation" => ErrorCode::Equivocation,
-            "wal_corrupt" => ErrorCode::WalCorrupt,
-            "wal_tail_truncated" => ErrorCode::WalTailTruncated,
-            "segment_header_mismatch" => ErrorCode::SegmentHeaderMismatch,
-            "wal_format_unsupported" => ErrorCode::WalFormatUnsupported,
-            "index_corrupt" => ErrorCode::IndexCorrupt,
-            "index_rebuild_required" => ErrorCode::IndexRebuildRequired,
-
-            // Checkpoint / snapshot
-            "checkpoint_hash_mismatch" => ErrorCode::CheckpointHashMismatch,
-            "checkpoint_format_unsupported" => ErrorCode::CheckpointFormatUnsupported,
-            "snapshot_too_large" => ErrorCode::SnapshotTooLarge,
-            "snapshot_corrupt" => ErrorCode::SnapshotCorrupt,
-            "archive_unsafe" => ErrorCode::ArchiveUnsafe,
-            "jsonl_parse_error" => ErrorCode::JsonlParseError,
-
-            // Namespace / policy
-            "namespace_invalid" => ErrorCode::NamespaceInvalid,
-            "namespace_unknown" => ErrorCode::NamespaceUnknown,
-            "namespace_policy_violation" => ErrorCode::NamespacePolicyViolation,
-            "cross_namespace_dependency" => ErrorCode::CrossNamespaceDependency,
-
-            // Locking / filesystem safety
-            "lock_held" => ErrorCode::LockHeld,
-            "lock_stale" => ErrorCode::LockStale,
-            "path_symlink_rejected" => ErrorCode::PathSymlinkRejected,
-            "permission_denied" => ErrorCode::PermissionDenied,
-
-            // Generic internal
-            "internal_error" => ErrorCode::InternalError,
-
-            // Legacy IPC / CLI codes
-            "not_found" => ErrorCode::NotFound,
-            "already_exists" => ErrorCode::AlreadyExists,
-            "already_claimed" => ErrorCode::AlreadyClaimed,
-            "cas_mismatch" => ErrorCode::CasMismatch,
-            "invalid_transition" => ErrorCode::InvalidTransition,
-            "validation_failed" => ErrorCode::ValidationFailed,
-            "not_a_git_repo" => ErrorCode::NotAGitRepo,
-            "no_remote" => ErrorCode::NoRemote,
-            "repo_not_initialized" => ErrorCode::RepoNotInitialized,
-            "sync_failed" => ErrorCode::SyncFailed,
-            "bead_deleted" => ErrorCode::BeadDeleted,
-            "wal_error" => ErrorCode::WalError,
-            "wal_merge_conflict" => ErrorCode::WalMergeConflict,
-            "not_claimed_by_you" => ErrorCode::NotClaimedByYou,
-            "dep_not_found" => ErrorCode::DepNotFound,
-            "load_timeout" => ErrorCode::LoadTimeout,
-            "internal" => ErrorCode::Internal,
-            "parse_error" => ErrorCode::ParseError,
-            "io_error" => ErrorCode::IoError,
-            "invalid_id" => ErrorCode::InvalidId,
-            "disconnected" => ErrorCode::Disconnected,
-            "daemon_unavailable" => ErrorCode::DaemonUnavailable,
-            "daemon_version_mismatch" => ErrorCode::DaemonVersionMismatch,
-            "init_failed" => ErrorCode::InitFailed,
-
-            other => ErrorCode::Unknown(other.to_string()),
+        if let Some(protocol) = ProtocolErrorCode::parse(code) {
+            return ErrorCode::Protocol(protocol);
         }
+        if let Some(cli) = CliErrorCode::parse(code) {
+            return ErrorCode::Cli(cli);
+        }
+        ErrorCode::Unknown(code.to_string())
+    }
+
+    pub fn is_protocol(&self) -> bool {
+        matches!(self, ErrorCode::Protocol(_))
+    }
+
+    pub fn is_cli(&self) -> bool {
+        matches!(self, ErrorCode::Cli(_))
+    }
+}
+
+impl From<ProtocolErrorCode> for ErrorCode {
+    fn from(code: ProtocolErrorCode) -> Self {
+        ErrorCode::Protocol(code)
+    }
+}
+
+impl From<CliErrorCode> for ErrorCode {
+    fn from(code: CliErrorCode) -> Self {
+        ErrorCode::Cli(code)
     }
 }
 
@@ -1032,7 +1088,7 @@ pub mod details {
         pub max_queue_events: Option<u64>,
     }
 
-    // Legacy IPC / CLI detail structs (optional, but typed for consistency).
+    // CLI / IPC detail structs (optional, but typed for consistency).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct NotFoundDetails {
         pub id: BeadId,
@@ -1125,7 +1181,7 @@ mod tests {
 
     #[test]
     fn error_payload_roundtrip_preserves_retryable_and_receipt() {
-        let payload = ErrorPayload::new(ErrorCode::NotFound, "missing", true)
+        let payload = ErrorPayload::new(CliErrorCode::NotFound.into(), "missing", true)
             .with_retry_after(1500)
             .with_details(serde_json::json!({ "k": "v" }))
             .with_receipt(serde_json::json!({ "receipt": "ok" }));

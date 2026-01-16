@@ -103,9 +103,9 @@ mod tests {
 
     #[test]
     fn to_payload_preserves_basic_fields() {
-        let error = ReplError::new(ErrorCode::Internal, "boom", false);
+        let error = ReplError::new(CliErrorCode::Internal.into(), "boom", false);
         let payload = error.to_payload();
-        assert_eq!(payload.code, ErrorCode::Internal);
+        assert_eq!(payload.code, CliErrorCode::Internal.into());
         assert_eq!(payload.message, "boom");
         assert!(!payload.retryable);
         assert!(payload.details.is_none());
@@ -115,14 +115,14 @@ mod tests {
     fn to_payload_carries_details() {
         let expected = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let got = StoreId::new(Uuid::from_bytes([2u8; 16]));
-        let error = ReplError::new(ErrorCode::WrongStore, "wrong store", false).with_details(
+        let error = ReplError::new(ProtocolErrorCode::WrongStore.into(), "wrong store", false).with_details(
             ReplErrorDetails::WrongStore(WrongStoreDetails {
                 expected_store_id: expected,
                 got_store_id: got,
             }),
         );
         let payload = error.to_payload();
-        assert_eq!(payload.code, ErrorCode::WrongStore);
+        assert_eq!(payload.code, ProtocolErrorCode::WrongStore.into());
         let details = payload
             .details_as::<WrongStoreDetails>()
             .unwrap()

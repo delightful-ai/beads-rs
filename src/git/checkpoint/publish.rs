@@ -251,7 +251,7 @@ fn refname_to_id_optional(
 ) -> Result<Option<Oid>, CheckpointPublishError> {
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
-        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) if e.code() == CliErrorCode::NotFound.into() => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -267,7 +267,7 @@ fn update_ref(
             reference.set_target(oid, message)?;
             Ok(())
         }
-        Err(e) if e.code() == ErrorCode::NotFound => {
+        Err(e) if e.code() == CliErrorCode::NotFound.into() => {
             repo.reference(name, oid, true, message)?;
             Ok(())
         }

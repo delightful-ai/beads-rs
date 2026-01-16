@@ -916,7 +916,7 @@ fn watermark_maps_from_state<K>(
 
 fn repl_lagged_error(reason: ReplRejectReason, limits: &Limits) -> ReplError {
     let message = repl_reject_reason_message(&reason);
-    ReplError::new(ErrorCode::SubscriberLagged, message, true).with_details(
+    ReplError::new(ProtocolErrorCode::SubscriberLagged.into(), message, true).with_details(
         ReplErrorDetails::SubscriberLagged(SubscriberLaggedDetails {
             reason: Some(reason),
             max_queue_bytes: Some(limits.max_repl_gap_bytes as u64),
@@ -935,7 +935,7 @@ fn repl_reject_reason_message(reason: &ReplRejectReason) -> &'static str {
 }
 
 fn wrong_store_error(expected: StoreId, got: StoreId) -> ReplError {
-    ReplError::new(ErrorCode::WrongStore, "wrong store id", false).with_details(
+    ReplError::new(ProtocolErrorCode::WrongStore.into(), "wrong store id", false).with_details(
         ReplErrorDetails::WrongStore(WrongStoreDetails {
             expected_store_id: expected,
             got_store_id: got,
@@ -948,7 +948,7 @@ fn store_epoch_mismatch_error(
     expected: StoreEpoch,
     got: StoreEpoch,
 ) -> ReplError {
-    ReplError::new(ErrorCode::StoreEpochMismatch, "store epoch mismatch", false).with_details(
+    ReplError::new(ProtocolErrorCode::StoreEpochMismatch.into(), "store epoch mismatch", false).with_details(
         ReplErrorDetails::StoreEpochMismatch(StoreEpochMismatchDetails {
             store_id,
             expected_epoch: expected.get(),
@@ -958,14 +958,14 @@ fn store_epoch_mismatch_error(
 }
 
 fn replica_id_collision_error(replica_id: ReplicaId) -> ReplError {
-    ReplError::new(ErrorCode::ReplicaIdCollision, "replica_id collision", false).with_details(
+    ReplError::new(ProtocolErrorCode::ReplicaIdCollision.into(), "replica_id collision", false).with_details(
         ReplErrorDetails::ReplicaIdCollision(ReplicaIdCollisionDetails { replica_id }),
     )
 }
 
 fn version_incompatible_error(err: &ProtocolIncompatible) -> ReplError {
     ReplError::new(
-        ErrorCode::VersionIncompatible,
+        ProtocolErrorCode::VersionIncompatible.into(),
         "protocol versions incompatible",
         false,
     )
@@ -979,7 +979,7 @@ fn version_incompatible_error(err: &ProtocolIncompatible) -> ReplError {
 
 fn invalid_request_error(reason: impl Into<String>) -> ReplError {
     let reason = reason.into();
-    ReplError::new(ErrorCode::InvalidRequest, reason.clone(), false).with_details(
+    ReplError::new(ProtocolErrorCode::InvalidRequest.into(), reason.clone(), false).with_details(
         ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
             field: Some("type".to_string()),
             reason: Some(reason),
@@ -989,7 +989,7 @@ fn invalid_request_error(reason: impl Into<String>) -> ReplError {
 
 fn namespace_policy_violation_error(namespace: &NamespaceId) -> ReplError {
     ReplError::new(
-        ErrorCode::NamespacePolicyViolation,
+        ProtocolErrorCode::NamespacePolicyViolation.into(),
         "namespace not accepted in replication handshake",
         false,
     )
@@ -1003,7 +1003,7 @@ fn namespace_policy_violation_error(namespace: &NamespaceId) -> ReplError {
 }
 
 fn internal_error(message: impl Into<String>) -> ReplError {
-    ReplError::new(ErrorCode::InternalError, "internal error", false).with_details(
+    ReplError::new(ProtocolErrorCode::InternalError.into(), "internal error", false).with_details(
         ReplErrorDetails::InternalError(InternalErrorDetails {
             trace_id: None,
             component: Some(message.into()),
@@ -1012,7 +1012,7 @@ fn internal_error(message: impl Into<String>) -> ReplError {
 }
 
 fn overloaded_error(rejection: AdmissionRejection) -> ReplError {
-    ReplError::new(ErrorCode::Overloaded, "overloaded", true).with_details(
+    ReplError::new(ProtocolErrorCode::Overloaded.into(), "overloaded", true).with_details(
         ReplErrorDetails::Overloaded(OverloadedDetails {
             subsystem: Some(rejection.subsystem),
             retry_after_ms: Some(rejection.retry_after_ms),
@@ -1058,7 +1058,7 @@ fn event_frame_error_payload(
             }
         }
         EventFrameError::FrameMismatch => ReplError::new(
-            ErrorCode::InvalidRequest,
+            ProtocolErrorCode::InvalidRequest.into(),
             "event id does not match decoded body",
             false,
         )
@@ -1068,7 +1068,7 @@ fn event_frame_error_payload(
         })),
         EventFrameError::HashMismatch => {
             let expected = hash_event_body(&frame.bytes);
-            ReplError::new(ErrorCode::HashMismatch, "event sha256 mismatch", false).with_details(
+            ReplError::new(ProtocolErrorCode::HashMismatch.into(), "event sha256 mismatch", false).with_details(
                 ReplErrorDetails::HashMismatch(HashMismatchDetails {
                     eid: event_id_details(&frame.eid),
                     expected_sha256: sha256_hex(expected),
@@ -1077,7 +1077,7 @@ fn event_frame_error_payload(
             )
         }
         EventFrameError::PrevMismatch => ReplError::new(
-            ErrorCode::PrevShaMismatch,
+            ProtocolErrorCode::PrevShaMismatch.into(),
             "prev_sha256 mismatch",
             false,
         )
@@ -1088,7 +1088,7 @@ fn event_frame_error_payload(
             head_seq,
         })),
         EventFrameError::Validation(err) => {
-            ReplError::new(ErrorCode::InvalidRequest, err.to_string(), false).with_details(
+            ReplError::new(ProtocolErrorCode::InvalidRequest.into(), err.to_string(), false).with_details(
                 ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
                     field: None,
                     reason: Some(err.to_string()),
@@ -1098,7 +1098,7 @@ fn event_frame_error_payload(
         EventFrameError::Decode(err) => decode_error_payload(&err, limits, frame.bytes.len()),
         EventFrameError::Lookup(err) => internal_error(err.to_string()),
         EventFrameError::Equivocation => {
-            ReplError::new(ErrorCode::Equivocation, "equivocation detected", false)
+            ReplError::new(ProtocolErrorCode::Equivocation.into(), "equivocation detected", false)
         }
     }
 }
@@ -1112,7 +1112,7 @@ fn drain_error_payload(err: DrainError) -> ReplError {
             expected,
             got,
             head_seq,
-        } => ReplError::new(ErrorCode::PrevShaMismatch, "prev_sha256 mismatch", false)
+        } => ReplError::new(ProtocolErrorCode::PrevShaMismatch.into(), "prev_sha256 mismatch", false)
             .with_details(ReplErrorDetails::PrevShaMismatch(PrevShaMismatchDetails {
                 eid: EventIdDetails {
                     namespace,
@@ -1131,7 +1131,7 @@ fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) 
         DecodeError::DecodeLimit(reason)
             if matches!(*reason, "max_wal_record_bytes" | "max_frame_bytes") =>
         {
-            ReplError::new(ErrorCode::FrameTooLarge, "event frame too large", false).with_details(
+            ReplError::new(ProtocolErrorCode::FrameTooLarge.into(), "event frame too large", false).with_details(
                 ReplErrorDetails::FrameTooLarge(FrameTooLargeDetails {
                     max_frame_bytes: limits.max_frame_bytes.min(limits.max_wal_record_bytes) as u64,
                     got_bytes: frame_bytes as u64,
@@ -1140,7 +1140,7 @@ fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) 
         }
         DecodeError::DecodeLimit(_) => invalid_request_decode_error(err),
         DecodeError::IndefiniteLength | DecodeError::TrailingBytes => ReplError::new(
-            ErrorCode::NonCanonical,
+            ProtocolErrorCode::NonCanonical.into(),
             err.to_string(),
             false,
         )
@@ -1153,7 +1153,7 @@ fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) 
 }
 
 fn invalid_request_decode_error(err: &DecodeError) -> ReplError {
-    ReplError::new(ErrorCode::InvalidRequest, err.to_string(), false).with_details(
+    ReplError::new(ProtocolErrorCode::InvalidRequest.into(), err.to_string(), false).with_details(
         ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
             field: None,
             reason: Some(err.to_string()),
@@ -1404,7 +1404,7 @@ mod tests {
         let SessionAction::Send(ReplMessage::Error(payload)) = &actions[0] else {
             panic!("expected error payload");
         };
-        assert_eq!(payload.code, ErrorCode::VersionIncompatible);
+        assert_eq!(payload.code, ProtocolErrorCode::VersionIncompatible.into());
     }
 
     #[test]
@@ -1547,7 +1547,7 @@ mod tests {
         let limits = Limits::default();
         let payload = repl_lagged_error(ReplRejectReason::GapTimeout, &limits).to_payload();
 
-        assert_eq!(payload.code, ErrorCode::SubscriberLagged);
+        assert_eq!(payload.code, ProtocolErrorCode::SubscriberLagged.into());
         assert_eq!(payload.message, "gap_timeout");
         let details = payload
             .details_as::<SubscriberLaggedDetails>()
@@ -1692,7 +1692,7 @@ mod tests {
                 _ => None,
             })
             .expect("error payload");
-        assert_eq!(payload.code, ErrorCode::NamespacePolicyViolation);
+        assert_eq!(payload.code, ProtocolErrorCode::NamespacePolicyViolation.into());
     }
 
     #[test]
@@ -1743,7 +1743,7 @@ mod tests {
         let SessionAction::Send(ReplMessage::Error(payload)) = &actions[0] else {
             panic!("expected error payload");
         };
-        assert_eq!(payload.code, ErrorCode::WrongStore);
+        assert_eq!(payload.code, ProtocolErrorCode::WrongStore.into());
     }
 
     #[test]
@@ -1759,7 +1759,7 @@ mod tests {
             0,
         )
         .to_payload();
-        assert_eq!(payload.code, ErrorCode::NonCanonical);
+        assert_eq!(payload.code, ProtocolErrorCode::NonCanonical.into());
         let details = payload
             .details_as::<NonCanonicalDetails>()
             .unwrap()
@@ -1782,7 +1782,7 @@ mod tests {
             0,
         )
         .to_payload();
-        assert_eq!(payload.code, ErrorCode::FrameTooLarge);
+        assert_eq!(payload.code, ProtocolErrorCode::FrameTooLarge.into());
         let details = payload
             .details_as::<FrameTooLargeDetails>()
             .unwrap()
@@ -1807,7 +1807,7 @@ mod tests {
             0,
         )
         .to_payload();
-        assert_eq!(payload.code, ErrorCode::InvalidRequest);
+        assert_eq!(payload.code, ProtocolErrorCode::InvalidRequest.into());
         let details = payload
             .details_as::<InvalidRequestDetails>()
             .unwrap()
@@ -1835,7 +1835,7 @@ mod tests {
         )
         .to_payload();
 
-        assert_eq!(payload.code, ErrorCode::HashMismatch);
+        assert_eq!(payload.code, ProtocolErrorCode::HashMismatch.into());
         let details = payload
             .details_as::<HashMismatchDetails>()
             .unwrap()
@@ -1875,7 +1875,7 @@ mod tests {
         )
         .to_payload();
 
-        assert_eq!(payload.code, ErrorCode::PrevShaMismatch);
+        assert_eq!(payload.code, ProtocolErrorCode::PrevShaMismatch.into());
         let details = payload
             .details_as::<PrevShaMismatchDetails>()
             .unwrap()

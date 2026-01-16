@@ -59,7 +59,7 @@ impl ReplSessionStore {
     }
 
     fn overload_error() -> ReplError {
-        ReplError::new(ErrorCode::Overloaded, "overloaded", true).with_details(
+        ReplError::new(ProtocolErrorCode::Overloaded.into(), "overloaded", true).with_details(
             ReplErrorDetails::Overloaded(OverloadedDetails {
                 subsystem: Some(OverloadedSubsystem::Repl),
                 retry_after_ms: Some(DEFAULT_RETRY_AFTER_MS),
@@ -171,7 +171,7 @@ impl SessionStore for ReplSessionStore {
             }
             Err(TrySendError::Disconnected(_)) => {
                 return Err(ReplError::new(
-                    ErrorCode::Internal,
+                    CliErrorCode::Internal.into(),
                     "replication ingest channel closed",
                     true,
                 ));
@@ -180,7 +180,7 @@ impl SessionStore for ReplSessionStore {
 
         respond_rx.recv().unwrap_or_else(|_| {
             Err(ReplError::new(
-                ErrorCode::Internal,
+                CliErrorCode::Internal.into(),
                 "replication ingest response dropped",
                 true,
             ))
@@ -338,14 +338,14 @@ impl WalRangeError {
     pub fn as_error_payload(&self) -> ErrorPayload {
         match self {
             WalRangeError::MissingRange { .. } => {
-                ErrorPayload::new(ErrorCode::BootstrapRequired, "bootstrap required", false)
+                ErrorPayload::new(ProtocolErrorCode::BootstrapRequired.into(), "bootstrap required", false)
             }
             WalRangeError::Corrupt {
                 namespace,
                 segment_id,
                 offset,
                 reason,
-            } => ErrorPayload::new(ErrorCode::WalCorrupt, "wal corrupt", false).with_details(
+            } => ErrorPayload::new(ProtocolErrorCode::WalCorrupt.into(), "wal corrupt", false).with_details(
                 WalCorruptDetails {
                     namespace: namespace.clone(),
                     segment_id: *segment_id,
@@ -354,7 +354,7 @@ impl WalRangeError {
                 },
             ),
             WalRangeError::Index(err) => {
-                ErrorPayload::new(ErrorCode::IndexCorrupt, "index corrupt", false).with_details(
+                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), "index corrupt", false).with_details(
                     IndexCorruptDetails {
                         reason: err.to_string(),
                     },
@@ -441,7 +441,7 @@ mod tests {
         }
         .as_error_payload();
 
-        assert_eq!(payload.code, ErrorCode::WalCorrupt);
+        assert_eq!(payload.code, ProtocolErrorCode::WalCorrupt.into());
         let details: WalCorruptDetails = payload.details_as().unwrap().unwrap();
         assert_eq!(details.namespace, namespace);
         assert_eq!(details.segment_id, Some(segment_id));
@@ -455,7 +455,7 @@ mod tests {
             WalRangeError::Index(WalIndexError::MetaMissing { key: "store_id" })
                 .as_error_payload();
 
-        assert_eq!(payload.code, ErrorCode::IndexCorrupt);
+        assert_eq!(payload.code, ProtocolErrorCode::IndexCorrupt.into());
         let details: IndexCorruptDetails = payload.details_as().unwrap().unwrap();
         assert_eq!(details.reason, "missing meta key: store_id");
     }

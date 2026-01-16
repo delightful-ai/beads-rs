@@ -81,7 +81,7 @@ fn subscribe_gates_on_require_min_seen() {
         .expect("response");
     match response {
         Response::Err { err } => {
-            assert_eq!(err.code, ErrorCode::RequireMinSeenUnsatisfied);
+            assert_eq!(err.code, ProtocolErrorCode::RequireMinSeenUnsatisfied.into());
             assert!(err.retryable, "require_min_seen should be retryable");
         }
         other => panic!("expected require_min_seen error, got {other:?}"),
@@ -268,7 +268,7 @@ fn collect_origin_seqs(
                 .expect("resubscribe");
             }
             Err(StreamClientError::Remote(err)) => {
-                if err.retryable && err.code == ErrorCode::Disconnected {
+                if err.retryable && err.code == CliErrorCode::Disconnected.into() {
                     reconnects += 1;
                     if reconnects > MAX_RECONNECTS {
                         panic!(

@@ -71,7 +71,7 @@ pub fn import_legacy_snapshot_wal(
 fn legacy_ref_oid(repo: &Repository) -> Result<Option<Oid>, SyncError> {
     match repo.refname_to_id(LEGACY_REF) {
         Ok(oid) => Ok(Some(oid)),
-        Err(err) if err.code() == ErrorCode::NotFound => Ok(None),
+        Err(err) if err.code() == CliErrorCode::NotFound.into() => Ok(None),
         Err(err) => Err(SyncError::Git(err)),
     }
 }

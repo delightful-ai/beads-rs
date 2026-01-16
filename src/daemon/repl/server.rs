@@ -267,7 +267,7 @@ where
 fn send_overloaded(stream: TcpStream, limits: &Limits) {
     let _ = stream.set_nodelay(true);
     let payload = ErrorPayload::new(
-        ErrorCode::Overloaded,
+        ProtocolErrorCode::Overloaded.into(),
         "replication connection limit reached",
         true,
     );
@@ -313,7 +313,7 @@ where
     let hello = match envelope.message {
         ReplMessage::Hello(hello) => hello,
         _ => {
-            let payload = ErrorPayload::new(ErrorCode::InvalidRequest, "expected HELLO", false);
+            let payload = ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), "expected HELLO", false);
             let _ = send_pre_handshake_error(&mut writer, payload);
             return Ok(());
         }
@@ -324,7 +324,7 @@ where
         .as_ref()
         .and_then(|roster| roster.replica(&hello.sender_replica_id));
     if runtime.roster.is_some() && roster_entry.is_none() {
-        let payload = ErrorPayload::new(ErrorCode::UnknownReplica, "unknown replica", false)
+        let payload = ErrorPayload::new(ProtocolErrorCode::UnknownReplica.into(), "unknown replica", false)
             .with_details(UnknownReplicaDetails {
                 replica_id: hello.sender_replica_id,
                 roster_hash: None,
@@ -923,7 +923,7 @@ fn handle_want(want: &Want, ctx: &mut WantContext<'_>) -> Result<(), ConnectionE
         }
         WantFramesOutcome::BootstrapRequired { namespaces } => {
             let payload =
-                ErrorPayload::new(ErrorCode::BootstrapRequired, "bootstrap required", false)
+                ErrorPayload::new(ProtocolErrorCode::BootstrapRequired.into(), "bootstrap required", false)
                     .with_details(BootstrapRequiredDetails {
                         namespaces: namespaces.into_iter().collect(),
                         reason: SnapshotRangeReason::RangeMissing,
@@ -1200,7 +1200,7 @@ mod tests {
         let mut reader = FrameReader::new(second, limits.max_frame_bytes);
         let response = read_message(&mut reader, &limits);
         match response {
-            ReplMessage::Error(payload) => assert_eq!(payload.code, ErrorCode::Overloaded),
+            ReplMessage::Error(payload) => assert_eq!(payload.code, ProtocolErrorCode::Overloaded.into()),
             other => panic!("unexpected response: {other:?}"),
         }
 
@@ -1245,7 +1245,7 @@ mod tests {
         send_message(&mut writer, hello);
         let response = read_message(&mut reader, &limits);
         match response {
-            ReplMessage::Error(payload) => assert_eq!(payload.code, ErrorCode::UnknownReplica),
+            ReplMessage::Error(payload) => assert_eq!(payload.code, ProtocolErrorCode::UnknownReplica.into()),
             other => panic!("unexpected response: {other:?}"),
         }
 

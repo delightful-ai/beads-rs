@@ -57,7 +57,7 @@ fn repl_backpressure_overload_emits_error() {
         })
         .expect("error");
 
-    assert_eq!(error.code, ErrorCode::Overloaded);
+    assert_eq!(error.code, ProtocolErrorCode::Overloaded.into());
     assert!(matches!(session.phase(), SessionPhase::Draining));
     assert!(
         actions

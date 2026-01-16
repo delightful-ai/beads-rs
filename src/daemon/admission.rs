@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::core::error::details::{OverloadedDetails, OverloadedSubsystem};
-use crate::core::{ErrorCode, ErrorPayload, Limits};
+use crate::core::{ErrorCode, ErrorPayload, Limits, ProtocolErrorCode};
 use crate::daemon::metrics;
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 100;
@@ -38,7 +38,7 @@ pub struct AdmissionRejection {
 
 impl AdmissionRejection {
     pub fn to_error_payload(&self) -> ErrorPayload {
-        ErrorPayload::new(ErrorCode::Overloaded, "overloaded", true).with_details(
+        ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), "overloaded", true).with_details(
             OverloadedDetails {
                 subsystem: Some(self.subsystem.clone()),
                 retry_after_ms: Some(self.retry_after_ms),
@@ -180,7 +180,7 @@ mod tests {
         let err = admission.try_admit_ipc_mutation().unwrap_err();
         assert_eq!(err.subsystem, OverloadedSubsystem::Ipc);
         let payload = err.to_error_payload();
-        assert_eq!(payload.code, ErrorCode::Overloaded);
+        assert_eq!(payload.code, ProtocolErrorCode::Overloaded.into());
         drop(permit);
         assert!(admission.try_admit_ipc_mutation().is_ok());
     }

@@ -210,7 +210,7 @@ impl ProtoDecodeError {
                 got_bytes,
             } => Some(
                 ErrorPayload::new(
-                    ErrorCode::BatchTooLarge,
+                    ProtocolErrorCode::BatchTooLarge.into(),
                     "event batch exceeds limits",
                     false,
                 )
@@ -223,7 +223,7 @@ impl ProtoDecodeError {
             ),
             ProtoDecodeError::MissingField(field) => Some(
                 ErrorPayload::new(
-                    ErrorCode::InvalidRequest,
+                    ProtocolErrorCode::InvalidRequest.into(),
                     format!("missing field {field}"),
                     false,
                 )
@@ -234,7 +234,7 @@ impl ProtoDecodeError {
             ),
             ProtoDecodeError::InvalidField { field, reason } => Some(
                 ErrorPayload::new(
-                    ErrorCode::InvalidRequest,
+                    ProtocolErrorCode::InvalidRequest.into(),
                     format!("invalid field {field}: {reason}"),
                     false,
                 )
@@ -245,7 +245,7 @@ impl ProtoDecodeError {
             ),
             ProtoDecodeError::UnknownMessageType(raw) => Some(
                 ErrorPayload::new(
-                    ErrorCode::InvalidRequest,
+                    ProtocolErrorCode::InvalidRequest.into(),
                     format!("unknown message type {raw}"),
                     false,
                 )
@@ -259,7 +259,7 @@ impl ProtoDecodeError {
             | ProtoDecodeError::TrailingBytes
             | ProtoDecodeError::Cbor(_) => Some(
                 ErrorPayload::new(
-                    ErrorCode::MalformedPayload,
+                    ProtocolErrorCode::MalformedPayload.into(),
                     "failed to decode CBOR payload",
                     false,
                 )
@@ -1701,7 +1701,7 @@ mod tests {
 
     #[test]
     fn repl_message_roundtrip_error_payload() {
-        let payload = ErrorPayload::new(ErrorCode::Overloaded, "busy", true).with_details(
+        let payload = ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), "busy", true).with_details(
             crate::core::error::details::OverloadedDetails {
                 subsystem: None,
                 retry_after_ms: Some(10),
@@ -1732,7 +1732,7 @@ mod tests {
         limits.max_event_batch_bytes = 1;
         let err = decode_envelope(&bytes, &limits).unwrap_err();
         let payload = err.as_error_payload().unwrap();
-        assert_eq!(payload.code, ErrorCode::BatchTooLarge);
+        assert_eq!(payload.code, ProtocolErrorCode::BatchTooLarge.into());
         let details: BatchTooLargeDetails = payload.details_as().unwrap().unwrap();
         assert_eq!(details.max_bytes, 1);
         assert!(details.got_bytes > 1);

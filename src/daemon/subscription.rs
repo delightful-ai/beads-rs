@@ -196,7 +196,7 @@ fn build_backfill_plan<R: WalRangeRead>(
 fn wal_range_error_payload(err: WalRangeError) -> Box<ErrorPayload> {
     Box::new(match err {
         WalRangeError::MissingRange { namespace, .. } => {
-            ErrorPayload::new(ErrorCode::BootstrapRequired, "bootstrap required", false)
+            ErrorPayload::new(ProtocolErrorCode::BootstrapRequired.into(), "bootstrap required", false)
                 .with_details(error_details::BootstrapRequiredDetails {
                     namespaces: vec![namespace],
                     reason: error_details::SnapshotRangeReason::RangeMissing,
@@ -372,7 +372,7 @@ mod tests {
             &Limits::default(),
         )
         .unwrap_err();
-        assert_eq!(err.code, ErrorCode::BootstrapRequired);
+        assert_eq!(err.code, ProtocolErrorCode::BootstrapRequired.into());
         let details = err
             .details_as::<error_details::BootstrapRequiredDetails>()
             .unwrap()
@@ -419,6 +419,6 @@ mod tests {
             &Limits::default(),
         )
         .unwrap_err();
-        assert_eq!(err.code, ErrorCode::WalCorrupt);
+        assert_eq!(err.code, ProtocolErrorCode::WalCorrupt.into());
     }
 }

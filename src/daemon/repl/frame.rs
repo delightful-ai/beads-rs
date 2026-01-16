@@ -33,7 +33,7 @@ impl FrameError {
                 got_bytes,
             } => Some(
                 ErrorPayload::new(
-                    ErrorCode::FrameTooLarge,
+                    ProtocolErrorCode::FrameTooLarge.into(),
                     "frame exceeds max_frame_bytes",
                     false,
                 )
@@ -189,7 +189,7 @@ mod tests {
         assert!(matches!(err, FrameError::FrameTooLarge { .. }));
 
         let payload = err.as_error_payload().unwrap();
-        assert_eq!(payload.code, ErrorCode::FrameTooLarge);
+        assert_eq!(payload.code, ProtocolErrorCode::FrameTooLarge.into());
         let details: FrameTooLargeDetails = payload.details_as().unwrap().unwrap();
         assert_eq!(details.max_frame_bytes, 5);
         assert_eq!(details.got_bytes, 10);

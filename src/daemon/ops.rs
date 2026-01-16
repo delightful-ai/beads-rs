@@ -13,9 +13,9 @@ use thiserror::Error;
 
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    ActorId, Applied, BeadFields, BeadId, BeadType, ClientRequestId, DurabilityClass,
-    DurabilityReceipt, ErrorCode, InvalidId, Label, Labels, Lww, NamespaceId, Priority, ReplicaId,
-    Stamp, WallClock, Watermarks, WorkflowStatus,
+    ActorId, Applied, BeadFields, BeadId, BeadType, CliErrorCode, ClientRequestId, DurabilityClass,
+    DurabilityReceipt, ErrorCode, InvalidId, Label, Labels, Lww, NamespaceId, Priority,
+    ProtocolErrorCode, ReplicaId, Stamp, WallClock, Watermarks, WorkflowStatus,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_lock::StoreLockError;
@@ -413,41 +413,41 @@ impl OpError {
     /// Get the error code for IPC responses.
     pub fn code(&self) -> ErrorCode {
         match self {
-            OpError::NotFound(_) => ErrorCode::NotFound,
-            OpError::AlreadyExists(_) => ErrorCode::AlreadyExists,
-            OpError::AlreadyClaimed { .. } => ErrorCode::AlreadyClaimed,
-            OpError::CasMismatch { .. } => ErrorCode::CasMismatch,
-            OpError::InvalidTransition { .. } => ErrorCode::InvalidTransition,
-            OpError::ValidationFailed { .. } => ErrorCode::ValidationFailed,
-            OpError::InvalidRequest { .. } => ErrorCode::InvalidRequest,
-            OpError::InvalidId(_) => ErrorCode::InvalidId,
-            OpError::Overloaded { .. } => ErrorCode::Overloaded,
-            OpError::RateLimited { .. } => ErrorCode::RateLimited,
-            OpError::MaintenanceMode { .. } => ErrorCode::MaintenanceMode,
-            OpError::ClientRequestIdReuseMismatch { .. } => ErrorCode::ClientRequestIdReuseMismatch,
-            OpError::NotAGitRepo(_) => ErrorCode::NotAGitRepo,
-            OpError::NoRemote(_) => ErrorCode::NoRemote,
-            OpError::RepoNotInitialized(_) => ErrorCode::RepoNotInitialized,
+            OpError::NotFound(_) => CliErrorCode::NotFound.into(),
+            OpError::AlreadyExists(_) => CliErrorCode::AlreadyExists.into(),
+            OpError::AlreadyClaimed { .. } => CliErrorCode::AlreadyClaimed.into(),
+            OpError::CasMismatch { .. } => CliErrorCode::CasMismatch.into(),
+            OpError::InvalidTransition { .. } => CliErrorCode::InvalidTransition.into(),
+            OpError::ValidationFailed { .. } => CliErrorCode::ValidationFailed.into(),
+            OpError::InvalidRequest { .. } => ProtocolErrorCode::InvalidRequest.into(),
+            OpError::InvalidId(_) => CliErrorCode::InvalidId.into(),
+            OpError::Overloaded { .. } => ProtocolErrorCode::Overloaded.into(),
+            OpError::RateLimited { .. } => ProtocolErrorCode::RateLimited.into(),
+            OpError::MaintenanceMode { .. } => ProtocolErrorCode::MaintenanceMode.into(),
+            OpError::ClientRequestIdReuseMismatch { .. } => ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
+            OpError::NotAGitRepo(_) => CliErrorCode::NotAGitRepo.into(),
+            OpError::NoRemote(_) => CliErrorCode::NoRemote.into(),
+            OpError::RepoNotInitialized(_) => CliErrorCode::RepoNotInitialized.into(),
             OpError::StoreRuntime(err) => store_runtime_error_code(err.as_ref()),
-            OpError::Sync(_) => ErrorCode::SyncFailed,
-            OpError::BeadDeleted(_) => ErrorCode::BeadDeleted,
-            OpError::NoteTooLarge { .. } => ErrorCode::NoteTooLarge,
-            OpError::OpsTooMany { .. } => ErrorCode::OpsTooMany,
-            OpError::LabelsTooMany { .. } => ErrorCode::LabelsTooMany,
-            OpError::DurabilityTimeout { .. } => ErrorCode::DurabilityTimeout,
-            OpError::DurabilityUnavailable { .. } => ErrorCode::DurabilityUnavailable,
-            OpError::RequireMinSeenTimeout { .. } => ErrorCode::RequireMinSeenTimeout,
-            OpError::RequireMinSeenUnsatisfied { .. } => ErrorCode::RequireMinSeenUnsatisfied,
-            OpError::NamespaceInvalid { .. } => ErrorCode::NamespaceInvalid,
-            OpError::NamespaceUnknown { .. } => ErrorCode::NamespaceUnknown,
-            OpError::NamespacePolicyViolation { .. } => ErrorCode::NamespacePolicyViolation,
-            OpError::CrossNamespaceDependency { .. } => ErrorCode::CrossNamespaceDependency,
-            OpError::WalRecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
+            OpError::Sync(_) => CliErrorCode::SyncFailed.into(),
+            OpError::BeadDeleted(_) => CliErrorCode::BeadDeleted.into(),
+            OpError::NoteTooLarge { .. } => ProtocolErrorCode::NoteTooLarge.into(),
+            OpError::OpsTooMany { .. } => ProtocolErrorCode::OpsTooMany.into(),
+            OpError::LabelsTooMany { .. } => ProtocolErrorCode::LabelsTooMany.into(),
+            OpError::DurabilityTimeout { .. } => ProtocolErrorCode::DurabilityTimeout.into(),
+            OpError::DurabilityUnavailable { .. } => ProtocolErrorCode::DurabilityUnavailable.into(),
+            OpError::RequireMinSeenTimeout { .. } => ProtocolErrorCode::RequireMinSeenTimeout.into(),
+            OpError::RequireMinSeenUnsatisfied { .. } => ProtocolErrorCode::RequireMinSeenUnsatisfied.into(),
+            OpError::NamespaceInvalid { .. } => ProtocolErrorCode::NamespaceInvalid.into(),
+            OpError::NamespaceUnknown { .. } => ProtocolErrorCode::NamespaceUnknown.into(),
+            OpError::NamespacePolicyViolation { .. } => ProtocolErrorCode::NamespacePolicyViolation.into(),
+            OpError::CrossNamespaceDependency { .. } => ProtocolErrorCode::CrossNamespaceDependency.into(),
+            OpError::WalRecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
             OpError::EventWal(err) => event_wal_error_code(err.as_ref()),
-            OpError::NotClaimedByYou => ErrorCode::NotClaimedByYou,
-            OpError::DepNotFound => ErrorCode::DepNotFound,
-            OpError::LoadTimeout { .. } => ErrorCode::LoadTimeout,
-            OpError::Internal(_) => ErrorCode::Internal,
+            OpError::NotClaimedByYou => CliErrorCode::NotClaimedByYou.into(),
+            OpError::DepNotFound => CliErrorCode::DepNotFound.into(),
+            OpError::LoadTimeout { .. } => CliErrorCode::LoadTimeout.into(),
+            OpError::Internal(_) => CliErrorCode::Internal.into(),
         }
     }
 
@@ -536,17 +536,17 @@ impl From<AdmissionRejection> for OpError {
 
 fn event_wal_error_code(err: &EventWalError) -> ErrorCode {
     match err {
-        EventWalError::RecordTooLarge { .. } => ErrorCode::WalRecordTooLarge,
+        EventWalError::RecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
         EventWalError::SegmentHeaderUnsupportedVersion { .. } => wal_segment_header_error_code(err),
-        EventWalError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
+        EventWalError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
         EventWalError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::IoError
+                CliErrorCode::IoError.into()
             }
         }
-        _ => ErrorCode::WalCorrupt,
+        _ => ProtocolErrorCode::WalCorrupt.into(),
     }
 }
 
@@ -567,69 +567,69 @@ fn event_wal_transience(err: &EventWalError) -> Transience {
 fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
     match err {
         StoreRuntimeError::Lock(lock_err) => store_lock_error_code(lock_err),
-        StoreRuntimeError::MetaSymlink { .. } => ErrorCode::PathSymlinkRejected,
+        StoreRuntimeError::MetaSymlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
         StoreRuntimeError::MetaRead { source, .. }
         | StoreRuntimeError::MetaWrite { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::InternalError
+                ProtocolErrorCode::InternalError.into()
             }
         }
-        StoreRuntimeError::MetaParse { .. } => ErrorCode::Corruption,
-        StoreRuntimeError::MetaMismatch { .. } => ErrorCode::WrongStore,
-        StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => ErrorCode::VersionIncompatible,
+        StoreRuntimeError::MetaParse { .. } => ProtocolErrorCode::Corruption.into(),
+        StoreRuntimeError::MetaMismatch { .. } => ProtocolErrorCode::WrongStore.into(),
+        StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => ProtocolErrorCode::VersionIncompatible.into(),
         StoreRuntimeError::NamespacePoliciesSymlink { .. }
-        | StoreRuntimeError::ReplicaRosterSymlink { .. } => ErrorCode::PathSymlinkRejected,
+        | StoreRuntimeError::ReplicaRosterSymlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
         StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::ValidationFailed
+                CliErrorCode::ValidationFailed.into()
             }
         }
-        StoreRuntimeError::NamespacePoliciesParse { .. } => ErrorCode::ValidationFailed,
+        StoreRuntimeError::NamespacePoliciesParse { .. } => CliErrorCode::ValidationFailed.into(),
         StoreRuntimeError::ReplicaRosterRead { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::ValidationFailed
+                CliErrorCode::ValidationFailed.into()
             }
         }
-        StoreRuntimeError::ReplicaRosterParse { .. } => ErrorCode::ValidationFailed,
-        StoreRuntimeError::StoreConfigSymlink { .. } => ErrorCode::PathSymlinkRejected,
+        StoreRuntimeError::ReplicaRosterParse { .. } => CliErrorCode::ValidationFailed.into(),
+        StoreRuntimeError::StoreConfigSymlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
         StoreRuntimeError::StoreConfigRead { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::ValidationFailed
+                CliErrorCode::ValidationFailed.into()
             }
         }
-        StoreRuntimeError::StoreConfigParse { .. } => ErrorCode::ValidationFailed,
-        StoreRuntimeError::StoreConfigSerialize { .. } => ErrorCode::InternalError,
+        StoreRuntimeError::StoreConfigParse { .. } => CliErrorCode::ValidationFailed.into(),
+        StoreRuntimeError::StoreConfigSerialize { .. } => ProtocolErrorCode::InternalError.into(),
         StoreRuntimeError::StoreConfigWrite { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::InternalError
+                ProtocolErrorCode::InternalError.into()
             }
         }
         StoreRuntimeError::WalIndex(err) => wal_index_error_code(err),
         StoreRuntimeError::WalReplay(err) => wal_replay_error_code(err),
-        StoreRuntimeError::WatermarkInvalid { .. } => ErrorCode::IndexCorrupt,
+        StoreRuntimeError::WatermarkInvalid { .. } => ProtocolErrorCode::IndexCorrupt.into(),
     }
 }
 
 fn store_lock_error_code(err: &StoreLockError) -> ErrorCode {
     match err {
-        StoreLockError::Held { .. } => ErrorCode::LockHeld,
-        StoreLockError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
-        StoreLockError::MetadataCorrupt { .. } => ErrorCode::Corruption,
+        StoreLockError::Held { .. } => ProtocolErrorCode::LockHeld.into(),
+        StoreLockError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+        StoreLockError::MetadataCorrupt { .. } => ProtocolErrorCode::Corruption.into(),
         StoreLockError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::InternalError
+                ProtocolErrorCode::InternalError.into()
             }
         }
     }
@@ -699,16 +699,16 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
 
 fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
     match err {
-        WalIndexError::SchemaVersionMismatch { .. } => ErrorCode::IndexRebuildRequired,
-        WalIndexError::Equivocation { .. } => ErrorCode::Equivocation,
+        WalIndexError::SchemaVersionMismatch { .. } => ProtocolErrorCode::IndexRebuildRequired.into(),
+        WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
         WalIndexError::ClientRequestIdReuseMismatch { .. } => {
-            ErrorCode::ClientRequestIdReuseMismatch
+            ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
         }
-        WalIndexError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
+        WalIndexError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
         WalIndexError::MetaMismatch { key, .. } => match *key {
-            "store_id" => ErrorCode::WrongStore,
-            "store_epoch" => ErrorCode::StoreEpochMismatch,
-            _ => ErrorCode::IndexCorrupt,
+            "store_id" => ProtocolErrorCode::WrongStore.into(),
+            "store_epoch" => ProtocolErrorCode::StoreEpochMismatch.into(),
+            _ => ProtocolErrorCode::IndexCorrupt.into(),
         },
         WalIndexError::MetaMissing { .. }
         | WalIndexError::EventIdDecode(_)
@@ -718,13 +718,13 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
         | WalIndexError::ReplicaLivenessRowDecode(_)
         | WalIndexError::CborDecode(_)
         | WalIndexError::CborEncode(_)
-        | WalIndexError::OriginSeqOverflow { .. } => ErrorCode::IndexCorrupt,
-        WalIndexError::Sqlite(_) => ErrorCode::IndexCorrupt,
+        | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
+        WalIndexError::Sqlite(_) => ProtocolErrorCode::IndexCorrupt.into(),
         WalIndexError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::IoError
+                CliErrorCode::IoError.into()
             }
         }
     }
@@ -732,17 +732,17 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
 
 fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
     match err {
-        WalReplayError::Symlink { .. } => ErrorCode::PathSymlinkRejected,
+        WalReplayError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
         WalReplayError::Io { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ErrorCode::PermissionDenied
+                ProtocolErrorCode::PermissionDenied.into()
             } else {
-                ErrorCode::IoError
+                CliErrorCode::IoError.into()
             }
         }
         WalReplayError::SegmentHeader { source, .. } => wal_segment_header_error_code(source),
-        WalReplayError::SegmentHeaderMismatch { .. } => ErrorCode::SegmentHeaderMismatch,
-        WalReplayError::RecordShaMismatch(_) => ErrorCode::HashMismatch,
+        WalReplayError::SegmentHeaderMismatch { .. } => ProtocolErrorCode::SegmentHeaderMismatch.into(),
+        WalReplayError::RecordShaMismatch(_) => ProtocolErrorCode::HashMismatch.into(),
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
         | WalReplayError::RecordHeaderMismatch { .. }
@@ -750,11 +750,11 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
         | WalReplayError::UnexpectedHead { .. }
         | WalReplayError::SealedSegmentFinalLenMissing { .. }
         | WalReplayError::SealedSegmentLenMismatch { .. }
-        | WalReplayError::MidFileCorruption { .. } => ErrorCode::WalCorrupt,
-        WalReplayError::NonContiguousSeq { .. } => ErrorCode::GapDetected,
-        WalReplayError::PrevShaMismatch { .. } => ErrorCode::PrevShaMismatch,
+        | WalReplayError::MidFileCorruption { .. } => ProtocolErrorCode::WalCorrupt.into(),
+        WalReplayError::NonContiguousSeq { .. } => ProtocolErrorCode::GapDetected.into(),
+        WalReplayError::PrevShaMismatch { .. } => ProtocolErrorCode::PrevShaMismatch.into(),
         WalReplayError::IndexOffsetInvalid { .. } | WalReplayError::OriginSeqOverflow { .. } => {
-            ErrorCode::IndexCorrupt
+            ProtocolErrorCode::IndexCorrupt.into()
         }
         WalReplayError::Index(err) => wal_index_error_code(err),
     }
@@ -762,8 +762,8 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
 
 fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
     match source {
-        EventWalError::SegmentHeaderUnsupportedVersion { .. } => ErrorCode::WalFormatUnsupported,
-        _ => ErrorCode::WalCorrupt,
+        EventWalError::SegmentHeaderUnsupportedVersion { .. } => ProtocolErrorCode::WalFormatUnsupported.into(),
+        _ => ProtocolErrorCode::WalCorrupt.into(),
     }
 }
 
