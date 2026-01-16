@@ -33,6 +33,7 @@ pub mod run;
 pub mod scheduler;
 pub mod scrubber;
 pub mod server;
+pub mod store;
 pub mod store_lock;
 pub mod store_runtime;
 pub mod subscription;

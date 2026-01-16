@@ -14,9 +14,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use crossbeam::channel::Sender;
 use git2::{ErrorCode as GitErrorCode, ObjectType, Oid, Repository, TreeWalkMode, TreeWalkResult};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
 use super::Clock;
 use super::broadcast::BroadcastEvent;
@@ -31,7 +29,7 @@ use super::ipc::{
 use super::metrics;
 use super::ops::OpError;
 use crate::api::QueryResult;
-use super::remote::{RemoteUrl, normalize_url};
+use super::remote::RemoteUrl;
 use super::repl::{
     BackoffPolicy, IngestOutcome, PeerConfig, ReplError, ReplErrorDetails, ReplIngestRequest,
     ReplSessionStore,
@@ -42,6 +40,7 @@ use super::repo::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
 };
 use super::scheduler::SyncScheduler;
+use super::store::StoreCaches;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
@@ -76,58 +75,6 @@ impl LoadedStore {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StoreIdSource {
-    EnvOverride,
-    PathCache,
-    PathMap,
-    GitMeta,
-    GitRefs,
-    RemoteFallback,
-}
-
-impl StoreIdSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            StoreIdSource::EnvOverride => "env_override",
-            StoreIdSource::PathCache => "path_cache",
-            StoreIdSource::PathMap => "path_map",
-            StoreIdSource::GitMeta => "git_meta",
-            StoreIdSource::GitRefs => "git_refs",
-            StoreIdSource::RemoteFallback => "remote_fallback",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedStore {
-    store_id: StoreId,
-    remote: RemoteUrl,
-}
-
-#[derive(Debug, Error)]
-enum StoreDiscoveryError {
-    #[error("store_meta.json missing in refs/beads/meta")]
-    MetaMissing,
-    #[error("store_meta.json parse failed: {source}")]
-    MetaParse {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("failed to read refs/beads/meta: {source}")]
-    MetaRef {
-        #[source]
-        source: git2::Error,
-    },
-    #[error("failed to list refs/beads/*: {source}")]
-    RefList {
-        #[source]
-        source: git2::Error,
-    },
-    #[error("multiple store ids discovered: {ids:?}")]
-    MultipleStoreIds { ids: Vec<StoreId> },
-}
-
 #[derive(Debug, Error)]
 enum CheckpointTreeError {
     #[error("checkpoint tree git error: {0}")]
@@ -142,23 +89,12 @@ enum CheckpointTreeError {
     InvalidPath { path: String },
 }
 
-#[derive(Debug, Deserialize)]
-struct StoreMetaRef {
-    store_id: StoreId,
-    #[allow(dead_code)]
-    store_epoch: StoreEpoch,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct StorePathMap {
-    entries: BTreeMap<String, StoreId>,
-}
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::core::{
     ActorId, Applied, ApplyError, BeadId, CanonicalState, CliErrorCode, ClientRequestId,
     ContentHash, CoreError, DurabilityClass, ErrorCode, EventBody, EventId, EventKindV1,
     HeadStatus, Limits, NamespaceId, NamespacePolicy, PrevVerified, ProtocolErrorCode, ReplicaId,
-    ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
+    ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreId, StoreIdentity,
     StoreState, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
     apply_event, decode_event_body,
 };
@@ -232,15 +168,8 @@ impl From<Response> for HandleOutcome {
 pub struct Daemon {
     /// Per-store runtime, keyed by StoreId.
     stores: BTreeMap<StoreId, StoreRuntime>,
-
-    /// Cache of repo path → store id.
-    path_to_store_id: HashMap<PathBuf, StoreId>,
-
-    /// Cache of remote URL → store id.
-    remote_to_store_id: HashMap<RemoteUrl, StoreId>,
-
-    /// Cache of repo path → remote URL (legacy).
-    path_to_remote: HashMap<PathBuf, RemoteUrl>,
+    /// Store discovery caches.
+    store_caches: StoreCaches,
 
     /// HLC clock for generating timestamps.
     clock: Clock,
@@ -322,9 +251,7 @@ impl Daemon {
 
         Daemon {
             stores: BTreeMap::new(),
-            path_to_store_id: HashMap::new(),
-            remote_to_store_id: HashMap::new(),
-            path_to_remote: HashMap::new(),
+            store_caches: StoreCaches::new(),
             clock: Clock::new_with_max_forward_drift(limits.hlc_max_forward_drift_ms),
             actor_clocks: BTreeMap::new(),
             actor,
@@ -586,7 +513,7 @@ impl Daemon {
     /// Get repo state by raw remote URL (for internal sync waiters, etc.).
     /// Returns None if not loaded.
     pub(crate) fn repo_state_by_url(&self, remote: &RemoteUrl) -> Option<&RepoState> {
-        self.remote_to_store_id
+        self.store_caches.remote_to_store_id
             .get(remote)
             .and_then(|store_id| self.stores.get(store_id))
             .map(|store| &store.repo_state)
@@ -603,109 +530,6 @@ impl Daemon {
         self.stores.get(store_id).map(|store| &store.primary_remote)
     }
 
-    /// Resolve a repo path to a normalized remote URL.
-    fn resolve_remote(&mut self, repo_path: &Path) -> Result<RemoteUrl, OpError> {
-        // 1. Env override (highest priority).
-        if let Ok(url) = std::env::var("BD_REMOTE_URL")
-            && !url.trim().is_empty()
-        {
-            return Ok(RemoteUrl(normalize_url(&url)));
-        }
-
-        // 2. Cache.
-        if let Some(remote) = self.path_to_remote.get(repo_path) {
-            return Ok(remote.clone());
-        }
-
-        // 3. Git config.
-        let repo =
-            Repository::open(repo_path).map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
-        let remote = repo
-            .find_remote("origin")
-            .map_err(|_| OpError::NoRemote(repo_path.to_owned()))?;
-        let url = remote
-            .url()
-            .ok_or_else(|| OpError::NoRemote(repo_path.to_owned()))?;
-
-        let remote = RemoteUrl(normalize_url(url));
-        self.path_to_remote
-            .insert(repo_path.to_owned(), remote.clone());
-        Ok(remote)
-    }
-
-    fn resolve_store(&mut self, repo_path: &Path) -> Result<ResolvedStore, OpError> {
-        let remote = self.resolve_remote(repo_path)?;
-        let (store_id, source) = self.resolve_store_id(repo_path, &remote)?;
-
-        self.path_to_store_id.insert(repo_path.to_owned(), store_id);
-        self.remote_to_store_id.insert(remote.clone(), store_id);
-
-        if let Err(err) = persist_store_id_mapping(repo_path, store_id) {
-            tracing::warn!(
-                "failed to persist store id mapping for {:?}: {}",
-                repo_path,
-                err
-            );
-        }
-
-        tracing::info!(
-            store_id = %store_id,
-            source = %source.as_str(),
-            repo = %repo_path.display(),
-            remote = %remote,
-            "store identity resolved"
-        );
-
-        Ok(ResolvedStore { store_id, remote })
-    }
-
-    fn resolve_store_id(
-        &mut self,
-        repo_path: &Path,
-        remote: &RemoteUrl,
-    ) -> Result<(StoreId, StoreIdSource), OpError> {
-        if let Ok(raw) = std::env::var("BD_STORE_ID")
-            && !raw.trim().is_empty()
-        {
-            let store_id = StoreId::parse_str(raw.trim()).map_err(|e| OpError::InvalidRequest {
-                field: Some("store_id".into()),
-                reason: e.to_string(),
-            })?;
-            return Ok((store_id, StoreIdSource::EnvOverride));
-        }
-
-        if let Some(store_id) = self.path_to_store_id.get(repo_path).copied() {
-            return Ok((store_id, StoreIdSource::PathCache));
-        }
-
-        if let Some(store_id) = load_store_id_for_path(repo_path) {
-            return Ok((store_id, StoreIdSource::PathMap));
-        }
-
-        let repo =
-            Repository::open(repo_path).map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
-
-        if let Some(store_id) =
-            read_store_id_from_git_meta(&repo).map_err(|err| OpError::InvalidRequest {
-                field: Some("store_id".into()),
-                reason: err.to_string(),
-            })?
-        {
-            return Ok((store_id, StoreIdSource::GitMeta));
-        }
-
-        if let Some(store_id) =
-            discover_store_id_from_refs(&repo).map_err(|err| OpError::InvalidRequest {
-                field: Some("store_id".into()),
-                reason: err.to_string(),
-            })?
-        {
-            return Ok((store_id, StoreIdSource::GitRefs));
-        }
-
-        Ok((store_id_from_remote(remote), StoreIdSource::RemoteFallback))
-    }
-
     /// Ensure repo is loaded using cached refs, without blocking on network fetch.
     ///
     /// If no local refs exist, this will attempt a one-time fetch with a bounded timeout.
@@ -714,10 +538,12 @@ impl Daemon {
         repo: &Path,
         git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore, OpError> {
-        let resolved = self.resolve_store(repo)?;
+        let resolved = self.store_caches.resolve_store(repo)?;
         let store_id = resolved.store_id;
         let remote = resolved.remote;
-        self.path_to_remote.insert(repo.to_owned(), remote.clone());
+        self.store_caches
+            .path_to_remote
+            .insert(repo.to_owned(), remote.clone());
 
         if !self.stores.contains_key(&store_id) {
             let open = StoreRuntime::open(
@@ -799,10 +625,12 @@ impl Daemon {
         repo: &Path,
         git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore, OpError> {
-        let resolved = self.resolve_store(repo)?;
+        let resolved = self.store_caches.resolve_store(repo)?;
         let store_id = resolved.store_id;
         let remote = resolved.remote;
-        self.path_to_remote.insert(repo.to_owned(), remote.clone());
+        self.store_caches
+            .path_to_remote
+            .insert(repo.to_owned(), remote.clone());
 
         if !self.stores.contains_key(&store_id) {
             let open = StoreRuntime::open(
@@ -1697,7 +1525,7 @@ impl Daemon {
         remote: &RemoteUrl,
         result: Result<super::git_worker::LoadResult, SyncError>,
     ) {
-        let store_id = match self.remote_to_store_id.get(remote).copied() {
+        let store_id = match self.store_caches.remote_to_store_id.get(remote).copied() {
             Some(id) => id,
             None => return,
         };
@@ -1774,7 +1602,7 @@ impl Daemon {
         repo: &Path,
         git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore, OpError> {
-        let resolved = self.resolve_store(repo)?;
+        let resolved = self.store_caches.resolve_store(repo)?;
 
         // Remove cached state so ensure_repo_loaded will do a fresh load
         self.stores.remove(&resolved.store_id);
@@ -1789,7 +1617,7 @@ impl Daemon {
     /// - Repo is dirty
     /// - Not already syncing
     pub fn maybe_start_sync(&mut self, remote: &RemoteUrl, git_tx: &Sender<GitOp>) {
-        let store_id = match self.remote_to_store_id.get(remote).copied() {
+        let store_id = match self.store_caches.remote_to_store_id.get(remote).copied() {
             Some(id) => id,
             None => return,
         };
@@ -1833,7 +1661,7 @@ impl Daemon {
     pub fn complete_sync(&mut self, remote: &RemoteUrl, result: Result<SyncOutcome, SyncError>) {
         let mut backoff_ms = None;
         let mut sync_succeeded = false;
-        let store_id = match self.remote_to_store_id.get(remote).copied() {
+        let store_id = match self.store_caches.remote_to_store_id.get(remote).copied() {
             Some(id) => id,
             None => return,
         };
@@ -2771,151 +2599,6 @@ fn load_timeout() -> Duration {
     Duration::from_secs(override_secs.unwrap_or(LOAD_TIMEOUT_SECS))
 }
 
-fn store_path_map_path() -> PathBuf {
-    crate::paths::data_dir().join("store_paths.json")
-}
-
-fn load_store_id_for_path(repo_path: &Path) -> Option<StoreId> {
-    let path = store_path_map_path();
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            if err.kind() != io::ErrorKind::NotFound {
-                tracing::warn!("store path map read failed {:?}: {}", path, err);
-            }
-            return None;
-        }
-    };
-
-    let map: StorePathMap = match serde_json::from_slice(&bytes) {
-        Ok(map) => map,
-        Err(err) => {
-            tracing::warn!("store path map parse failed {:?}: {}", path, err);
-            return None;
-        }
-    };
-
-    let key = repo_path.display().to_string();
-    map.entries.get(&key).copied()
-}
-
-fn persist_store_id_mapping(repo_path: &Path, store_id: StoreId) -> io::Result<()> {
-    let path = store_path_map_path();
-    let mut map = read_store_path_map();
-    let key = repo_path.display().to_string();
-    map.entries.insert(key, store_id);
-    write_store_path_map(&path, &map)
-}
-
-fn read_store_path_map() -> StorePathMap {
-    let path = store_path_map_path();
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return StorePathMap::default(),
-        Err(err) => {
-            tracing::warn!("store path map read failed {:?}: {}", path, err);
-            return StorePathMap::default();
-        }
-    };
-
-    match serde_json::from_slice(&bytes) {
-        Ok(map) => map,
-        Err(err) => {
-            tracing::warn!("store path map parse failed {:?}: {}", path, err);
-            StorePathMap::default()
-        }
-    }
-}
-
-fn write_store_path_map(path: &Path, map: &StorePathMap) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let bytes =
-        serde_json::to_vec(map).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    fs::write(path, bytes)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-
-    Ok(())
-}
-
-fn read_store_id_from_git_meta(repo: &Repository) -> Result<Option<StoreId>, StoreDiscoveryError> {
-    let reference = match repo.find_reference("refs/beads/meta") {
-        Ok(reference) => reference,
-        Err(err) if err.code() == GitErrorCode::NotFound => return Ok(None),
-        Err(err) => return Err(StoreDiscoveryError::MetaRef { source: err }),
-    };
-
-    let commit = reference
-        .peel_to_commit()
-        .map_err(|err| StoreDiscoveryError::MetaRef { source: err })?;
-    let tree = commit
-        .tree()
-        .map_err(|err| StoreDiscoveryError::MetaRef { source: err })?;
-    let entry = tree
-        .get_name("store_meta.json")
-        .ok_or(StoreDiscoveryError::MetaMissing)?;
-    let blob = repo
-        .find_blob(entry.id())
-        .map_err(|err| StoreDiscoveryError::MetaRef { source: err })?;
-    let meta: StoreMetaRef = serde_json::from_slice(blob.content())
-        .map_err(|source| StoreDiscoveryError::MetaParse { source })?;
-    Ok(Some(meta.store_id))
-}
-
-fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, StoreDiscoveryError> {
-    let mut ids = std::collections::BTreeSet::new();
-    let refs = repo
-        .references_glob("refs/beads/*")
-        .map_err(|source| StoreDiscoveryError::RefList { source })?;
-
-    for reference in refs {
-        let reference = reference.map_err(|source| StoreDiscoveryError::RefList { source })?;
-        let Some(name) = reference.name() else {
-            continue;
-        };
-        if name == "refs/beads/meta" {
-            continue;
-        }
-        let Some(rest) = name.strip_prefix("refs/beads/") else {
-            continue;
-        };
-        let store_id_raw = rest.split('/').next().unwrap_or_default();
-        if store_id_raw.is_empty() {
-            continue;
-        }
-        match StoreId::parse_str(store_id_raw) {
-            Ok(id) => {
-                ids.insert(id);
-            }
-            Err(_) => {
-                tracing::warn!("ignoring invalid store id ref {}", name);
-            }
-        }
-    }
-
-    if ids.is_empty() {
-        return Ok(None);
-    }
-    if ids.len() > 1 {
-        return Err(StoreDiscoveryError::MultipleStoreIds {
-            ids: ids.into_iter().collect(),
-        });
-    }
-    Ok(ids.into_iter().next())
-}
-
-fn store_id_from_remote(remote: &RemoteUrl) -> StoreId {
-    let store_uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, remote.as_str().as_bytes());
-    StoreId::new(store_uuid)
-}
-
 const CLOCK_SKEW_WARN_MS: u64 = 5 * 60 * 1000;
 
 pub(crate) fn detect_clock_skew(now_ms: u64, reference_ms: u64) -> Option<ClockSkewRecord> {
@@ -3510,11 +3193,18 @@ pub(crate) fn insert_store_for_tests(
     .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
     daemon.seed_actor_clocks(&open.runtime)?;
     daemon.stores.insert(store_id, open.runtime);
-    daemon.remote_to_store_id.insert(remote.clone(), store_id);
     daemon
+        .store_caches
+        .remote_to_store_id
+        .insert(remote.clone(), store_id);
+    daemon
+        .store_caches
         .path_to_store_id
         .insert(repo_path.to_owned(), store_id);
-    daemon.path_to_remote.insert(repo_path.to_owned(), remote);
+    daemon
+        .store_caches
+        .path_to_remote
+        .insert(repo_path.to_owned(), remote);
     daemon.register_default_checkpoint_groups(store_id)?;
     Ok(())
 }
@@ -3522,6 +3212,7 @@ pub(crate) fn insert_store_for_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::store::discovery::store_id_from_remote;
     use std::collections::BTreeMap;
     use std::io::Write;
     #[cfg(unix)]
@@ -3650,7 +3341,10 @@ mod tests {
         .unwrap()
         .runtime;
         daemon.seed_actor_clocks(&runtime).unwrap();
-        daemon.remote_to_store_id.insert(remote.clone(), store_id);
+        daemon
+            .store_caches
+            .remote_to_store_id
+            .insert(remote.clone(), store_id);
         daemon.stores.insert(store_id, runtime);
         store_id
     }
