@@ -33,7 +33,8 @@ use super::ops::OpError;
 use super::query::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
 use super::repl::{
-    BackoffPolicy, IngestOutcome, PeerConfig, ReplIngestRequest, ReplSessionStore,
+    BackoffPolicy, IngestOutcome, PeerConfig, ReplError, ReplErrorDetails, ReplIngestRequest,
+    ReplSessionStore,
     ReplicationManager, ReplicationManagerConfig, ReplicationManagerHandle, ReplicationServer,
     ReplicationServerConfig, ReplicationServerHandle, SharedSessionStore, WalRangeReader,
 };
@@ -1307,52 +1308,61 @@ impl Daemon {
 
     pub(crate) fn handle_repl_ingest(&mut self, request: ReplIngestRequest) {
         if self.shutting_down {
-            let payload = ErrorPayload::new(ErrorCode::MaintenanceMode, "shutting down", true);
-            let _ = request.respond.send(Err(Box::new(payload)));
+            let error =
+                ReplError::new(ErrorCode::MaintenanceMode, "shutting down", true);
+            let _ = request.respond.send(Err(error));
             return;
         }
-        if let Some(payload) = self.stores.get(&request.store_id).and_then(|store| {
+        if let Some(error) = self.stores.get(&request.store_id).and_then(|store| {
             if store.maintenance_mode {
                 Some(
-                    ErrorPayload::new(ErrorCode::MaintenanceMode, "maintenance mode enabled", true)
-                        .with_details(error_details::MaintenanceModeDetails {
+                    ReplError::new(
+                        ErrorCode::MaintenanceMode,
+                        "maintenance mode enabled",
+                        true,
+                    )
+                    .with_details(ReplErrorDetails::MaintenanceMode(
+                        error_details::MaintenanceModeDetails {
                             reason: Some("maintenance mode enabled".into()),
                             until_ms: None,
-                        }),
+                        },
+                    )),
                 )
             } else if let Some(policy) = store.policies.get(&request.namespace) {
                 if policy.replicate_mode == ReplicateMode::None {
                     Some(
-                        ErrorPayload::new(
+                        ReplError::new(
                             ErrorCode::NamespacePolicyViolation,
                             "namespace replication disabled by policy",
                             false,
                         )
-                        .with_details(
+                        .with_details(ReplErrorDetails::NamespacePolicyViolation(
                             error_details::NamespacePolicyViolationDetails {
                                 namespace: request.namespace.clone(),
                                 rule: "replicate_mode".to_string(),
                                 reason: Some("replicate_mode=none".to_string()),
                             },
-                        ),
+                        )),
                     )
                 } else {
                     None
                 }
             } else {
                 Some(
-                    ErrorPayload::new(
+                    ReplError::new(
                         ErrorCode::NamespaceUnknown,
                         "namespace not configured",
                         false,
                     )
-                    .with_details(error_details::NamespaceUnknownDetails {
-                        namespace: request.namespace.clone(),
-                    }),
+                    .with_details(ReplErrorDetails::NamespaceUnknown(
+                        error_details::NamespaceUnknownDetails {
+                            namespace: request.namespace.clone(),
+                        },
+                    )),
                 )
             }
         }) {
-            let _ = request.respond.send(Err(Box::new(payload)));
+            let _ = request.respond.send(Err(error));
             return;
         }
         let outcome = self.ingest_remote_batch(
@@ -1379,7 +1389,7 @@ impl Daemon {
         origin: ReplicaId,
         batch: Vec<VerifiedEvent<PrevVerified>>,
         now_ms: u64,
-    ) -> Result<IngestOutcome, Box<ErrorPayload>> {
+    ) -> Result<IngestOutcome, ReplError> {
         let actor_stamps: Vec<(ActorId, WriteStamp)> = batch
             .iter()
             .map(|event| {
@@ -1391,11 +1401,7 @@ impl Daemon {
             })
             .collect();
         let store = self.stores.get_mut(&store_id).ok_or_else(|| {
-            Box::new(ErrorPayload::new(
-                ErrorCode::Internal,
-                "store not loaded",
-                true,
-            ))
+            ReplError::new(ErrorCode::Internal, "store not loaded", true)
         })?;
 
         if batch.is_empty() {
@@ -1414,11 +1420,11 @@ impl Daemon {
 
         for event in &batch {
             if event.body.namespace != namespace || event.body.origin_replica_id != origin {
-                return Err(Box::new(ErrorPayload::new(
+                return Err(ReplError::new(
                     ErrorCode::Internal,
                     "replication batch has mismatched origin",
                     false,
-                )));
+                ));
             }
         }
 
@@ -1428,7 +1434,7 @@ impl Daemon {
         let mut txn = wal_index
             .writer()
             .begin_txn()
-            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            .map_err(|err| wal_index_error_payload(&err))?;
 
         for event in &batch {
             let record = VerifiedRecord::new(
@@ -1447,11 +1453,7 @@ impl Daemon {
             )
             .map_err(|err| {
                 tracing::error!(error = ?err, "record verification failed");
-                Box::new(ErrorPayload::new(
-                    ErrorCode::Internal,
-                    "record verification failed",
-                    false,
-                ))
+                ReplError::new(ErrorCode::Internal, "record verification failed", false)
             })?;
 
             let append_start = Instant::now();
@@ -1466,9 +1468,7 @@ impl Daemon {
                     let elapsed = append_start.elapsed();
                     metrics::wal_append_err(elapsed);
                     metrics::wal_fsync_err(elapsed);
-                    return Err(Box::new(event_wal_error_payload(
-                        &namespace, None, None, err,
-                    )));
+                    return Err(event_wal_error_payload(&namespace, None, None, err));
                 }
             };
             let segment_snapshot =
@@ -1476,11 +1476,11 @@ impl Daemon {
                     .event_wal
                     .segment_snapshot(&namespace)
                     .ok_or_else(|| {
-                        Box::new(ErrorPayload::new(
+                        ReplError::new(
                             ErrorCode::Internal,
                             "missing active wal segment",
                             false,
-                        ))
+                        )
                     })?;
             let last_indexed_offset = append.offset + append.len as u64;
             let segment_row = SegmentRow {
@@ -1494,7 +1494,7 @@ impl Daemon {
             };
 
             txn.upsert_segment(&segment_row)
-                .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+                .map_err(|err| wal_index_error_payload(&err))?;
             if let Some(sealed) = append.sealed.as_ref() {
                 let sealed_row = SegmentRow {
                     namespace: namespace.clone(),
@@ -1506,7 +1506,7 @@ impl Daemon {
                     final_len: Some(sealed.final_len),
                 };
                 txn.upsert_segment(&sealed_row)
-                    .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+                    .map_err(|err| wal_index_error_payload(&err))?;
             }
             txn.record_event(
                 &namespace,
@@ -1521,7 +1521,7 @@ impl Daemon {
                 event.body.client_request_id,
                 None,
             )
-            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            .map_err(|err| wal_index_error_payload(&err))?;
 
             let EventKindV1::TxnV1(txn_body) = &event.body.kind;
             txn.update_hlc(&HlcRow {
@@ -1529,11 +1529,11 @@ impl Daemon {
                 last_physical_ms: txn_body.hlc_max.physical_ms,
                 last_logical: txn_body.hlc_max.logical,
             })
-            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            .map_err(|err| wal_index_error_payload(&err))?;
         }
 
         txn.commit()
-            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            .map_err(|err| wal_index_error_payload(&err))?;
 
         let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
             let mut max_stamp = store.repo_state.last_seen_stamp.clone();
@@ -1550,9 +1550,7 @@ impl Daemon {
                     }
                     Err(err) => {
                         metrics::apply_err(apply_start.elapsed());
-                        return Err(Box::new(apply_event_error_payload(
-                            &namespace, &origin, err,
-                        )));
+                        return Err(apply_event_error_payload(&namespace, &origin, err));
                     }
                 };
                 store.record_checkpoint_dirty_shards(&namespace, &outcome);
@@ -1573,11 +1571,11 @@ impl Daemon {
                 store
                     .watermarks_applied
                     .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
-                    .map_err(|err| Box::new(watermark_error_payload(&namespace, &origin, err)))?;
+                    .map_err(|err| watermark_error_payload(&namespace, &origin, err))?;
                 store
                     .watermarks_durable
                     .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
-                    .map_err(|err| Box::new(watermark_error_payload(&namespace, &origin, err)))?;
+                    .map_err(|err| watermark_error_payload(&namespace, &origin, err))?;
             }
 
             if let Some(stamp) = max_stamp.clone() {
@@ -1627,7 +1625,7 @@ impl Daemon {
         let mut watermark_txn = wal_index
             .writer()
             .begin_txn()
-            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            .map_err(|err| wal_index_error_payload(&err))?;
         watermark_txn
             .update_watermark(
                 &namespace,
@@ -1637,10 +1635,10 @@ impl Daemon {
                 applied_head,
                 durable_head,
             )
-            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            .map_err(|err| wal_index_error_payload(&err))?;
         watermark_txn
             .commit()
-            .map_err(|err| Box::new(wal_index_error_payload(&err)))?;
+            .map_err(|err| wal_index_error_payload(&err))?;
 
         Ok(IngestOutcome { durable, applied })
     }
@@ -3405,14 +3403,14 @@ fn event_wal_error_payload(
     segment_id: Option<SegmentId>,
     offset: Option<u64>,
     err: EventWalError,
-) -> ErrorPayload {
-    ErrorPayload::new(ErrorCode::WalCorrupt, "wal error", true).with_details(
-        error_details::WalCorruptDetails {
+) -> ReplError {
+    ReplError::new(ErrorCode::WalCorrupt, "wal error", true).with_details(
+        ReplErrorDetails::WalCorrupt(error_details::WalCorruptDetails {
             namespace: namespace.clone(),
             segment_id,
             offset,
             reason: err.to_string(),
-        },
+        }),
     )
 }
 
@@ -3420,14 +3418,14 @@ fn apply_event_error_payload(
     namespace: &NamespaceId,
     origin: &ReplicaId,
     err: ApplyError,
-) -> ErrorPayload {
+) -> ReplError {
     let reason = format!("apply_event rejected for {namespace}/{origin}: {err}");
-    ErrorPayload::new(ErrorCode::Corruption, "apply_event rejected", false).with_details(
-        error_details::CorruptionDetails { reason },
+    ReplError::new(ErrorCode::Corruption, "apply_event rejected", false).with_details(
+        ReplErrorDetails::Corruption(error_details::CorruptionDetails { reason }),
     )
 }
 
-fn wal_index_error_payload(err: &WalIndexError) -> ErrorPayload {
+fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
     match err {
         WalIndexError::Equivocation {
             namespace,
@@ -3435,8 +3433,8 @@ fn wal_index_error_payload(err: &WalIndexError) -> ErrorPayload {
             seq,
             existing_sha256,
             new_sha256,
-        } => ErrorPayload::new(ErrorCode::Equivocation, "equivocation", false).with_details(
-            error_details::EquivocationDetails {
+        } => ReplError::new(ErrorCode::Equivocation, "equivocation", false).with_details(
+            ReplErrorDetails::Equivocation(error_details::EquivocationDetails {
                 eid: error_details::EventIdDetails {
                     namespace: namespace.clone(),
                     origin_replica_id: *origin,
@@ -3444,7 +3442,7 @@ fn wal_index_error_payload(err: &WalIndexError) -> ErrorPayload {
                 },
                 existing_sha256: hex::encode(existing_sha256),
                 new_sha256: hex::encode(new_sha256),
-            },
+            }),
         ),
         WalIndexError::ClientRequestIdReuseMismatch {
             namespace,
@@ -3452,21 +3450,23 @@ fn wal_index_error_payload(err: &WalIndexError) -> ErrorPayload {
             expected_request_sha256,
             got_request_sha256,
             ..
-        } => ErrorPayload::new(
+        } => ReplError::new(
             ErrorCode::ClientRequestIdReuseMismatch,
             "client_request_id reuse mismatch",
             false,
         )
-        .with_details(error_details::ClientRequestIdReuseMismatchDetails {
-            namespace: namespace.clone(),
-            client_request_id: *client_request_id,
-            expected_request_sha256: hex::encode(expected_request_sha256),
-            got_request_sha256: hex::encode(got_request_sha256),
-        }),
-        _ => ErrorPayload::new(ErrorCode::IndexCorrupt, "index error", true).with_details(
-            error_details::IndexCorruptDetails {
-                reason: err.to_string(),
+        .with_details(ReplErrorDetails::ClientRequestIdReuseMismatch(
+            error_details::ClientRequestIdReuseMismatchDetails {
+                namespace: namespace.clone(),
+                client_request_id: *client_request_id,
+                expected_request_sha256: hex::encode(expected_request_sha256),
+                got_request_sha256: hex::encode(got_request_sha256),
             },
+        )),
+        _ => ReplError::new(ErrorCode::IndexCorrupt, "index error", true).with_details(
+            ReplErrorDetails::IndexCorrupt(error_details::IndexCorruptDetails {
+                reason: err.to_string(),
+            }),
         ),
     }
 }
@@ -3475,20 +3475,20 @@ fn watermark_error_payload(
     namespace: &NamespaceId,
     origin: &ReplicaId,
     err: WatermarkError,
-) -> ErrorPayload {
+) -> ReplError {
     match err {
         WatermarkError::NonContiguous { expected, got } => {
             let durable_seen = expected.prev_seq0().get();
-            ErrorPayload::new(ErrorCode::GapDetected, "gap detected", false).with_details(
-                error_details::GapDetectedDetails {
+            ReplError::new(ErrorCode::GapDetected, "gap detected", false).with_details(
+                ReplErrorDetails::GapDetected(error_details::GapDetectedDetails {
                     namespace: namespace.clone(),
                     origin_replica_id: *origin,
                     durable_seen,
                     got_seq: got.get(),
-                },
+                }),
             )
         }
-        other => ErrorPayload::new(ErrorCode::Internal, other.to_string(), false),
+        other => ReplError::new(ErrorCode::Internal, other.to_string(), false),
     }
 }
 
@@ -4697,6 +4697,7 @@ mod tests {
             .expect_err("apply failure should reject batch");
         assert_eq!(err.code, ErrorCode::Corruption);
         let details = err
+            .to_payload()
             .details_as::<error_details::CorruptionDetails>()
             .unwrap()
             .expect("corruption details");

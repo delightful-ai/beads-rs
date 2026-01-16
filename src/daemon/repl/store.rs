@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::{IngestOutcome, SessionStore, WatermarkSnapshot};
+use super::{IngestOutcome, ReplError, SessionStore, WatermarkSnapshot};
 use crate::core::{
     EventId, EventShaLookupError, NamespaceId, PrevVerified, ReplicaId, ReplicaRole, Sha256,
     VerifiedEvent,
@@ -52,7 +52,7 @@ impl<S: SessionStore> SessionStore for SharedSessionStore<S> {
         origin: &ReplicaId,
         batch: &[VerifiedEvent<PrevVerified>],
         now_ms: u64,
-    ) -> Result<IngestOutcome, Box<crate::core::ErrorPayload>> {
+    ) -> Result<IngestOutcome, ReplError> {
         self.lock()
             .ingest_remote_batch(namespace, origin, batch, now_ms)
     }

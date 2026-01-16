@@ -892,12 +892,11 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, HeadStatus,
-        NamespaceId, NamespacePolicy, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
-        StoreIdentity, Watermark,
+        Applied, Durable, ErrorCode, EventBytes, EventFrameV1, EventId, HeadStatus, NamespaceId,
+        NamespacePolicy, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
+        Watermark,
     };
-    use crate::daemon::repl::IngestOutcome;
-    use crate::daemon::repl::WatermarkSnapshot;
+    use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
     use crate::daemon::repl::keepalive::KeepaliveTracker;
     use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap, Welcome};
 
@@ -927,7 +926,7 @@ mod tests {
             _origin: &ReplicaId,
             batch: &[crate::core::VerifiedEvent<crate::core::PrevVerified>],
             _now_ms: u64,
-        ) -> Result<IngestOutcome, Box<ErrorPayload>> {
+        ) -> Result<IngestOutcome, ReplError> {
             let Some(last) = batch.last() else {
                 let durable = Watermark::<Durable>::genesis();
                 let applied = Watermark::<Applied>::genesis();

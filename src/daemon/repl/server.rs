@@ -996,7 +996,7 @@ mod tests {
     };
     use crate::daemon::broadcast::BroadcasterLimits;
     use crate::daemon::repl::proto::{Capabilities, Hello, WatermarkHeads, WatermarkMap};
-    use crate::daemon::repl::{IngestOutcome, WatermarkSnapshot};
+    use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
 
     #[derive(Default)]
     struct TestStore;
@@ -1024,7 +1024,7 @@ mod tests {
             _origin: &ReplicaId,
             batch: &[crate::core::VerifiedEvent<crate::core::PrevVerified>],
             _now_ms: u64,
-        ) -> Result<IngestOutcome, Box<ErrorPayload>> {
+        ) -> Result<IngestOutcome, ReplError> {
             let Some(last) = batch.last() else {
                 let durable = Watermark::<Durable>::genesis();
                 let applied = Watermark::<Applied>::genesis();

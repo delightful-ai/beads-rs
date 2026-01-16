@@ -18,6 +18,7 @@ use crate::core::{
     NamespaceId, Opaque, PrevVerified, ReplicaId, ReplicaRole, SegmentId, Seq0, Sha256, StoreId,
     VerifiedEvent, decode_event_body,
 };
+use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
 use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
 use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
@@ -34,7 +35,7 @@ pub struct ReplIngestRequest {
     pub origin: ReplicaId,
     pub batch: Vec<VerifiedEvent<PrevVerified>>,
     pub now_ms: u64,
-    pub respond: Sender<Result<IngestOutcome, Box<ErrorPayload>>>,
+    pub respond: Sender<Result<IngestOutcome, ReplError>>,
 }
 
 #[derive(Clone)]
@@ -57,14 +58,14 @@ impl ReplSessionStore {
         }
     }
 
-    fn overload_payload() -> ErrorPayload {
-        ErrorPayload::new(ErrorCode::Overloaded, "overloaded", true).with_details(
-            OverloadedDetails {
+    fn overload_error() -> ReplError {
+        ReplError::new(ErrorCode::Overloaded, "overloaded", true).with_details(
+            ReplErrorDetails::Overloaded(OverloadedDetails {
                 subsystem: Some(OverloadedSubsystem::Repl),
                 retry_after_ms: Some(DEFAULT_RETRY_AFTER_MS),
                 queue_bytes: None,
                 queue_events: None,
-            },
+            }),
         )
     }
 }
@@ -152,7 +153,7 @@ impl SessionStore for ReplSessionStore {
         origin: &ReplicaId,
         batch: &[VerifiedEvent<PrevVerified>],
         now_ms: u64,
-    ) -> Result<IngestOutcome, Box<ErrorPayload>> {
+    ) -> Result<IngestOutcome, ReplError> {
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let request = ReplIngestRequest {
             store_id: self.store_id,
@@ -166,23 +167,23 @@ impl SessionStore for ReplSessionStore {
         match self.ingest_tx.try_send(request) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
-                return Err(Box::new(Self::overload_payload()));
+                return Err(Self::overload_error());
             }
             Err(TrySendError::Disconnected(_)) => {
-                return Err(Box::new(ErrorPayload::new(
+                return Err(ReplError::new(
                     ErrorCode::Internal,
                     "replication ingest channel closed",
                     true,
-                )));
+                ));
             }
         }
 
         respond_rx.recv().unwrap_or_else(|_| {
-            Err(Box::new(ErrorPayload::new(
+            Err(ReplError::new(
                 ErrorCode::Internal,
                 "replication ingest response dropped",
                 true,
-            )))
+            ))
         })
     }
 
