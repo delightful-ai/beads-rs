@@ -38,6 +38,7 @@ use super::git_lane::{
 };
 use super::scheduler::SyncScheduler;
 use super::store::StoreCaches;
+use super::store::discovery::ResolvedStore;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
@@ -87,10 +88,10 @@ enum CheckpointTreeError {
 }
 
 use crate::core::{
-    ActorId, Applied, ApplyError, BeadId, CanonicalState, CliErrorCode, ClientRequestId,
+    ActorId, Applied, ApplyError, CanonicalState, CliErrorCode, ClientRequestId,
     ContentHash, DurabilityClass, EventBody, EventId, EventKindV1,
     HeadStatus, Limits, NamespaceId, NamespacePolicy, PrevVerified, ProtocolErrorCode, ReplicaId,
-    ReplicateMode, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreId, StoreIdentity,
+    ReplicateMode, SegmentId, Seq0, Seq1, Sha256, StoreId, StoreIdentity,
     StoreState, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
     apply_event, decode_event_body,
 };
@@ -490,6 +491,40 @@ impl Daemon {
             .get_mut(&store_id)
             .ok_or(OpError::Internal("loaded store missing from state"))?;
         Ok((store, lane))
+    }
+
+    pub(crate) fn store_id_for_remote(&self, remote: &RemoteUrl) -> Option<StoreId> {
+        self.store_caches.remote_to_store_id.get(remote).copied()
+    }
+
+    pub(crate) fn store_and_lane_by_id_mut(
+        &mut self,
+        store_id: StoreId,
+    ) -> Option<(&mut StoreRuntime, &mut GitLaneState)> {
+        let store = self.stores.get_mut(&store_id)?;
+        let lane = self.git_lanes.get_mut(&store_id)?;
+        Some((store, lane))
+    }
+
+    pub(crate) fn drop_store_state(&mut self, store_id: StoreId) {
+        self.stores.remove(&store_id);
+        self.git_lanes.remove(&store_id);
+    }
+
+    pub(crate) fn resolve_store(&mut self, repo: &Path) -> Result<ResolvedStore, OpError> {
+        self.store_caches.resolve_store(repo)
+    }
+
+    pub(crate) fn scheduler(&self) -> &SyncScheduler {
+        &self.scheduler
+    }
+
+    pub(crate) fn scheduler_mut(&mut self) -> &mut SyncScheduler {
+        &mut self.scheduler
+    }
+
+    pub(crate) fn checkpoint_scheduler(&self) -> &CheckpointScheduler {
+        &self.checkpoint_scheduler
     }
 
     pub(crate) fn checkpoint_group_snapshots(
@@ -1535,7 +1570,7 @@ impl Daemon {
     /// Export state to Go-compatible JSONL format.
     ///
     /// Called after successful sync to keep .beads/issues.jsonl in sync.
-    fn export_go_compat(&self, store_id: StoreId, remote: &RemoteUrl) {
+    pub(crate) fn export_go_compat(&self, store_id: StoreId, remote: &RemoteUrl) {
         let Some(ref ctx) = self.export_ctx else {
             return;
         };
@@ -2362,7 +2397,7 @@ mod tests {
     use super::*;
     use crate::api::QueryResult;
     use crate::daemon::ipc::{MutationMeta, ReadConsistency, Request, ResponsePayload};
-    use crate::core::{CoreError, ErrorCode};
+    use crate::core::{BeadId, CoreError, ErrorCode, Stamp};
     use crate::git::sync::SyncOutcome;
     use crate::daemon::store::discovery::store_id_from_remote;
     use std::collections::BTreeMap;

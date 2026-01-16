@@ -19,7 +19,7 @@ use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
     ActorId, BeadId, CanonicalState, CliErrorCode, ClientRequestId, CoreError, DurabilityClass,
-    ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, WriteStamp, WallClock,
+    ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, WallClock,
 };
 use crate::git::{SyncError, SyncOutcome};
 use crate::git::collision::{detect_collisions, resolve_collisions};
@@ -29,11 +29,11 @@ const REFRESH_TTL: Duration = Duration::from_millis(1000);
 impl Daemon {
     /// Get the next scheduled sync deadline for a remote, if any.
     pub(crate) fn next_sync_deadline_for(&self, remote: &RemoteUrl) -> Option<Instant> {
-        self.scheduler.deadline_for(remote)
+        self.scheduler().deadline_for(remote)
     }
 
     pub(crate) fn schedule_sync(&mut self, remote: RemoteUrl) {
-        self.scheduler.schedule(remote);
+        self.scheduler_mut().schedule(remote);
     }
 
     /// Ensure repo is loaded and reasonably fresh from remote.
@@ -90,28 +90,23 @@ impl Daemon {
         remote: &RemoteUrl,
         result: Result<LoadResult, SyncError>,
     ) {
-        let store_id = match self.store_caches.remote_to_store_id.get(remote).copied() {
+        let store_id = match self.store_id_for_remote(remote) {
             Some(id) => id,
             None => return,
         };
-        let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
-        let store = match stores.get_mut(&store_id) {
-            Some(store) => store,
-            None => return,
-        };
-        let repo_state = match git_lanes.get_mut(&store_id) {
-            Some(repo_state) => repo_state,
-            None => return,
-        };
-
-        repo_state.refresh_in_progress = false;
+        let mut schedule_sync = false;
 
         match result {
             Ok(fresh) => {
                 // Advance clock to account for remote stamps
                 if let Some(max_stamp) = fresh.last_seen_stamp.as_ref() {
-                    self.clock.receive(max_stamp);
+                    self.clock_mut().receive(max_stamp);
                 }
+
+                let Some((store, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
+                    return;
+                };
+                repo_state.refresh_in_progress = false;
 
                 // Only apply refresh if repo is still clean (no mutations happened
                 // during the refresh). If dirty, we'll sync soon anyway.
@@ -159,14 +154,21 @@ impl Daemon {
                 // mark dirty so sync will push those changes.
                 if fresh.needs_sync && !repo_state.dirty {
                     repo_state.mark_dirty();
-                    self.scheduler.schedule(remote.clone());
+                    schedule_sync = true;
                 }
             }
             Err(e) => {
+                if let Some((_, repo_state)) = self.store_and_lane_by_id_mut(store_id) {
+                    repo_state.refresh_in_progress = false;
+                }
                 // Refresh failed - log and continue with cached state.
                 // Next TTL hit will retry.
                 tracing::debug!("background refresh failed for {:?}: {:?}", remote, e);
             }
+        }
+
+        if schedule_sync {
+            self.scheduler_mut().schedule(remote.clone());
         }
     }
 
@@ -179,11 +181,10 @@ impl Daemon {
         repo: &Path,
         git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore, OpError> {
-        let resolved = self.store_caches.resolve_store(repo)?;
+        let resolved = self.resolve_store(repo)?;
 
         // Remove cached state so ensure_repo_loaded will do a fresh load
-        self.stores.remove(&resolved.store_id);
-        self.git_lanes.remove(&resolved.store_id);
+        self.drop_store_state(resolved.store_id);
 
         // Now load fresh from git
         self.ensure_repo_loaded_strict(repo, git_tx)
@@ -195,18 +196,13 @@ impl Daemon {
     /// - Repo is dirty
     /// - Not already syncing
     pub fn maybe_start_sync(&mut self, remote: &RemoteUrl, git_tx: &Sender<GitOp>) {
-        let store_id = match self.store_caches.remote_to_store_id.get(remote).copied() {
+        let store_id = match self.store_id_for_remote(remote) {
             Some(id) => id,
             None => return,
         };
-        let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
-        let store = match stores.get_mut(&store_id) {
-            Some(store) => store,
-            None => return,
-        };
-        let repo_state = match git_lanes.get_mut(&store_id) {
-            Some(repo_state) => repo_state,
-            None => return,
+        let actor = self.actor().clone();
+        let Some((store, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
+            return;
         };
 
         if !repo_state.dirty || repo_state.sync_in_progress {
@@ -224,7 +220,7 @@ impl Daemon {
             repo: path,
             remote: remote.clone(),
             state: store.state.get_or_default(&NamespaceId::core()),
-            actor: self.actor.clone(),
+            actor,
         });
     }
 
@@ -244,34 +240,30 @@ impl Daemon {
     pub fn complete_sync(&mut self, remote: &RemoteUrl, result: Result<SyncOutcome, SyncError>) {
         let mut backoff_ms = None;
         let mut sync_succeeded = false;
-        let store_id = match self.store_caches.remote_to_store_id.get(remote).copied() {
+        let store_id = match self.store_id_for_remote(remote) {
             Some(id) => id,
             None => return,
         };
+        let mut reschedule_sync = false;
 
         match result {
             Ok(outcome) => {
                 let synced_state = outcome.state;
                 // Advance clock to account for remote stamps
                 if let Some(max_stamp) = outcome.last_seen_stamp.as_ref() {
-                    self.clock.receive(max_stamp);
+                    self.clock_mut().receive(max_stamp);
                 }
                 let resolution_stamp = {
                     let write_stamp = self.clock_mut().tick();
                     Stamp {
                         at: write_stamp,
-                        by: self.actor.clone(),
+                        by: self.actor().clone(),
                     }
                 };
+                let wall_ms = self.clock().wall_ms();
 
-                let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
-                let store = match stores.get_mut(&store_id) {
-                    Some(store) => store,
-                    None => return,
-                };
-                let repo_state = match git_lanes.get_mut(&store_id) {
-                    Some(repo_state) => repo_state,
-                    None => return,
+                let Some((store, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
+                    return;
                 };
 
                 repo_state.last_seen_stamp =
@@ -329,10 +321,10 @@ impl Daemon {
                             let mut next_state = store.state.clone();
                             next_state.set_namespace_state(NamespaceId::core(), merged);
                             store.state = next_state;
-                            repo_state.complete_sync(self.clock.wall_ms());
+                            repo_state.complete_sync(wall_ms);
                             // Still dirty from mutations during sync - reschedule
                             repo_state.dirty = true;
-                            self.scheduler.schedule(remote.clone());
+                            reschedule_sync = true;
                             sync_succeeded = true;
                         }
                         Err(errs) => {
@@ -350,25 +342,28 @@ impl Daemon {
                     let mut next_state = store.state.clone();
                     next_state.set_namespace_state(NamespaceId::core(), synced_state);
                     store.state = next_state;
-                    repo_state.complete_sync(self.clock.wall_ms());
+                    repo_state.complete_sync(wall_ms);
 
                     sync_succeeded = true;
                 }
             }
             Err(e) => {
                 tracing::error!("sync failed for {:?}: {:?}", remote, e);
-                let repo_state = match self.git_lanes.get_mut(&store_id) {
-                    Some(repo_state) => repo_state,
-                    None => return,
+                let Some((_, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
+                    return;
                 };
                 repo_state.fail_sync();
                 backoff_ms = Some(repo_state.backoff_ms());
             }
         }
 
+        if reschedule_sync {
+            self.scheduler_mut().schedule(remote.clone());
+        }
+
         if let Some(backoff) = backoff_ms {
             let backoff = Duration::from_millis(backoff);
-            self.scheduler.schedule_after(remote.clone(), backoff);
+            self.scheduler_mut().schedule_after(remote.clone(), backoff);
         }
 
         // Export Go-compatible JSONL after successful sync
@@ -378,11 +373,11 @@ impl Daemon {
     }
 
     pub fn next_sync_deadline(&mut self) -> Option<Instant> {
-        self.scheduler.next_deadline()
+        self.scheduler().next_deadline()
     }
 
     pub fn next_checkpoint_deadline(&mut self) -> Option<Instant> {
-        self.checkpoint_scheduler.next_deadline()
+        self.checkpoint_scheduler().next_deadline()
     }
 
     pub(crate) fn parse_mutation_meta(
@@ -393,7 +388,7 @@ impl Daemon {
         let namespace = self.normalize_namespace(proof, meta.namespace)?;
         let durability = parse_durability_meta(meta.durability)?;
         let client_request_id = parse_optional_client_request_id(meta.client_request_id)?;
-        let actor_id = parse_optional_actor_id(meta.actor_id, &self.actor)?;
+        let actor_id = parse_optional_actor_id(meta.actor_id, self.actor())?;
 
         Ok(ParsedMutationMeta {
             namespace,
