@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use beads_rs::core::{BeadType, NamespaceId, Priority, StoreId, StoreMeta};
 use beads_rs::daemon::ipc::{IpcClient, MutationMeta, Request, Response, ResponsePayload};
-use beads_rs::daemon::query::QueryResult;
+use beads_rs::api::QueryResult;
 use crate::fixtures::realtime::RealtimeFixture;
 
 fn marker_path(dir: &Path, stage: &str) -> PathBuf {

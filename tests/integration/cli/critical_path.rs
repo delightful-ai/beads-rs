@@ -39,7 +39,7 @@ fn socket_path(runtime_dir: &Path) -> PathBuf {
 #[cfg(feature = "slow-tests")]
 fn daemon_pid(runtime_dir: &Path) -> u32 {
     use beads_rs::daemon::ipc::{Request, Response, ResponsePayload};
-    use beads_rs::daemon::query::QueryResult;
+    use beads_rs::api::QueryResult;
 
     let socket = socket_path(runtime_dir);
     let mut stream =
@@ -3679,7 +3679,7 @@ fn test_show_with_all_optional_fields() {
 fn test_crash_recovery_replays_wal() {
     use beads_rs::daemon::ipc::ResponsePayload;
     use beads_rs::daemon::ops::OpResult;
-    use beads_rs::daemon::query::QueryResult;
+    use beads_rs::api::QueryResult;
     use beads_rs::git::sync::read_state_at_oid;
     use git2::Repository;
 
