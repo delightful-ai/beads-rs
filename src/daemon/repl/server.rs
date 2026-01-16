@@ -15,8 +15,8 @@ use crate::core::error::details::{
     BootstrapRequiredDetails, SnapshotRangeReason, UnknownReplicaDetails,
 };
 use crate::core::{
-    ErrorCode, ErrorPayload, EventFrameV1, Limits, NamespaceId, NamespacePolicy, ProtocolErrorCode,
-    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    ErrorPayload, EventFrameV1, Limits, NamespaceId, NamespacePolicy, ProtocolErrorCode, ReplicaId,
+    ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{

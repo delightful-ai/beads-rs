@@ -20,7 +20,7 @@ use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 use super::collision::{Collision, detect_collisions, resolve_collisions};
 use super::error::SyncError;
 use super::wire;
-use crate::core::{BeadId, CanonicalState, CliErrorCode, Stamp, WallClock, WriteStamp};
+use crate::core::{BeadId, CanonicalState, Stamp, WallClock, WriteStamp};
 
 // =============================================================================
 // Phase markers (zero-sized types for typestate)
@@ -1063,7 +1063,7 @@ fn sanitize_slug(name: &str) -> String {
 fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, SyncError> {
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
-        Err(e) if e.code() == CliErrorCode::NotFound.into() => Ok(None),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
         Err(e) => Err(SyncError::Git(e)),
     }
 }
@@ -1074,7 +1074,7 @@ fn update_ref(repo: &Repository, name: &str, oid: Oid, message: &str) -> Result<
             reference.set_target(oid, message)?;
             Ok(())
         }
-        Err(e) if e.code() == CliErrorCode::NotFound.into() => {
+        Err(e) if e.code() == ErrorCode::NotFound => {
             repo.reference(name, oid, true, message)?;
             Ok(())
         }

@@ -10,7 +10,7 @@ use crate::core::error::details::{
     WrongStoreDetails,
 };
 use crate::core::{
-    Applied, DecodeError, Durable, ErrorCode, ErrorPayload, EventFrameError, EventFrameV1, EventId,
+    Applied, DecodeError, Durable, ErrorPayload, EventFrameError, EventFrameV1, EventId,
     EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, PrevVerified,
     ProtocolErrorCode, ReplicaId, ReplicaRole, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
     StoreIdentity, VerifiedEvent, Watermark, WatermarkError, hash_event_body, verify_event_frame,

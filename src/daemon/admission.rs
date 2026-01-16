@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::core::error::details::{OverloadedDetails, OverloadedSubsystem};
-use crate::core::{ErrorCode, ErrorPayload, Limits, ProtocolErrorCode};
+use crate::core::{ErrorPayload, Limits, ProtocolErrorCode};
 use crate::daemon::metrics;
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 100;

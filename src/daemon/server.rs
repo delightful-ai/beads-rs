@@ -28,8 +28,8 @@ use super::remote::RemoteUrl;
 use super::subscription::{SubscribeReply, prepare_subscription, subscriber_limits};
 use crate::core::error::details as error_details;
 use crate::core::{
-    CliErrorCode, DurabilityClass, ErrorCode, ErrorPayload, EventFrameV1, EventId, Limits,
-    ProtocolErrorCode, ReplicaId, Sha256, decode_event_body,
+    CliErrorCode, DurabilityClass, ErrorPayload, EventFrameV1, EventId, Limits, ProtocolErrorCode,
+    ReplicaId, Sha256, decode_event_body,
 };
 
 /// Message sent from socket handlers to state thread.

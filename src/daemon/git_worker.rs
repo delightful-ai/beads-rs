@@ -11,7 +11,7 @@ use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
 use super::remote::RemoteUrl;
-use crate::core::{ActorId, CanonicalState, CliErrorCode, Stamp, StoreId, WriteStamp};
+use crate::core::{ActorId, CanonicalState, Stamp, StoreId, WriteStamp};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::git::checkpoint::{
@@ -502,7 +502,7 @@ fn build_load_result(inputs: LoadResultInputs) -> Result<LoadResult, SyncError> 
 fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, SyncError> {
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
-        Err(e) if e.code() == CliErrorCode::NotFound.into() => Ok(None),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
         Err(e) => Err(SyncError::Git(e)),
     }
 }

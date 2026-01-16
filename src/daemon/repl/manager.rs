@@ -12,8 +12,8 @@ use thiserror::Error;
 
 use crate::core::error::details::{BootstrapRequiredDetails, SnapshotRangeReason};
 use crate::core::{
-    ErrorCode, ErrorPayload, EventFrameV1, NamespaceId, NamespacePolicy, ProtocolErrorCode,
-    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    ErrorPayload, EventFrameV1, NamespaceId, NamespacePolicy, ProtocolErrorCode, ReplicaId,
+    ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
@@ -892,7 +892,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Durable, ErrorCode, EventBytes, EventFrameV1, EventId, HeadStatus, NamespaceId,
+        Applied, Durable, EventBytes, EventFrameV1, EventId, HeadStatus, NamespaceId,
         NamespacePolicy, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
         Watermark,
     };

@@ -10,7 +10,7 @@ use thiserror::Error;
 use super::export::{CheckpointExport, CheckpointExportError};
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{MANIFEST_FILE, META_FILE};
-use crate::core::{CliErrorCode, ContentHash, StoreEpoch, StoreId};
+use crate::core::{ContentHash, StoreEpoch, StoreId};
 use crate::git::error::SyncError;
 
 pub const STORE_META_REF: &str = "refs/beads/meta";
@@ -251,7 +251,7 @@ fn refname_to_id_optional(
 ) -> Result<Option<Oid>, CheckpointPublishError> {
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
-        Err(e) if e.code() == CliErrorCode::NotFound.into() => Ok(None),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -267,7 +267,7 @@ fn update_ref(
             reference.set_target(oid, message)?;
             Ok(())
         }
-        Err(e) if e.code() == CliErrorCode::NotFound.into() => {
+        Err(e) if e.code() == ErrorCode::NotFound => {
             repo.reference(name, oid, true, message)?;
             Ok(())
         }

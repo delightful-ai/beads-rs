@@ -14,9 +14,9 @@ use crate::core::error::details::{
     IndexCorruptDetails, OverloadedDetails, OverloadedSubsystem, WalCorruptDetails,
 };
 use crate::core::{
-    CliErrorCode, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, EventShaLookupError,
-    Limits, NamespaceId, Opaque, PrevVerified, ProtocolErrorCode, ReplicaId, ReplicaRole,
-    SegmentId, Seq0, Sha256, StoreId, VerifiedEvent, decode_event_body,
+    CliErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, EventShaLookupError, Limits,
+    NamespaceId, Opaque, PrevVerified, ProtocolErrorCode, ReplicaId, ReplicaRole, SegmentId, Seq0,
+    Sha256, StoreId, VerifiedEvent, decode_event_body,
 };
 use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
 use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
