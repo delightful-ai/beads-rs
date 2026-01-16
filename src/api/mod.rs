@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::core::DurabilityReceipt;
 
 use crate::core::{
-    ActorId, Applied, Bead, Claim, ClientRequestId, ContentHash, DepEdge as CoreDepEdge,
+    ActorId, Applied, Bead, BeadId, Claim, ClientRequestId, ContentHash, DepEdge as CoreDepEdge,
     DepKey as CoreDepKey, Durable, EventId, HlcMax, NamespaceId, ReplicaId, ReplicaRole, SegmentId,
     Seq1, StoreId, StoreIdentity, Tombstone as CoreTombstone, TxnDeltaV1, TxnId, WallClock,
     Watermarks, Workflow, WriteStamp,
@@ -910,3 +910,99 @@ impl IssueSummary {
         }
     }
 }
+
+// =============================================================================
+// Query results (IPC)
+// =============================================================================
+
+/// Result of a query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "result", content = "data", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum QueryResult {
+    /// Single issue result.
+    Issue(Issue),
+
+    /// List of issues (summaries).
+    Issues(Vec<IssueSummary>),
+
+    /// Dependency tree.
+    DepTree {
+        root: BeadId,
+        edges: Vec<DepEdge>,
+    },
+
+    /// Dependencies for a bead.
+    Deps {
+        incoming: Vec<DepEdge>,
+        outgoing: Vec<DepEdge>,
+    },
+
+    /// Dependency cycles.
+    DepCycles(DepCycles),
+
+    /// Notes for a bead.
+    Notes(Vec<Note>),
+
+    /// Issue database status (counts, etc).
+    Status(StatusOutput),
+
+    /// Blocked issues.
+    Blocked(Vec<BlockedIssue>),
+
+    /// Ready issues with summary counts.
+    Ready(ReadyResult),
+
+    /// Stale issues.
+    Stale(Vec<IssueSummary>),
+
+    /// Count results.
+    Count(CountResult),
+
+    /// Deleted issues (tombstones) list.
+    Deleted(Vec<Tombstone>),
+
+    /// Deleted issue lookup by id.
+    DeletedLookup(DeletedLookup),
+
+    /// Epic completion status.
+    EpicStatus(Vec<EpicStatus>),
+
+    /// Validation result.
+    Validation { warnings: Vec<String> },
+
+    /// Daemon info (handshake).
+    DaemonInfo(DaemonInfo),
+
+    /// Admin status snapshot.
+    AdminStatus(AdminStatusOutput),
+
+    /// Admin metrics snapshot.
+    AdminMetrics(AdminMetricsOutput),
+
+    /// Admin doctor report.
+    AdminDoctor(AdminDoctorOutput),
+
+    /// Admin scrub report.
+    AdminScrub(AdminScrubOutput),
+
+    /// Admin flush report.
+    AdminFlush(AdminFlushOutput),
+
+    /// Admin fingerprint report.
+    AdminFingerprint(AdminFingerprintOutput),
+
+    /// Admin reload policies report.
+    AdminReloadPolicies(AdminReloadPoliciesOutput),
+
+    /// Admin rotate replica id report.
+    AdminRotateReplicaId(AdminRotateReplicaIdOutput),
+
+    /// Maintenance mode toggle.
+    AdminMaintenanceMode(AdminMaintenanceModeOutput),
+
+    /// Rebuild index outcome.
+    AdminRebuildIndex(AdminRebuildIndexOutput),
+}
+
+mod convert;
