@@ -2409,7 +2409,6 @@ mod tests {
     use super::*;
     use crate::api::QueryResult;
     use crate::daemon::ipc::{MutationMeta, ReadConsistency, Request, ResponsePayload};
-    use crate::core::{BeadId, CoreError, ErrorCode, Stamp};
     use crate::git::sync::SyncOutcome;
     use crate::daemon::store::discovery::store_id_from_remote;
     use std::collections::BTreeMap;
