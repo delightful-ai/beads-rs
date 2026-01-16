@@ -17,14 +17,11 @@ use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
     EventWalError, EventWalResult, IndexDurabilityMode, RecordHeader, SegmentConfig, SegmentHeader,
     SegmentWriter, SqliteWalIndex, UnverifiedRecord, VerifiedRecord, WalIndexError,
+    SEGMENT_HEADER_PREFIX_LEN, WAL_FORMAT_VERSION, FRAME_HEADER_LEN,
 };
-
-const WAL_FORMAT_VERSION: u32 = 2;
-const SEGMENT_HEADER_PREFIX_LEN: usize = 13;
 const DEFAULT_MAX_RECORD_BYTES: usize = 1024 * 1024;
 const DEFAULT_SEGMENT_MAX_BYTES: u64 = u64::MAX;
 const DEFAULT_SEGMENT_MAX_AGE_MS: u64 = u64::MAX;
-const FRAME_HEADER_LEN: u64 = 12;
 
 pub struct TempWalDir {
     _temp: TempDir,
@@ -143,7 +140,7 @@ impl SegmentFixture {
     }
 
     pub fn frame_body_offset(&self, index: usize) -> u64 {
-        self.frame_offsets[index].saturating_add(FRAME_HEADER_LEN)
+        self.frame_offsets[index].saturating_add(FRAME_HEADER_LEN as u64)
     }
 }
 

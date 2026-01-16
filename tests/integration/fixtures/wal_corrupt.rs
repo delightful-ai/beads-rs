@@ -7,12 +7,11 @@ use std::path::Path;
 use beads_rs::core::NamespaceId;
 use crc32c::crc32c;
 
-use beads_rs::daemon::wal::{EventWalError, EventWalResult, RecordHeader};
+use beads_rs::daemon::wal::{
+    EventWalError, EventWalResult, RecordHeader, FRAME_CRC_OFFSET, FRAME_HEADER_LEN,
+};
 
 use super::wal::{SegmentFixture, TempWalDir, valid_segment};
-
-const FRAME_CRC_OFFSET: u64 = 8;
-const FRAME_HEADER_LEN: usize = 12;
 
 pub fn bad_crc_segment(
     temp: &TempWalDir,
@@ -36,7 +35,7 @@ pub fn truncated_segment(
 
 pub fn corrupt_frame_crc(segment: &SegmentFixture, frame_index: usize) -> std::io::Result<()> {
     let offset = segment.frame_offset(frame_index);
-    flip_byte_at(&segment.path, offset + FRAME_CRC_OFFSET)
+    flip_byte_at(&segment.path, offset + FRAME_CRC_OFFSET as u64)
 }
 
 pub fn corrupt_frame_body(segment: &SegmentFixture, frame_index: usize) -> std::io::Result<()> {
@@ -85,7 +84,9 @@ pub fn corrupt_record_header_event_time(
     file.write_all(&body)
         .map_err(|source| io_err(&segment.path, source))?;
     let crc = crc32c(&body);
-    file.seek(SeekFrom::Start(frame_offset + 8))
+    file.seek(SeekFrom::Start(
+        frame_offset + FRAME_CRC_OFFSET as u64,
+    ))
         .map_err(|source| io_err(&segment.path, source))?;
     file.write_all(&crc.to_le_bytes())
         .map_err(|source| io_err(&segment.path, source))?;
