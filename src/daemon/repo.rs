@@ -79,9 +79,6 @@ pub struct RepoState {
     /// Number of consecutive sync failures (for exponential backoff).
     pub consecutive_failures: u32,
 
-    /// Monotonic counter for WAL entries.
-    pub wal_sequence: u64,
-
     /// Last observed write stamp (from state or meta).
     pub last_seen_stamp: Option<WriteStamp>,
 
@@ -116,7 +113,6 @@ impl RepoState {
             last_sync_wall_ms: None,
             last_refresh: None,
             consecutive_failures: 0,
-            wal_sequence: 0,
             last_seen_stamp: None,
             last_fetch_error: None,
             last_divergence: None,
@@ -140,7 +136,6 @@ impl RepoState {
             last_sync_wall_ms: None,
             last_refresh: None,
             consecutive_failures: 0,
-            wal_sequence: 0,
             last_seen_stamp: None,
             last_fetch_error: None,
             last_divergence: None,
