@@ -35,7 +35,7 @@ impl ReplError {
     }
 
     pub fn to_payload(&self) -> ErrorPayload {
-        let payload = ErrorPayload::new(self.code, self.message.clone(), self.retryable);
+        let payload = ErrorPayload::new(self.code.clone(), self.message.clone(), self.retryable);
         match &self.details {
             None => payload,
             Some(details) => match details {

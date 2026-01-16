@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::core::error::details::{
     EventIdDetails, FrameTooLargeDetails, HashMismatchDetails, InternalErrorDetails,
     InvalidRequestDetails, NamespacePolicyViolationDetails, NonCanonicalDetails, OverloadedDetails,
-    OverloadedSubsystem, PrevShaMismatchDetails, ReplicaIdCollisionDetails, ReplRejectReason,
+    PrevShaMismatchDetails, ReplicaIdCollisionDetails, ReplRejectReason,
     StoreEpochMismatchDetails, SubscriberLaggedDetails, VersionIncompatibleDetails,
     WrongStoreDetails,
 };
