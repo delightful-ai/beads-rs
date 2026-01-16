@@ -10,7 +10,7 @@ pub const TOMBSTONES_DIR: &str = "tombstones";
 pub const DEPS_DIR: &str = "deps";
 pub const SHARD_COUNT: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckpointFileKind {
     State,
     Tombstones,
@@ -27,11 +27,25 @@ impl CheckpointFileKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CheckpointShardPath {
     pub namespace: NamespaceId,
     pub kind: CheckpointFileKind,
     pub shard: String,
+}
+
+impl CheckpointShardPath {
+    pub fn new(namespace: NamespaceId, kind: CheckpointFileKind, shard: String) -> Self {
+        Self {
+            namespace,
+            kind,
+            shard,
+        }
+    }
+
+    pub fn to_path(&self) -> String {
+        shard_path(&self.namespace, self.kind, &self.shard)
+    }
 }
 
 pub fn shard_name(byte: u8) -> String {
