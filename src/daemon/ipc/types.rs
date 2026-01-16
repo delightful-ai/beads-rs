@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::ops::{BeadPatch, OpResult};
-use super::query::{Filters, QueryResult};
+use crate::daemon::ops::{BeadPatch, OpResult};
+use crate::daemon::query::{Filters, QueryResult};
 use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
 use crate::core::{
     Applied, BeadType, DepKind, DurabilityReceipt, Priority, Watermarks,
@@ -607,7 +607,7 @@ pub struct StreamEventPayload {
 mod tests {
     use super::*;
     use crate::api::DaemonInfo;
-    use crate::core::{NamespaceId, Watermarks};
+    use crate::core::Watermarks;
 
     #[test]
     fn request_roundtrip() {

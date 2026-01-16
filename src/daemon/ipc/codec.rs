@@ -4,9 +4,9 @@ use std::os::unix::net::UnixStream;
 use serde_json::Value;
 use thiserror::Error;
 
-use super::ops::OpError;
-use super::store_lock::{StoreLockError, StoreLockOperation};
-use super::store_runtime::StoreRuntimeError;
+use crate::daemon::ops::OpError;
+use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
+use crate::daemon::store_runtime::StoreRuntimeError;
 use super::types::{Request, Response};
 use crate::core::error::details as error_details;
 use crate::core::{ErrorCode, ErrorPayload, InvalidId, Limits, StoreId};
@@ -159,7 +159,9 @@ impl From<OpError> for ErrorPayload {
                 error_details::LabelsTooManyDetails {
                     max_labels_per_bead: max_labels as u64,
                     got_labels: got_labels as u64,
-                    bead_id: bead_id.map(|id| id.as_str().to_string()),
+                    bead_id: bead_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_string()),
                 },
             ),
             OpError::WalRecordTooLarge {
