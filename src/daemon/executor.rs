@@ -22,13 +22,14 @@ use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
 use super::ipc::{MutationMeta, OpResponse, Response, ResponsePayload};
 use super::mutation_engine::{
-    IdContext, MutationContext, MutationEngine, MutationRequest, ParsedMutationRequest,
+    EventDraft, IdContext, MutationContext, MutationEngine, MutationRequest, ParsedMutationRequest,
+    SequencedEvent,
 };
 use super::ops::{BeadPatch, OpError, OpResult};
 use super::store_runtime::{StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
-    WalIndexError, WalReplayError,
+    WalIndexError, WalIndexTxn, WalReplayError,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
@@ -205,28 +206,6 @@ impl Daemon {
             .copied()
             .unwrap_or_else(Watermark::genesis);
 
-        let mut txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
-        let origin_seq = txn
-            .next_origin_seq(&namespace, &origin_replica_id)
-            .map_err(wal_index_to_op)?;
-        let expected_next = durable_watermark.seq().next();
-        if origin_seq != expected_next {
-            return Err(OpError::from(StoreRuntimeError::WatermarkInvalid {
-                kind: "durable",
-                namespace: namespace.clone(),
-                origin: origin_replica_id,
-                source: WatermarkError::NonContiguous {
-                    expected: expected_next,
-                    got: origin_seq,
-                },
-            }));
-        }
-        let prev_sha = match durable_watermark.head() {
-            HeadStatus::Genesis => None,
-            HeadStatus::Known(sha) => Some(sha),
-            HeadStatus::Unknown => unreachable!("durable watermark head should be known"),
-        };
-
         let state_snapshot = {
             let repo_state = self.repo_state(&proof)?;
             repo_state.state.get_or_default(&namespace)
@@ -237,17 +216,30 @@ impl Daemon {
                 &state_snapshot,
                 clock,
                 store,
-                origin_replica_id,
-                origin_seq,
                 id_ctx.as_ref(),
                 ctx.clone(),
                 parsed_request.clone(),
             )
         }?;
 
+        let mut txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
+        let LocalAppendPlan {
+            origin_seq,
+            prev_sha,
+            sequenced,
+        } = plan_local_append(
+            &engine,
+            draft,
+            store,
+            namespace.clone(),
+            origin_replica_id,
+            durable_watermark,
+            &mut *txn,
+        )?;
+
         let span = tracing::info_span!(
             "mutation",
-            txn_id = %draft.event_body.txn_id,
+            txn_id = %sequenced.event_body.txn_id,
             client_request_id = ?ctx.client_request_id,
             namespace = %namespace,
             origin_replica_id = %origin_replica_id,
@@ -256,30 +248,32 @@ impl Daemon {
         let _guard = span.enter();
         tracing::info!("mutation planned");
 
-        let sha = hash_event_body(&draft.event_bytes);
+        let sha = hash_event_body(&sequenced.event_bytes);
         let sha_bytes = sha.0;
-        let request_sha256 = draft.client_request_id.map(|_| draft.request_sha256);
+        let request_sha256 = sequenced
+            .client_request_id
+            .map(|_| sequenced.request_sha256);
 
         let record = VerifiedRecord::new(
             RecordHeader {
                 origin_replica_id,
                 origin_seq,
-                event_time_ms: draft.event_body.event_time_ms,
-                txn_id: draft.event_body.txn_id,
-                client_request_id: draft.event_body.client_request_id,
+                event_time_ms: sequenced.event_body.event_time_ms,
+                txn_id: sequenced.event_body.txn_id,
+                client_request_id: sequenced.event_body.client_request_id,
                 request_sha256,
                 sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
-            Bytes::copy_from_slice(draft.event_bytes.as_ref()),
-            &draft.event_body,
+            Bytes::copy_from_slice(sequenced.event_bytes.as_ref()),
+            &sequenced.event_body,
         )
         .map_err(|err| {
             tracing::error!(error = ?err, "record verification failed");
             OpError::Internal("record verification failed")
         })?;
 
-        let now_ms = draft.event_body.event_time_ms;
+        let now_ms = sequenced.event_body.event_time_ms;
         let (append, segment_snapshot) = {
             let store_runtime = self.store_runtime_mut(&proof)?;
             let append_start = Instant::now();
@@ -320,7 +314,7 @@ impl Daemon {
             event_id.clone(),
             sha,
             broadcast_prev,
-            EventBytes::from(draft.event_bytes.clone()),
+            EventBytes::from(sequenced.event_bytes.clone()),
         );
         let event_ids = vec![event_id];
         txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
@@ -345,7 +339,7 @@ impl Daemon {
             append.offset,
             append.len,
             now_ms,
-            draft.event_body.txn_id,
+            sequenced.event_body.txn_id,
             ctx.client_request_id,
             request_sha256,
         )
@@ -355,14 +349,14 @@ impl Daemon {
                 &namespace,
                 &origin_replica_id,
                 client_request_id,
-                draft.request_sha256,
-                draft.event_body.txn_id,
+                sequenced.request_sha256,
+                sequenced.event_body.txn_id,
                 &event_ids,
                 now_ms,
             )
             .map_err(wal_index_to_op)?;
         }
-        let EventKindV1::TxnV1(txn_body) = &draft.event_body.kind;
+        let EventKindV1::TxnV1(txn_body) = &sequenced.event_body.kind;
         let hlc_max = &txn_body.hlc_max;
         txn.update_hlc(&HlcRow {
             actor_id: hlc_max.actor_id.clone(),
@@ -388,7 +382,7 @@ impl Daemon {
                     .repo_state
                     .state
                     .ensure_namespace(namespace.clone());
-                apply_event(state, &draft.event_body)
+                apply_event(state, &sequenced.event_body)
             };
             let outcome = match apply_result {
                 Ok(outcome) => {
@@ -481,7 +475,7 @@ impl Daemon {
         let result = op_result_from_delta(&parsed_request, &txn_body.delta)?;
         let receipt = DurabilityReceipt::local_fsync(
             store,
-            draft.event_body.txn_id,
+            sequenced.event_body.txn_id,
             event_ids,
             now_ms,
             durable_watermarks,
@@ -776,6 +770,51 @@ fn event_wal_error_with_path(err: EventWalError, path: &Path) -> OpError {
         other => other,
     };
     OpError::from(err)
+}
+
+struct LocalAppendPlan {
+    origin_seq: Seq1,
+    prev_sha: Option<[u8; 32]>,
+    sequenced: SequencedEvent,
+}
+
+fn plan_local_append(
+    engine: &MutationEngine,
+    draft: EventDraft,
+    store: StoreIdentity,
+    namespace: NamespaceId,
+    origin_replica_id: ReplicaId,
+    durable_watermark: Watermark<Durable>,
+    txn: &mut dyn WalIndexTxn,
+) -> Result<LocalAppendPlan, OpError> {
+    let origin_seq = txn
+        .next_origin_seq(&namespace, &origin_replica_id)
+        .map_err(wal_index_to_op)?;
+    let expected_next = durable_watermark.seq().next();
+    if origin_seq != expected_next {
+        return Err(OpError::from(StoreRuntimeError::WatermarkInvalid {
+            kind: "durable",
+            namespace: namespace.clone(),
+            origin: origin_replica_id,
+            source: WatermarkError::NonContiguous {
+                expected: expected_next,
+                got: origin_seq,
+            },
+        }));
+    }
+    let prev_sha = match durable_watermark.head() {
+        HeadStatus::Genesis => None,
+        HeadStatus::Known(sha) => Some(sha),
+        HeadStatus::Unknown => unreachable!("durable watermark head should be known"),
+    };
+    let sequenced =
+        engine.build_event(draft, store, namespace, origin_replica_id, origin_seq)?;
+
+    Ok(LocalAppendPlan {
+        origin_seq,
+        prev_sha,
+        sequenced,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1307,28 +1346,35 @@ mod tests {
                 &state,
                 &mut clock,
                 store,
-                replica_id,
-                origin_seq,
                 None,
                 ctx.clone(),
                 request.clone(),
             )
             .unwrap();
+        let sequenced = engine
+            .build_event(
+                draft,
+                store,
+                ctx.namespace.clone(),
+                replica_id,
+                origin_seq,
+            )
+            .unwrap();
 
-        let sha = hash_event_body(&draft.event_bytes).0;
+        let sha = hash_event_body(&sequenced.event_bytes).0;
         let record = VerifiedRecord::new(
             RecordHeader {
                 origin_replica_id: replica_id,
                 origin_seq,
-                event_time_ms: draft.event_body.event_time_ms,
-                txn_id: draft.event_body.txn_id,
-                client_request_id: draft.event_body.client_request_id,
-                request_sha256: Some(draft.request_sha256),
+                event_time_ms: sequenced.event_body.event_time_ms,
+                txn_id: sequenced.event_body.txn_id,
+                client_request_id: sequenced.event_body.client_request_id,
+                request_sha256: Some(sequenced.request_sha256),
                 sha256: sha,
                 prev_sha256: None,
             },
-            Bytes::copy_from_slice(draft.event_bytes.as_ref()),
-            &draft.event_body,
+            Bytes::copy_from_slice(sequenced.event_bytes.as_ref()),
+            &sequenced.event_body,
         )
         .unwrap();
 
@@ -1336,12 +1382,12 @@ mod tests {
             &store_dir,
             &meta,
             &ctx.namespace,
-            draft.event_body.event_time_ms,
+            sequenced.event_body.event_time_ms,
             SegmentConfig::from_limits(&limits),
         )
         .unwrap();
         writer
-            .append(&record, draft.event_body.event_time_ms)
+            .append(&record, sequenced.event_body.event_time_ms)
             .unwrap();
 
         rebuild_index(&store_dir, &meta, &index, &limits).unwrap();
@@ -1378,7 +1424,7 @@ mod tests {
             MutationOutcome::Pending(_) => panic!("expected immediate response"),
         };
 
-        assert_eq!(response.receipt.txn_id, draft.event_body.txn_id);
+        assert_eq!(response.receipt.txn_id, sequenced.event_body.txn_id);
         assert_eq!(
             response.receipt.event_ids,
             vec![EventId::new(replica_id, ctx.namespace.clone(), origin_seq)]
