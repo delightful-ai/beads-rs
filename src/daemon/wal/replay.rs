@@ -11,7 +11,7 @@ use crc32c::crc32c;
 use thiserror::Error;
 
 use crate::core::{
-    DecodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq1, StoreMeta,
+    DecodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1, StoreMeta,
     decode_event_body, decode_event_hlc_max,
 };
 
@@ -121,35 +121,35 @@ pub enum WalReplayError {
     },
     #[error("non-contiguous seq for {namespace} {origin}: expected {expected}, got {got}")]
     NonContiguousSeq {
-        namespace: String,
+        namespace: NamespaceId,
         origin: ReplicaId,
-        expected: u64,
-        got: u64,
+        expected: Seq1,
+        got: Seq0,
     },
     #[error("prev_sha mismatch for {namespace} {origin} seq {seq}")]
     PrevShaMismatch {
-        namespace: String,
+        namespace: NamespaceId,
         origin: ReplicaId,
-        seq: u64,
+        seq: Seq1,
         expected_prev_sha256: [u8; 32],
         got_prev_sha256: [u8; 32],
-        head_seq: u64,
+        head_seq: Seq0,
     },
     #[error("head sha required for {namespace} {origin} seq {seq}")]
     MissingHead {
-        namespace: String,
+        namespace: NamespaceId,
         origin: ReplicaId,
-        seq: u64,
+        seq: Seq0,
     },
     #[error("head sha must be absent for {namespace} {origin} seq {seq}")]
     UnexpectedHead {
-        namespace: String,
+        namespace: NamespaceId,
         origin: ReplicaId,
-        seq: u64,
+        seq: Seq0,
     },
     #[error("origin_seq overflow for {namespace} {origin}")]
     OriginSeqOverflow {
-        namespace: String,
+        namespace: NamespaceId,
         origin: ReplicaId,
     },
     #[error("record header mismatch at {path:?} offset {offset}: {source}")]
@@ -167,7 +167,7 @@ pub enum WalReplayError {
 pub struct RecordShaMismatchInfo {
     pub namespace: NamespaceId,
     pub origin: ReplicaId,
-    pub seq: u64,
+    pub seq: Seq1,
     pub expected: [u8; 32],
     pub got: [u8; 32],
     pub path: PathBuf,
@@ -337,28 +337,29 @@ fn replay_index(
             }
             let head = state.head_sha;
             let seq = state.contiguous_seq;
-            if seq > 0 && head.is_none() {
+            if seq.get() > 0 && head.is_none() {
                 return Err(WalReplayError::MissingHead {
-                    namespace: namespace.to_string(),
+                    namespace: namespace.clone(),
                     origin,
                     seq,
                 });
             }
             let next_seq = state
                 .max_seq
+                .get()
                 .checked_add(1)
                 .ok_or_else(|| WalReplayError::OriginSeqOverflow {
-                    namespace: namespace.to_string(),
+                    namespace: namespace.clone(),
                     origin,
                 })?;
             let next_seq = Seq1::from_u64(next_seq).ok_or_else(|| {
                 WalReplayError::OriginSeqOverflow {
-                    namespace: namespace.to_string(),
+                    namespace: namespace.clone(),
                     origin,
                 }
             })?;
 
-            txn.update_watermark(&namespace, &origin, seq, seq, head, head)?;
+            txn.update_watermark(&namespace, &origin, seq.get(), seq.get(), head, head)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
         }
     }
@@ -385,7 +386,7 @@ fn index_record(
     tracker.observe_record(
         namespace,
         header.origin_replica_id,
-        header.origin_seq.get(),
+        header.origin_seq,
         header.sha256,
         header.prev_sha256,
     )?;
@@ -828,7 +829,7 @@ where
                 WalReplayError::RecordShaMismatch(Box::new(RecordShaMismatchInfo {
                     namespace: segment.header.namespace.clone(),
                     origin: header.origin_replica_id,
-                    seq: header.origin_seq.get(),
+                    seq: header.origin_seq,
                     expected,
                     got,
                     path: segment.path.clone(),
@@ -1109,7 +1110,7 @@ mod tests {
                 let info = info.as_ref();
                 assert_eq!(info.namespace, namespace);
                 assert_eq!(info.origin, origin);
-                assert_eq!(info.seq, body.origin_seq.get());
+                assert_eq!(info.seq, body.origin_seq);
                 assert_eq!(info.expected, expected_sha);
                 assert_ne!(info.got, expected_sha);
             }
@@ -1167,12 +1168,13 @@ impl ReplayTracker {
 
     fn seed_from_watermarks(&mut self, rows: Vec<WatermarkRow>) -> Result<(), WalReplayError> {
         for row in rows {
-            let head = if row.durable_seq == 0 {
+            let durable_seq = Seq0::new(row.durable_seq);
+            let head = if durable_seq == Seq0::ZERO {
                 if row.durable_head_sha.is_some() {
                     return Err(WalReplayError::UnexpectedHead {
-                        namespace: row.namespace.to_string(),
+                        namespace: row.namespace.clone(),
                         origin: row.origin,
-                        seq: row.durable_seq,
+                        seq: durable_seq,
                     });
                 }
                 None
@@ -1180,16 +1182,16 @@ impl ReplayTracker {
                 Some(
                     row.durable_head_sha
                         .ok_or_else(|| WalReplayError::MissingHead {
-                            namespace: row.namespace.to_string(),
+                            namespace: row.namespace.clone(),
                             origin: row.origin,
-                            seq: row.durable_seq,
+                            seq: durable_seq,
                         })?,
                 )
             };
 
             let state = OriginReplayState {
-                max_seq: row.durable_seq,
-                contiguous_seq: row.durable_seq,
+                max_seq: durable_seq,
+                contiguous_seq: durable_seq,
                 head_sha: head,
                 touched: false,
             };
@@ -1205,7 +1207,7 @@ impl ReplayTracker {
         &mut self,
         namespace: &NamespaceId,
         origin: ReplicaId,
-        seq: u64,
+        seq: Seq1,
         sha: [u8; 32],
         prev_sha: Option<[u8; 32]>,
     ) -> Result<(), WalReplayError> {
@@ -1219,12 +1221,23 @@ impl ReplayTracker {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct OriginReplayState {
-    max_seq: u64,
-    contiguous_seq: u64,
+    max_seq: Seq0,
+    contiguous_seq: Seq0,
     head_sha: Option<[u8; 32]>,
     touched: bool,
+}
+
+impl Default for OriginReplayState {
+    fn default() -> Self {
+        Self {
+            max_seq: Seq0::ZERO,
+            contiguous_seq: Seq0::ZERO,
+            head_sha: None,
+            touched: false,
+        }
+    }
 }
 
 impl OriginReplayState {
@@ -1232,31 +1245,23 @@ impl OriginReplayState {
         &mut self,
         namespace: &NamespaceId,
         origin: ReplicaId,
-        seq: u64,
+        seq: Seq1,
         sha: [u8; 32],
         prev_sha: Option<[u8; 32]>,
     ) -> Result<(), WalReplayError> {
-        if seq == 0 {
-            return Err(WalReplayError::NonContiguousSeq {
-                namespace: namespace.to_string(),
-                origin,
-                expected: self.contiguous_seq + 1,
-                got: seq,
-            });
-        }
-
-        self.max_seq = self.max_seq.max(seq);
+        let seq0 = Seq0::new(seq.get());
+        self.max_seq = Seq0::new(self.max_seq.get().max(seq.get()));
         self.touched = true;
 
-        let expected = self.contiguous_seq + 1;
+        let expected = self.contiguous_seq.next();
         if seq == expected {
             let expected_prev = self.head_sha.unwrap_or([0u8; 32]);
             let got_prev = prev_sha.unwrap_or([0u8; 32]);
             let head_seq = self.contiguous_seq;
-            if expected == 1 {
+            if self.contiguous_seq == Seq0::ZERO {
                 if prev_sha.is_some() {
                     return Err(WalReplayError::PrevShaMismatch {
-                        namespace: namespace.to_string(),
+                        namespace: namespace.clone(),
                         origin,
                         seq,
                         expected_prev_sha256: expected_prev,
@@ -1266,7 +1271,7 @@ impl OriginReplayState {
                 }
             } else if prev_sha != self.head_sha {
                 return Err(WalReplayError::PrevShaMismatch {
-                    namespace: namespace.to_string(),
+                    namespace: namespace.clone(),
                     origin,
                     seq,
                     expected_prev_sha256: expected_prev,
@@ -1275,17 +1280,17 @@ impl OriginReplayState {
                 });
             }
 
-            self.contiguous_seq = seq;
+            self.contiguous_seq = seq0;
             self.head_sha = Some(sha);
             return Ok(());
         }
 
-        if seq <= self.contiguous_seq {
+        if seq.get() <= self.contiguous_seq.get() {
             return Err(WalReplayError::NonContiguousSeq {
-                namespace: namespace.to_string(),
+                namespace: namespace.clone(),
                 origin,
                 expected,
-                got: seq,
+                got: Seq0::new(seq.get()),
             });
         }
 
