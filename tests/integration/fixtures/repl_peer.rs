@@ -2,8 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use uuid::Uuid;
-
 use beads_rs::Limits;
 use beads_rs::core::{
     Applied, Durable, EventFrameV1, EventId, EventShaLookupError, HeadStatus, NamespaceId,

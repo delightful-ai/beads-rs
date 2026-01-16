@@ -9,11 +9,12 @@ use beads_rs::daemon::repl::{
 };
 use beads_rs::{Limits, NamespaceId, ProtocolErrorCode, ReplicaId, StoreIdentity};
 
+use crate::fixtures::identity;
 use crate::fixtures::repl_frames;
 use crate::fixtures::repl_peer::MockStore;
 
 fn inbound_session_with_limits(limits: Limits) -> (Session, MockStore, StoreIdentity) {
-    let identity = repl_frames::store_identity(2);
+    let identity = identity::store_identity_with_epoch(2, 1);
     let local_replica = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
     let mut config = SessionConfig::new(identity, local_replica, &limits);
     config.requested_namespaces = vec![NamespaceId::core()];

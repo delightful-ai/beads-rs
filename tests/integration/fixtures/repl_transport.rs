@@ -260,6 +260,7 @@ impl ChannelTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::identity;
     use uuid::Uuid;
 
     use beads_rs::core::ReplicaId;
@@ -268,7 +269,7 @@ mod tests {
     fn fixtures_repl_transport_roundtrip() {
         let limits = Limits::default();
         let transport = ChannelTransport::with_limits(&limits);
-        let store = repl_frames::store_identity(1);
+        let store = identity::store_identity_with_epoch(1, 1);
         let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let hello = ReplMessage::Hello(repl_frames::hello(store, replica));
 
@@ -283,7 +284,7 @@ mod tests {
     fn fixtures_repl_transport_delay_and_drop() {
         let limits = Limits::default();
         let transport = ChannelTransport::with_limits(&limits);
-        let store = repl_frames::store_identity(3);
+        let store = identity::store_identity_with_epoch(3, 1);
         let replica = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
         let hello = ReplMessage::Hello(repl_frames::hello(store, replica));
 

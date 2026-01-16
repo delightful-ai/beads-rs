@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use beads_rs::core::{
     ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-    StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, encode_event_body_canonical,
+    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{

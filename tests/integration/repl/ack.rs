@@ -22,6 +22,7 @@ use beads_rs::{
     encode_event_body_canonical, hash_event_body,
 };
 
+use crate::fixtures::identity;
 use crate::fixtures::repl_frames;
 use crate::fixtures::repl_peer::MockStore;
 use crate::fixtures::store_dir::TempStoreDir;
@@ -29,7 +30,7 @@ use crate::fixtures::wal::record_for_seq;
 
 fn inbound_session() -> (Session, MockStore, StoreIdentity) {
     let limits = Limits::default();
-    let identity = repl_frames::store_identity(1);
+    let identity = identity::store_identity_with_epoch(1, 1);
     let local_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
     let mut config = SessionConfig::new(identity, local_replica, &limits);
     config.requested_namespaces = vec![NamespaceId::core()];
