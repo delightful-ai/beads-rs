@@ -2199,6 +2199,18 @@ mod tests {
     }
 
     #[test]
+    fn txn_id_includes_actor_identity() {
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([9u8; 16])), 0.into());
+        let stamp_a = Stamp::new(WriteStamp::new(42, 7), actor_id("alice"));
+        let stamp_b = Stamp::new(WriteStamp::new(42, 7), actor_id("bob"));
+
+        let id_a = txn_id_for_stamp(&store, &stamp_a);
+        let id_b = txn_id_for_stamp(&store, &stamp_b);
+
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
     fn parsed_request_rejects_invalid_id() {
         let actor = actor_id("alice");
         let err = ParsedMutationRequest::parse(
