@@ -31,7 +31,7 @@ pub mod namespace_policies;
 pub mod replica_roster;
 pub mod state;
 pub mod store_meta;
-pub mod store_state;
+mod namespaced_state;
 pub mod stores;
 pub mod time;
 pub mod tombstone;
@@ -75,7 +75,10 @@ pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
 pub use replica_roster::{ReplicaEntry, ReplicaRole, ReplicaRoster, ReplicaRosterError};
 pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use store_meta::{StoreMeta, StoreMetaVersions};
-pub use store_state::StoreState;
+pub use namespaced_state::StoreState;
+pub mod store_state {
+    pub use super::namespaced_state::*;
+}
 pub use stores::{DepStore, TombstoneStore};
 pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};
