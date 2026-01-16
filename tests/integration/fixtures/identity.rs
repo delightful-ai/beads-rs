@@ -27,14 +27,31 @@ pub fn segment_id(seed: u8) -> SegmentId {
 }
 
 pub fn store_identity(seed: u8) -> StoreIdentity {
-    StoreIdentity::new(store_id(seed), StoreEpoch::new(0))
+    store_identity_with_epoch(seed, 0)
+}
+
+pub fn store_identity_with_epoch(seed: u8, epoch: u64) -> StoreIdentity {
+    StoreIdentity::new(store_id(seed), StoreEpoch::new(epoch))
 }
 
 pub fn store_meta(seed: u8, created_at_ms: u64) -> StoreMeta {
+    store_meta_with_epoch(seed, 0, created_at_ms)
+}
+
+pub fn store_meta_with_epoch(seed: u8, epoch: u64, created_at_ms: u64) -> StoreMeta {
+    store_meta_with_versions(seed, epoch, created_at_ms, StoreMetaVersions::new(1, 1, 1, 1, 1))
+}
+
+pub fn store_meta_with_versions(
+    seed: u8,
+    epoch: u64,
+    created_at_ms: u64,
+    versions: StoreMetaVersions,
+) -> StoreMeta {
     StoreMeta::new(
-        store_identity(seed),
+        store_identity_with_epoch(seed, epoch),
         replica_id(seed.wrapping_add(1)),
-        StoreMetaVersions::new(1, 1, 1, 1, 1),
+        versions,
         created_at_ms,
     )
 }

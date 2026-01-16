@@ -7,7 +7,7 @@ use uuid::Uuid;
 use beads_rs::Limits;
 use beads_rs::core::{
     Applied, Durable, EventFrameV1, EventId, EventShaLookupError, HeadStatus, NamespaceId,
-    ReplicaId, ReplicaRole, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark,
+    ReplicaId, ReplicaRole, Seq0, Seq1, Sha256, StoreIdentity, Watermark,
 };
 use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
 use beads_rs::daemon::repl::{
@@ -16,6 +16,7 @@ use beads_rs::daemon::repl::{
 };
 
 use super::repl_frames;
+use super::identity;
 use super::repl_transport::ChannelEndpoint;
 
 #[derive(Clone, Debug, Default)]
@@ -239,13 +240,6 @@ pub fn fill_repl_ingest_queue(admission: &AdmissionController, limits: &Limits) 
         .expect("fill repl ingest queue")
 }
 
-pub fn store_identity(seed: u8) -> StoreIdentity {
-    StoreIdentity::new(
-        StoreId::new(Uuid::from_bytes([seed; 16])),
-        StoreEpoch::new(1),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,7 +253,7 @@ mod tests {
     fn fixtures_repl_peer_handshake_and_events() {
         let limits = Limits::default();
         let transport = ChannelTransport::with_limits(&limits);
-        let identity = store_identity(9);
+        let identity = identity::store_identity_with_epoch(9, 1);
         let outbound_replica = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
         let inbound_replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
 

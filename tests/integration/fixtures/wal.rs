@@ -10,8 +10,7 @@ use uuid::Uuid;
 
 use beads_rs::core::{
     ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
-    encode_event_body_canonical,
+    StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
@@ -19,6 +18,8 @@ use beads_rs::daemon::wal::{
     SegmentWriter, SqliteWalIndex, UnverifiedRecord, VerifiedRecord, WalIndexError,
     SEGMENT_HEADER_PREFIX_LEN, WAL_FORMAT_VERSION, FRAME_HEADER_LEN,
 };
+
+use super::identity;
 const DEFAULT_MAX_RECORD_BYTES: usize = 1024 * 1024;
 const DEFAULT_SEGMENT_MAX_BYTES: u64 = u64::MAX;
 const DEFAULT_SEGMENT_MAX_AGE_MS: u64 = u64::MAX;
@@ -39,15 +40,12 @@ impl TempWalDir {
         let store_dir = temp.path().join("store");
         fs::create_dir_all(&store_dir).expect("create store dir");
 
-        let store_id = StoreId::new(Uuid::from_bytes([seed; 16]));
-        let replica_id = ReplicaId::new(Uuid::from_bytes([seed.wrapping_add(1); 16]));
-        let identity = StoreIdentity::new(store_id, StoreEpoch::new(0));
         let versions = StoreMetaVersions::new(1, WAL_FORMAT_VERSION, 1, 1, 1);
-        let meta = StoreMeta::new(
-            identity,
-            replica_id,
-            versions,
+        let meta = identity::store_meta_with_versions(
+            seed,
+            0,
             1_700_000_000_000 + seed as u64,
+            versions,
         );
 
         Self {

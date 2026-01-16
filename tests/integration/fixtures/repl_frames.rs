@@ -9,7 +9,7 @@ use uuid::Uuid;
 use beads_rs::Limits;
 use beads_rs::core::{
     ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, NamespaceId,
-    Opaque, ReplicaId, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
+    Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
     encode_event_body_canonical, hash_event_body,
 };
 use beads_rs::daemon::repl::frame::{FrameReader, encode_frame};
@@ -17,6 +17,8 @@ use beads_rs::daemon::repl::proto::{
     Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplEnvelope, ReplMessage, Want,
     WatermarkHeads, WatermarkMap, Welcome, decode_envelope, encode_envelope,
 };
+
+use super::identity;
 
 pub fn default_capabilities() -> Capabilities {
     Capabilities {
@@ -163,20 +165,13 @@ pub fn single_event(store: StoreIdentity, origin: ReplicaId) -> EventFrameV1 {
     event_frame(store, NamespaceId::core(), origin, 1, None)
 }
 
-pub fn store_identity(seed: u8) -> StoreIdentity {
-    StoreIdentity::new(
-        StoreId::new(Uuid::from_bytes([seed; 16])),
-        StoreEpoch::new(1),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn fixtures_repl_frames_roundtrip() {
-        let store = store_identity(1);
+        let store = identity::store_identity_with_epoch(1, 1);
         let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let hello = ReplMessage::Hello(hello(store, replica));
         let frame = encode_message_frame(hello.clone(), Limits::default().max_frame_bytes);
