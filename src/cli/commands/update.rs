@@ -3,7 +3,7 @@ use super::super::{
     Ctx, UpdateArgs, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs,
     print_ok, resolve_description, send,
 };
-use crate::core::DepKind;
+use crate::core::{DepKind, WorkflowStatus};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
 use crate::daemon::query::QueryResult;
@@ -14,7 +14,11 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     let id_str = id.as_str().to_string();
     let mut patch = BeadPatch::default();
     let close_reason = normalize_reason(args.reason);
-    let status_closed = matches!(args.status.as_deref(), Some("closed"));
+    let status = match args.status.as_deref() {
+        Some(raw) => Some(parse_status(raw)?),
+        None => None,
+    };
+    let status_closed = matches!(status, Some(WorkflowStatus::Closed));
     let add_labels = std::mem::take(&mut args.add_label);
     let remove_labels = std::mem::take(&mut args.remove_label);
 
@@ -73,8 +77,8 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if let Some(bead_type) = args.bead_type {
         patch.bead_type = Patch::Set(bead_type);
     }
-    if let Some(status) = args.status {
-        if status == "closed" && close_reason.is_some() {
+    if let Some(status) = status {
+        if status == WorkflowStatus::Closed && close_reason.is_some() {
             // Close via explicit close op to preserve reason.
         } else {
             patch.status = Patch::Set(status);
@@ -216,4 +220,16 @@ fn normalize_reason(reason: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn parse_status(raw: &str) -> Result<WorkflowStatus> {
+    match raw {
+        "open" => Ok(WorkflowStatus::Open),
+        "in_progress" => Ok(WorkflowStatus::InProgress),
+        "closed" => Ok(WorkflowStatus::Closed),
+        other => Err(Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: "status".into(),
+            reason: format!("unknown status {other:?}"),
+        })),
+    }
 }
