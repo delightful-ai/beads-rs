@@ -1412,18 +1412,12 @@ impl Daemon {
             return Ok(IngestOutcome { durable, applied });
         }
 
-        let mut preview_state = store.repo_state.state.get_or_default(&namespace);
         for event in &batch {
             if event.body.namespace != namespace || event.body.origin_replica_id != origin {
                 return Err(Box::new(ErrorPayload::new(
                     ErrorCode::Internal,
                     "replication batch has mismatched origin",
                     false,
-                )));
-            }
-            if let Err(err) = apply_event(&mut preview_state, &event.body) {
-                return Err(Box::new(apply_event_error_payload(
-                    &namespace, &origin, err,
                 )));
             }
         }
@@ -3427,10 +3421,9 @@ fn apply_event_error_payload(
     origin: &ReplicaId,
     err: ApplyError,
 ) -> ErrorPayload {
-    ErrorPayload::new(
-        ErrorCode::Corruption,
-        format!("apply_event rejected for {namespace}/{origin}: {err}"),
-        false,
+    let reason = format!("apply_event rejected for {namespace}/{origin}: {err}");
+    ErrorPayload::new(ErrorCode::Corruption, "apply_event rejected", false).with_details(
+        error_details::CorruptionDetails { reason },
     )
 }
 
@@ -4668,7 +4661,7 @@ mod tests {
     }
 
     #[test]
-    fn ingest_rejects_apply_failure_before_append() {
+    fn ingest_reports_apply_failure_after_append() {
         let tmp = TempStoreDir::new();
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
@@ -4703,6 +4696,11 @@ mod tests {
             .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event], now_ms)
             .expect_err("apply failure should reject batch");
         assert_eq!(err.code, ErrorCode::Corruption);
+        let details = err
+            .details_as::<error_details::CorruptionDetails>()
+            .unwrap()
+            .expect("corruption details");
+        assert!(details.reason.contains("apply_event rejected for core/"));
 
         let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
         let segments = store_runtime
@@ -4710,7 +4708,7 @@ mod tests {
             .reader()
             .list_segments(&namespace)
             .expect("segments");
-        assert!(segments.is_empty());
+        assert_eq!(segments.len(), 1);
     }
 
     #[test]
