@@ -404,11 +404,11 @@ impl Daemon {
         read: ReadConsistency,
     ) -> Result<NormalizedReadConsistency, OpError> {
         let namespace = self.normalize_namespace(proof, read.namespace)?;
-        Ok(NormalizedReadConsistency {
+        Ok(NormalizedReadConsistency::new(
             namespace,
-            require_min_seen: read.require_min_seen,
-            wait_timeout_ms: read.wait_timeout_ms.unwrap_or(0),
-        })
+            read.require_min_seen,
+            read.wait_timeout_ms.unwrap_or(0),
+        ))
     }
 
     pub(crate) fn check_read_gate(

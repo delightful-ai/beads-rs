@@ -122,6 +122,18 @@ pub(crate) struct NormalizedReadConsistency {
 }
 
 impl NormalizedReadConsistency {
+    pub(crate) fn new(
+        namespace: NamespaceId,
+        require_min_seen: Option<Watermarks<Applied>>,
+        wait_timeout_ms: u64,
+    ) -> Self {
+        Self {
+            namespace,
+            require_min_seen,
+            wait_timeout_ms,
+        }
+    }
+
     pub(crate) fn namespace(&self) -> &NamespaceId {
         &self.namespace
     }
@@ -521,10 +533,6 @@ impl Daemon {
 
     pub(crate) fn scheduler_mut(&mut self) -> &mut SyncScheduler {
         &mut self.scheduler
-    }
-
-    pub(crate) fn checkpoint_scheduler(&self) -> &CheckpointScheduler {
-        &self.checkpoint_scheduler
     }
 
     pub(crate) fn checkpoint_scheduler_mut(&mut self) -> &mut CheckpointScheduler {
