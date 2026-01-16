@@ -374,20 +374,6 @@ impl Wal {
     }
 }
 
-/// Default base directory for WAL storage.
-///
-/// Uses `BD_WAL_DIR` if set, otherwise `BD_DATA_DIR` or
-/// `$XDG_DATA_HOME/beads-rs` (`~/.local/share/beads-rs`).
-#[allow(dead_code)]
-pub fn default_wal_base_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BD_WAL_DIR")
-        && !dir.trim().is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-    crate::paths::data_dir()
-}
-
 fn read_entry_at(path: &Path) -> Result<WalEntry, WalError> {
     let data = fs::read(path)?;
     let entry: WalEntry = serde_json::from_slice(&data)?;
