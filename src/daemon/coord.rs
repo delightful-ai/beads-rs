@@ -10,15 +10,21 @@ use super::core::{
     ReadGateStatus, detect_clock_skew, max_write_stamp,
 };
 use super::git_worker::{GitOp, LoadResult};
-use super::ipc::{MutationMeta, ReadConsistency, Request};
+use super::ipc::{
+    ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+};
 use super::ops::OpError;
 use super::remote::RemoteUrl;
+use crate::api::DaemonInfo as ApiDaemonInfo;
+use crate::api::QueryResult;
 use crate::core::{
-    ActorId, CanonicalState, ClientRequestId, DurabilityClass, NamespaceId, Stamp, WriteStamp,
-    WallClock,
+    ActorId, BeadId, CanonicalState, CliErrorCode, ClientRequestId, CoreError, DurabilityClass,
+    ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, WriteStamp, WallClock,
 };
 use crate::git::{SyncError, SyncOutcome};
 use crate::git::collision::{detect_collisions, resolve_collisions};
+
+const REFRESH_TTL: Duration = Duration::from_millis(1000);
 
 impl Daemon {
     /// Get the next scheduled sync deadline for a remote, if any.
@@ -51,7 +57,7 @@ impl Daemon {
             && !repo_state.refresh_in_progress
             && repo_state
                 .last_refresh
-                .map(|t| t.elapsed() >= super::core::REFRESH_TTL)
+                .map(|t| t.elapsed() >= REFRESH_TTL)
                 .unwrap_or(true);
 
         if needs_refresh {
@@ -603,49 +609,84 @@ impl Daemon {
             Request::AddNote {
                 repo,
                 id,
-                note,
+                content,
                 meta,
             } => {
-                self.apply_add_note(&repo, meta, id, note, git_tx)
+                self.apply_add_note(&repo, meta, id, content, git_tx)
             }
 
-            Request::SetNote {
+            Request::Claim {
                 repo,
                 id,
-                note_id,
-                note,
+                lease_secs,
                 meta,
             } => {
-                self.apply_set_note(&repo, meta, id, note_id, note, git_tx)
+                self.apply_claim(&repo, meta, id, lease_secs, git_tx)
             }
 
-            Request::SetClaim { repo, id, claim, meta } => {
-                self.apply_set_claim(&repo, meta, id, claim, git_tx)
+            Request::Unclaim { repo, id, meta } => {
+                self.apply_unclaim(&repo, meta, id, git_tx)
             }
 
-            Request::Ping { .. } => HandleOutcome::Response(super::ipc::Response::ok(
-                super::ipc::ResponsePayload::pong(),
-            )),
-
-            Request::SyncWait { repo } => {
-                HandleOutcome::SyncWait { repo }
+            Request::ExtendClaim {
+                repo,
+                id,
+                lease_secs,
+                meta,
+            } => {
+                self.apply_extend_claim(&repo, meta, id, lease_secs, git_tx)
             }
 
-            Request::Status { repo, read } => self.query_status(&repo, read, git_tx),
-
-            Request::Show { repo, id, read } => self.query_show(&repo, &id, read, git_tx),
+            // Queries - delegate to query_executor module
+            Request::Show { repo, id, read } => {
+                let id = match BeadId::parse(&id) {
+                    Ok(id) => id,
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
+                };
+                self.query_show(&repo, &id, read, git_tx).into()
+            }
 
             Request::ShowMultiple { repo, ids, read } => {
-                self.query_show_multiple(&repo, &ids, read, git_tx)
+                self.query_show_multiple(&repo, &ids, read, git_tx).into()
             }
 
-            Request::List { repo, filters, read } => {
-                self.query_list(&repo, &filters, read, git_tx)
+            Request::List {
+                repo,
+                filters,
+                read,
+            } => self.query_list(&repo, &filters, read, git_tx).into(),
+
+            Request::Ready { repo, limit, read } => {
+                self.query_ready(&repo, limit, read, git_tx).into()
             }
 
-            Request::Ready { repo, read } => self.query_ready(&repo, read, git_tx),
+            Request::DepTree { repo, id, read } => {
+                let id = match BeadId::parse(&id) {
+                    Ok(id) => id,
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
+                };
+                self.query_dep_tree(&repo, &id, read, git_tx).into()
+            }
 
-            Request::Blocked { repo, read } => self.query_blocked(&repo, read, git_tx),
+            Request::DepCycles { repo, read } => self.query_dep_cycles(&repo, read, git_tx).into(),
+
+            Request::Deps { repo, id, read } => {
+                let id = match BeadId::parse(&id) {
+                    Ok(id) => id,
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
+                };
+                self.query_deps(&repo, &id, read, git_tx).into()
+            }
+
+            Request::Notes { repo, id, read } => {
+                let id = match BeadId::parse(&id) {
+                    Ok(id) => id,
+                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
+                };
+                self.query_notes(&repo, &id, read, git_tx).into()
+            }
+
+            Request::Blocked { repo, read } => self.query_blocked(&repo, read, git_tx).into(),
 
             Request::Stale {
                 repo,
@@ -653,30 +694,18 @@ impl Daemon {
                 status,
                 limit,
                 read,
-            } => {
-                self.query_stale(&repo, days, status.as_deref(), limit, read, git_tx)
-            }
-
-            Request::Deps { repo, id, read } => self.query_deps(&repo, &id, read, git_tx),
-
-            Request::DepsForBead { repo, id, read } => {
-                self.query_deps_for_bead(&repo, &id, read, git_tx)
-            }
-
-            Request::DepsForTree { repo, id, read } => {
-                self.query_deps_for_tree(&repo, &id, read, git_tx)
-            }
-
-            Request::Notes { repo, id, read } => self.query_notes(&repo, &id, read, git_tx),
+            } => self
+                .query_stale(&repo, days, status.as_deref(), limit, read, git_tx)
+                .into(),
 
             Request::Count {
                 repo,
                 filters,
                 group_by,
                 read,
-            } => {
-                self.query_count(&repo, &filters, group_by.as_deref(), read, git_tx)
-            }
+            } => self
+                .query_count(&repo, &filters, group_by.as_deref(), read, git_tx)
+                .into(),
 
             Request::Deleted {
                 repo,
@@ -684,128 +713,184 @@ impl Daemon {
                 id,
                 read,
             } => {
+                let id = match id {
+                    Some(s) => Some(match BeadId::parse(&s) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            return Response::err(invalid_id_payload(e)).into();
+                        }
+                    }),
+                    None => None,
+                };
                 self.query_deleted(&repo, since_ms, id.as_ref(), read, git_tx)
+                    .into()
             }
 
             Request::EpicStatus {
                 repo,
                 eligible_only,
                 read,
-            } => {
-                self.query_epic_status(&repo, eligible_only, read, git_tx)
-            }
+            } => self
+                .query_epic_status(&repo, eligible_only, read, git_tx)
+                .into(),
 
-            Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx),
+            Request::Status { repo, read } => self.query_status(&repo, read, git_tx).into(),
 
-            Request::DepCycles { repo, read } => self.query_dep_cycles(&repo, read, git_tx),
+            Request::AdminStatus { repo, read } => self.admin_status(&repo, read, git_tx).into(),
 
-            Request::DurabilityWait { repo, read, wait } => {
-                HandleOutcome::DurabilityWait { repo, read, wait }
-            }
+            Request::AdminMetrics { repo, read } => self.admin_metrics(&repo, read, git_tx).into(),
 
-            Request::AdminStatus { repo } => self.admin_status(&repo, git_tx),
+            Request::AdminDoctor {
+                repo,
+                read,
+                max_records_per_namespace,
+                verify_checkpoint_cache,
+            } => self
+                .admin_doctor(
+                    &repo,
+                    read,
+                    max_records_per_namespace,
+                    verify_checkpoint_cache,
+                    git_tx,
+                )
+                .into(),
 
-            Request::AdminDoctor { repo } => self.admin_doctor(&repo, git_tx),
+            Request::AdminScrub {
+                repo,
+                read,
+                max_records_per_namespace,
+                verify_checkpoint_cache,
+            } => self
+                .admin_scrub_now(
+                    &repo,
+                    read,
+                    max_records_per_namespace,
+                    verify_checkpoint_cache,
+                    git_tx,
+                )
+                .into(),
 
-            Request::AdminMetrics { repo } => self.admin_metrics(&repo, git_tx),
+            Request::AdminFlush {
+                repo,
+                namespace,
+                checkpoint_now,
+            } => self
+                .admin_flush(&repo, namespace, checkpoint_now, git_tx)
+                .into(),
 
-            Request::AdminFingerprint { repo, limit } => {
-                self.admin_fingerprint(&repo, limit, git_tx)
-            }
-
-            Request::AdminMaintenance { repo, enable, reason, ttl_ms } => {
-                self.admin_maintenance(&repo, enable, reason, ttl_ms, git_tx)
-            }
-
-            Request::AdminRebuildIndex { repo } => {
-                self.admin_rebuild_index(&repo, git_tx)
-            }
+            Request::AdminFingerprint {
+                repo,
+                read,
+                mode,
+                sample,
+            } => self
+                .admin_fingerprint(&repo, read, mode, sample, git_tx)
+                .into(),
 
             Request::AdminReloadPolicies { repo } => {
-                self.admin_reload_policies(&repo, git_tx)
+                self.admin_reload_policies(&repo, git_tx).into()
             }
 
-            Request::AdminFlush { repo } => self.admin_flush(&repo, git_tx),
-
-            Request::AdminScrub { repo } => self.admin_scrub(&repo, git_tx),
-
-            Request::CheckpointStatus { repo } => self.checkpoint_status(&repo, git_tx),
-
-            Request::CheckpointList { repo } => self.checkpoint_list(&repo, git_tx),
-
-            Request::CheckpointExport { repo } => self.checkpoint_export(&repo, git_tx),
-
-            Request::CheckpointImport { repo } => self.checkpoint_import(&repo, git_tx),
-
-            Request::CheckpointImportPath { repo, path } => {
-                self.checkpoint_import_path(&repo, path, git_tx)
+            Request::AdminRotateReplicaId { repo } => {
+                self.admin_rotate_replica_id(&repo, git_tx).into()
             }
 
-            Request::CheckpointImportLatest { repo } => {
-                self.checkpoint_import_latest(&repo, git_tx)
+            Request::AdminMaintenanceMode { repo, enabled } => {
+                self.admin_maintenance_mode(&repo, enabled, git_tx).into()
             }
 
-            Request::CheckpointClearCache { repo } => {
-                self.checkpoint_clear_cache(&repo, git_tx)
+            Request::AdminRebuildIndex { repo } => self.admin_rebuild_index(&repo, git_tx).into(),
+
+            Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx).into(),
+
+            Request::Subscribe { .. } => Response::err(error_payload(
+                ProtocolErrorCode::InvalidRequest.into(),
+                "subscribe must be handled by the streaming IPC path",
+                false,
+            ))
+            .into(),
+
+            // Control
+            Request::Refresh { repo } => {
+                // Force reload from git (invalidates cached state).
+                // Used after external changes like migration.
+                match self.force_reload(&repo, git_tx) {
+                    Ok(_) => Response::ok(ResponsePayload::refreshed()),
+                    Err(e) => Response::err(e),
+                }
+                .into()
             }
 
-            Request::CheckpointPublish { repo } => self.checkpoint_publish(&repo, git_tx),
-
-            Request::CheckpointPublishPath { repo, path, ref_name } => {
-                self.checkpoint_publish_path(&repo, path, ref_name, git_tx)
+            Request::Sync { repo } => {
+                // Force immediate sync (used for graceful shutdown)
+                match self.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
+                    Ok(_) => Response::ok(ResponsePayload::synced()),
+                    Err(e) => Response::err(e),
+                }
+                .into()
             }
 
-            Request::CheckpointRestore { repo, group } => {
-                self.checkpoint_restore(&repo, group.as_deref(), git_tx)
+            Request::SyncWait { .. } => {
+                unreachable!("SyncWait is handled by the daemon state loop")
             }
 
-            Request::CheckpointSnapshot { repo, group, path } => {
-                self.checkpoint_snapshot(&repo, group.as_deref(), path, git_tx)
+            Request::Init { repo } => {
+                let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+                if git_tx
+                    .send(GitOp::Init {
+                        repo: repo.clone(),
+                        respond: respond_tx,
+                    })
+                    .is_err()
+                {
+                    return Response::err(error_payload(
+                        CliErrorCode::Internal.into(),
+                        "git thread not responding",
+                        false,
+                    ))
+                    .into();
+                }
+
+                match respond_rx.recv() {
+                    Ok(Ok(())) => match self.ensure_repo_loaded(&repo, git_tx) {
+                        Ok(_) => Response::ok(ResponsePayload::initialized()),
+                        Err(e) => Response::err(e),
+                    },
+                    Ok(Err(e)) => {
+                        Response::err(error_payload(CliErrorCode::InitFailed.into(), &e.to_string(), false))
+                    }
+                    Err(_) => {
+                        Response::err(error_payload(CliErrorCode::Internal.into(), "git thread died", false))
+                    }
+                }
+                .into()
             }
 
-            Request::CheckpointGarbageCollect { repo } => {
-                self.checkpoint_garbage_collect(&repo, git_tx)
-            }
+            Request::Ping => Response::ok(ResponsePayload::query(QueryResult::DaemonInfo(
+                ApiDaemonInfo {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: super::ipc::IPC_PROTOCOL_VERSION,
+                    pid: std::process::id(),
+                },
+            )))
+            .into(),
 
-            Request::CheckpointDelete { repo, group, id } => {
-                self.checkpoint_delete(&repo, group.as_deref(), id.as_deref(), git_tx)
-            }
-
-            Request::CheckpointDiff {
-                repo,
-                group,
-                left,
-                right,
-            } => {
-                self.checkpoint_diff(&repo, group.as_deref(), left.as_deref(), right.as_deref(), git_tx)
-            }
-
-            Request::AdminFsck { repo } => self.admin_fsck(&repo, git_tx),
-
-            Request::AdminUnlock { store_id, force } => {
-                self.admin_unlock(store_id, force)
-            }
-
-            Request::AdminSetClock { repo, stamp } => {
-                self.admin_set_clock(&repo, stamp, git_tx)
-            }
-
-            Request::AdminSetStoreMeta { repo, store_meta } => {
-                self.admin_set_store_meta(&repo, store_meta, git_tx)
-            }
-
-            Request::AdminReloadRoster { repo } => {
-                self.admin_reload_roster(&repo, git_tx)
-            }
-
-            Request::Subscribe { repo, since, read } => {
-                self.subscribe(&repo, since, read, git_tx)
-            }
-
-            Request::Unsubscribe { repo, token } => {
-                self.unsubscribe(&repo, token, git_tx)
+            Request::Shutdown => {
+                self.begin_shutdown();
+                Response::ok(ResponsePayload::shutting_down()).into()
             }
         }
+    }
+}
+
+fn error_payload(code: ErrorCode, message: &str, retryable: bool) -> ErrorPayload {
+    ErrorPayload::new(code, message, retryable)
+}
+
+fn invalid_id_payload(err: CoreError) -> ErrorPayload {
+    match err {
+        CoreError::InvalidId(id) => IpcError::from(id).into(),
+        other => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), other.to_string(), false),
     }
 }
 

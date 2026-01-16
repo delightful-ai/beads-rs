@@ -12,6 +12,7 @@ pub mod admission;
 pub mod broadcast;
 pub mod checkpoint_scheduler;
 pub mod clock;
+pub mod coord;
 pub mod core;
 pub mod durability_coordinator;
 pub mod executor;
