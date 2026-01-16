@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::ops::{BeadPatch, OpResult};
-use crate::daemon::query::{Filters, QueryResult};
+use crate::daemon::query::Filters;
 use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
+use crate::api::QueryResult;
 use crate::core::{
     Applied, BeadType, DepKind, DurabilityReceipt, Priority, Watermarks,
 };
@@ -508,6 +509,11 @@ pub enum ResponsePayload {
 }
 
 impl ResponsePayload {
+    /// Create a query payload.
+    pub fn query(result: impl Into<crate::api::QueryResult>) -> Self {
+        ResponsePayload::Query(result.into())
+    }
+
     /// Create a synced payload.
     pub fn synced() -> Self {
         ResponsePayload::Synced(SyncedPayload::default())

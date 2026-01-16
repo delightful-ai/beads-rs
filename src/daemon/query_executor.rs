@@ -290,7 +290,7 @@ impl Daemon {
             views.truncate(limit);
         }
 
-        let result = crate::api::ReadyResult {
+        let result = ReadyResult {
             issues: views,
             blocked_count,
             closed_count,
@@ -1219,7 +1219,7 @@ fn sort_ready_issues(issues: &mut [IssueSummary]) {
 #[cfg(test)]
 mod tests {
     use super::{dep_cycles_from_state, sort_ready_issues};
-    use crate::api::{Issue, IssueSummary};
+    use super::{Issue, IssueSummary};
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge,
         DepKey, DepKind, Labels, Lww, NamespaceId, Priority, Stamp, Workflow, WriteStamp,

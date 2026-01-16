@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use super::codec::IpcError;
 use super::types::{IPC_PROTOCOL_VERSION, Request, Response, ResponsePayload};
-use crate::daemon::query::QueryResult;
+use crate::api::QueryResult;
 
 // =============================================================================
 // Socket path

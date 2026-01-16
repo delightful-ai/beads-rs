@@ -78,7 +78,7 @@ impl Daemon {
             checkpoints,
         };
 
-        Response::ok(ResponsePayload::Query(QueryResult::AdminStatus(output)))
+        Response::ok(ResponsePayload::query(QueryResult::AdminStatus(output)))
     }
 
     pub fn admin_metrics(
@@ -101,7 +101,7 @@ impl Daemon {
 
         let snapshot = crate::daemon::metrics::snapshot();
         let output = build_metrics_output(snapshot);
-        Response::ok(ResponsePayload::Query(QueryResult::AdminMetrics(output)))
+        Response::ok(ResponsePayload::query(QueryResult::AdminMetrics(output)))
     }
 
     pub fn admin_doctor(
@@ -163,7 +163,7 @@ impl Daemon {
         crate::daemon::metrics::scrub_records_checked(report.stats.records_checked);
 
         let output = AdminDoctorOutput { report };
-        Response::ok(ResponsePayload::Query(QueryResult::AdminDoctor(output)))
+        Response::ok(ResponsePayload::query(QueryResult::AdminDoctor(output)))
     }
 
     pub fn admin_scrub_now(
@@ -225,7 +225,7 @@ impl Daemon {
         crate::daemon::metrics::scrub_records_checked(report.stats.records_checked);
 
         let output = AdminScrubOutput { report };
-        Response::ok(ResponsePayload::Query(QueryResult::AdminScrub(output)))
+        Response::ok(ResponsePayload::query(QueryResult::AdminScrub(output)))
     }
 
     pub fn admin_flush(
@@ -275,7 +275,7 @@ impl Daemon {
             checkpoint_now,
             checkpoint_groups,
         };
-        Response::ok(ResponsePayload::Query(QueryResult::AdminFlush(output)))
+        Response::ok(ResponsePayload::query(QueryResult::AdminFlush(output)))
     }
 
     pub fn admin_fingerprint(
@@ -373,7 +373,7 @@ impl Daemon {
             watermarks_durable: store.watermarks_durable.clone(),
             namespaces,
         };
-        Response::ok(ResponsePayload::Query(QueryResult::AdminFingerprint(
+        Response::ok(ResponsePayload::query(QueryResult::AdminFingerprint(
             output,
         )))
     }
@@ -416,7 +416,7 @@ impl Daemon {
             applied: reload.applied,
             requires_restart: reload.requires_restart,
         };
-        Response::ok(ResponsePayload::Query(QueryResult::AdminReloadPolicies(
+        Response::ok(ResponsePayload::query(QueryResult::AdminReloadPolicies(
             output,
         )))
     }
@@ -447,7 +447,7 @@ impl Daemon {
             old_replica_id,
             new_replica_id,
         };
-        Response::ok(ResponsePayload::Query(QueryResult::AdminRotateReplicaId(
+        Response::ok(ResponsePayload::query(QueryResult::AdminRotateReplicaId(
             output,
         )))
     }
@@ -469,7 +469,7 @@ impl Daemon {
 
         store.maintenance_mode = enabled;
         let output = AdminMaintenanceModeOutput { enabled };
-        Response::ok(ResponsePayload::Query(QueryResult::AdminMaintenanceMode(
+        Response::ok(ResponsePayload::query(QueryResult::AdminMaintenanceMode(
             output,
         )))
     }
@@ -504,7 +504,7 @@ impl Daemon {
         let output = AdminRebuildIndexOutput {
             stats: rebuild_stats(stats),
         };
-        Response::ok(ResponsePayload::Query(QueryResult::AdminRebuildIndex(
+        Response::ok(ResponsePayload::query(QueryResult::AdminRebuildIndex(
             output,
         )))
     }

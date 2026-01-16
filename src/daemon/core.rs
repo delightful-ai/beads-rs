@@ -30,7 +30,7 @@ use super::ipc::{
 };
 use super::metrics;
 use super::ops::OpError;
-use super::query::QueryResult;
+use crate::api::QueryResult;
 use super::remote::{RemoteUrl, normalize_url};
 use super::repl::{
     BackoffPolicy, IngestOutcome, PeerConfig, ReplError, ReplErrorDetails, ReplIngestRequest,
@@ -2735,7 +2735,7 @@ impl Daemon {
                 .into()
             }
 
-            Request::Ping => Response::ok(ResponsePayload::Query(QueryResult::DaemonInfo(
+            Request::Ping => Response::ok(ResponsePayload::query(QueryResult::DaemonInfo(
                 ApiDaemonInfo {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: super::ipc::IPC_PROTOCOL_VERSION,
