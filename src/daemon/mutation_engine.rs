@@ -15,6 +15,7 @@ use crate::core::{
     WireDepV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
     encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
 };
+use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
 
 #[derive(Clone, Debug)]
 pub struct MutationContext {
@@ -1822,8 +1823,6 @@ fn delta_error_to_op(err: TxnDeltaError) -> OpError {
         reason: err.to_string(),
     }
 }
-
-const RECORD_HEADER_BASE_LEN: usize = 88;
 
 fn estimated_record_bytes(payload_len: usize, has_client_request_id: bool) -> usize {
     let mut len = RECORD_HEADER_BASE_LEN + payload_len + 32 + 32;

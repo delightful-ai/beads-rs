@@ -10,7 +10,7 @@ use crate::core::{ClientRequestId, EventBody, ReplicaId, Seq1, TxnId, sha256_byt
 use super::{EventWalError, EventWalResult};
 
 const RECORD_HEADER_VERSION: u16 = 1;
-const RECORD_HEADER_BASE_LEN: usize = 88;
+pub(crate) const RECORD_HEADER_BASE_LEN: usize = 88;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecordFlags {
