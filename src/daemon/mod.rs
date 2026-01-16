@@ -28,7 +28,7 @@ pub mod query_model;
 pub mod query_executor;
 pub mod remote;
 pub mod repl;
-pub mod repo;
+pub mod git_lane;
 pub mod run;
 pub mod scheduler;
 pub mod scrubber;
@@ -52,7 +52,7 @@ pub use ipc::{
 pub use ops::{BeadPatch, OpError, OpResult, Patch};
 pub use query::{Filters, Query, QueryResult, SortField};
 pub use remote::RemoteUrl;
-pub use repo::RepoState;
+pub use git_lane::GitLaneState;
 pub use run::run_daemon;
 pub use scheduler::SyncScheduler;
 pub use server::{run_socket_thread, run_state_loop};

@@ -23,7 +23,7 @@ use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repl::PeerAckTable;
-use crate::daemon::repo::{RepoState, WalTailTruncatedRecord};
+use crate::daemon::git_lane::{GitLaneState, WalTailTruncatedRecord};
 use crate::daemon::store_lock::{StoreLock, StoreLockError};
 use crate::daemon::wal::{
     EventWal, HlcRow, IndexDurabilityMode, ReplayStats, SqliteWalIndex, WalIndex, WalIndexError,
@@ -56,7 +56,7 @@ pub struct StoreRuntime {
     pub(crate) meta: StoreMeta,
     #[allow(dead_code)]
     pub(crate) policies: BTreeMap<NamespaceId, NamespacePolicy>,
-    pub(crate) repo_state: RepoState,
+    pub(crate) repo_state: GitLaneState,
     pub(crate) watermarks_applied: Watermarks<Applied>,
     pub(crate) watermarks_durable: Watermarks<Durable>,
     checkpoint_dirty_shards: BTreeMap<NamespaceId, BTreeSet<CheckpointShardPath>>,
@@ -153,7 +153,7 @@ impl StoreRuntime {
         let broadcaster = EventBroadcaster::new(BroadcasterLimits::from_limits(limits));
         let admission = AdmissionController::new(limits);
         let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
-        let mut repo_state = RepoState::new();
+        let mut repo_state = GitLaneState::new();
         for truncation in &replay_stats.tail_truncations {
             let payload =
                 ErrorPayload::new(ProtocolErrorCode::WalTailTruncated.into(), "wal tail truncated", true)

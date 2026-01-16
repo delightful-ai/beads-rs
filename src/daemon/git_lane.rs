@@ -1,7 +1,7 @@
-//! Per-repository state management.
+//! Git checkpoint lane state for a single store.
 //!
 //! Provides:
-//! - `RepoState` - In-memory state for a single repository
+//! - `GitLaneState` - in-memory state for legacy git sync/checkpoint lane
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -43,8 +43,8 @@ pub struct WalTailTruncatedRecord {
     pub wall_ms: u64,
 }
 
-/// In-memory state for a single repository.
-pub struct RepoState {
+/// In-memory state for the legacy git checkpoint lane.
+pub struct GitLaneState {
     /// The current namespaced canonical state (beads, tombstones, deps).
     pub state: StoreState,
 
@@ -98,10 +98,10 @@ pub struct RepoState {
     pub last_wal_tail_truncated: Option<WalTailTruncatedRecord>,
 }
 
-impl RepoState {
-    /// Create a new RepoState with empty state.
+impl GitLaneState {
+    /// Create a new GitLaneState with empty state.
     pub fn new() -> Self {
-        RepoState {
+        GitLaneState {
             state: StoreState::new(),
             root_slug: None,
             known_paths: HashSet::new(),
@@ -122,9 +122,9 @@ impl RepoState {
         }
     }
 
-    /// Create a new RepoState with the given state.
+    /// Create a new GitLaneState with the given state.
     pub fn with_state(state: StoreState) -> Self {
-        RepoState {
+        GitLaneState {
             state,
             root_slug: None,
             known_paths: HashSet::new(),
@@ -145,7 +145,7 @@ impl RepoState {
         }
     }
 
-    /// Create a new RepoState with state, root slug, and initial clone path.
+    /// Create a new GitLaneState with state, root slug, and initial clone path.
     pub fn with_state_and_path(
         state: StoreState,
         root_slug: Option<String>,
@@ -229,7 +229,7 @@ impl RepoState {
     }
 }
 
-impl Default for RepoState {
+impl Default for GitLaneState {
     fn default() -> Self {
         Self::new()
     }
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn new_state_not_dirty() {
-        let state = RepoState::new();
+        let state = GitLaneState::new();
         assert!(!state.dirty);
         assert!(!state.sync_in_progress);
         assert!(!state.refresh_in_progress);
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn mark_dirty() {
-        let mut state = RepoState::new();
+        let mut state = GitLaneState::new();
         state.mark_dirty();
         assert!(state.dirty);
         assert!(state.last_mutation.is_some());
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn backoff_exponential() {
-        let mut state = RepoState::new();
+        let mut state = GitLaneState::new();
         assert_eq!(state.backoff_ms(), 500);
 
         state.consecutive_failures = 1;

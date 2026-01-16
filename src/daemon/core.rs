@@ -36,8 +36,8 @@ use super::repl::{
     ReplicationManager, ReplicationManagerConfig, ReplicationManagerHandle, ReplicationServer,
     ReplicationServerConfig, ReplicationServerHandle, SharedSessionStore, WalRangeReader,
 };
-use super::repo::{
-    ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, RepoState,
+use super::git_lane::{
+    ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, GitLaneState,
 };
 use super::scheduler::SyncScheduler;
 use super::store::StoreCaches;
@@ -458,7 +458,7 @@ impl Daemon {
     }
 
     /// Get repo state. Returns Internal if invariant is violated.
-    pub(crate) fn repo_state(&self, proof: &LoadedStore) -> Result<&RepoState, OpError> {
+    pub(crate) fn repo_state(&self, proof: &LoadedStore) -> Result<&GitLaneState, OpError> {
         self.stores
             .get(&proof.store_id)
             .map(|store| &store.repo_state)
@@ -469,7 +469,7 @@ impl Daemon {
     pub(crate) fn repo_state_mut(
         &mut self,
         proof: &LoadedStore,
-    ) -> Result<&mut RepoState, OpError> {
+    ) -> Result<&mut GitLaneState, OpError> {
         self.stores
             .get_mut(&proof.store_id)
             .map(|store| &mut store.repo_state)
@@ -512,7 +512,7 @@ impl Daemon {
 
     /// Get repo state by raw remote URL (for internal sync waiters, etc.).
     /// Returns None if not loaded.
-    pub(crate) fn repo_state_by_url(&self, remote: &RemoteUrl) -> Option<&RepoState> {
+    pub(crate) fn repo_state_by_url(&self, remote: &RemoteUrl) -> Option<&GitLaneState> {
         self.store_caches.remote_to_store_id
             .get(remote)
             .and_then(|store_id| self.stores.get(store_id))
@@ -757,7 +757,7 @@ impl Daemon {
             .as_ref()
             .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
 
-        let mut repo_state = RepoState::with_state_and_path(state, root_slug, repo.to_owned());
+        let mut repo_state = GitLaneState::with_state_and_path(state, root_slug, repo.to_owned());
         repo_state.last_seen_stamp = last_seen_stamp;
         repo_state.last_clock_skew = clock_skew;
         repo_state.last_fetch_error = loaded.fetch_error.map(|message| FetchErrorRecord {
@@ -2069,14 +2069,14 @@ impl Daemon {
     }
 
     /// Get iterator over all stores.
-    pub fn repos(&self) -> impl Iterator<Item = (&StoreId, &RepoState)> {
+    pub fn repos(&self) -> impl Iterator<Item = (&StoreId, &GitLaneState)> {
         self.stores
             .iter()
             .map(|(id, store)| (id, &store.repo_state))
     }
 
     /// Get mutable iterator over all stores.
-    pub fn repos_mut(&mut self) -> impl Iterator<Item = (&StoreId, &mut RepoState)> {
+    pub fn repos_mut(&mut self) -> impl Iterator<Item = (&StoreId, &mut GitLaneState)> {
         self.stores
             .iter_mut()
             .map(|(id, store)| (id, &mut store.repo_state))
@@ -3612,7 +3612,7 @@ mod tests {
         let store_id = insert_store(&mut daemon, &remote);
 
         // Manually insert a repo in refresh_in_progress state
-        let mut repo_state = RepoState::new();
+        let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
@@ -3726,7 +3726,7 @@ mod tests {
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
-        let mut repo_state = RepoState::new();
+        let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
 
@@ -3747,7 +3747,7 @@ mod tests {
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
-        let mut repo_state = RepoState::new();
+        let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = false; // Clean state
         daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
@@ -3776,7 +3776,7 @@ mod tests {
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
-        let mut repo_state = RepoState::new();
+        let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = true; // Dirty - mutations happened during refresh
         repo_state.root_slug = Some("original-slug".to_string());
@@ -3808,7 +3808,7 @@ mod tests {
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
 
-        let mut repo_state = RepoState::new();
+        let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = false;
         daemon.stores.get_mut(&store_id).unwrap().repo_state = repo_state;
@@ -4257,7 +4257,7 @@ mod tests {
         let mut local_state = CanonicalState::new();
         local_state.insert_live(loser);
 
-        let mut repo_state = RepoState::new();
+        let mut repo_state = GitLaneState::new();
         repo_state
             .state
             .set_namespace_state(NamespaceId::core(), local_state);
