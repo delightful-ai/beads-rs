@@ -94,10 +94,11 @@ fn subscribe_gates_on_require_min_seen() {
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
-    let mut client = StreamingClient::subscribe_with_client(repo.clone(), read, ipc_client.clone())
+    let mut client =
+        StreamingClient::subscribe_with_client(repo.clone(), read.clone(), ipc_client.clone())
         .expect("subscribe");
 
-    let report = run_load(repo, 1, &namespace, ipc_client.clone());
+    let report = run_load(repo.clone(), 1, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
     let seqs = collect_origin_seqs(
