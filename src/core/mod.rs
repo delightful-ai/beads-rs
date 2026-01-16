@@ -32,7 +32,7 @@ pub mod replica_roster;
 pub mod state;
 pub mod store_meta;
 mod namespaced_state;
-pub mod stores;
+mod dep_tombstone_store;
 pub mod time;
 pub mod tombstone;
 pub mod watermark;
@@ -79,7 +79,10 @@ pub use namespaced_state::StoreState;
 pub mod store_state {
     pub use super::namespaced_state::*;
 }
-pub use stores::{DepStore, TombstoneStore};
+pub use dep_tombstone_store::{DepStore, TombstoneStore};
+pub mod stores {
+    pub use super::dep_tombstone_store::*;
+}
 pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};
 pub use watermark::{
