@@ -112,7 +112,6 @@ pub trait WalIndexTxn {
         event_time_ms: u64,
         txn_id: TxnId,
         client_request_id: Option<ClientRequestId>,
-        request_sha256: Option<[u8; 32]>,
     ) -> Result<(), WalIndexError>;
     fn update_watermark(
         &mut self,
@@ -393,9 +392,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         event_time_ms: u64,
         txn_id: TxnId,
         client_request_id: Option<ClientRequestId>,
-        request_sha256: Option<[u8; 32]>,
     ) -> Result<(), WalIndexError> {
-        let _ = request_sha256;
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(eid.origin_replica_id.as_uuid());
         let eid_seq = eid.origin_seq.get() as i64;
@@ -1430,7 +1427,6 @@ mod tests {
             1_700_000,
             txn_id,
             Some(client_request_id),
-            Some([7u8; 32]),
         )
         .unwrap();
         let seq = origin_seq.get();
@@ -1700,11 +1696,11 @@ mod tests {
         let segment_id = SegmentId::new(Uuid::from_bytes([4u8; 16]));
 
         txn.record_event(
-            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None, None,
+            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None,
         )
         .unwrap();
         txn.record_event(
-            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None, None,
+            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None,
         )
         .unwrap();
         txn.commit().unwrap();
@@ -1729,13 +1725,13 @@ mod tests {
         let other_sha = [8u8; 32];
 
         txn.record_event(
-            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None, None,
+            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None,
         )
         .unwrap();
 
         let err = txn
             .record_event(
-                &ns, &event_id, other_sha, None, segment_id, 128, 64, 1_700_000, txn_id, None, None,
+                &ns, &event_id, other_sha, None, segment_id, 128, 64, 1_700_000, txn_id, None,
             )
             .unwrap_err();
 

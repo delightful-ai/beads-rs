@@ -341,7 +341,6 @@ impl Daemon {
             now_ms,
             sequenced.event_body.txn_id,
             ctx.client_request_id,
-            request_sha256,
         )
         .map_err(wal_index_to_op)?;
         if let Some(client_request_id) = ctx.client_request_id {

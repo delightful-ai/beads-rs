@@ -1520,7 +1520,6 @@ impl Daemon {
                 event.body.event_time_ms,
                 event.body.txn_id,
                 event.body.client_request_id,
-                None,
             )
             .map_err(|err| wal_index_error_payload(&err))?;
 

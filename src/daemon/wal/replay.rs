@@ -402,7 +402,6 @@ fn index_record(
         header.event_time_ms,
         header.txn_id,
         header.client_request_id,
-        header.request_sha256,
     )?;
 
     if let (Some(client_request_id), Some(request_sha256)) =
