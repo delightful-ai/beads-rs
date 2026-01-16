@@ -926,6 +926,7 @@ fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &
                     let payload =
                         ErrorPayload::new(ErrorCode::SubscriberLagged, "subscriber lagged", true)
                             .with_details(error_details::SubscriberLaggedDetails {
+                                reason: None,
                                 max_queue_bytes: Some(subscriber_limits.max_bytes as u64),
                                 max_queue_events: Some(subscriber_limits.max_events as u64),
                             });

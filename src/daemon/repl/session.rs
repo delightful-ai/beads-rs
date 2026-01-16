@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::core::error::details::{
     EventIdDetails, FrameTooLargeDetails, HashMismatchDetails, InternalErrorDetails,
     InvalidRequestDetails, NamespacePolicyViolationDetails, NonCanonicalDetails,
-    PrevShaMismatchDetails, ReplicaIdCollisionDetails, StoreEpochMismatchDetails,
+    PrevShaMismatchDetails, ReplicaIdCollisionDetails, ReplRejectReason, StoreEpochMismatchDetails,
     SubscriberLaggedDetails, VersionIncompatibleDetails, WrongStoreDetails,
 };
 use crate::core::{
@@ -485,8 +485,8 @@ impl Session {
                     insert_want(&mut wants, namespace, origin, want_from);
                 }
                 IngestDecision::DuplicateNoop => {}
-                IngestDecision::Reject { code } => {
-                    return self.fail(repl_lagged_payload(code, &self.limits));
+                IngestDecision::Reject { reason } => {
+                    return self.fail(repl_lagged_payload(reason, &self.limits));
                 }
             }
         }
@@ -876,13 +876,24 @@ fn watermark_maps_from_state<K>(
     (map, heads)
 }
 
-fn repl_lagged_payload(reason: String, limits: &Limits) -> ErrorPayload {
-    ErrorPayload::new(ErrorCode::SubscriberLagged, reason, true).with_details(
+fn repl_lagged_payload(reason: ReplRejectReason, limits: &Limits) -> ErrorPayload {
+    let message = repl_reject_reason_message(&reason);
+    ErrorPayload::new(ErrorCode::SubscriberLagged, message, true).with_details(
         SubscriberLaggedDetails {
+            reason: Some(reason),
             max_queue_bytes: Some(limits.max_repl_gap_bytes as u64),
             max_queue_events: Some(limits.max_repl_gap_events as u64),
         },
     )
+}
+
+fn repl_reject_reason_message(reason: &ReplRejectReason) -> &'static str {
+    match reason {
+        ReplRejectReason::PrevUnknown => "prev_unknown",
+        ReplRejectReason::GapTimeout => "gap_timeout",
+        ReplRejectReason::GapBufferOverflow => "gap_buffer_overflow",
+        ReplRejectReason::GapBufferBytesOverflow => "gap_buffer_bytes_overflow",
+    }
 }
 
 fn wrong_store_payload(expected: StoreId, got: StoreId) -> ErrorPayload {
@@ -1471,6 +1482,28 @@ mod tests {
             .copied()
             .unwrap_or(Seq0::ZERO);
         assert_eq!(seq, Seq0::ZERO);
+    }
+
+    #[test]
+    fn repl_lagged_payload_includes_reason() {
+        let limits = Limits::default();
+        let payload = repl_lagged_payload(ReplRejectReason::GapTimeout, &limits);
+
+        assert_eq!(payload.code, ErrorCode::SubscriberLagged);
+        assert_eq!(payload.message, "gap_timeout");
+        let details = payload
+            .details_as::<SubscriberLaggedDetails>()
+            .unwrap()
+            .expect("lagged details");
+        assert_eq!(details.reason, Some(ReplRejectReason::GapTimeout));
+        assert_eq!(
+            details.max_queue_bytes,
+            Some(limits.max_repl_gap_bytes as u64)
+        );
+        assert_eq!(
+            details.max_queue_events,
+            Some(limits.max_repl_gap_events as u64)
+        );
     }
 
     #[test]
