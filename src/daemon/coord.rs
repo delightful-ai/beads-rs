@@ -373,11 +373,11 @@ impl Daemon {
     }
 
     pub fn next_sync_deadline(&mut self) -> Option<Instant> {
-        self.scheduler().next_deadline()
+        self.scheduler_mut().next_deadline()
     }
 
     pub fn next_checkpoint_deadline(&mut self) -> Option<Instant> {
-        self.checkpoint_scheduler().next_deadline()
+        self.checkpoint_scheduler_mut().next_deadline()
     }
 
     pub(crate) fn parse_mutation_meta(

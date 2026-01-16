@@ -527,6 +527,10 @@ impl Daemon {
         &self.checkpoint_scheduler
     }
 
+    pub(crate) fn checkpoint_scheduler_mut(&mut self) -> &mut CheckpointScheduler {
+        &mut self.checkpoint_scheduler
+    }
+
     pub(crate) fn checkpoint_group_snapshots(
         &self,
         store_id: StoreId,
