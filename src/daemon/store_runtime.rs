@@ -30,16 +30,12 @@ use crate::daemon::wal::{
     WalReplayError, catch_up_index, rebuild_index,
 };
 use crate::git::checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, CheckpointFileKind, CheckpointSnapshot, CheckpointSnapshotError,
+    CheckpointFileKind, CheckpointSnapshot, CheckpointSnapshotError,
     CheckpointSnapshotInput, build_snapshot, policy_hash, roster_hash, shard_for_bead,
     shard_for_dep, shard_for_tombstone, shard_path,
 };
 use crate::paths;
 
-const STORE_FORMAT_VERSION: u32 = 1;
-const WAL_FORMAT_VERSION: u32 = 2;
-const REPLICATION_PROTOCOL_VERSION: u32 = 1;
-const INDEX_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -96,6 +92,7 @@ impl StoreRuntime {
         let meta_path = paths::store_meta_path(store_id);
         let existing = read_store_meta_optional(&meta_path)?;
 
+        let expected_versions = StoreMetaVersions::current();
         let meta = match existing.as_ref() {
             Some(meta) => {
                 if meta.store_id() != store_id {
@@ -104,18 +101,18 @@ impl StoreRuntime {
                         got: meta.store_id(),
                     });
                 }
+                let got_versions = meta.versions();
+                if got_versions != expected_versions {
+                    return Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
+                        expected: expected_versions,
+                        got: got_versions,
+                    });
+                }
                 meta.clone()
             }
             None => {
                 let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
-                let versions = StoreMetaVersions::new(
-                    STORE_FORMAT_VERSION,
-                    WAL_FORMAT_VERSION,
-                    CHECKPOINT_FORMAT_VERSION,
-                    REPLICATION_PROTOCOL_VERSION,
-                    INDEX_SCHEMA_VERSION,
-                );
-                StoreMeta::new(identity, new_replica_id(), versions, now_ms)
+                StoreMeta::new(identity, new_replica_id(), expected_versions, now_ms)
             }
         };
 
@@ -479,6 +476,11 @@ pub enum StoreRuntimeError {
     },
     #[error("store meta store_id mismatch: expected {expected}, got {got}")]
     MetaMismatch { expected: StoreId, got: StoreId },
+    #[error("store meta versions unsupported: expected {expected:?}, got {got:?}")]
+    UnsupportedStoreMetaVersion {
+        expected: StoreMetaVersions,
+        got: StoreMetaVersions,
+    },
     #[error("store meta write failed at {path:?}: {source}")]
     MetaWrite {
         path: Box<std::path::PathBuf>,
@@ -937,13 +939,7 @@ mod tests {
 
     fn write_meta_for(store_id: StoreId, replica_id: ReplicaId, now_ms: u64) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
-        let versions = StoreMetaVersions::new(
-            STORE_FORMAT_VERSION,
-            WAL_FORMAT_VERSION,
-            CHECKPOINT_FORMAT_VERSION,
-            REPLICATION_PROTOCOL_VERSION,
-            INDEX_SCHEMA_VERSION,
-        );
+        let versions = StoreMetaVersions::current();
         let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
         write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
         meta
@@ -1044,6 +1040,43 @@ mod tests {
         assert!(matches!(
             result,
             Err(StoreRuntimeError::WatermarkInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn store_runtime_rejects_version_mismatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([30u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([31u8; 16]));
+        let now_ms = 1_700_000_000_000;
+
+        let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let mut versions = StoreMetaVersions::current();
+        versions.wal_format_version = versions.wal_format_version.saturating_add(1);
+        let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
+        write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let err = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .err()
+        .expect("expected version mismatch");
+
+        let expected = StoreMetaVersions::current();
+        assert!(matches!(
+            err,
+            StoreRuntimeError::UnsupportedStoreMetaVersion { expected: got_expected, got }
+                if got_expected == expected && got == versions
         ));
     }
 

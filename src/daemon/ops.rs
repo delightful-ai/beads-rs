@@ -591,6 +591,7 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
         }
         StoreRuntimeError::MetaParse { .. } => ErrorCode::Corruption,
         StoreRuntimeError::MetaMismatch { .. } => ErrorCode::WrongStore,
+        StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => ErrorCode::VersionIncompatible,
         StoreRuntimeError::NamespacePoliciesSymlink { .. }
         | StoreRuntimeError::ReplicaRosterSymlink { .. } => ErrorCode::PathSymlinkRejected,
         StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
@@ -663,9 +664,9 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
             }
         },
         StoreRuntimeError::MetaSymlink { .. } => Transience::Permanent,
-        StoreRuntimeError::MetaParse { .. } | StoreRuntimeError::MetaMismatch { .. } => {
-            Transience::Permanent
-        }
+        StoreRuntimeError::MetaParse { .. }
+        | StoreRuntimeError::MetaMismatch { .. }
+        | StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => Transience::Permanent,
         StoreRuntimeError::MetaRead { source, .. }
         | StoreRuntimeError::MetaWrite { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {

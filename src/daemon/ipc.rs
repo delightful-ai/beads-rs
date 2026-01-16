@@ -939,6 +939,14 @@ fn store_runtime_error_payload(
                 },
             )
         }
+        StoreRuntimeError::UnsupportedStoreMetaVersion { expected, got } => {
+            ErrorPayload::new(ErrorCode::VersionIncompatible, message, retryable).with_details(
+                error_details::StoreMetaVersionMismatchDetails {
+                    expected: *expected,
+                    got: *got,
+                },
+            )
+        }
         StoreRuntimeError::MetaWrite { path, source } => match source.kind() {
             std::io::ErrorKind::PermissionDenied => {
                 ErrorPayload::new(ErrorCode::PermissionDenied, message, retryable).with_details(

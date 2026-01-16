@@ -547,7 +547,7 @@ pub mod details {
 
     use super::super::{
         ActorId, Applied, BeadId, ClientRequestId, DurabilityClass, NamespaceId, ReplicaId,
-        SegmentId, StoreId, Watermarks,
+        SegmentId, StoreId, StoreMetaVersions, Watermarks,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -642,6 +642,12 @@ pub mod details {
         pub store_id: StoreId,
         pub expected_epoch: u64,
         pub got_epoch: u64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct StoreMetaVersionMismatchDetails {
+        pub expected: StoreMetaVersions,
+        pub got: StoreMetaVersions,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
