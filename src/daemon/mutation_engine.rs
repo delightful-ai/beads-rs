@@ -513,7 +513,7 @@ impl MutationEngine {
                 logical: write_stamp.counter,
             },
             event_time_ms: write_stamp.wall_ms,
-            txn_id: txn_id_for_stamp(&store, &write_stamp),
+            txn_id: txn_id_for_stamp(&store, &stamp),
             request_sha256,
             client_request_id,
         })
@@ -1843,9 +1843,14 @@ fn estimated_record_bytes(payload_len: usize, has_client_request_id: bool) -> us
     len
 }
 
-fn txn_id_for_stamp(store: &StoreIdentity, stamp: &crate::core::WriteStamp) -> TxnId {
+fn txn_id_for_stamp(store: &StoreIdentity, stamp: &crate::core::Stamp) -> TxnId {
     let namespace = store.store_id.as_uuid();
-    let name = format!("{}:{}", stamp.wall_ms, stamp.counter);
+    let name = format!(
+        "{}:{}:{}",
+        stamp.by.as_str(),
+        stamp.at.wall_ms,
+        stamp.at.counter
+    );
     TxnId::new(Uuid::new_v5(&namespace, name.as_bytes()))
 }
 
