@@ -93,3 +93,41 @@ pub enum ReplErrorDetails {
     MaintenanceMode(MaintenanceModeDetails),
     Corruption(CorruptionDetails),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ReplError, ReplErrorDetails};
+    use crate::core::error::details::WrongStoreDetails;
+    use crate::core::{ErrorCode, StoreId};
+    use uuid::Uuid;
+
+    #[test]
+    fn to_payload_preserves_basic_fields() {
+        let error = ReplError::new(ErrorCode::Internal, "boom", false);
+        let payload = error.to_payload();
+        assert_eq!(payload.code, ErrorCode::Internal);
+        assert_eq!(payload.message, "boom");
+        assert!(!payload.retryable);
+        assert!(payload.details.is_none());
+    }
+
+    #[test]
+    fn to_payload_carries_details() {
+        let expected = StoreId::new(Uuid::from_bytes([1u8; 16]));
+        let got = StoreId::new(Uuid::from_bytes([2u8; 16]));
+        let error = ReplError::new(ErrorCode::WrongStore, "wrong store", false).with_details(
+            ReplErrorDetails::WrongStore(WrongStoreDetails {
+                expected_store_id: expected,
+                got_store_id: got,
+            }),
+        );
+        let payload = error.to_payload();
+        assert_eq!(payload.code, ErrorCode::WrongStore);
+        let details = payload
+            .details_as::<WrongStoreDetails>()
+            .unwrap()
+            .expect("details");
+        assert_eq!(details.expected_store_id, expected);
+        assert_eq!(details.got_store_id, got);
+    }
+}
