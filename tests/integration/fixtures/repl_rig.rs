@@ -108,7 +108,7 @@ impl ReplRig {
                 &peers,
                 options.dead_ms,
             )
-                .expect("write user replication config");
+            .expect("write user replication config");
         }
 
         for node in &nodes {
@@ -424,7 +424,8 @@ fn read_store_meta(data_dir: &Path, store_id_override: Option<StoreId>) -> Store
     let meta: StoreMeta = serde_json::from_str(&raw).expect("parse meta");
     if let Some(expected) = store_id_override {
         assert_eq!(
-            meta.store_id(), expected,
+            meta.store_id(),
+            expected,
             "store id mismatch: expected {expected} got {}",
             meta.store_id()
         );

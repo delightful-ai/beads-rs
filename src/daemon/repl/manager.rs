@@ -525,9 +525,7 @@ where
                 let should_retry = last_hello_at_ms
                     .map(|last| now_ms.saturating_sub(last) >= retry_after_ms)
                     .unwrap_or(true);
-                if should_retry
-                    && let Some(action) = session.resend_handshake(&store, now_ms)
-                {
+                if should_retry && let Some(action) = session.resend_handshake(&store, now_ms) {
                     apply_action(&mut writer, &session, action, &mut keepalive)?;
                     last_hello_at_ms = Some(now_ms);
                 }

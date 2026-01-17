@@ -1,9 +1,20 @@
 #![cfg(feature = "slow-tests")]
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
+use crate::fixtures::receipt;
 use crate::fixtures::repl_rig::{FaultProfile, ReplRig, ReplRigOptions};
-use beads_rs::core::NamespaceId;
+use beads_rs::api::QueryResult;
+use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
+use beads_rs::core::{
+    BeadType, DurabilityClass, DurabilityOutcome, HeadStatus, NamespaceId, Priority,
+    ProtocolErrorCode, Seq0,
+};
+use beads_rs::daemon::ipc::{
+    IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+};
+use beads_rs::daemon::ops::OpResult;
 
 #[test]
 fn repl_daemon_to_daemon_roundtrip() {
@@ -124,4 +135,208 @@ fn repl_daemon_crash_restart_roundtrip() {
     }
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+}
+
+#[test]
+fn repl_daemon_replicated_fsync_receipt() {
+    let mut options = ReplRigOptions::default();
+    options.seed = 31;
+
+    let rig = ReplRig::new(3, options);
+
+    let (issue_id, receipt) =
+        create_issue_with_durability(&rig, 0, "durability-ok", NonZeroU32::new(2).unwrap());
+
+    let requested = receipt::requested_durability(&receipt);
+    assert_eq!(
+        requested,
+        DurabilityClass::ReplicatedFsync {
+            k: NonZeroU32::new(2).unwrap(),
+        }
+    );
+    assert!(matches!(
+        receipt.outcome,
+        DurabilityOutcome::Achieved { .. }
+    ));
+    let replicated = receipt
+        .durability_proof
+        .replicated
+        .expect("replicated proof");
+    assert_eq!(replicated.k, NonZeroU32::new(2).unwrap());
+    let mut acked_by = replicated.acked_by.clone();
+    acked_by.sort();
+    let mut expected = vec![rig.node(1).replica_id(), rig.node(2).replica_id()];
+    expected.sort();
+    assert_eq!(acked_by, expected, "acked_by mismatch");
+
+    let response = show_issue_with_read(
+        &rig,
+        1,
+        &issue_id,
+        ReadConsistency {
+            require_min_seen: Some(receipt.min_seen.clone()),
+            wait_timeout_ms: Some(30_000),
+            ..Default::default()
+        },
+    );
+    match response {
+        Response::Ok {
+            ok: ResponsePayload::Query(QueryResult::Issue(issue)),
+        } => assert_eq!(issue.id, issue_id),
+        other => panic!("unexpected show response: {other:?}"),
+    }
+
+    let mut impossible = receipt.min_seen.clone();
+    let event_id = receipt.event_ids.first().expect("event id");
+    let next_seq = event_id.origin_seq.get() + 1;
+    impossible
+        .observe_at_least(
+            &event_id.namespace,
+            &event_id.origin_replica_id,
+            Seq0::new(next_seq),
+            HeadStatus::Unknown,
+        )
+        .expect("advance min_seen");
+
+    let response = show_issue_with_read(
+        &rig,
+        1,
+        &issue_id,
+        ReadConsistency {
+            require_min_seen: Some(impossible),
+            wait_timeout_ms: Some(0),
+            ..Default::default()
+        },
+    );
+    match response {
+        Response::Err { err } => {
+            assert_eq!(
+                err.code,
+                ProtocolErrorCode::RequireMinSeenUnsatisfied.into()
+            );
+            let details = err
+                .details_as::<RequireMinSeenUnsatisfiedDetails>()
+                .expect("require_min_seen details");
+            let details = details.expect("require_min_seen details missing");
+            let required = details
+                .required
+                .get(&event_id.namespace, &event_id.origin_replica_id)
+                .expect("required watermark");
+            assert_eq!(required.seq().get(), next_seq);
+        }
+        other => panic!("unexpected require_min_seen response: {other:?}"),
+    }
+}
+
+#[test]
+fn repl_daemon_replicated_fsync_timeout_receipt() {
+    let mut options = ReplRigOptions::default();
+    options.seed = 37;
+    options.dead_ms = Some(1_500);
+
+    let rig = ReplRig::new(3, options);
+    rig.crash_node(2);
+
+    let response = create_issue_with_durability_result(
+        &rig,
+        0,
+        "durability-timeout",
+        NonZeroU32::new(2).unwrap(),
+    );
+
+    match response {
+        Response::Err { err } => {
+            assert_eq!(err.code, ProtocolErrorCode::DurabilityTimeout.into());
+            let details = err
+                .details_as::<DurabilityTimeoutDetails>()
+                .expect("durability timeout details");
+            let details = details.expect("durability timeout details missing");
+            assert_eq!(
+                details.requested,
+                DurabilityClass::ReplicatedFsync {
+                    k: NonZeroU32::new(2).unwrap(),
+                }
+            );
+            let pending = details.pending_replica_ids.expect("pending replica ids");
+            assert!(
+                pending.contains(&rig.node(2).replica_id()),
+                "pending replicas did not include crashed peer"
+            );
+
+            let receipt = err
+                .receipt_as::<beads_rs::DurabilityReceipt>()
+                .expect("receipt decode");
+            let receipt = receipt.expect("receipt missing");
+            assert!(matches!(receipt.outcome, DurabilityOutcome::Pending { .. }));
+        }
+        other => panic!("unexpected durability timeout response: {other:?}"),
+    }
+}
+
+fn create_issue_with_durability(
+    rig: &ReplRig,
+    node_idx: usize,
+    title: &str,
+    k: NonZeroU32,
+) -> (String, beads_rs::DurabilityReceipt) {
+    let response = create_issue_with_durability_result(rig, node_idx, title, k);
+    match response {
+        Response::Ok {
+            ok: ResponsePayload::Op(op),
+        } => {
+            let issue_id = match op.result {
+                OpResult::Created { id } => id.to_string(),
+                other => panic!("unexpected op result: {other:?}"),
+            };
+            (issue_id, op.receipt)
+        }
+        other => panic!("unexpected create response: {other:?}"),
+    }
+}
+
+fn create_issue_with_durability_result(
+    rig: &ReplRig,
+    node_idx: usize,
+    title: &str,
+    k: NonZeroU32,
+) -> Response {
+    let node = rig.node(node_idx);
+    let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
+    let request = Request::Create {
+        repo: node.repo_dir().to_path_buf(),
+        id: None,
+        parent: None,
+        title: title.to_string(),
+        bead_type: BeadType::Task,
+        priority: Priority::MEDIUM,
+        description: None,
+        design: None,
+        acceptance_criteria: None,
+        assignee: None,
+        external_ref: None,
+        estimated_minutes: None,
+        labels: Vec::new(),
+        dependencies: Vec::new(),
+        meta: MutationMeta {
+            durability: Some(format!("replicated_fsync({})", k)),
+            ..Default::default()
+        },
+    };
+    client.send_request(&request).expect("create response")
+}
+
+fn show_issue_with_read(
+    rig: &ReplRig,
+    node_idx: usize,
+    issue_id: &str,
+    read: ReadConsistency,
+) -> Response {
+    let node = rig.node(node_idx);
+    let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
+    let request = Request::Show {
+        repo: node.repo_dir().to_path_buf(),
+        id: issue_id.to_string(),
+        read,
+    };
+    client.send_request(&request).expect("show response")
 }
