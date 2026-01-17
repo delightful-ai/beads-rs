@@ -137,37 +137,55 @@ fn main() {
 
     let listener = TcpListener::bind(&args.listen)
         .unwrap_or_else(|err| panic!("listen {} failed: {err}", args.listen));
-    let (client, _) = listener.accept().expect("accept client");
-    let upstream = connect_with_retry(&args.upstream, Duration::from_secs(5))
-        .unwrap_or_else(|err| panic!("connect upstream {} failed: {err}", args.upstream));
+    let mut connection_idx = 0u64;
 
-    let _ = client.set_nodelay(true);
-    let _ = upstream.set_nodelay(true);
+    loop {
+        let (client, _) = match listener.accept() {
+            Ok(conn) => conn,
+            Err(err) => {
+                eprintln!("accept client failed: {err}");
+                break;
+            }
+        };
+        let upstream = match connect_with_retry(&args.upstream, Duration::from_secs(5)) {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("connect upstream {} failed: {err}", args.upstream);
+                continue;
+            }
+        };
 
-    let client_read = client.try_clone().expect("clone client");
-    let client_write = client;
-    let upstream_read = upstream.try_clone().expect("clone upstream");
-    let upstream_write = upstream;
+        let _ = client.set_nodelay(true);
+        let _ = upstream.set_nodelay(true);
 
-    let a_to_b = spawn_direction(
-        "a->b",
-        client_read,
-        upstream_write,
-        profile,
-        seed ^ 0xA5A5_A5A5_A5A5_A5A5,
-        max_frame_bytes,
-    );
-    let b_to_a = spawn_direction(
-        "b->a",
-        upstream_read,
-        client_write,
-        profile,
-        seed ^ 0x5A5A_5A5A_5A5A_5A5A,
-        max_frame_bytes,
-    );
+        let client_read = client.try_clone().expect("clone client");
+        let client_write = client;
+        let upstream_read = upstream.try_clone().expect("clone upstream");
+        let upstream_write = upstream;
 
-    let _ = a_to_b.join();
-    let _ = b_to_a.join();
+        let conn_seed = seed ^ connection_idx.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        connection_idx = connection_idx.wrapping_add(1);
+
+        let a_to_b = spawn_direction(
+            "a->b",
+            client_read,
+            upstream_write,
+            profile,
+            conn_seed ^ 0xA5A5_A5A5_A5A5_A5A5,
+            max_frame_bytes,
+        );
+        let b_to_a = spawn_direction(
+            "b->a",
+            upstream_read,
+            client_write,
+            profile,
+            conn_seed ^ 0x5A5A_5A5A_5A5A_5A5A,
+            max_frame_bytes,
+        );
+
+        let _ = a_to_b.join();
+        let _ = b_to_a.join();
+    }
 }
 
 fn connect_with_retry(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
