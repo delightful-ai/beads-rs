@@ -132,6 +132,7 @@ pub struct NodeOptions {
     pub limits: Limits,
     pub sync_mode: SegmentSyncMode,
     pub wal_index: WalIndexBackend,
+    pub wal_backend: WalBackend,
 }
 
 impl Default for NodeOptions {
@@ -140,6 +141,7 @@ impl Default for NodeOptions {
             limits: Limits::default(),
             sync_mode: SegmentSyncMode::None,
             wal_index: WalIndexBackend::Sqlite,
+            wal_backend: WalBackend::Disk,
         }
     }
 }
@@ -148,6 +150,7 @@ impl NodeOptions {
     pub fn in_memory() -> Self {
         Self {
             wal_index: WalIndexBackend::Memory,
+            wal_backend: WalBackend::Memory,
             ..Self::default()
         }
     }
@@ -156,6 +159,12 @@ impl NodeOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalIndexBackend {
     Sqlite,
+    Memory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalBackend {
+    Disk,
     Memory,
 }
 
@@ -221,11 +230,18 @@ impl TestNode {
             if let Some(runtime) = daemon.store_runtime_by_id_mut(store_id) {
                 let config =
                     SegmentConfig::from_limits(&options.limits).with_sync_mode(options.sync_mode);
-                runtime.event_wal = EventWal::new_with_config(
-                    paths::store_dir(store_id),
-                    runtime.meta.clone(),
-                    config,
-                );
+                runtime.event_wal = match options.wal_backend {
+                    WalBackend::Disk => EventWal::new_with_config(
+                        paths::store_dir(store_id),
+                        runtime.meta.clone(),
+                        config,
+                    ),
+                    WalBackend::Memory => EventWal::new_memory_with_config(
+                        paths::store_dir(store_id),
+                        runtime.meta.clone(),
+                        config,
+                    ),
+                };
                 if options.wal_index == WalIndexBackend::Memory {
                     runtime.wal_index = Arc::new(MemoryWalIndex::new());
                     let store_dir = paths::store_dir(store_id);
@@ -957,6 +973,28 @@ impl Drop for TestDir {
             return;
         }
         let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn in_memory_node_skips_disk_wal_dir() {
+        let world = TestWorld::new(1_700_000_000_000);
+        let store_id = StoreId::new(Uuid::new_v4());
+        let node = world.node("mem-wal", store_id, NodeOptions::in_memory());
+
+        let _ = node.create_issue("no wal files");
+        node.with_daemon(|_| {
+            let wal_dir = paths::store_dir(store_id).join("wal");
+            assert!(
+                !wal_dir.exists(),
+                "expected no wal directory on disk for in-memory WAL"
+            );
+        });
     }
 }
 
