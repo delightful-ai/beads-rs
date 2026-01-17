@@ -255,6 +255,50 @@ fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
 }
 
 #[test]
+fn repl_daemon_stress_wal_rotation_roundtrip() {
+    let mut options = ReplRigOptions::default();
+    options.seed = 43;
+    options.wal_segment_max_bytes = Some(8 * 1024);
+
+    let rig = ReplRig::new(3, options);
+
+    let mut ids = Vec::new();
+    for node_idx in 0..3 {
+        for seq in 0..40 {
+            let title = format!("stress-{node_idx}-{seq}-{}", "x".repeat(64));
+            ids.push(rig.create_issue(node_idx, &title));
+        }
+    }
+
+    for node_idx in 0..3 {
+        for id in &ids {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(60));
+        }
+    }
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
+
+    for node_idx in 0..3 {
+        let status = rig.admin_status(node_idx);
+        let wal = status
+            .wal
+            .iter()
+            .find(|entry| entry.namespace == NamespaceId::core())
+            .expect("core namespace wal");
+        assert!(
+            wal.segment_count > 1,
+            "expected WAL rotation on node {node_idx}, saw {} segments",
+            wal.segment_count
+        );
+    }
+
+    let tail_id = rig.create_issue(1, "stress-tail");
+    for node_idx in 0..3 {
+        rig.wait_for_show(node_idx, &tail_id, Duration::from_secs(60));
+    }
+}
+
+#[test]
 fn repl_daemon_replicated_fsync_receipt() {
     let mut options = ReplRigOptions::default();
     options.seed = 31;
