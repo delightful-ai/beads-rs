@@ -27,6 +27,7 @@ pub struct ReplRigOptions {
     pub fault_profile: Option<FaultProfile>,
     pub seed: u64,
     pub use_store_id_override: bool,
+    pub dead_ms: Option<u64>,
 }
 
 impl Default for ReplRigOptions {
@@ -35,6 +36,7 @@ impl Default for ReplRigOptions {
             fault_profile: None,
             seed: 42,
             use_store_id_override: true,
+            dead_ms: None,
         }
     }
 }
@@ -100,7 +102,12 @@ impl ReplRig {
             }
             write_replication_config(&node.repo_dir, &node.listen_addr, &peers)
                 .expect("write replication config");
-            write_replication_user_config(&node.config_dir, &node.listen_addr, &peers)
+            write_replication_user_config(
+                &node.config_dir,
+                &node.listen_addr,
+                &peers,
+                options.dead_ms,
+            )
                 .expect("write user replication config");
         }
 
@@ -468,6 +475,7 @@ fn write_replication_user_config(
     config_dir: &Path,
     listen_addr: &str,
     peers: &[(ReplicaId, String)],
+    dead_ms: Option<u64>,
 ) -> Result<(), String> {
     let mut config = Config::default();
     config.replication.listen_addr = listen_addr.to_string();
@@ -483,6 +491,9 @@ fn write_replication_user_config(
             allowed_namespaces: Some(vec![NamespaceId::core()]),
         })
         .collect();
+    if let Some(dead_ms) = dead_ms {
+        config.limits.dead_ms = dead_ms;
+    }
 
     let config_path = config_dir.join("beads-rs").join("config.toml");
     beads_rs::config::write_config(&config_path, &config)
