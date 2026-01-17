@@ -2,12 +2,14 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use rusqlite::Connection;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -15,9 +17,11 @@ use beads_rs::StoreId;
 use beads_rs::api::{AdminStatusOutput, QueryResult};
 use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_rs::core::{
-    NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, StoreMeta, Watermarks,
+    NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch, StoreMeta,
+    Watermarks,
 };
 use beads_rs::daemon::ipc::{IpcClient, ReadConsistency, Request, Response, ResponsePayload};
+use beads_rs::daemon::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy};
@@ -167,6 +171,64 @@ impl ReplRig {
     pub fn restart_node(&self, idx: usize) {
         self.nodes[idx].unlock_store(self.store_id);
         self.nodes[idx].start_daemon();
+    }
+
+    pub fn shutdown_node(&self, idx: usize) {
+        shutdown_daemon(&self.nodes[idx].runtime_dir);
+    }
+
+    pub fn reload_replication(&self, idx: usize) {
+        self.nodes[idx].reload_replication();
+    }
+
+    pub fn overwrite_roster(&self, entries: Vec<ReplicaEntry>) {
+        for node in &self.nodes {
+            write_replica_roster(&node.data_dir, self.store_id, &entries)
+                .expect("write replica roster");
+        }
+    }
+
+    pub fn bump_store_epoch(&self) -> StoreEpoch {
+        let base = read_store_meta(&self.nodes[0].data_dir, Some(self.store_id));
+        for node in &self.nodes {
+            let meta = read_store_meta(&node.data_dir, Some(self.store_id));
+            assert_eq!(
+                meta.store_epoch(),
+                base.store_epoch(),
+                "store_epoch mismatch before bump"
+            );
+        }
+        let next_epoch = StoreEpoch::new(base.store_epoch().get() + 1);
+        for node in &self.nodes {
+            bump_store_epoch_on_disk(&node.data_dir, self.store_id, next_epoch)
+                .expect("bump store epoch");
+        }
+        next_epoch
+    }
+
+    pub fn wait_for_durability_eligible(
+        &self,
+        idx: usize,
+        peer: ReplicaId,
+        expected: bool,
+        timeout: Duration,
+    ) {
+        let ok = poll_until(timeout, || {
+            let status = self.nodes[idx].admin_status();
+            status
+                .replica_liveness
+                .iter()
+                .find(|row| row.replica_id == peer)
+                .map(|row| row.durability_eligible == expected)
+                .unwrap_or(false)
+        });
+        if ok {
+            return;
+        }
+        let status = self.nodes[idx].admin_status();
+        panic!(
+            "durability_eligible did not become {expected} for {peer} on node {idx}: {status:?}"
+        );
     }
 
     pub fn assert_converged(&self, namespaces: &[NamespaceId], timeout: Duration) {
@@ -376,6 +438,22 @@ impl Node {
             Response::Err { err } => panic!("admin status error: {err:?}"),
         }
     }
+
+    pub fn reload_replication(&self) {
+        let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
+        let request = Request::AdminReloadReplication {
+            repo: self.repo_dir.clone(),
+        };
+        let response = client
+            .send_request_no_autostart(&request)
+            .expect("admin reload replication");
+        match response {
+            Response::Ok {
+                ok: ResponsePayload::Query(QueryResult::AdminReloadReplication(_)),
+            } => {}
+            other => panic!("unexpected admin reload replication response: {other:?}"),
+        }
+    }
 }
 
 struct NodeSeed {
@@ -539,6 +617,147 @@ fn write_replica_roster(
     let store_dir = data_dir.join("stores").join(store_id.to_string());
     fs::write(store_dir.join("replicas.toml"), raw)
         .map_err(|err| format!("write replicas.toml failed: {err}"))?;
+    Ok(())
+}
+
+fn bump_store_epoch_on_disk(
+    data_dir: &Path,
+    store_id: StoreId,
+    store_epoch: StoreEpoch,
+) -> Result<(), String> {
+    let store_dir = data_dir.join("stores").join(store_id.to_string());
+    update_store_meta_epoch(&store_dir, store_id, store_epoch)?;
+    update_wal_index_epoch(&store_dir, store_epoch)?;
+    update_wal_segments_epoch(&store_dir, store_id, store_epoch)?;
+    Ok(())
+}
+
+fn update_store_meta_epoch(
+    store_dir: &Path,
+    store_id: StoreId,
+    store_epoch: StoreEpoch,
+) -> Result<(), String> {
+    let meta_path = store_dir.join("meta.json");
+    let bytes = fs::read(&meta_path).map_err(|err| format!("read meta.json failed: {err}"))?;
+    let mut meta: StoreMeta =
+        serde_json::from_slice(&bytes).map_err(|err| format!("parse meta.json failed: {err}"))?;
+    if meta.store_id() != store_id {
+        return Err(format!(
+            "store id mismatch in meta.json: expected {store_id} got {}",
+            meta.store_id()
+        ));
+    }
+    meta.identity.store_epoch = store_epoch;
+    let bytes =
+        serde_json::to_vec(&meta).map_err(|err| format!("serialize meta.json failed: {err}"))?;
+    fs::write(&meta_path, bytes).map_err(|err| format!("write meta.json failed: {err}"))?;
+    Ok(())
+}
+
+fn update_wal_index_epoch(store_dir: &Path, store_epoch: StoreEpoch) -> Result<(), String> {
+    let index_path = store_dir.join("index").join("wal.sqlite");
+    if !index_path.exists() {
+        return Ok(());
+    }
+    let conn =
+        Connection::open(&index_path).map_err(|err| format!("open wal.sqlite failed: {err}"))?;
+    let updated = conn
+        .execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'store_epoch'",
+            [store_epoch.get().to_string()],
+        )
+        .map_err(|err| format!("update wal.sqlite store_epoch failed: {err}"))?;
+    if updated == 0 {
+        return Err(format!(
+            "wal.sqlite missing store_epoch meta at {index_path:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn update_wal_segments_epoch(
+    store_dir: &Path,
+    store_id: StoreId,
+    store_epoch: StoreEpoch,
+) -> Result<(), String> {
+    let wal_dir = store_dir.join("wal");
+    if !wal_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&wal_dir).map_err(|err| format!("read wal dir failed: {err}"))? {
+        let entry = entry.map_err(|err| format!("read wal dir entry failed: {err}"))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        for segment in
+            fs::read_dir(&path).map_err(|err| format!("read wal namespace dir failed: {err}"))?
+        {
+            let segment = segment.map_err(|err| format!("read wal segment entry failed: {err}"))?;
+            let segment_path = segment.path();
+            if !segment_path.is_file() {
+                continue;
+            }
+            if segment_path.extension().and_then(|ext| ext.to_str()) != Some("wal") {
+                continue;
+            }
+            rewrite_segment_epoch(&segment_path, store_id, store_epoch)?;
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_segment_epoch(
+    path: &Path,
+    store_id: StoreId,
+    store_epoch: StoreEpoch,
+) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|err| format!("open segment failed: {err}"))?;
+    let mut prefix = [0u8; SEGMENT_HEADER_PREFIX_LEN];
+    file.read_exact(&mut prefix)
+        .map_err(|err| format!("read segment header prefix failed: {err}"))?;
+    let header_len = u32::from_le_bytes([
+        prefix[SEGMENT_HEADER_PREFIX_LEN - 4],
+        prefix[SEGMENT_HEADER_PREFIX_LEN - 3],
+        prefix[SEGMENT_HEADER_PREFIX_LEN - 2],
+        prefix[SEGMENT_HEADER_PREFIX_LEN - 1],
+    ]) as usize;
+    if header_len < SEGMENT_HEADER_PREFIX_LEN {
+        return Err(format!(
+            "segment header length too small ({header_len}) at {path:?}"
+        ));
+    }
+    let mut header_bytes = vec![0u8; header_len];
+    file.seek(SeekFrom::Start(0))
+        .map_err(|err| format!("seek segment header failed: {err}"))?;
+    file.read_exact(&mut header_bytes)
+        .map_err(|err| format!("read segment header failed: {err}"))?;
+    let mut header = SegmentHeader::decode(&header_bytes)
+        .map_err(|err| format!("decode segment header failed: {err}"))?;
+    if header.store_id != store_id {
+        return Err(format!(
+            "segment store id mismatch at {path:?}: expected {store_id} got {}",
+            header.store_id
+        ));
+    }
+    header.store_epoch = store_epoch;
+    let encoded = header
+        .encode()
+        .map_err(|err| format!("encode segment header failed: {err}"))?;
+    if encoded.len() != header_len {
+        return Err(format!(
+            "segment header length mismatch at {path:?}: expected {header_len} got {}",
+            encoded.len()
+        ));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|err| format!("seek segment header for write failed: {err}"))?;
+    file.write_all(&encoded)
+        .map_err(|err| format!("write segment header failed: {err}"))?;
     Ok(())
 }
 
