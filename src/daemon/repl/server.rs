@@ -378,7 +378,7 @@ where
     config.offered_namespaces = eligible;
 
     let peer_replica_id = hello.sender_replica_id;
-    tracing::Span::current().record("peer_replica_id", &tracing::field::display(peer_replica_id));
+    tracing::Span::current().record("peer_replica_id", tracing::field::display(peer_replica_id));
     let requested_namespaces = hello.requested_namespaces.clone();
     let offered_namespaces = hello.offered_namespaces.clone();
     let mut session = Session::new(SessionRole::Inbound, config, limits.clone(), admission);
