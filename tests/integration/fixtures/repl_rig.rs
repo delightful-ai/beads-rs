@@ -398,7 +398,7 @@ fn link_seed(seed: u64, from: usize, to: usize) -> u64 {
     seed ^ ((from as u64) << 32) ^ (to as u64) ^ 0x9E37_79B9_7F4A_7C15
 }
 
-fn watermarks_equal_for_namespace<K>(
+fn watermarks_equal_for_namespace<K: PartialEq>(
     left: &Watermarks<K>,
     right: &Watermarks<K>,
     namespace: &NamespaceId,
