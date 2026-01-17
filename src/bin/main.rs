@@ -1,7 +1,4 @@
-use beads_rs::cli;
-use tracing::metadata::LevelFilter;
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::{EnvFilter, Registry};
+use beads_rs::{cli, config, telemetry};
 
 fn main() {
     let cli = cli::parse_from(std::env::args_os());
@@ -13,7 +10,7 @@ fn main() {
         unsafe { std::env::set_var("BD_ACTOR", actor) };
     }
 
-    init_tracing(cli.verbose);
+    let _telemetry_guard = init_tracing(cli.verbose);
 
     if let Err(e) = cli::run(cli) {
         tracing::error!("error: {}", e);
@@ -21,19 +18,16 @@ fn main() {
     }
 }
 
-fn init_tracing(verbose: u8) {
-    let level = match verbose {
-        0 => LevelFilter::ERROR,
-        1 => LevelFilter::INFO,
-        _ => LevelFilter::DEBUG,
+fn init_tracing(verbose: u8) -> telemetry::TelemetryGuard {
+    let cfg = match config::load() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("config load failed, using defaults: {err}");
+            let mut cfg = config::Config::default();
+            config::apply_env_overrides(&mut cfg);
+            cfg
+        }
     };
-    Registry::default()
-        .with(tracing_tree::HierarchicalLayer::new(2))
-        .with(
-            EnvFilter::builder()
-                .with_default_directive(level.into())
-                .with_env_var("LOG")
-                .from_env_lossy(),
-        )
-        .init();
+    let telemetry_cfg = telemetry::TelemetryConfig::new(verbose, cfg.logging);
+    telemetry::init(telemetry_cfg)
 }

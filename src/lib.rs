@@ -12,6 +12,7 @@ pub mod git;
 pub mod migrate;
 pub mod paths;
 pub mod repo;
+pub mod telemetry;
 #[cfg(feature = "test-harness")]
 pub mod test_harness;
 pub mod upgrade;

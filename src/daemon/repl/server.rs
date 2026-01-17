@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crossbeam::channel::Sender;
 use thiserror::Error;
+use tracing::field;
 
 use crate::core::error::details::{
     BootstrapRequiredDetails, SnapshotRangeReason, UnknownReplicaDetails,
@@ -227,6 +228,16 @@ fn run_accept_loop<S>(listener: TcpListener, runtime: ServerRuntime<S>)
 where
     S: SessionStore + Send + 'static,
 {
+    let local_addr = listener.local_addr().ok();
+    let span = tracing::info_span!(
+        "repl_accept_loop",
+        store_id = %runtime.local_store.store_id,
+        store_epoch = runtime.local_store.store_epoch.get(),
+        local_replica_id = %runtime.local_replica_id,
+        listen_addr = ?local_addr
+    );
+    let _guard = span.enter();
+
     if let Err(err) = listener.set_nonblocking(true) {
         tracing::error!("replication server failed to set nonblocking: {err}");
         return;
@@ -283,6 +294,18 @@ fn run_inbound_session<S>(
 where
     S: SessionStore + Send + 'static,
 {
+    let peer_addr = stream.peer_addr().ok();
+    let span = tracing::info_span!(
+        "repl_session",
+        direction = "inbound",
+        store_id = %runtime.local_store.store_id,
+        store_epoch = runtime.local_store.store_epoch.get(),
+        local_replica_id = %runtime.local_replica_id,
+        peer_replica_id = field::Empty,
+        peer_addr = ?peer_addr
+    );
+    let _span_guard = span.enter();
+
     let mut store = runtime.store.clone();
     let admission = runtime.admission.clone();
     let broadcaster = runtime.broadcaster.clone();
@@ -355,6 +378,7 @@ where
     config.offered_namespaces = eligible;
 
     let peer_replica_id = hello.sender_replica_id;
+    tracing::Span::current().record("peer_replica_id", &tracing::field::display(peer_replica_id));
     let requested_namespaces = hello.requested_namespaces.clone();
     let offered_namespaces = hello.offered_namespaces.clone();
     let mut session = Session::new(SessionRole::Inbound, config, limits.clone(), admission);

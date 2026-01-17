@@ -11,5 +11,7 @@ pub use load::{
 pub use merge::{apply_env_overrides, merge_layers};
 pub use schema::{
     CheckpointGroupConfig, CheckpointGroupConfigOverride, Config, ConfigLayer, DefaultsConfig,
-    LimitsOverride, ReplicationConfig, ReplicationConfigOverride, ReplicationPeerConfig,
+    FileLoggingConfig, FileLoggingConfigOverride, LimitsOverride, LogFormat, LogRotation,
+    LoggingConfig, LoggingConfigOverride, ReplicationConfig, ReplicationConfigOverride,
+    ReplicationPeerConfig,
 };

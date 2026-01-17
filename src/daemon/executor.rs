@@ -237,6 +237,9 @@ impl Daemon {
 
         let span = tracing::info_span!(
             "mutation",
+            store_id = %store.store_id,
+            store_epoch = store.store_epoch.get(),
+            durability = ?durability,
             txn_id = %sequenced.event_body.txn_id,
             client_request_id = ?ctx.client_request_id,
             namespace = %namespace,

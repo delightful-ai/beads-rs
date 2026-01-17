@@ -41,6 +41,19 @@ pub(crate) fn data_dir() -> PathBuf {
         .join("beads-rs")
 }
 
+/// Base directory for log files.
+///
+/// Uses `BD_LOG_DIR` if set, otherwise `<data_dir>/logs`.
+pub(crate) fn log_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("BD_LOG_DIR")
+        && !dir.trim().is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+
+    data_dir().join("logs")
+}
+
 #[doc(hidden)]
 pub struct DataDirOverride {
     prev: Option<PathBuf>,

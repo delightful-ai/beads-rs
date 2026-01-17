@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,8 @@ pub struct Config {
     pub auto_upgrade: bool,
     #[serde(default)]
     pub defaults: DefaultsConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
     pub limits: Limits,
     pub replication: ReplicationConfig,
     #[serde(default = "default_namespace_policies")]
@@ -26,6 +29,7 @@ impl Default for Config {
         Self {
             auto_upgrade: true,
             defaults: DefaultsConfig::default(),
+            logging: LoggingConfig::default(),
             limits: Limits::default(),
             replication: ReplicationConfig::default(),
             namespace_defaults: default_namespace_policies(),
@@ -60,12 +64,130 @@ impl DefaultsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogFormat {
+    Tree,
+    Pretty,
+    Compact,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogRotation {
+    Daily,
+    Hourly,
+    Minutely,
+    Never,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    pub stdout: bool,
+    pub stdout_format: LogFormat,
+    pub file: FileLoggingConfig,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            stdout: true,
+            stdout_format: LogFormat::Tree,
+            file: FileLoggingConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileLoggingConfig {
+    pub enabled: bool,
+    pub dir: Option<PathBuf>,
+    pub format: LogFormat,
+    pub rotation: LogRotation,
+    pub retention_max_age_days: Option<u64>,
+    pub retention_max_files: Option<usize>,
+}
+
+impl Default for FileLoggingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: None,
+            format: LogFormat::Json,
+            rotation: LogRotation::Daily,
+            retention_max_age_days: Some(7),
+            retention_max_files: Some(10),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LoggingConfigOverride {
+    pub stdout: Option<bool>,
+    pub stdout_format: Option<LogFormat>,
+    pub file: Option<FileLoggingConfigOverride>,
+}
+
+impl LoggingConfigOverride {
+    pub fn apply_to(&self, target: &mut LoggingConfig) {
+        if let Some(stdout) = self.stdout {
+            target.stdout = stdout;
+        }
+        if let Some(format) = self.stdout_format {
+            target.stdout_format = format;
+        }
+        if let Some(file) = self.file.as_ref() {
+            file.apply_to(&mut target.file);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FileLoggingConfigOverride {
+    pub enabled: Option<bool>,
+    pub dir: Option<PathBuf>,
+    pub format: Option<LogFormat>,
+    pub rotation: Option<LogRotation>,
+    pub retention_max_age_days: Option<u64>,
+    pub retention_max_files: Option<usize>,
+}
+
+impl FileLoggingConfigOverride {
+    pub fn apply_to(&self, target: &mut FileLoggingConfig) {
+        if let Some(enabled) = self.enabled {
+            target.enabled = enabled;
+        }
+        if let Some(dir) = self.dir.as_ref() {
+            target.dir = Some(dir.clone());
+        }
+        if let Some(format) = self.format {
+            target.format = format;
+        }
+        if let Some(rotation) = self.rotation {
+            target.rotation = rotation;
+        }
+        if let Some(days) = self.retention_max_age_days {
+            target.retention_max_age_days = Some(days);
+        }
+        if let Some(files) = self.retention_max_files {
+            target.retention_max_files = Some(files);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ConfigLayer {
     pub auto_upgrade: Option<bool>,
     #[serde(default)]
     pub defaults: DefaultsConfig,
+    #[serde(default)]
+    pub logging: LoggingConfigOverride,
     #[serde(default)]
     pub limits: LimitsOverride,
     #[serde(default)]
@@ -80,6 +202,7 @@ impl ConfigLayer {
             base.auto_upgrade = auto_upgrade;
         }
         self.defaults.apply_to(&mut base.defaults);
+        self.logging.apply_to(&mut base.logging);
         self.limits.apply_to(&mut base.limits);
         self.replication.apply_to(&mut base.replication);
         if let Some(namespace_defaults) = &self.namespace_defaults {

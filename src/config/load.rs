@@ -128,11 +128,13 @@ mod tests {
     use super::*;
 
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     use uuid::Uuid;
 
     use crate::config::{
-        CheckpointGroupConfig, DefaultsConfig, ReplicationConfig, ReplicationPeerConfig,
+        CheckpointGroupConfig, DefaultsConfig, LogFormat, LogRotation, LoggingConfig,
+        ReplicationConfig, ReplicationPeerConfig,
     };
     use crate::core::{NamespaceId, ReplicaId, ReplicaRole};
 
@@ -158,6 +160,18 @@ mod tests {
                 namespace: Some(NamespaceId::parse("wf").unwrap()),
                 ..DefaultsConfig::default()
             },
+            logging: LoggingConfig {
+                stdout: false,
+                stdout_format: LogFormat::Compact,
+                file: crate::config::FileLoggingConfig {
+                    enabled: true,
+                    dir: Some(PathBuf::from("/tmp/beads-test-logs")),
+                    format: LogFormat::Json,
+                    rotation: LogRotation::Hourly,
+                    retention_max_age_days: Some(3),
+                    retention_max_files: Some(7),
+                },
+            },
             limits: crate::core::Limits::default(),
             replication: ReplicationConfig {
                 listen_addr: "127.0.0.1:9999".to_string(),
@@ -178,6 +192,17 @@ mod tests {
         assert_eq!(loaded.defaults.namespace, cfg.defaults.namespace);
         assert_eq!(loaded.replication.listen_addr, "127.0.0.1:9999");
         assert_eq!(loaded.replication.peers.len(), 1);
+        assert!(!loaded.logging.stdout);
+        assert!(matches!(loaded.logging.stdout_format, LogFormat::Compact));
+        assert!(loaded.logging.file.enabled);
+        assert_eq!(
+            loaded.logging.file.dir.as_ref().unwrap().to_string_lossy(),
+            "/tmp/beads-test-logs"
+        );
+        assert!(matches!(loaded.logging.file.format, LogFormat::Json));
+        assert!(matches!(loaded.logging.file.rotation, LogRotation::Hourly));
+        assert_eq!(loaded.logging.file.retention_max_age_days, Some(3));
+        assert_eq!(loaded.logging.file.retention_max_files, Some(7));
         assert!(loaded.checkpoint_groups.contains_key("core"));
         assert_eq!(
             loaded

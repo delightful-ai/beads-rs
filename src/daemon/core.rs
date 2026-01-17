@@ -1209,6 +1209,15 @@ impl Daemon {
     }
 
     pub(crate) fn handle_repl_ingest(&mut self, request: ReplIngestRequest) {
+        let span = tracing::info_span!(
+            "repl_ingest_request",
+            store_id = %request.store_id,
+            namespace = %request.namespace,
+            origin_replica_id = %request.origin,
+            batch_len = request.batch.len()
+        );
+        let _guard = span.enter();
+
         if self.shutting_down {
             let error = ReplError::new(
                 ProtocolErrorCode::MaintenanceMode.into(),
@@ -1328,6 +1337,28 @@ impl Daemon {
                 .unwrap_or_else(Watermark::genesis);
             return Ok(IngestOutcome { durable, applied });
         }
+
+        let store_identity = store.meta.identity;
+        let (origin_seq_first, origin_seq_last) =
+            batch
+                .iter()
+                .fold((None::<u64>, None::<u64>), |(min_seq, max_seq), event| {
+                    let seq = event.body.origin_seq.get();
+                    let min_seq = Some(min_seq.map_or(seq, |min| min.min(seq)));
+                    let max_seq = Some(max_seq.map_or(seq, |max| max.max(seq)));
+                    (min_seq, max_seq)
+                });
+        let span = tracing::info_span!(
+            "repl_ingest",
+            store_id = %store_identity.store_id,
+            store_epoch = store_identity.store_epoch.get(),
+            namespace = %namespace,
+            origin_replica_id = %origin,
+            origin_seq_first = ?origin_seq_first,
+            origin_seq_last = ?origin_seq_last,
+            batch_len = batch.len()
+        );
+        let _guard = span.enter();
 
         for event in &batch {
             if event.body.namespace != namespace || event.body.origin_replica_id != origin {

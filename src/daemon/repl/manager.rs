@@ -244,6 +244,18 @@ fn run_peer_loop<S>(plan: PeerPlan, runtime: PeerRuntime<S>)
 where
     S: SessionStore + Send + 'static,
 {
+    let span = tracing::info_span!(
+        "repl_peer_loop",
+        direction = "outbound",
+        store_id = %runtime.local_store.store_id,
+        store_epoch = runtime.local_store.store_epoch.get(),
+        local_replica_id = %runtime.local_replica_id,
+        peer_replica_id = %plan.replica_id,
+        peer_addr = %plan.addr,
+        peer_role = ?plan.role
+    );
+    let _guard = span.enter();
+
     let mut backoff = Backoff::new(runtime.backoff);
 
     while !runtime.shutdown.load(Ordering::Relaxed) {
