@@ -53,6 +53,7 @@ cli = ["clap"]
 slow-tests = []
 test-harness = []
 e2e-tests = ["test-harness"]
+model-testing = []
 
 [[bin]]
 name = "bd"

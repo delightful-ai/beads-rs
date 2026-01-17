@@ -21,7 +21,7 @@ pub struct DurabilityCoordinator {
 }
 
 #[derive(Debug)]
-pub(crate) enum ReplicatedPoll {
+pub enum ReplicatedPoll {
     Satisfied {
         acked_by: Vec<ReplicaId>,
     },

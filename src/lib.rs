@@ -10,6 +10,8 @@ pub mod daemon;
 pub mod error;
 pub mod git;
 pub mod migrate;
+#[cfg(feature = "model-testing")]
+pub mod model;
 pub mod paths;
 pub mod repo;
 pub mod telemetry;
