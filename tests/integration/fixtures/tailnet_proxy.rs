@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::net::TcpStream;
+use std::net::TcpListener;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -103,13 +103,23 @@ fn push_opt_arg<T: ToString>(cmd: &mut Command, flag: &str, value: Option<T>) {
 
 fn wait_for_listen(addr: &str, timeout: Duration) {
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if TcpStream::connect(addr).is_ok() {
-            return;
+    loop {
+        match TcpListener::bind(addr) {
+            Ok(listener) => {
+                drop(listener);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                return;
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    panic!("tailnet proxy did not start listening on {addr}: {err}");
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!("tailnet proxy did not start listening on {addr}");
         }
         std::thread::sleep(Duration::from_millis(10));
-    }
-    if TcpStream::connect(addr).is_err() {
-        panic!("tailnet proxy did not start listening on {addr}");
     }
 }
