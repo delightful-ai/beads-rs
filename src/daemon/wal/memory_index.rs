@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::core::{
@@ -39,6 +40,7 @@ struct MemoryWalIndexState {
 #[derive(Clone)]
 pub struct MemoryWalIndex {
     state: Arc<RwLock<MemoryWalIndexState>>,
+    txn_gate: Arc<AtomicBool>,
     mode: IndexDurabilityMode,
 }
 
@@ -50,6 +52,7 @@ impl MemoryWalIndex {
     pub fn with_mode(mode: IndexDurabilityMode) -> Self {
         Self {
             state: Arc::new(RwLock::new(MemoryWalIndexState::default())),
+            txn_gate: Arc::new(AtomicBool::new(false)),
             mode,
         }
     }
@@ -59,6 +62,7 @@ impl WalIndex for MemoryWalIndex {
     fn writer(&self) -> Box<dyn WalIndexWriter> {
         Box::new(MemoryWalIndexWriter {
             state: Arc::clone(&self.state),
+            txn_gate: Arc::clone(&self.txn_gate),
         })
     }
 
@@ -79,10 +83,12 @@ impl WalIndex for MemoryWalIndex {
 
 struct MemoryWalIndexWriter {
     state: Arc<RwLock<MemoryWalIndexState>>,
+    txn_gate: Arc<AtomicBool>,
 }
 
 impl WalIndexWriter for MemoryWalIndexWriter {
     fn begin_txn(&self) -> Result<Box<dyn WalIndexTxn>, WalIndexError> {
+        acquire_gate(&self.txn_gate);
         let snapshot = self
             .state
             .read()
@@ -91,6 +97,7 @@ impl WalIndexWriter for MemoryWalIndexWriter {
         let base_version = snapshot.version;
         Ok(Box::new(MemoryWalIndexTxn {
             state: Arc::clone(&self.state),
+            txn_gate: Arc::clone(&self.txn_gate),
             working: snapshot,
             base_version,
             committed: false,
@@ -100,6 +107,7 @@ impl WalIndexWriter for MemoryWalIndexWriter {
 
 struct MemoryWalIndexTxn {
     state: Arc<RwLock<MemoryWalIndexState>>,
+    txn_gate: Arc<AtomicBool>,
     working: MemoryWalIndexState,
     base_version: u64,
     committed: bool,
@@ -290,15 +298,12 @@ impl WalIndexTxn for MemoryWalIndexTxn {
             return Ok(());
         }
         let mut guard = self.state.write().expect("memory wal index lock poisoned");
-        if guard.version != self.base_version {
-            return Err(WalIndexError::ConcurrentWrite {
-                expected: self.base_version,
-                got: guard.version,
-            });
-        }
-        self.working.version = self.base_version.wrapping_add(1);
-        *guard = self.working;
+        let _ = self.base_version;
+        let mut working = std::mem::take(&mut self.working);
+        working.version = guard.version.wrapping_add(1);
+        *guard = working;
         self.committed = true;
+        self.txn_gate.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -307,7 +312,30 @@ impl WalIndexTxn for MemoryWalIndexTxn {
             return Ok(());
         }
         self.committed = true;
+        self.txn_gate.store(false, Ordering::Release);
         Ok(())
+    }
+}
+
+impl Drop for MemoryWalIndexTxn {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.txn_gate.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn acquire_gate(gate: &Arc<AtomicBool>) {
+    let mut backoff = std::time::Duration::from_micros(50);
+    while gate
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        std::thread::sleep(backoff);
+        backoff = std::cmp::min(
+            backoff.saturating_mul(2),
+            std::time::Duration::from_millis(5),
+        );
     }
 }
 

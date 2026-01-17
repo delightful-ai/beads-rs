@@ -14,6 +14,7 @@ use beads_rs::StoreId;
 use beads_rs::core::{NamespaceId, ReplicaId, StoreMeta};
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::tailnet_proxy::TailnetProxy;
 
 struct NodeFixture {
     repo_dir: PathBuf,
@@ -54,6 +55,8 @@ fn repl_daemon_to_daemon_roundtrip() {
     let store_id = StoreId::new(Uuid::new_v4());
     let port_a = pick_port();
     let port_b = pick_port();
+    let proxy_ab_port = pick_port();
+    let proxy_ba_port = pick_port();
 
     let mut node_a = build_node(root.path(), "a", &remote_dir, port_a);
     let mut node_b = build_node(root.path(), "b", &remote_dir, port_b);
@@ -61,8 +64,25 @@ fn repl_daemon_to_daemon_roundtrip() {
     bootstrap_replica(&mut node_a, store_id);
     bootstrap_replica(&mut node_b, store_id);
 
-    let peers_a = vec![(node_b.replica_id.unwrap(), node_b.listen_addr.clone())];
-    let peers_b = vec![(node_a.replica_id.unwrap(), node_a.listen_addr.clone())];
+    let _proxy_ab = TailnetProxy::spawn(
+        format!("127.0.0.1:{proxy_ab_port}"),
+        node_b.listen_addr.clone(),
+        7,
+    );
+    let _proxy_ba = TailnetProxy::spawn(
+        format!("127.0.0.1:{proxy_ba_port}"),
+        node_a.listen_addr.clone(),
+        13,
+    );
+
+    let peers_a = vec![(
+        node_b.replica_id.unwrap(),
+        format!("127.0.0.1:{proxy_ab_port}"),
+    )];
+    let peers_b = vec![(
+        node_a.replica_id.unwrap(),
+        format!("127.0.0.1:{proxy_ba_port}"),
+    )];
     write_replication_config(&node_a.repo_dir, &node_a.listen_addr, &peers_a)
         .expect("write config a");
     write_replication_config(&node_b.repo_dir, &node_b.listen_addr, &peers_b)
