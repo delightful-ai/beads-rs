@@ -627,4 +627,15 @@ mod tests {
                 .any(|entry| entry.path == PathBuf::from("newest.log"))
         );
     }
+
+    #[test]
+    fn daemon_logging_defaults_skip_in_tests() {
+        let mut logging = LoggingConfig::default();
+        logging.file.enabled = false;
+        apply_daemon_logging_defaults_inner(&mut logging, true, false);
+        assert!(
+            !logging.file.enabled,
+            "daemon logging defaults should skip in tests"
+        );
+    }
 }
