@@ -1298,6 +1298,13 @@ impl Daemon {
         }
     }
 
+    pub(crate) fn reload_replication_runtime(&mut self, store_id: StoreId) -> Result<(), OpError> {
+        if let Some(handles) = self.repl_handles.remove(&store_id) {
+            handles.shutdown();
+        }
+        self.ensure_replication_runtime(store_id)
+    }
+
     fn ingest_remote_batch(
         &mut self,
         store_id: StoreId,

@@ -428,11 +428,7 @@ impl Daemon {
         };
         let store_id = proof.store_id();
 
-        if let Some(handles) = self.repl_handles.remove(&store_id) {
-            handles.shutdown();
-        }
-
-        if let Err(err) = self.ensure_replication_runtime(store_id) {
+        if let Err(err) = self.reload_replication_runtime(store_id) {
             return Response::err(err);
         }
 

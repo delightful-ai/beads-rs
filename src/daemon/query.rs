@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use super::query_model::{
     AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput, AdminMaintenanceModeOutput,
     AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadPoliciesOutput,
-    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult,
-    DaemonInfo, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue, IssueSummary, Note,
-    ReadyResult, StatusOutput, Tombstone,
+    AdminReloadReplicationOutput, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
+    BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
+    IssueSummary, Note, ReadyResult, StatusOutput, Tombstone,
 };
 use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
 
@@ -508,6 +508,9 @@ pub enum QueryResult {
 
     /// Admin reload policies report.
     AdminReloadPolicies(AdminReloadPoliciesOutput),
+
+    /// Admin reload replication report.
+    AdminReloadReplication(AdminReloadReplicationOutput),
 
     /// Admin rotate replica id report.
     AdminRotateReplicaId(AdminRotateReplicaIdOutput),
