@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use beads_rs::core::NamespaceId;
-
 use crate::fixtures::repl_rig::{FaultProfile, ReplRig, ReplRigOptions};
 
 #[test]
