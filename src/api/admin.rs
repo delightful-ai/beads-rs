@@ -330,6 +330,12 @@ pub struct AdminRotateReplicaIdOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminReloadReplicationOutput {
+    pub store_id: StoreId,
+    pub roster_present: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminMaintenanceModeOutput {
     pub enabled: bool,
 }

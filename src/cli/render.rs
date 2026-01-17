@@ -8,9 +8,9 @@ use crate::api::{
     AdminClockAnomalyKind, AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode,
     AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput, AdminHealthReport,
     AdminHealthStatus, AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
-    AdminReloadPoliciesOutput, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
-    BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary,
-    Note, StatusOutput, SyncWarning, Tombstone,
+    AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminRotateReplicaIdOutput,
+    AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup,
+    DepEdge, EpicStatus, Issue, IssueSummary, Note, StatusOutput, SyncWarning, Tombstone,
 };
 use crate::core::{HeadStatus, NamespaceId, ReplicaRole, Watermarks};
 use crate::daemon::ipc::ResponsePayload;
@@ -533,6 +533,7 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::AdminFlush(out) => render_admin_flush(out),
         QueryResult::AdminFingerprint(out) => render_admin_fingerprint(out),
         QueryResult::AdminReloadPolicies(out) => render_admin_reload_policies(out),
+        QueryResult::AdminReloadReplication(out) => render_admin_reload_replication(out),
         QueryResult::AdminRotateReplicaId(out) => render_admin_rotate_replica_id(out),
         QueryResult::AdminMaintenanceMode(out) => render_admin_maintenance(out),
         QueryResult::AdminRebuildIndex(out) => render_admin_rebuild_index(out),
@@ -873,6 +874,18 @@ fn render_admin_reload_policies(out: &AdminReloadPoliciesOutput) -> String {
             }
         }
     }
+    out_str.trim_end().into()
+}
+
+fn render_admin_reload_replication(out: &AdminReloadReplicationOutput) -> String {
+    let mut out_str = String::new();
+    out_str.push_str("Admin Reload Replication\n");
+    out_str.push_str("========================\n\n");
+    out_str.push_str(&format!("store_id: {}\n", out.store_id));
+    out_str.push_str(&format!(
+        "roster_present: {}\n",
+        if out.roster_present { "true" } else { "false" }
+    ));
     out_str.trim_end().into()
 }
 

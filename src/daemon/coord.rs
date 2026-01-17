@@ -761,6 +761,10 @@ impl Daemon {
                 self.admin_reload_policies(&repo, git_tx).into()
             }
 
+            Request::AdminReloadReplication { repo } => {
+                self.admin_reload_replication(&repo, git_tx).into()
+            }
+
             Request::AdminRotateReplicaId { repo } => {
                 self.admin_rotate_replica_id(&repo, git_tx).into()
             }

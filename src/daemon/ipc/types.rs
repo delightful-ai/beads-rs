@@ -394,6 +394,9 @@ pub enum Request {
     /// Admin reload namespace policies.
     AdminReloadPolicies { repo: PathBuf },
 
+    /// Admin reload replication runtime.
+    AdminReloadReplication { repo: PathBuf },
+
     /// Admin rotate replica id.
     AdminRotateReplicaId { repo: PathBuf },
 

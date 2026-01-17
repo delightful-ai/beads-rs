@@ -13,8 +13,8 @@ use crate::api::{
     AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
     AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
     AdminReloadPoliciesOutput, AdminReplicaLiveness, AdminReplicationNamespace,
-    AdminReplicationPeer, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
-    AdminWalNamespace, AdminWalSegment,
+    AdminReloadReplicationOutput, AdminReplicationPeer, AdminRotateReplicaIdOutput,
+    AdminScrubOutput, AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
 };
 use crate::core::{
     NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, WallClock, Watermarks,
@@ -23,7 +23,7 @@ use crate::daemon::clock::{ClockAnomaly, ClockAnomalyKind};
 use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_namespaces};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::scrubber::{ScrubOptions, scrub_store};
-use crate::daemon::store_runtime::StoreRuntimeError;
+use crate::daemon::store_runtime::{StoreRuntimeError, load_replica_roster};
 use crate::daemon::wal::{ReplayStats, rebuild_index};
 use crate::git::checkpoint::layout::SHARD_COUNT;
 use crate::paths;
@@ -417,6 +417,34 @@ impl Daemon {
             requires_restart: reload.requires_restart,
         };
         Response::ok(ResponsePayload::query(QueryResult::AdminReloadPolicies(
+            output,
+        )))
+    }
+
+    pub fn admin_reload_replication(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => return Response::err(err),
+        };
+        let store_id = proof.store_id();
+
+        if let Some(handles) = self.repl_handles.remove(&store_id) {
+            handles.shutdown();
+        }
+
+        if let Err(err) = self.ensure_replication_runtime(store_id) {
+            return Response::err(err);
+        }
+
+        let roster = match load_replica_roster(store_id) {
+            Ok(roster) => roster,
+            Err(err) => return Response::err(OpError::StoreRuntime(Box::new(err))),
+        };
+        let output = AdminReloadReplicationOutput {
+            store_id,
+            roster_present: roster.is_some(),
+        };
+        Response::ok(ResponsePayload::query(QueryResult::AdminReloadReplication(
             output,
         )))
     }
