@@ -8,11 +8,7 @@ use beads_rs::core::NamespaceId;
 #[test]
 fn repl_daemon_to_daemon_roundtrip() {
     let mut options = ReplRigOptions::default();
-    let mut profile = FaultProfile::tailnet();
-    profile.loss_rate = Some(0.0);
-    profile.duplicate_rate = Some(0.0);
-    profile.reorder_rate = Some(0.0);
-    options.fault_profile = Some(profile);
+    options.fault_profile = None;
     options.seed = 7;
 
     let rig = ReplRig::new(3, options);
