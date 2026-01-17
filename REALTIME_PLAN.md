@@ -2862,3 +2862,9 @@ Config/paths:
 ## Deferred: Authenticated replication (next phase)
 
 Authenticated replication (ed25519 handshake signatures, replica roster authorization) is explicitly deferred to the next phase. The current plan assumes a trusted network boundary (tailnet). Auth will be added after the distributed database correctness is validated.
+
+---
+
+Footnotes:
+- Holon Streaming (Windowed CRDTs): gives you a clean “window/epoch” framing that makes safe compaction boring and explicit. (arxiv.org (https://arxiv.org/abs/2510.25757?utm_source=openai))
+- Undo/Redo for Replicated Registers: not about GC per se, but it’s a solid reference for history surgery semantics under concurrency. (arxiv.org (https://arxiv.org/abs/2404.11308?utm_source=openai))
