@@ -61,8 +61,7 @@ impl ReplRig {
             nodes.push(Node::new(seed, store_id, replica_id));
         }
 
-        let mut proxies = Vec::new();
-        let link_addrs = link_addrs(&nodes, &options, &mut proxies);
+        let (link_addrs, proxy_specs) = plan_links(&nodes, &options);
         for (idx, node) in nodes.iter().enumerate() {
             let mut peers = Vec::new();
             for (peer_idx, peer) in nodes.iter().enumerate() {
@@ -82,6 +81,8 @@ impl ReplRig {
         for node in &nodes {
             node.start_daemon();
         }
+
+        let proxies = spawn_proxies(proxy_specs);
 
         Self {
             _root: root,
@@ -362,13 +363,13 @@ fn build_node(root: &Path, idx: usize, remote_dir: &Path) -> NodeSeed {
     }
 }
 
-fn link_addrs(
+fn plan_links(
     nodes: &[Node],
     options: &ReplRigOptions,
-    proxies: &mut Vec<TailnetProxy>,
-) -> Vec<Vec<Option<String>>> {
+) -> (Vec<Vec<Option<String>>>, Vec<ProxySpec>) {
     let node_count = nodes.len();
     let mut link_addrs = vec![vec![None; node_count]; node_count];
+    let mut proxies = Vec::new();
     for (from, _) in nodes.iter().enumerate() {
         for (to, target) in nodes.iter().enumerate() {
             if from == to {
@@ -377,13 +378,12 @@ fn link_addrs(
             let addr = if let Some(profile) = options.fault_profile.as_ref() {
                 let listen_addr = format!("127.0.0.1:{}", pick_port());
                 let seed = link_seed(options.seed, from, to);
-                let proxy = TailnetProxy::spawn_with_profile(
-                    listen_addr.clone(),
-                    target.listen_addr.clone(),
+                proxies.push(ProxySpec {
+                    listen_addr: listen_addr.clone(),
+                    upstream_addr: target.listen_addr.clone(),
                     seed,
-                    profile.clone(),
-                );
-                proxies.push(proxy);
+                    profile: profile.clone(),
+                });
                 listen_addr
             } else {
                 target.listen_addr.clone()
@@ -391,11 +391,32 @@ fn link_addrs(
             link_addrs[from][to] = Some(addr);
         }
     }
-    link_addrs
+    (link_addrs, proxies)
 }
 
 fn link_seed(seed: u64, from: usize, to: usize) -> u64 {
     seed ^ ((from as u64) << 32) ^ (to as u64) ^ 0x9E37_79B9_7F4A_7C15
+}
+
+fn spawn_proxies(specs: Vec<ProxySpec>) -> Vec<TailnetProxy> {
+    specs
+        .into_iter()
+        .map(|spec| {
+            TailnetProxy::spawn_with_profile(
+                spec.listen_addr,
+                spec.upstream_addr,
+                spec.seed,
+                spec.profile,
+            )
+        })
+        .collect()
+}
+
+struct ProxySpec {
+    listen_addr: String,
+    upstream_addr: String,
+    seed: u64,
+    profile: FaultProfile,
 }
 
 fn watermarks_equal_for_namespace<K: PartialEq>(
