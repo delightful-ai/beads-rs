@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::core::{Limits, NamespaceId, StoreMeta};
 
 use super::memory_wal::MemoryEventWal;
+use super::{AppendOutcome, EventWalResult, SegmentConfig, SegmentWriter, VerifiedRecord};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentSnapshot {
