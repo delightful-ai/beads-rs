@@ -406,18 +406,30 @@ fn run_reader(
                     delay_ms = 0;
                 }
                 let deliver_at = Instant::now() + Duration::from_millis(delay_ms);
-                let _ = tx.send(ScheduledFrame {
-                    deliver_at,
-                    payload: payload.clone(),
-                });
+                if tx
+                    .send(ScheduledFrame {
+                        deliver_at,
+                        payload: payload.clone(),
+                    })
+                    .is_err()
+                {
+                    eprintln!("proxy {label} send failed (writer dropped)");
+                    break;
+                }
 
                 if chance(&mut rng, profile.duplicate_rate) {
                     let dup_delay = delay_ms.saturating_add(1);
                     let deliver_at = Instant::now() + Duration::from_millis(dup_delay);
-                    let _ = tx.send(ScheduledFrame {
-                        deliver_at,
-                        payload,
-                    });
+                    if tx
+                        .send(ScheduledFrame {
+                            deliver_at,
+                            payload,
+                        })
+                        .is_err()
+                    {
+                        eprintln!("proxy {label} send failed (writer dropped)");
+                        break;
+                    }
                 }
             }
             Ok(None) => break,
