@@ -9,6 +9,10 @@ pub mod event_factory;
 pub mod repl_ingest;
 
 pub use crate::daemon::repl::{GapBufferByNsOrigin, IngestDecision, OriginStreamState, PeerAckTable};
+pub use crate::daemon::repl::gap_buffer::{
+    BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOriginSnapshot, GapBufferSnapshot,
+    HeadSnapshot, OriginStreamSnapshot, WatermarkSnapshot,
+};
 pub use crate::core::{
     encode_event_body_canonical, hash_event_body, verify_event_frame, EventBody, EventFrameV1,
     EventId, EventKindV1, HlcMax, NamespaceId, PrevDeferred, PrevVerified, ReplicaId, Seq0, Seq1,

@@ -31,6 +31,134 @@ impl GapBuffer {
     }
 }
 
+#[cfg(feature = "model-testing")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HeadSnapshot {
+    Genesis,
+    Known(Sha256),
+    Unknown,
+}
+
+#[cfg(feature = "model-testing")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct WatermarkSnapshot {
+    pub seq: Seq0,
+    pub head: HeadSnapshot,
+}
+
+#[cfg(feature = "model-testing")]
+impl WatermarkSnapshot {
+    fn from_watermark<K>(wm: Watermark<K>) -> Self {
+        let head = match wm.head() {
+            HeadStatus::Genesis => HeadSnapshot::Genesis,
+            HeadStatus::Known(bytes) => HeadSnapshot::Known(Sha256(bytes)),
+            HeadStatus::Unknown => HeadSnapshot::Unknown,
+        };
+        Self {
+            seq: wm.seq(),
+            head,
+        }
+    }
+}
+
+#[cfg(feature = "model-testing")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BufferedPrevSnapshot {
+    Contiguous { prev: Option<Sha256> },
+    Deferred { prev: Sha256, expected_prev_seq: Seq1 },
+}
+
+#[cfg(feature = "model-testing")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BufferedEventSnapshot {
+    pub seq: Seq1,
+    pub sha256: Sha256,
+    pub prev: BufferedPrevSnapshot,
+    pub bytes_len: usize,
+}
+
+#[cfg(feature = "model-testing")]
+impl BufferedEventSnapshot {
+    fn from_event(seq: Seq1, event: &VerifiedEventAny) -> Self {
+        let (sha256, prev) = match event {
+            VerifiedEventAny::Contiguous(ev) => (
+                ev.sha256,
+                BufferedPrevSnapshot::Contiguous { prev: ev.prev.prev },
+            ),
+            VerifiedEventAny::Deferred(ev) => (
+                ev.sha256,
+                BufferedPrevSnapshot::Deferred {
+                    prev: ev.prev.prev,
+                    expected_prev_seq: ev.prev.expected_prev_seq,
+                },
+            ),
+        };
+        Self {
+            seq,
+            sha256,
+            prev,
+            bytes_len: event.bytes_len(),
+        }
+    }
+}
+
+#[cfg(feature = "model-testing")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GapBufferSnapshot {
+    pub buffered: Vec<BufferedEventSnapshot>,
+    pub buffered_bytes: usize,
+    pub started_at_ms: Option<u64>,
+    pub max_events: usize,
+    pub max_bytes: usize,
+    pub timeout_ms: u64,
+}
+
+#[cfg(feature = "model-testing")]
+impl GapBuffer {
+    pub fn model_snapshot(&self) -> GapBufferSnapshot {
+        let buffered = self
+            .buffered
+            .iter()
+            .map(|(seq, ev)| BufferedEventSnapshot::from_event(*seq, ev))
+            .collect();
+        GapBufferSnapshot {
+            buffered,
+            buffered_bytes: self.buffered_bytes,
+            started_at_ms: self.started_at_ms,
+            max_events: self.max_events,
+            max_bytes: self.max_bytes,
+            timeout_ms: self.timeout_ms,
+        }
+    }
+}
+
+#[cfg(feature = "model-testing")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OriginStreamSnapshot {
+    pub namespace: NamespaceId,
+    pub origin: ReplicaId,
+    pub durable: WatermarkSnapshot,
+    pub gap: GapBufferSnapshot,
+}
+
+#[cfg(feature = "model-testing")]
+impl OriginStreamState {
+    pub fn model_snapshot(&self) -> OriginStreamSnapshot {
+        OriginStreamSnapshot {
+            namespace: self.namespace.clone(),
+            origin: self.origin,
+            durable: WatermarkSnapshot::from_watermark(self.durable),
+            gap: self.gap.model_snapshot(),
+        }
+    }
+}
+
+#[cfg(feature = "model-testing")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GapBufferByNsOriginSnapshot {
+    pub origins: Vec<OriginStreamSnapshot>,
+}
+
 #[derive(Clone, Debug)]
 pub struct OriginStreamState {
     pub namespace: NamespaceId,
@@ -327,6 +455,19 @@ impl GapBufferByNsOrigin {
             state.durable = durable;
         }
         state
+    }
+}
+
+#[cfg(feature = "model-testing")]
+impl GapBufferByNsOrigin {
+    pub fn model_snapshot(&self) -> GapBufferByNsOriginSnapshot {
+        let mut origins = Vec::new();
+        for origins_map in self.by_ns.values() {
+            for state in origins_map.values() {
+                origins.push(state.model_snapshot());
+            }
+        }
+        GapBufferByNsOriginSnapshot { origins }
     }
 }
 
