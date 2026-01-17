@@ -20,7 +20,7 @@ use beads_rs::{
 use stateright::actor::{
     model_peers, model_timeout, Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out,
 };
-use stateright::{report::WriteReporter, Expectation, Property};
+use stateright::{report::WriteReporter, Checker, Expectation, Model};
 use uuid::Uuid;
 
 const ACTOR_COUNT: usize = 2;
@@ -42,11 +42,25 @@ impl StreamKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct FrameDigest {
     eid: EventId,
     sha256: Sha256,
     prev_sha256: Option<Sha256>,
+}
+
+impl PartialOrd for FrameDigest {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FrameDigest {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let lhs_prev = self.prev_sha256.map(|s| s.0);
+        let rhs_prev = other.prev_sha256.map(|s| s.0);
+        (self.eid.clone(), self.sha256.0, lhs_prev).cmp(&(other.eid.clone(), other.sha256.0, rhs_prev))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -559,7 +573,8 @@ fn reject_reason_code(reason: &beads_rs::core::error::details::ReplRejectReason)
 
 fn make_uuid(replica: ReplicaId, seq: u64, variant: u8) -> Uuid {
     let mut bytes = [0u8; 16];
-    let seed = replica.as_uuid().as_bytes();
+    let replica_uuid = replica.as_uuid();
+    let seed = replica_uuid.as_bytes();
     bytes[0] = seed[0];
     bytes[1] = seed[1];
     bytes[2] = seq as u8;

@@ -10,6 +10,3 @@
 //! Each example in `examples/` focuses on one "little machine" at a time.
 
 pub mod drift_guard;
-pub mod spec;
-pub mod toy_codec;
-pub mod realtime_types_sketch;

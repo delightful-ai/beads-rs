@@ -7,8 +7,10 @@
 
 #[allow(unused_imports)]
 use beads_rs::model::{
-    GapBufferByNsOrigin, IngestDecision, OriginStreamState, PeerAckTable, VerifiedEventAny,
-    digest, durability, event_factory, repl_ingest,
+    BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOrigin, GapBufferByNsOriginSnapshot,
+    GapBufferSnapshot, HeadSnapshot, IngestDecision, OriginStreamSnapshot, OriginStreamState,
+    PeerAckTable, VerifiedEventAny, WatermarkSnapshot, digest, durability, event_factory,
+    repl_ingest,
 };
 #[allow(unused_imports)]
 use beads_rs::{
@@ -38,4 +40,35 @@ fn _drift_guard_examples(
     let _ = IngestDecision::DuplicateNoop;
     let _ = PeerAckTable::new();
     let _ = durability::poll_replicated;
+    let _: GapBufferByNsOriginSnapshot = GapBufferByNsOriginSnapshot { origins: Vec::new() };
+    let _: GapBufferSnapshot = GapBufferSnapshot {
+        buffered: Vec::new(),
+        buffered_bytes: 0,
+        started_at_ms: None,
+        max_events: 0,
+        max_bytes: 0,
+        timeout_ms: 0,
+    };
+    let _: OriginStreamSnapshot = OriginStreamSnapshot {
+        namespace: namespace.clone(),
+        origin,
+        durable: WatermarkSnapshot {
+            seq: beads_rs::Seq0::ZERO,
+            head: HeadSnapshot::Genesis,
+        },
+        gap: GapBufferSnapshot {
+            buffered: Vec::new(),
+            buffered_bytes: 0,
+            started_at_ms: None,
+            max_events: 0,
+            max_bytes: 0,
+            timeout_ms: 0,
+        },
+    };
+    let _: BufferedEventSnapshot = BufferedEventSnapshot {
+        seq,
+        sha256: Sha256([0u8; 32]),
+        prev: BufferedPrevSnapshot::Contiguous { prev: None },
+        bytes_len: 0,
+    };
 }
