@@ -182,6 +182,44 @@ fn repl_daemon_crash_restart_roundtrip() {
 }
 
 #[test]
+fn repl_daemon_crash_restart_tailnet_roundtrip() {
+    let mut options = ReplRigOptions::default();
+    options.seed = 51;
+    options.fault_profile = Some(FaultProfile::tailnet());
+
+    let rig = ReplRig::new(3, options);
+
+    let initial = [
+        rig.create_issue(0, "tailnet-crash-pre-0"),
+        rig.create_issue(1, "tailnet-crash-pre-1"),
+        rig.create_issue(2, "tailnet-crash-pre-2"),
+    ];
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+
+    rig.crash_node(2);
+
+    let post = [
+        rig.create_issue(0, "tailnet-crash-post-0"),
+        rig.create_issue(1, "tailnet-crash-post-1"),
+    ];
+
+    for node_idx in 0..2 {
+        for id in &post {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(60));
+        }
+    }
+
+    rig.restart_node(2);
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
+
+    for id in initial.iter().chain(post.iter()) {
+        rig.wait_for_show(2, id, Duration::from_secs(30));
+    }
+}
+
+#[test]
 fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.seed = 37;
