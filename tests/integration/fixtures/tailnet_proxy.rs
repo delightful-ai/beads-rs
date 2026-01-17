@@ -4,6 +4,43 @@ use std::net::TcpStream;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Debug)]
+pub struct TailnetProfile {
+    pub profile: String,
+    pub base_latency_ms: Option<u64>,
+    pub jitter_ms: Option<u64>,
+    pub loss_rate: Option<f64>,
+    pub duplicate_rate: Option<f64>,
+    pub reorder_rate: Option<f64>,
+    pub max_frame_bytes: Option<usize>,
+}
+
+impl TailnetProfile {
+    pub fn tailnet() -> Self {
+        Self {
+            profile: "tailnet".to_string(),
+            base_latency_ms: None,
+            jitter_ms: None,
+            loss_rate: None,
+            duplicate_rate: None,
+            reorder_rate: None,
+            max_frame_bytes: None,
+        }
+    }
+
+    pub fn none() -> Self {
+        Self {
+            profile: "none".to_string(),
+            base_latency_ms: None,
+            jitter_ms: None,
+            loss_rate: None,
+            duplicate_rate: None,
+            reorder_rate: None,
+            max_frame_bytes: None,
+        }
+    }
+}
+
 pub struct TailnetProxy {
     child: Child,
     listen_addr: String,
@@ -11,6 +48,15 @@ pub struct TailnetProxy {
 
 impl TailnetProxy {
     pub fn spawn(listen_addr: String, upstream_addr: String, seed: u64) -> Self {
+        Self::spawn_with_profile(listen_addr, upstream_addr, seed, TailnetProfile::tailnet())
+    }
+
+    pub fn spawn_with_profile(
+        listen_addr: String,
+        upstream_addr: String,
+        seed: u64,
+        profile: TailnetProfile,
+    ) -> Self {
         let bin = assert_cmd::cargo::cargo_bin!("tailnet_proxy");
         let mut cmd = Command::new(bin);
         cmd.args([
@@ -19,10 +65,16 @@ impl TailnetProxy {
             "--upstream",
             upstream_addr.as_str(),
             "--profile",
-            "tailnet",
+            profile.profile.as_str(),
             "--seed",
             &seed.to_string(),
         ]);
+        push_opt_arg(&mut cmd, "--base-latency-ms", profile.base_latency_ms);
+        push_opt_arg(&mut cmd, "--jitter-ms", profile.jitter_ms);
+        push_opt_arg(&mut cmd, "--loss-rate", profile.loss_rate);
+        push_opt_arg(&mut cmd, "--duplicate-rate", profile.duplicate_rate);
+        push_opt_arg(&mut cmd, "--reorder-rate", profile.reorder_rate);
+        push_opt_arg(&mut cmd, "--max-frame-bytes", profile.max_frame_bytes);
         let mut child = cmd.spawn().expect("spawn tailnet proxy");
         wait_for_listen(&listen_addr, Duration::from_secs(2));
         if let Some(status) = child.try_wait().expect("check proxy status") {
@@ -40,6 +92,12 @@ impl Drop for TailnetProxy {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+fn push_opt_arg<T: ToString>(cmd: &mut Command, flag: &str, value: Option<T>) {
+    if let Some(value) = value {
+        cmd.arg(flag).arg(value.to_string());
     }
 }
 
