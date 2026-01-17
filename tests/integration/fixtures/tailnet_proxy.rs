@@ -12,6 +12,12 @@ pub struct TailnetProfile {
     pub loss_rate: Option<f64>,
     pub duplicate_rate: Option<f64>,
     pub reorder_rate: Option<f64>,
+    pub blackhole_after_frames: Option<u64>,
+    pub blackhole_after_bytes: Option<u64>,
+    pub blackhole_for_ms: Option<u64>,
+    pub reset_after_frames: Option<u64>,
+    pub reset_after_bytes: Option<u64>,
+    pub one_way_loss: Option<String>,
     pub max_frame_bytes: Option<usize>,
 }
 
@@ -24,6 +30,12 @@ impl TailnetProfile {
             loss_rate: None,
             duplicate_rate: None,
             reorder_rate: None,
+            blackhole_after_frames: None,
+            blackhole_after_bytes: None,
+            blackhole_for_ms: None,
+            reset_after_frames: None,
+            reset_after_bytes: None,
+            one_way_loss: None,
             max_frame_bytes: None,
         }
     }
@@ -36,6 +48,30 @@ impl TailnetProfile {
             loss_rate: None,
             duplicate_rate: None,
             reorder_rate: None,
+            blackhole_after_frames: None,
+            blackhole_after_bytes: None,
+            blackhole_for_ms: None,
+            reset_after_frames: None,
+            reset_after_bytes: None,
+            one_way_loss: None,
+            max_frame_bytes: None,
+        }
+    }
+
+    pub fn pathological() -> Self {
+        Self {
+            profile: "pathological".to_string(),
+            base_latency_ms: None,
+            jitter_ms: None,
+            loss_rate: None,
+            duplicate_rate: None,
+            reorder_rate: None,
+            blackhole_after_frames: None,
+            blackhole_after_bytes: None,
+            blackhole_for_ms: None,
+            reset_after_frames: None,
+            reset_after_bytes: None,
+            one_way_loss: None,
             max_frame_bytes: None,
         }
     }
@@ -74,6 +110,12 @@ impl TailnetProxy {
         push_opt_arg(&mut cmd, "--loss-rate", profile.loss_rate);
         push_opt_arg(&mut cmd, "--duplicate-rate", profile.duplicate_rate);
         push_opt_arg(&mut cmd, "--reorder-rate", profile.reorder_rate);
+        push_opt_arg(&mut cmd, "--blackhole-after-frames", profile.blackhole_after_frames);
+        push_opt_arg(&mut cmd, "--blackhole-after-bytes", profile.blackhole_after_bytes);
+        push_opt_arg(&mut cmd, "--blackhole-for-ms", profile.blackhole_for_ms);
+        push_opt_arg(&mut cmd, "--reset-after-frames", profile.reset_after_frames);
+        push_opt_arg(&mut cmd, "--reset-after-bytes", profile.reset_after_bytes);
+        push_opt_arg(&mut cmd, "--one-way-loss", profile.one_way_loss.clone());
         push_opt_arg(&mut cmd, "--max-frame-bytes", profile.max_frame_bytes);
         let mut child = cmd.spawn().expect("spawn tailnet proxy");
         wait_for_listen(&listen_addr, Duration::from_secs(2));
