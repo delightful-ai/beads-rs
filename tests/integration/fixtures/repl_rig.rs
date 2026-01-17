@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use beads_rs::StoreId;
 use beads_rs::api::{AdminStatusOutput, QueryResult};
+use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_rs::core::{NamespaceId, ReplicaId, ReplicaRole, StoreMeta, Watermarks};
 use beads_rs::daemon::ipc::{IpcClient, ReadConsistency, Request, Response, ResponsePayload};
 
