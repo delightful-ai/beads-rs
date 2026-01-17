@@ -36,7 +36,41 @@ struct Args {
     #[arg(long)]
     reorder_rate: Option<f64>,
     #[arg(long)]
+    blackhole_after_frames: Option<u64>,
+    #[arg(long)]
+    blackhole_after_bytes: Option<u64>,
+    #[arg(long)]
+    blackhole_for_ms: Option<u64>,
+    #[arg(long)]
+    reset_after_frames: Option<u64>,
+    #[arg(long)]
+    reset_after_bytes: Option<u64>,
+    #[arg(long)]
+    one_way_loss: Option<String>,
+    #[arg(long)]
     max_frame_bytes: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LossDirection {
+    AtoB,
+    BtoA,
+}
+
+impl LossDirection {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "a->b" | "a-to-b" | "a2b" => Some(LossDirection::AtoB),
+            "b->a" | "b-to-a" | "b2a" => Some(LossDirection::BtoA),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Direction {
+    AtoB,
+    BtoA,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,6 +80,12 @@ struct Profile {
     loss_rate: f64,
     duplicate_rate: f64,
     reorder_rate: f64,
+    blackhole_after_frames: Option<u64>,
+    blackhole_after_bytes: Option<u64>,
+    blackhole_for_ms: Option<u64>,
+    reset_after_frames: Option<u64>,
+    reset_after_bytes: Option<u64>,
+    one_way_loss: Option<LossDirection>,
 }
 
 impl Profile {
@@ -56,6 +96,12 @@ impl Profile {
             loss_rate: 0.01,
             duplicate_rate: 0.002,
             reorder_rate: 0.01,
+            blackhole_after_frames: None,
+            blackhole_after_bytes: None,
+            blackhole_for_ms: None,
+            reset_after_frames: None,
+            reset_after_bytes: None,
+            one_way_loss: None,
         }
     }
 
@@ -66,7 +112,43 @@ impl Profile {
             loss_rate: 0.0,
             duplicate_rate: 0.0,
             reorder_rate: 0.0,
+            blackhole_after_frames: None,
+            blackhole_after_bytes: None,
+            blackhole_for_ms: None,
+            reset_after_frames: None,
+            reset_after_bytes: None,
+            one_way_loss: None,
         }
+    }
+
+    fn pathological() -> Self {
+        Self {
+            base_latency_ms: 15,
+            jitter_ms: 40,
+            loss_rate: 0.08,
+            duplicate_rate: 0.0,
+            reorder_rate: 0.02,
+            blackhole_after_frames: Some(6),
+            blackhole_after_bytes: None,
+            blackhole_for_ms: Some(250),
+            reset_after_frames: Some(24),
+            reset_after_bytes: None,
+            one_way_loss: None,
+        }
+    }
+
+    fn for_direction(mut self, direction: Direction) -> Self {
+        if let Some(loss_direction) = self.one_way_loss {
+            let matches = match (direction, loss_direction) {
+                (Direction::AtoB, LossDirection::AtoB) => true,
+                (Direction::BtoA, LossDirection::BtoA) => true,
+                _ => false,
+            };
+            if !matches {
+                self.loss_rate = 0.0;
+            }
+        }
+        self
     }
 
     fn sample_delay_ms(&self, rng: &mut StdRng) -> u64 {
@@ -117,8 +199,18 @@ fn main() {
     let seed = args.seed.unwrap_or(42);
     let mut profile = match args.profile.as_str() {
         "none" => Profile::none(),
+        "pathology" | "pathological" => Profile::pathological(),
         _ => Profile::tailnet(),
     };
+    let one_way_loss = args
+        .one_way_loss
+        .as_deref()
+        .and_then(LossDirection::parse);
+    if args.one_way_loss.is_some() && one_way_loss.is_none() {
+        eprintln!("invalid --one-way-loss value (use a->b or b->a)");
+        std::process::exit(2);
+    }
+    profile.one_way_loss = one_way_loss;
     if let Some(value) = args.base_latency_ms {
         profile.base_latency_ms = value;
     }
@@ -133,6 +225,21 @@ fn main() {
     }
     if let Some(value) = args.reorder_rate {
         profile.reorder_rate = value;
+    }
+    if let Some(value) = args.blackhole_after_frames {
+        profile.blackhole_after_frames = Some(value);
+    }
+    if let Some(value) = args.blackhole_after_bytes {
+        profile.blackhole_after_bytes = Some(value);
+    }
+    if let Some(value) = args.blackhole_for_ms {
+        profile.blackhole_for_ms = Some(value);
+    }
+    if let Some(value) = args.reset_after_frames {
+        profile.reset_after_frames = Some(value);
+    }
+    if let Some(value) = args.reset_after_bytes {
+        profile.reset_after_bytes = Some(value);
     }
 
     let listener = TcpListener::bind(&args.listen)
@@ -170,7 +277,7 @@ fn main() {
             "a->b",
             client_read,
             upstream_write,
-            profile,
+            profile.for_direction(Direction::AtoB),
             conn_seed ^ 0xA5A5_A5A5_A5A5_A5A5,
             max_frame_bytes,
         );
@@ -178,7 +285,7 @@ fn main() {
             "b->a",
             upstream_read,
             client_write,
-            profile,
+            profile.for_direction(Direction::BtoA),
             conn_seed ^ 0x5A5A_5A5A_5A5A_5A5A,
             max_frame_bytes,
         );
@@ -233,9 +340,69 @@ fn run_reader(
 ) {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut frame_reader = FrameReader::new(reader, max_frame_bytes);
+    let mut frames_seen: u64 = 0;
+    let mut bytes_seen: u64 = 0;
+    let mut blackhole_until: Option<Instant> = None;
+    let mut blackhole_indefinite = false;
+    let mut blackhole_after_frames = profile.blackhole_after_frames;
+    let mut blackhole_after_bytes = profile.blackhole_after_bytes;
     loop {
         match frame_reader.read_next() {
             Ok(Some(payload)) => {
+                frames_seen = frames_seen.saturating_add(1);
+                bytes_seen = bytes_seen.saturating_add(payload.len() as u64);
+
+                if profile
+                    .reset_after_frames
+                    .map(|threshold| frames_seen >= threshold)
+                    .unwrap_or(false)
+                    || profile
+                        .reset_after_bytes
+                        .map(|threshold| bytes_seen >= threshold)
+                        .unwrap_or(false)
+                {
+                    eprintln!("proxy {label} injected reset");
+                    break;
+                }
+
+                if let Some(until) = blackhole_until {
+                    if Instant::now() >= until {
+                        blackhole_until = None;
+                    }
+                }
+
+                let mut triggered_blackhole = false;
+                if let Some(threshold) = blackhole_after_frames {
+                    if frames_seen >= threshold {
+                        blackhole_after_frames = None;
+                        triggered_blackhole = true;
+                    }
+                }
+                if let Some(threshold) = blackhole_after_bytes {
+                    if bytes_seen >= threshold {
+                        blackhole_after_bytes = None;
+                        triggered_blackhole = true;
+                    }
+                }
+
+                if triggered_blackhole {
+                    if let Some(for_ms) = profile.blackhole_for_ms {
+                        if for_ms == 0 {
+                            blackhole_indefinite = true;
+                        } else {
+                            blackhole_until =
+                                Some(Instant::now() + Duration::from_millis(for_ms));
+                        }
+                    } else {
+                        blackhole_indefinite = true;
+                    }
+                    eprintln!("proxy {label} entered blackhole");
+                }
+
+                if blackhole_indefinite || blackhole_until.is_some() {
+                    continue;
+                }
+
                 if chance(&mut rng, profile.loss_rate) {
                     continue;
                 }
