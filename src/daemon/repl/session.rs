@@ -236,19 +236,38 @@ impl Session {
         Some(SessionAction::Send(ReplMessage::Hello(hello)))
     }
 
+    pub fn resend_handshake(
+        &mut self,
+        store: &impl SessionStore,
+        now_ms: u64,
+    ) -> Option<SessionAction> {
+        if self.role != SessionRole::Outbound || !matches!(self.state, SessionState::Handshaking) {
+            return None;
+        }
+        let hello = self.build_hello(store, now_ms);
+        Some(SessionAction::Send(ReplMessage::Hello(hello)))
+    }
+
     pub fn handle_message(
         &mut self,
         msg: ReplMessage,
         store: &mut impl SessionStore,
         now_ms: u64,
     ) -> Vec<SessionAction> {
+        let state = self.state.clone();
         match msg {
-            ReplMessage::Hello(msg) => match &self.state {
+            ReplMessage::Hello(msg) => match state {
                 SessionState::Connecting => self.handle_hello(msg, store, now_ms),
+                SessionState::Streaming { ref peer } if self.role == SessionRole::Inbound => {
+                    self.handle_hello_replay(msg, peer, store)
+                }
                 _ => self.invalid_request("unexpected HELLO"),
             },
-            ReplMessage::Welcome(msg) => match &self.state {
+            ReplMessage::Welcome(msg) => match state {
                 SessionState::Handshaking => self.handle_welcome(msg, store, now_ms),
+                SessionState::Streaming { ref peer } if self.role == SessionRole::Outbound => {
+                    self.handle_welcome_replay(msg, peer)
+                }
                 _ => self.invalid_request("unexpected WELCOME"),
             },
             ReplMessage::Events(msg) => match &self.state {
@@ -375,6 +394,55 @@ impl Session {
         vec![SessionAction::Send(ReplMessage::Welcome(welcome))]
     }
 
+    fn handle_hello_replay(
+        &mut self,
+        hello: Hello,
+        peer: &SessionPeer,
+        store: &mut impl SessionStore,
+    ) -> Vec<SessionAction> {
+        if self.role != SessionRole::Inbound {
+            return self.invalid_request("unexpected HELLO");
+        }
+
+        if let Err(error) =
+            self.validate_peer_store(hello.store_id, hello.store_epoch, hello.sender_replica_id)
+        {
+            return self.fail(error);
+        }
+        if hello.sender_replica_id != peer.replica_id {
+            return self.invalid_request("unexpected HELLO");
+        }
+        if hello.min_protocol_version > hello.protocol_version {
+            return self.invalid_request("min_protocol_version exceeds protocol_version");
+        }
+
+        let negotiated = match negotiate_version(
+            self.config.protocol,
+            hello.protocol_version,
+            hello.min_protocol_version,
+        ) {
+            Ok(version) => version,
+            Err(err) => return self.fail(version_incompatible_error(&err)),
+        };
+        if negotiated != peer.protocol_version {
+            return self.invalid_request("HELLO protocol mismatch");
+        }
+
+        let accepted_namespaces =
+            intersect_namespaces(&self.config.offered_namespaces, &hello.requested_namespaces);
+        let incoming_namespaces =
+            intersect_namespaces(&self.config.requested_namespaces, &hello.offered_namespaces);
+        if accepted_namespaces != peer.accepted_namespaces
+            || incoming_namespaces != peer.incoming_namespaces
+        {
+            return self.invalid_request("HELLO namespaces changed");
+        }
+
+        let snapshot = store.watermark_snapshot(&accepted_namespaces);
+        let welcome = self.build_welcome(negotiated, &hello, snapshot, accepted_namespaces);
+        vec![SessionAction::Send(ReplMessage::Welcome(welcome))]
+    }
+
     fn handle_welcome(
         &mut self,
         welcome: super::proto::Welcome,
@@ -422,6 +490,35 @@ impl Session {
             live_stream_enabled: welcome.live_stream_enabled,
         };
         self.state = SessionState::Streaming { peer };
+
+        Vec::new()
+    }
+
+    fn handle_welcome_replay(
+        &mut self,
+        welcome: super::proto::Welcome,
+        peer: &SessionPeer,
+    ) -> Vec<SessionAction> {
+        if self.role != SessionRole::Outbound {
+            return self.invalid_request("unexpected WELCOME");
+        }
+
+        if let Err(error) = self.validate_peer_store(
+            welcome.store_id,
+            welcome.store_epoch,
+            welcome.receiver_replica_id,
+        ) {
+            return self.fail(error);
+        }
+        if welcome.receiver_replica_id != peer.replica_id {
+            return self.invalid_request("unexpected WELCOME");
+        }
+        if welcome.protocol_version != peer.protocol_version {
+            return self.invalid_request("WELCOME protocol mismatch");
+        }
+        if welcome.accepted_namespaces != peer.accepted_namespaces {
+            return self.invalid_request("WELCOME namespaces changed");
+        }
 
         Vec::new()
     }

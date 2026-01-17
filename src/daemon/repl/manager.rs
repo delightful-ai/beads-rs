@@ -347,9 +347,11 @@ where
 
     let mut session = Session::new(SessionRole::Outbound, config, limits.clone(), admission);
     let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
+    let mut last_hello_at_ms = None;
 
     if let Some(action) = session.begin_handshake(&store, now_ms()) {
         apply_action(&mut writer, &session, action, &mut keepalive)?;
+        last_hello_at_ms = Some(now_ms());
     }
 
     let mut accepted_set = BTreeSet::new();
@@ -470,6 +472,7 @@ where
             streaming = true;
             let now_ms = now_ms();
             handshake_at_ms = Some(now_ms);
+            last_hello_at_ms = None;
             if let Err(err) = store.update_replica_liveness(
                 plan.replica_id,
                 now_ms,
@@ -513,6 +516,22 @@ where
                 &mut keepalive,
             )?;
             sent_hot_cache = true;
+        }
+
+        if session.phase() == SessionPhase::Handshaking {
+            let now_ms = now_ms();
+            let retry_after_ms = limits.keepalive_ms;
+            if retry_after_ms > 0 {
+                let should_retry = last_hello_at_ms
+                    .map(|last| now_ms.saturating_sub(last) >= retry_after_ms)
+                    .unwrap_or(true);
+                if should_retry {
+                    if let Some(action) = session.resend_handshake(&store, now_ms) {
+                        apply_action(&mut writer, &session, action, &mut keepalive)?;
+                        last_hello_at_ms = Some(now_ms);
+                    }
+                }
+            }
         }
 
         if session.phase() == SessionPhase::Streaming {
