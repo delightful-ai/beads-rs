@@ -27,3 +27,27 @@ fn repl_daemon_to_daemon_roundtrip() {
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
 }
+
+#[test]
+fn repl_daemon_to_daemon_tailnet_roundtrip() {
+    let mut options = ReplRigOptions::default();
+    options.fault_profile = Some(FaultProfile::tailnet());
+    options.seed = 19;
+
+    let rig = ReplRig::new(3, options);
+
+    let ids = [
+        rig.create_issue(0, "tailnet-0"),
+        rig.create_issue(1, "tailnet-1"),
+        rig.create_issue(2, "tailnet-2"),
+    ];
+
+    for node_idx in 0..3 {
+        for id in &ids {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(60));
+        }
+    }
+
+    rig.assert_peers_seen(Duration::from_secs(60));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+}
