@@ -14,7 +14,9 @@ use uuid::Uuid;
 use beads_rs::StoreId;
 use beads_rs::api::{AdminStatusOutput, QueryResult};
 use beads_rs::config::{Config, ReplicationPeerConfig};
-use beads_rs::core::{NamespaceId, ReplicaId, ReplicaRole, StoreMeta, Watermarks};
+use beads_rs::core::{
+    NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, StoreMeta, Watermarks,
+};
 use beads_rs::daemon::ipc::{IpcClient, ReadConsistency, Request, Response, ResponsePayload};
 
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
@@ -86,6 +88,12 @@ impl ReplRig {
             nodes.push(Node::new(seed, store_id_override, replica_id));
         }
         let store_id = resolved_store_id.expect("store id resolved");
+
+        let roster_entries = build_roster_entries(&nodes);
+        for node in &nodes {
+            write_replica_roster(&node.data_dir, store_id, &roster_entries)
+                .expect("write replica roster");
+        }
 
         let (link_addrs, proxy_specs) = plan_links(&nodes, &options);
         for (idx, node) in nodes.iter().enumerate() {
@@ -499,6 +507,36 @@ fn write_replication_user_config(
     let config_path = config_dir.join("beads-rs").join("config.toml");
     beads_rs::config::write_config(&config_path, &config)
         .map_err(|err| format!("write config.toml failed: {err}"))?;
+    Ok(())
+}
+
+fn build_roster_entries(nodes: &[Node]) -> Vec<ReplicaEntry> {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, node)| ReplicaEntry {
+            replica_id: node.replica_id,
+            name: format!("node-{idx}"),
+            role: ReplicaRole::Peer,
+            durability_eligible: true,
+            allowed_namespaces: Some(vec![NamespaceId::core()]),
+            expire_after_ms: None,
+        })
+        .collect()
+}
+
+fn write_replica_roster(
+    data_dir: &Path,
+    store_id: StoreId,
+    entries: &[ReplicaEntry],
+) -> Result<(), String> {
+    let roster = ReplicaRoster {
+        replicas: entries.to_vec(),
+    };
+    let raw = toml::to_string(&roster).map_err(|err| format!("serialize roster failed: {err}"))?;
+    let store_dir = data_dir.join("stores").join(store_id.to_string());
+    fs::write(store_dir.join("replicas.toml"), raw)
+        .map_err(|err| format!("write replicas.toml failed: {err}"))?;
     Ok(())
 }
 
