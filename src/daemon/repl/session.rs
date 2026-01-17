@@ -380,6 +380,7 @@ impl Session {
         if let Err(error) = self.seed_watermarks(store, &incoming_namespaces) {
             return self.fail(error);
         }
+        let wants = self.initial_wants(&hello.seen_durable, &incoming_namespaces);
         let peer = SessionPeer {
             replica_id: hello.sender_replica_id,
             store_epoch: hello.store_epoch,
@@ -390,8 +391,11 @@ impl Session {
             live_stream_enabled: welcome.live_stream_enabled,
         };
         self.state = SessionState::Streaming { peer };
-
-        vec![SessionAction::Send(ReplMessage::Welcome(welcome))]
+        let mut actions = vec![SessionAction::Send(ReplMessage::Welcome(welcome))];
+        if !wants.is_empty() {
+            actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
+        }
+        actions
     }
 
     fn handle_hello_replay(
@@ -480,6 +484,7 @@ impl Session {
             return self.fail(error);
         }
 
+        let wants = self.initial_wants(&welcome.receiver_seen_durable, &incoming_namespaces);
         let peer = SessionPeer {
             replica_id: welcome.receiver_replica_id,
             store_epoch: welcome.store_epoch,
@@ -490,8 +495,11 @@ impl Session {
             live_stream_enabled: welcome.live_stream_enabled,
         };
         self.state = SessionState::Streaming { peer };
-
-        Vec::new()
+        if wants.is_empty() {
+            Vec::new()
+        } else {
+            vec![SessionAction::Send(ReplMessage::Want(Want { want: wants }))]
+        }
     }
 
     fn handle_welcome_replay(
@@ -799,6 +807,29 @@ impl Session {
         for namespace in empty {
             wants.remove(&namespace);
         }
+    }
+
+    fn initial_wants(
+        &self,
+        peer_seen: &WatermarkMap,
+        incoming_namespaces: &[NamespaceId],
+    ) -> WatermarkMap {
+        let mut wants = WatermarkMap::new();
+        for namespace in incoming_namespaces {
+            let Some(origins) = peer_seen.get(namespace) else {
+                continue;
+            };
+            for (origin, peer_seq) in origins {
+                let local_seq = self.durable_for(namespace, origin).seq();
+                if peer_seq.get() > local_seq.get() {
+                    wants
+                        .entry(namespace.clone())
+                        .or_default()
+                        .insert(*origin, local_seq);
+                }
+            }
+        }
+        wants
     }
 
     fn validate_peer_store(
@@ -1296,6 +1327,7 @@ mod tests {
         Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
         encode_event_body_canonical, hash_event_body,
     };
+    use crate::daemon::repl::proto;
 
     #[derive(Clone, Debug)]
     struct TestStore {
@@ -1490,6 +1522,57 @@ mod tests {
         };
         assert_eq!(welcome.protocol_version, PROTOCOL_VERSION_V1);
         assert_eq!(welcome.accepted_namespaces, vec![NamespaceId::core()]);
+    }
+
+    #[test]
+    fn welcome_sends_initial_want_when_peer_ahead() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()];
+        config.offered_namespaces = vec![NamespaceId::core()];
+
+        let mut session = Session::new(SessionRole::Outbound, config, limits, admission);
+        session.begin_handshake(&store, 0).expect("hello action");
+
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let mut receiver_seen: WatermarkMap = BTreeMap::new();
+        receiver_seen
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(peer_replica, Seq0::new(2));
+
+        let welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: peer_replica,
+            welcome_nonce: 10,
+            accepted_namespaces: vec![NamespaceId::core()],
+            receiver_seen_durable: receiver_seen,
+            receiver_seen_durable_heads: None,
+            receiver_seen_applied: None,
+            receiver_seen_applied_heads: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 1024,
+        };
+
+        let actions = session.handle_message(ReplMessage::Welcome(welcome), &mut store, 0);
+        let want = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Want(want)) => Some(want),
+                _ => None,
+            })
+            .expect("want");
+        let seq = want
+            .want
+            .get(&NamespaceId::core())
+            .and_then(|m| m.get(&peer_replica))
+            .copied()
+            .unwrap_or(Seq0::ZERO);
+        assert_eq!(seq, Seq0::ZERO);
     }
 
     #[test]
