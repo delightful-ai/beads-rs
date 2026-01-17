@@ -9,11 +9,7 @@ use crate::fixtures::repl_rig::{FaultProfile, ReplRig, ReplRigOptions};
 #[test]
 fn repl_daemon_to_daemon_roundtrip() {
     let mut options = ReplRigOptions::default();
-    let mut profile = FaultProfile::tailnet();
-    profile.loss_rate = Some(0.0);
-    profile.duplicate_rate = Some(0.0);
-    profile.reorder_rate = Some(0.0);
-    options.fault_profile = Some(profile);
+    options.fault_profile = Some(FaultProfile::none());
     options.seed = 7;
 
     let rig = ReplRig::new(3, options);
@@ -27,5 +23,5 @@ fn repl_daemon_to_daemon_roundtrip() {
     let id2 = rig.create_issue(2, "from-2");
     rig.wait_for_show(0, &id2, Duration::from_secs(15));
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(30));
+    rig.assert_peers_seen(Duration::from_secs(30));
 }

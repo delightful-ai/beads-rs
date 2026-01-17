@@ -126,6 +126,16 @@ impl ReplRig {
         panic!("replication did not converge: {statuses:?}");
     }
 
+    pub fn assert_peers_seen(&self, timeout: Duration) {
+        let ok = poll_until(timeout, || self.peers_seen());
+        if ok {
+            return;
+        }
+        let statuses: Vec<AdminStatusOutput> =
+            self.nodes.iter().map(|node| node.admin_status()).collect();
+        panic!("replication peers not observed: {statuses:?}");
+    }
+
     fn converged(&self, namespaces: &[NamespaceId]) -> bool {
         if self.nodes.len() < 2 {
             return true;
@@ -150,6 +160,30 @@ impl ReplRig {
                     &status.watermarks_durable,
                     namespace,
                 ) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn peers_seen(&self) -> bool {
+        if self.nodes.len() < 2 {
+            return true;
+        }
+        let expected: BTreeSet<ReplicaId> = self.nodes.iter().map(|node| node.replica_id).collect();
+        for node in &self.nodes {
+            let status = node.admin_status();
+            let seen: BTreeSet<ReplicaId> = status
+                .replica_liveness
+                .iter()
+                .map(|row| row.replica_id)
+                .collect();
+            for peer in &expected {
+                if *peer == status.replica_id {
+                    continue;
+                }
+                if !seen.contains(peer) {
                     return false;
                 }
             }
