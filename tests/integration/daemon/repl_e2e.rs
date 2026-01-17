@@ -84,3 +84,44 @@ fn repl_daemon_store_discovery_roundtrip() {
         );
     }
 }
+
+#[test]
+fn repl_daemon_crash_restart_roundtrip() {
+    let mut options = ReplRigOptions::default();
+    options.seed = 29;
+
+    let rig = ReplRig::new(3, options);
+
+    let initial = [
+        rig.create_issue(0, "crash-pre-0"),
+        rig.create_issue(1, "crash-pre-1"),
+        rig.create_issue(2, "crash-pre-2"),
+    ];
+
+    for node_idx in 0..3 {
+        for id in &initial {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(30));
+        }
+    }
+
+    rig.crash_node(2);
+
+    let post = [
+        rig.create_issue(0, "crash-post-0"),
+        rig.create_issue(1, "crash-post-1"),
+    ];
+
+    for node_idx in 0..2 {
+        for id in &post {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(30));
+        }
+    }
+
+    rig.restart_node(2);
+
+    for id in initial.iter().chain(post.iter()) {
+        rig.wait_for_show(2, id, Duration::from_secs(60));
+    }
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+}
