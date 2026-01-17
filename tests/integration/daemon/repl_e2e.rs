@@ -9,7 +9,7 @@ use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
 use beads_rs::core::{
     BeadType, DurabilityClass, DurabilityOutcome, HeadStatus, NamespaceId, Priority,
-    ProtocolErrorCode, Seq0,
+    ProtocolErrorCode, ReplicaEntry, ReplicaRole, Seq0,
 };
 use beads_rs::daemon::ipc::{
     IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
@@ -182,6 +182,79 @@ fn repl_daemon_crash_restart_roundtrip() {
 }
 
 #[test]
+fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
+    let mut options = ReplRigOptions::default();
+    options.seed = 37;
+
+    let rig = ReplRig::new(3, options);
+
+    let initial = [
+        rig.create_issue(0, "roster-pre-0"),
+        rig.create_issue(1, "roster-pre-1"),
+        rig.create_issue(2, "roster-pre-2"),
+    ];
+
+    for node_idx in 0..3 {
+        for id in &initial {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(30));
+        }
+    }
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+
+    let mut entries = roster_entries(&rig);
+    entries[2].durability_eligible = false;
+    rig.overwrite_roster(entries);
+    for idx in 0..3 {
+        rig.reload_replication(idx);
+    }
+
+    let replica = rig.node(2).replica_id();
+    rig.wait_for_durability_eligible(0, replica, false, Duration::from_secs(30));
+
+    let post_roster = [
+        rig.create_issue(0, "roster-post-0"),
+        rig.create_issue(1, "roster-post-1"),
+    ];
+
+    for node_idx in 0..3 {
+        for id in &post_roster {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(30));
+        }
+    }
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+
+    for idx in 0..3 {
+        rig.shutdown_node(idx);
+    }
+
+    let bumped = rig.bump_store_epoch();
+    assert!(bumped.get() > 0, "store_epoch should advance");
+
+    for idx in 0..3 {
+        rig.restart_node(idx);
+    }
+
+    let post_epoch = [
+        rig.create_issue(0, "epoch-post-0"),
+        rig.create_issue(2, "epoch-post-2"),
+    ];
+
+    for node_idx in 0..3 {
+        for id in initial
+            .iter()
+            .chain(post_roster.iter())
+            .chain(post_epoch.iter())
+        {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(60));
+        }
+    }
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
+}
+
+#[test]
 fn repl_daemon_replicated_fsync_receipt() {
     let mut options = ReplRigOptions::default();
     options.seed = 31;
@@ -270,6 +343,21 @@ fn repl_daemon_replicated_fsync_receipt() {
         }
         other => panic!("unexpected require_min_seen response: {other:?}"),
     }
+}
+
+fn roster_entries(rig: &ReplRig) -> Vec<ReplicaEntry> {
+    rig.nodes()
+        .iter()
+        .enumerate()
+        .map(|(idx, node)| ReplicaEntry {
+            replica_id: node.replica_id(),
+            name: format!("node-{idx}"),
+            role: ReplicaRole::Peer,
+            durability_eligible: true,
+            allowed_namespaces: Some(vec![NamespaceId::core()]),
+            expire_after_ms: None,
+        })
+        .collect()
 }
 
 #[test]
