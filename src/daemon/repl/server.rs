@@ -250,6 +250,9 @@ where
 
         match listener.accept() {
             Ok((stream, _)) => {
+                if let Err(err) = stream.set_nonblocking(false) {
+                    tracing::warn!("replication inbound stream failed to set blocking: {err}");
+                }
                 if let Some(guard) = ConnectionGuard::try_acquire(
                     &runtime.active_connections,
                     runtime.max_connections,
