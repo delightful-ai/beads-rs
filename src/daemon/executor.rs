@@ -239,6 +239,7 @@ impl Daemon {
             "mutation",
             store_id = %store.store_id,
             store_epoch = store.store_epoch.get(),
+            replica_id = %origin_replica_id,
             durability = ?durability,
             txn_id = %sequenced.event_body.txn_id,
             client_request_id = ?ctx.client_request_id,
@@ -1116,6 +1117,8 @@ fn find_claim_expiry(delta: &TxnDeltaV1, expected: &BeadId) -> Result<WallClock,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
     use std::sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -1132,9 +1135,18 @@ mod tests {
         WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::daemon::Clock;
+    use crate::daemon::Daemon;
+    use crate::daemon::core::insert_store_for_tests;
+    use crate::daemon::ipc::{MutationMeta, Request};
+    use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{
         IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
     };
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::{Layer, Registry};
 
     fn bead_id(id: &str) -> BeadId {
         BeadId::parse(id).unwrap()
@@ -1182,6 +1194,181 @@ mod tests {
             now: Arc::new(AtomicU64::new(now)),
         });
         Clock::with_time_source(source)
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct SpanFields {
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl FieldVisitor {
+        fn record(&mut self, field: &Field, value: String) {
+            self.fields.insert(field.name().to_string(), value);
+        }
+    }
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.record(field, format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.record(field, value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.record(field, value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.record(field, value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.record(field, value.to_string());
+        }
+
+        fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+            self.record(field, value.to_string());
+        }
+    }
+
+    struct CaptureLayer {
+        spans: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    impl CaptureLayer {
+        fn new(spans: Arc<Mutex<Vec<BTreeMap<String, String>>>>) -> Self {
+            Self { spans }
+        }
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::Id,
+            ctx: Context<'_, S>,
+        ) {
+            let mut visitor = FieldVisitor::default();
+            attrs.record(&mut visitor);
+            if let Some(span) = ctx.span(id) {
+                span.extensions_mut().insert(SpanFields {
+                    fields: visitor.fields,
+                });
+            }
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: Context<'_, S>,
+        ) {
+            if let Some(span) = ctx.span(id) {
+                let mut visitor = FieldVisitor::default();
+                values.record(&mut visitor);
+                let mut extensions = span.extensions_mut();
+                if extensions.get_mut::<SpanFields>().is_none() {
+                    extensions.insert(SpanFields::default());
+                }
+                let fields = extensions.get_mut::<SpanFields>().expect("span fields");
+                fields.fields.extend(visitor.fields);
+            }
+        }
+
+        fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+            let Some(span) = ctx.span(&id) else {
+                return;
+            };
+            if span.metadata().name() != "mutation" {
+                return;
+            }
+            let fields = span
+                .extensions()
+                .get::<SpanFields>()
+                .map(|fields| fields.fields.clone())
+                .unwrap_or_default();
+            self.spans.lock().expect("span capture").push(fields);
+        }
+    }
+
+    #[test]
+    fn mutation_span_includes_realtime_context() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let _override = crate::paths::override_data_dir_for_tests(Some(data_dir));
+
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let mut daemon = Daemon::new(actor_id("trace@test"));
+        let store_id = StoreId::new(Uuid::from_bytes([5u8; 16]));
+        let remote = RemoteUrl("example.com/test/repo".into());
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let layer = CaptureLayer::new(spans.clone());
+        let subscriber = Registry::default().with(layer);
+
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let client_request_id = ClientRequestId::new(Uuid::from_bytes([6u8; 16]));
+        let request = Request::Create {
+            repo: repo_path.clone(),
+            id: None,
+            parent: None,
+            title: "trace".to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            meta: MutationMeta {
+                client_request_id: Some(client_request_id.to_string()),
+                ..MutationMeta::default()
+            },
+        };
+
+        tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+            let _ = daemon.handle_request(request, &git_tx);
+        });
+
+        let captured = spans.lock().expect("span capture");
+        let fields = captured
+            .iter()
+            .find(|fields| fields.contains_key("store_id"))
+            .cloned()
+            .unwrap_or_default();
+
+        for key in [
+            "store_id",
+            "store_epoch",
+            "replica_id",
+            "txn_id",
+            "client_request_id",
+            "namespace",
+            "origin_replica_id",
+            "origin_seq",
+        ] {
+            assert!(
+                fields.contains_key(key),
+                "mutation span missing {key}: {fields:?}"
+            );
+        }
     }
 
     #[test]

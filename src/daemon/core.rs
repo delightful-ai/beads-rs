@@ -1209,11 +1209,35 @@ impl Daemon {
     }
 
     pub(crate) fn handle_repl_ingest(&mut self, request: ReplIngestRequest) {
+        let (store_epoch, local_replica_id) = self
+            .stores
+            .get(&request.store_id)
+            .map(|store| {
+                (
+                    Some(store.meta.identity.store_epoch),
+                    Some(store.meta.replica_id),
+                )
+            })
+            .unwrap_or((None, None));
+        let origin_seq = request
+            .batch
+            .first()
+            .map(|event| event.body.origin_seq.get());
+        let txn_id = request.batch.first().map(|event| event.body.txn_id);
+        let client_request_id = request
+            .batch
+            .first()
+            .and_then(|event| event.body.client_request_id);
         let span = tracing::info_span!(
             "repl_ingest_request",
             store_id = %request.store_id,
+            store_epoch = ?store_epoch.map(|epoch| epoch.get()),
+            replica_id = ?local_replica_id,
             namespace = %request.namespace,
             origin_replica_id = %request.origin,
+            origin_seq = ?origin_seq,
+            txn_id = ?txn_id,
+            client_request_id = ?client_request_id,
             batch_len = request.batch.len()
         );
         let _guard = span.enter();
