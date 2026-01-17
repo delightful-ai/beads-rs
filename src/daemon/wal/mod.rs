@@ -1,6 +1,7 @@
 //! Event WAL implementation (v0.5).
 
-use std::path::PathBuf;
+use std::io::{Read, Seek};
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -9,6 +10,7 @@ pub mod frame;
 pub mod fsck;
 pub mod index;
 pub mod memory_index;
+pub mod memory_wal;
 pub mod record;
 pub mod replay;
 pub mod segment;
@@ -34,6 +36,21 @@ pub use segment::{
 };
 
 pub type EventWalResult<T> = Result<T, EventWalError>;
+
+pub(crate) trait ReadSeek: Read + Seek {}
+
+impl<T: Read + Seek> ReadSeek for T {}
+
+pub(crate) fn open_segment_reader(path: &Path) -> EventWalResult<Box<dyn ReadSeek>> {
+    if let Some(bytes) = memory_wal::read_segment_bytes(path) {
+        return Ok(Box::new(std::io::Cursor::new(bytes)));
+    }
+    let file = std::fs::File::open(path).map_err(|source| EventWalError::Io {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    Ok(Box::new(file))
+}
 
 #[derive(Debug, Error)]
 pub enum EventWalError {

@@ -7,7 +7,6 @@
 //! 4. Marks dirty and schedules sync
 //! 5. Returns response
 
-use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,7 +28,7 @@ use super::ops::{BeadPatch, OpError, OpResult};
 use super::store_runtime::{StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
-    WalIndexError, WalIndexTxn, WalReplayError,
+    WalIndexError, WalIndexTxn, WalReplayError, open_segment_reader,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
@@ -962,20 +961,18 @@ fn load_event_body(
         store_dir.join(&segment.segment_path)
     };
 
-    let mut file = File::open(&path).map_err(|source| {
-        OpError::from(EventWalError::Io {
-            path: Some(path.clone()),
-            source,
-        })
-    })?;
-    file.seek(SeekFrom::Start(item.offset)).map_err(|source| {
-        OpError::from(EventWalError::Io {
-            path: Some(path.clone()),
-            source,
-        })
-    })?;
+    let mut reader =
+        open_segment_reader(&path).map_err(|err| event_wal_error_with_path(err, &path))?;
+    reader
+        .seek(SeekFrom::Start(item.offset))
+        .map_err(|source| {
+            OpError::from(EventWalError::Io {
+                path: Some(path.clone()),
+                source,
+            })
+        })?;
 
-    let mut reader = FrameReader::new(file, limits.max_wal_record_bytes);
+    let mut reader = FrameReader::new(reader, limits.max_wal_record_bytes);
     let record = reader
         .read_next()
         .map_err(|err| event_wal_error_with_path(err, &path))?

@@ -4,7 +4,7 @@
 //! The serialization point for all mutations - runs on a single thread.
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::{Component, Path, PathBuf};
@@ -42,7 +42,7 @@ use super::store::discovery::ResolvedStore;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
-    WalIndexError, WalReplayError,
+    WalIndexError, WalReplayError, open_segment_reader,
 };
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
@@ -2219,20 +2219,26 @@ fn load_event_body_at(
     offset: u64,
     limits: &Limits,
 ) -> Result<EventBody, StoreRuntimeError> {
-    let mut file = File::open(path).map_err(|source| {
-        StoreRuntimeError::WalReplay(Box::new(WalReplayError::Io {
-            path: path.to_path_buf(),
-            source,
+    let mut reader = open_segment_reader(path).map_err(|source| {
+        StoreRuntimeError::WalReplay(Box::new(match source {
+            EventWalError::Io { source, .. } => WalReplayError::Io {
+                path: path.to_path_buf(),
+                source,
+            },
+            other => WalReplayError::RecordDecode {
+                path: path.to_path_buf(),
+                source: other,
+            },
         }))
     })?;
-    file.seek(SeekFrom::Start(offset)).map_err(|source| {
+    reader.seek(SeekFrom::Start(offset)).map_err(|source| {
         StoreRuntimeError::WalReplay(Box::new(WalReplayError::Io {
             path: path.to_path_buf(),
             source,
         }))
     })?;
 
-    let mut reader = FrameReader::new(file, limits.max_wal_record_bytes);
+    let mut reader = FrameReader::new(reader, limits.max_wal_record_bytes);
     let record = reader
         .read_next()
         .map_err(|source| {

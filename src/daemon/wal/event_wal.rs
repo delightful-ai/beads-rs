@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::core::{Limits, NamespaceId, StoreMeta};
 
-use super::{AppendOutcome, EventWalResult, SegmentConfig, SegmentWriter, VerifiedRecord};
+use super::memory_wal::MemoryEventWal;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentSnapshot {
@@ -14,11 +14,13 @@ pub struct SegmentSnapshot {
     pub path: PathBuf,
 }
 
+enum EventWalBackend {
+    Disk(DiskEventWal),
+    Memory(MemoryEventWal),
+}
+
 pub struct EventWal {
-    store_dir: PathBuf,
-    meta: StoreMeta,
-    config: SegmentConfig,
-    writers: BTreeMap<NamespaceId, SegmentWriter>,
+    backend: EventWalBackend,
 }
 
 impl EventWal {
@@ -28,10 +30,21 @@ impl EventWal {
 
     pub fn new_with_config(store_dir: PathBuf, meta: StoreMeta, config: SegmentConfig) -> Self {
         Self {
-            store_dir,
-            meta,
-            config,
-            writers: BTreeMap::new(),
+            backend: EventWalBackend::Disk(DiskEventWal::new(store_dir, meta, config)),
+        }
+    }
+
+    pub fn new_memory(store_dir: PathBuf, meta: StoreMeta, limits: &Limits) -> Self {
+        Self::new_memory_with_config(store_dir, meta, SegmentConfig::from_limits(limits))
+    }
+
+    pub fn new_memory_with_config(
+        store_dir: PathBuf,
+        meta: StoreMeta,
+        config: SegmentConfig,
+    ) -> Self {
+        Self {
+            backend: EventWalBackend::Memory(MemoryEventWal::new(store_dir, meta, config)),
         }
     }
 
@@ -41,11 +54,55 @@ impl EventWal {
         record: &VerifiedRecord,
         now_ms: u64,
     ) -> EventWalResult<AppendOutcome> {
+        match &mut self.backend {
+            EventWalBackend::Disk(wal) => wal.append(namespace, record, now_ms),
+            EventWalBackend::Memory(wal) => wal.append(namespace, record, now_ms),
+        }
+    }
+
+    pub fn segment_snapshot(&self, namespace: &NamespaceId) -> Option<SegmentSnapshot> {
+        match &self.backend {
+            EventWalBackend::Disk(wal) => wal.segment_snapshot(namespace),
+            EventWalBackend::Memory(wal) => wal.segment_snapshot(namespace),
+        }
+    }
+
+    pub fn flush(&mut self, namespace: &NamespaceId) -> EventWalResult<Option<SegmentSnapshot>> {
+        match &mut self.backend {
+            EventWalBackend::Disk(wal) => wal.flush(namespace),
+            EventWalBackend::Memory(wal) => wal.flush(namespace),
+        }
+    }
+}
+
+struct DiskEventWal {
+    store_dir: PathBuf,
+    meta: StoreMeta,
+    config: SegmentConfig,
+    writers: BTreeMap<NamespaceId, SegmentWriter>,
+}
+
+impl DiskEventWal {
+    fn new(store_dir: PathBuf, meta: StoreMeta, config: SegmentConfig) -> Self {
+        Self {
+            store_dir,
+            meta,
+            config,
+            writers: BTreeMap::new(),
+        }
+    }
+
+    fn append(
+        &mut self,
+        namespace: &NamespaceId,
+        record: &VerifiedRecord,
+        now_ms: u64,
+    ) -> EventWalResult<AppendOutcome> {
         let writer = self.writer_mut(namespace, now_ms)?;
         writer.append(record, now_ms)
     }
 
-    pub fn segment_snapshot(&self, namespace: &NamespaceId) -> Option<SegmentSnapshot> {
+    fn segment_snapshot(&self, namespace: &NamespaceId) -> Option<SegmentSnapshot> {
         self.writers.get(namespace).map(|writer| SegmentSnapshot {
             segment_id: writer.current_segment_id(),
             created_at_ms: writer.current_created_at_ms(),
@@ -53,7 +110,7 @@ impl EventWal {
         })
     }
 
-    pub fn flush(&mut self, namespace: &NamespaceId) -> EventWalResult<Option<SegmentSnapshot>> {
+    fn flush(&mut self, namespace: &NamespaceId) -> EventWalResult<Option<SegmentSnapshot>> {
         let Some(writer) = self.writers.get_mut(namespace) else {
             return Ok(None);
         };

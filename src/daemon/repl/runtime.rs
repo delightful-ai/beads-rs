@@ -1,7 +1,6 @@
 //! Replication runtime adapters for the daemon coordinator.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +22,7 @@ use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
 use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
     EventWalError, FrameReader, ReplicaLivenessRow, VerifiedRecord, WalIndex, WalIndexError,
+    open_segment_reader,
 };
 use crate::paths;
 
@@ -389,17 +389,15 @@ fn read_record_at(
     max_record_bytes: usize,
     limits: &Limits,
 ) -> Result<VerifiedRecord, EventWalError> {
-    let mut file = File::open(path).map_err(|source| EventWalError::Io {
-        path: Some(path.to_path_buf()),
-        source,
-    })?;
-    file.seek(SeekFrom::Start(offset))
+    let mut reader = open_segment_reader(path)?;
+    reader
+        .seek(SeekFrom::Start(offset))
         .map_err(|source| EventWalError::Io {
             path: Some(path.to_path_buf()),
             source,
         })?;
 
-    let mut reader = FrameReader::new(file, max_record_bytes);
+    let mut reader = FrameReader::new(reader, max_record_bytes);
     let record = reader
         .read_next()
         .map_err(|err| match err {

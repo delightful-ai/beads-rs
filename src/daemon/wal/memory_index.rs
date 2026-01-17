@@ -58,6 +58,12 @@ impl MemoryWalIndex {
     }
 }
 
+impl Default for MemoryWalIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WalIndex for MemoryWalIndex {
     fn writer(&self) -> Box<dyn WalIndexWriter> {
         Box::new(MemoryWalIndexWriter {
@@ -470,7 +476,7 @@ impl WalIndexReader for MemoryWalIndexReader {
     fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<Seq0, WalIndexError> {
         self.with_state(|state| {
             let mut max = 0u64;
-            for ((key_ns, key_origin, key_seq), _entry) in &state.events {
+            for (key_ns, key_origin, key_seq) in state.events.keys() {
                 if key_ns == ns && key_origin == origin {
                     max = max.max(key_seq.get());
                 }
