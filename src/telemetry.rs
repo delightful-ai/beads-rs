@@ -58,7 +58,7 @@ pub trait Tracer: Send + Sync {
     fn on_event(&self, record: LogRecord);
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TelemetryConfig {
     pub verbosity: u8,
     pub logging: LoggingConfig,
@@ -125,7 +125,9 @@ pub fn init(config: TelemetryConfig) -> TelemetryGuard {
         layers.push(Box::new(layer));
     }
 
-    Registry::default().with(filter).with(layers).init();
+    layers.push(Box::new(filter));
+
+    Registry::default().with(layers).init();
 
     if let Some(report) = file_prune_report {
         tracing::info!(
@@ -240,12 +242,10 @@ where
             let mut visitor = FieldVisitor::default();
             values.record(&mut visitor);
             let mut extensions = span.extensions_mut();
-            let fields = extensions
-                .get_mut::<SpanFields>()
-                .unwrap_or_else(|| {
-                    extensions.insert(SpanFields::default());
-                    extensions.get_mut::<SpanFields>().expect("span fields")
-                });
+            if extensions.get_mut::<SpanFields>().is_none() {
+                extensions.insert(SpanFields::default());
+            }
+            let fields = extensions.get_mut::<SpanFields>().expect("span fields");
             fields.fields.extend(visitor.fields);
         }
     }
