@@ -26,6 +26,7 @@ pub type FaultProfile = TailnetProfile;
 pub struct ReplRigOptions {
     pub fault_profile: Option<FaultProfile>,
     pub seed: u64,
+    pub use_store_id_override: bool,
 }
 
 impl Default for ReplRigOptions {
@@ -33,6 +34,7 @@ impl Default for ReplRigOptions {
         Self {
             fault_profile: None,
             seed: 42,
+            use_store_id_override: true,
         }
     }
 }
@@ -61,13 +63,27 @@ impl ReplRig {
         fs::create_dir_all(&remote_dir).expect("create remote dir");
         run_git(&["init", "--bare"], &remote_dir).expect("git init --bare");
 
-        let store_id = StoreId::new(Uuid::new_v4());
+        let store_id_override = if options.use_store_id_override {
+            Some(StoreId::new(Uuid::new_v4()))
+        } else {
+            None
+        };
+        let mut resolved_store_id = store_id_override;
         let mut nodes = Vec::with_capacity(node_count);
         for idx in 0..node_count {
             let seed = build_node(&root_path, idx, &remote_dir);
-            let replica_id = bootstrap_replica(&seed, store_id);
-            nodes.push(Node::new(seed, store_id, replica_id));
+            let (store_id, replica_id) = bootstrap_replica(&seed, store_id_override);
+            if let Some(existing) = resolved_store_id {
+                assert_eq!(
+                    existing, store_id,
+                    "store id mismatch: expected {existing} got {store_id}"
+                );
+            } else {
+                resolved_store_id = Some(store_id);
+            }
+            nodes.push(Node::new(seed, store_id_override, replica_id));
         }
+        let store_id = resolved_store_id.expect("store id resolved");
 
         let (link_addrs, proxy_specs) = plan_links(&nodes, &options);
         for (idx, node) in nodes.iter().enumerate() {
@@ -218,19 +234,19 @@ pub struct Node {
     data_dir: PathBuf,
     config_dir: PathBuf,
     listen_addr: String,
-    store_id: StoreId,
+    store_id_override: Option<StoreId>,
     replica_id: ReplicaId,
 }
 
 impl Node {
-    fn new(seed: NodeSeed, store_id: StoreId, replica_id: ReplicaId) -> Self {
+    fn new(seed: NodeSeed, store_id_override: Option<StoreId>, replica_id: ReplicaId) -> Self {
         Self {
             repo_dir: seed.repo_dir,
             runtime_dir: seed.runtime_dir,
             data_dir: seed.data_dir,
             config_dir: seed.config_dir,
             listen_addr: seed.listen_addr,
-            store_id,
+            store_id_override,
             replica_id,
         }
     }
@@ -264,7 +280,9 @@ impl Node {
         cmd.current_dir(&self.repo_dir);
         cmd.env("XDG_RUNTIME_DIR", &self.runtime_dir);
         cmd.env("BD_DATA_DIR", &self.data_dir);
-        cmd.env("BD_STORE_ID", self.store_id.to_string());
+        if let Some(store_id) = self.store_id_override {
+            cmd.env("BD_STORE_ID", store_id.to_string());
+        }
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd.env("XDG_CONFIG_HOME", &self.config_dir);
         cmd.env("BD_TESTING", "1");
@@ -335,12 +353,14 @@ struct NodeSeed {
 }
 
 impl NodeSeed {
-    fn bd_cmd(&self, store_id: StoreId) -> Command {
+    fn bd_cmd(&self, store_id_override: Option<StoreId>) -> Command {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(&self.repo_dir);
         cmd.env("XDG_RUNTIME_DIR", &self.runtime_dir);
         cmd.env("BD_DATA_DIR", &self.data_dir);
-        cmd.env("BD_STORE_ID", store_id.to_string());
+        if let Some(store_id) = store_id_override {
+            cmd.env("BD_STORE_ID", store_id.to_string());
+        }
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd.env("XDG_CONFIG_HOME", &self.config_dir);
         cmd.env("BD_TESTING", "1");
@@ -348,23 +368,60 @@ impl NodeSeed {
     }
 }
 
-fn bootstrap_replica(node: &NodeSeed, store_id: StoreId) -> ReplicaId {
-    node.bd_cmd(store_id).args(["init"]).assert().success();
-    let replica_id = read_replica_id(&node.data_dir, store_id);
+fn bootstrap_replica(node: &NodeSeed, store_id_override: Option<StoreId>) -> (StoreId, ReplicaId) {
+    node.bd_cmd(store_id_override)
+        .args(["init"])
+        .assert()
+        .success();
+    let meta = read_store_meta(&node.data_dir, store_id_override);
     shutdown_daemon(&node.runtime_dir);
-    replica_id
+    (meta.store_id(), meta.replica_id)
 }
 
-fn read_replica_id(data_dir: &Path, store_id: StoreId) -> ReplicaId {
-    let meta_path = data_dir
-        .join("stores")
-        .join(store_id.to_string())
-        .join("meta.json");
-    let ok = poll_until(Duration::from_secs(2), || meta_path.exists());
-    assert!(ok, "store meta not written: {meta_path:?}");
+fn read_store_meta(data_dir: &Path, store_id_override: Option<StoreId>) -> StoreMeta {
+    let stores_dir = data_dir.join("stores");
+    let mut meta_path: Option<PathBuf> = None;
+    let ok = poll_until(Duration::from_secs(2), || {
+        if meta_path.is_some() {
+            return true;
+        }
+        meta_path = match store_id_override {
+            Some(store_id) => {
+                let path = stores_dir.join(store_id.to_string()).join("meta.json");
+                path.exists().then_some(path)
+            }
+            None => discover_store_meta_path(&stores_dir),
+        };
+        meta_path.is_some()
+    });
+    assert!(ok, "store meta not written under {stores_dir:?}");
+    let meta_path = meta_path.expect("store meta path");
     let raw = fs::read_to_string(&meta_path).expect("read meta");
     let meta: StoreMeta = serde_json::from_str(&raw).expect("parse meta");
-    meta.replica_id
+    if let Some(expected) = store_id_override {
+        assert_eq!(
+            meta.store_id(), expected,
+            "store id mismatch: expected {expected} got {}",
+            meta.store_id()
+        );
+    }
+    meta
+}
+
+fn discover_store_meta_path(stores_dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(stores_dir).ok()?;
+    let mut store_dirs = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        if entry.file_type().ok()?.is_dir() {
+            store_dirs.push(entry.path());
+        }
+    }
+    if store_dirs.len() != 1 {
+        return None;
+    }
+    let meta_path = store_dirs[0].join("meta.json");
+    meta_path.exists().then_some(meta_path)
 }
 
 fn write_replication_config(
