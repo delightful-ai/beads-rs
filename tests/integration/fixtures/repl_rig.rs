@@ -38,7 +38,7 @@ impl Default for ReplRigOptions {
 }
 
 pub struct ReplRig {
-    _root: TempDir,
+    _root: Option<TempDir>,
     store_id: StoreId,
     nodes: Vec<Node>,
     _proxies: Vec<TailnetProxy>,
@@ -50,14 +50,21 @@ impl ReplRig {
 
         let tmp_root = ensure_tmp_root();
         let root = TempDir::new_in(&tmp_root).expect("temp root");
-        let remote_dir = root.path().join("remote.git");
+        let keep_tmp = std::env::var("BD_TEST_KEEP_TMP").is_ok();
+        let (root_path, root_guard): (PathBuf, Option<TempDir>) = if keep_tmp {
+            let path = root.keep();
+            (path, None)
+        } else {
+            (root.path().to_path_buf(), Some(root))
+        };
+        let remote_dir = root_path.join("remote.git");
         fs::create_dir_all(&remote_dir).expect("create remote dir");
         run_git(&["init", "--bare"], &remote_dir).expect("git init --bare");
 
         let store_id = StoreId::new(Uuid::new_v4());
         let mut nodes = Vec::with_capacity(node_count);
         for idx in 0..node_count {
-            let seed = build_node(root.path(), idx, &remote_dir);
+            let seed = build_node(&root_path, idx, &remote_dir);
             let replica_id = bootstrap_replica(&seed, store_id);
             nodes.push(Node::new(seed, store_id, replica_id));
         }
@@ -89,7 +96,7 @@ impl ReplRig {
         let proxies = spawn_proxies(proxy_specs);
 
         Self {
-            _root: root,
+            _root: root_guard,
             store_id,
             nodes,
             _proxies: proxies,
