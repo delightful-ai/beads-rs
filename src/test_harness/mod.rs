@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crossbeam::channel::{Receiver, Sender, unbounded};
@@ -9,23 +9,27 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use uuid::Uuid;
 
+use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
 use crate::core::{
     ActorId, BeadId, EventId, EventShaLookupError, Limits, NamespaceId, ReplicaId, Seq0, Sha256,
     StoreEpoch, StoreId, StoreIdentity,
 };
-use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
+use crate::daemon::Clock;
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::core::{Daemon, HandleOutcome, insert_store_for_tests};
 use crate::daemon::ipc::{MutationMeta, Request, Response, ResponsePayload};
+use crate::daemon::remote::RemoteUrl;
+use crate::daemon::repl::frame::{FrameReader, encode_frame};
+use crate::daemon::repl::proto::{
+    PROTOCOL_VERSION_V1, ReplEnvelope, decode_envelope, encode_envelope,
+};
 use crate::daemon::repl::{
     Ack, Events, IngestOutcome, ReplError, Session, SessionAction, SessionConfig, SessionRole,
     SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
 };
-use crate::daemon::repl::frame::{FrameReader, encode_frame};
-use crate::daemon::repl::proto::{ReplEnvelope, decode_envelope, encode_envelope, PROTOCOL_VERSION_V1};
-use crate::daemon::remote::RemoteUrl;
-use crate::daemon::wal::{EventWal, SegmentConfig, SegmentSyncMode, WalIndex, WalIndexError};
-use crate::daemon::Clock;
+use crate::daemon::wal::{
+    EventWal, MemoryWalIndex, SegmentConfig, SegmentSyncMode, WalIndexError, rebuild_index,
+};
 use crate::paths;
 use std::io::Cursor;
 
@@ -92,7 +96,14 @@ impl TestWorld {
     }
 
     pub fn node(&self, label: &str, store_id: StoreId, options: NodeOptions) -> TestNode {
-        TestNode::new(label, store_id, self.clock.clone(), &self.tmp_root, self.keep_tmp, options)
+        TestNode::new(
+            label,
+            store_id,
+            self.clock.clone(),
+            &self.tmp_root,
+            self.keep_tmp,
+            options,
+        )
     }
 
     pub fn in_memory_node(&self, label: &str, store_id: StoreId) -> TestNode {
@@ -120,6 +131,7 @@ struct TestNodeInner {
 pub struct NodeOptions {
     pub limits: Limits,
     pub sync_mode: SegmentSyncMode,
+    pub wal_index: WalIndexBackend,
 }
 
 impl Default for NodeOptions {
@@ -127,14 +139,24 @@ impl Default for NodeOptions {
         Self {
             limits: Limits::default(),
             sync_mode: SegmentSyncMode::None,
+            wal_index: WalIndexBackend::Sqlite,
         }
     }
 }
 
 impl NodeOptions {
     pub fn in_memory() -> Self {
-        Self::default()
+        Self {
+            wal_index: WalIndexBackend::Memory,
+            ..Self::default()
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalIndexBackend {
+    Sqlite,
+    Memory,
 }
 
 pub fn new_in_memory_store(start_ms: u64, label: &str) -> (TestWorld, TestNode, StoreId) {
@@ -204,6 +226,17 @@ impl TestNode {
                     runtime.meta.clone(),
                     config,
                 );
+                if options.wal_index == WalIndexBackend::Memory {
+                    runtime.wal_index = Arc::new(MemoryWalIndex::new());
+                    let store_dir = paths::store_dir(store_id);
+                    rebuild_index(
+                        &store_dir,
+                        &runtime.meta,
+                        runtime.wal_index.as_ref(),
+                        &options.limits,
+                    )
+                    .expect("rebuild memory wal index");
+                }
             }
         }
 
@@ -258,12 +291,10 @@ impl TestNode {
     }
 
     pub fn apply_request(&self, req: Request) -> Response {
-        self.with_daemon_mut(|daemon, git_tx| {
-            match daemon.handle_request(req, git_tx) {
-                HandleOutcome::Response(response) => response,
-                HandleOutcome::DurabilityWait(_) => {
-                    panic!("durability wait not supported in test harness")
-                }
+        self.with_daemon_mut(|daemon, git_tx| match daemon.handle_request(req, git_tx) {
+            HandleOutcome::Response(response) => response,
+            HandleOutcome::DurabilityWait(_) => {
+                panic!("durability wait not supported in test harness")
             }
         })
     }
@@ -291,10 +322,7 @@ impl TestNode {
         match response {
             Response::Ok {
                 ok: ResponsePayload::Op(payload),
-            } => payload
-                .issue
-                .expect("created issue")
-                .id,
+            } => payload.issue.expect("created issue").id,
             other => panic!("unexpected response: {other:?}"),
         }
     }
@@ -392,7 +420,10 @@ impl TestNode {
         f(&inner.daemon)
     }
 
-    fn with_daemon_mut<R>(&self, f: impl FnOnce(&mut Daemon, &Sender<crate::daemon::GitOp>) -> R) -> R {
+    fn with_daemon_mut<R>(
+        &self,
+        f: impl FnOnce(&mut Daemon, &Sender<crate::daemon::GitOp>) -> R,
+    ) -> R {
         let data_dir = self.inner.borrow().data_dir.clone();
         let _guard = paths::override_data_dir_for_tests(Some(data_dir));
         let mut inner = self.inner.borrow_mut();
@@ -542,11 +573,14 @@ pub struct ReplicationRig {
 
 impl ReplicationRig {
     pub fn new(node_count: usize, start_ms: u64) -> Self {
+        Self::new_with_options(node_count, start_ms, NodeOptions::default())
+    }
+
+    pub fn new_with_options(node_count: usize, start_ms: u64, options: NodeOptions) -> Self {
         assert!(node_count >= 2, "replication rig needs at least two nodes");
         let world = TestWorld::new(start_ms);
         let clock = world.clock();
         let store_id = StoreId::new(Uuid::new_v4());
-        let options = NodeOptions::default();
 
         let mut nodes = Vec::with_capacity(node_count);
         for idx in 0..node_count {
@@ -670,7 +704,8 @@ impl ReplicationRig {
                 let to_replica = to_node.replica_id();
                 let outbound_store = from_node.session_store();
                 let inbound_store = to_node.session_store();
-                let mut outbound = new_session(SessionRole::Outbound, identity, from_replica, &limits);
+                let mut outbound =
+                    new_session(SessionRole::Outbound, identity, from_replica, &limits);
                 let inbound = new_session(SessionRole::Inbound, identity, to_replica, &limits);
                 if let Some(action) = outbound.begin_handshake(&outbound_store, self.clock.now_ms())
                 {
@@ -705,7 +740,12 @@ impl ReplicationRig {
     }
 }
 
-fn new_session(role: SessionRole, identity: StoreIdentity, replica: ReplicaId, limits: &Limits) -> Session {
+fn new_session(
+    role: SessionRole,
+    identity: StoreIdentity,
+    replica: ReplicaId,
+    limits: &Limits,
+) -> Session {
     let mut config = SessionConfig::new(identity, replica, limits);
     config.requested_namespaces = vec![NamespaceId::core()];
     config.offered_namespaces = vec![NamespaceId::core()];
@@ -767,9 +807,11 @@ impl RigLink {
         if !outbound_msgs.is_empty() {
             progressed = true;
             for envelope in outbound_msgs {
-                let actions =
-                    self.outbound
-                        .handle_message(envelope.message, &mut self.outbound_store, now_ms);
+                let actions = self.outbound.handle_message(
+                    envelope.message,
+                    &mut self.outbound_store,
+                    now_ms,
+                );
                 for action in actions {
                     self.apply_action(action, Endpoint::Outbound, now_ms);
                 }
@@ -789,7 +831,10 @@ impl RigLink {
             }
         }
 
-        if matches!(self.inbound.phase(), crate::daemon::repl::SessionPhase::Streaming) {
+        if matches!(
+            self.inbound.phase(),
+            crate::daemon::repl::SessionPhase::Streaming
+        ) {
             let inbound_snapshot = self
                 .inbound_store
                 .watermark_snapshot(&[NamespaceId::core()]);
@@ -827,7 +872,9 @@ impl RigLink {
                     .map(|last| last != &want_map)
                     .unwrap_or(true);
                 if resend_due || changed {
-                    let want = Want { want: want_map.clone() };
+                    let want = Want {
+                        want: want_map.clone(),
+                    };
                     self.transport
                         .b
                         .send_message(&crate::daemon::repl::ReplMessage::Want(want));
@@ -866,18 +913,16 @@ impl RigLink {
                     transport.send_message(&crate::daemon::repl::ReplMessage::Events(message));
                 }
             }
-            SessionAction::PeerAck(ack) => {
-                match endpoint {
-                    Endpoint::Outbound => {
-                        let peer = self.to_node.replica_id();
-                        self.from_node.record_peer_ack(peer, &ack);
-                    }
-                    Endpoint::Inbound => {
-                        let peer = self.from_node.replica_id();
-                        self.to_node.record_peer_ack(peer, &ack);
-                    }
+            SessionAction::PeerAck(ack) => match endpoint {
+                Endpoint::Outbound => {
+                    let peer = self.to_node.replica_id();
+                    self.from_node.record_peer_ack(peer, &ack);
                 }
-            }
+                Endpoint::Inbound => {
+                    let peer = self.from_node.replica_id();
+                    self.to_node.record_peer_ack(peer, &ack);
+                }
+            },
             SessionAction::PeerError(_err) => {}
             SessionAction::Close { .. } => {
                 self.outbound.mark_closed();
@@ -885,10 +930,7 @@ impl RigLink {
             }
         }
         if matches!(endpoint, Endpoint::Outbound) {
-            if let Some(action) = self
-                .outbound
-                .begin_handshake(&self.outbound_store, now_ms)
-            {
+            if let Some(action) = self.outbound.begin_handshake(&self.outbound_store, now_ms) {
                 self.apply_action(action, Endpoint::Outbound, now_ms);
             }
         }
@@ -1298,7 +1340,10 @@ pub fn measure_latency<F: FnOnce()>(f: F) -> u128 {
     start.elapsed().as_millis()
 }
 
-fn encode_message_frame(message: crate::daemon::repl::ReplMessage, max_frame_bytes: usize) -> Vec<u8> {
+fn encode_message_frame(
+    message: crate::daemon::repl::ReplMessage,
+    max_frame_bytes: usize,
+) -> Vec<u8> {
     let envelope = ReplEnvelope {
         version: PROTOCOL_VERSION_V1,
         message,

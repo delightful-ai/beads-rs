@@ -83,7 +83,10 @@ fn subscribe_gates_on_require_min_seen() {
         .expect("response");
     match response {
         Response::Err { err } => {
-            assert_eq!(err.code, ProtocolErrorCode::RequireMinSeenUnsatisfied.into());
+            assert_eq!(
+                err.code,
+                ProtocolErrorCode::RequireMinSeenUnsatisfied.into()
+            );
             assert!(err.retryable, "require_min_seen should be retryable");
         }
         other => panic!("expected require_min_seen error, got {other:?}"),
@@ -99,7 +102,7 @@ fn subscribe_gates_on_require_min_seen() {
     };
     let mut client =
         StreamingClient::subscribe_with_client(repo.clone(), read.clone(), ipc_client.clone())
-        .expect("subscribe");
+            .expect("subscribe");
 
     let report = run_load(repo.clone(), 1, &namespace, ipc_client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
@@ -256,10 +259,7 @@ fn collect_origin_seqs(
             Err(StreamClientError::Ipc(IpcError::Disconnected)) => {
                 reconnects += 1;
                 if reconnects > MAX_RECONNECTS {
-                    panic!(
-                        "subscribe stream disconnected {} times",
-                        reconnects
-                    );
+                    panic!("subscribe stream disconnected {} times", reconnects);
                 }
                 std::thread::sleep(Duration::from_millis(50 * reconnects as u64));
                 *client = StreamingClient::subscribe_with_client(

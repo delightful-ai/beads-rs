@@ -1701,14 +1701,13 @@ mod tests {
 
     #[test]
     fn repl_message_roundtrip_error_payload() {
-        let payload = ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), "busy", true).with_details(
-            crate::core::error::details::OverloadedDetails {
+        let payload = ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), "busy", true)
+            .with_details(crate::core::error::details::OverloadedDetails {
                 subsystem: None,
                 retry_after_ms: Some(10),
                 queue_bytes: Some(5),
                 queue_events: Some(1),
-            },
-        );
+            });
         let envelope = ReplEnvelope {
             version: PROTOCOL_VERSION_V1,
             message: ReplMessage::Error(payload),

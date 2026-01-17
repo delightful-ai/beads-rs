@@ -3,10 +3,10 @@ use super::super::{
     Ctx, UpdateArgs, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs,
     print_ok, resolve_description, send,
 };
+use crate::api::QueryResult;
 use crate::core::{DepKind, WorkflowStatus};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
-use crate::api::QueryResult;
 use crate::{Error, Result};
 
 pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {

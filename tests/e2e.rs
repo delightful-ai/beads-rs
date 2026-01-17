@@ -101,3 +101,18 @@ fn e2e_replication_converges_under_tailnet_profile() {
     });
     rig.pump_until_converged(800, &[NamespaceId::core()]);
 }
+
+#[test]
+fn e2e_in_memory_wal_replication_roundtrip() {
+    let options = NodeOptions::in_memory();
+    let mut rig = ReplicationRig::new_with_options(2, 1_700_000_000_400, options);
+    let node_a = rig.node(0);
+    let node_b = rig.node(1);
+
+    let id = node_a.create_issue("in-memory");
+    let bead = BeadId::parse(&id).expect("bead id");
+
+    rig.pump_until(300, |rig| rig.node(1).has_bead(&bead));
+    assert!(node_b.has_bead(&bead));
+    rig.pump_until_converged(400, &[NamespaceId::core()]);
+}

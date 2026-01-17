@@ -2,10 +2,10 @@ use serde::Serialize;
 
 use super::super::render;
 use super::super::{Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, send};
+use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::Filters;
-use crate::api::QueryResult;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Serialize)]

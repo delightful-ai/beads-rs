@@ -40,16 +40,26 @@ impl ReplError {
             None => payload,
             Some(details) => match details {
                 ReplErrorDetails::WrongStore(details) => payload.with_details(details.clone()),
-                ReplErrorDetails::StoreEpochMismatch(details) => payload.with_details(details.clone()),
-                ReplErrorDetails::ReplicaIdCollision(details) => payload.with_details(details.clone()),
-                ReplErrorDetails::VersionIncompatible(details) => payload.with_details(details.clone()),
+                ReplErrorDetails::StoreEpochMismatch(details) => {
+                    payload.with_details(details.clone())
+                }
+                ReplErrorDetails::ReplicaIdCollision(details) => {
+                    payload.with_details(details.clone())
+                }
+                ReplErrorDetails::VersionIncompatible(details) => {
+                    payload.with_details(details.clone())
+                }
                 ReplErrorDetails::InvalidRequest(details) => payload.with_details(details.clone()),
                 ReplErrorDetails::NamespacePolicyViolation(details) => {
                     payload.with_details(details.clone())
                 }
-                ReplErrorDetails::NamespaceUnknown(details) => payload.with_details(details.clone()),
+                ReplErrorDetails::NamespaceUnknown(details) => {
+                    payload.with_details(details.clone())
+                }
                 ReplErrorDetails::InternalError(details) => payload.with_details(details.clone()),
-                ReplErrorDetails::SubscriberLagged(details) => payload.with_details(details.clone()),
+                ReplErrorDetails::SubscriberLagged(details) => {
+                    payload.with_details(details.clone())
+                }
                 ReplErrorDetails::HashMismatch(details) => payload.with_details(details.clone()),
                 ReplErrorDetails::PrevShaMismatch(details) => payload.with_details(details.clone()),
                 ReplErrorDetails::FrameTooLarge(details) => payload.with_details(details.clone()),
@@ -115,12 +125,11 @@ mod tests {
     fn to_payload_carries_details() {
         let expected = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let got = StoreId::new(Uuid::from_bytes([2u8; 16]));
-        let error = ReplError::new(ProtocolErrorCode::WrongStore.into(), "wrong store", false).with_details(
-            ReplErrorDetails::WrongStore(WrongStoreDetails {
+        let error = ReplError::new(ProtocolErrorCode::WrongStore.into(), "wrong store", false)
+            .with_details(ReplErrorDetails::WrongStore(WrongStoreDetails {
                 expected_store_id: expected,
                 got_store_id: got,
-            }),
-        );
+            }));
         let payload = error.to_payload();
         assert_eq!(payload.code, ProtocolErrorCode::WrongStore.into());
         let details = payload

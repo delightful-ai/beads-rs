@@ -82,7 +82,6 @@ pub struct GitLaneState {
 
     /// Last detected clock skew.
     pub last_clock_skew: Option<ClockSkewRecord>,
-
 }
 
 impl GitLaneState {

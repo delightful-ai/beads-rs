@@ -1,8 +1,8 @@
 //! Integration tests for `bd upgrade`.
 
 use assert_cmd::Command;
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use predicates::str::contains;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -182,8 +182,6 @@ fn upgrade_rejects_checksum_mismatch() {
     cmd.env("BD_CONFIG_DIR", &config_dir);
     cmd.env("BD_DATA_DIR", &data_dir);
 
-    cmd.assert()
-        .failure()
-        .stderr(contains("checksum mismatch"));
+    cmd.assert().failure().stderr(contains("checksum mismatch"));
     assert!(!install_path.exists());
 }

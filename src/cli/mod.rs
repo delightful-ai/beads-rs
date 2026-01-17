@@ -12,6 +12,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, builder::BoolishValueParser};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
 
+use crate::api::QueryResult;
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{
     ActorId, Applied, BeadId, BeadSlug, BeadType, ClientRequestId, DepKind, DurabilityClass,
@@ -20,7 +21,6 @@ use crate::core::{
 use crate::daemon::ipc::{
     MutationMeta, ReadConsistency, Request, Response, ResponsePayload, send_request,
 };
-use crate::api::QueryResult;
 use crate::daemon::query::SortField;
 use crate::{Error, Result};
 

@@ -3,9 +3,9 @@ use super::super::{
     Ctx, ListArgs, SearchArgs, apply_common_filters, normalize_bead_id_for, parse_sort,
     parse_time_ms_opt, print_ok, send,
 };
+use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::Filters;
-use crate::api::QueryResult;
 use crate::{Error, Result};
 
 pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {

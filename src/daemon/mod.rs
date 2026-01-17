@@ -17,6 +17,7 @@ pub mod core;
 pub mod durability_coordinator;
 pub mod executor;
 pub mod fingerprint;
+pub mod git_lane;
 pub mod git_worker;
 pub(crate) mod io_budget;
 pub mod ipc;
@@ -25,11 +26,10 @@ pub mod migration;
 pub mod mutation_engine;
 pub mod ops;
 pub mod query;
-pub mod query_model;
 pub mod query_executor;
+pub mod query_model;
 pub mod remote;
 pub mod repl;
-pub mod git_lane;
 pub mod run;
 pub mod scheduler;
 pub mod scrubber;
@@ -45,6 +45,7 @@ mod wal_legacy_snapshot;
 pub use core::{Daemon, LoadedStore};
 
 pub use clock::Clock;
+pub use git_lane::GitLaneState;
 pub use git_worker::{GitOp, GitResult, GitWorker, SyncResult, run_git_loop};
 pub use ipc::{
     ErrorPayload, IpcError, OpResponse, Request, Response, ResponsePayload, decode_request,
@@ -53,7 +54,6 @@ pub use ipc::{
 pub use ops::{BeadPatch, OpError, OpResult, Patch};
 pub use query::{Filters, Query, QueryResult, SortField};
 pub use remote::RemoteUrl;
-pub use git_lane::GitLaneState;
 pub use run::run_daemon;
 pub use scheduler::SyncScheduler;
 pub use server::{run_socket_thread, run_state_loop};

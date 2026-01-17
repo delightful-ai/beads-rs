@@ -841,17 +841,23 @@ fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &
                     subscription.drop_reason(),
                     Some(DropReason::SubscriberLagged)
                 ) {
-                    let payload =
-                        ErrorPayload::new(ProtocolErrorCode::SubscriberLagged.into(), "subscriber lagged", true)
-                            .with_details(error_details::SubscriberLaggedDetails {
-                                reason: None,
-                                max_queue_bytes: Some(subscriber_limits.max_bytes as u64),
-                                max_queue_events: Some(subscriber_limits.max_events as u64),
-                            });
+                    let payload = ErrorPayload::new(
+                        ProtocolErrorCode::SubscriberLagged.into(),
+                        "subscriber lagged",
+                        true,
+                    )
+                    .with_details(error_details::SubscriberLaggedDetails {
+                        reason: None,
+                        max_queue_bytes: Some(subscriber_limits.max_bytes as u64),
+                        max_queue_events: Some(subscriber_limits.max_events as u64),
+                    });
                     let _ = send_response(writer, &Response::err(payload));
                 } else {
-                    let payload =
-                        ErrorPayload::new(CliErrorCode::Disconnected.into(), "subscription closed", true);
+                    let payload = ErrorPayload::new(
+                        CliErrorCode::Disconnected.into(),
+                        "subscription closed",
+                        true,
+                    );
                     let _ = send_response(writer, &Response::err(payload));
                 }
                 return;
@@ -909,13 +915,17 @@ fn stream_event_response_from_parts(
         Ok(body) => body,
         Err(err) => {
             return Response::err(
-                ErrorPayload::new(ProtocolErrorCode::WalCorrupt.into(), "event body decode failed", false)
-                    .with_details(error_details::WalCorruptDetails {
-                        namespace: event_id.namespace.clone(),
-                        segment_id: None,
-                        offset: None,
-                        reason: err.to_string(),
-                    }),
+                ErrorPayload::new(
+                    ProtocolErrorCode::WalCorrupt.into(),
+                    "event body decode failed",
+                    false,
+                )
+                .with_details(error_details::WalCorruptDetails {
+                    namespace: event_id.namespace.clone(),
+                    segment_id: None,
+                    offset: None,
+                    reason: err.to_string(),
+                }),
             );
         }
     };
@@ -951,7 +961,6 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::replica_roster::ReplicaEntry;
-    use crate::daemon::repl::proto::WatermarkHeads;
     use crate::core::{
         ActorId, Applied, BeadId, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
         EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, ReplicaRole,
@@ -962,6 +971,7 @@ mod tests {
     use crate::daemon::ipc::OpResponse;
     use crate::daemon::ops::OpResult;
     use crate::daemon::repl::PeerAckTable;
+    use crate::daemon::repl::proto::WatermarkHeads;
     use crate::daemon::repl::proto::WatermarkMap;
 
     struct TestEnv {

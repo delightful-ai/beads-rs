@@ -107,10 +107,7 @@ impl<W: Write> FrameWriter<W> {
     }
 }
 
-pub fn encode_frame(
-    record: &VerifiedRecord,
-    max_record_bytes: usize,
-) -> EventWalResult<Vec<u8>> {
+pub fn encode_frame(record: &VerifiedRecord, max_record_bytes: usize) -> EventWalResult<Vec<u8>> {
     let body = record.encode_body()?;
     if body.len() > max_record_bytes {
         return Err(EventWalError::RecordTooLarge {

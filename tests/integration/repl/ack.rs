@@ -1,10 +1,10 @@
 //! Replication ACK/WANT semantics.
 
-
 use std::sync::Arc;
 
 use uuid::Uuid;
 
+use beads_rs::core::error::details as error_details;
 use beads_rs::daemon::admission::AdmissionController;
 use beads_rs::daemon::repl::{
     Events, ReplMessage, Session, SessionAction, SessionConfig, SessionPhase, SessionRole,
@@ -13,7 +13,6 @@ use beads_rs::daemon::repl::{
 use beads_rs::daemon::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
 };
-use beads_rs::core::error::details as error_details;
 use beads_rs::paths;
 use beads_rs::{
     ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
@@ -285,7 +284,12 @@ fn repl_want_reads_from_wal() {
 
     let reader = WalRangeReader::new(store_id, Arc::new(index), limits.clone());
     let frames = reader
-        .read_range(&namespace, &origin, Seq0::ZERO, limits.max_event_batch_bytes)
+        .read_range(
+            &namespace,
+            &origin,
+            Seq0::ZERO,
+            limits.max_event_batch_bytes,
+        )
         .expect("read wal range");
 
     assert_eq!(frames.len(), 2);

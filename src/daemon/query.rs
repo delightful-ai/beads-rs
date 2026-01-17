@@ -444,10 +444,7 @@ pub enum QueryResult {
     Issues(Vec<IssueSummary>),
 
     /// Dependency tree.
-    DepTree {
-        root: BeadId,
-        edges: Vec<DepEdge>,
-    },
+    DepTree { root: BeadId, edges: Vec<DepEdge> },
 
     /// Dependencies for a bead.
     Deps {

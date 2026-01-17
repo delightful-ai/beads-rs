@@ -1,6 +1,5 @@
 //! WAL fsck verification + repair.
 
-
 use std::fs;
 
 use uuid::Uuid;

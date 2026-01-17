@@ -52,6 +52,8 @@ pub enum WalIndexError {
         namespace: String,
         origin: ReplicaId,
     },
+    #[error("wal index txn conflict: expected version {expected}, got {got}")]
+    ConcurrentWrite { expected: u64, got: u64 },
     #[error("equivocation for {namespace} {origin} seq {seq}")]
     Equivocation {
         namespace: NamespaceId,
@@ -81,6 +83,8 @@ pub enum WalIndexError {
 pub trait WalIndex: Send + Sync {
     fn writer(&self) -> Box<dyn WalIndexWriter>;
     fn reader(&self) -> Box<dyn WalIndexReader>;
+    fn durability_mode(&self) -> IndexDurabilityMode;
+    fn checkpoint_truncate(&self) -> Result<(), WalIndexError>;
 }
 
 pub trait WalIndexWriter {
@@ -306,6 +310,14 @@ impl WalIndex for SqliteWalIndex {
             mode: self.mode,
         })
     }
+
+    fn durability_mode(&self) -> IndexDurabilityMode {
+        self.mode
+    }
+
+    fn checkpoint_truncate(&self) -> Result<(), WalIndexError> {
+        SqliteWalIndex::checkpoint_truncate(self)
+    }
 }
 
 struct SqliteWalIndexWriter {
@@ -353,9 +365,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 namespace: namespace.to_string(),
                 origin: *origin,
             })?;
-        let next = Seq1::from_u64(next_raw).ok_or_else(|| {
-            WalIndexError::EventIdDecode("origin_seq must be >= 1".to_string())
-        })?;
+        let next = Seq1::from_u64(next_raw)
+            .ok_or_else(|| WalIndexError::EventIdDecode("origin_seq must be >= 1".to_string()))?;
         self.conn.execute(
             "INSERT INTO origin_seq (namespace, origin_replica_id, next_seq) VALUES (?1, ?2, ?3) \
              ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET next_seq = excluded.next_seq",

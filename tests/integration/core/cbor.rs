@@ -1,6 +1,5 @@
 //! Core CBOR hashing + decode bounds.
 
-
 use beads_rs::{DecodeError, Limits, decode_event_body, encode_event_body_canonical};
 
 use crate::fixtures::cbor::{

@@ -1,6 +1,5 @@
 //! WAL index rebuild + catch-up.
 
-
 use std::fs::{self, OpenOptions};
 
 use uuid::Uuid;

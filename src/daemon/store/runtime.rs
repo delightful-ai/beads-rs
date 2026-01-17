@@ -35,7 +35,6 @@ use crate::git::checkpoint::{
 };
 use crate::paths;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct StoreConfig {
@@ -77,7 +76,7 @@ pub struct StoreRuntime {
     pub(crate) peer_acks: Arc<Mutex<PeerAckTable>>,
     pub(crate) event_wal: EventWal,
     #[allow(dead_code)]
-    pub(crate) wal_index: Arc<SqliteWalIndex>,
+    pub(crate) wal_index: Arc<dyn WalIndex>,
     pub(crate) last_wal_checkpoint: Option<Instant>,
     pub(crate) last_lock_heartbeat: Option<Instant>,
     #[allow(dead_code)]
@@ -157,19 +156,23 @@ impl StoreRuntime {
             }
         };
 
-        let (watermarks_applied, watermarks_durable) = load_watermarks(&wal_index)?;
+        let wal_index: Arc<dyn WalIndex> = Arc::new(wal_index);
+        let (watermarks_applied, watermarks_durable) = load_watermarks(wal_index.as_ref())?;
         let broadcaster = EventBroadcaster::new(BroadcasterLimits::from_limits(limits));
         let admission = AdmissionController::new(limits);
         let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
         let mut last_wal_tail_truncated = None;
         for truncation in &replay_stats.tail_truncations {
-            let payload =
-                ErrorPayload::new(ProtocolErrorCode::WalTailTruncated.into(), "wal tail truncated", true)
-                    .with_details(WalTailTruncatedDetails {
-                        namespace: truncation.namespace.clone(),
-                        segment_id: Some(truncation.segment_id),
-                        truncated_from_offset: truncation.truncated_from_offset,
-                    });
+            let payload = ErrorPayload::new(
+                ProtocolErrorCode::WalTailTruncated.into(),
+                "wal tail truncated",
+                true,
+            )
+            .with_details(WalTailTruncatedDetails {
+                namespace: truncation.namespace.clone(),
+                segment_id: Some(truncation.segment_id),
+                truncated_from_offset: truncation.truncated_from_offset,
+            });
             tracing::warn!(payload = ?payload, "wal tail truncated");
             last_wal_tail_truncated = Some(WalTailTruncatedRecord {
                 namespace: truncation.namespace.clone(),
@@ -196,7 +199,7 @@ impl StoreRuntime {
             maintenance_mode: false,
             peer_acks,
             event_wal,
-            wal_index: Arc::new(wal_index),
+            wal_index,
             last_wal_checkpoint: None,
             last_lock_heartbeat: Some(now),
             lock,
@@ -745,7 +748,7 @@ pub(crate) fn load_replica_roster(
 }
 
 fn load_watermarks(
-    index: &SqliteWalIndex,
+    index: &dyn WalIndex,
 ) -> Result<(Watermarks<Applied>, Watermarks<Durable>), StoreRuntimeError> {
     let rows = index.reader().load_watermarks()?;
     let mut applied = Watermarks::<Applied>::new();

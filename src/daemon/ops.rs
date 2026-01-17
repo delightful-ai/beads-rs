@@ -424,7 +424,9 @@ impl OpError {
             OpError::Overloaded { .. } => ProtocolErrorCode::Overloaded.into(),
             OpError::RateLimited { .. } => ProtocolErrorCode::RateLimited.into(),
             OpError::MaintenanceMode { .. } => ProtocolErrorCode::MaintenanceMode.into(),
-            OpError::ClientRequestIdReuseMismatch { .. } => ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
+            OpError::ClientRequestIdReuseMismatch { .. } => {
+                ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
+            }
             OpError::NotAGitRepo(_) => CliErrorCode::NotAGitRepo.into(),
             OpError::NoRemote(_) => CliErrorCode::NoRemote.into(),
             OpError::RepoNotInitialized(_) => CliErrorCode::RepoNotInitialized.into(),
@@ -435,13 +437,23 @@ impl OpError {
             OpError::OpsTooMany { .. } => ProtocolErrorCode::OpsTooMany.into(),
             OpError::LabelsTooMany { .. } => ProtocolErrorCode::LabelsTooMany.into(),
             OpError::DurabilityTimeout { .. } => ProtocolErrorCode::DurabilityTimeout.into(),
-            OpError::DurabilityUnavailable { .. } => ProtocolErrorCode::DurabilityUnavailable.into(),
-            OpError::RequireMinSeenTimeout { .. } => ProtocolErrorCode::RequireMinSeenTimeout.into(),
-            OpError::RequireMinSeenUnsatisfied { .. } => ProtocolErrorCode::RequireMinSeenUnsatisfied.into(),
+            OpError::DurabilityUnavailable { .. } => {
+                ProtocolErrorCode::DurabilityUnavailable.into()
+            }
+            OpError::RequireMinSeenTimeout { .. } => {
+                ProtocolErrorCode::RequireMinSeenTimeout.into()
+            }
+            OpError::RequireMinSeenUnsatisfied { .. } => {
+                ProtocolErrorCode::RequireMinSeenUnsatisfied.into()
+            }
             OpError::NamespaceInvalid { .. } => ProtocolErrorCode::NamespaceInvalid.into(),
             OpError::NamespaceUnknown { .. } => ProtocolErrorCode::NamespaceUnknown.into(),
-            OpError::NamespacePolicyViolation { .. } => ProtocolErrorCode::NamespacePolicyViolation.into(),
-            OpError::CrossNamespaceDependency { .. } => ProtocolErrorCode::CrossNamespaceDependency.into(),
+            OpError::NamespacePolicyViolation { .. } => {
+                ProtocolErrorCode::NamespacePolicyViolation.into()
+            }
+            OpError::CrossNamespaceDependency { .. } => {
+                ProtocolErrorCode::CrossNamespaceDependency.into()
+            }
             OpError::WalRecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
             OpError::EventWal(err) => event_wal_error_code(err.as_ref()),
             OpError::NotClaimedByYou => CliErrorCode::NotClaimedByYou.into(),
@@ -578,9 +590,13 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
         }
         StoreRuntimeError::MetaParse { .. } => ProtocolErrorCode::Corruption.into(),
         StoreRuntimeError::MetaMismatch { .. } => ProtocolErrorCode::WrongStore.into(),
-        StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => ProtocolErrorCode::VersionIncompatible.into(),
+        StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => {
+            ProtocolErrorCode::VersionIncompatible.into()
+        }
         StoreRuntimeError::NamespacePoliciesSymlink { .. }
-        | StoreRuntimeError::ReplicaRosterSymlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+        | StoreRuntimeError::ReplicaRosterSymlink { .. } => {
+            ProtocolErrorCode::PathSymlinkRejected.into()
+        }
         StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ProtocolErrorCode::PermissionDenied.into()
@@ -597,7 +613,9 @@ fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
             }
         }
         StoreRuntimeError::ReplicaRosterParse { .. } => CliErrorCode::ValidationFailed.into(),
-        StoreRuntimeError::StoreConfigSymlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+        StoreRuntimeError::StoreConfigSymlink { .. } => {
+            ProtocolErrorCode::PathSymlinkRejected.into()
+        }
         StoreRuntimeError::StoreConfigRead { source, .. } => {
             if source.kind() == std::io::ErrorKind::PermissionDenied {
                 ProtocolErrorCode::PermissionDenied.into()
@@ -699,7 +717,9 @@ fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
 
 fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
     match err {
-        WalIndexError::SchemaVersionMismatch { .. } => ProtocolErrorCode::IndexRebuildRequired.into(),
+        WalIndexError::SchemaVersionMismatch { .. } => {
+            ProtocolErrorCode::IndexRebuildRequired.into()
+        }
         WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
         WalIndexError::ClientRequestIdReuseMismatch { .. } => {
             ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
@@ -718,6 +738,7 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
         | WalIndexError::ReplicaLivenessRowDecode(_)
         | WalIndexError::CborDecode(_)
         | WalIndexError::CborEncode(_)
+        | WalIndexError::ConcurrentWrite { .. }
         | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
         WalIndexError::Sqlite(_) => ProtocolErrorCode::IndexCorrupt.into(),
         WalIndexError::Io { source, .. } => {
@@ -741,7 +762,9 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
             }
         }
         WalReplayError::SegmentHeader { source, .. } => wal_segment_header_error_code(source),
-        WalReplayError::SegmentHeaderMismatch { .. } => ProtocolErrorCode::SegmentHeaderMismatch.into(),
+        WalReplayError::SegmentHeaderMismatch { .. } => {
+            ProtocolErrorCode::SegmentHeaderMismatch.into()
+        }
         WalReplayError::RecordShaMismatch(_) => ProtocolErrorCode::HashMismatch.into(),
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
@@ -762,7 +785,9 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
 
 fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
     match source {
-        EventWalError::SegmentHeaderUnsupportedVersion { .. } => ProtocolErrorCode::WalFormatUnsupported.into(),
+        EventWalError::SegmentHeaderUnsupportedVersion { .. } => {
+            ProtocolErrorCode::WalFormatUnsupported.into()
+        }
         _ => ProtocolErrorCode::WalCorrupt.into(),
     }
 }
@@ -786,6 +811,7 @@ fn wal_index_transience(err: &WalIndexError) -> Transience {
         WalIndexError::Equivocation { .. } | WalIndexError::ClientRequestIdReuseMismatch { .. } => {
             Transience::Permanent
         }
+        WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
         _ => Transience::Retryable,
     }
 }

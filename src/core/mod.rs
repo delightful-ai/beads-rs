@@ -18,6 +18,7 @@ pub mod collections;
 pub mod composite;
 pub mod crdt;
 pub mod dep;
+mod dep_tombstone_store;
 pub mod domain;
 pub mod durability;
 pub mod error;
@@ -28,11 +29,10 @@ pub mod limits;
 pub mod meta;
 pub mod namespace;
 pub mod namespace_policies;
+mod namespaced_state;
 pub mod replica_roster;
 pub mod state;
 pub mod store_meta;
-mod namespaced_state;
-mod dep_tombstone_store;
 pub mod time;
 pub mod tombstone;
 pub mod watermark;
@@ -72,10 +72,10 @@ pub use namespace::{
     RetentionPolicy, TtlBasis,
 };
 pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
+pub use namespaced_state::StoreState;
 pub use replica_roster::{ReplicaEntry, ReplicaRole, ReplicaRoster, ReplicaRosterError};
 pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use store_meta::{StoreMeta, StoreMetaVersions};
-pub use namespaced_state::StoreState;
 pub mod store_state {
     pub use super::namespaced_state::*;
 }

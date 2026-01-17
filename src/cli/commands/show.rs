@@ -1,8 +1,8 @@
 use super::super::render;
 use super::super::{Ctx, ShowArgs, fetch_issue_summaries, normalize_bead_id, print_ok, send};
 use crate::Result;
-use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::api::QueryResult;
+use crate::daemon::ipc::{Request, ResponsePayload};
 
 pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;

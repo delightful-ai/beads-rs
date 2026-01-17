@@ -1,6 +1,5 @@
 #![cfg(feature = "slow-tests")]
 
-
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -8,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::fixtures::realtime::RealtimeFixture;
+use beads_rs::api::QueryResult;
 use beads_rs::core::{BeadType, NamespaceId, Priority, StoreId, StoreMeta};
 use beads_rs::daemon::ipc::{IpcClient, MutationMeta, Request, Response, ResponsePayload};
-use beads_rs::api::QueryResult;
-use crate::fixtures::realtime::RealtimeFixture;
 
 fn marker_path(dir: &Path, stage: &str) -> PathBuf {
     dir.join(format!("beads-wal-hang-{stage}"))

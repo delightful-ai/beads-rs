@@ -2,14 +2,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::api::QueryResult;
+use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
+use crate::core::ErrorPayload;
+use crate::core::{Applied, BeadType, DepKind, DurabilityReceipt, Priority, Watermarks};
 use crate::daemon::ops::{BeadPatch, OpResult};
 use crate::daemon::query::Filters;
-use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
-use crate::api::QueryResult;
-use crate::core::{
-    Applied, BeadType, DepKind, DurabilityReceipt, Priority, Watermarks,
-};
-use crate::core::ErrorPayload;
 
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 

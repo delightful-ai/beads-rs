@@ -2,8 +2,8 @@ use super::super::render;
 use super::super::{
     CommentAddArgs, CommentsArgs, CommentsCmd, Ctx, normalize_bead_id, print_ok, send,
 };
-use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::api::QueryResult;
+use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::{Error, Result};
 
 pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {

@@ -24,7 +24,7 @@ use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::scrubber::{ScrubOptions, scrub_store};
 use crate::daemon::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::{ReplayStats, WalIndex, rebuild_index};
+use crate::daemon::wal::{ReplayStats, rebuild_index};
 use crate::git::checkpoint::layout::SHARD_COUNT;
 use crate::paths;
 

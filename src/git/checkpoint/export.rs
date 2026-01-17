@@ -552,8 +552,12 @@ mod tests {
 
         let bead = make_bead(&bead_id, &stamp);
         let collision_lineage = make_stamp(0, 0, "loser");
-        let tombstone =
-            Tombstone::new_collision(bead_id.clone(), stamp.clone(), collision_lineage, Some("bye".into()));
+        let tombstone = Tombstone::new_collision(
+            bead_id.clone(),
+            stamp.clone(),
+            collision_lineage,
+            Some("bye".into()),
+        );
         let dep_key = DepKey::new(bead_id.clone(), dep_to.clone(), DepKind::Blocks).unwrap();
         let dep_edge = DepEdge::new(stamp.clone());
 

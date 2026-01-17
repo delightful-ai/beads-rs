@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::core::StoreId;
 use crate::daemon::ops::OpError;
 use crate::daemon::remote::{RemoteUrl, normalize_url};
-use crate::core::StoreId;
 
 #[derive(Clone, Debug, Default)]
 pub struct StoreCaches {

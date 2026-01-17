@@ -7,10 +7,10 @@ use thiserror::Error;
 
 use beads_rs::Watermarks;
 use beads_rs::api::AdminStatusOutput;
+use beads_rs::api::QueryResult;
 use beads_rs::daemon::ipc::{
     IpcClient, IpcError, ReadConsistency, Request, Response, ResponsePayload,
 };
-use beads_rs::api::QueryResult;
 
 #[derive(Debug, Error)]
 pub enum StatusError {

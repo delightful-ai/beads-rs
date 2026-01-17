@@ -10,13 +10,14 @@ use uuid::Uuid;
 
 use beads_rs::core::{
     ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, encode_event_body_canonical,
+    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
+    encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
-    EventWalError, EventWalResult, IndexDurabilityMode, RecordHeader, SegmentConfig, SegmentHeader,
-    SegmentWriter, SqliteWalIndex, UnverifiedRecord, VerifiedRecord, WalIndexError,
-    SEGMENT_HEADER_PREFIX_LEN, WAL_FORMAT_VERSION, FRAME_HEADER_LEN,
+    EventWalError, EventWalResult, FRAME_HEADER_LEN, IndexDurabilityMode, RecordHeader,
+    SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentWriter, SqliteWalIndex,
+    UnverifiedRecord, VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError,
 };
 
 use super::identity;
@@ -41,12 +42,8 @@ impl TempWalDir {
         fs::create_dir_all(&store_dir).expect("create store dir");
 
         let versions = StoreMetaVersions::new(1, WAL_FORMAT_VERSION, 1, 1, 1);
-        let meta = identity::store_meta_with_versions(
-            seed,
-            0,
-            1_700_000_000_000 + seed as u64,
-            versions,
-        );
+        let meta =
+            identity::store_meta_with_versions(seed, 0, 1_700_000_000_000 + seed as u64, versions);
 
         Self {
             _temp: temp,
@@ -192,15 +189,7 @@ pub fn record_for_seq(
 ) -> VerifiedRecord {
     let event_time_ms = 1_700_000_000_000 + seq;
     let txn_id = TxnId::new(Uuid::from_bytes([seq as u8; 16]));
-    let body = event_body(
-        meta,
-        namespace,
-        origin,
-        seq,
-        event_time_ms,
-        txn_id,
-        None,
-    );
+    let body = event_body(meta, namespace, origin, seq, event_time_ms, txn_id, None);
     let payload = event_body_bytes(&body);
     let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {

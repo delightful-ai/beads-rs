@@ -641,7 +641,9 @@ impl MutationEngine {
                 reason: reason.clone(),
                 on_branch: on_branch.clone(),
             }),
-            ParsedMutationRequest::Reopen { id } => Ok(CanonicalMutationOp::Reopen { id: id.clone() }),
+            ParsedMutationRequest::Reopen { id } => {
+                Ok(CanonicalMutationOp::Reopen { id: id.clone() })
+            }
             ParsedMutationRequest::Delete { id, reason } => Ok(CanonicalMutationOp::Delete {
                 id: id.clone(),
                 reason: reason.clone(),
@@ -669,7 +671,9 @@ impl MutationEngine {
                 id: id.clone(),
                 lease_secs: *lease_secs,
             }),
-            ParsedMutationRequest::Unclaim { id } => Ok(CanonicalMutationOp::Unclaim { id: id.clone() }),
+            ParsedMutationRequest::Unclaim { id } => {
+                Ok(CanonicalMutationOp::Unclaim { id: id.clone() })
+            }
             ParsedMutationRequest::ExtendClaim { id, lease_secs } => {
                 Ok(CanonicalMutationOp::ExtendClaim {
                     id: id.clone(),
@@ -2077,14 +2081,7 @@ mod tests {
         let mut clock_b = fixed_clock(1_000);
 
         let draft_a = engine
-            .plan(
-                &state,
-                &mut clock_a,
-                store,
-                None,
-                ctx.clone(),
-                req_a,
-            )
+            .plan(&state, &mut clock_a, store, None, ctx.clone(), req_a)
             .unwrap();
         let draft_b = engine
             .plan(&state, &mut clock_b, store, None, ctx, req_b)
@@ -2224,8 +2221,6 @@ mod tests {
             &actor,
         )
         .unwrap_err();
-        assert!(
-            matches!(err, OpError::ValidationFailed { field, .. } if field == "labels")
-        );
+        assert!(matches!(err, OpError::ValidationFailed { field, .. } if field == "labels"));
     }
 }

@@ -22,6 +22,9 @@ use super::checkpoint_scheduler::{
     CheckpointGroupConfig, CheckpointGroupKey, CheckpointGroupSnapshot, CheckpointScheduler,
 };
 use super::executor::DurabilityWait;
+use super::git_lane::{
+    ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, GitLaneState,
+};
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::Response;
 use super::metrics;
@@ -29,12 +32,9 @@ use super::ops::OpError;
 use super::remote::RemoteUrl;
 use super::repl::{
     BackoffPolicy, IngestOutcome, PeerConfig, ReplError, ReplErrorDetails, ReplIngestRequest,
-    ReplSessionStore,
-    ReplicationManager, ReplicationManagerConfig, ReplicationManagerHandle, ReplicationServer,
-    ReplicationServerConfig, ReplicationServerHandle, SharedSessionStore, WalRangeReader,
-};
-use super::git_lane::{
-    ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, GitLaneState,
+    ReplSessionStore, ReplicationManager, ReplicationManagerConfig, ReplicationManagerHandle,
+    ReplicationServer, ReplicationServerConfig, ReplicationServerHandle, SharedSessionStore,
+    WalRangeReader,
 };
 use super::scheduler::SyncScheduler;
 use super::store::StoreCaches;
@@ -88,12 +88,11 @@ enum CheckpointTreeError {
 }
 
 use crate::core::{
-    ActorId, Applied, ApplyError, CanonicalState, CliErrorCode, ClientRequestId,
-    ContentHash, DurabilityClass, EventBody, EventId, EventKindV1,
-    HeadStatus, Limits, NamespaceId, NamespacePolicy, PrevVerified, ProtocolErrorCode, ReplicaId,
-    ReplicateMode, SegmentId, Seq0, Seq1, Sha256, StoreId, StoreIdentity,
-    StoreState, VerifiedEvent, WallClock, Watermark, WatermarkError, Watermarks, WriteStamp,
-    apply_event, decode_event_body,
+    ActorId, Applied, ApplyError, CanonicalState, CliErrorCode, ClientRequestId, ContentHash,
+    DurabilityClass, EventBody, EventId, EventKindV1, HeadStatus, Limits, NamespaceId,
+    NamespacePolicy, PrevVerified, ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0,
+    Seq1, Sha256, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark,
+    WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
@@ -574,7 +573,8 @@ impl Daemon {
     /// Get git lane state by raw remote URL (for internal sync waiters, etc.).
     /// Returns None if not loaded.
     pub(crate) fn git_lane_state_by_url(&self, remote: &RemoteUrl) -> Option<&GitLaneState> {
-        self.store_caches.remote_to_store_id
+        self.store_caches
+            .remote_to_store_id
             .get(remote)
             .and_then(|store_id| self.git_lanes.get(store_id))
     }
@@ -1210,8 +1210,11 @@ impl Daemon {
 
     pub(crate) fn handle_repl_ingest(&mut self, request: ReplIngestRequest) {
         if self.shutting_down {
-            let error =
-                ReplError::new(ProtocolErrorCode::MaintenanceMode.into(), "shutting down", true);
+            let error = ReplError::new(
+                ProtocolErrorCode::MaintenanceMode.into(),
+                "shutting down",
+                true,
+            );
             let _ = request.respond.send(Err(error));
             return;
         }
@@ -1238,13 +1241,15 @@ impl Daemon {
                             "namespace replication disabled by policy",
                             false,
                         )
-                        .with_details(ReplErrorDetails::NamespacePolicyViolation(
-                            error_details::NamespacePolicyViolationDetails {
-                                namespace: request.namespace.clone(),
-                                rule: "replicate_mode".to_string(),
-                                reason: Some("replicate_mode=none".to_string()),
-                            },
-                        )),
+                        .with_details(
+                            ReplErrorDetails::NamespacePolicyViolation(
+                                error_details::NamespacePolicyViolationDetails {
+                                    namespace: request.namespace.clone(),
+                                    rule: "replicate_mode".to_string(),
+                                    reason: Some("replicate_mode=none".to_string()),
+                                },
+                            ),
+                        ),
                     )
                 } else {
                     None
@@ -1359,7 +1364,11 @@ impl Daemon {
             )
             .map_err(|err| {
                 tracing::error!(error = ?err, "record verification failed");
-                ReplError::new(CliErrorCode::Internal.into(), "record verification failed", false)
+                ReplError::new(
+                    CliErrorCode::Internal.into(),
+                    "record verification failed",
+                    false,
+                )
             })?;
 
             let append_start = Instant::now();
@@ -1437,8 +1446,7 @@ impl Daemon {
             .map_err(|err| wal_index_error_payload(&err))?;
         }
 
-        txn.commit()
-            .map_err(|err| wal_index_error_payload(&err))?;
+        txn.commit().map_err(|err| wal_index_error_payload(&err))?;
 
         let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
@@ -1461,8 +1469,7 @@ impl Daemon {
                 store.record_checkpoint_dirty_shards(&namespace, &outcome);
 
                 let EventKindV1::TxnV1(txn_body) = &event.body.kind;
-                let stamp =
-                    WriteStamp::new(txn_body.hlc_max.physical_ms, txn_body.hlc_max.logical);
+                let stamp = WriteStamp::new(txn_body.hlc_max.physical_ms, txn_body.hlc_max.logical);
                 max_stamp = max_write_stamp(max_stamp, Some(stamp));
 
                 let event_id = event_id_for(origin, namespace.clone(), event.body.origin_seq);
@@ -1849,8 +1856,6 @@ impl Daemon {
     pub fn repos_mut(&mut self) -> impl Iterator<Item = (&StoreId, &mut GitLaneState)> {
         self.git_lanes.iter_mut()
     }
-
-
 }
 
 fn load_timeout() -> Duration {
@@ -2320,9 +2325,14 @@ fn apply_event_error_payload(
     err: ApplyError,
 ) -> ReplError {
     let reason = format!("apply_event rejected for {namespace}/{origin}: {err}");
-    ReplError::new(ProtocolErrorCode::Corruption.into(), "apply_event rejected", false).with_details(
-        ReplErrorDetails::Corruption(error_details::CorruptionDetails { reason }),
+    ReplError::new(
+        ProtocolErrorCode::Corruption.into(),
+        "apply_event rejected",
+        false,
     )
+    .with_details(ReplErrorDetails::Corruption(
+        error_details::CorruptionDetails { reason },
+    ))
 }
 
 fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
@@ -2333,8 +2343,13 @@ fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
             seq,
             existing_sha256,
             new_sha256,
-        } => ReplError::new(ProtocolErrorCode::Equivocation.into(), "equivocation", false).with_details(
-            ReplErrorDetails::Equivocation(error_details::EquivocationDetails {
+        } => ReplError::new(
+            ProtocolErrorCode::Equivocation.into(),
+            "equivocation",
+            false,
+        )
+        .with_details(ReplErrorDetails::Equivocation(
+            error_details::EquivocationDetails {
                 eid: error_details::EventIdDetails {
                     namespace: namespace.clone(),
                     origin_replica_id: *origin,
@@ -2342,8 +2357,8 @@ fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
                 },
                 existing_sha256: hex::encode(existing_sha256),
                 new_sha256: hex::encode(new_sha256),
-            }),
-        ),
+            },
+        )),
         WalIndexError::ClientRequestIdReuseMismatch {
             namespace,
             client_request_id,
@@ -2363,11 +2378,12 @@ fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
                 got_request_sha256: hex::encode(got_request_sha256),
             },
         )),
-        _ => ReplError::new(ProtocolErrorCode::IndexCorrupt.into(), "index error", true).with_details(
-            ReplErrorDetails::IndexCorrupt(error_details::IndexCorruptDetails {
-                reason: err.to_string(),
-            }),
-        ),
+        _ => ReplError::new(ProtocolErrorCode::IndexCorrupt.into(), "index error", true)
+            .with_details(ReplErrorDetails::IndexCorrupt(
+                error_details::IndexCorruptDetails {
+                    reason: err.to_string(),
+                },
+            )),
     }
 }
 
@@ -2379,14 +2395,15 @@ fn watermark_error_payload(
     match err {
         WatermarkError::NonContiguous { expected, got } => {
             let durable_seen = expected.prev_seq0().get();
-            ReplError::new(ProtocolErrorCode::GapDetected.into(), "gap detected", false).with_details(
-                ReplErrorDetails::GapDetected(error_details::GapDetectedDetails {
-                    namespace: namespace.clone(),
-                    origin_replica_id: *origin,
-                    durable_seen,
-                    got_seq: got.get(),
-                }),
-            )
+            ReplError::new(ProtocolErrorCode::GapDetected.into(), "gap detected", false)
+                .with_details(ReplErrorDetails::GapDetected(
+                    error_details::GapDetectedDetails {
+                        namespace: namespace.clone(),
+                        origin_replica_id: *origin,
+                        durable_seen,
+                        got_seq: got.get(),
+                    },
+                ))
         }
         other => ReplError::new(CliErrorCode::Internal.into(), other.to_string(), false),
     }
@@ -2410,9 +2427,10 @@ pub(crate) fn insert_store_for_tests(
     .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
     daemon.seed_actor_clocks(&open.runtime)?;
     daemon.stores.insert(store_id, open.runtime);
-    daemon
-        .git_lanes
-        .insert(store_id, GitLaneState::with_path(None, repo_path.to_owned()));
+    daemon.git_lanes.insert(
+        store_id,
+        GitLaneState::with_path(None, repo_path.to_owned()),
+    );
     daemon
         .store_caches
         .remote_to_store_id
@@ -2434,8 +2452,8 @@ mod tests {
     use super::*;
     use crate::api::QueryResult;
     use crate::daemon::ipc::{MutationMeta, ReadConsistency, Request, ResponsePayload};
-    use crate::git::sync::SyncOutcome;
     use crate::daemon::store::discovery::store_id_from_remote;
+    use crate::git::sync::SyncOutcome;
     use std::collections::BTreeMap;
     use std::io::Write;
     #[cfg(unix)]
@@ -2455,9 +2473,9 @@ mod tests {
         ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Labels,
         Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority,
         ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1,
-        TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
-        WriteStamp, encode_event_body_canonical, hash_event_body,
+        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+        TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp,
+        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -3163,10 +3181,7 @@ mod tests {
             .expect("load repo");
 
         let store = daemon.stores.get(&store_id).expect("store runtime");
-        let core = store
-            .state
-            .get(&NamespaceId::core())
-            .expect("core state");
+        let core = store.state.get(&NamespaceId::core()).expect("core state");
         assert!(core.get_live(&bead_id).is_some());
 
         let durable = store

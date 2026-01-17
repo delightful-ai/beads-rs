@@ -10,6 +10,7 @@ use std::process::Command as StdCommand;
 use assert_cmd::Command;
 use tempfile::TempDir;
 
+use crate::fixtures::daemon_runtime::shutdown_daemon;
 use beads_rs::api::{
     AdminClockAnomaly, AdminClockAnomalyKind, AdminHealthReport, AdminHealthRisk, AdminHealthStats,
     AdminHealthSummary, AdminStatusOutput,
@@ -18,7 +19,6 @@ use beads_rs::{
     Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicateMode,
     StoreId, Watermarks,
 };
-use crate::fixtures::daemon_runtime::shutdown_daemon;
 use uuid::Uuid;
 
 struct AdminFixture {

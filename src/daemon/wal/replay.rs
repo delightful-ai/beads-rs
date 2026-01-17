@@ -22,9 +22,9 @@ use super::record::{RecordHeaderMismatch, RecordVerifyError, UnverifiedRecord, V
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
 
 #[cfg(test)]
-use std::io::Write;
-#[cfg(test)]
 use crate::core::sha256_bytes;
+#[cfg(test)]
+use std::io::Write;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplayStats {
@@ -344,20 +344,17 @@ fn replay_index(
                     seq,
                 });
             }
-            let next_seq = state
-                .max_seq
-                .get()
-                .checked_add(1)
-                .ok_or_else(|| WalReplayError::OriginSeqOverflow {
-                    namespace: namespace.clone(),
-                    origin,
-                })?;
-            let next_seq = Seq1::from_u64(next_seq).ok_or_else(|| {
+            let next_seq = state.max_seq.get().checked_add(1).ok_or_else(|| {
                 WalReplayError::OriginSeqOverflow {
                     namespace: namespace.clone(),
                     origin,
                 }
             })?;
+            let next_seq =
+                Seq1::from_u64(next_seq).ok_or_else(|| WalReplayError::OriginSeqOverflow {
+                    namespace: namespace.clone(),
+                    origin,
+                })?;
 
             txn.update_watermark(&namespace, &origin, seq.get(), seq.get(), head, head)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
@@ -804,11 +801,12 @@ where
             });
         }
 
-        let record =
-            UnverifiedRecord::decode_body(&body).map_err(|source| WalReplayError::RecordDecode {
+        let record = UnverifiedRecord::decode_body(&body).map_err(|source| {
+            WalReplayError::RecordDecode {
                 path: segment.path.clone(),
                 source,
-            })?;
+            }
+        })?;
         let (_, event_body) =
             decode_event_body(record.payload_bytes(), limits).map_err(|source| {
                 WalReplayError::EventBodyDecode {
@@ -818,24 +816,26 @@ where
                 }
             })?;
         let header = record.header().clone();
-        let record = record.verify_with_event_body(&event_body).map_err(|err| match err {
-            RecordVerifyError::HeaderMismatch(source) => WalReplayError::RecordHeaderMismatch {
-                path: segment.path.clone(),
-                offset,
-                source,
-            },
-            RecordVerifyError::ShaMismatch { expected, got } => {
-                WalReplayError::RecordShaMismatch(Box::new(RecordShaMismatchInfo {
-                    namespace: segment.header.namespace.clone(),
-                    origin: header.origin_replica_id,
-                    seq: header.origin_seq,
-                    expected,
-                    got,
+        let record = record
+            .verify_with_event_body(&event_body)
+            .map_err(|err| match err {
+                RecordVerifyError::HeaderMismatch(source) => WalReplayError::RecordHeaderMismatch {
                     path: segment.path.clone(),
                     offset,
-                }))
-            }
-        })?;
+                    source,
+                },
+                RecordVerifyError::ShaMismatch { expected, got } => {
+                    WalReplayError::RecordShaMismatch(Box::new(RecordShaMismatchInfo {
+                        namespace: segment.header.namespace.clone(),
+                        origin: header.origin_replica_id,
+                        seq: header.origin_seq,
+                        expected,
+                        got,
+                        path: segment.path.clone(),
+                        offset,
+                    }))
+                }
+            })?;
         on_record(offset, &record, frame_len as u32)?;
 
         records += 1;
@@ -944,8 +944,8 @@ mod tests {
 
     use crate::core::{
         ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, SegmentId, Seq1,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
-        TxnV1, encode_event_body_canonical,
+        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
+        encode_event_body_canonical,
     };
     use crate::daemon::wal::SegmentConfig;
     use crate::daemon::wal::record::RecordHeader;

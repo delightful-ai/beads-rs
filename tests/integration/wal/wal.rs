@@ -1,6 +1,5 @@
 //! WAL framing + tail truncation.
 
-
 use std::fs;
 use std::io::{Seek, SeekFrom};
 

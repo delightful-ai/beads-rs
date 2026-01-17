@@ -1,6 +1,5 @@
 //! Checkpoint export/import determinism.
 
-
 use std::collections::BTreeMap;
 use std::path::Path;
 

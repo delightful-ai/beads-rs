@@ -15,7 +15,10 @@ pub use client::{
     socket_path_for_runtime_dir, subscribe_stream, subscribe_stream_at,
     subscribe_stream_no_autostart_at, wait_for_daemon_ready, wait_for_daemon_ready_at,
 };
-pub use codec::{IpcError, decode_request, decode_request_with_limits, encode_response, read_requests, send_response};
+pub use codec::{
+    IpcError, decode_request, decode_request_with_limits, encode_response, read_requests,
+    send_response,
+};
 pub use types::{
     IPC_PROTOCOL_VERSION, InitializedPayload, MutationMeta, OpResponse, ReadConsistency,
     RefreshedPayload, Request, Response, ResponsePayload, ShuttingDownPayload, StreamEventPayload,

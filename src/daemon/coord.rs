@@ -21,8 +21,8 @@ use crate::core::{
     ActorId, BeadId, CanonicalState, CliErrorCode, ClientRequestId, CoreError, DurabilityClass,
     ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, WallClock,
 };
-use crate::git::{SyncError, SyncOutcome};
 use crate::git::collision::{detect_collisions, resolve_collisions};
+use crate::git::{SyncError, SyncOutcome};
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
 
@@ -85,11 +85,7 @@ impl Daemon {
     ///
     /// Called when git thread reports refresh result. Applies fresh state
     /// if refresh succeeded, otherwise just clears the in-progress flag.
-    pub fn complete_refresh(
-        &mut self,
-        remote: &RemoteUrl,
-        result: Result<LoadResult, SyncError>,
-    ) {
+    pub fn complete_refresh(&mut self, remote: &RemoteUrl, result: Result<LoadResult, SyncError>) {
         let store_id = match self.store_id_for_remote(remote) {
             Some(id) => id,
             None => return,
@@ -129,26 +125,29 @@ impl Daemon {
                     .last_seen_stamp
                     .as_ref()
                     .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
-                repo_state.last_fetch_error = fresh.fetch_error.map(|message| {
-                    super::git_lane::FetchErrorRecord {
-                        message,
-                        wall_ms: now_wall_ms,
-                    }
-                });
-                repo_state.last_divergence = fresh.divergence.map(|divergence| {
-                    super::git_lane::DivergenceRecord {
-                        local_oid: divergence.local_oid.to_string(),
-                        remote_oid: divergence.remote_oid.to_string(),
-                        wall_ms: now_wall_ms,
-                    }
-                });
-                repo_state.last_force_push = fresh.force_push.map(|force_push| {
-                    super::git_lane::ForcePushRecord {
-                        previous_remote_oid: force_push.previous_remote_oid.to_string(),
-                        remote_oid: force_push.remote_oid.to_string(),
-                        wall_ms: now_wall_ms,
-                    }
-                });
+                repo_state.last_fetch_error =
+                    fresh
+                        .fetch_error
+                        .map(|message| super::git_lane::FetchErrorRecord {
+                            message,
+                            wall_ms: now_wall_ms,
+                        });
+                repo_state.last_divergence =
+                    fresh
+                        .divergence
+                        .map(|divergence| super::git_lane::DivergenceRecord {
+                            local_oid: divergence.local_oid.to_string(),
+                            remote_oid: divergence.remote_oid.to_string(),
+                            wall_ms: now_wall_ms,
+                        });
+                repo_state.last_force_push =
+                    fresh
+                        .force_push
+                        .map(|force_push| super::git_lane::ForcePushRecord {
+                            previous_remote_oid: force_push.previous_remote_oid.to_string(),
+                            remote_oid: force_push.remote_oid.to_string(),
+                            wall_ms: now_wall_ms,
+                        });
 
                 // If local/WAL has changes that remote doesn't (crash recovery),
                 // mark dirty so sync will push those changes.
@@ -273,20 +272,22 @@ impl Daemon {
                     .last_seen_stamp
                     .as_ref()
                     .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
-                repo_state.last_divergence = outcome.divergence.map(|divergence| {
-                    super::git_lane::DivergenceRecord {
-                        local_oid: divergence.local_oid.to_string(),
-                        remote_oid: divergence.remote_oid.to_string(),
-                        wall_ms: now_wall_ms,
-                    }
-                });
-                repo_state.last_force_push = outcome.force_push.map(|force_push| {
-                    super::git_lane::ForcePushRecord {
-                        previous_remote_oid: force_push.previous_remote_oid.to_string(),
-                        remote_oid: force_push.remote_oid.to_string(),
-                        wall_ms: now_wall_ms,
-                    }
-                });
+                repo_state.last_divergence =
+                    outcome
+                        .divergence
+                        .map(|divergence| super::git_lane::DivergenceRecord {
+                            local_oid: divergence.local_oid.to_string(),
+                            remote_oid: divergence.remote_oid.to_string(),
+                            wall_ms: now_wall_ms,
+                        });
+                repo_state.last_force_push =
+                    outcome
+                        .force_push
+                        .map(|force_push| super::git_lane::ForcePushRecord {
+                            previous_remote_oid: force_push.previous_remote_oid.to_string(),
+                            remote_oid: force_push.remote_oid.to_string(),
+                            wall_ms: now_wall_ms,
+                        });
 
                 // If mutations happened during sync, merge them
                 if repo_state.dirty {
@@ -527,36 +528,28 @@ impl Daemon {
                 patch,
                 cas,
                 meta,
-            } => {
-                self.apply_update(&repo, meta, id, patch, cas, git_tx)
-            }
+            } => self.apply_update(&repo, meta, id, patch, cas, git_tx),
 
             Request::AddLabels {
                 repo,
                 id,
                 labels,
                 meta,
-            } => {
-                self.apply_add_labels(&repo, meta, id, labels, git_tx)
-            }
+            } => self.apply_add_labels(&repo, meta, id, labels, git_tx),
 
             Request::RemoveLabels {
                 repo,
                 id,
                 labels,
                 meta,
-            } => {
-                self.apply_remove_labels(&repo, meta, id, labels, git_tx)
-            }
+            } => self.apply_remove_labels(&repo, meta, id, labels, git_tx),
 
             Request::SetParent {
                 repo,
                 id,
                 parent,
                 meta,
-            } => {
-                self.apply_set_parent(&repo, meta, id, parent, git_tx)
-            }
+            } => self.apply_set_parent(&repo, meta, id, parent, git_tx),
 
             Request::Close {
                 repo,
@@ -564,22 +557,16 @@ impl Daemon {
                 reason,
                 on_branch,
                 meta,
-            } => {
-                self.apply_close(&repo, meta, id, reason, on_branch, git_tx)
-            }
+            } => self.apply_close(&repo, meta, id, reason, on_branch, git_tx),
 
-            Request::Reopen { repo, id, meta } => {
-                self.apply_reopen(&repo, meta, id, git_tx)
-            }
+            Request::Reopen { repo, id, meta } => self.apply_reopen(&repo, meta, id, git_tx),
 
             Request::Delete {
                 repo,
                 id,
                 reason,
                 meta,
-            } => {
-                self.apply_delete(&repo, meta, id, reason, git_tx)
-            }
+            } => self.apply_delete(&repo, meta, id, reason, git_tx),
 
             Request::AddDep {
                 repo,
@@ -587,9 +574,7 @@ impl Daemon {
                 to,
                 kind,
                 meta,
-            } => {
-                self.apply_add_dep(&repo, meta, from, to, kind, git_tx)
-            }
+            } => self.apply_add_dep(&repo, meta, from, to, kind, git_tx),
 
             Request::RemoveDep {
                 repo,
@@ -597,40 +582,30 @@ impl Daemon {
                 to,
                 kind,
                 meta,
-            } => {
-                self.apply_remove_dep(&repo, meta, from, to, kind, git_tx)
-            }
+            } => self.apply_remove_dep(&repo, meta, from, to, kind, git_tx),
 
             Request::AddNote {
                 repo,
                 id,
                 content,
                 meta,
-            } => {
-                self.apply_add_note(&repo, meta, id, content, git_tx)
-            }
+            } => self.apply_add_note(&repo, meta, id, content, git_tx),
 
             Request::Claim {
                 repo,
                 id,
                 lease_secs,
                 meta,
-            } => {
-                self.apply_claim(&repo, meta, id, lease_secs, git_tx)
-            }
+            } => self.apply_claim(&repo, meta, id, lease_secs, git_tx),
 
-            Request::Unclaim { repo, id, meta } => {
-                self.apply_unclaim(&repo, meta, id, git_tx)
-            }
+            Request::Unclaim { repo, id, meta } => self.apply_unclaim(&repo, meta, id, git_tx),
 
             Request::ExtendClaim {
                 repo,
                 id,
                 lease_secs,
                 meta,
-            } => {
-                self.apply_extend_claim(&repo, meta, id, lease_secs, git_tx)
-            }
+            } => self.apply_extend_claim(&repo, meta, id, lease_secs, git_tx),
 
             // Queries - delegate to query_executor module
             Request::Show { repo, id, read } => {
@@ -851,12 +826,16 @@ impl Daemon {
                         Ok(_) => Response::ok(ResponsePayload::initialized()),
                         Err(e) => Response::err(e),
                     },
-                    Ok(Err(e)) => {
-                        Response::err(error_payload(CliErrorCode::InitFailed.into(), &e.to_string(), false))
-                    }
-                    Err(_) => {
-                        Response::err(error_payload(CliErrorCode::Internal.into(), "git thread died", false))
-                    }
+                    Ok(Err(e)) => Response::err(error_payload(
+                        CliErrorCode::InitFailed.into(),
+                        &e.to_string(),
+                        false,
+                    )),
+                    Err(_) => Response::err(error_payload(
+                        CliErrorCode::Internal.into(),
+                        "git thread died",
+                        false,
+                    )),
                 }
                 .into()
             }
@@ -885,7 +864,11 @@ fn error_payload(code: ErrorCode, message: &str, retryable: bool) -> ErrorPayloa
 fn invalid_id_payload(err: CoreError) -> ErrorPayload {
     match err {
         CoreError::InvalidId(id) => IpcError::from(id).into(),
-        other => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), other.to_string(), false),
+        other => ErrorPayload::new(
+            ProtocolErrorCode::InternalError.into(),
+            other.to_string(),
+            false,
+        ),
     }
 }
 

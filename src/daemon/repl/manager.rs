@@ -828,12 +828,15 @@ fn handle_want(want: &Want, ctx: &mut WantContext<'_>) -> Result<(), PeerError> 
             send_events(ctx.writer, ctx.session, frames, ctx.limits, ctx.keepalive)
         }
         WantFramesOutcome::BootstrapRequired { namespaces } => {
-            let payload =
-                ErrorPayload::new(ProtocolErrorCode::BootstrapRequired.into(), "bootstrap required", false)
-                    .with_details(BootstrapRequiredDetails {
-                        namespaces: namespaces.into_iter().collect(),
-                        reason: SnapshotRangeReason::RangeMissing,
-                    });
+            let payload = ErrorPayload::new(
+                ProtocolErrorCode::BootstrapRequired.into(),
+                "bootstrap required",
+                false,
+            )
+            .with_details(BootstrapRequiredDetails {
+                namespaces: namespaces.into_iter().collect(),
+                reason: SnapshotRangeReason::RangeMissing,
+            });
             send_payload(
                 ctx.writer,
                 ctx.session,
@@ -896,9 +899,9 @@ mod tests {
         NamespacePolicy, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
         Watermark,
     };
-    use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
     use crate::daemon::repl::keepalive::KeepaliveTracker;
     use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap, Welcome};
+    use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
 
     #[derive(Default)]
     struct TestStore;
@@ -1430,7 +1433,8 @@ mod tests {
                 let mut reader = FrameReader::new(reader_stream, 1024 * 1024);
                 let mut writer = FrameWriter::new(stream, 1024 * 1024);
                 let _ = reader.read_next();
-                let payload = ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), "overloaded", true);
+                let payload =
+                    ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), "overloaded", true);
                 let envelope = ReplEnvelope {
                     version: PROTOCOL_VERSION_V1,
                     message: ReplMessage::Error(payload),

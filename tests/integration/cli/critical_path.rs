@@ -2,7 +2,6 @@
 //!
 //! These tests run the actual `bd` binary against temp git repos.
 
-
 use std::fs;
 #[cfg(feature = "slow-tests")]
 use std::io::{BufRead, BufReader, Write};
@@ -10,8 +9,8 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "slow-tests")]
 use std::time::{Duration, Instant};
 
-use assert_cmd::Command;
 use crate::fixtures::daemon_runtime::shutdown_daemon;
+use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -38,8 +37,8 @@ fn socket_path(runtime_dir: &Path) -> PathBuf {
 
 #[cfg(feature = "slow-tests")]
 fn daemon_pid(runtime_dir: &Path) -> u32 {
-    use beads_rs::daemon::ipc::{Request, Response, ResponsePayload};
     use beads_rs::api::QueryResult;
+    use beads_rs::daemon::ipc::{Request, Response, ResponsePayload};
 
     let socket = socket_path(runtime_dir);
     let mut stream =
@@ -3677,9 +3676,9 @@ fn test_show_with_all_optional_fields() {
 #[cfg(feature = "slow-tests")]
 #[test]
 fn test_crash_recovery_replays_wal() {
+    use beads_rs::api::QueryResult;
     use beads_rs::daemon::ipc::ResponsePayload;
     use beads_rs::daemon::ops::OpResult;
-    use beads_rs::api::QueryResult;
     use beads_rs::git::sync::read_state_at_oid;
     use git2::Repository;
 

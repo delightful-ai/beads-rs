@@ -5,9 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::core::error::details::{
     EventIdDetails, FrameTooLargeDetails, HashMismatchDetails, InternalErrorDetails,
     InvalidRequestDetails, NamespacePolicyViolationDetails, NonCanonicalDetails, OverloadedDetails,
-    PrevShaMismatchDetails, ReplicaIdCollisionDetails, ReplRejectReason,
-    StoreEpochMismatchDetails, SubscriberLaggedDetails, VersionIncompatibleDetails,
-    WrongStoreDetails,
+    PrevShaMismatchDetails, ReplRejectReason, ReplicaIdCollisionDetails, StoreEpochMismatchDetails,
+    SubscriberLaggedDetails, VersionIncompatibleDetails, WrongStoreDetails,
 };
 use crate::core::{
     Applied, DecodeError, Durable, ErrorPayload, EventFrameError, EventFrameV1, EventId,
@@ -229,9 +228,7 @@ impl Session {
         store: &impl SessionStore,
         now_ms: u64,
     ) -> Option<SessionAction> {
-        if self.role != SessionRole::Outbound
-            || !matches!(self.state, SessionState::Connecting)
-        {
+        if self.role != SessionRole::Outbound || !matches!(self.state, SessionState::Connecting) {
             return None;
         }
         let hello = self.build_hello(store, now_ms);
@@ -436,7 +433,6 @@ impl Session {
         store: &mut impl SessionStore,
         now_ms: u64,
     ) -> Vec<SessionAction> {
-
         let total_bytes: u64 = events
             .events
             .iter()
@@ -473,11 +469,10 @@ impl Session {
                 HeadStatus::Unknown => None,
             };
 
-            let expected_prev =
-                match self.expected_prev_head(durable, frame.eid.origin_seq) {
-                    Ok(prev) => prev,
-                    Err(error) => return self.fail(error),
-                };
+            let expected_prev = match self.expected_prev_head(durable, frame.eid.origin_seq) {
+                Ok(prev) => prev,
+                Err(error) => return self.fail(error),
+            };
 
             let verified = {
                 let lookup = SessionLookup { store };
@@ -603,16 +598,16 @@ impl Session {
         namespaces: &[NamespaceId],
     ) -> SessionResult<()> {
         let snapshot = store.watermark_snapshot(namespaces);
-        self.durable = watermark_state_from_snapshot(
-            &snapshot.durable,
-            Some(&snapshot.durable_heads),
-        )
-        .map_err(|err| internal_error(format!("invalid durable watermark snapshot: {err}")))?;
-        self.applied = watermark_state_from_snapshot(
-            &snapshot.applied,
-            Some(&snapshot.applied_heads),
-        )
-        .map_err(|err| internal_error(format!("invalid applied watermark snapshot: {err}")))?;
+        self.durable =
+            watermark_state_from_snapshot(&snapshot.durable, Some(&snapshot.durable_heads))
+                .map_err(|err| {
+                    internal_error(format!("invalid durable watermark snapshot: {err}"))
+                })?;
+        self.applied =
+            watermark_state_from_snapshot(&snapshot.applied, Some(&snapshot.applied_heads))
+                .map_err(|err| {
+                    internal_error(format!("invalid applied watermark snapshot: {err}"))
+                })?;
         Ok(())
     }
 
@@ -935,12 +930,15 @@ fn repl_reject_reason_message(reason: &ReplRejectReason) -> &'static str {
 }
 
 fn wrong_store_error(expected: StoreId, got: StoreId) -> ReplError {
-    ReplError::new(ProtocolErrorCode::WrongStore.into(), "wrong store id", false).with_details(
-        ReplErrorDetails::WrongStore(WrongStoreDetails {
-            expected_store_id: expected,
-            got_store_id: got,
-        }),
+    ReplError::new(
+        ProtocolErrorCode::WrongStore.into(),
+        "wrong store id",
+        false,
     )
+    .with_details(ReplErrorDetails::WrongStore(WrongStoreDetails {
+        expected_store_id: expected,
+        got_store_id: got,
+    }))
 }
 
 fn store_epoch_mismatch_error(
@@ -948,19 +946,29 @@ fn store_epoch_mismatch_error(
     expected: StoreEpoch,
     got: StoreEpoch,
 ) -> ReplError {
-    ReplError::new(ProtocolErrorCode::StoreEpochMismatch.into(), "store epoch mismatch", false).with_details(
-        ReplErrorDetails::StoreEpochMismatch(StoreEpochMismatchDetails {
+    ReplError::new(
+        ProtocolErrorCode::StoreEpochMismatch.into(),
+        "store epoch mismatch",
+        false,
+    )
+    .with_details(ReplErrorDetails::StoreEpochMismatch(
+        StoreEpochMismatchDetails {
             store_id,
             expected_epoch: expected.get(),
             got_epoch: got.get(),
-        }),
-    )
+        },
+    ))
 }
 
 fn replica_id_collision_error(replica_id: ReplicaId) -> ReplError {
-    ReplError::new(ProtocolErrorCode::ReplicaIdCollision.into(), "replica_id collision", false).with_details(
-        ReplErrorDetails::ReplicaIdCollision(ReplicaIdCollisionDetails { replica_id }),
+    ReplError::new(
+        ProtocolErrorCode::ReplicaIdCollision.into(),
+        "replica_id collision",
+        false,
     )
+    .with_details(ReplErrorDetails::ReplicaIdCollision(
+        ReplicaIdCollisionDetails { replica_id },
+    ))
 }
 
 fn version_incompatible_error(err: &ProtocolIncompatible) -> ReplError {
@@ -969,22 +977,27 @@ fn version_incompatible_error(err: &ProtocolIncompatible) -> ReplError {
         "protocol versions incompatible",
         false,
     )
-    .with_details(ReplErrorDetails::VersionIncompatible(VersionIncompatibleDetails {
-        local_min: err.local_min,
-        local_max: err.local_max,
-        peer_min: err.peer_min,
-        peer_max: err.peer_max,
-    }))
+    .with_details(ReplErrorDetails::VersionIncompatible(
+        VersionIncompatibleDetails {
+            local_min: err.local_min,
+            local_max: err.local_max,
+            peer_min: err.peer_min,
+            peer_max: err.peer_max,
+        },
+    ))
 }
 
 fn invalid_request_error(reason: impl Into<String>) -> ReplError {
     let reason = reason.into();
-    ReplError::new(ProtocolErrorCode::InvalidRequest.into(), reason.clone(), false).with_details(
-        ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
-            field: Some("type".to_string()),
-            reason: Some(reason),
-        }),
+    ReplError::new(
+        ProtocolErrorCode::InvalidRequest.into(),
+        reason.clone(),
+        false,
     )
+    .with_details(ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
+        field: Some("type".to_string()),
+        reason: Some(reason),
+    }))
 }
 
 fn namespace_policy_violation_error(namespace: &NamespaceId) -> ReplError {
@@ -995,20 +1008,23 @@ fn namespace_policy_violation_error(namespace: &NamespaceId) -> ReplError {
     )
     .with_details(ReplErrorDetails::NamespacePolicyViolation(
         NamespacePolicyViolationDetails {
-        namespace: namespace.clone(),
-        rule: "accepted_namespaces".to_string(),
-        reason: Some("namespace not negotiated for this session".to_string()),
+            namespace: namespace.clone(),
+            rule: "accepted_namespaces".to_string(),
+            reason: Some("namespace not negotiated for this session".to_string()),
         },
     ))
 }
 
 fn internal_error(message: impl Into<String>) -> ReplError {
-    ReplError::new(ProtocolErrorCode::InternalError.into(), "internal error", false).with_details(
-        ReplErrorDetails::InternalError(InternalErrorDetails {
-            trace_id: None,
-            component: Some(message.into()),
-        }),
+    ReplError::new(
+        ProtocolErrorCode::InternalError.into(),
+        "internal error",
+        false,
     )
+    .with_details(ReplErrorDetails::InternalError(InternalErrorDetails {
+        trace_id: None,
+        component: Some(message.into()),
+    }))
 }
 
 fn overloaded_error(rejection: AdmissionRejection) -> ReplError {
@@ -1050,11 +1066,7 @@ fn event_frame_error_payload(
             if expected.store_id != got.store_id {
                 wrong_store_error(expected.store_id, got.store_id)
             } else {
-                store_epoch_mismatch_error(
-                    expected.store_id,
-                    expected.store_epoch,
-                    got.store_epoch,
-                )
+                store_epoch_mismatch_error(expected.store_id, expected.store_epoch, got.store_epoch)
             }
         }
         EventFrameError::FrameMismatch => ReplError::new(
@@ -1068,13 +1080,16 @@ fn event_frame_error_payload(
         })),
         EventFrameError::HashMismatch => {
             let expected = hash_event_body(&frame.bytes);
-            ReplError::new(ProtocolErrorCode::HashMismatch.into(), "event sha256 mismatch", false).with_details(
-                ReplErrorDetails::HashMismatch(HashMismatchDetails {
-                    eid: event_id_details(&frame.eid),
-                    expected_sha256: sha256_hex(expected),
-                    got_sha256: sha256_hex(frame.sha256),
-                }),
+            ReplError::new(
+                ProtocolErrorCode::HashMismatch.into(),
+                "event sha256 mismatch",
+                false,
             )
+            .with_details(ReplErrorDetails::HashMismatch(HashMismatchDetails {
+                eid: event_id_details(&frame.eid),
+                expected_sha256: sha256_hex(expected),
+                got_sha256: sha256_hex(frame.sha256),
+            }))
         }
         EventFrameError::PrevMismatch => ReplError::new(
             ProtocolErrorCode::PrevShaMismatch.into(),
@@ -1087,19 +1102,22 @@ fn event_frame_error_payload(
             got_prev_sha256: sha256_hex_or_zero(frame.prev_sha256),
             head_seq,
         })),
-        EventFrameError::Validation(err) => {
-            ReplError::new(ProtocolErrorCode::InvalidRequest.into(), err.to_string(), false).with_details(
-                ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
-                    field: None,
-                    reason: Some(err.to_string()),
-                }),
-            )
-        }
+        EventFrameError::Validation(err) => ReplError::new(
+            ProtocolErrorCode::InvalidRequest.into(),
+            err.to_string(),
+            false,
+        )
+        .with_details(ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
+            field: None,
+            reason: Some(err.to_string()),
+        })),
         EventFrameError::Decode(err) => decode_error_payload(&err, limits, frame.bytes.len()),
         EventFrameError::Lookup(err) => internal_error(err.to_string()),
-        EventFrameError::Equivocation => {
-            ReplError::new(ProtocolErrorCode::Equivocation.into(), "equivocation detected", false)
-        }
+        EventFrameError::Equivocation => ReplError::new(
+            ProtocolErrorCode::Equivocation.into(),
+            "equivocation detected",
+            false,
+        ),
     }
 }
 
@@ -1112,17 +1130,21 @@ fn drain_error_payload(err: DrainError) -> ReplError {
             expected,
             got,
             head_seq,
-        } => ReplError::new(ProtocolErrorCode::PrevShaMismatch.into(), "prev_sha256 mismatch", false)
-            .with_details(ReplErrorDetails::PrevShaMismatch(PrevShaMismatchDetails {
-                eid: EventIdDetails {
-                    namespace,
-                    origin_replica_id: origin,
-                    origin_seq: seq.get(),
-                },
-                expected_prev_sha256: sha256_hex_or_zero(expected),
-                got_prev_sha256: sha256_hex_or_zero(got),
-                head_seq,
-            })),
+        } => ReplError::new(
+            ProtocolErrorCode::PrevShaMismatch.into(),
+            "prev_sha256 mismatch",
+            false,
+        )
+        .with_details(ReplErrorDetails::PrevShaMismatch(PrevShaMismatchDetails {
+            eid: EventIdDetails {
+                namespace,
+                origin_replica_id: origin,
+                origin_seq: seq.get(),
+            },
+            expected_prev_sha256: sha256_hex_or_zero(expected),
+            got_prev_sha256: sha256_hex_or_zero(got),
+            head_seq,
+        })),
     }
 }
 
@@ -1131,12 +1153,15 @@ fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) 
         DecodeError::DecodeLimit(reason)
             if matches!(*reason, "max_wal_record_bytes" | "max_frame_bytes") =>
         {
-            ReplError::new(ProtocolErrorCode::FrameTooLarge.into(), "event frame too large", false).with_details(
-                ReplErrorDetails::FrameTooLarge(FrameTooLargeDetails {
-                    max_frame_bytes: limits.max_frame_bytes.min(limits.max_wal_record_bytes) as u64,
-                    got_bytes: frame_bytes as u64,
-                }),
+            ReplError::new(
+                ProtocolErrorCode::FrameTooLarge.into(),
+                "event frame too large",
+                false,
             )
+            .with_details(ReplErrorDetails::FrameTooLarge(FrameTooLargeDetails {
+                max_frame_bytes: limits.max_frame_bytes.min(limits.max_wal_record_bytes) as u64,
+                got_bytes: frame_bytes as u64,
+            }))
         }
         DecodeError::DecodeLimit(_) => invalid_request_decode_error(err),
         DecodeError::IndefiniteLength | DecodeError::TrailingBytes => ReplError::new(
@@ -1153,12 +1178,15 @@ fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) 
 }
 
 fn invalid_request_decode_error(err: &DecodeError) -> ReplError {
-    ReplError::new(ProtocolErrorCode::InvalidRequest.into(), err.to_string(), false).with_details(
-        ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
-            field: None,
-            reason: Some(err.to_string()),
-        }),
+    ReplError::new(
+        ProtocolErrorCode::InvalidRequest.into(),
+        err.to_string(),
+        false,
     )
+    .with_details(ReplErrorDetails::InvalidRequest(InvalidRequestDetails {
+        field: None,
+        reason: Some(err.to_string()),
+    }))
 }
 
 #[cfg(test)]
@@ -1692,7 +1720,10 @@ mod tests {
                 _ => None,
             })
             .expect("error payload");
-        assert_eq!(payload.code, ProtocolErrorCode::NamespacePolicyViolation.into());
+        assert_eq!(
+            payload.code,
+            ProtocolErrorCode::NamespacePolicyViolation.into()
+        );
     }
 
     #[test]
@@ -1847,10 +1878,7 @@ mod tests {
             details.expected_sha256,
             hex::encode(hash_event_body(&frame.bytes).as_bytes())
         );
-        assert_eq!(
-            details.got_sha256,
-            hex::encode(frame.sha256.as_bytes())
-        );
+        assert_eq!(details.got_sha256, hex::encode(frame.sha256.as_bytes()));
     }
 
     #[test]
@@ -1858,13 +1886,7 @@ mod tests {
         let (_store, identity, origin) = base_store();
         let expected_prev = Sha256([1u8; 32]);
         let got_prev = Sha256([2u8; 32]);
-        let frame = make_event(
-            identity,
-            NamespaceId::core(),
-            origin,
-            2,
-            Some(got_prev),
-        );
+        let frame = make_event(identity, NamespaceId::core(), origin, 2, Some(got_prev));
 
         let payload = event_frame_error_payload(
             &frame,

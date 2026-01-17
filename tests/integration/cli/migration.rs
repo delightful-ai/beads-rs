@@ -2,11 +2,10 @@
 //!
 //! Tests importing issues.jsonl from Go beads export format.
 
-
 use std::fs;
 
-use assert_cmd::Command;
 use crate::fixtures::daemon_runtime::shutdown_daemon;
+use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 

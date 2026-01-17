@@ -39,7 +39,12 @@ pub fn store_meta(seed: u8, created_at_ms: u64) -> StoreMeta {
 }
 
 pub fn store_meta_with_epoch(seed: u8, epoch: u64, created_at_ms: u64) -> StoreMeta {
-    store_meta_with_versions(seed, epoch, created_at_ms, StoreMetaVersions::new(1, 1, 1, 1, 1))
+    store_meta_with_versions(
+        seed,
+        epoch,
+        created_at_ms,
+        StoreMetaVersions::new(1, 1, 1, 1, 1),
+    )
 }
 
 pub fn store_meta_with_versions(

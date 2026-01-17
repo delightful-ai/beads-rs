@@ -189,11 +189,10 @@ impl RecordHeader {
 
         let origin_replica_id = ReplicaId::new(read_uuid(bytes, &mut offset)?);
         let origin_seq_raw = read_u64_le(bytes, &mut offset)?;
-        let origin_seq = Seq1::from_u64(origin_seq_raw).ok_or_else(|| {
-            EventWalError::RecordHeaderInvalid {
+        let origin_seq =
+            Seq1::from_u64(origin_seq_raw).ok_or_else(|| EventWalError::RecordHeaderInvalid {
                 reason: "origin_seq must be >= 1".to_string(),
-            }
-        })?;
+            })?;
         let event_time_ms = read_u64_le(bytes, &mut offset)?;
         let txn_id = TxnId::new(read_uuid(bytes, &mut offset)?);
 

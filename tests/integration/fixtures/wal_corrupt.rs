@@ -8,7 +8,7 @@ use beads_rs::core::NamespaceId;
 use crc32c::crc32c;
 
 use beads_rs::daemon::wal::{
-    EventWalError, EventWalResult, RecordHeader, FRAME_CRC_OFFSET, FRAME_HEADER_LEN,
+    EventWalError, EventWalResult, FRAME_CRC_OFFSET, FRAME_HEADER_LEN, RecordHeader,
 };
 
 use super::wal::{SegmentFixture, TempWalDir, valid_segment};
@@ -84,9 +84,7 @@ pub fn corrupt_record_header_event_time(
     file.write_all(&body)
         .map_err(|source| io_err(&segment.path, source))?;
     let crc = crc32c(&body);
-    file.seek(SeekFrom::Start(
-        frame_offset + FRAME_CRC_OFFSET as u64,
-    ))
+    file.seek(SeekFrom::Start(frame_offset + FRAME_CRC_OFFSET as u64))
         .map_err(|source| io_err(&segment.path, source))?;
     file.write_all(&crc.to_le_bytes())
         .map_err(|source| io_err(&segment.path, source))?;

@@ -19,9 +19,13 @@ impl From<model::DaemonInfo> for DaemonInfo {
 impl From<model::SyncWarning> for SyncWarning {
     fn from(value: model::SyncWarning) -> Self {
         match value {
-            model::SyncWarning::Fetch { message, at_wall_ms } => {
-                SyncWarning::Fetch { message, at_wall_ms }
-            }
+            model::SyncWarning::Fetch {
+                message,
+                at_wall_ms,
+            } => SyncWarning::Fetch {
+                message,
+                at_wall_ms,
+            },
             model::SyncWarning::Diverged {
                 local_oid,
                 remote_oid,
@@ -40,12 +44,13 @@ impl From<model::SyncWarning> for SyncWarning {
                 remote_oid,
                 at_wall_ms,
             },
-            model::SyncWarning::ClockSkew { delta_ms, at_wall_ms } => {
-                SyncWarning::ClockSkew {
-                    delta_ms,
-                    at_wall_ms,
-                }
-            }
+            model::SyncWarning::ClockSkew {
+                delta_ms,
+                at_wall_ms,
+            } => SyncWarning::ClockSkew {
+                delta_ms,
+                at_wall_ms,
+            },
             model::SyncWarning::WalTailTruncated {
                 namespace,
                 segment_id,
@@ -188,7 +193,9 @@ impl From<model::DepEdge> for DepEdge {
 
 impl From<model::DepCycles> for DepCycles {
     fn from(value: model::DepCycles) -> Self {
-        Self { cycles: value.cycles }
+        Self {
+            cycles: value.cycles,
+        }
     }
 }
 
@@ -280,9 +287,7 @@ impl From<internal_query::QueryResult> for QueryResult {
                 incoming: incoming.into_iter().map(Into::into).collect(),
                 outgoing: outgoing.into_iter().map(Into::into).collect(),
             },
-            internal_query::QueryResult::DepCycles(cycles) => {
-                QueryResult::DepCycles(cycles.into())
-            }
+            internal_query::QueryResult::DepCycles(cycles) => QueryResult::DepCycles(cycles.into()),
             internal_query::QueryResult::Notes(notes) => {
                 QueryResult::Notes(notes.into_iter().map(Into::into).collect())
             }
@@ -301,9 +306,9 @@ impl From<internal_query::QueryResult> for QueryResult {
             internal_query::QueryResult::DeletedLookup(out) => {
                 QueryResult::DeletedLookup(out.into())
             }
-            internal_query::QueryResult::EpicStatus(statuses) => QueryResult::EpicStatus(
-                statuses.into_iter().map(Into::into).collect(),
-            ),
+            internal_query::QueryResult::EpicStatus(statuses) => {
+                QueryResult::EpicStatus(statuses.into_iter().map(Into::into).collect())
+            }
             internal_query::QueryResult::Validation { warnings } => {
                 QueryResult::Validation { warnings }
             }

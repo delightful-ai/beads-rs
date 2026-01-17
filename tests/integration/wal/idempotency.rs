@@ -1,6 +1,5 @@
 //! WAL idempotency mapping + request hash reuse.
 
-
 use uuid::Uuid;
 
 use beads_rs::daemon::wal::{WalIndex, WalIndexError};

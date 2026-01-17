@@ -125,8 +125,14 @@ mod tests {
     #[test]
     fn store_meta_versions_current_is_consistent() {
         let current = StoreMetaVersions::current();
-        assert_eq!(current.store_format_version, StoreMetaVersions::STORE_FORMAT_VERSION);
-        assert_eq!(current.wal_format_version, StoreMetaVersions::WAL_FORMAT_VERSION);
+        assert_eq!(
+            current.store_format_version,
+            StoreMetaVersions::STORE_FORMAT_VERSION
+        );
+        assert_eq!(
+            current.wal_format_version,
+            StoreMetaVersions::WAL_FORMAT_VERSION
+        );
         assert_eq!(
             current.checkpoint_format_version,
             StoreMetaVersions::CHECKPOINT_FORMAT_VERSION
@@ -135,6 +141,9 @@ mod tests {
             current.replication_protocol_version,
             StoreMetaVersions::REPLICATION_PROTOCOL_VERSION
         );
-        assert_eq!(current.index_schema_version, StoreMetaVersions::INDEX_SCHEMA_VERSION);
+        assert_eq!(
+            current.index_schema_version,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION
+        );
     }
 }

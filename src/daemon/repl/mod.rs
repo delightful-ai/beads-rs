@@ -1,8 +1,8 @@
 //! Replication protocol modules.
 
+pub mod error;
 pub mod frame;
 pub mod gap_buffer;
-pub mod error;
 mod keepalive;
 pub mod manager;
 pub mod peer_acks;
@@ -14,9 +14,9 @@ pub mod session;
 pub mod store;
 mod want;
 
+pub use error::{ReplError, ReplErrorDetails};
 pub use frame::{FrameError, FrameReader, FrameWriter};
 pub use gap_buffer::{GapBufferByNsOrigin, IngestDecision, OriginStreamState};
-pub use error::{ReplError, ReplErrorDetails};
 pub use manager::{
     BackoffPolicy, PeerConfig, ReplicationManager, ReplicationManagerConfig,
     ReplicationManagerHandle,

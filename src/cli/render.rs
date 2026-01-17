@@ -3,6 +3,7 @@
 //! Parity target: beads-go default (non-`--json`) formatting.
 //! This module is pure formatting; handlers gather any extra data needed.
 
+use crate::api::QueryResult;
 use crate::api::{
     AdminClockAnomalyKind, AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode,
     AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput, AdminHealthReport,
@@ -14,7 +15,6 @@ use crate::api::{
 use crate::core::{HeadStatus, NamespaceId, ReplicaRole, Watermarks};
 use crate::daemon::ipc::ResponsePayload;
 use crate::daemon::ops::OpResult;
-use crate::api::QueryResult;
 use std::sync::LazyLock;
 
 /// Render a daemon response for human output.
@@ -1662,5 +1662,4 @@ mod tests {
         );
         assert_eq!(output, expected);
     }
-
 }

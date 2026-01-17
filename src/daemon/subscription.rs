@@ -10,7 +10,9 @@ use crate::core::{
     Applied, ErrorPayload, EventFrameV1, Limits, NamespaceId, ProtocolErrorCode, ReplicaId, Seq0,
     Watermark, Watermarks,
 };
-use crate::daemon::broadcast::{BroadcastError, BroadcastEvent, EventSubscription, SubscriberLimits};
+use crate::daemon::broadcast::{
+    BroadcastError, BroadcastEvent, EventSubscription, SubscriberLimits,
+};
 use crate::daemon::core::Daemon;
 use crate::daemon::git_worker::GitOp;
 use crate::daemon::ipc::{ReadConsistency, Response, ResponsePayload};
@@ -32,19 +34,13 @@ pub fn prepare_subscription(
     read: ReadConsistency,
     git_tx: &Sender<GitOp>,
 ) -> Result<SubscribeReply, Box<ErrorPayload>> {
-    let loaded = daemon
-        .ensure_repo_fresh(repo, git_tx)
-        .map_err(box_error)?;
+    let loaded = daemon.ensure_repo_fresh(repo, git_tx).map_err(box_error)?;
     let read = daemon
         .normalize_read_consistency(&loaded, read)
         .map_err(box_error)?;
-    daemon
-        .check_read_gate(&loaded, &read)
-        .map_err(box_error)?;
+    daemon.check_read_gate(&loaded, &read).map_err(box_error)?;
 
-    let store_runtime = daemon
-        .store_runtime(&loaded)
-        .map_err(box_error)?;
+    let store_runtime = daemon.store_runtime(&loaded).map_err(box_error)?;
     let subscription = store_runtime
         .broadcaster
         .subscribe(subscriber_limits(daemon.limits()))
@@ -195,13 +191,15 @@ fn build_backfill_plan<R: WalRangeRead>(
 
 fn wal_range_error_payload(err: WalRangeError) -> Box<ErrorPayload> {
     Box::new(match err {
-        WalRangeError::MissingRange { namespace, .. } => {
-            ErrorPayload::new(ProtocolErrorCode::BootstrapRequired.into(), "bootstrap required", false)
-                .with_details(error_details::BootstrapRequiredDetails {
-                    namespaces: vec![namespace],
-                    reason: error_details::SnapshotRangeReason::RangeMissing,
-                })
-        }
+        WalRangeError::MissingRange { namespace, .. } => ErrorPayload::new(
+            ProtocolErrorCode::BootstrapRequired.into(),
+            "bootstrap required",
+            false,
+        )
+        .with_details(error_details::BootstrapRequiredDetails {
+            namespaces: vec![namespace],
+            reason: error_details::SnapshotRangeReason::RangeMissing,
+        }),
         other => other.as_error_payload(),
     })
 }
@@ -213,9 +211,7 @@ mod tests {
     use std::cell::RefCell;
     use uuid::Uuid;
 
-    use crate::core::{
-        EventBytes, EventId, HeadStatus, NamespaceId, Opaque, Seq1, Sha256,
-    };
+    use crate::core::{EventBytes, EventId, HeadStatus, NamespaceId, Opaque, Seq1, Sha256};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ReadCall {

@@ -22,8 +22,7 @@ use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
 use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
 use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
-    EventWalError, FrameReader, ReplicaLivenessRow, VerifiedRecord, WalIndex,
-    WalIndexError,
+    EventWalError, FrameReader, ReplicaLivenessRow, VerifiedRecord, WalIndex, WalIndexError,
 };
 use crate::paths;
 
@@ -337,29 +336,31 @@ pub enum WalRangeError {
 impl WalRangeError {
     pub fn as_error_payload(&self) -> ErrorPayload {
         match self {
-            WalRangeError::MissingRange { .. } => {
-                ErrorPayload::new(ProtocolErrorCode::BootstrapRequired.into(), "bootstrap required", false)
-            }
+            WalRangeError::MissingRange { .. } => ErrorPayload::new(
+                ProtocolErrorCode::BootstrapRequired.into(),
+                "bootstrap required",
+                false,
+            ),
             WalRangeError::Corrupt {
                 namespace,
                 segment_id,
                 offset,
                 reason,
-            } => ErrorPayload::new(ProtocolErrorCode::WalCorrupt.into(), "wal corrupt", false).with_details(
-                WalCorruptDetails {
+            } => ErrorPayload::new(ProtocolErrorCode::WalCorrupt.into(), "wal corrupt", false)
+                .with_details(WalCorruptDetails {
                     namespace: namespace.clone(),
                     segment_id: *segment_id,
                     offset: *offset,
                     reason: reason.clone(),
-                },
-            ),
-            WalRangeError::Index(err) => {
-                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), "index corrupt", false).with_details(
-                    IndexCorruptDetails {
-                        reason: err.to_string(),
-                    },
-                )
-            }
+                }),
+            WalRangeError::Index(err) => ErrorPayload::new(
+                ProtocolErrorCode::IndexCorrupt.into(),
+                "index corrupt",
+                false,
+            )
+            .with_details(IndexCorruptDetails {
+                reason: err.to_string(),
+            }),
         }
     }
 }
@@ -416,11 +417,11 @@ fn read_record_at(
             reason: format!("event body decode failed: {err}"),
         }
     })?;
-    record.verify_with_event_body(&event_body).map_err(|err| {
-        EventWalError::RecordHeaderInvalid {
+    record
+        .verify_with_event_body(&event_body)
+        .map_err(|err| EventWalError::RecordHeaderInvalid {
             reason: err.to_string(),
-        }
-    })
+        })
 }
 
 #[cfg(test)]
@@ -452,8 +453,7 @@ mod tests {
     #[test]
     fn wal_range_index_maps_to_index_corrupt_details() {
         let payload =
-            WalRangeError::Index(WalIndexError::MetaMissing { key: "store_id" })
-                .as_error_payload();
+            WalRangeError::Index(WalIndexError::MetaMissing { key: "store_id" }).as_error_payload();
 
         assert_eq!(payload.code, ProtocolErrorCode::IndexCorrupt.into());
         let details: IndexCorruptDetails = payload.details_as().unwrap().unwrap();

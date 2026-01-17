@@ -589,7 +589,10 @@ impl CanonicalState {
             }
             nodes.insert(key.from().clone());
             nodes.insert(key.to().clone());
-            adjacency.entry(key.from().clone()).or_default().push(key.to().clone());
+            adjacency
+                .entry(key.from().clone())
+                .or_default()
+                .push(key.to().clone());
         }
         for targets in adjacency.values_mut() {
             targets.sort();
@@ -684,7 +687,14 @@ impl CanonicalState {
 
         for node in nodes {
             if !state.contains_key(&node) {
-                dfs(&node, &adjacency, &mut state, &mut stack, &mut seen, &mut cycles);
+                dfs(
+                    &node,
+                    &adjacency,
+                    &mut state,
+                    &mut stack,
+                    &mut seen,
+                    &mut cycles,
+                );
             }
         }
 
@@ -1091,7 +1101,10 @@ mod tests {
         // Merge: bead should win (resurrection)
         let merged = CanonicalState::join(&state_a, &state_b).unwrap();
         assert!(merged.get_live(&id).is_some(), "bead should be resurrected");
-        assert!(merged.get_tombstone(&id).is_none(), "tombstone should be gone");
+        assert!(
+            merged.get_tombstone(&id).is_none(),
+            "tombstone should be gone"
+        );
     }
 
     #[test]
@@ -1132,7 +1145,10 @@ mod tests {
         // Merge: tombstone should win
         let merged = CanonicalState::join(&state_a, &state_b).unwrap();
         assert!(merged.get_live(&id).is_none(), "bead should be deleted");
-        assert!(merged.get_tombstone(&id).is_some(), "tombstone should exist");
+        assert!(
+            merged.get_tombstone(&id).is_some(),
+            "tombstone should exist"
+        );
     }
 
     #[test]

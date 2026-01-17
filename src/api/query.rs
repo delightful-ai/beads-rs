@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::admin::{
     AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput, AdminMaintenanceModeOutput,
-    AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadPoliciesOutput, AdminRotateReplicaIdOutput,
-    AdminScrubOutput, AdminStatusOutput, DaemonInfo,
+    AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadPoliciesOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, DaemonInfo,
 };
 use crate::api::deps::{DepCycles, DepEdge};
 use crate::api::issues::{

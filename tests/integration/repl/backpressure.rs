@@ -1,6 +1,5 @@
 //! Replication backpressure behavior.
 
-
 use uuid::Uuid;
 
 use beads_rs::daemon::admission::AdmissionController;

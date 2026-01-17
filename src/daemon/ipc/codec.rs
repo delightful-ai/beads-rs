@@ -4,12 +4,14 @@ use std::os::unix::net::UnixStream;
 use serde_json::Value;
 use thiserror::Error;
 
+use super::types::{Request, Response};
+use crate::core::error::details as error_details;
+use crate::core::{
+    CliErrorCode, ErrorCode, ErrorPayload, InvalidId, Limits, ProtocolErrorCode, StoreId,
+};
 use crate::daemon::ops::OpError;
 use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
 use crate::daemon::store_runtime::StoreRuntimeError;
-use super::types::{Request, Response};
-use crate::core::error::details as error_details;
-use crate::core::{CliErrorCode, ErrorCode, ErrorPayload, InvalidId, Limits, ProtocolErrorCode, StoreId};
 use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 use crate::git::error::{SyncError, WireError};
@@ -23,8 +25,10 @@ impl From<OpError> for ErrorPayload {
         let message = e.to_string();
         let retryable = e.transience().is_retryable();
         match e {
-            OpError::NotFound(id) => ErrorPayload::new(CliErrorCode::NotFound.into(), message, retryable)
-                .with_details(error_details::NotFoundDetails { id }),
+            OpError::NotFound(id) => {
+                ErrorPayload::new(CliErrorCode::NotFound.into(), message, retryable)
+                    .with_details(error_details::NotFoundDetails { id })
+            }
             OpError::AlreadyExists(id) => {
                 ErrorPayload::new(CliErrorCode::AlreadyExists.into(), message, retryable)
                     .with_details(error_details::AlreadyExistsDetails { id })
@@ -47,87 +51,91 @@ impl From<OpError> for ErrorPayload {
                     .with_details(error_details::ValidationFailedDetails { field, reason })
             }
             OpError::InvalidRequest { field, reason } => {
-                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable).with_details(
-                    error_details::InvalidRequestDetails {
+                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable)
+                    .with_details(error_details::InvalidRequestDetails {
                         field,
                         reason: Some(reason),
-                    },
-                )
+                    })
             }
-            OpError::InvalidId(err) => ErrorPayload::new(CliErrorCode::InvalidId.into(), message, retryable)
-                .with_details(invalid_id_details(&err)),
+            OpError::InvalidId(err) => {
+                ErrorPayload::new(CliErrorCode::InvalidId.into(), message, retryable)
+                    .with_details(invalid_id_details(&err))
+            }
             OpError::Overloaded {
                 subsystem,
                 retry_after_ms,
                 queue_bytes,
                 queue_events,
-            } => ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), message, retryable).with_details(
-                error_details::OverloadedDetails {
+            } => ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), message, retryable)
+                .with_details(error_details::OverloadedDetails {
                     subsystem: Some(subsystem),
                     retry_after_ms,
                     queue_bytes,
                     queue_events,
-                },
-            ),
+                }),
             OpError::RateLimited {
                 retry_after_ms,
                 limit_bytes_per_sec,
-            } => ErrorPayload::new(ProtocolErrorCode::RateLimited.into(), message, retryable).with_details(
-                error_details::RateLimitedDetails {
+            } => ErrorPayload::new(ProtocolErrorCode::RateLimited.into(), message, retryable)
+                .with_details(error_details::RateLimitedDetails {
                     retry_after_ms,
                     limit_bytes_per_sec,
-                },
-            ),
-            OpError::MaintenanceMode { reason } => {
-                ErrorPayload::new(ProtocolErrorCode::MaintenanceMode.into(), message, retryable).with_details(
-                    error_details::MaintenanceModeDetails {
-                        reason,
-                        until_ms: None,
-                    },
-                )
-            }
+                }),
+            OpError::MaintenanceMode { reason } => ErrorPayload::new(
+                ProtocolErrorCode::MaintenanceMode.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::MaintenanceModeDetails {
+                reason,
+                until_ms: None,
+            }),
             OpError::ClientRequestIdReuseMismatch {
                 namespace,
                 client_request_id,
                 expected_request_sha256,
                 got_request_sha256,
-            } => ErrorPayload::new(ProtocolErrorCode::ClientRequestIdReuseMismatch.into(), message, retryable)
-                .with_details(error_details::ClientRequestIdReuseMismatchDetails {
-                    namespace,
-                    client_request_id,
-                    expected_request_sha256: hex::encode(expected_request_sha256.as_ref()),
-                    got_request_sha256: hex::encode(got_request_sha256.as_ref()),
-                }),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::ClientRequestIdReuseMismatchDetails {
+                namespace,
+                client_request_id,
+                expected_request_sha256: hex::encode(expected_request_sha256.as_ref()),
+                got_request_sha256: hex::encode(got_request_sha256.as_ref()),
+            }),
             OpError::NotAGitRepo(path) => {
-                ErrorPayload::new(CliErrorCode::NotAGitRepo.into(), message, retryable).with_details(
+                ErrorPayload::new(CliErrorCode::NotAGitRepo.into(), message, retryable)
+                    .with_details(error_details::PathDetails {
+                        path: path.display().to_string(),
+                    })
+            }
+            OpError::NoRemote(path) => {
+                ErrorPayload::new(CliErrorCode::NoRemote.into(), message, retryable).with_details(
                     error_details::PathDetails {
                         path: path.display().to_string(),
                     },
                 )
             }
-            OpError::NoRemote(path) => ErrorPayload::new(CliErrorCode::NoRemote.into(), message, retryable)
-                .with_details(error_details::PathDetails {
-                    path: path.display().to_string(),
-                }),
             OpError::RepoNotInitialized(path) => {
-                ErrorPayload::new(CliErrorCode::RepoNotInitialized.into(), message, retryable).with_details(
-                    error_details::PathDetails {
+                ErrorPayload::new(CliErrorCode::RepoNotInitialized.into(), message, retryable)
+                    .with_details(error_details::PathDetails {
                         path: path.display().to_string(),
-                    },
-                )
+                    })
             }
             OpError::Sync(err) => match err.as_ref() {
                 SyncError::Wire(WireError::ChecksumMismatch {
                     blob,
                     expected,
                     actual,
-                }) => ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable).with_details(
-                    error_details::StoreChecksumMismatchDetails {
+                }) => ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable)
+                    .with_details(error_details::StoreChecksumMismatchDetails {
                         blob: (*blob).to_string(),
                         expected_sha256: expected.to_hex(),
                         got_sha256: actual.to_hex(),
-                    },
-                ),
+                    }),
                 _ => ErrorPayload::new(CliErrorCode::SyncFailed.into(), message, retryable),
             },
             OpError::BeadDeleted(id) => {
@@ -137,127 +145,158 @@ impl From<OpError> for ErrorPayload {
             OpError::NoteTooLarge {
                 max_bytes,
                 got_bytes,
-            } => ErrorPayload::new(ProtocolErrorCode::NoteTooLarge.into(), message, retryable).with_details(
-                error_details::NoteTooLargeDetails {
+            } => ErrorPayload::new(ProtocolErrorCode::NoteTooLarge.into(), message, retryable)
+                .with_details(error_details::NoteTooLargeDetails {
                     max_note_bytes: max_bytes as u64,
                     got_bytes: got_bytes as u64,
-                },
-            ),
+                }),
             OpError::OpsTooMany { max_ops, got_ops } => {
-                ErrorPayload::new(ProtocolErrorCode::OpsTooMany.into(), message, retryable).with_details(
-                    error_details::OpsTooManyDetails {
+                ErrorPayload::new(ProtocolErrorCode::OpsTooMany.into(), message, retryable)
+                    .with_details(error_details::OpsTooManyDetails {
                         max_ops_per_txn: max_ops as u64,
                         got_ops: got_ops as u64,
-                    },
-                )
+                    })
             }
             OpError::LabelsTooMany {
                 max_labels,
                 got_labels,
                 bead_id,
-            } => ErrorPayload::new(ProtocolErrorCode::LabelsTooMany.into(), message, retryable).with_details(
-                error_details::LabelsTooManyDetails {
+            } => ErrorPayload::new(ProtocolErrorCode::LabelsTooMany.into(), message, retryable)
+                .with_details(error_details::LabelsTooManyDetails {
                     max_labels_per_bead: max_labels as u64,
                     got_labels: got_labels as u64,
-                    bead_id: bead_id
-                        .as_ref()
-                        .map(|id| id.as_str().to_string()),
-                },
-            ),
+                    bead_id: bead_id.as_ref().map(|id| id.as_str().to_string()),
+                }),
             OpError::WalRecordTooLarge {
                 max_wal_record_bytes,
                 estimated_bytes,
-            } => ErrorPayload::new(ProtocolErrorCode::WalRecordTooLarge.into(), message, retryable).with_details(
-                error_details::WalRecordTooLargeDetails {
-                    max_wal_record_bytes: max_wal_record_bytes as u64,
-                    estimated_bytes: estimated_bytes as u64,
-                },
-            ),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::WalRecordTooLarge.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::WalRecordTooLargeDetails {
+                max_wal_record_bytes: max_wal_record_bytes as u64,
+                estimated_bytes: estimated_bytes as u64,
+            }),
             OpError::DurabilityUnavailable {
                 requested,
                 eligible_total,
                 eligible_replica_ids,
-            } => ErrorPayload::new(ProtocolErrorCode::DurabilityUnavailable.into(), message, retryable)
-                .with_details(error_details::DurabilityUnavailableDetails {
-                    requested,
-                    eligible_total,
-                    eligible_replica_ids,
-                }),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::DurabilityUnavailable.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::DurabilityUnavailableDetails {
+                requested,
+                eligible_total,
+                eligible_replica_ids,
+            }),
             OpError::DurabilityTimeout {
                 requested,
                 waited_ms,
                 pending_replica_ids,
                 receipt,
-            } => ErrorPayload::new(ProtocolErrorCode::DurabilityTimeout.into(), message, retryable)
-                .with_details(error_details::DurabilityTimeoutDetails {
-                    requested,
-                    waited_ms,
-                    pending_replica_ids,
-                })
-                .with_receipt(receipt),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::DurabilityTimeout.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::DurabilityTimeoutDetails {
+                requested,
+                waited_ms,
+                pending_replica_ids,
+            })
+            .with_receipt(receipt),
             OpError::RequireMinSeenTimeout {
                 waited_ms,
                 required,
                 current_applied,
-            } => ErrorPayload::new(ProtocolErrorCode::RequireMinSeenTimeout.into(), message, retryable)
-                .with_details(error_details::RequireMinSeenTimeoutDetails {
-                    waited_ms,
-                    required: required.as_ref().clone(),
-                    current_applied: current_applied.as_ref().clone(),
-                }),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::RequireMinSeenTimeout.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::RequireMinSeenTimeoutDetails {
+                waited_ms,
+                required: required.as_ref().clone(),
+                current_applied: current_applied.as_ref().clone(),
+            }),
             OpError::RequireMinSeenUnsatisfied {
                 required,
                 current_applied,
-            } => ErrorPayload::new(ProtocolErrorCode::RequireMinSeenUnsatisfied.into(), message, retryable)
-                .with_details(error_details::RequireMinSeenUnsatisfiedDetails {
-                    required: required.as_ref().clone(),
-                    current_applied: current_applied.as_ref().clone(),
-                }),
-            OpError::NamespaceInvalid { namespace, .. } => {
-                ErrorPayload::new(ProtocolErrorCode::NamespaceInvalid.into(), message, retryable).with_details(
-                    error_details::NamespaceInvalidDetails {
-                        namespace,
-                        pattern: "[a-z][a-z0-9_]{0,31}".to_string(),
-                    },
-                )
-            }
-            OpError::NamespaceUnknown { namespace } => {
-                ErrorPayload::new(ProtocolErrorCode::NamespaceUnknown.into(), message, retryable)
-                    .with_details(error_details::NamespaceUnknownDetails { namespace })
-            }
+            } => ErrorPayload::new(
+                ProtocolErrorCode::RequireMinSeenUnsatisfied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::RequireMinSeenUnsatisfiedDetails {
+                required: required.as_ref().clone(),
+                current_applied: current_applied.as_ref().clone(),
+            }),
+            OpError::NamespaceInvalid { namespace, .. } => ErrorPayload::new(
+                ProtocolErrorCode::NamespaceInvalid.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::NamespaceInvalidDetails {
+                namespace,
+                pattern: "[a-z][a-z0-9_]{0,31}".to_string(),
+            }),
+            OpError::NamespaceUnknown { namespace } => ErrorPayload::new(
+                ProtocolErrorCode::NamespaceUnknown.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::NamespaceUnknownDetails { namespace }),
             OpError::NamespacePolicyViolation {
                 namespace,
                 rule,
                 reason,
-            } => ErrorPayload::new(ProtocolErrorCode::NamespacePolicyViolation.into(), message, retryable)
-                .with_details(error_details::NamespacePolicyViolationDetails {
-                    namespace,
-                    rule,
-                    reason,
-                }),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::NamespacePolicyViolation.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::NamespacePolicyViolationDetails {
+                namespace,
+                rule,
+                reason,
+            }),
             OpError::CrossNamespaceDependency {
                 from_namespace,
                 to_namespace,
-            } => ErrorPayload::new(ProtocolErrorCode::CrossNamespaceDependency.into(), message, retryable)
-                .with_details(error_details::CrossNamespaceDependencyDetails {
-                    from_namespace,
-                    to_namespace,
-                }),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::CrossNamespaceDependency.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::CrossNamespaceDependencyDetails {
+                from_namespace,
+                to_namespace,
+            }),
             OpError::EventWal(e) => match e.as_ref() {
                 EventWalError::RecordTooLarge {
                     max_bytes,
                     got_bytes,
-                } => ErrorPayload::new(ProtocolErrorCode::WalRecordTooLarge.into(), message, retryable)
-                    .with_details(error_details::WalRecordTooLargeDetails {
-                        max_wal_record_bytes: *max_bytes as u64,
-                        estimated_bytes: *got_bytes as u64,
-                    }),
-                EventWalError::Symlink { path } => {
-                    ErrorPayload::new(ProtocolErrorCode::PathSymlinkRejected.into(), message, retryable)
-                        .with_details(error_details::PathSymlinkRejectedDetails {
-                            path: path.display().to_string(),
-                        })
-                }
+                } => ErrorPayload::new(
+                    ProtocolErrorCode::WalRecordTooLarge.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::WalRecordTooLargeDetails {
+                    max_wal_record_bytes: *max_bytes as u64,
+                    estimated_bytes: *got_bytes as u64,
+                }),
+                EventWalError::Symlink { path } => ErrorPayload::new(
+                    ProtocolErrorCode::PathSymlinkRejected.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PathSymlinkRejectedDetails {
+                    path: path.display().to_string(),
+                }),
                 _ => ErrorPayload::new(event_wal_error_code(e.as_ref()), message, retryable)
                     .with_details(error_details::WalErrorDetails {
                         message: e.to_string(),
@@ -266,22 +305,25 @@ impl From<OpError> for ErrorPayload {
             OpError::NotClaimedByYou => {
                 ErrorPayload::new(CliErrorCode::NotClaimedByYou.into(), message, retryable)
             }
-            OpError::DepNotFound => ErrorPayload::new(CliErrorCode::DepNotFound.into(), message, retryable),
+            OpError::DepNotFound => {
+                ErrorPayload::new(CliErrorCode::DepNotFound.into(), message, retryable)
+            }
             OpError::LoadTimeout {
                 repo,
                 timeout_secs,
                 remote,
-            } => ErrorPayload::new(CliErrorCode::LoadTimeout.into(), message, retryable).with_details(
-                error_details::LoadTimeoutDetails {
+            } => ErrorPayload::new(CliErrorCode::LoadTimeout.into(), message, retryable)
+                .with_details(error_details::LoadTimeoutDetails {
                     repo: repo.display().to_string(),
                     timeout_secs,
                     remote,
-                },
-            ),
+                }),
             OpError::StoreRuntime(err) => {
                 store_runtime_error_payload(err.as_ref(), message, retryable)
             }
-            OpError::Internal(_) => ErrorPayload::new(CliErrorCode::Internal.into(), message, retryable),
+            OpError::Internal(_) => {
+                ErrorPayload::new(CliErrorCode::Internal.into(), message, retryable)
+            }
         }
     }
 }
@@ -293,157 +335,159 @@ fn store_runtime_error_payload(
 ) -> ErrorPayload {
     match err {
         StoreRuntimeError::Lock(lock_err) => store_lock_error_payload(lock_err, message, retryable),
-        StoreRuntimeError::MetaSymlink { path } => {
-            ErrorPayload::new(ProtocolErrorCode::PathSymlinkRejected.into(), message, retryable).with_details(
-                error_details::PathSymlinkRejectedDetails {
-                    path: path.display().to_string(),
-                },
-            )
-        }
+        StoreRuntimeError::MetaSymlink { path } => ErrorPayload::new(
+            ProtocolErrorCode::PathSymlinkRejected.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::PathSymlinkRejectedDetails {
+            path: path.display().to_string(),
+        }),
         StoreRuntimeError::NamespacePoliciesSymlink { path }
-        | StoreRuntimeError::ReplicaRosterSymlink { path } => {
-            ErrorPayload::new(ProtocolErrorCode::PathSymlinkRejected.into(), message, retryable).with_details(
-                error_details::PathSymlinkRejectedDetails {
-                    path: path.display().to_string(),
-                },
-            )
-        }
+        | StoreRuntimeError::ReplicaRosterSymlink { path } => ErrorPayload::new(
+            ProtocolErrorCode::PathSymlinkRejected.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::PathSymlinkRejectedDetails {
+            path: path.display().to_string(),
+        }),
         StoreRuntimeError::MetaRead { path, source } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                ErrorPayload::new(ProtocolErrorCode::PermissionDenied.into(), message, retryable).with_details(
-                    error_details::PermissionDeniedDetails {
-                        path: path.display().to_string(),
-                        operation: error_details::PermissionOperation::Read,
-                    },
-                )
-            }
+            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                ProtocolErrorCode::PermissionDenied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PermissionDeniedDetails {
+                path: path.display().to_string(),
+                operation: error_details::PermissionOperation::Read,
+            }),
             _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
         },
         StoreRuntimeError::MetaParse { source, .. } => {
-            ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable).with_details(
-                error_details::CorruptionDetails {
+            ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable)
+                .with_details(error_details::CorruptionDetails {
                     reason: source.to_string(),
-                },
-            )
+                })
         }
         StoreRuntimeError::MetaMismatch { expected, got } => {
-            ErrorPayload::new(ProtocolErrorCode::WrongStore.into(), message, retryable).with_details(
-                error_details::WrongStoreDetails {
+            ErrorPayload::new(ProtocolErrorCode::WrongStore.into(), message, retryable)
+                .with_details(error_details::WrongStoreDetails {
                     expected_store_id: *expected,
                     got_store_id: *got,
-                },
-            )
+                })
         }
-        StoreRuntimeError::UnsupportedStoreMetaVersion { expected, got } => {
-            ErrorPayload::new(ProtocolErrorCode::VersionIncompatible.into(), message, retryable).with_details(
-                error_details::StoreMetaVersionMismatchDetails {
-                    expected: *expected,
-                    got: *got,
-                },
-            )
-        }
+        StoreRuntimeError::UnsupportedStoreMetaVersion { expected, got } => ErrorPayload::new(
+            ProtocolErrorCode::VersionIncompatible.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::StoreMetaVersionMismatchDetails {
+            expected: *expected,
+            got: *got,
+        }),
         StoreRuntimeError::MetaWrite { path, source } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                ErrorPayload::new(ProtocolErrorCode::PermissionDenied.into(), message, retryable).with_details(
-                    error_details::PermissionDeniedDetails {
-                        path: path.display().to_string(),
-                        operation: error_details::PermissionOperation::Write,
-                    },
-                )
-            }
+            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                ProtocolErrorCode::PermissionDenied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PermissionDeniedDetails {
+                path: path.display().to_string(),
+                operation: error_details::PermissionOperation::Write,
+            }),
             _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
         },
         StoreRuntimeError::NamespacePoliciesRead { path, source } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                ErrorPayload::new(ProtocolErrorCode::PermissionDenied.into(), message, retryable).with_details(
-                    error_details::PermissionDeniedDetails {
-                        path: path.display().to_string(),
-                        operation: error_details::PermissionOperation::Read,
-                    },
-                )
-            }
-            _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable).with_details(
-                error_details::ValidationFailedDetails {
+            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                ProtocolErrorCode::PermissionDenied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PermissionDeniedDetails {
+                path: path.display().to_string(),
+                operation: error_details::PermissionOperation::Read,
+            }),
+            _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                .with_details(error_details::ValidationFailedDetails {
                     field: "namespaces".to_string(),
                     reason: format!("failed to read {}: {source}", path.display()),
-                },
-            ),
+                }),
         },
         StoreRuntimeError::NamespacePoliciesParse { source, .. } => {
-            ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable).with_details(
-                error_details::ValidationFailedDetails {
+            ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                .with_details(error_details::ValidationFailedDetails {
                     field: "namespaces".to_string(),
                     reason: source.to_string(),
-                },
-            )
+                })
         }
         StoreRuntimeError::ReplicaRosterRead { path, source } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                ErrorPayload::new(ProtocolErrorCode::PermissionDenied.into(), message, retryable).with_details(
-                    error_details::PermissionDeniedDetails {
-                        path: path.display().to_string(),
-                        operation: error_details::PermissionOperation::Read,
-                    },
-                )
-            }
-            _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable).with_details(
-                error_details::ValidationFailedDetails {
+            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                ProtocolErrorCode::PermissionDenied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PermissionDeniedDetails {
+                path: path.display().to_string(),
+                operation: error_details::PermissionOperation::Read,
+            }),
+            _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                .with_details(error_details::ValidationFailedDetails {
                     field: "replicas".to_string(),
                     reason: format!("failed to read {}: {source}", path.display()),
-                },
-            ),
+                }),
         },
         StoreRuntimeError::ReplicaRosterParse { source, .. } => {
-            ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable).with_details(
-                error_details::ValidationFailedDetails {
+            ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                .with_details(error_details::ValidationFailedDetails {
                     field: "replicas".to_string(),
                     reason: source.to_string(),
-                },
-            )
+                })
         }
-        StoreRuntimeError::StoreConfigSymlink { path } => {
-            ErrorPayload::new(ProtocolErrorCode::PathSymlinkRejected.into(), message, retryable).with_details(
-                error_details::PathSymlinkRejectedDetails {
-                    path: path.display().to_string(),
-                },
-            )
-        }
+        StoreRuntimeError::StoreConfigSymlink { path } => ErrorPayload::new(
+            ProtocolErrorCode::PathSymlinkRejected.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::PathSymlinkRejectedDetails {
+            path: path.display().to_string(),
+        }),
         StoreRuntimeError::StoreConfigRead { path, source } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                ErrorPayload::new(ProtocolErrorCode::PermissionDenied.into(), message, retryable).with_details(
-                    error_details::PermissionDeniedDetails {
-                        path: path.display().to_string(),
-                        operation: error_details::PermissionOperation::Read,
-                    },
-                )
-            }
-            _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable).with_details(
-                error_details::ValidationFailedDetails {
+            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                ProtocolErrorCode::PermissionDenied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PermissionDeniedDetails {
+                path: path.display().to_string(),
+                operation: error_details::PermissionOperation::Read,
+            }),
+            _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                .with_details(error_details::ValidationFailedDetails {
                     field: "store_config".to_string(),
                     reason: format!("failed to read {}: {source}", path.display()),
-                },
-            ),
+                }),
         },
         StoreRuntimeError::StoreConfigParse { source, .. } => {
-            ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable).with_details(
-                error_details::ValidationFailedDetails {
+            ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                .with_details(error_details::ValidationFailedDetails {
                     field: "store_config".to_string(),
                     reason: source.to_string(),
-                },
-            )
+                })
         }
         StoreRuntimeError::StoreConfigSerialize { .. } => {
             ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable)
         }
         StoreRuntimeError::StoreConfigWrite { path, source } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                ErrorPayload::new(ProtocolErrorCode::PermissionDenied.into(), message, retryable).with_details(
-                    error_details::PermissionDeniedDetails {
-                        path: path.display().to_string(),
-                        operation: error_details::PermissionOperation::Write,
-                    },
-                )
-            }
+            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                ProtocolErrorCode::PermissionDenied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PermissionDeniedDetails {
+                path: path.display().to_string(),
+                operation: error_details::PermissionOperation::Write,
+            }),
             _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
         },
         StoreRuntimeError::WatermarkInvalid {
@@ -451,11 +495,10 @@ fn store_runtime_error_payload(
             namespace,
             origin,
             source,
-        } => ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable).with_details(
-            error_details::IndexCorruptDetails {
+        } => ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+            .with_details(error_details::IndexCorruptDetails {
                 reason: format!("{kind} watermark for {namespace} {origin}: {source}"),
-            },
-        ),
+            }),
         StoreRuntimeError::WalIndex(err) => wal_index_error_payload(err, message, retryable),
         StoreRuntimeError::WalReplay(err) => wal_replay_error_payload(err, message, retryable),
     }
@@ -467,17 +510,18 @@ fn wal_replay_error_payload(
     retryable: bool,
 ) -> ErrorPayload {
     match err {
-        WalReplayError::Symlink { path } => {
-            ErrorPayload::new(ProtocolErrorCode::PathSymlinkRejected.into(), message, retryable).with_details(
-                error_details::PathSymlinkRejectedDetails {
-                    path: path.display().to_string(),
-                },
-            )
-        }
+        WalReplayError::Symlink { path } => ErrorPayload::new(
+            ProtocolErrorCode::PathSymlinkRejected.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::PathSymlinkRejectedDetails {
+            path: path.display().to_string(),
+        }),
         WalReplayError::RecordShaMismatch(info) => {
             let info = info.as_ref();
-            ErrorPayload::new(ProtocolErrorCode::HashMismatch.into(), message, retryable).with_details(
-                error_details::HashMismatchDetails {
+            ErrorPayload::new(ProtocolErrorCode::HashMismatch.into(), message, retryable)
+                .with_details(error_details::HashMismatchDetails {
                     eid: error_details::EventIdDetails {
                         namespace: info.namespace.clone(),
                         origin_replica_id: info.origin,
@@ -485,8 +529,7 @@ fn wal_replay_error_payload(
                     },
                     expected_sha256: hex::encode(info.expected),
                     got_sha256: hex::encode(info.got),
-                },
-            )
+                })
         }
         WalReplayError::PrevShaMismatch {
             namespace,
@@ -495,20 +538,21 @@ fn wal_replay_error_payload(
             expected_prev_sha256,
             got_prev_sha256,
             head_seq,
-        } => {
-            ErrorPayload::new(ProtocolErrorCode::PrevShaMismatch.into(), message, retryable).with_details(
-                error_details::PrevShaMismatchDetails {
-                    eid: error_details::EventIdDetails {
-                        namespace: namespace.clone(),
-                        origin_replica_id: *origin,
-                        origin_seq: seq.get(),
-                    },
-                    expected_prev_sha256: hex::encode(expected_prev_sha256),
-                    got_prev_sha256: hex::encode(got_prev_sha256),
-                    head_seq: head_seq.get(),
-                },
-            )
-        }
+        } => ErrorPayload::new(
+            ProtocolErrorCode::PrevShaMismatch.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::PrevShaMismatchDetails {
+            eid: error_details::EventIdDetails {
+                namespace: namespace.clone(),
+                origin_replica_id: *origin,
+                origin_seq: seq.get(),
+            },
+            expected_prev_sha256: hex::encode(expected_prev_sha256),
+            got_prev_sha256: hex::encode(got_prev_sha256),
+            head_seq: head_seq.get(),
+        }),
         WalReplayError::NonContiguousSeq {
             namespace,
             origin,
@@ -516,31 +560,32 @@ fn wal_replay_error_payload(
             got,
         } => {
             let durable_seen = expected.prev_seq0().get();
-            ErrorPayload::new(ProtocolErrorCode::GapDetected.into(), message, retryable).with_details(
-                error_details::GapDetectedDetails {
+            ErrorPayload::new(ProtocolErrorCode::GapDetected.into(), message, retryable)
+                .with_details(error_details::GapDetectedDetails {
                     namespace: namespace.clone(),
                     origin_replica_id: *origin,
                     durable_seen,
                     got_seq: got.get(),
-                },
-            )
+                })
         }
         WalReplayError::IndexOffsetInvalid { .. } | WalReplayError::OriginSeqOverflow { .. } => {
-            ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable).with_details(
-                error_details::IndexCorruptDetails {
+            ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                .with_details(error_details::IndexCorruptDetails {
                     reason: err.to_string(),
-                },
-            )
+                })
         }
         WalReplayError::SegmentHeader {
             source: EventWalError::SegmentHeaderUnsupportedVersion { got, supported },
             ..
-        } => ErrorPayload::new(ProtocolErrorCode::WalFormatUnsupported.into(), message, retryable).with_details(
-            error_details::WalFormatUnsupportedDetails {
-                wal_format_version: *got,
-                supported: vec![*supported],
-            },
-        ),
+        } => ErrorPayload::new(
+            ProtocolErrorCode::WalFormatUnsupported.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::WalFormatUnsupportedDetails {
+            wal_format_version: *got,
+            supported: vec![*supported],
+        }),
         WalReplayError::SegmentHeader { .. } => {
             ErrorPayload::new(wal_replay_error_code(err), message, retryable)
         }
@@ -551,13 +596,14 @@ fn wal_replay_error_payload(
 
 fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool) -> ErrorPayload {
     match err {
-        WalIndexError::Symlink { path } => {
-            ErrorPayload::new(ProtocolErrorCode::PathSymlinkRejected.into(), message, retryable).with_details(
-                error_details::PathSymlinkRejectedDetails {
-                    path: path.display().to_string(),
-                },
-            )
-        }
+        WalIndexError::Symlink { path } => ErrorPayload::new(
+            ProtocolErrorCode::PathSymlinkRejected.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::PathSymlinkRejectedDetails {
+            path: path.display().to_string(),
+        }),
         WalIndexError::SchemaVersionMismatch { expected, got } => ErrorPayload::new(
             ProtocolErrorCode::IndexRebuildRequired.into(),
             message,
@@ -573,8 +619,8 @@ fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool
             seq,
             existing_sha256,
             new_sha256,
-        } => ErrorPayload::new(ProtocolErrorCode::Equivocation.into(), message, retryable).with_details(
-            error_details::EquivocationDetails {
+        } => ErrorPayload::new(ProtocolErrorCode::Equivocation.into(), message, retryable)
+            .with_details(error_details::EquivocationDetails {
                 eid: error_details::EventIdDetails {
                     namespace: namespace.clone(),
                     origin_replica_id: *origin,
@@ -582,21 +628,24 @@ fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool
                 },
                 existing_sha256: hex::encode(existing_sha256),
                 new_sha256: hex::encode(new_sha256),
-            },
-        ),
+            }),
         WalIndexError::ClientRequestIdReuseMismatch {
             namespace,
             client_request_id,
             expected_request_sha256,
             got_request_sha256,
             ..
-        } => ErrorPayload::new(ProtocolErrorCode::ClientRequestIdReuseMismatch.into(), message, retryable)
-            .with_details(error_details::ClientRequestIdReuseMismatchDetails {
-                namespace: namespace.clone(),
-                client_request_id: *client_request_id,
-                expected_request_sha256: hex::encode(expected_request_sha256),
-                got_request_sha256: hex::encode(got_request_sha256),
-            }),
+        } => ErrorPayload::new(
+            ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::ClientRequestIdReuseMismatchDetails {
+            namespace: namespace.clone(),
+            client_request_id: *client_request_id,
+            expected_request_sha256: hex::encode(expected_request_sha256),
+            got_request_sha256: hex::encode(got_request_sha256),
+        }),
         WalIndexError::MetaMismatch {
             key: "store_id",
             expected,
@@ -606,18 +655,16 @@ fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool
             let expected = StoreId::parse_str(expected).ok();
             let got = StoreId::parse_str(got).ok();
             if let (Some(expected), Some(got)) = (expected, got) {
-                ErrorPayload::new(ProtocolErrorCode::WrongStore.into(), message, retryable).with_details(
-                    error_details::WrongStoreDetails {
+                ErrorPayload::new(ProtocolErrorCode::WrongStore.into(), message, retryable)
+                    .with_details(error_details::WrongStoreDetails {
                         expected_store_id: expected,
                         got_store_id: got,
-                    },
-                )
+                    })
             } else {
-                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable).with_details(
-                    error_details::IndexCorruptDetails {
+                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                    .with_details(error_details::IndexCorruptDetails {
                         reason: err.to_string(),
-                    },
-                )
+                    })
             }
         }
         WalIndexError::MetaMismatch {
@@ -629,19 +676,21 @@ fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool
             let expected_epoch = expected.parse::<u64>().ok();
             let got_epoch = got.parse::<u64>().ok();
             if let (Some(expected_epoch), Some(got_epoch)) = (expected_epoch, got_epoch) {
-                ErrorPayload::new(ProtocolErrorCode::StoreEpochMismatch.into(), message, retryable).with_details(
-                    error_details::StoreEpochMismatchDetails {
-                        store_id: *store_id,
-                        expected_epoch,
-                        got_epoch,
-                    },
+                ErrorPayload::new(
+                    ProtocolErrorCode::StoreEpochMismatch.into(),
+                    message,
+                    retryable,
                 )
+                .with_details(error_details::StoreEpochMismatchDetails {
+                    store_id: *store_id,
+                    expected_epoch,
+                    got_epoch,
+                })
             } else {
-                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable).with_details(
-                    error_details::IndexCorruptDetails {
+                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                    .with_details(error_details::IndexCorruptDetails {
                         reason: err.to_string(),
-                    },
-                )
+                    })
             }
         }
         WalIndexError::MetaMismatch { .. }
@@ -653,13 +702,13 @@ fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool
         | WalIndexError::ReplicaLivenessRowDecode(_)
         | WalIndexError::CborDecode(_)
         | WalIndexError::CborEncode(_)
+        | WalIndexError::ConcurrentWrite { .. }
         | WalIndexError::OriginSeqOverflow { .. }
         | WalIndexError::Sqlite(_) => {
-            ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable).with_details(
-                error_details::IndexCorruptDetails {
+            ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                .with_details(error_details::IndexCorruptDetails {
                     reason: err.to_string(),
-                },
-            )
+                })
         }
         _ => ErrorPayload::new(wal_index_error_code(err), message, retryable),
     }
@@ -667,7 +716,9 @@ fn wal_index_error_payload(err: &WalIndexError, message: String, retryable: bool
 
 fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
     match err {
-        WalIndexError::SchemaVersionMismatch { .. } => ProtocolErrorCode::IndexRebuildRequired.into(),
+        WalIndexError::SchemaVersionMismatch { .. } => {
+            ProtocolErrorCode::IndexRebuildRequired.into()
+        }
         WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
         WalIndexError::ClientRequestIdReuseMismatch { .. } => {
             ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
@@ -686,6 +737,7 @@ fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
         | WalIndexError::ReplicaLivenessRowDecode(_)
         | WalIndexError::CborDecode(_)
         | WalIndexError::CborEncode(_)
+        | WalIndexError::ConcurrentWrite { .. }
         | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
         WalIndexError::Sqlite(_) => ProtocolErrorCode::IndexCorrupt.into(),
         WalIndexError::Io { source, .. } => {
@@ -709,7 +761,9 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
             }
         }
         WalReplayError::SegmentHeader { source, .. } => wal_segment_header_error_code(source),
-        WalReplayError::SegmentHeaderMismatch { .. } => ProtocolErrorCode::SegmentHeaderMismatch.into(),
+        WalReplayError::SegmentHeaderMismatch { .. } => {
+            ProtocolErrorCode::SegmentHeaderMismatch.into()
+        }
         WalReplayError::RecordShaMismatch(_) => ProtocolErrorCode::HashMismatch.into(),
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
@@ -746,7 +800,9 @@ fn event_wal_error_code(err: &EventWalError) -> ErrorCode {
 
 fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
     match source {
-        EventWalError::SegmentHeaderUnsupportedVersion { .. } => ProtocolErrorCode::WalFormatUnsupported.into(),
+        EventWalError::SegmentHeaderUnsupportedVersion { .. } => {
+            ProtocolErrorCode::WalFormatUnsupported.into()
+        }
         _ => ProtocolErrorCode::WalCorrupt.into(),
     }
 }
@@ -779,33 +835,34 @@ fn store_lock_error_payload(
                 },
             )
         }
-        StoreLockError::Symlink { path } => {
-            ErrorPayload::new(ProtocolErrorCode::PathSymlinkRejected.into(), message, retryable).with_details(
-                error_details::PathSymlinkRejectedDetails {
-                    path: path.display().to_string(),
-                },
-            )
-        }
+        StoreLockError::Symlink { path } => ErrorPayload::new(
+            ProtocolErrorCode::PathSymlinkRejected.into(),
+            message,
+            retryable,
+        )
+        .with_details(error_details::PathSymlinkRejectedDetails {
+            path: path.display().to_string(),
+        }),
         StoreLockError::MetadataCorrupt { source, .. } => {
-            ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable).with_details(
-                error_details::CorruptionDetails {
+            ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable)
+                .with_details(error_details::CorruptionDetails {
                     reason: source.to_string(),
-                },
-            )
+                })
         }
         StoreLockError::Io {
             path,
             operation,
             source,
         } => match source.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                ErrorPayload::new(ProtocolErrorCode::PermissionDenied.into(), message, retryable).with_details(
-                    error_details::PermissionDeniedDetails {
-                        path: path.display().to_string(),
-                        operation: lock_permission_operation(*operation),
-                    },
-                )
-            }
+            std::io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                ProtocolErrorCode::PermissionDenied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PermissionDeniedDetails {
+                path: path.display().to_string(),
+                operation: lock_permission_operation(*operation),
+            }),
             _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
         },
     }
@@ -824,43 +881,46 @@ impl From<IpcError> for ErrorPayload {
         let message = e.to_string();
         let retryable = e.transience().is_retryable();
         match e {
-            IpcError::Parse(err) => {
-                ErrorPayload::new(ProtocolErrorCode::MalformedPayload.into(), message, retryable).with_details(
-                    error_details::MalformedPayloadDetails {
-                        parser: error_details::ParserKind::Json,
-                        reason: Some(err.to_string()),
-                    },
-                )
-            }
+            IpcError::Parse(err) => ErrorPayload::new(
+                ProtocolErrorCode::MalformedPayload.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::MalformedPayloadDetails {
+                parser: error_details::ParserKind::Json,
+                reason: Some(err.to_string()),
+            }),
             IpcError::InvalidRequest { field, reason } => {
-                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable).with_details(
-                    error_details::InvalidRequestDetails {
+                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable)
+                    .with_details(error_details::InvalidRequestDetails {
                         field,
                         reason: Some(reason),
-                    },
-                )
+                    })
             }
             IpcError::Io(_) => ErrorPayload::new(CliErrorCode::IoError.into(), message, retryable),
-            IpcError::InvalidId(err) => ErrorPayload::new(CliErrorCode::InvalidId.into(), message, retryable)
-                .with_details(invalid_id_details(&err)),
+            IpcError::InvalidId(err) => {
+                ErrorPayload::new(CliErrorCode::InvalidId.into(), message, retryable)
+                    .with_details(invalid_id_details(&err))
+            }
             IpcError::Disconnected => {
                 ErrorPayload::new(CliErrorCode::Disconnected.into(), message, retryable)
             }
             IpcError::DaemonUnavailable(_) => {
                 ErrorPayload::new(CliErrorCode::DaemonUnavailable.into(), message, retryable)
             }
-            IpcError::DaemonVersionMismatch { .. } => {
-                ErrorPayload::new(CliErrorCode::DaemonVersionMismatch.into(), message, retryable)
-            }
+            IpcError::DaemonVersionMismatch { .. } => ErrorPayload::new(
+                CliErrorCode::DaemonVersionMismatch.into(),
+                message,
+                retryable,
+            ),
             IpcError::FrameTooLarge {
                 max_bytes,
                 got_bytes,
-            } => ErrorPayload::new(ProtocolErrorCode::FrameTooLarge.into(), message, retryable).with_details(
-                error_details::FrameTooLargeDetails {
+            } => ErrorPayload::new(ProtocolErrorCode::FrameTooLarge.into(), message, retryable)
+                .with_details(error_details::FrameTooLargeDetails {
                     max_frame_bytes: max_bytes as u64,
                     got_bytes: got_bytes as u64,
-                },
-            ),
+                }),
         }
     }
 }
@@ -1061,8 +1121,8 @@ pub fn read_requests(stream: UnixStream) -> impl Iterator<Item = Result<Request,
 mod tests {
     use super::*;
     use crate::core::{
-        DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, Seq0, Seq1, StoreEpoch, StoreId,
-        StoreIdentity, TxnId,
+        DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, Seq0, Seq1, StoreEpoch,
+        StoreId, StoreIdentity, TxnId,
     };
     use crate::daemon::wal::{RecordShaMismatchInfo, WalIndexError, WalReplayError};
     use std::io;
@@ -1348,7 +1408,10 @@ mod tests {
             reason: Some("replicate_mode=none".to_string()),
         };
         let payload: ErrorPayload = err.into();
-        assert_eq!(payload.code, ProtocolErrorCode::NamespacePolicyViolation.into());
+        assert_eq!(
+            payload.code,
+            ProtocolErrorCode::NamespacePolicyViolation.into()
+        );
         let details = payload
             .details_as::<error_details::NamespacePolicyViolationDetails>()
             .expect("details decode")

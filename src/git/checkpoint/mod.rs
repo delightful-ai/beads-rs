@@ -10,7 +10,8 @@ pub mod meta;
 pub mod publish;
 pub mod types;
 
-pub const CHECKPOINT_FORMAT_VERSION: u32 = crate::core::StoreMetaVersions::CHECKPOINT_FORMAT_VERSION;
+pub const CHECKPOINT_FORMAT_VERSION: u32 =
+    crate::core::StoreMetaVersions::CHECKPOINT_FORMAT_VERSION;
 
 pub use cache::{
     CheckpointCache, CheckpointCacheEntry, CheckpointCacheError, DEFAULT_CHECKPOINT_CACHE_KEEP,

@@ -800,8 +800,7 @@ fn plan_local_append(
         HeadStatus::Known(sha) => Some(sha),
         HeadStatus::Unknown => unreachable!("durable watermark head should be known"),
     };
-    let sequenced =
-        engine.build_event(draft, store, namespace, origin_replica_id, origin_seq)?;
+    let sequenced = engine.build_event(draft, store, namespace, origin_replica_id, origin_seq)?;
 
     Ok(LocalAppendPlan {
         origin_seq,
@@ -1345,13 +1344,7 @@ mod tests {
             )
             .unwrap();
         let sequenced = engine
-            .build_event(
-                draft,
-                store,
-                ctx.namespace.clone(),
-                replica_id,
-                origin_seq,
-            )
+            .build_event(draft, store, ctx.namespace.clone(), replica_id, origin_seq)
             .unwrap();
 
         let sha = hash_event_body(&sequenced.event_bytes).0;

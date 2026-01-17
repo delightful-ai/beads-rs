@@ -8,17 +8,19 @@ pub mod event_wal;
 pub mod frame;
 pub mod fsck;
 pub mod index;
+pub mod memory_index;
 pub mod record;
 pub mod replay;
 pub mod segment;
 
 pub use event_wal::{EventWal, SegmentSnapshot};
-pub use frame::{FrameReader, FrameWriter, FRAME_CRC_OFFSET, FRAME_HEADER_LEN};
+pub use frame::{FRAME_CRC_OFFSET, FRAME_HEADER_LEN, FrameReader, FrameWriter};
 pub use index::{
     ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow,
     SegmentRow, SqliteWalIndex, WalIndex, WalIndexError, WalIndexReader, WalIndexTxn,
     WalIndexWriter, WatermarkRow,
 };
+pub use memory_index::MemoryWalIndex;
 pub use record::{
     Record, RecordFlags, RecordHeader, RecordHeaderMismatch, RecordVerifyError, Unverified,
     UnverifiedRecord, Verified, VerifiedRecord,
@@ -27,8 +29,8 @@ pub use replay::{
     RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
 };
 pub use segment::{
-    AppendOutcome, SegmentConfig, SegmentHeader, SegmentSyncMode, SegmentWriter,
-    SEGMENT_HEADER_PREFIX_LEN, WAL_FORMAT_VERSION,
+    AppendOutcome, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentSyncMode,
+    SegmentWriter, WAL_FORMAT_VERSION,
 };
 
 pub type EventWalResult<T> = Result<T, EventWalError>;

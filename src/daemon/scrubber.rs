@@ -14,7 +14,6 @@ use crate::core::{Limits, NamespaceId, ReplicaId, SegmentId, Seq0, decode_event_
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::store_runtime::StoreRuntime;
-use crate::daemon::wal::WalIndex;
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use crate::daemon::wal::record::{RecordVerifyError, UnverifiedRecord};
 use crate::daemon::wal::segment::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};

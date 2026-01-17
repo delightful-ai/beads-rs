@@ -3,8 +3,8 @@ use serde::Serialize;
 use super::super::render;
 use super::super::{Ctx, EpicCmd, print_ok, send};
 use crate::Result;
-use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::api::QueryResult;
+use crate::daemon::ipc::{Request, ResponsePayload};
 
 #[derive(Debug, Serialize)]
 struct EpicCloseResult {

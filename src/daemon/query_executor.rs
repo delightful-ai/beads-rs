@@ -1104,7 +1104,12 @@ fn dep_cycles_from_state(state: &CanonicalState) -> DepCycles {
     let cycles = state
         .dependency_cycles()
         .into_iter()
-        .map(|cycle| cycle.into_iter().map(|id| id.as_str().to_string()).collect())
+        .map(|cycle| {
+            cycle
+                .into_iter()
+                .map(|id| id.as_str().to_string())
+                .collect()
+        })
         .collect();
     DepCycles { cycles }
 }
@@ -1178,8 +1183,8 @@ fn sort_ready_issues(issues: &mut [IssueSummary]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dep_cycles_from_state, sort_ready_issues};
     use super::{Issue, IssueSummary};
+    use super::{dep_cycles_from_state, sort_ready_issues};
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge,
         DepKey, DepKind, Labels, Lww, NamespaceId, Priority, Stamp, Workflow, WriteStamp,
@@ -1296,6 +1301,9 @@ mod tests {
         state.insert_dep(ba, DepEdge::new(stamp));
 
         let cycles = dep_cycles_from_state(&state);
-        assert_eq!(cycles.cycles, vec![vec![a.to_string(), b.to_string(), a.to_string()]]);
+        assert_eq!(
+            cycles.cycles,
+            vec![vec![a.to_string(), b.to_string(), a.to_string()]]
+        );
     }
 }

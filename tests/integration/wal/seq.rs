@@ -1,6 +1,5 @@
 //! WAL origin_seq allocation.
 
-
 use uuid::Uuid;
 
 use beads_rs::daemon::wal::{VerifiedRecord, WalIndex, rebuild_index};

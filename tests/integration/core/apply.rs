@@ -1,6 +1,5 @@
 //! Core apply semantics + LWW determinism.
 
-
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
     ActorId, ApplyError, CanonicalState, EventBody, EventKindV1, HlcMax, TxnDeltaV1, TxnOpV1,
@@ -10,7 +9,9 @@ use beads_rs::{
 use crate::fixtures::apply_harness::{
     ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
 };
-use crate::fixtures::event_body::{actor_id, bead_id, event_body_with_delta, note_id, sample_event_body};
+use crate::fixtures::event_body::{
+    actor_id, bead_id, event_body_with_delta, note_id, sample_event_body,
+};
 
 fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -> EventBody {
     let mut patch = WireBeadPatch::new(bead_id.clone());

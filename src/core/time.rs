@@ -4,7 +4,7 @@
 //! WallClock for TTL/lease (not ordering).
 
 use std::cmp::Ordering;
-use std::sync::{Arc, RwLock, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 

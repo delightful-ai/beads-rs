@@ -1,6 +1,5 @@
 //! Core identity: persistence, namespace validation, and lock behavior.
 
-
 use std::fs;
 use std::io;
 use std::path::Path;

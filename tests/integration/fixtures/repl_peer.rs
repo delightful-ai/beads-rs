@@ -13,8 +13,8 @@ use beads_rs::daemon::repl::{
     SessionRole, SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
 };
 
-use super::repl_frames;
 use super::identity;
+use super::repl_frames;
 use super::repl_transport::ChannelEndpoint;
 
 #[derive(Clone, Debug, Default)]

@@ -1,6 +1,7 @@
 mod admin;
 mod admin_status;
-mod subscribe;
-mod store_lock;
-mod lifecycle;
 mod crash_recovery;
+mod lifecycle;
+mod repl_e2e;
+mod store_lock;
+mod subscribe;

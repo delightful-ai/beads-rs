@@ -101,8 +101,6 @@ fn run_git(args: &[&str], cwd: &Path) -> Result<(), String> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     Err(format!(
         "git {:?} failed in {:?} (status {}): stdout: {stdout} stderr: {stderr}",
-        args,
-        cwd,
-        output.status
+        args, cwd, output.status
     ))
 }

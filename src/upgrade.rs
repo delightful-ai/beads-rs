@@ -203,7 +203,11 @@ fn download_prebuilt(
     let archive_file = tempfile::NamedTempFile::new()
         .map_err(|e| upgrade_error(format!("failed to create temp archive: {e}")))?;
 
-    download_asset(&asset.name, &asset.browser_download_url, archive_file.path())?;
+    download_asset(
+        &asset.name,
+        &asset.browser_download_url,
+        archive_file.path(),
+    )?;
     verify_archive_checksum(&asset.name, archive_file.path(), expected_checksum)?;
 
     let archive = fs::File::open(archive_file.path())
@@ -250,8 +254,7 @@ fn fetch_asset_checksum(release: &ReleaseInfo, asset: &ReleaseAsset) -> Result<O
         return Ok(None);
     };
 
-    let contents =
-        download_asset_text(&checksum_asset.name, &checksum_asset.browser_download_url)?;
+    let contents = download_asset_text(&checksum_asset.name, &checksum_asset.browser_download_url)?;
     Ok(parse_checksum_file(&contents, &asset.name))
 }
 
@@ -272,8 +275,8 @@ fn download_asset(name: &str, url: &str, dest: &Path) -> Result<()> {
         .call()
         .map_err(|e| upgrade_error(format!("failed to download asset: {e}")))?;
     let mut reader = resp.into_reader();
-    let mut file =
-        fs::File::create(dest).map_err(|e| upgrade_error(format!("failed to create archive: {e}")))?;
+    let mut file = fs::File::create(dest)
+        .map_err(|e| upgrade_error(format!("failed to create archive: {e}")))?;
     std::io::copy(&mut reader, &mut file)
         .map_err(|e| upgrade_error(format!("failed to write archive: {e}")))?;
     Ok(())

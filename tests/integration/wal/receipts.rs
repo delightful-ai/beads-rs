@@ -1,6 +1,5 @@
 //! Durability receipts + origin_seq persistence.
 
-
 use uuid::Uuid;
 
 use beads_rs::daemon::wal::{WalIndex, rebuild_index};

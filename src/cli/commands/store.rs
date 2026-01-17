@@ -3,13 +3,13 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::api::QueryResult;
 use crate::core::StoreId;
+use crate::daemon::OpError;
 use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request_no_autostart};
 use crate::daemon::store_lock::{StoreLockError, StoreLockMeta, read_lock_meta, remove_lock_file};
 use crate::daemon::store_runtime::StoreRuntimeError;
 use crate::daemon::wal::fsck::{FsckOptions, FsckReport, FsckStatus, fsck_store};
-use crate::api::QueryResult;
-use crate::daemon::OpError;
 use crate::paths;
 use crate::{Error, Result};
 
@@ -439,15 +439,15 @@ fn store_lock_error(err: StoreLockError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
-    use uuid::Uuid;
     use crate::core::{NamespaceId, ReplicaId};
     use crate::daemon::wal::fsck::{
         FsckCheck, FsckCheckId, FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRepairKind,
         FsckRisk, FsckSeverity, FsckStats, FsckSummary,
     };
+    use std::path::Path;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use uuid::Uuid;
 
     #[test]
     fn unlock_decision_stale_pid_removes() {
