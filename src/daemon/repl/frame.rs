@@ -1,6 +1,7 @@
 //! Replication framing (length + crc32c).
 
 use std::io::{Read, Write};
+use std::net::{Shutdown, TcpStream};
 
 use crc32c::crc32c;
 use thiserror::Error;
@@ -145,6 +146,12 @@ impl<W: Write> FrameWriter<W> {
         let frame = encode_frame(payload, max_frame_bytes)?;
         self.writer.write_all(&frame)?;
         Ok(frame.len())
+    }
+}
+
+impl FrameWriter<TcpStream> {
+    pub fn shutdown(&self) {
+        let _ = self.writer.shutdown(Shutdown::Both);
     }
 }
 

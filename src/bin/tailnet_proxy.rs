@@ -457,6 +457,7 @@ fn run_scheduler(
             {
                 if let Err(err) = frame_writer.write_frame(&frame.payload) {
                     eprintln!("proxy {label} write error: {}", frame_error_desc(&err));
+                    frame_writer.shutdown();
                     break;
                 }
                 continue;
@@ -468,6 +469,7 @@ fn run_scheduler(
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if heap.is_empty() {
+                        frame_writer.shutdown();
                         break;
                     }
                 }
@@ -475,7 +477,10 @@ fn run_scheduler(
         } else {
             match rx.recv() {
                 Ok(frame) => heap.push(frame),
-                Err(_) => break,
+                Err(_) => {
+                    frame_writer.shutdown();
+                    break;
+                }
             }
         }
     }
