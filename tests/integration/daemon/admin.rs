@@ -57,6 +57,7 @@ impl AdminFixture {
         cmd.env("BD_WAL_DIR", self.runtime_dir.path());
         cmd.env("BD_DATA_DIR", &data_dir);
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
+        cmd.env("BD_TESTING", "1");
         cmd
     }
 

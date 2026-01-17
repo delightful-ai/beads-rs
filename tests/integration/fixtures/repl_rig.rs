@@ -260,6 +260,7 @@ impl Node {
         cmd.env("BD_STORE_ID", self.store_id.to_string());
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd.env("XDG_CONFIG_HOME", &self.config_dir);
+        cmd.env("BD_TESTING", "1");
         cmd
     }
 
@@ -335,6 +336,7 @@ impl NodeSeed {
         cmd.env("BD_STORE_ID", store_id.to_string());
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd.env("XDG_CONFIG_HOME", &self.config_dir);
+        cmd.env("BD_TESTING", "1");
         cmd
     }
 }

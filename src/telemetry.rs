@@ -77,6 +77,34 @@ impl TelemetryConfig {
     }
 }
 
+pub fn is_test_env() -> bool {
+    std::env::var_os("BD_TESTING").is_some() || std::env::var_os("RUST_TEST_THREADS").is_some()
+}
+
+pub fn apply_daemon_logging_defaults(logging: &mut LoggingConfig) {
+    apply_daemon_logging_defaults_inner(
+        logging,
+        is_test_env(),
+        std::env::var_os("BD_LOG_FILE").is_some(),
+    );
+}
+
+fn apply_daemon_logging_defaults_inner(
+    logging: &mut LoggingConfig,
+    is_test_env: bool,
+    has_log_file_env: bool,
+) {
+    if is_test_env {
+        return;
+    }
+    if has_log_file_env {
+        return;
+    }
+    if !logging.file.enabled {
+        logging.file.enabled = true;
+    }
+}
+
 pub struct TelemetryGuard {
     _guards: Vec<tracing_appender::non_blocking::WorkerGuard>,
 }

@@ -12,7 +12,9 @@ use tar::Builder;
 use tempfile::TempDir;
 
 fn bd_cmd() -> Command {
-    assert_cmd::cargo::cargo_bin_cmd!("bd")
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
+    cmd.env("BD_TESTING", "1");
+    cmd
 }
 
 fn detect_platform() -> Option<&'static str> {

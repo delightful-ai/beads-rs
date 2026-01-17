@@ -10,7 +10,13 @@ fn main() {
         unsafe { std::env::set_var("BD_ACTOR", actor) };
     }
 
-    let _telemetry_guard = init_tracing(cli.verbose);
+    let is_daemon = matches!(
+        cli.command,
+        cli::Commands::Daemon {
+            cmd: cli::DaemonCmd::Run
+        }
+    );
+    let _telemetry_guard = init_tracing(cli.verbose, is_daemon);
 
     if let Err(e) = cli::run(cli) {
         tracing::error!("error: {}", e);
@@ -18,7 +24,7 @@ fn main() {
     }
 }
 
-fn init_tracing(verbose: u8) -> telemetry::TelemetryGuard {
+fn init_tracing(verbose: u8, is_daemon: bool) -> telemetry::TelemetryGuard {
     let cfg = match config::load() {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -28,6 +34,10 @@ fn init_tracing(verbose: u8) -> telemetry::TelemetryGuard {
             cfg
         }
     };
-    let telemetry_cfg = telemetry::TelemetryConfig::new(verbose, cfg.logging);
+    let mut logging = cfg.logging;
+    if is_daemon {
+        telemetry::apply_daemon_logging_defaults(&mut logging);
+    }
+    let telemetry_cfg = telemetry::TelemetryConfig::new(verbose, logging);
     telemetry::init(telemetry_cfg)
 }
