@@ -35,6 +35,7 @@ pub struct ReplRigOptions {
     pub seed: u64,
     pub use_store_id_override: bool,
     pub dead_ms: Option<u64>,
+    pub wal_segment_max_bytes: Option<usize>,
 }
 
 impl Default for ReplRigOptions {
@@ -45,6 +46,7 @@ impl Default for ReplRigOptions {
             seed: 42,
             use_store_id_override: true,
             dead_ms: None,
+            wal_segment_max_bytes: None,
         }
     }
 }
@@ -121,6 +123,7 @@ impl ReplRig {
                 &node.listen_addr,
                 &peers,
                 options.dead_ms,
+                options.wal_segment_max_bytes,
             )
             .expect("write user replication config");
         }
@@ -565,6 +568,7 @@ fn write_replication_user_config(
     listen_addr: &str,
     peers: &[(ReplicaId, String)],
     dead_ms: Option<u64>,
+    wal_segment_max_bytes: Option<usize>,
 ) -> Result<(), String> {
     let mut config = Config::default();
     config.replication.listen_addr = listen_addr.to_string();
@@ -582,6 +586,9 @@ fn write_replication_user_config(
         .collect();
     if let Some(dead_ms) = dead_ms {
         config.limits.dead_ms = dead_ms;
+    }
+    if let Some(wal_segment_max_bytes) = wal_segment_max_bytes {
+        config.limits.wal_segment_max_bytes = wal_segment_max_bytes;
     }
 
     let config_path = config_dir.join("beads-rs").join("config.toml");
