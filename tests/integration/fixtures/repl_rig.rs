@@ -17,7 +17,7 @@ use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_rs::core::{NamespaceId, ReplicaId, ReplicaRole, StoreMeta, Watermarks};
 use beads_rs::daemon::ipc::{IpcClient, ReadConsistency, Request, Response, ResponsePayload};
 
-use super::daemon_runtime::shutdown_daemon;
+use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy};
 
 pub type FaultProfile = TailnetProfile;
@@ -141,6 +141,15 @@ impl ReplRig {
 
     pub fn admin_status(&self, idx: usize) -> AdminStatusOutput {
         self.node(idx).admin_status()
+    }
+
+    pub fn crash_node(&self, idx: usize) {
+        crash_daemon(&self.nodes[idx].runtime_dir);
+    }
+
+    pub fn restart_node(&self, idx: usize) {
+        self.nodes[idx].unlock_store(self.store_id);
+        self.nodes[idx].start_daemon();
     }
 
     pub fn assert_converged(&self, namespaces: &[NamespaceId], timeout: Duration) {
@@ -287,6 +296,14 @@ impl Node {
         cmd.env("XDG_CONFIG_HOME", &self.config_dir);
         cmd.env("BD_TESTING", "1");
         cmd
+    }
+
+    fn unlock_store(&self, store_id: StoreId) {
+        let store_id = store_id.to_string();
+        self.bd_cmd()
+            .args(["store", "unlock", "--store-id", store_id.as_str()])
+            .assert()
+            .success();
     }
 
     fn start_daemon(&self) {

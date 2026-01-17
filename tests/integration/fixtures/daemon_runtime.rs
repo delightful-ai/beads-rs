@@ -43,6 +43,13 @@ pub fn shutdown_daemon(runtime_dir: &Path) {
     }
 }
 
+/// Force-kill the daemon process without cleanup (simulates a crash).
+pub fn crash_daemon(runtime_dir: &Path) {
+    if let Some(pid) = daemon_pid(runtime_dir) {
+        force_kill(pid, Duration::from_millis(500));
+    }
+}
+
 fn socket_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("beads").join("daemon.sock")
 }
@@ -71,6 +78,14 @@ fn terminate_process(pid: u32, timeout: Duration) {
         let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
         wait_for_exit(pid, timeout);
     }
+}
+
+fn force_kill(pid: u32, timeout: Duration) {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+    wait_for_exit(pid, timeout);
 }
 
 fn wait_for_exit(pid: u32, timeout: Duration) {
