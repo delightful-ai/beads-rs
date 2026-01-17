@@ -576,11 +576,7 @@ fn plan_links(
             "fault profile matrix size mismatch"
         );
         for row in matrix {
-            assert_eq!(
-                row.len(),
-                node_count,
-                "fault profile matrix size mismatch"
-            );
+            assert_eq!(row.len(), node_count, "fault profile matrix size mismatch");
         }
     }
     for (from, _) in nodes.iter().enumerate() {

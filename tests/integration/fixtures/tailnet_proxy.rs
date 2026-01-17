@@ -110,8 +110,16 @@ impl TailnetProxy {
         push_opt_arg(&mut cmd, "--loss-rate", profile.loss_rate);
         push_opt_arg(&mut cmd, "--duplicate-rate", profile.duplicate_rate);
         push_opt_arg(&mut cmd, "--reorder-rate", profile.reorder_rate);
-        push_opt_arg(&mut cmd, "--blackhole-after-frames", profile.blackhole_after_frames);
-        push_opt_arg(&mut cmd, "--blackhole-after-bytes", profile.blackhole_after_bytes);
+        push_opt_arg(
+            &mut cmd,
+            "--blackhole-after-frames",
+            profile.blackhole_after_frames,
+        );
+        push_opt_arg(
+            &mut cmd,
+            "--blackhole-after-bytes",
+            profile.blackhole_after_bytes,
+        );
         push_opt_arg(&mut cmd, "--blackhole-for-ms", profile.blackhole_for_ms);
         push_opt_arg(&mut cmd, "--reset-after-frames", profile.reset_after_frames);
         push_opt_arg(&mut cmd, "--reset-after-bytes", profile.reset_after_bytes);

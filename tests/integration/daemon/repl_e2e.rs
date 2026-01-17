@@ -64,6 +64,50 @@ fn repl_daemon_to_daemon_tailnet_roundtrip() {
 }
 
 #[test]
+fn repl_daemon_pathological_tailnet_roundtrip() {
+    let mut options = ReplRigOptions::default();
+    options.seed = 41;
+
+    let mut profile = FaultProfile::pathological();
+    profile.base_latency_ms = Some(10);
+    profile.jitter_ms = Some(25);
+    profile.loss_rate = Some(0.12);
+    profile.duplicate_rate = Some(0.01);
+    profile.reorder_rate = Some(0.05);
+    profile.blackhole_after_frames = Some(5);
+    profile.blackhole_for_ms = Some(200);
+    profile.reset_after_frames = Some(20);
+    profile.one_way_loss = Some("a->b".to_string());
+
+    let mut by_link = vec![vec![None; 3]; 3];
+    for from in 0..3 {
+        for to in 0..3 {
+            if from == to {
+                continue;
+            }
+            by_link[from][to] = Some(profile.clone());
+        }
+    }
+    options.fault_profile_by_link = Some(by_link);
+
+    let rig = ReplRig::new(3, options);
+
+    let ids = [
+        rig.create_issue(0, "pathology-0"),
+        rig.create_issue(1, "pathology-1"),
+        rig.create_issue(2, "pathology-2"),
+    ];
+
+    for node_idx in 0..3 {
+        for id in &ids {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(90));
+        }
+    }
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
+}
+
+#[test]
 fn repl_daemon_store_discovery_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.use_store_id_override = false;

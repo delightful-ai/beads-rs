@@ -202,10 +202,7 @@ fn main() {
         "pathology" | "pathological" => Profile::pathological(),
         _ => Profile::tailnet(),
     };
-    let one_way_loss = args
-        .one_way_loss
-        .as_deref()
-        .and_then(LossDirection::parse);
+    let one_way_loss = args.one_way_loss.as_deref().and_then(LossDirection::parse);
     if args.one_way_loss.is_some() && one_way_loss.is_none() {
         eprintln!("invalid --one-way-loss value (use a->b or b->a)");
         std::process::exit(2);
@@ -390,8 +387,7 @@ fn run_reader(
                         if for_ms == 0 {
                             blackhole_indefinite = true;
                         } else {
-                            blackhole_until =
-                                Some(Instant::now() + Duration::from_millis(for_ms));
+                            blackhole_until = Some(Instant::now() + Duration::from_millis(for_ms));
                         }
                     } else {
                         blackhole_indefinite = true;
