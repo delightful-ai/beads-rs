@@ -1,8 +1,9 @@
 //! In-memory WAL backend for deterministic tests.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
@@ -25,27 +26,32 @@ struct MemoryWalRegistry {
     segments: BTreeMap<PathBuf, Arc<Mutex<MemorySegment>>>,
 }
 
-fn registry() -> &'static Mutex<MemoryWalRegistry> {
-    static REGISTRY: OnceLock<Mutex<MemoryWalRegistry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(MemoryWalRegistry::default()))
+thread_local! {
+    static REGISTRY: RefCell<MemoryWalRegistry> = RefCell::new(MemoryWalRegistry::default());
 }
 
 pub(crate) fn read_segment_bytes(path: &Path) -> Option<Vec<u8>> {
-    let guard = registry().lock().expect("memory wal registry poisoned");
-    let segment = guard.segments.get(path)?;
-    let segment = segment.lock().expect("memory wal segment poisoned");
-    Some(segment.bytes.clone())
+    REGISTRY.with(|r| {
+        let guard = r.borrow();
+        let segment = guard.segments.get(path)?;
+        let segment = segment.lock().expect("memory wal segment poisoned");
+        Some(segment.bytes.clone())
+    })
 }
 
 fn register_segment(path: PathBuf, segment: Arc<Mutex<MemorySegment>>) {
-    let mut guard = registry().lock().expect("memory wal registry poisoned");
-    guard.segments.insert(path, segment);
+    REGISTRY.with(|r| {
+        r.borrow_mut().segments.insert(path, segment);
+    });
 }
 
 fn purge_segments_for_store(store_dir: &Path) {
     let prefix = store_dir.join(MEMORY_DIR_NAME);
-    let mut guard = registry().lock().expect("memory wal registry poisoned");
-    guard.segments.retain(|path, _| !path.starts_with(&prefix));
+    REGISTRY.with(|r| {
+        r.borrow_mut()
+            .segments
+            .retain(|path, _| !path.starts_with(&prefix));
+    });
 }
 
 pub struct MemoryEventWal {
