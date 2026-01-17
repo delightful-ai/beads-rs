@@ -51,3 +51,36 @@ fn repl_daemon_to_daemon_tailnet_roundtrip() {
     rig.assert_peers_seen(Duration::from_secs(60));
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
 }
+
+#[test]
+fn repl_daemon_store_discovery_roundtrip() {
+    let mut options = ReplRigOptions::default();
+    options.use_store_id_override = false;
+    options.seed = 23;
+
+    let rig = ReplRig::new(3, options);
+
+    let ids = [
+        rig.create_issue(0, "discover-0"),
+        rig.create_issue(1, "discover-1"),
+        rig.create_issue(2, "discover-2"),
+    ];
+
+    for node_idx in 0..3 {
+        for id in &ids {
+            rig.wait_for_show(node_idx, id, Duration::from_secs(60));
+        }
+    }
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+
+    let expected = rig.store_id();
+    for node in rig.nodes() {
+        let status = node.admin_status();
+        assert_eq!(
+            status.store_id, expected,
+            "store discovery mismatch: expected {expected} got {}",
+            status.store_id
+        );
+    }
+}
