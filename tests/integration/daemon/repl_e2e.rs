@@ -194,7 +194,7 @@ fn repl_daemon_replicated_fsync_receipt() {
             &event_id.namespace,
             &event_id.origin_replica_id,
             Seq0::new(next_seq),
-            HeadStatus::Unknown,
+            HeadStatus::Known([0u8; 32]),
         )
         .expect("advance min_seen");
 
