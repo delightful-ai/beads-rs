@@ -27,6 +27,7 @@ pub type FaultProfile = TailnetProfile;
 #[derive(Clone, Debug)]
 pub struct ReplRigOptions {
     pub fault_profile: Option<FaultProfile>,
+    pub fault_profile_by_link: Option<Vec<Vec<Option<FaultProfile>>>>,
     pub seed: u64,
     pub use_store_id_override: bool,
     pub dead_ms: Option<u64>,
@@ -36,6 +37,7 @@ impl Default for ReplRigOptions {
     fn default() -> Self {
         Self {
             fault_profile: None,
+            fault_profile_by_link: None,
             seed: 42,
             use_store_id_override: true,
             dead_ms: None,
@@ -567,19 +569,42 @@ fn plan_links(
     let node_count = nodes.len();
     let mut link_addrs = vec![vec![None; node_count]; node_count];
     let mut proxies = Vec::new();
+    if let Some(matrix) = options.fault_profile_by_link.as_ref() {
+        assert_eq!(
+            matrix.len(),
+            node_count,
+            "fault profile matrix size mismatch"
+        );
+        for row in matrix {
+            assert_eq!(
+                row.len(),
+                node_count,
+                "fault profile matrix size mismatch"
+            );
+        }
+    }
     for (from, _) in nodes.iter().enumerate() {
         for (to, target) in nodes.iter().enumerate() {
             if from == to {
                 continue;
             }
-            let addr = if let Some(profile) = options.fault_profile.as_ref() {
+            let profile = if let Some(matrix) = options.fault_profile_by_link.as_ref() {
+                matrix
+                    .get(from)
+                    .and_then(|row| row.get(to))
+                    .cloned()
+                    .flatten()
+            } else {
+                options.fault_profile.clone()
+            };
+            let addr = if let Some(profile) = profile {
                 let listen_addr = format!("127.0.0.1:{}", pick_port());
                 let seed = link_seed(options.seed, from, to);
                 proxies.push(ProxySpec {
                     listen_addr: listen_addr.clone(),
                     upstream_addr: target.listen_addr.clone(),
                     seed,
-                    profile: profile.clone(),
+                    profile,
                 });
                 listen_addr
             } else {
