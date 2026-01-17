@@ -261,14 +261,14 @@ fn run_scheduler(
     loop {
         if let Some(next_due) = heap.peek().map(|frame| frame.deliver_at) {
             let now = Instant::now();
-            if next_due <= now {
-                if let Some(frame) = heap.pop() {
-                    if let Err(err) = frame_writer.write_frame(&frame.payload) {
-                        eprintln!("proxy {label} write error: {}", frame_error_desc(&err));
-                        break;
-                    }
-                    continue;
+            if next_due <= now
+                && let Some(frame) = heap.pop()
+            {
+                if let Err(err) = frame_writer.write_frame(&frame.payload) {
+                    eprintln!("proxy {label} write error: {}", frame_error_desc(&err));
+                    break;
                 }
+                continue;
             }
 
             let timeout = next_due.saturating_duration_since(now);
