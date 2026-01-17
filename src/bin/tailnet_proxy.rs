@@ -138,15 +138,13 @@ impl Profile {
     }
 
     fn for_direction(mut self, direction: Direction) -> Self {
-        if let Some(loss_direction) = self.one_way_loss {
-            let matches = match (direction, loss_direction) {
-                (Direction::AtoB, LossDirection::AtoB) => true,
-                (Direction::BtoA, LossDirection::BtoA) => true,
-                _ => false,
-            };
-            if !matches {
-                self.loss_rate = 0.0;
-            }
+        if let Some(loss_direction) = self.one_way_loss
+            && !matches!(
+                (direction, loss_direction),
+                (Direction::AtoB, LossDirection::AtoB) | (Direction::BtoA, LossDirection::BtoA)
+            )
+        {
+            self.loss_rate = 0.0;
         }
         self
     }
@@ -362,24 +360,24 @@ fn run_reader(
                     break;
                 }
 
-                if let Some(until) = blackhole_until {
-                    if Instant::now() >= until {
-                        blackhole_until = None;
-                    }
+                if let Some(until) = blackhole_until
+                    && Instant::now() >= until
+                {
+                    blackhole_until = None;
                 }
 
                 let mut triggered_blackhole = false;
-                if let Some(threshold) = blackhole_after_frames {
-                    if frames_seen >= threshold {
-                        blackhole_after_frames = None;
-                        triggered_blackhole = true;
-                    }
+                if let Some(threshold) = blackhole_after_frames
+                    && frames_seen >= threshold
+                {
+                    blackhole_after_frames = None;
+                    triggered_blackhole = true;
                 }
-                if let Some(threshold) = blackhole_after_bytes {
-                    if bytes_seen >= threshold {
-                        blackhole_after_bytes = None;
-                        triggered_blackhole = true;
-                    }
+                if let Some(threshold) = blackhole_after_bytes
+                    && bytes_seen >= threshold
+                {
+                    blackhole_after_bytes = None;
+                    triggered_blackhole = true;
                 }
 
                 if triggered_blackhole {
