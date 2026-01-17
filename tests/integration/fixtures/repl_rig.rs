@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use beads_rs::StoreId;
 use beads_rs::api::{AdminStatusOutput, QueryResult};
-use beads_rs::core::{NamespaceId, ReplicaId, StoreMeta, Watermarks};
+use beads_rs::core::{NamespaceId, ReplicaId, ReplicaRole, StoreMeta, Watermarks};
 use beads_rs::daemon::ipc::{IpcClient, ReadConsistency, Request, Response, ResponsePayload};
 
 use super::daemon_runtime::shutdown_daemon;
@@ -76,9 +76,12 @@ impl ReplRig {
             }
             write_replication_config(&node.repo_dir, &node.listen_addr, &peers)
                 .expect("write replication config");
+            write_replication_user_config(&node.config_dir, &node.listen_addr, &peers)
+                .expect("write user replication config");
         }
 
         for node in &nodes {
+            shutdown_daemon(&node.runtime_dir);
             node.start_daemon();
         }
 
@@ -374,6 +377,32 @@ fn write_replication_config(
     }
     fs::write(repo_dir.join("beads.toml"), out)
         .map_err(|err| format!("write beads.toml failed: {err}"))?;
+    Ok(())
+}
+
+fn write_replication_user_config(
+    config_dir: &Path,
+    listen_addr: &str,
+    peers: &[(ReplicaId, String)],
+) -> Result<(), String> {
+    let mut config = Config::default();
+    config.replication.listen_addr = listen_addr.to_string();
+    config.replication.backoff_base_ms = 50;
+    config.replication.backoff_max_ms = 500;
+    config.replication.max_connections = Some(8);
+    config.replication.peers = peers
+        .iter()
+        .map(|(replica_id, addr)| ReplicationPeerConfig {
+            replica_id: *replica_id,
+            addr: addr.clone(),
+            role: Some(ReplicaRole::Peer),
+            allowed_namespaces: Some(vec![NamespaceId::core()]),
+        })
+        .collect();
+
+    let config_path = config_dir.join("beads-rs").join("config.toml");
+    beads_rs::config::write_config(&config_path, &config)
+        .map_err(|err| format!("write config.toml failed: {err}"))?;
     Ok(())
 }
 
