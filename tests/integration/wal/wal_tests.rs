@@ -20,7 +20,7 @@ fn wal_framing_roundtrips_records() {
     let namespace = NamespaceId::core();
     let record = sample_record(temp.meta(), &namespace, 1);
     let fixture = temp
-        .write_segment(&namespace, 1_700_000_000_000, &[record.clone()])
+        .write_segment(&namespace, 1_700_000_000_000, std::slice::from_ref(&record))
         .expect("write segment");
 
     let mut file = fs::File::open(&fixture.path).expect("open segment");

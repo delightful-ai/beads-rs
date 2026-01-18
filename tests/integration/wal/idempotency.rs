@@ -32,7 +32,7 @@ fn idempotency_mapping_reuses_txn_and_event_ids() {
         client_request_id,
         request_sha,
         txn_id,
-        &[event_id.clone()],
+        std::slice::from_ref(&event_id),
         created_at_ms,
     )
     .expect("upsert client request");

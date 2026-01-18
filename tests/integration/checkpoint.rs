@@ -125,7 +125,7 @@ fn checkpoint_included_watermarks_match() {
     let core = NamespaceId::core();
     let (store_state, watermarks, export) = build_core_store_state();
 
-    let expected_included = included_from_watermarks(&watermarks, &[core.clone()]);
+    let expected_included = included_from_watermarks(&watermarks, std::slice::from_ref(&core));
     assert_eq!(export.meta.included, expected_included);
     assert!(export.meta.included_heads.is_some());
 
@@ -165,14 +165,16 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
         .expect("watermark");
 
     let snapshot = build_snapshot_from_state(
-        "core",
-        vec![core],
-        StoreId::new(Uuid::from_bytes([4u8; 16])),
-        StoreEpoch::new(0),
-        1_700_000_000_000,
-        origin,
-        ContentHash::from_bytes([9u8; 32]),
-        None,
+        SnapshotBuildArgs {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![core],
+            store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
+            store_epoch: StoreEpoch::new(0),
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: ContentHash::from_bytes([9u8; 32]),
+            roster_hash: None,
+        },
         &store_state,
         &watermarks,
     );
@@ -185,8 +187,8 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
     (store_state, watermarks, export)
 }
 
-fn build_snapshot_from_state(
-    checkpoint_group: &str,
+struct SnapshotBuildArgs {
+    checkpoint_group: String,
     namespaces: Vec<NamespaceId>,
     store_id: StoreId,
     store_epoch: StoreEpoch,
@@ -194,18 +196,22 @@ fn build_snapshot_from_state(
     created_by_replica_id: ReplicaId,
     policy_hash: ContentHash,
     roster_hash: Option<ContentHash>,
+}
+
+fn build_snapshot_from_state(
+    args: SnapshotBuildArgs,
     state: &StoreState,
     watermarks: &Watermarks<Durable>,
 ) -> beads_rs::git::checkpoint::CheckpointSnapshot {
     beads_rs::git::checkpoint::build_snapshot(CheckpointSnapshotInput {
-        checkpoint_group: checkpoint_group.to_string(),
-        namespaces,
-        store_id,
-        store_epoch,
-        created_at_ms,
-        created_by_replica_id,
-        policy_hash,
-        roster_hash,
+        checkpoint_group: args.checkpoint_group,
+        namespaces: args.namespaces,
+        store_id: args.store_id,
+        store_epoch: args.store_epoch,
+        created_at_ms: args.created_at_ms,
+        created_by_replica_id: args.created_by_replica_id,
+        policy_hash: args.policy_hash,
+        roster_hash: args.roster_hash,
         dirty_shards: None,
         state,
         watermarks_durable: watermarks,
