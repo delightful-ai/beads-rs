@@ -110,10 +110,7 @@ pub struct TelemetryGuard {
 }
 
 pub fn init(config: TelemetryConfig) -> TelemetryGuard {
-    let filter = EnvFilter::builder()
-        .with_default_directive(level_from_verbosity(config.verbosity).into())
-        .with_env_var("LOG")
-        .from_env_lossy();
+    let filter = build_env_filter(config.verbosity, config.logging.filter.as_deref());
 
     let mut guards = Vec::new();
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
@@ -170,6 +167,43 @@ pub fn init(config: TelemetryConfig) -> TelemetryGuard {
     }
 
     TelemetryGuard { _guards: guards }
+}
+
+fn build_env_filter(verbosity: u8, config_filter: Option<&str>) -> EnvFilter {
+    build_env_filter_inner(verbosity, config_filter, std::env::var("LOG").ok().as_deref())
+}
+
+fn build_env_filter_inner(
+    verbosity: u8,
+    config_filter: Option<&str>,
+    log_env: Option<&str>,
+) -> EnvFilter {
+    let default_directive = level_from_verbosity(verbosity).into();
+    let builder = EnvFilter::builder()
+        .with_default_directive(default_directive)
+        .with_env_var("LOG");
+
+    if let Some(raw) = log_env {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return builder.parse(trimmed).unwrap_or_else(|err| {
+                eprintln!("invalid LOG filter: {err}");
+                builder.from_env_lossy()
+            });
+        }
+    }
+
+    if let Some(raw) = config_filter {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return builder.parse(trimmed).unwrap_or_else(|err| {
+                eprintln!("invalid logging.filter: {err}");
+                builder.from_env_lossy()
+            });
+        }
+    }
+
+    builder.from_env_lossy()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -637,5 +671,27 @@ mod tests {
             !logging.file.enabled,
             "daemon logging defaults should skip in tests"
         );
+    }
+
+    #[test]
+    fn log_filter_prefers_log_env_over_config() {
+        let filter = build_env_filter_inner(1, Some("beads_rs=debug"), Some("beads_rs=info"));
+        let rendered = filter.to_string();
+        assert!(rendered.contains("beads_rs=info"));
+        assert!(!rendered.contains("beads_rs=debug"));
+    }
+
+    #[test]
+    fn log_filter_uses_config_when_env_missing() {
+        let filter = build_env_filter_inner(1, Some("beads_rs=debug"), None);
+        let rendered = filter.to_string();
+        assert!(rendered.contains("beads_rs=debug"));
+    }
+
+    #[test]
+    fn log_filter_falls_back_to_verbosity() {
+        let filter = build_env_filter_inner(0, None, None);
+        let rendered = filter.to_string();
+        assert!(rendered.contains("error"));
     }
 }
