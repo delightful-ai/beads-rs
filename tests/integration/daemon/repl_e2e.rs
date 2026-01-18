@@ -1,8 +1,9 @@
 #![cfg(feature = "slow-tests")]
 
 use std::num::NonZeroU32;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::fixtures::load_gen::LoadGenerator;
 use crate::fixtures::receipt;
 use crate::fixtures::repl_rig::{FaultProfile, ReplRig, ReplRigOptions};
 use beads_rs::api::QueryResult;
@@ -39,6 +40,65 @@ fn wait_for_sample_on(rig: &ReplRig, ids: &[String], nodes: &[usize], timeout: D
 fn wait_for_sample(rig: &ReplRig, ids: &[String], timeout: Duration) {
     let nodes: Vec<usize> = (0..rig.nodes().len()).collect();
     wait_for_sample_on(rig, ids, &nodes, timeout);
+}
+
+fn churn_node(node: &crate::fixtures::repl_rig::Node, total: usize, workers: usize) {
+    let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
+    let mut generator = LoadGenerator::with_client(node.repo_dir().to_path_buf(), client);
+    generator.config_mut().total_requests = total;
+    generator.config_mut().workers = workers;
+    generator.config_mut().max_errors = 4;
+    let report = generator.run();
+    assert_eq!(
+        report.failures, 0,
+        "load generator failures: {:#?}",
+        report.errors
+    );
+}
+
+fn wait_for_checkpoint(rig: &ReplRig, idx: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = rig.node(idx).admin_status();
+        let ok = status.checkpoints.iter().any(|group| {
+            group.last_checkpoint_wall_ms.is_some() && !group.in_flight && !group.dirty
+        });
+        if ok {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("checkpoint did not complete in time: {status:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_for_wal_segments(
+    rig: &ReplRig,
+    idx: usize,
+    namespace: &NamespaceId,
+    min_segments: usize,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = rig.node(idx).admin_status();
+        let (segments, total_bytes) = status
+            .wal
+            .iter()
+            .find(|row| &row.namespace == namespace)
+            .map(|row| (row.segment_count, row.total_bytes))
+            .unwrap_or((0, 0));
+        if segments >= min_segments {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "wal segments did not reach {min_segments} within {timeout:?}: segments={segments} total_bytes={total_bytes}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -143,6 +203,45 @@ fn repl_daemon_store_discovery_roundtrip() {
             status.store_id
         );
     }
+}
+
+#[test]
+fn repl_checkpoint_bootstrap_under_churn() {
+    let mut options = ReplRigOptions::default();
+    options.seed = 73;
+    options.wal_segment_max_bytes = Some(64 * 1024);
+
+    let rig = ReplRig::new(3, options);
+
+    rig.shutdown_node(2);
+
+    let warm_ids = [
+        rig.create_issue(0, "bootstrap-pre-0"),
+        rig.create_issue(1, "bootstrap-pre-1"),
+    ];
+
+    churn_node(rig.node(0), 400, 2);
+    churn_node(rig.node(1), 400, 2);
+
+    wait_for_wal_segments(
+        &rig,
+        0,
+        &NamespaceId::core(),
+        2,
+        Duration::from_secs(30),
+    );
+    wait_for_checkpoint(&rig, 0, Duration::from_secs(120));
+
+    let tail_ids = [
+        rig.create_issue(0, "bootstrap-tail-0"),
+        rig.create_issue(1, "bootstrap-tail-1"),
+    ];
+
+    rig.restart_node(2);
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
+    let combined: Vec<String> = warm_ids.iter().chain(tail_ids.iter()).cloned().collect();
+    wait_for_sample(&rig, &combined, Duration::from_secs(30));
 }
 
 #[test]
