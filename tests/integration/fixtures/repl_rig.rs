@@ -24,7 +24,7 @@ use beads_rs::daemon::ipc::{IpcClient, ReadConsistency, Request, Response, Respo
 use beads_rs::daemon::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
-use super::tailnet_proxy::{TailnetProfile, TailnetProxy};
+use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
 
 pub type FaultProfile = TailnetProfile;
 
@@ -35,7 +35,16 @@ pub struct ReplRigOptions {
     pub seed: u64,
     pub use_store_id_override: bool,
     pub dead_ms: Option<u64>,
+    pub keepalive_ms: Option<u64>,
     pub wal_segment_max_bytes: Option<usize>,
+    pub tailnet_trace: Option<TailnetTraceConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TailnetTraceConfig {
+    pub mode: TailnetTraceMode,
+    pub dir: PathBuf,
+    pub timeout_ms: Option<u64>,
 }
 
 impl Default for ReplRigOptions {
@@ -46,7 +55,9 @@ impl Default for ReplRigOptions {
             seed: 42,
             use_store_id_override: true,
             dead_ms: None,
+            keepalive_ms: None,
             wal_segment_max_bytes: None,
+            tailnet_trace: None,
         }
     }
 }
@@ -123,6 +134,7 @@ impl ReplRig {
                 &node.listen_addr,
                 &peers,
                 options.dead_ms,
+                options.keepalive_ms,
                 options.wal_segment_max_bytes,
             )
             .expect("write user replication config");
@@ -568,6 +580,7 @@ fn write_replication_user_config(
     listen_addr: &str,
     peers: &[(ReplicaId, String)],
     dead_ms: Option<u64>,
+    keepalive_ms: Option<u64>,
     wal_segment_max_bytes: Option<usize>,
 ) -> Result<(), String> {
     let mut config = Config::default();
@@ -586,6 +599,9 @@ fn write_replication_user_config(
         .collect();
     if let Some(dead_ms) = dead_ms {
         config.limits.dead_ms = dead_ms;
+    }
+    if let Some(keepalive_ms) = keepalive_ms {
+        config.limits.keepalive_ms = keepalive_ms;
     }
     if let Some(wal_segment_max_bytes) = wal_segment_max_bytes {
         config.limits.wal_segment_max_bytes = wal_segment_max_bytes;
@@ -819,7 +835,16 @@ fn plan_links(
             } else {
                 options.fault_profile.clone()
             };
-            let addr = if let Some(profile) = profile {
+            let trace = options.tailnet_trace.as_ref().map(|trace| TailnetTrace {
+                mode: trace.mode,
+                path: trace
+                    .dir
+                    .join(format!("trace-{from}-{to}.jsonl")),
+                timeout_ms: trace.timeout_ms,
+            });
+            let needs_proxy = profile.is_some() || trace.is_some();
+            let profile = profile.unwrap_or_else(FaultProfile::none);
+            let addr = if needs_proxy {
                 let listen_addr = format!("127.0.0.1:{}", pick_port());
                 let seed = link_seed(options.seed, from, to);
                 proxies.push(ProxySpec {
@@ -827,6 +852,7 @@ fn plan_links(
                     upstream_addr: target.listen_addr.clone(),
                     seed,
                     profile,
+                    trace,
                 });
                 listen_addr
             } else {
@@ -846,11 +872,12 @@ fn spawn_proxies(specs: Vec<ProxySpec>) -> Vec<TailnetProxy> {
     specs
         .into_iter()
         .map(|spec| {
-            TailnetProxy::spawn_with_profile(
+            TailnetProxy::spawn_with_profile_and_trace(
                 spec.listen_addr,
                 spec.upstream_addr,
                 spec.seed,
                 spec.profile,
+                spec.trace,
             )
         })
         .collect()
@@ -861,6 +888,7 @@ struct ProxySpec {
     upstream_addr: String,
     seed: u64,
     profile: FaultProfile,
+    trace: Option<TailnetTrace>,
 }
 
 fn watermarks_equal_for_namespace<K: PartialEq>(

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -77,6 +78,28 @@ impl TailnetProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum TailnetTraceMode {
+    Record,
+    Replay,
+}
+
+impl TailnetTraceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TailnetTraceMode::Record => "record",
+            TailnetTraceMode::Replay => "replay",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TailnetTrace {
+    pub mode: TailnetTraceMode,
+    pub path: PathBuf,
+    pub timeout_ms: Option<u64>,
+}
+
 pub struct TailnetProxy {
     child: Child,
     listen_addr: String,
@@ -92,6 +115,16 @@ impl TailnetProxy {
         upstream_addr: String,
         seed: u64,
         profile: TailnetProfile,
+    ) -> Self {
+        Self::spawn_with_profile_and_trace(listen_addr, upstream_addr, seed, profile, None)
+    }
+
+    pub fn spawn_with_profile_and_trace(
+        listen_addr: String,
+        upstream_addr: String,
+        seed: u64,
+        profile: TailnetProfile,
+        trace: Option<TailnetTrace>,
     ) -> Self {
         let bin = assert_cmd::cargo::cargo_bin!("tailnet_proxy");
         let mut cmd = Command::new(bin);
@@ -125,6 +158,11 @@ impl TailnetProxy {
         push_opt_arg(&mut cmd, "--reset-after-bytes", profile.reset_after_bytes);
         push_opt_arg(&mut cmd, "--one-way-loss", profile.one_way_loss.clone());
         push_opt_arg(&mut cmd, "--max-frame-bytes", profile.max_frame_bytes);
+        if let Some(trace) = trace {
+            cmd.arg("--trace-mode").arg(trace.mode.as_str());
+            cmd.arg("--trace-path").arg(&trace.path);
+            push_opt_arg(&mut cmd, "--trace-timeout-ms", trace.timeout_ms);
+        }
         let mut child = cmd.spawn().expect("spawn tailnet proxy");
         wait_for_listen(&listen_addr, Duration::from_secs(2));
         if let Some(status) = child.try_wait().expect("check proxy status") {
