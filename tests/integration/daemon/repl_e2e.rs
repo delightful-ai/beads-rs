@@ -1,11 +1,15 @@
 #![cfg(feature = "slow-tests")]
 
 use std::num::NonZeroU32;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::fixtures::load_gen::LoadGenerator;
 use crate::fixtures::receipt;
-use crate::fixtures::repl_rig::{FaultProfile, ReplRig, ReplRigOptions};
+use crate::fixtures::repl_rig::{
+    FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig,
+};
+use crate::fixtures::tailnet_proxy::TailnetTraceMode;
 use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
 use beads_rs::core::{
@@ -16,6 +20,7 @@ use beads_rs::daemon::ipc::{
     IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
 };
 use beads_rs::daemon::ops::OpResult;
+use tempfile::TempDir;
 
 fn sample_ids<'a>(ids: &'a [String]) -> Vec<&'a String> {
     match ids.len() {
@@ -104,6 +109,44 @@ fn wait_for_wal_segments(
             );
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn trace_path(trace_dir: &Path, from: usize, to: usize) -> std::path::PathBuf {
+    trace_dir.join(format!("trace-{from}-{to}.jsonl"))
+}
+
+fn run_trace_harness(mode: TailnetTraceMode, trace_dir: &Path) {
+    let mut options = ReplRigOptions::default();
+    options.seed = 101;
+    options.fault_profile = Some(FaultProfile::none());
+    options.keepalive_ms = Some(60_000);
+    options.tailnet_trace = Some(TailnetTraceConfig {
+        mode,
+        dir: trace_dir.to_path_buf(),
+        timeout_ms: Some(30_000),
+    });
+
+    let rig = ReplRig::new(2, options);
+
+    let ids = [
+        rig.create_issue(0, "trace-0"),
+        rig.create_issue(1, "trace-1"),
+        rig.create_issue(0, "trace-2"),
+    ];
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(30));
+    wait_for_sample(&rig, &ids, Duration::from_secs(15));
+
+    if matches!(mode, TailnetTraceMode::Record) {
+        assert!(
+            trace_path(trace_dir, 0, 1).exists(),
+            "missing trace for 0->1"
+        );
+        assert!(
+            trace_path(trace_dir, 1, 0).exists(),
+            "missing trace for 1->0"
+        );
     }
 }
 
@@ -255,6 +298,17 @@ fn repl_checkpoint_bootstrap_under_churn() {
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
     let combined: Vec<String> = warm_ids.iter().chain(tail_ids.iter()).cloned().collect();
     wait_for_sample(&rig, &combined, Duration::from_secs(30));
+}
+
+#[test]
+fn repl_interleaving_trace_replay() {
+    let tmp_root = std::env::current_dir().expect("cwd").join("tmp");
+    std::fs::create_dir_all(&tmp_root).expect("trace tmp root");
+    let trace_root = TempDir::new_in(&tmp_root).expect("trace tmp dir");
+    let trace_dir = trace_root.path().to_path_buf();
+
+    run_trace_harness(TailnetTraceMode::Record, &trace_dir);
+    run_trace_harness(TailnetTraceMode::Replay, &trace_dir);
 }
 
 #[test]
