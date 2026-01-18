@@ -148,9 +148,10 @@ pub fn extend_claim_request(id: impl Into<String>, lease_secs: u64) -> MutationR
 }
 
 pub fn patch_title(title: impl Into<String>) -> BeadPatch {
-    let mut patch = BeadPatch::default();
-    patch.title = Patch::Set(title.into());
-    patch
+    BeadPatch {
+        title: Patch::Set(title.into()),
+        ..Default::default()
+    }
 }
 
 pub fn sample_requests() -> Vec<MutationRequest> {

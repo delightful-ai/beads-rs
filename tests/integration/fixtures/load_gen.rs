@@ -75,7 +75,7 @@ impl LoadGenerator {
     pub fn run(&self) -> LoadReport {
         let workers = self.config.workers.max(1);
         let total = self.config.total_requests.max(1);
-        let per_worker = (total + workers - 1) / workers;
+        let per_worker = total.div_ceil(workers);
         let errors = Arc::new(Mutex::new(Vec::new()));
         let attempts = Arc::new(AtomicUsize::new(0));
         let successes = Arc::new(AtomicUsize::new(0));

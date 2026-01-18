@@ -13,7 +13,7 @@ use beads_rs::daemon::ipc::{
 #[derive(Debug)]
 pub enum StreamMessage {
     Subscribed(SubscribeInfo),
-    Event(StreamEvent),
+    Event(Box<StreamEvent>),
 }
 
 #[derive(Debug, Error)]
@@ -21,9 +21,9 @@ pub enum StreamClientError {
     #[error(transparent)]
     Ipc(#[from] IpcError),
     #[error("stream error: {0:?}")]
-    Remote(beads_rs::ErrorPayload),
+    Remote(Box<beads_rs::ErrorPayload>),
     #[error("unexpected response payload: {0:?}")]
-    Unexpected(ResponsePayload),
+    Unexpected(Box<ResponsePayload>),
 }
 
 pub struct StreamingClient {
@@ -81,7 +81,7 @@ impl StreamingClient {
     pub fn next_event(&mut self) -> Result<Option<StreamEvent>, StreamClientError> {
         loop {
             match self.next_message()? {
-                Some(StreamMessage::Event(event)) => return Ok(Some(event)),
+                Some(StreamMessage::Event(event)) => return Ok(Some(*event)),
                 Some(StreamMessage::Subscribed(info)) => {
                     self.subscribed = Some(info);
                 }
@@ -108,10 +108,12 @@ impl StreamingClient {
                 ResponsePayload::Subscribed(payload) => {
                     Ok(StreamMessage::Subscribed(payload.subscribed))
                 }
-                ResponsePayload::Event(payload) => Ok(StreamMessage::Event(payload.event)),
-                other => Err(StreamClientError::Unexpected(other)),
+                ResponsePayload::Event(payload) => {
+                    Ok(StreamMessage::Event(Box::new(payload.event)))
+                }
+                other => Err(StreamClientError::Unexpected(Box::new(other))),
             },
-            Response::Err { err } => Err(StreamClientError::Remote(err)),
+            Response::Err { err } => Err(StreamClientError::Remote(Box::new(err))),
         }
     }
 }

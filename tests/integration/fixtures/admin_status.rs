@@ -17,9 +17,9 @@ pub enum StatusError {
     #[error(transparent)]
     Ipc(#[from] IpcError),
     #[error("remote error: {0:?}")]
-    Remote(beads_rs::ErrorPayload),
+    Remote(Box<beads_rs::ErrorPayload>),
     #[error("unexpected response payload: {0:?}")]
-    Unexpected(ResponsePayload),
+    Unexpected(Box<ResponsePayload>),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -103,9 +103,9 @@ fn parse_admin_status(response: Response) -> Result<AdminStatusOutput, StatusErr
     match response {
         Response::Ok { ok } => match ok {
             ResponsePayload::Query(QueryResult::AdminStatus(status)) => Ok(status),
-            other => Err(StatusError::Unexpected(other)),
+            other => Err(StatusError::Unexpected(Box::new(other))),
         },
-        Response::Err { err } => Err(StatusError::Remote(err)),
+        Response::Err { err } => Err(StatusError::Remote(Box::new(err))),
     }
 }
 
