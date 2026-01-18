@@ -1982,8 +1982,10 @@ mod tests {
     fn decode_error_frame_too_large_maps_to_frame_too_large() {
         let (_store, identity, origin) = base_store();
         let frame = make_event(identity, NamespaceId::core(), origin, 1, None);
-        let mut limits = Limits::default();
-        limits.max_frame_bytes = 1;
+        let limits = Limits {
+            max_frame_bytes: 1,
+            ..Default::default()
+        };
 
         let payload = event_frame_error_payload(
             &frame,

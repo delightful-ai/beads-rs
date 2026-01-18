@@ -2093,8 +2093,10 @@ mod tests {
 
     #[test]
     fn rejects_note_over_limit() {
-        let mut limits = Limits::default();
-        limits.max_note_bytes = 2;
+        let limits = Limits {
+            max_note_bytes: 2,
+            ..Default::default()
+        };
         let engine = MutationEngine::new(limits);
         let actor = actor_id("alice");
         let ctx = MutationContext {
@@ -2124,8 +2126,10 @@ mod tests {
 
     #[test]
     fn rejects_ops_over_limit() {
-        let mut limits = Limits::default();
-        limits.max_ops_per_txn = 0;
+        let limits = Limits {
+            max_ops_per_txn: 0,
+            ..Default::default()
+        };
         let engine = MutationEngine::new(limits);
         let actor = actor_id("alice");
         let ctx = MutationContext {

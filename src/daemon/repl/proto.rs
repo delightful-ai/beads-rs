@@ -1721,8 +1721,10 @@ mod tests {
             }),
         };
         let bytes = encode_envelope(&envelope).unwrap();
-        let mut limits = Limits::default();
-        limits.max_event_batch_bytes = 1;
+        let limits = Limits {
+            max_event_batch_bytes: 1,
+            ..Default::default()
+        };
         let err = decode_envelope(&bytes, &limits).unwrap_err();
         let payload = err.as_error_payload().unwrap();
         assert_eq!(payload.code, ProtocolErrorCode::BatchTooLarge.into());

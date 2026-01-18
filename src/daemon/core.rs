@@ -2662,8 +2662,10 @@ mod tests {
     #[test]
     fn wal_checkpoint_deadline_tracks_interval() {
         let _tmp = test_store_dir();
-        let mut limits = Limits::default();
-        limits.wal_sqlite_checkpoint_interval_ms = 10;
+        let limits = Limits {
+            wal_sqlite_checkpoint_interval_ms: 10,
+            ..Default::default()
+        };
         let mut daemon = Daemon::new_with_limits(test_actor(), limits);
         let remote = test_remote();
         insert_store(&mut daemon, &remote);

@@ -57,9 +57,11 @@ mod tests {
 
     #[test]
     fn keepalive_emits_ping_after_idle() {
-        let mut limits = Limits::default();
-        limits.keepalive_ms = 100;
-        limits.dead_ms = 1_000;
+        let limits = Limits {
+            keepalive_ms: 100,
+            dead_ms: 1_000,
+            ..Default::default()
+        };
         let mut tracker = KeepaliveTracker::new(&limits, 0);
 
         assert!(tracker.poll(99).is_none());
@@ -80,9 +82,11 @@ mod tests {
 
     #[test]
     fn keepalive_deadline_trumps_ping() {
-        let mut limits = Limits::default();
-        limits.keepalive_ms = 50;
-        limits.dead_ms = 100;
+        let limits = Limits {
+            keepalive_ms: 50,
+            dead_ms: 100,
+            ..Default::default()
+        };
         let mut tracker = KeepaliveTracker::new(&limits, 0);
 
         assert!(matches!(tracker.poll(101), Some(KeepaliveDecision::Close)));
@@ -90,9 +94,11 @@ mod tests {
 
     #[test]
     fn keepalive_recv_resets_deadline() {
-        let mut limits = Limits::default();
-        limits.keepalive_ms = 0;
-        limits.dead_ms = 100;
+        let limits = Limits {
+            keepalive_ms: 0,
+            dead_ms: 100,
+            ..Default::default()
+        };
         let mut tracker = KeepaliveTracker::new(&limits, 0);
 
         tracker.note_recv(80);

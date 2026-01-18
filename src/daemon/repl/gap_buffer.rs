@@ -624,8 +624,10 @@ mod tests {
 
     #[test]
     fn gap_overflow_rejects() {
-        let mut limits = Limits::default();
-        limits.max_repl_gap_events = 1;
+        let limits = Limits {
+            max_repl_gap_events: 1,
+            ..Default::default()
+        };
         let mut state = state_with_limits(&limits);
 
         let _ = state.ingest_one(contiguous_event(2), 100);
@@ -640,8 +642,10 @@ mod tests {
 
     #[test]
     fn gap_timeout_rejects() {
-        let mut limits = Limits::default();
-        limits.repl_gap_timeout_ms = 10;
+        let limits = Limits {
+            repl_gap_timeout_ms: 10,
+            ..Default::default()
+        };
         let mut state = state_with_limits(&limits);
 
         let _ = state.ingest_one(contiguous_event(2), 100);
@@ -656,8 +660,10 @@ mod tests {
 
     #[test]
     fn gap_bytes_overflow_rejects() {
-        let mut limits = Limits::default();
-        limits.max_repl_gap_bytes = 4;
+        let limits = Limits {
+            max_repl_gap_bytes: 4,
+            ..Default::default()
+        };
         let mut state = state_with_limits(&limits);
 
         let decision = state.ingest_one(contiguous_event(2), 100);

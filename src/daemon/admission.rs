@@ -172,8 +172,10 @@ mod tests {
 
     #[test]
     fn ipc_limit_enforced_and_released() {
-        let mut limits = Limits::default();
-        limits.max_ipc_inflight_mutations = 1;
+        let limits = Limits {
+            max_ipc_inflight_mutations: 1,
+            ..Default::default()
+        };
         let admission = AdmissionController::new(&limits);
 
         let permit = admission.try_admit_ipc_mutation().unwrap();
@@ -187,10 +189,12 @@ mod tests {
 
     #[test]
     fn repl_sheds_before_ipc_mutations() {
-        let mut limits = Limits::default();
-        limits.max_repl_ingest_queue_bytes = 10;
-        limits.max_repl_ingest_queue_events = 1;
-        limits.max_ipc_inflight_mutations = 1;
+        let limits = Limits {
+            max_repl_ingest_queue_bytes: 10,
+            max_repl_ingest_queue_events: 1,
+            max_ipc_inflight_mutations: 1,
+            ..Default::default()
+        };
         let admission = AdmissionController::new(&limits);
 
         let _repl = admission.try_admit_repl_ingest(10, 1).unwrap();
@@ -201,9 +205,11 @@ mod tests {
 
     #[test]
     fn repl_limits_report_queue_metrics() {
-        let mut limits = Limits::default();
-        limits.max_repl_ingest_queue_bytes = 8;
-        limits.max_repl_ingest_queue_events = 2;
+        let limits = Limits {
+            max_repl_ingest_queue_bytes: 8,
+            max_repl_ingest_queue_events: 2,
+            ..Default::default()
+        };
         let admission = AdmissionController::new(&limits);
 
         let _repl = admission.try_admit_repl_ingest(8, 2).unwrap();
