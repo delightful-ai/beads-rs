@@ -18,6 +18,14 @@ cargo run --example repl_core_machine -- check
 cargo run --example repl_core_machine -- explore localhost:3000
 ```
 
+## Equivocation coverage run
+
+Use the helper script to exercise the equivocation paths (non-default):
+
+```bash
+./scripts/run_repl_equivocate.sh
+```
+
 ## Notes
 
 - Use `RUST_LOG=info` (or higher) for checker output details.
