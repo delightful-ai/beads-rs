@@ -198,11 +198,11 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     }
 
     // Emit updated view / summary.
-    let issue = fetch_issue(ctx, &id)?;
     if ctx.json {
+        let issue = fetch_issue(ctx, &id)?;
         print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
     } else {
-        println!("{}", render::render_updated(&issue.id));
+        println!("{}", render::render_updated(&id_str));
     }
     Ok(())
 }
