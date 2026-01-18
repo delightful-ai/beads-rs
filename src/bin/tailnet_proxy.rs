@@ -69,16 +69,6 @@ enum TraceMode {
     Replay,
 }
 
-impl TraceMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            TraceMode::Off => "off",
-            TraceMode::Record => "record",
-            TraceMode::Replay => "replay",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 struct TraceConfig {
     mode: TraceMode,
@@ -534,7 +524,7 @@ fn run_trace_session(
 
 enum IncomingFrame {
     Frame { direction: Direction, payload: Vec<u8> },
-    Eof(Direction),
+    Eof,
 }
 
 fn run_trace_record(
@@ -576,7 +566,7 @@ fn run_trace_record(
                     break;
                 }
             }
-            Ok(IncomingFrame::Eof(_)) => {
+            Ok(IncomingFrame::Eof) => {
                 done += 1;
             }
             Err(_) => break,
@@ -588,9 +578,9 @@ fn run_trace_record(
 }
 
 fn run_trace_replay(
-    mut client_read: TcpStream,
+    client_read: TcpStream,
     client_write: TcpStream,
-    mut upstream_read: TcpStream,
+    upstream_read: TcpStream,
     upstream_write: TcpStream,
     max_frame_bytes: usize,
     trace: &TraceConfig,
@@ -658,12 +648,12 @@ fn trace_reader(
                 }
             }
             Ok(None) => {
-                let _ = tx.send(IncomingFrame::Eof(direction));
+                let _ = tx.send(IncomingFrame::Eof);
                 break;
             }
             Err(err) => {
                 eprintln!("trace read error {direction:?}: {}", frame_error_desc(&err));
-                let _ = tx.send(IncomingFrame::Eof(direction));
+                let _ = tx.send(IncomingFrame::Eof);
                 break;
             }
         }
