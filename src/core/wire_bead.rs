@@ -178,6 +178,18 @@ pub enum WorkflowStatus {
     Closed,
 }
 
+crate::enum_str! {
+    impl WorkflowStatus {
+        pub fn as_str(&self) -> &'static str;
+        fn parse_str(raw: &str) -> Option<Self>;
+        variants {
+            Open => ["open"],
+            InProgress => ["in_progress"],
+            Closed => ["closed"],
+        }
+    }
+}
+
 impl WorkflowStatus {
     pub fn from_workflow(workflow: &Workflow) -> Self {
         match workflow {
@@ -187,12 +199,8 @@ impl WorkflowStatus {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            WorkflowStatus::Open => "open",
-            WorkflowStatus::InProgress => "in_progress",
-            WorkflowStatus::Closed => "closed",
-        }
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::parse_str(raw)
     }
 
     pub fn into_workflow(

@@ -32,12 +32,14 @@ pub enum Effect {
     Unknown,
 }
 
-impl Effect {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Effect::None => "none",
-            Effect::Some => "some",
-            Effect::Unknown => "unknown",
+crate::enum_str! {
+    impl Effect {
+        pub fn as_str(&self) -> &'static str;
+        fn parse_str(raw: &str) -> Option<Self>;
+        variants {
+            None => ["none"],
+            Some => ["some"],
+            Unknown => ["unknown"],
         }
     }
 }

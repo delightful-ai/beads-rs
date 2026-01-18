@@ -23,12 +23,14 @@ enum PidState {
     Unknown,
 }
 
-impl PidState {
-    fn as_str(self) -> &'static str {
-        match self {
-            PidState::Missing => "missing",
-            PidState::Alive => "alive",
-            PidState::Unknown => "unknown",
+crate::enum_str! {
+    impl PidState {
+        fn as_str(&self) -> &'static str;
+        fn parse_str(raw: &str) -> Option<Self>;
+        variants {
+            Missing => ["missing"],
+            Alive => ["alive"],
+            Unknown => ["unknown"],
         }
     }
 }

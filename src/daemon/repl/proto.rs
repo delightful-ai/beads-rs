@@ -121,32 +121,26 @@ enum MessageType {
     Error,
 }
 
-impl MessageType {
-    fn as_str(self) -> &'static str {
-        match self {
-            MessageType::Hello => "HELLO",
-            MessageType::Welcome => "WELCOME",
-            MessageType::Events => "EVENTS",
-            MessageType::Ack => "ACK",
-            MessageType::Want => "WANT",
-            MessageType::Ping => "PING",
-            MessageType::Pong => "PONG",
-            MessageType::Error => "ERROR",
+crate::enum_str! {
+    impl MessageType {
+        fn as_str(&self) -> &'static str;
+        fn parse_str(raw: &str) -> Option<Self>;
+        variants {
+            Hello => ["HELLO"],
+            Welcome => ["WELCOME"],
+            Events => ["EVENTS"],
+            Ack => ["ACK"],
+            Want => ["WANT"],
+            Ping => ["PING"],
+            Pong => ["PONG"],
+            Error => ["ERROR"],
         }
     }
+}
 
+impl MessageType {
     fn parse(raw: &str) -> Option<Self> {
-        match raw {
-            "HELLO" => Some(MessageType::Hello),
-            "WELCOME" => Some(MessageType::Welcome),
-            "EVENTS" => Some(MessageType::Events),
-            "ACK" => Some(MessageType::Ack),
-            "WANT" => Some(MessageType::Want),
-            "PING" => Some(MessageType::Ping),
-            "PONG" => Some(MessageType::Pong),
-            "ERROR" => Some(MessageType::Error),
-            _ => None,
-        }
+        Self::parse_str(raw)
     }
 }
 

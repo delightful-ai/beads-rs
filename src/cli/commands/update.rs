@@ -223,13 +223,10 @@ fn normalize_reason(reason: Option<String>) -> Option<String> {
 }
 
 fn parse_status(raw: &str) -> Result<WorkflowStatus> {
-    match raw {
-        "open" => Ok(WorkflowStatus::Open),
-        "in_progress" => Ok(WorkflowStatus::InProgress),
-        "closed" => Ok(WorkflowStatus::Closed),
-        other => Err(Error::Op(crate::daemon::OpError::ValidationFailed {
+    WorkflowStatus::parse(raw).ok_or_else(|| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
             field: "status".into(),
-            reason: format!("unknown status {other:?}"),
-        })),
-    }
+            reason: format!("unknown status {raw:?}"),
+        })
+    })
 }

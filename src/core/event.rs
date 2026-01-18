@@ -1085,36 +1085,24 @@ fn decode_wire_bead_patch(
             }
             "status" => {
                 let raw = decode_text(dec, limits)?;
-                patch.status = Some(match raw {
-                    "open" => WorkflowStatus::Open,
-                    "in_progress" => WorkflowStatus::InProgress,
-                    "closed" => WorkflowStatus::Closed,
-                    _ => {
-                        return Err(DecodeError::InvalidField {
-                            field: "status",
-                            reason: format!("unknown status {raw}"),
-                        });
+                patch.status = Some(WorkflowStatus::parse(raw).ok_or_else(|| {
+                    DecodeError::InvalidField {
+                        field: "status",
+                        reason: format!("unknown status {raw}"),
                     }
-                });
+                })?);
             }
             "title" => {
                 patch.title = Some(decode_text(dec, limits)?.to_string());
             }
             "type" => {
                 let raw = decode_text(dec, limits)?;
-                patch.bead_type = Some(match raw {
-                    "bug" => super::domain::BeadType::Bug,
-                    "feature" => super::domain::BeadType::Feature,
-                    "task" => super::domain::BeadType::Task,
-                    "epic" => super::domain::BeadType::Epic,
-                    "chore" => super::domain::BeadType::Chore,
-                    _ => {
-                        return Err(DecodeError::InvalidField {
-                            field: "type",
-                            reason: format!("unknown bead type {raw}"),
-                        });
+                patch.bead_type = Some(super::domain::BeadType::parse(raw).ok_or_else(|| {
+                    DecodeError::InvalidField {
+                        field: "type",
+                        reason: format!("unknown bead type {raw}"),
                     }
-                });
+                })?);
             }
             other => {
                 return Err(DecodeError::InvalidField {

@@ -134,15 +134,17 @@ enum StoreIdSource {
     RemoteFallback,
 }
 
-impl StoreIdSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            StoreIdSource::EnvOverride => "env_override",
-            StoreIdSource::PathCache => "path_cache",
-            StoreIdSource::PathMap => "path_map",
-            StoreIdSource::GitMeta => "git_meta",
-            StoreIdSource::GitRefs => "git_refs",
-            StoreIdSource::RemoteFallback => "remote_fallback",
+crate::enum_str! {
+    impl StoreIdSource {
+        fn as_str(&self) -> &'static str;
+        fn parse_str(raw: &str) -> Option<Self>;
+        variants {
+            EnvOverride => ["env_override"],
+            PathCache => ["path_cache"],
+            PathMap => ["path_map"],
+            GitMeta => ["git_meta"],
+            GitRefs => ["git_refs"],
+            RemoteFallback => ["remote_fallback"],
         }
     }
 }

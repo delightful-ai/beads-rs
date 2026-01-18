@@ -19,15 +19,23 @@ pub enum BeadType {
     Chore,
 }
 
-impl BeadType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Bug => "bug",
-            Self::Feature => "feature",
-            Self::Task => "task",
-            Self::Epic => "epic",
-            Self::Chore => "chore",
+crate::enum_str! {
+    impl BeadType {
+        pub fn as_str(&self) -> &'static str;
+        fn parse_str(raw: &str) -> Option<Self>;
+        variants {
+            Bug => ["bug"],
+            Feature => ["feature"],
+            Task => ["task"],
+            Epic => ["epic"],
+            Chore => ["chore"],
         }
+    }
+}
+
+impl BeadType {
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::parse_str(raw)
     }
 }
 
@@ -41,28 +49,26 @@ pub enum DepKind {
     DiscoveredFrom,
 }
 
-impl DepKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Blocks => "blocks",
-            Self::Parent => "parent",
-            Self::Related => "related",
-            Self::DiscoveredFrom => "discovered_from",
+crate::enum_str! {
+    impl DepKind {
+        pub fn as_str(&self) -> &'static str;
+        fn parse_str(raw: &str) -> Option<Self>;
+        variants {
+            Blocks => ["blocks", "block"],
+            Parent => ["parent", "parent_child", "parentchild"],
+            Related => ["related", "relates"],
+            DiscoveredFrom => ["discovered_from", "discoveredfrom"],
         }
     }
+}
 
+impl DepKind {
     pub fn parse(raw: &str) -> Result<Self, CoreError> {
         let s = raw.trim().to_lowercase().replace('-', "_");
-        match s.as_str() {
-            "blocks" | "block" => Ok(DepKind::Blocks),
-            "parent" | "parent_child" | "parentchild" => Ok(DepKind::Parent),
-            "related" | "relates" => Ok(DepKind::Related),
-            "discovered_from" | "discoveredfrom" => Ok(DepKind::DiscoveredFrom),
-            _ => Err(InvalidDepKind {
-                raw: raw.to_string(),
-            }
-            .into()),
+        Self::parse_str(&s).ok_or_else(|| InvalidDepKind {
+            raw: raw.to_string(),
         }
+        .into())
     }
 
     /// Returns true if this dependency kind requires DAG enforcement (no cycles).

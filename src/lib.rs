@@ -7,6 +7,8 @@ pub mod compat;
 pub mod config;
 pub mod core;
 pub mod daemon;
+#[macro_use]
+mod enum_str;
 pub mod error;
 pub mod git;
 pub mod migrate;
