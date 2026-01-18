@@ -803,3 +803,10 @@ fn main() -> Result<(), pico_args::Error> {
     }
     Ok(())
 }
+
+#[allow(dead_code)]
+pub(crate) fn run_regression_check() {
+    let checker = build_model().checker().threads(1).spawn_dfs().join();
+    assert!(checker.is_done(), "model checking did not complete");
+    checker.assert_properties();
+}
