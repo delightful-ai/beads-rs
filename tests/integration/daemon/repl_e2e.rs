@@ -56,18 +56,24 @@ fn churn_node(node: &crate::fixtures::repl_rig::Node, total: usize, workers: usi
     );
 }
 
-fn wait_for_checkpoint(rig: &ReplRig, idx: usize, timeout: Duration) {
+fn wait_for_checkpoint(rig: &ReplRig, idx: usize, namespace: &NamespaceId, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
         let status = rig.node(idx).admin_status();
-        let ok = status.checkpoints.iter().any(|group| {
-            group.last_checkpoint_wall_ms.is_some() && !group.in_flight && !group.dirty
-        });
+        let ok = status
+            .checkpoints
+            .iter()
+            .find(|group| group.namespaces.contains(namespace))
+            .is_some_and(|group| {
+                group.last_checkpoint_wall_ms.is_some() && !group.in_flight && !group.dirty
+            });
         if ok {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("checkpoint did not complete in time: {status:?}");
+            panic!(
+                "checkpoint for {namespace:?} did not complete in time: {status:?}"
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -230,7 +236,7 @@ fn repl_checkpoint_bootstrap_under_churn() {
         2,
         Duration::from_secs(30),
     );
-    wait_for_checkpoint(&rig, 0, Duration::from_secs(120));
+    wait_for_checkpoint(&rig, 0, &NamespaceId::core(), Duration::from_secs(120));
 
     let tail_ids = [
         rig.create_issue(0, "bootstrap-tail-0"),
