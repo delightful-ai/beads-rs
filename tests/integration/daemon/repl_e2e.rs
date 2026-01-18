@@ -236,6 +236,13 @@ fn repl_checkpoint_bootstrap_under_churn() {
         2,
         Duration::from_secs(30),
     );
+    wait_for_wal_segments(
+        &rig,
+        1,
+        &NamespaceId::core(),
+        2,
+        Duration::from_secs(30),
+    );
     wait_for_checkpoint(&rig, 0, &NamespaceId::core(), Duration::from_secs(120));
 
     let tail_ids = [
