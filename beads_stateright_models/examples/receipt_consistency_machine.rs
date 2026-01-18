@@ -328,7 +328,7 @@ fn issue_put(cfg: &ServerCfg, state: &mut ClientState, o: &mut Out<ModelActor>) 
     }
     let request_id = request_id_for(state.next_seq);
     let request_sha = request_sha_for(request_id);
-    match build_receipt(cfg, &state.wal, request_id, request_sha, state.next_seq as u64) {
+    match build_receipt(cfg, &state.wal, request_id, request_sha, 0) {
         Ok((receipt, snapshot)) => {
             let key = ReceiptKey::from_receipt(&receipt);
             state.wal = snapshot;
