@@ -1384,15 +1384,25 @@ pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
 }
 
 fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
-    let s = if json {
-        serde_json::to_string_pretty(payload).map_err(crate::daemon::IpcError::from)?
-    } else {
-        render::render_human(payload)
-    };
-
+    if json {
+        return print_json(payload);
+    }
+    let s = render::render_human(payload);
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
     if let Err(e) = writeln!(stdout, "{s}")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(crate::daemon::IpcError::from(e).into());
+    }
+    Ok(())
+}
+
+fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, value).map_err(crate::daemon::IpcError::from)?;
+    if let Err(e) = writeln!(stdout)
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
         return Err(crate::daemon::IpcError::from(e).into());

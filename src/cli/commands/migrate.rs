@@ -1,4 +1,4 @@
-use super::super::{Ctx, MigrateCmd, normalize_bead_slug_for};
+use super::super::{Ctx, MigrateCmd, normalize_bead_slug_for, print_json};
 use crate::core::FormatVersion;
 use crate::daemon::ipc::{Request, send_request};
 use crate::{Error, Result};
@@ -15,9 +15,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 "latest_format_version": latest,
                 "needs_migration": current != latest,
             });
-            let s =
-                serde_json::to_string_pretty(&payload).map_err(crate::daemon::IpcError::from)?;
-            println!("{s}");
+            print_json(&payload)?;
             Ok(())
         }
         MigrateCmd::To(args) => Err(Error::Op(crate::daemon::OpError::ValidationFailed {
@@ -52,9 +50,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                     "notes": report.notes,
                     "warnings": report.warnings,
                 });
-                let s = serde_json::to_string_pretty(&payload)
-                    .map_err(crate::daemon::IpcError::from)?;
-                println!("{s}");
+                print_json(&payload)?;
                 return Ok(());
             }
 
@@ -111,9 +107,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 "commit": commit_oid,
                 "pushed": pushed,
             });
-            let s =
-                serde_json::to_string_pretty(&payload).map_err(crate::daemon::IpcError::from)?;
-            println!("{s}");
+            print_json(&payload)?;
             Ok(())
         }
     }

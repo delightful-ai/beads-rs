@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 
+use super::super::print_json;
 use crate::Result;
 use crate::config::load_or_init;
 use crate::upgrade::{UpgradeMethod, UpgradeOutcome, run_upgrade};
@@ -26,8 +27,7 @@ pub(crate) fn handle(json: bool, background: bool) -> Result<()> {
             install_path: outcome.install_path.to_str().unwrap_or(""),
             method: method_str(outcome.method),
         };
-        let s = serde_json::to_string_pretty(&payload).map_err(crate::daemon::IpcError::from)?;
-        println!("{s}");
+        print_json(&payload)?;
         return Ok(());
     }
 

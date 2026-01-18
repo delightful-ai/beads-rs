@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use super::super::render;
-use super::super::{Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, send};
+use super::super::{Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, print_json, send};
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
@@ -44,11 +44,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             }
 
             if ctx.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&results)
-                        .map_err(crate::daemon::IpcError::from)?
-                );
+                print_json(&results)?;
                 return Ok(());
             }
 
@@ -78,11 +74,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             }
 
             if ctx.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&results)
-                        .map_err(crate::daemon::IpcError::from)?
-                );
+                print_json(&results)?;
                 return Ok(());
             }
 
@@ -95,11 +87,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             let id = normalize_bead_id(&id)?;
             let issue = fetch_issue(ctx, &id)?;
             if ctx.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&issue.labels)
-                        .map_err(crate::daemon::IpcError::from)?
-                );
+                print_json(&issue.labels)?;
                 return Ok(());
             }
             println!("{}", render::render_label_list(&issue.id, &issue.labels));
@@ -129,10 +117,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                         count: *count,
                     })
                     .collect();
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&out).map_err(crate::daemon::IpcError::from)?
-                );
+                print_json(&out)?;
                 return Ok(());
             }
             println!("{}", render::render_label_list_all(&counts));

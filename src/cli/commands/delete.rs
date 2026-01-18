@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::super::{Ctx, DeleteArgs, normalize_bead_ids, send};
+use super::super::{Ctx, DeleteArgs, normalize_bead_ids, print_json, send};
 use crate::Result;
 use crate::daemon::ipc::Request;
 
@@ -31,10 +31,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
     }
 
     if ctx.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&results).map_err(crate::daemon::IpcError::from)?
-        );
+        print_json(&results)?;
         return Ok(());
     }
 

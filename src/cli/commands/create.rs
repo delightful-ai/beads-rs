@@ -2,8 +2,8 @@ use std::io::{BufRead, Write};
 
 use super::super::render;
 use super::super::{
-    CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_ok,
-    resolve_description, send, send_raw,
+    CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_json,
+    print_ok, resolve_description, send, send_raw,
 };
 use crate::api::QueryResult;
 use crate::core::BeadType;
@@ -226,10 +226,7 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     }
 
     if ctx.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&created).map_err(crate::daemon::IpcError::from)?
-        );
+        print_json(&created)?;
         return Ok(());
     }
 

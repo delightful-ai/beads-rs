@@ -13,7 +13,7 @@ use crate::daemon::wal::fsck::{FsckOptions, FsckReport, FsckStatus, fsck_store};
 use crate::paths;
 use crate::{Error, Result};
 
-use super::super::{StoreCmd, StoreFsckArgs, StoreUnlockArgs};
+use super::super::{StoreCmd, StoreFsckArgs, StoreUnlockArgs, print_json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -286,11 +286,10 @@ fn pid_check(pid: u32) -> PidCheck {
 }
 
 fn write_report(report: &StoreUnlockReport, json: bool) -> Result<()> {
-    let output = if json {
-        serde_json::to_string_pretty(report).map_err(crate::daemon::IpcError::from)?
-    } else {
-        render_human(report)
-    };
+    if json {
+        return print_json(report);
+    }
+    let output = render_human(report);
 
     let mut stdout = std::io::stdout().lock();
     if let Err(e) = writeln!(stdout, "{output}")
@@ -302,11 +301,10 @@ fn write_report(report: &StoreUnlockReport, json: bool) -> Result<()> {
 }
 
 fn write_fsck_report(report: &FsckReport, json: bool) -> Result<()> {
-    let output = if json {
-        serde_json::to_string_pretty(report).map_err(crate::daemon::IpcError::from)?
-    } else {
-        render_fsck_human(report)
-    };
+    if json {
+        return print_json(report);
+    }
+    let output = render_fsck_human(report);
 
     let mut stdout = std::io::stdout().lock();
     if let Err(e) = writeln!(stdout, "{output}")

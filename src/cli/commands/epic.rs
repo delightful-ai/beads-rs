@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use super::super::render;
-use super::super::{Ctx, EpicCmd, print_ok, send};
+use super::super::{Ctx, EpicCmd, print_json, print_ok, send};
 use crate::Result;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
@@ -92,10 +92,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
                     count: closed.len(),
                     closed,
                 };
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&out).map_err(crate::daemon::IpcError::from)?
-                );
+                print_json(&out)?;
             } else {
                 println!("{}", render::render_epic_close_result(&closed));
             }
