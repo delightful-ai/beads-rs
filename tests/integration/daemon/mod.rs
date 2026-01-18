@@ -3,6 +3,7 @@ mod admin_status;
 mod crash_recovery;
 mod lifecycle;
 mod logging;
+mod realtime_smoke;
 mod repl_e2e;
 mod store_lock;
 mod subscribe;
