@@ -1,8 +1,12 @@
 use super::super::render;
-use super::super::{Ctx, ShowArgs, fetch_issue_summaries, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, ShowArgs, normalize_bead_id, print_ok, send};
+use crate::api::IssueSummary;
 use crate::Result;
 use crate::api::QueryResult;
+use crate::core::BeadId;
+use crate::daemon::Filters;
 use crate::daemon::ipc::{Request, ResponsePayload};
+use std::collections::{BTreeSet, HashMap};
 
 pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
@@ -46,8 +50,6 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
                 _ => Vec::new(),
             };
 
-            use std::collections::BTreeSet;
-
             // Collect IDs for outgoing deps
             let outgoing_ids: BTreeSet<String> =
                 outgoing_edges.iter().map(|e| e.to.clone()).collect();
@@ -74,12 +76,19 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
                 }
             }
 
-            // Batch fetch all summaries in a few calls instead of N individual requests
-            let outgoing_views = fetch_issue_summaries(ctx, outgoing_ids.into_iter().collect())?;
-            let blocks = fetch_issue_summaries(ctx, blocks_ids.into_iter().collect())?;
-            let children = fetch_issue_summaries(ctx, children_ids.into_iter().collect())?;
-            let related = fetch_issue_summaries(ctx, related_ids.into_iter().collect())?;
-            let discovered = fetch_issue_summaries(ctx, discovered_ids.into_iter().collect())?;
+            let mut all_ids = BTreeSet::new();
+            all_ids.extend(outgoing_ids.iter().cloned());
+            all_ids.extend(blocks_ids.iter().cloned());
+            all_ids.extend(children_ids.iter().cloned());
+            all_ids.extend(related_ids.iter().cloned());
+            all_ids.extend(discovered_ids.iter().cloned());
+            let summary_map = fetch_summary_map(ctx, &all_ids)?;
+
+            let outgoing_views = summaries_for(&outgoing_ids, &summary_map);
+            let blocks = summaries_for(&blocks_ids, &summary_map);
+            let children = summaries_for(&children_ids, &summary_map);
+            let related = summaries_for(&related_ids, &summary_map);
+            let discovered = summaries_for(&discovered_ids, &summary_map);
 
             let incoming = render::IncomingGroups {
                 children,
@@ -96,4 +105,42 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
         }
         other => print_ok(&other, false),
     }
+}
+
+fn fetch_summary_map(
+    ctx: &Ctx,
+    ids: &BTreeSet<String>,
+) -> Result<HashMap<String, IssueSummary>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let bead_ids = ids
+        .iter()
+        .map(|id| BeadId::parse(id))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let filters = Filters {
+        ids: Some(bead_ids),
+        ..Filters::default()
+    };
+    let req = Request::List {
+        repo: ctx.repo.clone(),
+        filters,
+        read: ctx.read_consistency(),
+    };
+    match send(&req)? {
+        ResponsePayload::Query(QueryResult::Issues(summaries)) => Ok(summaries
+            .into_iter()
+            .map(|summary| (summary.id.clone(), summary))
+            .collect()),
+        _ => Ok(HashMap::new()),
+    }
+}
+
+fn summaries_for(
+    ids: &BTreeSet<String>,
+    summaries: &HashMap<String, IssueSummary>,
+) -> Vec<IssueSummary> {
+    ids.iter()
+        .filter_map(|id| summaries.get(id).cloned())
+        .collect()
 }
