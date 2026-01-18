@@ -79,7 +79,7 @@ impl From<EventBytes<Canonical>> for EventBytes<Opaque> {
 }
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Sha256(pub [u8; 32]);
 
 impl Sha256 {

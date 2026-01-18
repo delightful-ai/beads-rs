@@ -10,13 +10,13 @@ use crate::core::{
 
 use super::proto::{WatermarkHeads, WatermarkMap};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct PeerAckTable {
     peers: BTreeMap<ReplicaId, PeerAckState>,
     eligible: BTreeMap<NamespaceId, BTreeSet<ReplicaId>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PeerAckState {
     durable: Watermarks<Durable>,
     applied: Watermarks<Applied>,

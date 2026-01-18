@@ -23,6 +23,8 @@ pub use index::{
     WalIndexWriter, WatermarkRow,
 };
 pub use memory_index::MemoryWalIndex;
+#[cfg(feature = "model-testing")]
+pub use memory_index::MemoryWalIndexSnapshot;
 pub use record::{
     Record, RecordFlags, RecordHeader, RecordHeaderMismatch, RecordVerifyError, Unverified,
     UnverifiedRecord, Verified, VerifiedRecord,

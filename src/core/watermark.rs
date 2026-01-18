@@ -10,10 +10,10 @@ use thiserror::Error;
 
 use super::{NamespaceId, ReplicaId};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Applied;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Durable;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -115,14 +115,14 @@ impl From<Seq1> for u64 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HeadStatus {
     Genesis,
     Known([u8; 32]),
     Unknown,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Watermark<K> {
     seq: Seq0,
     head: HeadStatus,
@@ -217,7 +217,7 @@ fn validate_head(seq: Seq0, head: HeadStatus) -> Result<(), WatermarkError> {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Watermarks<K> {
     inner: BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>,
 }

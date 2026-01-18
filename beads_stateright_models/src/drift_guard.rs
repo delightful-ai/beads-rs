@@ -7,10 +7,10 @@
 
 #[allow(unused_imports)]
 use beads_rs::model::{
-    BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOrigin, GapBufferByNsOriginSnapshot,
-    GapBufferSnapshot, HeadSnapshot, IngestDecision, OriginStreamSnapshot, OriginStreamState,
-    PeerAckTable, VerifiedEventAny, WatermarkSnapshot, digest, durability, event_factory,
-    repl_ingest,
+    digest, durability, event_factory, repl_ingest, BufferedEventSnapshot, BufferedPrevSnapshot,
+    GapBufferByNsOrigin, GapBufferByNsOriginSnapshot, GapBufferSnapshot, HeadSnapshot,
+    IngestDecision, MemoryWalIndex, OriginStreamSnapshot, OriginStreamState, PeerAckTable,
+    VerifiedEventAny, WatermarkSnapshot,
 };
 #[allow(unused_imports)]
 use beads_rs::{
@@ -32,15 +32,32 @@ fn _drift_guard_examples(
     lookup: &dyn beads_rs::EventShaLookup,
 ) {
     let _digest = digest::canonical_state_sha(state);
-    let _event = factory.txn_body(seq, TxnId::new(origin.as_uuid()), 0, 0, TxnDeltaV1::new(), None);
+    let _event = factory.txn_body(
+        seq,
+        TxnId::new(origin.as_uuid()),
+        0,
+        0,
+        TxnDeltaV1::new(),
+        None,
+    );
     let _frame = event_factory::encode_frame(&_event, None);
     let _verified = repl_ingest::verify_frame(frame, limits, store, None, lookup);
     let _ = GapBufferByNsOrigin::new(limits.clone());
-    let _ = OriginStreamState::new(namespace.clone(), origin, beads_rs::Watermark::genesis(), limits);
+    let _ = OriginStreamState::new(
+        namespace.clone(),
+        origin,
+        beads_rs::Watermark::genesis(),
+        limits,
+    );
     let _ = IngestDecision::DuplicateNoop;
     let _ = PeerAckTable::new();
+    let _ = MemoryWalIndex::new();
     let _ = durability::poll_replicated;
-    let _: GapBufferByNsOriginSnapshot = GapBufferByNsOriginSnapshot { origins: Vec::new() };
+    let _ = durability::pending_receipt;
+    let _ = durability::achieved_receipt;
+    let _: GapBufferByNsOriginSnapshot = GapBufferByNsOriginSnapshot {
+        origins: Vec::new(),
+    };
     let _: GapBufferSnapshot = GapBufferSnapshot {
         buffered: Vec::new(),
         buffered_bytes: 0,
@@ -71,4 +88,5 @@ fn _drift_guard_examples(
         prev: BufferedPrevSnapshot::Contiguous { prev: None },
         bytes_len: 0,
     };
+    let _ = MemoryWalIndex::new().model_snapshot();
 }

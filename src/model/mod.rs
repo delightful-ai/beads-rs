@@ -20,3 +20,4 @@ pub use crate::daemon::repl::gap_buffer::{
 pub use crate::daemon::repl::{
     GapBufferByNsOrigin, IngestDecision, OriginStreamState, PeerAckTable,
 };
+pub use crate::daemon::wal::{MemoryWalIndex, MemoryWalIndexSnapshot};

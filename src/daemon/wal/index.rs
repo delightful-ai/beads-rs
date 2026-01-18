@@ -170,7 +170,7 @@ pub trait WalIndexReader {
     fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<Seq0, WalIndexError>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientRequestRow {
     pub request_sha256: [u8; 32],
     pub txn_id: TxnId,
@@ -178,7 +178,7 @@ pub struct ClientRequestRow {
     pub created_at_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct IndexedRangeItem {
     pub event_id: EventId,
     pub sha: [u8; 32],
@@ -191,7 +191,7 @@ pub struct IndexedRangeItem {
     pub client_request_id: Option<ClientRequestId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SegmentRow {
     pub namespace: NamespaceId,
     pub segment_id: SegmentId,
@@ -202,7 +202,7 @@ pub struct SegmentRow {
     pub final_len: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct WatermarkRow {
     pub namespace: NamespaceId,
     pub origin: ReplicaId,
@@ -212,14 +212,14 @@ pub struct WatermarkRow {
     pub durable_head_sha: Option<[u8; 32]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HlcRow {
     pub actor_id: ActorId,
     pub last_physical_ms: u64,
     pub last_logical: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ReplicaLivenessRow {
     pub replica_id: ReplicaId,
     pub last_seen_ms: u64,
@@ -228,7 +228,7 @@ pub struct ReplicaLivenessRow {
     pub durability_eligible: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexDurabilityMode {
     Cache,

@@ -13,7 +13,7 @@ use super::{
 
 type EventKey = (NamespaceId, ReplicaId, Seq1);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct EventEntry {
     sha: [u8; 32],
     prev_sha: Option<[u8; 32]>,
@@ -25,7 +25,7 @@ struct EventEntry {
     client_request_id: Option<ClientRequestId>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 struct MemoryWalIndexState {
     version: u64,
     origin_next_seq: BTreeMap<(NamespaceId, ReplicaId), u64>,
@@ -35,6 +35,13 @@ struct MemoryWalIndexState {
     hlc: BTreeMap<ActorId, HlcRow>,
     client_requests: BTreeMap<(NamespaceId, ReplicaId, ClientRequestId), ClientRequestRow>,
     replica_liveness: BTreeMap<ReplicaId, ReplicaLivenessRow>,
+}
+
+#[cfg(feature = "model-testing")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MemoryWalIndexSnapshot {
+    state: MemoryWalIndexState,
+    mode: IndexDurabilityMode,
 }
 
 #[derive(Clone)]
@@ -54,6 +61,28 @@ impl MemoryWalIndex {
             state: Arc::new(RwLock::new(MemoryWalIndexState::default())),
             txn_gate: Arc::new(AtomicBool::new(false)),
             mode,
+        }
+    }
+
+    #[cfg(feature = "model-testing")]
+    pub fn model_snapshot(&self) -> MemoryWalIndexSnapshot {
+        let state = self
+            .state
+            .read()
+            .expect("memory wal index lock poisoned")
+            .clone();
+        MemoryWalIndexSnapshot {
+            state,
+            mode: self.mode,
+        }
+    }
+
+    #[cfg(feature = "model-testing")]
+    pub fn from_snapshot(snapshot: MemoryWalIndexSnapshot) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(snapshot.state)),
+            txn_gate: Arc::new(AtomicBool::new(false)),
+            mode: snapshot.mode,
         }
     }
 }
