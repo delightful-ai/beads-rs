@@ -987,10 +987,11 @@ mod tests {
     }
 
     fn test_limits() -> crate::core::Limits {
-        let mut limits = crate::core::Limits::default();
-        limits.max_event_batch_events = 4;
-        limits.max_event_batch_bytes = 1024;
-        limits
+        crate::core::Limits {
+            max_event_batch_events: 4,
+            max_event_batch_bytes: 1024,
+            ..Default::default()
+        }
     }
 
     fn test_policy() -> BTreeMap<NamespaceId, NamespacePolicy> {
@@ -1036,44 +1037,43 @@ mod tests {
                         decode_envelope(&bytes, &crate::core::Limits::default()).expect("decode");
                     tx.send(envelope.message.clone()).expect("send");
 
-                    if respond_with_welcome && !welcome_sent {
-                        if let ReplMessage::Hello(hello) = envelope.message {
-                            let mut config = SessionConfig::new(
-                                peer_store,
-                                peer_replica,
-                                &crate::core::Limits::default(),
-                            );
-                            config.offered_namespaces = hello.requested_namespaces.clone();
-                            config.requested_namespaces = hello.offered_namespaces.clone();
-                            let mut session = Session::new(
-                                SessionRole::Inbound,
-                                config,
-                                crate::core::Limits::default(),
-                                AdmissionController::new(&crate::core::Limits::default()),
-                            );
-                            let actions = session.handle_message(
-                                ReplMessage::Hello(hello),
-                                &mut TestStore::default(),
-                                now_ms(),
-                            );
-                            for action in actions {
-                                if let SessionAction::Send(message) = action {
-                                    let mut message = message;
-                                    if let Some(override_namespaces) = accepted_override.clone() {
-                                        if let ReplMessage::Welcome(ref mut welcome) = message {
-                                            welcome.accepted_namespaces = override_namespaces;
-                                        }
-                                    }
-                                    let envelope = ReplEnvelope {
-                                        version: PROTOCOL_VERSION_V1,
-                                        message,
-                                    };
-                                    let bytes = encode_envelope(&envelope).expect("encode");
-                                    writer.write_frame(&bytes).expect("write");
+                    if respond_with_welcome
+                        && !welcome_sent
+                        && let ReplMessage::Hello(hello) = envelope.message
+                    {
+                        let mut config = SessionConfig::new(
+                            peer_store,
+                            peer_replica,
+                            &crate::core::Limits::default(),
+                        );
+                        config.offered_namespaces = hello.requested_namespaces.clone();
+                        config.requested_namespaces = hello.offered_namespaces.clone();
+                        let mut session = Session::new(
+                            SessionRole::Inbound,
+                            config,
+                            crate::core::Limits::default(),
+                            AdmissionController::new(&crate::core::Limits::default()),
+                        );
+                        let mut store = TestStore;
+                        let actions =
+                            session.handle_message(ReplMessage::Hello(hello), &mut store, now_ms());
+                        for action in actions {
+                            if let SessionAction::Send(message) = action {
+                                let mut message = message;
+                                if let Some(override_namespaces) = accepted_override.clone()
+                                    && let ReplMessage::Welcome(ref mut welcome) = message
+                                {
+                                    welcome.accepted_namespaces = override_namespaces;
                                 }
+                                let envelope = ReplEnvelope {
+                                    version: PROTOCOL_VERSION_V1,
+                                    message,
+                                };
+                                let bytes = encode_envelope(&envelope).expect("encode");
+                                writer.write_frame(&bytes).expect("write");
                             }
-                            welcome_sent = true;
                         }
+                        welcome_sent = true;
                     }
                 }
             }
@@ -1126,8 +1126,7 @@ mod tests {
                 max: Duration::from_millis(10),
             },
         };
-        let manager =
-            ReplicationManager::new(SharedSessionStore::new(TestStore::default()), config);
+        let manager = ReplicationManager::new(SharedSessionStore::new(TestStore), config);
 
         let handle = manager.start();
         let msg = rx.recv_timeout(Duration::from_secs(1)).expect("hello");
@@ -1182,8 +1181,7 @@ mod tests {
                 max: Duration::from_millis(10),
             },
         };
-        let manager =
-            ReplicationManager::new(SharedSessionStore::new(TestStore::default()), config);
+        let manager = ReplicationManager::new(SharedSessionStore::new(TestStore), config);
 
         let handle = manager.start();
         rx.recv_timeout(Duration::from_secs(1)).expect("hello");
@@ -1242,7 +1240,8 @@ mod tests {
             limits.clone(),
             AdmissionController::new(&limits),
         );
-        let _ = session.begin_handshake(&TestStore::default(), now_ms());
+        let mut store = TestStore;
+        let _ = session.begin_handshake(&store, now_ms());
         let welcome = Welcome {
             protocol_version: PROTOCOL_VERSION_V1,
             store_id: local_store.store_id,
@@ -1259,7 +1258,7 @@ mod tests {
         };
         session.handle_message(
             ReplMessage::Welcome(welcome),
-            &mut TestStore::default(),
+            &mut store,
             now_ms(),
         );
         assert!(matches!(session.phase(), SessionPhase::Streaming));
@@ -1295,7 +1294,8 @@ mod tests {
         let (frame1, frame2) = loop {
             let f1 = make_frame(namespace.clone(), origin, 1, payload_len);
             let f2 = make_frame(namespace.clone(), origin, 2, payload_len);
-            let len_single = events_envelope_len(&session, &[f1.clone()]).expect("len");
+            let len_single = events_envelope_len(&session, std::slice::from_ref(&f1))
+                .expect("len");
             let len_double = events_envelope_len(&session, &[f1.clone(), f2.clone()]).expect("len");
             if len_single < max_frame && len_double > max_frame {
                 break (f1, f2);
@@ -1376,8 +1376,7 @@ mod tests {
                 max: Duration::from_millis(10),
             },
         };
-        let manager =
-            ReplicationManager::new(SharedSessionStore::new(TestStore::default()), config);
+        let manager = ReplicationManager::new(SharedSessionStore::new(TestStore), config);
 
         let handle = manager.start();
         rx.recv_timeout(Duration::from_secs(1)).expect("hello");
@@ -1450,8 +1449,7 @@ mod tests {
                 max: Duration::from_millis(40),
             },
         };
-        let manager =
-            ReplicationManager::new(SharedSessionStore::new(TestStore::default()), config);
+        let manager = ReplicationManager::new(SharedSessionStore::new(TestStore), config);
 
         let handle = manager.start();
         let (seen_tx, seen_rx) = crossbeam::channel::bounded(2);
