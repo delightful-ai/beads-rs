@@ -170,6 +170,7 @@ fn parse_log_rotation(raw: &str) -> Option<LogRotation> {
 mod tests {
     use super::*;
 
+    use crate::config::DefaultsConfig;
     use crate::core::NamespaceId;
 
     #[test]

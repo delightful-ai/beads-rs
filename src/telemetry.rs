@@ -619,12 +619,12 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|entry| entry.path == "new.log")
+                .any(|entry| entry.path.as_path() == std::path::Path::new("new.log"))
         );
         assert!(
             entries
                 .iter()
-                .any(|entry| entry.path == "newest.log")
+                .any(|entry| entry.path.as_path() == std::path::Path::new("newest.log"))
         );
     }
 

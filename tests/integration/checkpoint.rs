@@ -79,14 +79,16 @@ fn checkpoint_round_trip_preserves_state_and_manifest() {
         watermarks_from_included(&imported.included, imported.included_heads.as_ref());
 
     let snapshot = build_snapshot_from_state(
-        "core",
-        vec![core.clone()],
-        expected_export.meta.store_id,
-        expected_export.meta.store_epoch,
-        expected_export.meta.created_at_ms,
-        expected_export.meta.created_by_replica_id,
-        expected_export.meta.policy_hash,
-        expected_export.meta.roster_hash,
+        SnapshotBuildArgs {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![core.clone()],
+            store_id: expected_export.meta.store_id,
+            store_epoch: expected_export.meta.store_epoch,
+            created_at_ms: expected_export.meta.created_at_ms,
+            created_by_replica_id: expected_export.meta.created_by_replica_id,
+            policy_hash: expected_export.meta.policy_hash,
+            roster_hash: expected_export.meta.roster_hash,
+        },
         &imported.state,
         &imported_watermarks,
     );
