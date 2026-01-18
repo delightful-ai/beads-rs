@@ -2,14 +2,19 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::fs;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 
 use beads_rs::core::Limits;
 use beads_rs::daemon::repl::frame::{FrameError, FrameReader, FrameWriter};
@@ -49,6 +54,53 @@ struct Args {
     one_way_loss: Option<String>,
     #[arg(long)]
     max_frame_bytes: Option<usize>,
+    #[arg(long, default_value = "off", value_enum)]
+    trace_mode: TraceMode,
+    #[arg(long)]
+    trace_path: Option<PathBuf>,
+    #[arg(long, default_value_t = 5_000)]
+    trace_timeout_ms: u64,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum TraceMode {
+    Off,
+    Record,
+    Replay,
+}
+
+impl TraceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            TraceMode::Off => "off",
+            TraceMode::Record => "record",
+            TraceMode::Replay => "replay",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TraceConfig {
+    mode: TraceMode,
+    path: PathBuf,
+    timeout: Duration,
+}
+
+impl TraceConfig {
+    fn from_args(args: &Args) -> Result<Option<Self>, String> {
+        if args.trace_mode == TraceMode::Off {
+            return Ok(None);
+        }
+        let path = args
+            .trace_path
+            .clone()
+            .ok_or_else(|| "trace mode requires --trace-path".to_string())?;
+        Ok(Some(Self {
+            mode: args.trace_mode,
+            path,
+            timeout: Duration::from_millis(args.trace_timeout_ms.max(1)),
+        }))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,7 +119,8 @@ impl LossDirection {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum Direction {
     AtoB,
     BtoA,
@@ -165,6 +218,132 @@ struct ScheduledFrame {
     payload: Vec<u8>,
 }
 
+const TRACE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TraceRecord {
+    Header { version: u32, max_frame_bytes: usize },
+    Step {
+        seq: u64,
+        direction: Direction,
+        payload_len: usize,
+    },
+}
+
+#[derive(Debug)]
+struct TraceStep {
+    seq: u64,
+    direction: Direction,
+    payload_len: usize,
+}
+
+struct TraceWriter {
+    writer: std::io::BufWriter<File>,
+    next_seq: u64,
+}
+
+impl TraceWriter {
+    fn new(path: &Path, max_frame_bytes: usize) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("trace dir create failed {:?}: {err}", parent))?;
+        }
+        let file =
+            File::create(path).map_err(|err| format!("trace file create failed {path:?}: {err}"))?;
+        let mut writer = std::io::BufWriter::new(file);
+        let header = TraceRecord::Header {
+            version: TRACE_VERSION,
+            max_frame_bytes,
+        };
+        writeln!(
+            writer,
+            "{}",
+            serde_json::to_string(&header).expect("serialize trace header")
+        )
+        .map_err(|err| format!("trace header write failed: {err}"))?;
+        writer
+            .flush()
+            .map_err(|err| format!("trace header flush failed: {err}"))?;
+        Ok(Self {
+            writer,
+            next_seq: 0,
+        })
+    }
+
+    fn write_step(&mut self, direction: Direction, payload_len: usize) -> Result<(), String> {
+        let record = TraceRecord::Step {
+            seq: self.next_seq,
+            direction,
+            payload_len,
+        };
+        self.next_seq = self.next_seq.saturating_add(1);
+        writeln!(
+            self.writer,
+            "{}",
+            serde_json::to_string(&record).expect("serialize trace step")
+        )
+        .map_err(|err| format!("trace step write failed: {err}"))?;
+        self.writer
+            .flush()
+            .map_err(|err| format!("trace step flush failed: {err}"))?;
+        Ok(())
+    }
+}
+
+struct TraceReader {
+    max_frame_bytes: usize,
+    steps: Vec<TraceStep>,
+}
+
+impl TraceReader {
+    fn read(path: &Path) -> Result<Self, String> {
+        let file =
+            File::open(path).map_err(|err| format!("trace file open failed {path:?}: {err}"))?;
+        let reader = BufReader::new(file);
+        let mut max_frame_bytes = None;
+        let mut steps = Vec::new();
+        for line in reader.lines() {
+            let line = line.map_err(|err| format!("trace read failed: {err}"))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: TraceRecord =
+                serde_json::from_str(&line).map_err(|err| format!("trace parse failed: {err}"))?;
+            match record {
+                TraceRecord::Header {
+                    version,
+                    max_frame_bytes: header_max,
+                } => {
+                    if version != TRACE_VERSION {
+                        return Err(format!(
+                            "trace version mismatch: expected {TRACE_VERSION} got {version}"
+                        ));
+                    }
+                    max_frame_bytes = Some(header_max);
+                }
+                TraceRecord::Step {
+                    seq,
+                    direction,
+                    payload_len,
+                } => {
+                    steps.push(TraceStep {
+                        seq,
+                        direction,
+                        payload_len,
+                    });
+                }
+            }
+        }
+        let max_frame_bytes =
+            max_frame_bytes.ok_or_else(|| "trace missing header".to_string())?;
+        Ok(Self {
+            max_frame_bytes,
+            steps,
+        })
+    }
+}
+
 impl Ord for ScheduledFrame {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap by delivery time.
@@ -237,6 +416,11 @@ fn main() {
         profile.reset_after_bytes = Some(value);
     }
 
+    let trace = TraceConfig::from_args(&args).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        std::process::exit(2);
+    });
+
     let listener = TcpListener::bind(&args.listen)
         .unwrap_or_else(|err| panic!("listen {} failed: {err}", args.listen));
     let mut connection_idx = 0u64;
@@ -264,6 +448,18 @@ fn main() {
         let client_write = client;
         let upstream_read = upstream.try_clone().expect("clone upstream");
         let upstream_write = upstream;
+
+        if let Some(ref trace) = trace {
+            run_trace_session(
+                client_read,
+                client_write,
+                upstream_read,
+                upstream_write,
+                max_frame_bytes,
+                trace,
+            );
+            break;
+        }
 
         let conn_seed = seed ^ connection_idx.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         connection_idx = connection_idx.wrapping_add(1);
@@ -304,6 +500,206 @@ fn connect_with_retry(addr: &str, timeout: Duration) -> Result<TcpStream, String
                 backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(200));
             }
         }
+    }
+}
+
+fn run_trace_session(
+    client_read: TcpStream,
+    client_write: TcpStream,
+    upstream_read: TcpStream,
+    upstream_write: TcpStream,
+    max_frame_bytes: usize,
+    trace: &TraceConfig,
+) {
+    match trace.mode {
+        TraceMode::Record => run_trace_record(
+            client_read,
+            client_write,
+            upstream_read,
+            upstream_write,
+            max_frame_bytes,
+            trace,
+        ),
+        TraceMode::Replay => run_trace_replay(
+            client_read,
+            client_write,
+            upstream_read,
+            upstream_write,
+            max_frame_bytes,
+            trace,
+        ),
+        TraceMode::Off => {}
+    }
+}
+
+enum IncomingFrame {
+    Frame { direction: Direction, payload: Vec<u8> },
+    Eof(Direction),
+}
+
+fn run_trace_record(
+    client_read: TcpStream,
+    client_write: TcpStream,
+    upstream_read: TcpStream,
+    upstream_write: TcpStream,
+    max_frame_bytes: usize,
+    trace: &TraceConfig,
+) {
+    let (tx, rx) = mpsc::channel::<IncomingFrame>();
+    let a_tx = tx.clone();
+    let b_tx = tx.clone();
+    let a_reader = thread::spawn(move || trace_reader(Direction::AtoB, client_read, a_tx, max_frame_bytes));
+    let b_reader =
+        thread::spawn(move || trace_reader(Direction::BtoA, upstream_read, b_tx, max_frame_bytes));
+
+    let mut writer_a = FrameWriter::new(client_write, max_frame_bytes);
+    let mut writer_b = FrameWriter::new(upstream_write, max_frame_bytes);
+    let mut trace_writer = match TraceWriter::new(&trace.path, max_frame_bytes) {
+        Ok(writer) => writer,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+
+    let mut done = 0;
+    while done < 2 {
+        match rx.recv() {
+            Ok(IncomingFrame::Frame { direction, payload }) => {
+                if let Err(err) = forward_payload(direction, &payload, &mut writer_a, &mut writer_b)
+                {
+                    eprintln!("trace record write error: {}", frame_error_desc(&err));
+                    break;
+                }
+                if let Err(err) = trace_writer.write_step(direction, payload.len()) {
+                    eprintln!("{err}");
+                    break;
+                }
+            }
+            Ok(IncomingFrame::Eof(_)) => {
+                done += 1;
+            }
+            Err(_) => break,
+        }
+    }
+
+    let _ = a_reader.join();
+    let _ = b_reader.join();
+}
+
+fn run_trace_replay(
+    mut client_read: TcpStream,
+    client_write: TcpStream,
+    mut upstream_read: TcpStream,
+    upstream_write: TcpStream,
+    max_frame_bytes: usize,
+    trace: &TraceConfig,
+) {
+    let trace_reader = match TraceReader::read(&trace.path) {
+        Ok(reader) => reader,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    if trace_reader.max_frame_bytes != max_frame_bytes {
+        eprintln!(
+            "trace max_frame_bytes mismatch: trace={} runtime={}",
+            trace_reader.max_frame_bytes, max_frame_bytes
+        );
+    }
+    let _ = client_read.set_read_timeout(Some(trace.timeout));
+    let _ = upstream_read.set_read_timeout(Some(trace.timeout));
+
+    let mut reader_a = FrameReader::new(client_read, max_frame_bytes);
+    let mut reader_b = FrameReader::new(upstream_read, max_frame_bytes);
+    let mut writer_a = FrameWriter::new(client_write, max_frame_bytes);
+    let mut writer_b = FrameWriter::new(upstream_write, max_frame_bytes);
+
+    for step in trace_reader.steps {
+        let payload = match step.direction {
+            Direction::AtoB => read_trace_frame(&mut reader_a, step.seq, step.direction),
+            Direction::BtoA => read_trace_frame(&mut reader_b, step.seq, step.direction),
+        };
+        let Some(payload) = payload else {
+            return;
+        };
+        if payload.len() != step.payload_len {
+            eprintln!(
+                "trace replay payload length mismatch at {}: expected {} got {}",
+                step.seq,
+                step.payload_len,
+                payload.len()
+            );
+            return;
+        }
+        if let Err(err) = forward_payload(step.direction, &payload, &mut writer_a, &mut writer_b) {
+            eprintln!("trace replay write error: {}", frame_error_desc(&err));
+            return;
+        }
+    }
+}
+
+fn trace_reader(
+    direction: Direction,
+    reader: TcpStream,
+    tx: mpsc::Sender<IncomingFrame>,
+    max_frame_bytes: usize,
+) {
+    let mut frame_reader = FrameReader::new(reader, max_frame_bytes);
+    loop {
+        match frame_reader.read_next() {
+            Ok(Some(payload)) => {
+                if tx
+                    .send(IncomingFrame::Frame { direction, payload })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(None) => {
+                let _ = tx.send(IncomingFrame::Eof(direction));
+                break;
+            }
+            Err(err) => {
+                eprintln!("trace read error {direction:?}: {}", frame_error_desc(&err));
+                let _ = tx.send(IncomingFrame::Eof(direction));
+                break;
+            }
+        }
+    }
+}
+
+fn read_trace_frame(
+    reader: &mut FrameReader<TcpStream>,
+    seq: u64,
+    direction: Direction,
+) -> Option<Vec<u8>> {
+    match reader.read_next() {
+        Ok(Some(payload)) => Some(payload),
+        Ok(None) => {
+            eprintln!("trace replay closed before step {seq} ({direction:?})");
+            None
+        }
+        Err(err) => {
+            eprintln!(
+                "trace replay read error at {seq} ({direction:?}): {}",
+                frame_error_desc(&err)
+            );
+            None
+        }
+    }
+}
+
+fn forward_payload(
+    direction: Direction,
+    payload: &[u8],
+    writer_a: &mut FrameWriter<TcpStream>,
+    writer_b: &mut FrameWriter<TcpStream>,
+) -> Result<usize, FrameError> {
+    match direction {
+        Direction::AtoB => writer_b.write_frame(payload),
+        Direction::BtoA => writer_a.write_frame(payload),
     }
 }
 
