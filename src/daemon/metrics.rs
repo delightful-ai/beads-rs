@@ -342,6 +342,70 @@ pub fn set_checkpoint_queue_depth(value: usize) {
     );
 }
 
+pub fn set_wal_bytes_total(namespace: &crate::core::NamespaceId, value: u64) {
+    emit(
+        "wal_bytes_total",
+        MetricValue::Gauge(value),
+        vec![MetricLabel {
+            key: "namespace",
+            value: namespace.to_string(),
+        }],
+    );
+}
+
+pub fn set_wal_segments_total(namespace: &crate::core::NamespaceId, value: u64) {
+    emit(
+        "wal_segments_total",
+        MetricValue::Gauge(value),
+        vec![MetricLabel {
+            key: "namespace",
+            value: namespace.to_string(),
+        }],
+    );
+}
+
+pub fn set_wal_growth_bytes_per_sec(
+    namespace: &crate::core::NamespaceId,
+    window_ms: u64,
+    value: u64,
+) {
+    emit(
+        "wal_growth_bytes_per_sec",
+        MetricValue::Gauge(value),
+        vec![
+            MetricLabel {
+                key: "namespace",
+                value: namespace.to_string(),
+            },
+            MetricLabel {
+                key: "window_ms",
+                value: window_ms.to_string(),
+            },
+        ],
+    );
+}
+
+pub fn set_wal_growth_segments_per_sec(
+    namespace: &crate::core::NamespaceId,
+    window_ms: u64,
+    value: u64,
+) {
+    emit(
+        "wal_growth_segments_per_sec",
+        MetricValue::Gauge(value),
+        vec![
+            MetricLabel {
+                key: "namespace",
+                value: namespace.to_string(),
+            },
+            MetricLabel {
+                key: "window_ms",
+                value: window_ms.to_string(),
+            },
+        ],
+    );
+}
+
 pub fn scrub_ok() {
     emit("scrub_ok", MetricValue::Counter(1), Vec::new());
 }

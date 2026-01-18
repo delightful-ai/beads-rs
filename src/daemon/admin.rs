@@ -14,10 +14,11 @@ use crate::api::{
     AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
     AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminReplicaLiveness,
     AdminReplicationNamespace, AdminReplicationPeer, AdminRotateReplicaIdOutput, AdminScrubOutput,
-    AdminStatusOutput, AdminWalNamespace, AdminWalSegment,
+    AdminStatusOutput, AdminWalGrowth, AdminWalNamespace, AdminWalSegment, AdminWalWarning,
+    AdminWalWarningKind,
 };
 use crate::core::{
-    NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, WallClock, Watermarks,
+    Limits, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, WallClock, Watermarks,
 };
 use crate::daemon::clock::{ClockAnomaly, ClockAnomalyKind};
 use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_namespaces};
@@ -56,8 +57,9 @@ impl Daemon {
         };
 
         let namespaces = collect_namespaces(store);
-        let wal = match build_wal_status(store, &namespaces) {
-            Ok(wal) => wal,
+        let now_ms = WallClock::now().0;
+        let wal_report = match build_wal_status(store, &namespaces, self.limits(), now_ms) {
+            Ok(wal_report) => wal_report,
             Err(err) => return Response::err(err),
         };
         let replication = build_replication_status(store, &namespaces);
@@ -72,7 +74,8 @@ impl Daemon {
             watermarks_applied: store.watermarks_applied.clone(),
             watermarks_durable: store.watermarks_durable.clone(),
             last_clock_anomaly: clock_anomaly_output(self.clock().last_anomaly()),
-            wal,
+            wal: wal_report.namespaces,
+            wal_warnings: wal_report.warnings,
             replication,
             replica_liveness,
             checkpoints,
@@ -99,6 +102,15 @@ impl Daemon {
             return Response::err(err);
         }
 
+        let store = match self.store_runtime(&proof) {
+            Ok(store) => store,
+            Err(e) => return Response::err(e),
+        };
+        let namespaces = collect_namespaces(store);
+        let now_ms = WallClock::now().0;
+        if let Err(err) = build_wal_status(store, &namespaces, self.limits(), now_ms) {
+            return Response::err(err);
+        }
         let snapshot = crate::daemon::metrics::snapshot();
         let output = build_metrics_output(snapshot);
         Response::ok(ResponsePayload::query(QueryResult::AdminMetrics(output)))
@@ -542,12 +554,26 @@ fn collect_namespaces(store: &crate::daemon::store_runtime::StoreRuntime) -> BTr
     namespaces
 }
 
+struct WalStatusReport {
+    namespaces: Vec<AdminWalNamespace>,
+    warnings: Vec<AdminWalWarning>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WalSegmentStats {
+    created_at_ms: u64,
+    bytes: u64,
+}
+
 fn build_wal_status(
     store: &crate::daemon::store_runtime::StoreRuntime,
     namespaces: &BTreeSet<NamespaceId>,
-) -> Result<Vec<AdminWalNamespace>, OpError> {
+    limits: &Limits,
+    now_ms: u64,
+) -> Result<WalStatusReport, OpError> {
     let reader = store.wal_index.reader();
     let mut out = Vec::new();
+    let mut warnings = Vec::new();
     let store_dir = paths::store_dir(store.meta.store_id());
     for namespace in namespaces {
         let mut segments = reader
@@ -559,6 +585,7 @@ fn build_wal_status(
                 .then_with(|| a.segment_id.cmp(&b.segment_id))
         });
         let mut segment_infos = Vec::new();
+        let mut segment_stats = Vec::new();
         let mut total_bytes = 0u64;
         for segment in segments {
             let resolved_path = resolve_segment_path(&store_dir, &segment.segment_path);
@@ -566,6 +593,10 @@ fn build_wal_status(
             if let Some(value) = bytes {
                 total_bytes = total_bytes.saturating_add(value);
             }
+            segment_stats.push(WalSegmentStats {
+                created_at_ms: segment.created_at_ms,
+                bytes: bytes.unwrap_or(0),
+            });
             segment_infos.push(AdminWalSegment {
                 segment_id: segment.segment_id,
                 created_at_ms: segment.created_at_ms,
@@ -576,14 +607,128 @@ fn build_wal_status(
                 path: resolved_path.to_string_lossy().to_string(),
             });
         }
+        let segment_count = segment_infos.len() as u64;
+        let growth = build_wal_growth(
+            &segment_stats,
+            limits.wal_guardrail_growth_window_ms,
+            now_ms,
+        );
+        record_wal_metrics(namespace, total_bytes, segment_count, &growth);
+        warnings.extend(wal_guardrail_warnings(
+            namespace,
+            total_bytes,
+            segment_count,
+            &growth,
+            limits,
+        ));
         out.push(AdminWalNamespace {
             namespace: namespace.clone(),
             segment_count: segment_infos.len(),
             total_bytes,
+            growth,
             segments: segment_infos,
         });
     }
-    Ok(out)
+    Ok(WalStatusReport {
+        namespaces: out,
+        warnings,
+    })
+}
+
+fn build_wal_growth(
+    segment_stats: &[WalSegmentStats],
+    window_ms: u64,
+    now_ms: u64,
+) -> AdminWalGrowth {
+    if window_ms == 0 {
+        return AdminWalGrowth {
+            window_ms,
+            segments: 0,
+            bytes: 0,
+            segments_per_sec: 0,
+            bytes_per_sec: 0,
+        };
+    }
+    let cutoff = now_ms.saturating_sub(window_ms);
+    let mut segments = 0u64;
+    let mut bytes = 0u64;
+    for segment in segment_stats {
+        if segment.created_at_ms >= cutoff {
+            segments = segments.saturating_add(1);
+            bytes = bytes.saturating_add(segment.bytes);
+        }
+    }
+    let denom_ms = window_ms.max(1);
+    let segments_per_sec = segments.saturating_mul(1000) / denom_ms;
+    let bytes_per_sec = bytes.saturating_mul(1000) / denom_ms;
+    AdminWalGrowth {
+        window_ms,
+        segments,
+        bytes,
+        segments_per_sec,
+        bytes_per_sec,
+    }
+}
+
+fn wal_guardrail_warnings(
+    namespace: &NamespaceId,
+    total_bytes: u64,
+    segment_count: u64,
+    growth: &AdminWalGrowth,
+    limits: &Limits,
+) -> Vec<AdminWalWarning> {
+    let mut warnings = Vec::new();
+    if limits.wal_guardrail_max_bytes > 0 && total_bytes > limits.wal_guardrail_max_bytes {
+        warnings.push(AdminWalWarning {
+            namespace: namespace.clone(),
+            kind: AdminWalWarningKind::TotalBytesExceeded,
+            observed: total_bytes,
+            limit: limits.wal_guardrail_max_bytes,
+            window_ms: None,
+        });
+    }
+    if limits.wal_guardrail_max_segments > 0 && segment_count > limits.wal_guardrail_max_segments {
+        warnings.push(AdminWalWarning {
+            namespace: namespace.clone(),
+            kind: AdminWalWarningKind::SegmentCountExceeded,
+            observed: segment_count,
+            limit: limits.wal_guardrail_max_segments,
+            window_ms: None,
+        });
+    }
+    if limits.wal_guardrail_growth_max_bytes > 0
+        && growth.window_ms > 0
+        && growth.bytes > limits.wal_guardrail_growth_max_bytes
+    {
+        warnings.push(AdminWalWarning {
+            namespace: namespace.clone(),
+            kind: AdminWalWarningKind::GrowthBytesExceeded,
+            observed: growth.bytes,
+            limit: limits.wal_guardrail_growth_max_bytes,
+            window_ms: Some(growth.window_ms),
+        });
+    }
+    warnings
+}
+
+fn record_wal_metrics(
+    namespace: &NamespaceId,
+    total_bytes: u64,
+    segment_count: u64,
+    growth: &AdminWalGrowth,
+) {
+    crate::daemon::metrics::set_wal_bytes_total(namespace, total_bytes);
+    crate::daemon::metrics::set_wal_segments_total(namespace, segment_count);
+    crate::daemon::metrics::set_wal_growth_bytes_per_sec(
+        namespace,
+        growth.window_ms,
+        growth.bytes_per_sec,
+    );
+    crate::daemon::metrics::set_wal_growth_segments_per_sec(
+        namespace,
+        growth.window_ms,
+        growth.segments_per_sec,
+    );
 }
 
 fn segment_bytes(path: &Path, final_len: Option<u64>) -> Option<u64> {
@@ -962,4 +1107,70 @@ fn clock_anomaly_output(anomaly: Option<ClockAnomaly>) -> Option<AdminClockAnoma
         },
         delta_ms: anomaly.delta_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WalSegmentStats, build_wal_growth, wal_guardrail_warnings};
+    use crate::api::AdminWalWarningKind;
+    use crate::core::{Limits, NamespaceId};
+
+    #[test]
+    fn wal_guardrails_warn_on_limits() {
+        let namespace = NamespaceId::core();
+        let now_ms = 10_000;
+        let limits = Limits {
+            wal_guardrail_max_bytes: 100,
+            wal_guardrail_max_segments: 2,
+            wal_guardrail_growth_window_ms: 1_000,
+            wal_guardrail_growth_max_bytes: 50,
+            ..Limits::default()
+        };
+
+        let segment_stats = vec![
+            WalSegmentStats {
+                created_at_ms: now_ms - 200,
+                bytes: 60,
+            },
+            WalSegmentStats {
+                created_at_ms: now_ms - 100,
+                bytes: 40,
+            },
+            WalSegmentStats {
+                created_at_ms: now_ms - 5_000,
+                bytes: 50,
+            },
+        ];
+        let growth = build_wal_growth(
+            &segment_stats,
+            limits.wal_guardrail_growth_window_ms,
+            now_ms,
+        );
+        let warnings = wal_guardrail_warnings(
+            &namespace,
+            150,
+            segment_stats.len() as u64,
+            &growth,
+            &limits,
+        );
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.kind == AdminWalWarningKind::TotalBytesExceeded)
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.kind == AdminWalWarningKind::SegmentCountExceeded)
+        );
+        let growth_warning = warnings
+            .iter()
+            .find(|warning| warning.kind == AdminWalWarningKind::GrowthBytesExceeded)
+            .expect("growth warning");
+        assert_eq!(
+            growth_warning.window_ms,
+            Some(limits.wal_guardrail_growth_window_ms)
+        );
+    }
 }

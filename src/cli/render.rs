@@ -593,12 +593,41 @@ fn render_admin_status(status: &AdminStatusOutput) -> String {
     if !status.wal.is_empty() {
         out.push_str("\nWAL:\n");
         for ns in &status.wal {
+            if ns.growth.window_ms > 0 {
+                out.push_str(&format!(
+                    "  {}: {} segments, {} bytes (growth {} bytes/s, {} segs/s over {}ms)\n",
+                    ns.namespace.as_str(),
+                    ns.segment_count,
+                    ns.total_bytes,
+                    ns.growth.bytes_per_sec,
+                    ns.growth.segments_per_sec,
+                    ns.growth.window_ms
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  {}: {} segments, {} bytes\n",
+                    ns.namespace.as_str(),
+                    ns.segment_count,
+                    ns.total_bytes
+                ));
+            }
+        }
+    }
+
+    if !status.wal_warnings.is_empty() {
+        out.push_str("\nWAL Warnings:\n");
+        for warning in &status.wal_warnings {
             out.push_str(&format!(
-                "  {}: {} segments, {} bytes\n",
-                ns.namespace.as_str(),
-                ns.segment_count,
-                ns.total_bytes
+                "  {}: {}={} limit={}",
+                warning.namespace.as_str(),
+                wal_warning_kind_str(warning.kind),
+                warning.observed,
+                warning.limit
             ));
+            if let Some(window_ms) = warning.window_ms {
+                out.push_str(&format!(" window={}ms", window_ms));
+            }
+            out.push('\n');
         }
     }
 
@@ -1053,6 +1082,14 @@ fn replica_role_str(role: ReplicaRole) -> &'static str {
         ReplicaRole::Anchor => "anchor",
         ReplicaRole::Peer => "peer",
         ReplicaRole::Observer => "observer",
+    }
+}
+
+fn wal_warning_kind_str(kind: crate::api::AdminWalWarningKind) -> &'static str {
+    match kind {
+        crate::api::AdminWalWarningKind::TotalBytesExceeded => "total_bytes",
+        crate::api::AdminWalWarningKind::SegmentCountExceeded => "segment_count",
+        crate::api::AdminWalWarningKind::GrowthBytesExceeded => "growth_bytes",
     }
 }
 
@@ -1610,6 +1647,7 @@ mod tests {
             watermarks_durable: durable,
             last_clock_anomaly: None,
             wal: Vec::new(),
+            wal_warnings: Vec::new(),
             replication: Vec::new(),
             replica_liveness: Vec::new(),
             checkpoints: Vec::new(),

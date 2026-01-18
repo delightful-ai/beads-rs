@@ -1602,6 +1602,8 @@ Remote ingest (authoritative):
 
 v0.5 does not prune WAL segments. Namespace retention policies are parsed and validated,
 but enforcement via GC markers and segment deletion is deferred.
+Guardrails (admin status + metrics) MUST surface WAL segment counts, total bytes, and
+growth rates, and emit warnings when configured thresholds are exceeded.
 
 Retention + pruning gates:
 Deferred in v0.5 (requires WAL pruning work):
@@ -2690,7 +2692,8 @@ Observability requirements (normative):
   - counters: wal_append_ok/err, wal_fsync_ok/err, apply_ok/err, repl_events_in/out,
     checkpoint_export_ok/err, scrub_ok/err, scrub_records_checked
   - gauges: IPC inflight, repl ingest queue bytes/events, checkpoint job queue depth,
-    per-peer lag (durable watermark diff)
+    per-peer lag (durable watermark diff), wal_bytes_total, wal_segments_total,
+    wal_growth_bytes_per_sec, wal_growth_segments_per_sec (per namespace, windowed)
   - histograms: wal_append_duration, wal_fsync_duration, apply_duration, checkpoint_duration
 
 Graceful shutdown (normative):

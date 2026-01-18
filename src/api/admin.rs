@@ -32,6 +32,8 @@ pub struct AdminStatusOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_clock_anomaly: Option<AdminClockAnomaly>,
     pub wal: Vec<AdminWalNamespace>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub wal_warnings: Vec<AdminWalWarning>,
     pub replication: Vec<AdminReplicationPeer>,
     pub replica_liveness: Vec<AdminReplicaLiveness>,
     pub checkpoints: Vec<AdminCheckpointGroup>,
@@ -55,7 +57,35 @@ pub struct AdminWalNamespace {
     pub namespace: NamespaceId,
     pub segment_count: usize,
     pub total_bytes: u64,
+    pub growth: AdminWalGrowth,
     pub segments: Vec<AdminWalSegment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWalGrowth {
+    pub window_ms: u64,
+    pub segments: u64,
+    pub bytes: u64,
+    pub segments_per_sec: u64,
+    pub bytes_per_sec: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWalWarning {
+    pub namespace: NamespaceId,
+    pub kind: AdminWalWarningKind,
+    pub observed: u64,
+    pub limit: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminWalWarningKind {
+    TotalBytesExceeded,
+    SegmentCountExceeded,
+    GrowthBytesExceeded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(limits.wal_guardrail_growth_max_bytes, 512 * 1024 * 1024);
         assert_eq!(limits.wal_group_commit_max_latency_ms, 2);
         assert_eq!(limits.wal_group_commit_max_events, 64);
-        assert_eq!(limits.wal_group_commit_max_bytes, 1 * 1024 * 1024);
+        assert_eq!(limits.wal_group_commit_max_bytes, 1024 * 1024);
         assert_eq!(limits.wal_sqlite_checkpoint_interval_ms, 3_600_000);
         assert_eq!(limits.max_repl_ingest_queue_bytes, 32 * 1024 * 1024);
         assert_eq!(limits.max_repl_ingest_queue_events, 50_000);
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(limits.event_hot_cache_max_bytes, 64 * 1024 * 1024);
         assert_eq!(limits.event_hot_cache_max_events, 200_000);
         assert_eq!(limits.max_events_per_origin_per_batch, 1024);
-        assert_eq!(limits.max_bytes_per_origin_per_batch, 1 * 1024 * 1024);
+        assert_eq!(limits.max_bytes_per_origin_per_batch, 1024 * 1024);
         assert_eq!(limits.max_snapshot_bytes, 512 * 1024 * 1024);
         assert_eq!(limits.max_snapshot_entries, 200_000);
         assert_eq!(limits.max_snapshot_entry_bytes, 64 * 1024 * 1024);

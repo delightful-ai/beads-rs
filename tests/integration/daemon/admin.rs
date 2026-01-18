@@ -408,6 +408,7 @@ fn admin_clock_anomaly_serializes_in_status_and_doctor() {
         watermarks_durable: Watermarks::<Durable>::new(),
         last_clock_anomaly: Some(anomaly.clone()),
         wal: Vec::new(),
+        wal_warnings: Vec::new(),
         replication: Vec::new(),
         replica_liveness: Vec::new(),
         checkpoints: Vec::new(),
