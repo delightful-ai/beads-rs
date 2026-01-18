@@ -174,13 +174,23 @@ mod tests {
 
     #[test]
     fn merge_layers_respects_precedence() {
-        let mut user = ConfigLayer::default();
-        user.auto_upgrade = Some(false);
-        user.defaults.namespace = Some(NamespaceId::parse("wf").unwrap());
+        let user = ConfigLayer {
+            auto_upgrade: Some(false),
+            defaults: DefaultsConfig {
+                namespace: Some(NamespaceId::parse("wf").unwrap()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
-        let mut repo = ConfigLayer::default();
-        repo.auto_upgrade = Some(true);
-        repo.defaults.namespace = Some(NamespaceId::parse("sys").unwrap());
+        let repo = ConfigLayer {
+            auto_upgrade: Some(true),
+            defaults: DefaultsConfig {
+                namespace: Some(NamespaceId::parse("sys").unwrap()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let config = merge_layers(Some(user), Some(repo));
         assert!(config.auto_upgrade);

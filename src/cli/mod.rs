@@ -1699,13 +1699,15 @@ mod tests {
 
     #[test]
     fn resolve_defaults_use_config_when_no_flags() {
-        let mut config = Config::default();
-        config.defaults = DefaultsConfig {
-            namespace: Some(NamespaceId::parse("wf").unwrap()),
-            durability: Some(DurabilityClass::ReplicatedFsync {
-                k: NonZeroU32::new(2).unwrap(),
-            }),
-            ..DefaultsConfig::default()
+        let config = Config {
+            defaults: DefaultsConfig {
+                namespace: Some(NamespaceId::parse("wf").unwrap()),
+                durability: Some(DurabilityClass::ReplicatedFsync {
+                    k: NonZeroU32::new(2).unwrap(),
+                }),
+                ..DefaultsConfig::default()
+            },
+            ..Default::default()
         };
 
         let namespace = resolve_namespace(None, &config).expect("namespace");
@@ -1716,11 +1718,13 @@ mod tests {
 
     #[test]
     fn resolve_defaults_cli_overrides_config() {
-        let mut config = Config::default();
-        config.defaults = DefaultsConfig {
-            namespace: Some(NamespaceId::parse("wf").unwrap()),
-            durability: Some(DurabilityClass::LocalFsync),
-            ..DefaultsConfig::default()
+        let config = Config {
+            defaults: DefaultsConfig {
+                namespace: Some(NamespaceId::parse("wf").unwrap()),
+                durability: Some(DurabilityClass::LocalFsync),
+                ..DefaultsConfig::default()
+            },
+            ..Default::default()
         };
 
         let namespace = resolve_namespace(Some("core"), &config).expect("namespace");

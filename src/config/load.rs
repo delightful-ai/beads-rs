@@ -149,9 +149,11 @@ mod tests {
             allowed_namespaces: Some(vec![NamespaceId::core()]),
         };
         let mut checkpoint_groups = BTreeMap::new();
-        let mut core_group = CheckpointGroupConfig::default();
-        core_group.namespaces = vec![NamespaceId::core()];
-        core_group.debounce_ms = Some(123);
+        let core_group = CheckpointGroupConfig {
+            namespaces: vec![NamespaceId::core()],
+            debounce_ms: Some(123),
+            ..Default::default()
+        };
         checkpoint_groups.insert("core".to_string(), core_group);
         let namespace_defaults = Config::default().namespace_defaults;
         let cfg = Config {

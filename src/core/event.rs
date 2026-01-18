@@ -2744,8 +2744,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_text_bounds() {
-        let mut limits = Limits::default();
-        limits.max_cbor_text_string_len = 3;
+        let limits = Limits {
+            max_cbor_text_string_len: 3,
+            ..Default::default()
+        };
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
         let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
@@ -2757,8 +2759,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_map_entry_bounds() {
-        let mut limits = Limits::default();
-        limits.max_cbor_map_entries = 1;
+        let limits = Limits {
+            max_cbor_map_entries: 1,
+            ..Default::default()
+        };
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
         let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
@@ -2770,8 +2774,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_array_entry_bounds() {
-        let mut limits = Limits::default();
-        limits.max_cbor_array_entries = 0;
+        let limits = Limits {
+            max_cbor_array_entries: 0,
+            ..Default::default()
+        };
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
         let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
@@ -2783,8 +2789,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_depth_bounds() {
-        let mut limits = Limits::default();
-        limits.max_cbor_depth = 0;
+        let limits = Limits {
+            max_cbor_depth: 0,
+            ..Default::default()
+        };
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
         let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
@@ -2795,8 +2803,10 @@ mod tests {
     fn decode_rejects_record_size_bounds() {
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
-        let mut limits = Limits::default();
-        limits.max_wal_record_bytes = encoded.as_ref().len() - 1;
+        let limits = Limits {
+            max_wal_record_bytes: encoded.as_ref().len() - 1,
+            ..Default::default()
+        };
         let err = decode_event_body(encoded.as_ref(), &limits).unwrap_err();
         assert!(matches!(
             err,
