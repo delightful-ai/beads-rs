@@ -942,6 +942,13 @@ fn ensure_file_permissions(path: &Path) -> Result<(), StoreRuntimeError> {
     Ok(())
 }
 
+fn new_replica_id() -> ReplicaId {
+    let mut rng = rand::rng();
+    let mut bytes = [0u8; 16];
+    rng.fill_bytes(&mut bytes);
+    ReplicaId::new(Uuid::from_bytes(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,7 +1235,7 @@ mod tests {
         runtime.record_checkpoint_dirty_shards(&namespace, &outcome);
 
         let snapshot = runtime
-            .checkpoint_snapshot("core", &[namespace.clone()], 1_700_000_000_000)
+            .checkpoint_snapshot("core", std::slice::from_ref(&namespace), 1_700_000_000_000)
             .expect("snapshot");
 
         let state_path = CheckpointShardPath::new(
@@ -1254,7 +1261,7 @@ mod tests {
             expected_paths.iter().map(|path| path.to_path()).collect();
 
         assert_eq!(snapshot.dirty_shards, expected_dirty);
-        assert!(runtime.checkpoint_dirty_shards.get(&namespace).is_none());
+        assert!(!runtime.checkpoint_dirty_shards.contains_key(&namespace));
 
         runtime.rollback_checkpoint_dirty_shards("core");
         let restored = runtime
@@ -1265,10 +1272,10 @@ mod tests {
         assert_eq!(restored, expected_paths);
 
         let _ = runtime
-            .checkpoint_snapshot("core", &[namespace.clone()], 1_700_000_000_001)
+            .checkpoint_snapshot("core", std::slice::from_ref(&namespace), 1_700_000_000_001)
             .expect("snapshot");
         runtime.commit_checkpoint_dirty_shards("core");
-        assert!(runtime.checkpoint_dirty_shards.get(&namespace).is_none());
+        assert!(!runtime.checkpoint_dirty_shards.contains_key(&namespace));
     }
 
     #[test]
@@ -1384,11 +1391,4 @@ durability_eligible = true
         assert!(loaded.contains_key(&NamespaceId::parse("wf").unwrap()));
         assert!(loaded.contains_key(&NamespaceId::parse("tmp").unwrap()));
     }
-}
-
-fn new_replica_id() -> ReplicaId {
-    let mut rng = rand::rng();
-    let mut bytes = [0u8; 16];
-    rng.fill_bytes(&mut bytes);
-    ReplicaId::new(Uuid::from_bytes(bytes))
 }

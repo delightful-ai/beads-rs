@@ -223,9 +223,12 @@ mod tests {
 
     #[derive(Default)]
     struct FakeWalReader {
-        responses: RefCell<HashMap<(ReplicaId, Seq0), Result<Vec<EventFrameV1>, WalRangeError>>>,
+        responses: RefCell<WalReadResponses>,
         calls: RefCell<Vec<ReadCall>>,
     }
+
+    type WalReadResult = Result<Vec<EventFrameV1>, WalRangeError>;
+    type WalReadResponses = HashMap<(ReplicaId, Seq0), WalReadResult>;
 
     impl FakeWalReader {
         fn with_response(

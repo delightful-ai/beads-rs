@@ -227,7 +227,7 @@ pub struct SegmentWriter {
 
 #[cfg(test)]
 thread_local! {
-    static LAST_SYNC_MODE: Cell<Option<SegmentSyncMode>> = Cell::new(None);
+    static LAST_SYNC_MODE: Cell<Option<SegmentSyncMode>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]

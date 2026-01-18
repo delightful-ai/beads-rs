@@ -1180,7 +1180,7 @@ mod tests {
             local_replica,
             limits.clone(),
         );
-        let server = ReplicationServer::new(SharedSessionStore::new(TestStore::default()), config);
+        let server = ReplicationServer::new(SharedSessionStore::new(TestStore), config);
         let handle = server.start().expect("start");
 
         let stream = TcpStream::connect(handle.local_addr()).expect("connect");
@@ -1214,7 +1214,7 @@ mod tests {
             limits.clone(),
         );
         config.max_connections = NonZeroUsize::new(1);
-        let server = ReplicationServer::new(SharedSessionStore::new(TestStore::default()), config);
+        let server = ReplicationServer::new(SharedSessionStore::new(TestStore), config);
         let handle = server.start().expect("start");
 
         let first = TcpStream::connect(handle.local_addr()).expect("connect first");
@@ -1270,7 +1270,7 @@ mod tests {
                 expire_after_ms: None,
             }],
         });
-        let server = ReplicationServer::new(SharedSessionStore::new(TestStore::default()), config);
+        let server = ReplicationServer::new(SharedSessionStore::new(TestStore), config);
         let handle = server.start().expect("start");
 
         let stream = TcpStream::connect(handle.local_addr()).expect("connect");

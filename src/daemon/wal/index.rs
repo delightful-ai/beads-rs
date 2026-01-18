@@ -1449,7 +1449,7 @@ mod tests {
             client_request_id,
             [7u8; 32],
             txn_id,
-            &[event_id.clone()],
+            std::slice::from_ref(&event_id),
             1_700_000,
         )
         .unwrap();
@@ -1574,7 +1574,7 @@ mod tests {
             client_request_id,
             [7u8; 32],
             first_txn_id,
-            &[first_event_id.clone()],
+            std::slice::from_ref(&first_event_id),
             1_700_000,
         )
         .unwrap();
@@ -1587,7 +1587,7 @@ mod tests {
             client_request_id,
             [7u8; 32],
             second_txn_id,
-            &[second_event_id.clone()],
+            std::slice::from_ref(&second_event_id),
             1_800_000,
         )
         .unwrap();

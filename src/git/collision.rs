@@ -201,11 +201,11 @@ fn verify_determinism(local: &Bead, remote: &Bead) -> bool {
     let (w2, _) = determine_winner(remote, local);
 
     // If we flip inputs, winner should flip sides but refer to same bead
-    match (w1, w2) {
-        (CollisionSide::Local, CollisionSide::Remote) => true,
-        (CollisionSide::Remote, CollisionSide::Local) => true,
-        _ => false,
-    }
+    matches!(
+        (w1, w2),
+        (CollisionSide::Local, CollisionSide::Remote)
+            | (CollisionSide::Remote, CollisionSide::Local)
+    )
 }
 
 #[cfg(test)]

@@ -619,12 +619,12 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|entry| entry.path == PathBuf::from("new.log"))
+                .any(|entry| entry.path == "new.log")
         );
         assert!(
             entries
                 .iter()
-                .any(|entry| entry.path == PathBuf::from("newest.log"))
+                .any(|entry| entry.path == "newest.log")
         );
     }
 
