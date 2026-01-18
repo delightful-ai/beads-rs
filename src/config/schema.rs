@@ -87,6 +87,7 @@ pub enum LogRotation {
 pub struct LoggingConfig {
     pub stdout: bool,
     pub stdout_format: LogFormat,
+    pub filter: Option<String>,
     pub file: FileLoggingConfig,
 }
 
@@ -95,6 +96,7 @@ impl Default for LoggingConfig {
         Self {
             stdout: true,
             stdout_format: LogFormat::Tree,
+            filter: None,
             file: FileLoggingConfig::default(),
         }
     }
@@ -129,6 +131,7 @@ impl Default for FileLoggingConfig {
 pub struct LoggingConfigOverride {
     pub stdout: Option<bool>,
     pub stdout_format: Option<LogFormat>,
+    pub filter: Option<String>,
     pub file: Option<FileLoggingConfigOverride>,
 }
 
@@ -139,6 +142,9 @@ impl LoggingConfigOverride {
         }
         if let Some(format) = self.stdout_format {
             target.stdout_format = format;
+        }
+        if let Some(filter) = self.filter.as_ref() {
+            target.filter = Some(filter.clone());
         }
         if let Some(file) = self.file.as_ref() {
             file.apply_to(&mut target.file);

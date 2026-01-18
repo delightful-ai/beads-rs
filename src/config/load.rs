@@ -165,6 +165,7 @@ mod tests {
             logging: LoggingConfig {
                 stdout: false,
                 stdout_format: LogFormat::Compact,
+                filter: None,
                 file: crate::config::FileLoggingConfig {
                     enabled: true,
                     dir: Some(PathBuf::from("/tmp/beads-test-logs")),

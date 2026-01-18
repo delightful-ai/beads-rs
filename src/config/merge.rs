@@ -78,6 +78,13 @@ where
         }
     }
 
+    if let Some(raw) = lookup("BD_LOG_FILTER") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            config.logging.filter = Some(trimmed.to_string());
+        }
+    }
+
     if let Some(raw) = lookup("BD_LOG_FILE") {
         if let Some(value) = parse_boolish(&raw) {
             config.logging.file.enabled = value;
@@ -211,6 +218,7 @@ mod tests {
                 "BD_REPL_MAX_CONNECTIONS" => Some("12".to_string()),
                 "BD_LOG_STDOUT" => Some("false".to_string()),
                 "BD_LOG_STDOUT_FORMAT" => Some("compact".to_string()),
+                "BD_LOG_FILTER" => Some("beads_rs=debug".to_string()),
                 "BD_LOG_FILE" => Some("true".to_string()),
                 "BD_LOG_DIR" => Some("/tmp/beads-logs".to_string()),
                 "BD_LOG_FILE_FORMAT" => Some("json".to_string()),
@@ -233,6 +241,10 @@ mod tests {
         assert_eq!(config.replication.max_connections, Some(12));
         assert!(!config.logging.stdout);
         assert!(matches!(config.logging.stdout_format, LogFormat::Compact));
+        assert_eq!(
+            config.logging.filter.as_deref(),
+            Some("beads_rs=debug")
+        );
         assert!(config.logging.file.enabled);
         assert_eq!(
             config.logging.file.dir.as_ref().unwrap().to_string_lossy(),
@@ -242,5 +254,21 @@ mod tests {
         assert!(matches!(config.logging.file.rotation, LogRotation::Hourly));
         assert_eq!(config.logging.file.retention_max_age_days, Some(5));
         assert_eq!(config.logging.file.retention_max_files, Some(25));
+    }
+
+    #[test]
+    fn env_log_filter_overrides_config() {
+        let lookup = |key: &str| -> Option<String> {
+            match key {
+                "BD_LOG_FILTER" => Some("metrics=info".to_string()),
+                _ => None,
+            }
+        };
+        let mut config = Config::default();
+        config.logging.filter = Some("beads_rs=debug".to_string());
+
+        apply_env_overrides_from(&mut config, lookup);
+
+        assert_eq!(config.logging.filter.as_deref(), Some("metrics=info"));
     }
 }
