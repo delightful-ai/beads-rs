@@ -186,13 +186,16 @@ impl Model for WalCrashRecovery {
             Property::always("LocalFsync receipts are durable", |_, s: &State| {
                 s.receipts.iter().all(|seq| s.wal_fsynced.contains(seq))
             }),
-            Property::always("recovery catches up durable-but-unindexed", |_, s: &State| {
-                if s.just_recovered {
-                    s.wal_fsynced.iter().all(|seq| s.indexed.contains(seq))
-                } else {
-                    true
-                }
-            }),
+            Property::always(
+                "recovery catches up durable-but-unindexed",
+                |_, s: &State| {
+                    if s.just_recovered {
+                        s.wal_fsynced.iter().all(|seq| s.indexed.contains(seq))
+                    } else {
+                        true
+                    }
+                },
+            ),
         ]
     }
 }

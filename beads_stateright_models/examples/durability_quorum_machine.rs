@@ -296,8 +296,9 @@ impl Model for DurabilityQuorum {
                     _ => true,
                 }
             }),
-            Property::always("ineligible replicas never satisfy quorum", |_, s: &State| {
-                match s.last_result {
+            Property::always(
+                "ineligible replicas never satisfy quorum",
+                |_, s: &State| match s.last_result {
                     Some(ResultKind::Success {
                         seq,
                         class: DurabilityClass::ReplicatedFsync(k),
@@ -306,8 +307,8 @@ impl Model for DurabilityQuorum {
                         eligible >= k
                     }
                     _ => true,
-                }
-            }),
+                },
+            ),
             Property::always("honest timeout receipts", |_, s: &State| {
                 match s.last_result {
                     Some(ResultKind::Timeout { seq }) => {
@@ -316,12 +317,13 @@ impl Model for DurabilityQuorum {
                     _ => true,
                 }
             }),
-            Property::always("durability unavailable is fail-fast", |_, s: &State| {
-                match s.last_result {
+            Property::always(
+                "durability unavailable is fail-fast",
+                |_, s: &State| match s.last_result {
                     Some(ResultKind::Unavailable { k }) => eligible_total(s) < k,
                     _ => true,
-                }
-            }),
+                },
+            ),
         ]
     }
 }

@@ -152,9 +152,10 @@ impl Model for GapWant {
                 true
             }),
             // Safety: nothing buffered is <= durable+1; if it were, we should have forwarded it.
-            Property::always("buffered items are strictly beyond the next expected", |_, s: &State| {
-                s.buffered.iter().all(|b| *b > s.durable + 1)
-            }),
+            Property::always(
+                "buffered items are strictly beyond the next expected",
+                |_, s: &State| s.buffered.iter().all(|b| *b > s.durable + 1),
+            ),
             // Liveness-ish: it's possible to reach durable==MAX_SEQ.
             Property::sometimes("can fully catch up", |_, s: &State| s.durable == MAX_SEQ),
         ]

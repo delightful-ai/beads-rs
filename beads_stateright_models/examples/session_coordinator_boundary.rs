@@ -176,29 +176,25 @@ impl Model for SessionCoordinator {
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
             // Safety: session never "gets ahead" of coordinator truth.
-            Property::always("session durable never exceeds coordinator durable", |_, s: &State| {
-                s.session_durable <= s.coord_durable
-            }),
-
+            Property::always(
+                "session durable never exceeds coordinator durable",
+                |_, s: &State| s.session_durable <= s.coord_durable,
+            ),
             // Safety: any pending ingest must start at session_durable+1.
             Property::always("pending ingest starts at next expected", |_, s: &State| {
                 if let Some(batch) = &s.pending_ingest {
                     let expected = s.session_durable + 1;
                     batch.first().copied() == Some(expected)
-                        && batch
-                            .windows(2)
-                            .all(|w| w[1] == w[0] + 1)
+                        && batch.windows(2).all(|w| w[1] == w[0] + 1)
                 } else {
                     true
                 }
             }),
-
             // Safety: coordinator durable is exactly the max element in the log (contiguous ingest).
             Property::always("coordinator durable matches its log max", |_, s: &State| {
                 let max = s.coord_log.iter().copied().max().unwrap_or(0);
                 max == s.coord_durable
             }),
-
             // Liveness-ish: system can reach full catch-up.
             Property::sometimes("can fully replicate", |_, s: &State| {
                 s.coord_durable == MAX_SEQ && s.session_durable == MAX_SEQ

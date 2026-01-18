@@ -286,9 +286,7 @@ impl Model for IdempotencyModel {
             Property::always("request digest mismatch rejected", |_, s: &State| {
                 match s.last_response {
                     Some(Response::Mismatch) => {
-                        if let (Some(digest), Some(record)) =
-                            (s.last_request, current_record(s))
-                        {
+                        if let (Some(digest), Some(record)) = (s.last_request, current_record(s)) {
                             digest != record.digest
                         } else {
                             false

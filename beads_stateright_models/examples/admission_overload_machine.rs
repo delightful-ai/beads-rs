@@ -125,9 +125,7 @@ impl Model for AdmissionOverload {
                             Class::Ipc
                         }
                     }
-                    Class::Replication => {
-                        Class::Replication
-                    }
+                    Class::Replication => Class::Replication,
                     Class::Want => {
                         if next.repl_q > 0 {
                             dequeue_one(&mut next, Class::Replication);
@@ -152,10 +150,7 @@ impl Model for AdmissionOverload {
                 if shed != class {
                     enqueue_one(&mut next, class);
                 }
-                next.last_overload = Some(OverloadRecord {
-                    shed,
-                    repl_present,
-                });
+                next.last_overload = Some(OverloadRecord { shed, repl_present });
             }
             Action::Process => {
                 if next.ipc_q > 0 {
@@ -185,12 +180,13 @@ impl Model for AdmissionOverload {
             Property::always("IPC not starved by background", |_, s: &State| {
                 s.ipc_wait <= MAX_IPC_WAIT
             }),
-            Property::always("replication sheds first on overload", |_, s: &State| {
-                match s.last_overload {
+            Property::always(
+                "replication sheds first on overload",
+                |_, s: &State| match s.last_overload {
                     Some(record) if record.repl_present => record.shed == Class::Replication,
                     _ => true,
-                }
-            }),
+                },
+            ),
         ]
     }
 }

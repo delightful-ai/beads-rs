@@ -20,7 +20,10 @@ struct ReadRequest {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum Response {
-    Success { applied_at: u8, required: u8 },
+    Success {
+        applied_at: u8,
+        required: u8,
+    },
     Timeout {
         applied_at: u8,
         required: u8,
@@ -116,24 +119,24 @@ impl Model for ReadGating {
 
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
-            Property::always("no stale reads", |_, s: &State| {
-                match s.last_response {
-                    Some(Response::Success { applied_at, required }) => {
-                        applied_at >= required && applied_at == s.applied
-                    }
-                    _ => true,
-                }
+            Property::always("no stale reads", |_, s: &State| match s.last_response {
+                Some(Response::Success {
+                    applied_at,
+                    required,
+                }) => applied_at >= required && applied_at == s.applied,
+                _ => true,
             }),
-            Property::always("timeouts are retryable and include watermark", |_, s: &State| {
-                match s.last_response {
+            Property::always(
+                "timeouts are retryable and include watermark",
+                |_, s: &State| match s.last_response {
                     Some(Response::Timeout {
                         applied_at,
                         required,
                         retryable,
                     }) => retryable && applied_at == s.applied && applied_at < required,
                     _ => true,
-                }
-            }),
+                },
+            ),
         ]
     }
 }

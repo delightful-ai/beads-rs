@@ -225,19 +225,25 @@ impl Model for CanonicalHashModel {
 
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
-            Property::always("canonical enforcement when enabled", |m: &CanonicalHashModel, s: &State| {
-                if !m.enforce_canonical {
-                    return true;
-                }
-                match s.last_event.as_ref() {
-                    Some(last)
-                        if matches!(last.kind, LastEffectKind::Applied | LastEffectKind::Buffered) =>
-                    {
-                        last.canonical && last.sha_ok && last.store_ok
+            Property::always(
+                "canonical enforcement when enabled",
+                |m: &CanonicalHashModel, s: &State| {
+                    if !m.enforce_canonical {
+                        return true;
                     }
-                    _ => true,
-                }
-            }),
+                    match s.last_event.as_ref() {
+                        Some(last)
+                            if matches!(
+                                last.kind,
+                                LastEffectKind::Applied | LastEffectKind::Buffered
+                            ) =>
+                        {
+                            last.canonical && last.sha_ok && last.store_ok
+                        }
+                        _ => true,
+                    }
+                },
+            ),
             Property::always("prev continuity on apply", |_, s: &State| {
                 match s.last_event.as_ref() {
                     Some(last) if matches!(last.kind, LastEffectKind::Applied) => last.prev_ok,
@@ -269,21 +275,21 @@ fn main() -> Result<(), pico_args::Error> {
             CanonicalHashModel {
                 enforce_canonical: true,
             }
-                .checker()
-                .threads(num_cpus::get())
-                .timeout(Duration::from_secs(60))
-                .serve(address);
+            .checker()
+            .threads(num_cpus::get())
+            .timeout(Duration::from_secs(60))
+            .serve(address);
         }
         Some("check") | None => {
             println!("Model checking canonical hash/prev rules.");
             CanonicalHashModel {
                 enforce_canonical: true,
             }
-                .checker()
-                .threads(num_cpus::get())
-                .timeout(Duration::from_secs(60))
-                .spawn_dfs()
-                .report(&mut WriteReporter::new(&mut std::io::stdout()));
+            .checker()
+            .threads(num_cpus::get())
+            .timeout(Duration::from_secs(60))
+            .spawn_dfs()
+            .report(&mut WriteReporter::new(&mut std::io::stdout()));
         }
         _ => {
             println!("USAGE:");

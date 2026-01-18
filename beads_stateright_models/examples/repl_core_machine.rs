@@ -66,7 +66,11 @@ impl Ord for FrameDigest {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let lhs_prev = self.prev_sha256.map(|s| s.0);
         let rhs_prev = other.prev_sha256.map(|s| s.0);
-        (self.eid.clone(), self.sha256.0, lhs_prev).cmp(&(other.eid.clone(), other.sha256.0, rhs_prev))
+        (self.eid.clone(), self.sha256.0, lhs_prev).cmp(&(
+            other.eid.clone(),
+            other.sha256.0,
+            rhs_prev,
+        ))
     }
 }
 
@@ -198,16 +202,16 @@ impl ReplActor {
                 let prev_for_seq = prev_sha;
                 let txn_id = TxnId::new(make_uuid(replica_id, seq, 0));
                 let body = factory.txn_body(seq1, txn_id, seq, 0, TxnDeltaV1::new(), None);
-                let frame = event_factory::encode_frame(&body, prev_for_seq)
-                    .expect("encode frame");
+                let frame = event_factory::encode_frame(&body, prev_for_seq).expect("encode frame");
                 prev_sha = Some(frame.sha256);
                 frames.push(FrameMsg::new(frame));
 
                 if self.equivocate && seq == EQUIVOCATE_SEQ {
                     let txn_id = TxnId::new(make_uuid(replica_id, seq, 1));
-                    let body = factory.txn_body(seq1, txn_id, seq + 100, 0, TxnDeltaV1::new(), None);
-                    let frame = event_factory::encode_frame(&body, prev_for_seq)
-                        .expect("encode frame");
+                    let body =
+                        factory.txn_body(seq1, txn_id, seq + 100, 0, TxnDeltaV1::new(), None);
+                    let frame =
+                        event_factory::encode_frame(&body, prev_for_seq).expect("encode frame");
                     frames.push(FrameMsg::new(frame));
                 }
             }
@@ -260,7 +264,10 @@ impl Actor for ReplActor {
                 let effect = state.ingest_frame(&frame_msg.frame, &self.limits, self.store);
                 let after = state.core_digest();
                 let changed = before != after;
-                state.last_effect = Some(LastEffect { kind: effect, changed });
+                state.last_effect = Some(LastEffect {
+                    kind: effect,
+                    changed,
+                });
 
                 if let Some(last_want) = state.last_want.clone() {
                     o.send(
@@ -320,10 +327,22 @@ struct WantInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum LastEffectKind {
-    Applied { key: StreamKey, seq: Seq1, prev_seen: Seq0 },
-    Buffered { key: StreamKey, seq: Seq1 },
-    Duplicate { key: StreamKey, seq: Seq1 },
-    Rejected { code: &'static str },
+    Applied {
+        key: StreamKey,
+        seq: Seq1,
+        prev_seen: Seq0,
+    },
+    Buffered {
+        key: StreamKey,
+        seq: Seq1,
+    },
+    Duplicate {
+        key: StreamKey,
+        seq: Seq1,
+    },
+    Rejected {
+        code: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -435,8 +454,13 @@ impl From<&WatermarkDigest> for WatermarkOrderKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum BufferedPrevOrderKey {
-    Contiguous { prev: Option<[u8; 32]> },
-    Deferred { prev: [u8; 32], expected_prev_seq: Seq1 },
+    Contiguous {
+        prev: Option<[u8; 32]>,
+    },
+    Deferred {
+        prev: [u8; 32],
+        expected_prev_seq: Seq1,
+    },
 }
 
 impl From<&BufferedPrevSnapshot> for BufferedPrevOrderKey {
@@ -706,7 +730,10 @@ impl NodeState {
                 }
             }
             beads_rs::model::IngestDecision::BufferedNeedWant { want_from } => {
-                self.last_want = Some(WantInfo { key: key.clone(), from: want_from });
+                self.last_want = Some(WantInfo {
+                    key: key.clone(),
+                    from: want_from,
+                });
                 self.refresh_acks();
                 self.refresh_maxes();
                 LastEffectKind::Buffered {
@@ -742,7 +769,11 @@ impl NodeState {
         }
 
         for ev in batch {
-            let eid = EventId::new(ev.body.origin_replica_id, namespace.clone(), ev.body.origin_seq);
+            let eid = EventId::new(
+                ev.body.origin_replica_id,
+                namespace.clone(),
+                ev.body.origin_seq,
+            );
             self.event_store.insert(eid, ev.sha256);
         }
 
@@ -847,7 +878,10 @@ impl WatermarkDigest {
             HeadStatus::Known(bytes) => HeadDigest::Known(Sha256(bytes)),
             HeadStatus::Unknown => HeadDigest::Unknown,
         };
-        Self { seq: wm.seq(), head }
+        Self {
+            seq: wm.seq(),
+            head,
+        }
     }
 }
 
@@ -856,7 +890,10 @@ struct EventLookup<'a> {
 }
 
 impl EventShaLookup for EventLookup<'_> {
-    fn lookup_event_sha(&self, eid: &EventId) -> Result<Option<Sha256>, beads_rs::EventShaLookupError> {
+    fn lookup_event_sha(
+        &self,
+        eid: &EventId,
+    ) -> Result<Option<Sha256>, beads_rs::EventShaLookupError> {
         Ok(self.events.get(eid).copied())
     }
 }
@@ -952,9 +989,11 @@ where
         .property(Expectation::Always, "history ack monotonic", |_, s| {
             s.history.ack_monotonic
         })
-        .property(Expectation::Always, "history wants not ahead of delivered", |_, s| {
-            s.history.want_not_ahead
-        })
+        .property(
+            Expectation::Always,
+            "history wants not ahead of delivered",
+            |_, s| s.history.want_not_ahead,
+        )
 }
 
 fn add_base_properties(
@@ -962,135 +1001,168 @@ fn add_base_properties(
 ) -> ActorModel<ReplActor, (), History> {
     let model = add_history_properties(model);
     model
-        .property(Expectation::Always, "ack never exceeds contiguous seen", |_, s| {
-            s.actor_states.iter().all(|state| {
-                state.ack_durable.iter().all(|(key, ack)| {
-                    let seen = state
-                        .durable
-                        .get(key)
-                        .map(|wm| wm.seq())
-                        .unwrap_or(Seq0::ZERO);
-                    *ack <= seen
+        .property(
+            Expectation::Always,
+            "ack never exceeds contiguous seen",
+            |_, s| {
+                s.actor_states.iter().all(|state| {
+                    state.ack_durable.iter().all(|(key, ack)| {
+                        let seen = state
+                            .durable
+                            .get(key)
+                            .map(|wm| wm.seq())
+                            .unwrap_or(Seq0::ZERO);
+                        *ack <= seen
+                    })
                 })
-            })
-        })
+            },
+        )
         .property(Expectation::Always, "seen map is monotonic", |_, s| {
             s.actor_states.iter().all(|state| {
                 state.durable.iter().all(|(key, wm)| {
-                    state
-                        .durable_max
-                        .get(key)
-                        .copied()
-                        .unwrap_or(Seq0::ZERO)
-                        == wm.seq()
+                    state.durable_max.get(key).copied().unwrap_or(Seq0::ZERO) == wm.seq()
                 })
             })
         })
         .property(Expectation::Always, "ack map is monotonic", |_, s| {
             s.actor_states.iter().all(|state| {
-                state.ack_durable.iter().all(|(key, ack)| {
-                    state
-                        .ack_max
-                        .get(key)
-                        .copied()
-                        .unwrap_or(Seq0::ZERO)
-                        == *ack
-                })
+                state
+                    .ack_durable
+                    .iter()
+                    .all(|(key, ack)| state.ack_max.get(key).copied().unwrap_or(Seq0::ZERO) == *ack)
             })
         })
-        .property(Expectation::Always, "contiguous seen implies applied prefix", |_, s| {
-            s.actor_states.iter().all(|state| {
-                state.durable.iter().all(|(key, wm)| {
-                    let seen = wm.seq().get();
-                    (1..=seen).all(|seq| {
-                        let seq1 = Seq1::from_u64(seq).expect("seq1");
-                        let eid = EventId::new(key.origin, key.namespace.clone(), seq1);
-                        state.event_store.contains_key(&eid)
+        .property(
+            Expectation::Always,
+            "contiguous seen implies applied prefix",
+            |_, s| {
+                s.actor_states.iter().all(|state| {
+                    state.durable.iter().all(|(key, wm)| {
+                        let seen = wm.seq().get();
+                        (1..=seen).all(|seq| {
+                            let seq1 = Seq1::from_u64(seq).expect("seq1");
+                            let eid = EventId::new(key.origin, key.namespace.clone(), seq1);
+                            state.event_store.contains_key(&eid)
+                        })
                     })
                 })
-            })
-        })
-        .property(Expectation::Always, "applies only the next contiguous seq", |_, s| {
-            s.actor_states.iter().all(|state| match state.last_effect.as_ref() {
-                Some(LastEffect {
-                    kind: LastEffectKind::Applied { seq, prev_seen, .. },
-                    ..
-                }) => seq.get() == prev_seen.get().saturating_add(1),
-                _ => true,
-            })
-        })
-        .property(Expectation::Always, "buffered items are beyond next expected", |_, s| {
-            s.actor_states.iter().all(|state| {
-                let snapshot = state.gap.model_snapshot();
-                snapshot.origins.iter().all(|origin| {
-                    let durable_seq = origin.durable.seq.get();
-                    origin
-                        .gap
-                        .buffered
-                        .iter()
-                        .all(|ev| ev.seq.get() > durable_seq.saturating_add(1))
-                })
-            })
-        })
-        .property(Expectation::Always, "buffer stays within bounds unless closed", |_, s| {
-            s.actor_states.iter().all(|state| {
-                if state.errored {
-                    return true;
-                }
-                let snapshot = state.gap.model_snapshot();
-                snapshot.origins.iter().all(|origin| {
-                    origin.gap.buffered.len() <= origin.gap.max_events
-                        && origin.gap.buffered_bytes <= origin.gap.max_bytes
-                })
-            })
-        })
-        .property(Expectation::Always, "equivocation implies hard close", |_, s| {
-            s.actor_states
-                .iter()
-                .all(|state| !state.equivocation_seen || state.errored)
-        })
-        .property(Expectation::Always, "duplicate deliveries are idempotent", |_, s| {
-            s.actor_states.iter().all(|state| match state.last_effect.as_ref() {
-                Some(LastEffect {
-                    kind: LastEffectKind::Duplicate { .. },
-                    changed,
-                }) => !*changed,
-                _ => true,
-            })
-        })
-        .property(Expectation::Always, "want from equals seen when emitted", |_, s| {
-            s.actor_states.iter().all(|state| match state.last_want.as_ref() {
-                None => true,
-                Some(WantInfo { key, from }) => {
-                    let seen = state
-                        .durable
-                        .get(key)
-                        .map(|wm| wm.seq())
-                        .unwrap_or(Seq0::ZERO);
+            },
+        )
+        .property(
+            Expectation::Always,
+            "applies only the next contiguous seq",
+            |_, s| {
+                s.actor_states
+                    .iter()
+                    .all(|state| match state.last_effect.as_ref() {
+                        Some(LastEffect {
+                            kind: LastEffectKind::Applied { seq, prev_seen, .. },
+                            ..
+                        }) => seq.get() == prev_seen.get().saturating_add(1),
+                        _ => true,
+                    })
+            },
+        )
+        .property(
+            Expectation::Always,
+            "buffered items are beyond next expected",
+            |_, s| {
+                s.actor_states.iter().all(|state| {
                     let snapshot = state.gap.model_snapshot();
-                    let has_gap = snapshot.origins.iter().any(|origin| {
-                        origin.origin == key.origin
-                            && origin.namespace == key.namespace
-                            && !origin.gap.buffered.is_empty()
-                    });
-                    *from == seen && has_gap
-                }
-            })
-        })
-        .property(Expectation::Always, "history applied not ahead of delivered", |_, s| {
-            s.actor_states.iter().enumerate().all(|(ix, state)| {
-                let id = Id::from(ix);
-                state.applied.iter().all(|(key, wm)| {
-                    let delivered = s
-                        .history
-                        .last_delivered
-                        .get(&(id, key.clone()))
-                        .copied()
-                        .unwrap_or(Seq0::ZERO);
-                    wm.seq() <= delivered
+                    snapshot.origins.iter().all(|origin| {
+                        let durable_seq = origin.durable.seq.get();
+                        origin
+                            .gap
+                            .buffered
+                            .iter()
+                            .all(|ev| ev.seq.get() > durable_seq.saturating_add(1))
+                    })
                 })
-            })
-        })
+            },
+        )
+        .property(
+            Expectation::Always,
+            "buffer stays within bounds unless closed",
+            |_, s| {
+                s.actor_states.iter().all(|state| {
+                    if state.errored {
+                        return true;
+                    }
+                    let snapshot = state.gap.model_snapshot();
+                    snapshot.origins.iter().all(|origin| {
+                        origin.gap.buffered.len() <= origin.gap.max_events
+                            && origin.gap.buffered_bytes <= origin.gap.max_bytes
+                    })
+                })
+            },
+        )
+        .property(
+            Expectation::Always,
+            "equivocation implies hard close",
+            |_, s| {
+                s.actor_states
+                    .iter()
+                    .all(|state| !state.equivocation_seen || state.errored)
+            },
+        )
+        .property(
+            Expectation::Always,
+            "duplicate deliveries are idempotent",
+            |_, s| {
+                s.actor_states
+                    .iter()
+                    .all(|state| match state.last_effect.as_ref() {
+                        Some(LastEffect {
+                            kind: LastEffectKind::Duplicate { .. },
+                            changed,
+                        }) => !*changed,
+                        _ => true,
+                    })
+            },
+        )
+        .property(
+            Expectation::Always,
+            "want from equals seen when emitted",
+            |_, s| {
+                s.actor_states
+                    .iter()
+                    .all(|state| match state.last_want.as_ref() {
+                        None => true,
+                        Some(WantInfo { key, from }) => {
+                            let seen = state
+                                .durable
+                                .get(key)
+                                .map(|wm| wm.seq())
+                                .unwrap_or(Seq0::ZERO);
+                            let snapshot = state.gap.model_snapshot();
+                            let has_gap = snapshot.origins.iter().any(|origin| {
+                                origin.origin == key.origin
+                                    && origin.namespace == key.namespace
+                                    && !origin.gap.buffered.is_empty()
+                            });
+                            *from == seen && has_gap
+                        }
+                    })
+            },
+        )
+        .property(
+            Expectation::Always,
+            "history applied not ahead of delivered",
+            |_, s| {
+                s.actor_states.iter().enumerate().all(|(ix, state)| {
+                    let id = Id::from(ix);
+                    state.applied.iter().all(|(key, wm)| {
+                        let delivered = s
+                            .history
+                            .last_delivered
+                            .get(&(id, key.clone()))
+                            .copied()
+                            .unwrap_or(Seq0::ZERO);
+                        wm.seq() <= delivered
+                    })
+                })
+            },
+        )
         .property(Expectation::Sometimes, "can fully catch up", |_, s| {
             s.actor_states.iter().all(|state| {
                 state.durable.len() == s.actor_states.len().saturating_sub(1)
@@ -1163,12 +1235,7 @@ fn rewrite_id_streamkey_map<S>(
         .collect()
 }
 
-fn update_last_delivered(
-    history: &mut History,
-    dst: Id,
-    key: StreamKey,
-    seq: Seq0,
-) {
+fn update_last_delivered(history: &mut History, dst: Id, key: StreamKey, seq: Seq0) {
     let entry = history
         .last_delivered
         .entry((dst, key))
