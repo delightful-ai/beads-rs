@@ -132,6 +132,7 @@ struct Storage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[allow(clippy::large_enum_variant)]
 enum ActorState {
     Server(ServerState),
     Peer(PeerState),
@@ -291,7 +292,7 @@ impl Actor for ModelActor {
 
     fn on_msg(
         &self,
-        id: Id,
+        _id: Id,
         state: &mut Cow<Self::State>,
         _src: Id,
         msg: Self::Msg,
@@ -319,27 +320,18 @@ impl Actor for ModelActor {
                 }
                 Msg::PeerAck { peer, seq, head } => {
                     state.now_ms = state.now_ms.saturating_add(1);
-                    if let Err(_) = handle_peer_ack(&self.server_cfg, state, peer, seq, head, o) {
+                    if handle_peer_ack(&self.server_cfg, state, peer, seq, head, o).is_err() {
                         state.errored = true;
                     }
                 }
                 Msg::Response { .. } => {}
             },
-            (Role::Peer, ActorState::Peer(state)) => {
-                if let Msg::Response { .. } | Msg::Submit { .. } = msg {
-                    return;
-                }
-                if let Msg::PeerAck { .. } = msg {
-                    return;
-                }
-                drop((id, state));
-            }
-            (Role::Client, ActorState::Client(state)) => match msg {
-                Msg::Response { kind, .. } => {
+            (Role::Peer, ActorState::Peer(_state)) => {}
+            (Role::Client, ActorState::Client(state)) => {
+                if let Msg::Response { kind, .. } = msg {
                     state.last_response = Some(kind);
                 }
-                _ => {}
-            },
+            }
             _ => {}
         }
     }
@@ -594,7 +586,7 @@ fn build_receipt(
             request_id,
             request_sha,
             txn_id,
-            &[event_id.clone()],
+            std::slice::from_ref(&event_id),
             now_ms,
         )
         .map_err(|_| ())?;

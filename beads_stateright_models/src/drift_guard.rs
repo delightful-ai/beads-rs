@@ -19,7 +19,7 @@ use beads_rs::{
     TxnV1, VerifiedEvent,
 };
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn _drift_guard_examples(
     state: &CanonicalState,
     factory: &event_factory::EventFactory,

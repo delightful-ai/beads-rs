@@ -135,7 +135,7 @@ impl Hash for FrameMsg {
 
 impl PartialOrd for FrameMsg {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.digest.cmp(&other.digest))
+        Some(self.cmp(other))
     }
 }
 
@@ -146,6 +146,7 @@ impl Ord for FrameMsg {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[allow(clippy::large_enum_variant)]
 enum ReplMsg {
     Event(FrameMsg),
     Want { key: StreamKey, from: Seq0 },
@@ -1124,11 +1125,12 @@ fn make_uuid(replica: ReplicaId, seq: u64, variant: u8) -> Uuid {
 }
 
 fn build_limits() -> Limits {
-    let mut limits = Limits::default();
-    limits.repl_gap_timeout_ms = GAP_TIMEOUT_TICKS;
-    limits.max_repl_gap_events = MAX_GAP_EVENTS;
-    limits.max_repl_gap_bytes = MAX_GAP_BYTES;
-    limits
+    Limits {
+        repl_gap_timeout_ms: GAP_TIMEOUT_TICKS,
+        max_repl_gap_events: MAX_GAP_EVENTS,
+        max_repl_gap_bytes: MAX_GAP_BYTES,
+        ..Limits::default()
+    }
 }
 
 fn build_actors(
@@ -1551,6 +1553,7 @@ struct ModelConfig {
     symmetry: bool,
     replica_count: usize,
     equivocate: bool,
+    timeout_secs: u64,
 }
 
 fn parse_network(args: &mut pico_args::Arguments) -> Result<NetConfig, pico_args::Error> {
@@ -1564,7 +1567,7 @@ fn parse_network(args: &mut pico_args::Arguments) -> Result<NetConfig, pico_args
         "unordered_nonduplicating" => NetworkKind::UnorderedNonDuplicating,
         other => {
             return Err(pico_args::Error::ArgumentParsingFailed {
-                cause: format!("unsupported --network {other}").into(),
+                cause: format!("unsupported --network {other}"),
             })
         }
     };
@@ -1580,7 +1583,7 @@ fn parse_network(args: &mut pico_args::Arguments) -> Result<NetConfig, pico_args
             "no" => LossyNetwork::No,
             other => {
                 return Err(pico_args::Error::ArgumentParsingFailed {
-                    cause: format!("unsupported --lossy {other}").into(),
+                    cause: format!("unsupported --lossy {other}"),
                 })
             }
         },
@@ -1636,6 +1639,7 @@ fn parse_model_config(args: &mut pico_args::Arguments) -> Result<ModelConfig, pi
     }
 
     let equivocate = args.contains("--equivocate");
+    let timeout_secs = args.opt_value_from_str("--timeout-secs")?.unwrap_or(300);
 
     Ok(ModelConfig {
         kind: net.kind,
@@ -1644,6 +1648,7 @@ fn parse_model_config(args: &mut pico_args::Arguments) -> Result<ModelConfig, pi
         symmetry,
         replica_count,
         equivocate,
+        timeout_secs,
     })
 }
 
@@ -1683,19 +1688,20 @@ enum RunMode {
     Explore(String),
 }
 
-fn run_model_plain<M>(model: M, mode: RunMode)
+fn run_model_plain<M>(model: M, mode: RunMode, timeout_secs: u64)
 where
     M: Model + Send + Sync + 'static,
     M::State: std::fmt::Debug + Hash + Send + Sync + Clone + PartialEq,
     M::Action: std::fmt::Debug + Send + Sync + Clone + PartialEq,
 {
+    let timeout = Duration::from_secs(timeout_secs);
     match mode {
         RunMode::Explore(address) => {
             println!("Exploring replication core state space on {address}.");
             model
                 .checker()
                 .threads(num_cpus::get())
-                .timeout(Duration::from_secs(60))
+                .timeout(timeout)
                 .serve(address);
         }
         RunMode::Check => {
@@ -1703,19 +1709,20 @@ where
             model
                 .checker()
                 .threads(num_cpus::get())
-                .timeout(Duration::from_secs(60))
+                .timeout(timeout)
                 .spawn_dfs()
                 .report(&mut WriteReporter::new(&mut std::io::stdout()));
         }
     }
 }
 
-fn run_model_symmetric<M>(model: M, mode: RunMode)
+fn run_model_symmetric<M>(model: M, mode: RunMode, timeout_secs: u64)
 where
     M: Model + Send + Sync + 'static,
     M::State: Representative + std::fmt::Debug + Hash + Send + Sync + Clone + PartialEq,
     M::Action: std::fmt::Debug + Send + Sync + Clone + PartialEq,
 {
+    let timeout = Duration::from_secs(timeout_secs);
     match mode {
         RunMode::Explore(address) => {
             println!("Exploring replication core state space on {address} (symmetry on).");
@@ -1723,7 +1730,7 @@ where
                 .checker()
                 .symmetry()
                 .threads(num_cpus::get())
-                .timeout(Duration::from_secs(60))
+                .timeout(timeout)
                 .serve(address);
         }
         RunMode::Check => {
@@ -1732,7 +1739,7 @@ where
                 .checker()
                 .symmetry()
                 .threads(num_cpus::get())
-                .timeout(Duration::from_secs(60))
+                .timeout(timeout)
                 .spawn_dfs()
                 .report(&mut WriteReporter::new(&mut std::io::stdout()));
         }
@@ -1754,23 +1761,25 @@ fn main() -> Result<(), pico_args::Error> {
         _ => {
             println!("USAGE:");
             println!(
-                "  repl_core_machine check [--replicas N] [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link] [--symmetry|--no-symmetry] [--equivocate]"
+                "  repl_core_machine check [--replicas N] [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link] [--symmetry|--no-symmetry] [--equivocate] [--timeout-secs N]"
             );
             println!(
-                "  repl_core_machine explore [ADDRESS] [--replicas N] [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link] [--symmetry|--no-symmetry] [--equivocate]"
+                "  repl_core_machine explore [ADDRESS] [--replicas N] [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link] [--symmetry|--no-symmetry] [--equivocate] [--timeout-secs N]"
             );
+            println!("  repl_core_machine check --timeout-secs 300");
             return Ok(());
         }
     };
 
     println!(
-        "Config: replicas={}, network={}, lossy={}, ordered_link={}, symmetry={}, equivocate={}",
+        "Config: replicas={}, network={}, lossy={}, ordered_link={}, symmetry={}, equivocate={}, timeout_secs={}",
         config.replica_count,
         network_label(config.kind),
         lossy_label(config.lossy),
         config.ordered_link,
         config.symmetry,
-        config.equivocate
+        config.equivocate,
+        config.timeout_secs
     );
 
     if config.ordered_link {
@@ -1781,7 +1790,7 @@ fn main() -> Result<(), pico_args::Error> {
             config.replica_count,
             config.equivocate,
         );
-        run_model_plain(model, mode);
+        run_model_plain(model, mode, config.timeout_secs);
     } else {
         let network = network_for_base(config.kind);
         let model = build_model(
@@ -1791,9 +1800,9 @@ fn main() -> Result<(), pico_args::Error> {
             config.equivocate,
         );
         if config.symmetry {
-            run_model_symmetric(model, mode);
+            run_model_symmetric(model, mode, config.timeout_secs);
         } else {
-            run_model_plain(model, mode);
+            run_model_plain(model, mode, config.timeout_secs);
         }
     }
 

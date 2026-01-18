@@ -6,8 +6,8 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot};
 use beads_rs::daemon::wal::WalIndex;
+use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot};
 use beads_rs::{
     Applied, ClientRequestId, DurabilityReceipt, EventId, NamespaceId, ReplicaId, StoreEpoch,
     StoreId, StoreIdentity, TxnId, Watermarks,
@@ -242,7 +242,7 @@ fn build_receipt(
             request_id,
             request_sha,
             txn_id,
-            &[event_id.clone()],
+            std::slice::from_ref(&event_id),
             now_ms,
         )
         .map_err(|_| ())?;
@@ -377,33 +377,33 @@ fn handle_client_msg(
     }
 }
 
-fn build_model(
-) -> ActorModel<
-    ModelActor,
-    (),
-    LinearizabilityTester<Id, Register<ReceiptKey>>,
-> {
+fn build_model() -> ActorModel<ModelActor, (), LinearizabilityTester<Id, Register<ReceiptKey>>> {
     let cfg = ServerCfg::new();
     let actors = vec![ModelActor::server(cfg.clone()), ModelActor::client(cfg)];
-    ActorModel::new((), LinearizabilityTester::new(Register(ReceiptKey::default())))
-        .actors(actors)
-        .init_network(Network::new_ordered([]))
-        .lossy_network(LossyNetwork::No)
-        .record_msg_out(RegisterMsg::record_invocations)
-        .record_msg_in(RegisterMsg::record_returns)
-        .property(Expectation::Always, "receipt history is linearizable", |_, s| {
-            s.history.is_consistent()
-        })
-        .property(
-            Expectation::Always,
-            "client/server receipt keys stay in sync",
-            |_, s| {
-                s.actor_states.iter().all(|state| match &**state {
-                    ActorState::Server(state) => !state.mismatch,
-                    ActorState::Client(state) => !state.mismatch,
-                })
-            },
-        )
+    ActorModel::new(
+        (),
+        LinearizabilityTester::new(Register(ReceiptKey::default())),
+    )
+    .actors(actors)
+    .init_network(Network::new_ordered([]))
+    .lossy_network(LossyNetwork::No)
+    .record_msg_out(RegisterMsg::record_invocations)
+    .record_msg_in(RegisterMsg::record_returns)
+    .property(
+        Expectation::Always,
+        "receipt history is linearizable",
+        |_, s| s.history.is_consistent(),
+    )
+    .property(
+        Expectation::Always,
+        "client/server receipt keys stay in sync",
+        |_, s| {
+            s.actor_states.iter().all(|state| match &**state {
+                ActorState::Server(state) => !state.mismatch,
+                ActorState::Client(state) => !state.mismatch,
+            })
+        },
+    )
 }
 
 fn main() -> Result<(), pico_args::Error> {
