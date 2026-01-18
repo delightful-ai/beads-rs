@@ -587,6 +587,7 @@ mod tests {
             namespace.clone(),
             Seq1::from_u64(1).expect("seq1"),
         );
+        let event_ids = [event_id.clone()];
 
         let mut first = index.writer().begin_txn().expect("begin txn");
         first
@@ -596,7 +597,7 @@ mod tests {
                 request_id,
                 [1u8; 32],
                 TxnId::new(Uuid::from_bytes([6u8; 16])),
-                &[event_id],
+                &event_ids,
                 10,
             )
             .expect("upsert client request");
@@ -610,7 +611,7 @@ mod tests {
                 request_id,
                 [2u8; 32],
                 TxnId::new(Uuid::from_bytes([7u8; 16])),
-                &[event_id],
+                &event_ids,
                 11,
             )
             .expect_err("reuse mismatch");
