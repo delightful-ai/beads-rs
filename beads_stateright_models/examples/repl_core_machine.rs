@@ -11,7 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
-use beads_rs::model::{event_factory, repl_ingest, GapBufferByNsOrigin, GapBufferByNsOriginSnapshot};
+use beads_rs::model::{
+    event_factory, repl_ingest, BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOrigin,
+    GapBufferByNsOriginSnapshot, GapBufferSnapshot, HeadSnapshot, OriginStreamSnapshot,
+    WatermarkSnapshot,
+};
 use beads_rs::{
     ActorId, Applied, Durable, EventFrameError, EventFrameV1, EventId, EventShaLookup, HeadStatus,
     Limits, NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
@@ -21,10 +25,12 @@ use stateright::actor::{
     model_peers, model_timeout, ordered_reliable_link::ActorWrapper,
     ordered_reliable_link::MsgWrapper, Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out,
 };
-use stateright::{report::WriteReporter, Checker, Expectation, Model};
+use stateright::{
+    report::WriteReporter, Checker, Expectation, Model, Representative, Rewrite, RewritePlan,
+};
 use uuid::Uuid;
 
-const ACTOR_COUNT: usize = 2;
+const DEFAULT_REPLICAS: usize = 2;
 const MAX_SEQ: u64 = 3;
 const GAP_TIMEOUT_TICKS: u64 = 2;
 const MAX_GAP_EVENTS: usize = 3;
@@ -114,6 +120,12 @@ enum ReplMsg {
     Ack { key: StreamKey, durable: Seq0 },
 }
 
+impl Rewrite<Id> for ReplMsg {
+    fn rewrite<S>(&self, _plan: &RewritePlan<Id, S>) -> Self {
+        self.clone()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum TimerTag {
     Tick,
@@ -144,10 +156,22 @@ impl Default for History {
     }
 }
 
+impl Rewrite<Id> for History {
+    fn rewrite<S>(&self, plan: &RewritePlan<Id, S>) -> Self {
+        Self {
+            sent: self.sent.clone(),
+            delivered: self.delivered.clone(),
+            last_delivered: rewrite_id_streamkey_map(&self.last_delivered, plan),
+            last_want_out: rewrite_id_streamkey_map(&self.last_want_out, plan),
+            last_ack_out: rewrite_id_streamkey_map(&self.last_ack_out, plan),
+            ack_monotonic: self.ack_monotonic,
+            want_not_ahead: self.want_not_ahead,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ReplActor {
-    replica_id: ReplicaId,
-    actor_id: ActorId,
     store: StoreIdentity,
     namespaces: Vec<NamespaceId>,
     limits: Limits,
@@ -157,20 +181,22 @@ struct ReplActor {
 }
 
 impl ReplActor {
-    fn build_frames(&self) -> Vec<FrameMsg> {
+    fn build_frames(&self, id: Id) -> Vec<FrameMsg> {
+        let replica_id = replica_id_for(id);
+        let actor_id = actor_id_for(id);
         let mut frames = Vec::new();
         for namespace in &self.namespaces {
             let factory = event_factory::EventFactory::new(
                 self.store,
                 namespace.clone(),
-                self.replica_id,
-                self.actor_id.clone(),
+                replica_id,
+                actor_id.clone(),
             );
             let mut prev_sha = None;
             for seq in 1..=self.max_seq {
                 let seq1 = Seq1::from_u64(seq).expect("seq1");
                 let prev_for_seq = prev_sha;
-                let txn_id = TxnId::new(make_uuid(self.replica_id, seq, 0));
+                let txn_id = TxnId::new(make_uuid(replica_id, seq, 0));
                 let body = factory.txn_body(seq1, txn_id, seq, 0, TxnDeltaV1::new(), None);
                 let frame = event_factory::encode_frame(&body, prev_for_seq)
                     .expect("encode frame");
@@ -178,7 +204,7 @@ impl ReplActor {
                 frames.push(FrameMsg::new(frame));
 
                 if self.equivocate && seq == EQUIVOCATE_SEQ {
-                    let txn_id = TxnId::new(make_uuid(self.replica_id, seq, 1));
+                    let txn_id = TxnId::new(make_uuid(replica_id, seq, 1));
                     let body = factory.txn_body(seq1, txn_id, seq + 100, 0, TxnDeltaV1::new(), None);
                     let frame = event_factory::encode_frame(&body, prev_for_seq)
                         .expect("encode frame");
@@ -200,7 +226,7 @@ impl Actor for ReplActor {
     fn on_start(&self, id: Id, _storage: &Option<Self::Storage>, o: &mut Out<Self>) -> Self::State {
         o.set_timer(TimerTag::Tick, model_timeout());
 
-        let frames = self.build_frames();
+        let frames = self.build_frames(id);
         let peers = model_peers(usize::from(id), self.peer_count);
         for peer in peers {
             for frame in &frames {
@@ -286,13 +312,13 @@ impl Actor for ReplActor {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct WantInfo {
     key: StreamKey,
     from: Seq0,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum LastEffectKind {
     Applied { key: StreamKey, seq: Seq1, prev_seen: Seq0 },
     Buffered { key: StreamKey, seq: Seq1 },
@@ -300,7 +326,7 @@ enum LastEffectKind {
     Rejected { code: &'static str },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct LastEffect {
     kind: LastEffectKind,
     changed: bool,
@@ -354,6 +380,230 @@ struct StateDigest {
     core: CoreDigest,
     last_effect: Option<LastEffect>,
     last_want: Option<WantInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum HeadOrderKey {
+    Genesis,
+    Known([u8; 32]),
+    Unknown,
+}
+
+impl From<&HeadSnapshot> for HeadOrderKey {
+    fn from(head: &HeadSnapshot) -> Self {
+        match head {
+            HeadSnapshot::Genesis => HeadOrderKey::Genesis,
+            HeadSnapshot::Known(bytes) => HeadOrderKey::Known(bytes.0),
+            HeadSnapshot::Unknown => HeadOrderKey::Unknown,
+        }
+    }
+}
+
+impl From<&HeadDigest> for HeadOrderKey {
+    fn from(head: &HeadDigest) -> Self {
+        match head {
+            HeadDigest::Genesis => HeadOrderKey::Genesis,
+            HeadDigest::Known(bytes) => HeadOrderKey::Known(bytes.0),
+            HeadDigest::Unknown => HeadOrderKey::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct WatermarkOrderKey {
+    seq: Seq0,
+    head: HeadOrderKey,
+}
+
+impl From<&WatermarkSnapshot> for WatermarkOrderKey {
+    fn from(wm: &WatermarkSnapshot) -> Self {
+        Self {
+            seq: wm.seq,
+            head: HeadOrderKey::from(&wm.head),
+        }
+    }
+}
+
+impl From<&WatermarkDigest> for WatermarkOrderKey {
+    fn from(wm: &WatermarkDigest) -> Self {
+        Self {
+            seq: wm.seq,
+            head: HeadOrderKey::from(&wm.head),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BufferedPrevOrderKey {
+    Contiguous { prev: Option<[u8; 32]> },
+    Deferred { prev: [u8; 32], expected_prev_seq: Seq1 },
+}
+
+impl From<&BufferedPrevSnapshot> for BufferedPrevOrderKey {
+    fn from(prev: &BufferedPrevSnapshot) -> Self {
+        match prev {
+            BufferedPrevSnapshot::Contiguous { prev } => BufferedPrevOrderKey::Contiguous {
+                prev: prev.map(|sha| sha.0),
+            },
+            BufferedPrevSnapshot::Deferred {
+                prev,
+                expected_prev_seq,
+            } => BufferedPrevOrderKey::Deferred {
+                prev: prev.0,
+                expected_prev_seq: *expected_prev_seq,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BufferedEventOrderKey {
+    seq: Seq1,
+    sha256: [u8; 32],
+    prev: BufferedPrevOrderKey,
+    bytes_len: usize,
+}
+
+impl From<&BufferedEventSnapshot> for BufferedEventOrderKey {
+    fn from(ev: &BufferedEventSnapshot) -> Self {
+        Self {
+            seq: ev.seq,
+            sha256: ev.sha256.0,
+            prev: BufferedPrevOrderKey::from(&ev.prev),
+            bytes_len: ev.bytes_len,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GapBufferOrderKey {
+    buffered: Vec<BufferedEventOrderKey>,
+    buffered_bytes: usize,
+    started_at_ms: Option<u64>,
+    max_events: usize,
+    max_bytes: usize,
+    timeout_ms: u64,
+}
+
+impl From<&GapBufferSnapshot> for GapBufferOrderKey {
+    fn from(gap: &GapBufferSnapshot) -> Self {
+        Self {
+            buffered: gap
+                .buffered
+                .iter()
+                .map(BufferedEventOrderKey::from)
+                .collect(),
+            buffered_bytes: gap.buffered_bytes,
+            started_at_ms: gap.started_at_ms,
+            max_events: gap.max_events,
+            max_bytes: gap.max_bytes,
+            timeout_ms: gap.timeout_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct OriginStreamOrderKey {
+    namespace: NamespaceId,
+    origin: ReplicaId,
+    durable: WatermarkOrderKey,
+    gap: GapBufferOrderKey,
+}
+
+impl From<&OriginStreamSnapshot> for OriginStreamOrderKey {
+    fn from(origin: &OriginStreamSnapshot) -> Self {
+        Self {
+            namespace: origin.namespace.clone(),
+            origin: origin.origin,
+            durable: WatermarkOrderKey::from(&origin.durable),
+            gap: GapBufferOrderKey::from(&origin.gap),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GapBufferByNsOriginOrderKey {
+    origins: Vec<OriginStreamOrderKey>,
+}
+
+impl From<&GapBufferByNsOriginSnapshot> for GapBufferByNsOriginOrderKey {
+    fn from(gap: &GapBufferByNsOriginSnapshot) -> Self {
+        Self {
+            origins: gap.origins.iter().map(OriginStreamOrderKey::from).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CoreOrderKey {
+    now_ms: u64,
+    gap: GapBufferByNsOriginOrderKey,
+    durable: Vec<(StreamKey, WatermarkOrderKey)>,
+    applied: Vec<(StreamKey, WatermarkOrderKey)>,
+    event_store: Vec<(EventId, [u8; 32])>,
+    ack_durable: Vec<(StreamKey, Seq0)>,
+    ack_max: Vec<(StreamKey, Seq0)>,
+    durable_max: Vec<(StreamKey, Seq0)>,
+    errored: bool,
+    equivocation_seen: bool,
+}
+
+impl From<&CoreDigest> for CoreOrderKey {
+    fn from(digest: &CoreDigest) -> Self {
+        Self {
+            now_ms: digest.now_ms,
+            gap: GapBufferByNsOriginOrderKey::from(&digest.gap),
+            durable: digest
+                .durable
+                .iter()
+                .map(|(key, wm)| (key.clone(), WatermarkOrderKey::from(wm)))
+                .collect(),
+            applied: digest
+                .applied
+                .iter()
+                .map(|(key, wm)| (key.clone(), WatermarkOrderKey::from(wm)))
+                .collect(),
+            event_store: digest
+                .event_store
+                .iter()
+                .map(|(key, sha)| (key.clone(), sha.0))
+                .collect(),
+            ack_durable: digest
+                .ack_durable
+                .iter()
+                .map(|(key, seq)| (key.clone(), *seq))
+                .collect(),
+            ack_max: digest
+                .ack_max
+                .iter()
+                .map(|(key, seq)| (key.clone(), *seq))
+                .collect(),
+            durable_max: digest
+                .durable_max
+                .iter()
+                .map(|(key, seq)| (key.clone(), *seq))
+                .collect(),
+            errored: digest.errored,
+            equivocation_seen: digest.equivocation_seen,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct StateOrderKey {
+    core: CoreOrderKey,
+    last_effect: Option<LastEffect>,
+    last_want: Option<WantInfo>,
+}
+
+impl From<&StateDigest> for StateOrderKey {
+    fn from(digest: &StateDigest) -> Self {
+        Self {
+            core: CoreOrderKey::from(&digest.core),
+            last_effect: digest.last_effect.clone(),
+            last_want: digest.last_want.clone(),
+        }
+    }
 }
 
 impl NodeState {
@@ -564,6 +814,24 @@ impl Hash for NodeState {
     }
 }
 
+impl PartialOrd for NodeState {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NodeState {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        StateOrderKey::from(&self.digest()).cmp(&StateOrderKey::from(&other.digest()))
+    }
+}
+
+impl Rewrite<Id> for NodeState {
+    fn rewrite<S>(&self, _plan: &RewritePlan<Id, S>) -> Self {
+        self.clone()
+    }
+}
+
 fn digest_watermarks<K>(
     map: &BTreeMap<StreamKey, Watermark<K>>,
 ) -> BTreeMap<StreamKey, WatermarkDigest> {
@@ -627,6 +895,16 @@ fn reject_reason_code(reason: &beads_rs::core::error::details::ReplRejectReason)
     }
 }
 
+fn replica_id_for(id: Id) -> ReplicaId {
+    let idx = usize::from(id);
+    ReplicaId::new(Uuid::from_bytes([idx as u8 + 1; 16]))
+}
+
+fn actor_id_for(id: Id) -> ActorId {
+    let idx = usize::from(id);
+    ActorId::new(format!("replica-{idx}")).expect("actor id")
+}
+
 fn make_uuid(replica: ReplicaId, seq: u64, variant: u8) -> Uuid {
     let mut bytes = [0u8; 16];
     let replica_uuid = replica.as_uuid();
@@ -646,25 +924,22 @@ fn build_limits() -> Limits {
     limits
 }
 
-fn build_actors(store: StoreIdentity, namespaces: Vec<NamespaceId>) -> Vec<ReplActor> {
+fn build_actors(
+    store: StoreIdentity,
+    namespaces: Vec<NamespaceId>,
+    replica_count: usize,
+    equivocate: bool,
+) -> Vec<ReplActor> {
     let limits = build_limits();
-    let replica_ids = (0..ACTOR_COUNT)
-        .map(|ix| ReplicaId::new(Uuid::from_bytes([ix as u8 + 1; 16])))
-        .collect::<Vec<_>>();
-    replica_ids
-        .iter()
-        .enumerate()
-        .map(|(ix, replica_id)| ReplActor {
-            replica_id: *replica_id,
-            actor_id: ActorId::new(format!("replica-{ix}")).expect("actor id"),
-            store,
-            namespaces: namespaces.clone(),
-            limits: limits.clone(),
-            max_seq: MAX_SEQ,
-            equivocate: ix == 0,
-            peer_count: ACTOR_COUNT,
-        })
-        .collect()
+    let template = ReplActor {
+        store,
+        namespaces,
+        limits,
+        max_seq: MAX_SEQ,
+        equivocate,
+        peer_count: replica_count,
+    };
+    (0..replica_count).map(|_| template.clone()).collect()
 }
 
 fn add_history_properties<A>(model: ActorModel<A, (), History>) -> ActorModel<A, (), History>
@@ -818,7 +1093,7 @@ fn add_base_properties(
         })
         .property(Expectation::Sometimes, "can fully catch up", |_, s| {
             s.actor_states.iter().all(|state| {
-                state.durable.len() == ACTOR_COUNT.saturating_sub(1)
+                state.durable.len() == s.actor_states.len().saturating_sub(1)
                     && state.durable.values().all(|wm| wm.seq().get() >= MAX_SEQ)
             })
         })
@@ -830,13 +1105,18 @@ fn add_orl_properties(
     add_history_properties(model)
 }
 
-fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<ReplActor, (), History> {
+fn build_model(
+    network: Network<ReplMsg>,
+    lossy: LossyNetwork,
+    replica_count: usize,
+    equivocate: bool,
+) -> ActorModel<ReplActor, (), History> {
     let store = StoreIdentity::new(
         StoreId::new(Uuid::from_bytes([9u8; 16])),
         StoreEpoch::new(1),
     );
     let namespaces = vec![NamespaceId::core()];
-    let actors = build_actors(store, namespaces);
+    let actors = build_actors(store, namespaces, replica_count, equivocate);
 
     let model = ActorModel::new((), History::default())
         .actors(actors)
@@ -851,13 +1131,15 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
 fn build_model_wrapped(
     network: Network<MsgWrapper<ReplMsg>>,
     lossy: LossyNetwork,
+    replica_count: usize,
+    equivocate: bool,
 ) -> ActorModel<ActorWrapper<ReplActor>, (), History> {
     let store = StoreIdentity::new(
         StoreId::new(Uuid::from_bytes([9u8; 16])),
         StoreEpoch::new(1),
     );
     let namespaces = vec![NamespaceId::core()];
-    let actors = build_actors(store, namespaces)
+    let actors = build_actors(store, namespaces, replica_count, equivocate)
         .into_iter()
         .map(ActorWrapper::with_default_timeout)
         .collect::<Vec<_>>();
@@ -870,6 +1152,15 @@ fn build_model_wrapped(
         .record_msg_out(record_msg_out_orl);
 
     add_orl_properties(model)
+}
+
+fn rewrite_id_streamkey_map<S>(
+    map: &BTreeMap<(Id, StreamKey), Seq0>,
+    plan: &RewritePlan<Id, S>,
+) -> BTreeMap<(Id, StreamKey), Seq0> {
+    map.iter()
+        .map(|((id, key), seq)| ((id.rewrite(plan), key.clone()), *seq))
+        .collect()
 }
 
 fn update_last_delivered(
@@ -1009,6 +1300,15 @@ struct NetConfig {
     ordered_link: bool,
 }
 
+struct ModelConfig {
+    kind: NetworkKind,
+    lossy: LossyNetwork,
+    ordered_link: bool,
+    symmetry: bool,
+    replica_count: usize,
+    equivocate: bool,
+}
+
 fn parse_network(args: &mut pico_args::Arguments) -> Result<NetConfig, pico_args::Error> {
     let network = args
         .opt_value_from_str::<_, String>("--network")?
@@ -1055,6 +1355,54 @@ fn parse_network(args: &mut pico_args::Arguments) -> Result<NetConfig, pico_args
     })
 }
 
+fn parse_model_config(args: &mut pico_args::Arguments) -> Result<ModelConfig, pico_args::Error> {
+    let net = parse_network(args)?;
+    let replica_count = args
+        .opt_value_from_str("--replicas")?
+        .unwrap_or(DEFAULT_REPLICAS);
+    if replica_count < 2 {
+        return Err(pico_args::Error::ArgumentParsingFailed {
+            cause: "--replicas must be >= 2".into(),
+        });
+    }
+    if replica_count > u8::MAX as usize {
+        return Err(pico_args::Error::ArgumentParsingFailed {
+            cause: "--replicas too large for replica id mapping".into(),
+        });
+    }
+
+    let symmetry_flag = args.contains("--symmetry");
+    let no_symmetry_flag = args.contains("--no-symmetry");
+    if symmetry_flag && no_symmetry_flag {
+        return Err(pico_args::Error::ArgumentParsingFailed {
+            cause: "cannot combine --symmetry and --no-symmetry".into(),
+        });
+    }
+    let symmetry = if symmetry_flag {
+        true
+    } else if no_symmetry_flag {
+        false
+    } else {
+        !net.ordered_link
+    };
+    if net.ordered_link && symmetry {
+        return Err(pico_args::Error::ArgumentParsingFailed {
+            cause: "--symmetry is not supported with --ordered-link".into(),
+        });
+    }
+
+    let equivocate = args.contains("--equivocate");
+
+    Ok(ModelConfig {
+        kind: net.kind,
+        lossy: net.lossy,
+        ordered_link: net.ordered_link,
+        symmetry,
+        replica_count,
+        equivocate,
+    })
+}
+
 fn network_for_base(kind: NetworkKind) -> Network<ReplMsg> {
     match kind {
         NetworkKind::Ordered => Network::new_ordered([]),
@@ -1071,12 +1419,27 @@ fn network_for_wrapped(kind: NetworkKind) -> Network<MsgWrapper<ReplMsg>> {
     }
 }
 
+fn network_label(kind: NetworkKind) -> &'static str {
+    match kind {
+        NetworkKind::Ordered => "ordered",
+        NetworkKind::UnorderedDuplicating => "unordered_duplicating",
+        NetworkKind::UnorderedNonDuplicating => "unordered_nonduplicating",
+    }
+}
+
+fn lossy_label(lossy: LossyNetwork) -> &'static str {
+    match lossy {
+        LossyNetwork::Yes => "yes",
+        LossyNetwork::No => "no",
+    }
+}
+
 enum RunMode {
     Check,
     Explore(String),
 }
 
-fn run_model<M>(model: M, mode: RunMode)
+fn run_model_plain<M>(model: M, mode: RunMode)
 where
     M: Model + Send + Sync + 'static,
     M::State: std::fmt::Debug + Hash + Send + Sync + Clone + PartialEq,
@@ -1103,10 +1466,39 @@ where
     }
 }
 
+fn run_model_symmetric<M>(model: M, mode: RunMode)
+where
+    M: Model + Send + Sync + 'static,
+    M::State: Representative + std::fmt::Debug + Hash + Send + Sync + Clone + PartialEq,
+    M::Action: std::fmt::Debug + Send + Sync + Clone + PartialEq,
+{
+    match mode {
+        RunMode::Explore(address) => {
+            println!("Exploring replication core state space on {address} (symmetry on).");
+            model
+                .checker()
+                .symmetry()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .serve(address);
+        }
+        RunMode::Check => {
+            println!("Model checking replication core (symmetry on).");
+            model
+                .checker()
+                .symmetry()
+                .threads(num_cpus::get())
+                .timeout(Duration::from_secs(60))
+                .spawn_dfs()
+                .report(&mut WriteReporter::new(&mut std::io::stdout()));
+        }
+    }
+}
+
 fn main() -> Result<(), pico_args::Error> {
     env_logger::init();
     let mut args = pico_args::Arguments::from_env();
-    let config = parse_network(&mut args)?;
+    let config = parse_model_config(&mut args)?;
     let mode = match args.subcommand()?.as_deref() {
         Some("explore") => {
             let address = args
@@ -1117,18 +1509,48 @@ fn main() -> Result<(), pico_args::Error> {
         Some("check") | None => RunMode::Check,
         _ => {
             println!("USAGE:");
-            println!("  repl_core_machine check [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link]");
-            println!("  repl_core_machine explore [ADDRESS] [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link]");
+            println!(
+                "  repl_core_machine check [--replicas N] [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link] [--symmetry|--no-symmetry] [--equivocate]"
+            );
+            println!(
+                "  repl_core_machine explore [ADDRESS] [--replicas N] [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link] [--symmetry|--no-symmetry] [--equivocate]"
+            );
             return Ok(());
         }
     };
 
+    println!(
+        "Config: replicas={}, network={}, lossy={}, ordered_link={}, symmetry={}, equivocate={}",
+        config.replica_count,
+        network_label(config.kind),
+        lossy_label(config.lossy),
+        config.ordered_link,
+        config.symmetry,
+        config.equivocate
+    );
+
     if config.ordered_link {
         let network = network_for_wrapped(config.kind);
-        run_model(build_model_wrapped(network, config.lossy), mode);
+        let model = build_model_wrapped(
+            network,
+            config.lossy,
+            config.replica_count,
+            config.equivocate,
+        );
+        run_model_plain(model, mode);
     } else {
         let network = network_for_base(config.kind);
-        run_model(build_model(network, config.lossy), mode);
+        let model = build_model(
+            network,
+            config.lossy,
+            config.replica_count,
+            config.equivocate,
+        );
+        if config.symmetry {
+            run_model_symmetric(model, mode);
+        } else {
+            run_model_plain(model, mode);
+        }
     }
 
     Ok(())

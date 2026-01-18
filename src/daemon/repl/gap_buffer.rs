@@ -64,8 +64,13 @@ impl WatermarkSnapshot {
 #[cfg(feature = "model-testing")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BufferedPrevSnapshot {
-    Contiguous { prev: Option<Sha256> },
-    Deferred { prev: Sha256, expected_prev_seq: Seq1 },
+    Contiguous {
+        prev: Option<Sha256>,
+    },
+    Deferred {
+        prev: Sha256,
+        expected_prev_seq: Seq1,
+    },
 }
 
 #[cfg(feature = "model-testing")]

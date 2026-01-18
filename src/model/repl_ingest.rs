@@ -1,8 +1,8 @@
 //! Thin wrappers for replication ingest helpers.
 
 use crate::core::{
-    EventFrameError, EventFrameV1, EventShaLookup, Limits, Sha256, StoreIdentity,
-    VerifiedEventAny, verify_event_frame,
+    EventFrameError, EventFrameV1, EventShaLookup, Limits, Sha256, StoreIdentity, VerifiedEventAny,
+    verify_event_frame,
 };
 
 pub fn verify_frame(

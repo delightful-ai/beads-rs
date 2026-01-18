@@ -58,10 +58,17 @@ impl EventFactory {
     }
 }
 
-pub fn encode_frame(body: &EventBody, prev_sha256: Option<Sha256>) -> Result<EventFrameV1, crate::core::EncodeError> {
+pub fn encode_frame(
+    body: &EventBody,
+    prev_sha256: Option<Sha256>,
+) -> Result<EventFrameV1, crate::core::EncodeError> {
     let bytes = encode_event_body_canonical(body)?;
     let sha256 = hash_event_body(&bytes);
-    let eid = EventId::new(body.origin_replica_id, body.namespace.clone(), body.origin_seq);
+    let eid = EventId::new(
+        body.origin_replica_id,
+        body.namespace.clone(),
+        body.origin_seq,
+    );
     Ok(EventFrameV1 {
         eid,
         sha256,
