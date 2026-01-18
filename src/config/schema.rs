@@ -234,6 +234,10 @@ pub struct LimitsOverride {
 
     pub wal_segment_max_bytes: Option<usize>,
     pub wal_segment_max_age_ms: Option<u64>,
+    pub wal_guardrail_max_bytes: Option<u64>,
+    pub wal_guardrail_max_segments: Option<u64>,
+    pub wal_guardrail_growth_window_ms: Option<u64>,
+    pub wal_guardrail_growth_max_bytes: Option<u64>,
 
     pub wal_group_commit_max_latency_ms: Option<u64>,
     pub wal_group_commit_max_events: Option<usize>,
@@ -314,6 +318,18 @@ impl LimitsOverride {
         }
         if let Some(value) = self.wal_segment_max_age_ms {
             limits.wal_segment_max_age_ms = value;
+        }
+        if let Some(value) = self.wal_guardrail_max_bytes {
+            limits.wal_guardrail_max_bytes = value;
+        }
+        if let Some(value) = self.wal_guardrail_max_segments {
+            limits.wal_guardrail_max_segments = value;
+        }
+        if let Some(value) = self.wal_guardrail_growth_window_ms {
+            limits.wal_guardrail_growth_window_ms = value;
+        }
+        if let Some(value) = self.wal_guardrail_growth_max_bytes {
+            limits.wal_guardrail_growth_max_bytes = value;
         }
 
         if let Some(value) = self.wal_group_commit_max_latency_ms {

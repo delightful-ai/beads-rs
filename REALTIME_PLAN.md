@@ -815,6 +815,10 @@ These defaults are not optional; implementations MUST enforce bounds.
 - WAL_SEGMENT_MAX_BYTES default 32 MiB.
 - WAL_SEGMENT_MAX_AGE default 60s.
 - MAX_WAL_RECORD_BYTES MUST be enforced; default <= 16 MiB.
+- WAL_GUARDRAIL_MAX_BYTES default 8 GiB (warn only; WAL pruning remains deferred).
+- WAL_GUARDRAIL_MAX_SEGMENTS default 10,000 (warn only; WAL pruning remains deferred).
+- WAL_GUARDRAIL_GROWTH_WINDOW_MS default 10 minutes.
+- WAL_GUARDRAIL_GROWTH_MAX_BYTES default 512 MiB per window (warn only).
 
 Content-level limits (normative defaults; can be tightened per-namespace):
 - MAX_NOTE_BYTES default 64 KiB (reject larger note_append content).

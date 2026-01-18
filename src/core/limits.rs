@@ -22,6 +22,10 @@ pub struct Limits {
 
     pub wal_segment_max_bytes: usize,
     pub wal_segment_max_age_ms: u64,
+    pub wal_guardrail_max_bytes: u64,
+    pub wal_guardrail_max_segments: u64,
+    pub wal_guardrail_growth_window_ms: u64,
+    pub wal_guardrail_growth_max_bytes: u64,
 
     pub wal_group_commit_max_latency_ms: u64,
     pub wal_group_commit_max_events: usize,
@@ -82,6 +86,10 @@ impl Default for Limits {
 
             wal_segment_max_bytes: 32 * 1024 * 1024,
             wal_segment_max_age_ms: 60_000,
+            wal_guardrail_max_bytes: 8 * 1024 * 1024 * 1024,
+            wal_guardrail_max_segments: 10_000,
+            wal_guardrail_growth_window_ms: 600_000,
+            wal_guardrail_growth_max_bytes: 512 * 1024 * 1024,
 
             wal_group_commit_max_latency_ms: 2,
             wal_group_commit_max_events: 64,
@@ -145,6 +153,10 @@ mod tests {
         assert_eq!(limits.dead_ms, 30_000);
         assert_eq!(limits.wal_segment_max_bytes, 32 * 1024 * 1024);
         assert_eq!(limits.wal_segment_max_age_ms, 60_000);
+        assert_eq!(limits.wal_guardrail_max_bytes, 8 * 1024 * 1024 * 1024);
+        assert_eq!(limits.wal_guardrail_max_segments, 10_000);
+        assert_eq!(limits.wal_guardrail_growth_window_ms, 600_000);
+        assert_eq!(limits.wal_guardrail_growth_max_bytes, 512 * 1024 * 1024);
         assert_eq!(limits.wal_group_commit_max_latency_ms, 2);
         assert_eq!(limits.wal_group_commit_max_events, 64);
         assert_eq!(limits.wal_group_commit_max_bytes, 1 * 1024 * 1024);
