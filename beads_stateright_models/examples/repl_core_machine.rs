@@ -49,6 +49,15 @@ impl StreamKey {
     }
 }
 
+impl Rewrite<Id> for StreamKey {
+    fn rewrite<S>(&self, plan: &RewritePlan<Id, S>) -> Self {
+        Self {
+            namespace: self.namespace.clone(),
+            origin: rewrite_replica_id(self.origin, plan),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct FrameDigest {
     eid: EventId,
@@ -74,6 +83,16 @@ impl Ord for FrameDigest {
     }
 }
 
+impl Rewrite<Id> for FrameDigest {
+    fn rewrite<S>(&self, plan: &RewritePlan<Id, S>) -> Self {
+        Self {
+            eid: rewrite_event_id(&self.eid, plan),
+            sha256: self.sha256,
+            prev_sha256: self.prev_sha256,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FrameMsg {
     digest: FrameDigest,
@@ -88,6 +107,15 @@ impl FrameMsg {
             prev_sha256: frame.prev_sha256,
         };
         Self { digest, frame }
+    }
+}
+
+impl Rewrite<Id> for FrameMsg {
+    fn rewrite<S>(&self, plan: &RewritePlan<Id, S>) -> Self {
+        Self {
+            digest: self.digest.rewrite(plan),
+            frame: self.frame.clone(),
+        }
     }
 }
 
@@ -125,8 +153,18 @@ enum ReplMsg {
 }
 
 impl Rewrite<Id> for ReplMsg {
-    fn rewrite<S>(&self, _plan: &RewritePlan<Id, S>) -> Self {
-        self.clone()
+    fn rewrite<S>(&self, plan: &RewritePlan<Id, S>) -> Self {
+        match self {
+            ReplMsg::Event(frame) => ReplMsg::Event(frame.rewrite(plan)),
+            ReplMsg::Want { key, from } => ReplMsg::Want {
+                key: key.rewrite(plan),
+                from: *from,
+            },
+            ReplMsg::Ack { key, durable } => ReplMsg::Ack {
+                key: key.rewrite(plan),
+                durable: *durable,
+            },
+        }
     }
 }
 
@@ -163,8 +201,8 @@ impl Default for History {
 impl Rewrite<Id> for History {
     fn rewrite<S>(&self, plan: &RewritePlan<Id, S>) -> Self {
         Self {
-            sent: self.sent.clone(),
-            delivered: self.delivered.clone(),
+            sent: rewrite_frame_set(&self.sent, plan),
+            delivered: rewrite_frame_set(&self.delivered, plan),
             last_delivered: rewrite_id_streamkey_map(&self.last_delivered, plan),
             last_want_out: rewrite_id_streamkey_map(&self.last_want_out, plan),
             last_ack_out: rewrite_id_streamkey_map(&self.last_ack_out, plan),
@@ -365,6 +403,7 @@ struct NodeState {
     equivocation_seen: bool,
     last_effect: Option<LastEffect>,
     last_want: Option<WantInfo>,
+    digest_override: Option<StateDigest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -645,6 +684,7 @@ impl NodeState {
             equivocation_seen: false,
             last_effect: None,
             last_want: None,
+            digest_override: None,
         }
     }
 
@@ -664,6 +704,9 @@ impl NodeState {
     }
 
     fn digest(&self) -> StateDigest {
+        if let Some(digest) = &self.digest_override {
+            return digest.clone();
+        }
         StateDigest {
             core: self.core_digest(),
             last_effect: self.last_effect.clone(),
@@ -858,8 +901,10 @@ impl Ord for NodeState {
 }
 
 impl Rewrite<Id> for NodeState {
-    fn rewrite<S>(&self, _plan: &RewritePlan<Id, S>) -> Self {
-        self.clone()
+    fn rewrite<S>(&self, plan: &RewritePlan<Id, S>) -> Self {
+        let mut next = self.clone();
+        next.digest_override = Some(rewrite_state_digest(self, plan));
+        next
     }
 }
 
@@ -895,6 +940,108 @@ impl EventShaLookup for EventLookup<'_> {
         eid: &EventId,
     ) -> Result<Option<Sha256>, beads_rs::EventShaLookupError> {
         Ok(self.events.get(eid).copied())
+    }
+}
+
+fn rewrite_streamkey_map<S, V: Clone>(
+    map: &BTreeMap<StreamKey, V>,
+    plan: &RewritePlan<Id, S>,
+) -> BTreeMap<StreamKey, V> {
+    map.iter()
+        .map(|(key, value)| (key.rewrite(plan), value.clone()))
+        .collect()
+}
+
+fn rewrite_event_store<S>(
+    map: &BTreeMap<EventId, Sha256>,
+    plan: &RewritePlan<Id, S>,
+) -> BTreeMap<EventId, Sha256> {
+    map.iter()
+        .map(|(eid, sha)| (rewrite_event_id(eid, plan), *sha))
+        .collect()
+}
+
+fn rewrite_gap_snapshot<S>(
+    snapshot: &GapBufferByNsOriginSnapshot,
+    plan: &RewritePlan<Id, S>,
+) -> GapBufferByNsOriginSnapshot {
+    let mut origins = snapshot
+        .origins
+        .iter()
+        .map(|origin| OriginStreamSnapshot {
+            namespace: origin.namespace.clone(),
+            origin: rewrite_replica_id(origin.origin, plan),
+            durable: origin.durable.clone(),
+            gap: origin.gap.clone(),
+        })
+        .collect::<Vec<_>>();
+    origins.sort_by(|lhs, rhs| {
+        (lhs.namespace.clone(), lhs.origin).cmp(&(rhs.namespace.clone(), rhs.origin))
+    });
+    GapBufferByNsOriginSnapshot { origins }
+}
+
+fn rewrite_last_effect<S>(effect: &LastEffect, plan: &RewritePlan<Id, S>) -> LastEffect {
+    let kind = match &effect.kind {
+        LastEffectKind::Applied {
+            key,
+            seq,
+            prev_seen,
+        } => LastEffectKind::Applied {
+            key: key.rewrite(plan),
+            seq: *seq,
+            prev_seen: *prev_seen,
+        },
+        LastEffectKind::Buffered { key, seq } => LastEffectKind::Buffered {
+            key: key.rewrite(plan),
+            seq: *seq,
+        },
+        LastEffectKind::Duplicate { key, seq } => LastEffectKind::Duplicate {
+            key: key.rewrite(plan),
+            seq: *seq,
+        },
+        LastEffectKind::Rejected { code } => LastEffectKind::Rejected { code },
+    };
+    LastEffect {
+        kind,
+        changed: effect.changed,
+    }
+}
+
+fn rewrite_want_info<S>(want: &WantInfo, plan: &RewritePlan<Id, S>) -> WantInfo {
+    WantInfo {
+        key: want.key.rewrite(plan),
+        from: want.from,
+    }
+}
+
+fn rewrite_core_digest<S>(digest: &CoreDigest, plan: &RewritePlan<Id, S>) -> CoreDigest {
+    CoreDigest {
+        now_ms: digest.now_ms,
+        gap: rewrite_gap_snapshot(&digest.gap, plan),
+        durable: rewrite_streamkey_map(&digest.durable, plan),
+        applied: rewrite_streamkey_map(&digest.applied, plan),
+        event_store: rewrite_event_store(&digest.event_store, plan),
+        ack_durable: rewrite_streamkey_map(&digest.ack_durable, plan),
+        ack_max: rewrite_streamkey_map(&digest.ack_max, plan),
+        durable_max: rewrite_streamkey_map(&digest.durable_max, plan),
+        errored: digest.errored,
+        equivocation_seen: digest.equivocation_seen,
+    }
+}
+
+fn rewrite_state_digest<S>(state: &NodeState, plan: &RewritePlan<Id, S>) -> StateDigest {
+    let core = rewrite_core_digest(&state.core_digest(), plan);
+    StateDigest {
+        core,
+        last_effect: state
+            .last_effect
+            .as_ref()
+            .map(|effect| rewrite_last_effect(effect, plan)),
+        last_want: state
+            .last_want
+            .as_ref()
+            .map(|want| rewrite_want_info(want, plan)),
     }
 }
 
@@ -935,6 +1082,29 @@ fn reject_reason_code(reason: &beads_rs::core::error::details::ReplRejectReason)
 fn replica_id_for(id: Id) -> ReplicaId {
     let idx = usize::from(id);
     ReplicaId::new(Uuid::from_bytes([idx as u8 + 1; 16]))
+}
+
+fn replica_id_to_id(replica_id: ReplicaId) -> Option<Id> {
+    let uuid = replica_id.as_uuid();
+    let bytes = uuid.as_bytes();
+    let first = bytes[0];
+    if first == 0 || bytes.iter().any(|b| *b != first) {
+        return None;
+    }
+    let idx = first.saturating_sub(1) as usize;
+    Some(Id::from(idx))
+}
+
+fn rewrite_replica_id<S>(replica_id: ReplicaId, plan: &RewritePlan<Id, S>) -> ReplicaId {
+    match replica_id_to_id(replica_id) {
+        Some(id) => replica_id_for(id.rewrite(plan)),
+        None => replica_id,
+    }
+}
+
+fn rewrite_event_id<S>(eid: &EventId, plan: &RewritePlan<Id, S>) -> EventId {
+    let origin = rewrite_replica_id(eid.origin_replica_id, plan);
+    EventId::new(origin, eid.namespace.clone(), eid.origin_seq)
 }
 
 fn actor_id_for(id: Id) -> ActorId {
@@ -1231,8 +1401,15 @@ fn rewrite_id_streamkey_map<S>(
     plan: &RewritePlan<Id, S>,
 ) -> BTreeMap<(Id, StreamKey), Seq0> {
     map.iter()
-        .map(|((id, key), seq)| ((id.rewrite(plan), key.clone()), *seq))
+        .map(|((id, key), seq)| ((id.rewrite(plan), key.rewrite(plan)), *seq))
         .collect()
+}
+
+fn rewrite_frame_set<S>(
+    set: &BTreeSet<FrameDigest>,
+    plan: &RewritePlan<Id, S>,
+) -> BTreeSet<FrameDigest> {
+    set.iter().map(|digest| digest.rewrite(plan)).collect()
 }
 
 fn update_last_delivered(history: &mut History, dst: Id, key: StreamKey, seq: Seq0) {
