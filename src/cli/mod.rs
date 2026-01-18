@@ -5,6 +5,7 @@
 //! - Extensible command tree + thin handlers
 //! - LLM-robust parsing (aliases, boolish flags, case/dash tolerance)
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -19,13 +20,17 @@ use crate::core::{
     NamespaceId, Priority, Watermarks,
 };
 use crate::daemon::ipc::{
-    MutationMeta, ReadConsistency, Request, Response, ResponsePayload, send_request,
+    IpcClient, IpcConnection, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
 };
 use crate::daemon::query::SortField;
 use crate::{Error, Result};
 
 mod commands;
 mod render;
+
+thread_local! {
+    static COMMAND_CONNECTION: RefCell<Option<IpcConnection>> = const { RefCell::new(None) };
+}
 
 // =============================================================================
 // Entry + global options
@@ -1395,17 +1400,43 @@ fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn send_raw(req: &Request) -> Result<Response> {
+    let response = send_raw_once(req).or_else(|err| {
+        if err.transience().is_retryable() {
+            COMMAND_CONNECTION.with(|conn| {
+                *conn.borrow_mut() = None;
+            });
+            send_raw_once(req)
+        } else {
+            Err(err)
+        }
+    })?;
+    Ok(response)
+}
+
+fn send_raw_once(req: &Request) -> std::result::Result<Response, crate::daemon::ipc::IpcError> {
+    COMMAND_CONNECTION.with(|conn| {
+        let mut conn = conn.borrow_mut();
+        if conn.is_none() {
+            let client = IpcClient::new();
+            *conn = Some(client.connect()?);
+        }
+        conn.as_mut()
+            .expect("command connection initialized")
+            .send_request(req)
+    })
+}
+
 fn send(req: &Request) -> Result<ResponsePayload> {
-    match send_request(req) {
-        Ok(Response::Ok { ok }) => Ok(ok),
-        Ok(Response::Err { err }) => {
+    match send_raw(req)? {
+        Response::Ok { ok } => Ok(ok),
+        Response::Err { err } => {
             tracing::error!("error: {} - {}", err.code, err.message);
             if let Some(details) = err.details {
                 tracing::error!("details: {}", details);
             }
             std::process::exit(1);
         }
-        Err(e) => Err(e.into()),
     }
 }
 

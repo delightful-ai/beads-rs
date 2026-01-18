@@ -3,11 +3,11 @@ use std::io::{BufRead, Write};
 use super::super::render;
 use super::super::{
     CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_ok,
-    resolve_description, send,
+    resolve_description, send, send_raw,
 };
 use crate::api::QueryResult;
 use crate::core::BeadType;
-use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request};
+use crate::daemon::ipc::{Request, Response, ResponsePayload};
 use crate::daemon::ops::OpResult;
 use crate::{Error, Result};
 
@@ -167,7 +167,7 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
         };
 
         // Best-effort: keep going on per-issue failures.
-        let resp = send_request(&req)?;
+        let resp = send_raw(&req)?;
         let created_id = match resp {
             Response::Ok {
                 ok: ResponsePayload::Op(op),

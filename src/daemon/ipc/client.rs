@@ -138,6 +138,10 @@ impl IpcClient {
         &self.socket
     }
 
+    pub fn connect(&self) -> Result<IpcConnection, IpcError> {
+        IpcConnection::connect(self.socket.clone(), self.autostart)
+    }
+
     pub fn send_request(&self, req: &Request) -> Result<Response, IpcError> {
         if self.autostart {
             send_request_at(&self.socket, req)
@@ -166,6 +170,79 @@ impl IpcClient {
 impl Default for IpcClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct IpcConnection {
+    writer: UnixStream,
+    reader: BufReader<UnixStream>,
+}
+
+impl IpcConnection {
+    pub fn connect(socket: PathBuf, autostart: bool) -> Result<Self, IpcError> {
+        const MAX_ATTEMPTS: u32 = 3;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let stream = if autostart {
+                connect_with_autostart(&socket)
+            } else {
+                UnixStream::connect(&socket).map_err(IpcError::from)
+            };
+            let stream = match stream {
+                Ok(s) => s,
+                Err(e) => {
+                    if attempt >= MAX_ATTEMPTS {
+                        return Err(e);
+                    }
+                    let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
+                    std::thread::sleep(backoff);
+                    continue;
+                }
+            };
+
+            let mut conn = IpcConnection::new(stream)?;
+            match verify_daemon_version(&socket, &mut conn.writer, &mut conn.reader) {
+                Ok(()) => return Ok(conn),
+                Err(IpcError::DaemonVersionMismatch { daemon, .. }) if attempt < MAX_ATTEMPTS => {
+                    tracing::info!(
+                        "daemon version mismatch, restarting (attempt {}/{})",
+                        attempt,
+                        MAX_ATTEMPTS
+                    );
+                    if let Some(info) = daemon {
+                        let _ = kill_daemon_forcefully(info.pid, &socket);
+                    } else {
+                        let _ = try_restart_daemon_by_socket(&socket);
+                    }
+                    let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
+                    std::thread::sleep(backoff);
+                }
+                Err(IpcError::DaemonUnavailable(ref msg)) if attempt < MAX_ATTEMPTS => {
+                    tracing::debug!("daemon unavailable ({}), retrying", msg);
+                    let _ = try_restart_daemon_by_socket(&socket);
+                    let backoff = Duration::from_millis(100 * (1 << (attempt - 1)));
+                    std::thread::sleep(backoff);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(IpcError::DaemonUnavailable(
+            "max retry attempts exceeded".into(),
+        ))
+    }
+
+    fn new(stream: UnixStream) -> Result<Self, IpcError> {
+        let reader_stream = stream.try_clone()?;
+        Ok(Self {
+            writer: stream,
+            reader: BufReader::new(reader_stream),
+        })
+    }
+
+    pub fn send_request(&mut self, req: &Request) -> Result<Response, IpcError> {
+        write_req_line(&mut self.writer, req)?;
+        read_resp_line(&mut self.reader)
     }
 }
 
