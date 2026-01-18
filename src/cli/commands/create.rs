@@ -136,6 +136,7 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     }
 
     let mut created = Vec::new();
+    let mut created_summaries = Vec::new();
     let mut failed = Vec::new();
 
     for t in templates {
@@ -204,8 +205,17 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
             }
         };
 
-        let issue = fetch_issue(ctx, &created_id)?;
-        created.push(issue);
+        if ctx.json {
+            let issue = fetch_issue(ctx, &created_id)?;
+            created.push(issue);
+        } else {
+            created_summaries.push(CreatedSummary {
+                id: created_id.as_str().to_string(),
+                title: t.title.clone(),
+                priority: t.priority,
+                bead_type: t.bead_type,
+            });
+        }
     }
 
     if !failed.is_empty() {
@@ -224,11 +234,18 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     }
 
     let file_label = path.display();
-    println!("✓ Created {} issues from {}:", created.len(), file_label);
-    for issue in &created {
+    println!(
+        "✓ Created {} issues from {}:",
+        created_summaries.len(),
+        file_label
+    );
+    for issue in &created_summaries {
         println!(
             "  {}: {} [P{}, {}]",
-            issue.id, issue.title, issue.priority, issue.issue_type
+            issue.id,
+            issue.title,
+            issue.priority.value(),
+            issue.bead_type.as_str()
         );
     }
     Ok(())
@@ -245,6 +262,14 @@ struct MarkdownIssue {
     assignee: Option<String>,
     labels: Vec<String>,
     dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CreatedSummary {
+    id: String,
+    title: String,
+    priority: crate::core::Priority,
+    bead_type: BeadType,
 }
 
 fn parse_markdown_file(path: &std::path::Path) -> Result<Vec<MarkdownIssue>> {
