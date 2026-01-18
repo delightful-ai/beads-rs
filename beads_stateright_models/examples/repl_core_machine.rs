@@ -18,7 +18,8 @@ use beads_rs::{
     TxnDeltaV1, TxnId, Watermark,
 };
 use stateright::actor::{
-    model_peers, model_timeout, Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out,
+    model_peers, model_timeout, ordered_reliable_link::ActorWrapper,
+    ordered_reliable_link::MsgWrapper, Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out,
 };
 use stateright::{report::WriteReporter, Checker, Expectation, Model};
 use uuid::Uuid;
@@ -109,6 +110,8 @@ impl Ord for FrameMsg {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum ReplMsg {
     Event(FrameMsg),
+    Want { key: StreamKey, from: Seq0 },
+    Ack { key: StreamKey, durable: Seq0 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -116,10 +119,29 @@ enum TimerTag {
     Tick,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct History {
     sent: BTreeSet<FrameDigest>,
     delivered: BTreeSet<FrameDigest>,
+    last_delivered: BTreeMap<(Id, StreamKey), Seq0>,
+    last_want_out: BTreeMap<(Id, StreamKey), Seq0>,
+    last_ack_out: BTreeMap<(Id, StreamKey), Seq0>,
+    ack_monotonic: bool,
+    want_not_ahead: bool,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            sent: BTreeSet::new(),
+            delivered: BTreeSet::new(),
+            last_delivered: BTreeMap::new(),
+            last_want_out: BTreeMap::new(),
+            last_ack_out: BTreeMap::new(),
+            ack_monotonic: true,
+            want_not_ahead: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -193,25 +215,59 @@ impl Actor for ReplActor {
         &self,
         _id: Id,
         state: &mut Cow<Self::State>,
-        _src: Id,
+        src: Id,
         msg: Self::Msg,
-        _o: &mut Out<Self>,
+        o: &mut Out<Self>,
     ) {
-        let ReplMsg::Event(frame_msg) = msg;
         let state = state.to_mut();
-        if state.errored {
-            return;
+        match msg {
+            ReplMsg::Event(frame_msg) => {
+                if state.errored {
+                    return;
+                }
+
+                state.last_effect = None;
+                state.last_want = None;
+                state.now_ms = state.now_ms.saturating_add(1);
+
+                let before = state.core_digest();
+                let effect = state.ingest_frame(&frame_msg.frame, &self.limits, self.store);
+                let after = state.core_digest();
+                let changed = before != after;
+                state.last_effect = Some(LastEffect { kind: effect, changed });
+
+                if let Some(last_want) = state.last_want.clone() {
+                    o.send(
+                        src,
+                        ReplMsg::Want {
+                            key: last_want.key.clone(),
+                            from: last_want.from,
+                        },
+                    );
+                }
+
+                if let Some(last_effect) = state.last_effect.as_ref() {
+                    let key = match &last_effect.kind {
+                        LastEffectKind::Applied { key, .. }
+                        | LastEffectKind::Buffered { key, .. }
+                        | LastEffectKind::Duplicate { key, .. } => Some(key),
+                        LastEffectKind::Rejected { .. } => None,
+                    };
+                    if let Some(key) = key {
+                        if let Some(seq) = state.ack_durable.get(key) {
+                            o.send(
+                                src,
+                                ReplMsg::Ack {
+                                    key: key.clone(),
+                                    durable: *seq,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            ReplMsg::Want { .. } | ReplMsg::Ack { .. } => {}
         }
-
-        state.last_effect = None;
-        state.last_want = None;
-        state.now_ms = state.now_ms.saturating_add(1);
-
-        let before = state.core_digest();
-        let effect = state.ingest_frame(&frame_msg.frame, &self.limits, self.store);
-        let after = state.core_digest();
-        let changed = before != after;
-        state.last_effect = Some(LastEffect { kind: effect, changed });
     }
 
     fn on_timeout(
@@ -611,24 +667,30 @@ fn build_actors(store: StoreIdentity, namespaces: Vec<NamespaceId>) -> Vec<ReplA
         .collect()
 }
 
-fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<ReplActor, (), History> {
-    let store = StoreIdentity::new(
-        StoreId::new(Uuid::from_bytes([9u8; 16])),
-        StoreEpoch::new(1),
-    );
-    let namespaces = vec![NamespaceId::core()];
-    let actors = build_actors(store, namespaces);
+fn add_history_properties<A>(model: ActorModel<A, (), History>) -> ActorModel<A, (), History>
+where
+    A: Actor,
+    A::Msg: Ord,
+    A::Timer: Ord,
+{
+    model
+        .property(Expectation::Always, "history ack monotonic", |_, s| {
+            s.history.ack_monotonic
+        })
+        .property(Expectation::Always, "history wants not ahead of delivered", |_, s| {
+            s.history.want_not_ahead
+        })
+}
 
-    ActorModel::new((), History::default())
-        .actors(actors)
-        .init_network(network)
-        .lossy_network(lossy)
-        .record_msg_in(record_msg_in)
-        .record_msg_out(record_msg_out)
+fn add_base_properties(
+    model: ActorModel<ReplActor, (), History>,
+) -> ActorModel<ReplActor, (), History> {
+    let model = add_history_properties(model);
+    model
         .property(Expectation::Always, "ack never exceeds contiguous seen", |_, s| {
-            s.actor_states.iter().all(|node| {
-                node.ack_durable.iter().all(|(key, ack)| {
-                    let seen = node
+            s.actor_states.iter().all(|state| {
+                state.ack_durable.iter().all(|(key, ack)| {
+                    let seen = state
                         .durable
                         .get(key)
                         .map(|wm| wm.seq())
@@ -638,9 +700,10 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
             })
         })
         .property(Expectation::Always, "seen map is monotonic", |_, s| {
-            s.actor_states.iter().all(|node| {
-                node.durable.iter().all(|(key, wm)| {
-                    node.durable_max
+            s.actor_states.iter().all(|state| {
+                state.durable.iter().all(|(key, wm)| {
+                    state
+                        .durable_max
                         .get(key)
                         .copied()
                         .unwrap_or(Seq0::ZERO)
@@ -649,9 +712,10 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
             })
         })
         .property(Expectation::Always, "ack map is monotonic", |_, s| {
-            s.actor_states.iter().all(|node| {
-                node.ack_durable.iter().all(|(key, ack)| {
-                    node.ack_max
+            s.actor_states.iter().all(|state| {
+                state.ack_durable.iter().all(|(key, ack)| {
+                    state
+                        .ack_max
                         .get(key)
                         .copied()
                         .unwrap_or(Seq0::ZERO)
@@ -660,19 +724,19 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
             })
         })
         .property(Expectation::Always, "contiguous seen implies applied prefix", |_, s| {
-            s.actor_states.iter().all(|node| {
-                node.durable.iter().all(|(key, wm)| {
+            s.actor_states.iter().all(|state| {
+                state.durable.iter().all(|(key, wm)| {
                     let seen = wm.seq().get();
                     (1..=seen).all(|seq| {
                         let seq1 = Seq1::from_u64(seq).expect("seq1");
                         let eid = EventId::new(key.origin, key.namespace.clone(), seq1);
-                        node.event_store.contains_key(&eid)
+                        state.event_store.contains_key(&eid)
                     })
                 })
             })
         })
         .property(Expectation::Always, "applies only the next contiguous seq", |_, s| {
-            s.actor_states.iter().all(|node| match node.last_effect.as_ref() {
+            s.actor_states.iter().all(|state| match state.last_effect.as_ref() {
                 Some(LastEffect {
                     kind: LastEffectKind::Applied { seq, prev_seen, .. },
                     ..
@@ -681,8 +745,8 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
             })
         })
         .property(Expectation::Always, "buffered items are beyond next expected", |_, s| {
-            s.actor_states.iter().all(|node| {
-                let snapshot = node.gap.model_snapshot();
+            s.actor_states.iter().all(|state| {
+                let snapshot = state.gap.model_snapshot();
                 snapshot.origins.iter().all(|origin| {
                     let durable_seq = origin.durable.seq.get();
                     origin
@@ -694,11 +758,11 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
             })
         })
         .property(Expectation::Always, "buffer stays within bounds unless closed", |_, s| {
-            s.actor_states.iter().all(|node| {
-                if node.errored {
+            s.actor_states.iter().all(|state| {
+                if state.errored {
                     return true;
                 }
-                let snapshot = node.gap.model_snapshot();
+                let snapshot = state.gap.model_snapshot();
                 snapshot.origins.iter().all(|origin| {
                     origin.gap.buffered.len() <= origin.gap.max_events
                         && origin.gap.buffered_bytes <= origin.gap.max_bytes
@@ -708,10 +772,10 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
         .property(Expectation::Always, "equivocation implies hard close", |_, s| {
             s.actor_states
                 .iter()
-                .all(|node| !node.equivocation_seen || node.errored)
+                .all(|state| !state.equivocation_seen || state.errored)
         })
         .property(Expectation::Always, "duplicate deliveries are idempotent", |_, s| {
-            s.actor_states.iter().all(|node| match node.last_effect.as_ref() {
+            s.actor_states.iter().all(|state| match state.last_effect.as_ref() {
                 Some(LastEffect {
                     kind: LastEffectKind::Duplicate { .. },
                     changed,
@@ -720,15 +784,15 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
             })
         })
         .property(Expectation::Always, "want from equals seen when emitted", |_, s| {
-            s.actor_states.iter().all(|node| match node.last_want.as_ref() {
+            s.actor_states.iter().all(|state| match state.last_want.as_ref() {
                 None => true,
                 Some(WantInfo { key, from }) => {
-                    let seen = node
+                    let seen = state
                         .durable
                         .get(key)
                         .map(|wm| wm.seq())
                         .unwrap_or(Seq0::ZERO);
-                    let snapshot = node.gap.model_snapshot();
+                    let snapshot = state.gap.model_snapshot();
                     let has_gap = snapshot.origins.iter().any(|origin| {
                         origin.origin == key.origin
                             && origin.namespace == key.namespace
@@ -738,71 +802,333 @@ fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<Rep
                 }
             })
         })
+        .property(Expectation::Always, "history applied not ahead of delivered", |_, s| {
+            s.actor_states.iter().enumerate().all(|(ix, state)| {
+                let id = Id::from(ix);
+                state.applied.iter().all(|(key, wm)| {
+                    let delivered = s
+                        .history
+                        .last_delivered
+                        .get(&(id, key.clone()))
+                        .copied()
+                        .unwrap_or(Seq0::ZERO);
+                    wm.seq() <= delivered
+                })
+            })
+        })
         .property(Expectation::Sometimes, "can fully catch up", |_, s| {
-            s.actor_states.iter().all(|node| {
-                node.durable.len() == ACTOR_COUNT.saturating_sub(1)
-                    && node.durable.values().all(|wm| wm.seq().get() >= MAX_SEQ)
+            s.actor_states.iter().all(|state| {
+                state.durable.len() == ACTOR_COUNT.saturating_sub(1)
+                    && state.durable.values().all(|wm| wm.seq().get() >= MAX_SEQ)
             })
         })
 }
 
-fn record_msg_out(_cfg: &(), history: &History, env: Envelope<&ReplMsg>) -> Option<History> {
-    let ReplMsg::Event(frame) = env.msg;
-    let mut next = history.clone();
-    next.sent.insert(frame.digest.clone());
-    Some(next)
+fn add_orl_properties(
+    model: ActorModel<ActorWrapper<ReplActor>, (), History>,
+) -> ActorModel<ActorWrapper<ReplActor>, (), History> {
+    add_history_properties(model)
 }
 
-fn record_msg_in(_cfg: &(), history: &History, env: Envelope<&ReplMsg>) -> Option<History> {
-    let ReplMsg::Event(frame) = env.msg;
-    let mut next = history.clone();
-    next.delivered.insert(frame.digest.clone());
-    Some(next)
+fn build_model(network: Network<ReplMsg>, lossy: LossyNetwork) -> ActorModel<ReplActor, (), History> {
+    let store = StoreIdentity::new(
+        StoreId::new(Uuid::from_bytes([9u8; 16])),
+        StoreEpoch::new(1),
+    );
+    let namespaces = vec![NamespaceId::core()];
+    let actors = build_actors(store, namespaces);
+
+    let model = ActorModel::new((), History::default())
+        .actors(actors)
+        .init_network(network)
+        .lossy_network(lossy)
+        .record_msg_in(record_msg_in)
+        .record_msg_out(record_msg_out);
+
+    add_base_properties(model)
 }
 
-fn parse_network(args: &mut pico_args::Arguments) -> Result<(Network<ReplMsg>, LossyNetwork), pico_args::Error> {
-    let network = args
-        .opt_value_from_str::<_, String>("--network")?
-        .unwrap_or_else(|| "unordered_duplicating".to_string());
-    match network.as_str() {
-        "ordered" => Ok((Network::new_ordered([]), LossyNetwork::No)),
-        "unordered_duplicating" => Ok((Network::new_unordered_duplicating([]), LossyNetwork::Yes)),
-        other => Err(pico_args::Error::ArgumentParsingFailed {
-            cause: format!("unsupported --network {other}").into(),
-        }),
+fn build_model_wrapped(
+    network: Network<MsgWrapper<ReplMsg>>,
+    lossy: LossyNetwork,
+) -> ActorModel<ActorWrapper<ReplActor>, (), History> {
+    let store = StoreIdentity::new(
+        StoreId::new(Uuid::from_bytes([9u8; 16])),
+        StoreEpoch::new(1),
+    );
+    let namespaces = vec![NamespaceId::core()];
+    let actors = build_actors(store, namespaces)
+        .into_iter()
+        .map(ActorWrapper::with_default_timeout)
+        .collect::<Vec<_>>();
+
+    let model = ActorModel::new((), History::default())
+        .actors(actors)
+        .init_network(network)
+        .lossy_network(lossy)
+        .record_msg_in(record_msg_in_orl)
+        .record_msg_out(record_msg_out_orl);
+
+    add_orl_properties(model)
+}
+
+fn update_last_delivered(
+    history: &mut History,
+    dst: Id,
+    key: StreamKey,
+    seq: Seq0,
+) {
+    let entry = history
+        .last_delivered
+        .entry((dst, key))
+        .or_insert(Seq0::ZERO);
+    if seq > *entry {
+        *entry = seq;
     }
 }
 
-fn main() -> Result<(), pico_args::Error> {
-    env_logger::init();
-    let mut args = pico_args::Arguments::from_env();
-    let (network, lossy) = parse_network(&mut args)?;
-    match args.subcommand()?.as_deref() {
-        Some("explore") => {
-            let address = args
-                .opt_free_from_str()?
-                .unwrap_or("localhost:3000".to_string());
+fn update_monotonic(
+    map: &mut BTreeMap<(Id, StreamKey), Seq0>,
+    key: (Id, StreamKey),
+    seq: Seq0,
+    ok: &mut bool,
+) {
+    if let Some(prev) = map.get(&key) {
+        if seq < *prev {
+            *ok = false;
+        }
+    }
+    map.insert(key, seq);
+}
+
+fn apply_msg_out(history: &History, env: Envelope<&ReplMsg>) -> History {
+    let mut next = history.clone();
+    match env.msg {
+        ReplMsg::Event(frame) => {
+            next.sent.insert(frame.digest.clone());
+        }
+        ReplMsg::Want { key, from } => {
+            update_monotonic(
+                &mut next.last_want_out,
+                (env.src, key.clone()),
+                *from,
+                &mut next.want_not_ahead,
+            );
+            let delivered = next
+                .last_delivered
+                .get(&(env.src, key.clone()))
+                .copied()
+                .unwrap_or(Seq0::ZERO);
+            if *from > delivered {
+                next.want_not_ahead = false;
+            }
+        }
+        ReplMsg::Ack { key, durable } => {
+            update_monotonic(
+                &mut next.last_ack_out,
+                (env.src, key.clone()),
+                *durable,
+                &mut next.ack_monotonic,
+            );
+        }
+    }
+    next
+}
+
+fn apply_msg_in(history: &History, env: Envelope<&ReplMsg>) -> History {
+    let mut next = history.clone();
+    match env.msg {
+        ReplMsg::Event(frame) => {
+            next.delivered.insert(frame.digest.clone());
+            let key = StreamKey::new(
+                frame.digest.eid.namespace.clone(),
+                frame.digest.eid.origin_replica_id,
+            );
+            let seq0 = Seq0::new(frame.digest.eid.origin_seq.get());
+            update_last_delivered(&mut next, env.dst, key, seq0);
+        }
+        ReplMsg::Want { .. } | ReplMsg::Ack { .. } => {}
+    }
+    next
+}
+
+fn record_msg_out(_cfg: &(), history: &History, env: Envelope<&ReplMsg>) -> Option<History> {
+    Some(apply_msg_out(history, env))
+}
+
+fn record_msg_in(_cfg: &(), history: &History, env: Envelope<&ReplMsg>) -> Option<History> {
+    Some(apply_msg_in(history, env))
+}
+
+fn record_msg_out_orl(
+    _cfg: &(),
+    history: &History,
+    env: Envelope<&MsgWrapper<ReplMsg>>,
+) -> Option<History> {
+    match env.msg {
+        MsgWrapper::Deliver(_, msg) => Some(apply_msg_out(
+            history,
+            Envelope {
+                src: env.src,
+                dst: env.dst,
+                msg,
+            },
+        )),
+        MsgWrapper::Ack(_) => None,
+    }
+}
+
+fn record_msg_in_orl(
+    _cfg: &(),
+    history: &History,
+    env: Envelope<&MsgWrapper<ReplMsg>>,
+) -> Option<History> {
+    match env.msg {
+        MsgWrapper::Deliver(_, msg) => Some(apply_msg_in(
+            history,
+            Envelope {
+                src: env.src,
+                dst: env.dst,
+                msg,
+            },
+        )),
+        MsgWrapper::Ack(_) => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetworkKind {
+    Ordered,
+    UnorderedDuplicating,
+    UnorderedNonDuplicating,
+}
+
+struct NetConfig {
+    kind: NetworkKind,
+    lossy: LossyNetwork,
+    ordered_link: bool,
+}
+
+fn parse_network(args: &mut pico_args::Arguments) -> Result<NetConfig, pico_args::Error> {
+    let network = args
+        .opt_value_from_str::<_, String>("--network")?
+        .unwrap_or_else(|| "unordered_duplicating".to_string());
+    let ordered_link = args.contains("--ordered-link");
+    let kind = match network.as_str() {
+        "ordered" => NetworkKind::Ordered,
+        "unordered_duplicating" => NetworkKind::UnorderedDuplicating,
+        "unordered_nonduplicating" => NetworkKind::UnorderedNonDuplicating,
+        other => {
+            return Err(pico_args::Error::ArgumentParsingFailed {
+                cause: format!("unsupported --network {other}").into(),
+            })
+        }
+    };
+
+    let lossy_default = match kind {
+        NetworkKind::UnorderedDuplicating => LossyNetwork::Yes,
+        NetworkKind::Ordered | NetworkKind::UnorderedNonDuplicating => LossyNetwork::No,
+    };
+    let lossy = match args.opt_value_from_str::<_, String>("--lossy")? {
+        None => lossy_default,
+        Some(value) => match value.as_str() {
+            "yes" => LossyNetwork::Yes,
+            "no" => LossyNetwork::No,
+            other => {
+                return Err(pico_args::Error::ArgumentParsingFailed {
+                    cause: format!("unsupported --lossy {other}").into(),
+                })
+            }
+        },
+    };
+
+    if ordered_link && kind != NetworkKind::Ordered {
+        return Err(pico_args::Error::ArgumentParsingFailed {
+            cause: "--ordered-link requires --network ordered".into(),
+        });
+    }
+
+    Ok(NetConfig {
+        kind,
+        lossy,
+        ordered_link,
+    })
+}
+
+fn network_for_base(kind: NetworkKind) -> Network<ReplMsg> {
+    match kind {
+        NetworkKind::Ordered => Network::new_ordered([]),
+        NetworkKind::UnorderedDuplicating => Network::new_unordered_duplicating([]),
+        NetworkKind::UnorderedNonDuplicating => Network::new_unordered_nonduplicating([]),
+    }
+}
+
+fn network_for_wrapped(kind: NetworkKind) -> Network<MsgWrapper<ReplMsg>> {
+    match kind {
+        NetworkKind::Ordered => Network::new_ordered([]),
+        NetworkKind::UnorderedDuplicating => Network::new_unordered_duplicating([]),
+        NetworkKind::UnorderedNonDuplicating => Network::new_unordered_nonduplicating([]),
+    }
+}
+
+enum RunMode {
+    Check,
+    Explore(String),
+}
+
+fn run_model<M>(model: M, mode: RunMode)
+where
+    M: Model + Send + Sync + 'static,
+    M::State: std::fmt::Debug + Hash + Send + Sync + Clone + PartialEq,
+    M::Action: std::fmt::Debug + Send + Sync + Clone + PartialEq,
+{
+    match mode {
+        RunMode::Explore(address) => {
             println!("Exploring replication core state space on {address}.");
-            build_model(network, lossy)
+            model
                 .checker()
                 .threads(num_cpus::get())
                 .timeout(Duration::from_secs(60))
                 .serve(address);
         }
-        Some("check") | None => {
+        RunMode::Check => {
             println!("Model checking replication core.");
-            build_model(network, lossy)
+            model
                 .checker()
                 .threads(num_cpus::get())
                 .timeout(Duration::from_secs(60))
                 .spawn_dfs()
                 .report(&mut WriteReporter::new(&mut std::io::stdout()));
         }
+    }
+}
+
+fn main() -> Result<(), pico_args::Error> {
+    env_logger::init();
+    let mut args = pico_args::Arguments::from_env();
+    let config = parse_network(&mut args)?;
+    let mode = match args.subcommand()?.as_deref() {
+        Some("explore") => {
+            let address = args
+                .opt_free_from_str()?
+                .unwrap_or("localhost:3000".to_string());
+            RunMode::Explore(address)
+        }
+        Some("check") | None => RunMode::Check,
         _ => {
             println!("USAGE:");
-            println!("  repl_core_machine check [--network ordered|unordered_duplicating]");
-            println!("  repl_core_machine explore [ADDRESS] [--network ordered|unordered_duplicating]");
+            println!("  repl_core_machine check [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link]");
+            println!("  repl_core_machine explore [ADDRESS] [--network ordered|unordered_duplicating|unordered_nonduplicating] [--lossy yes|no] [--ordered-link]");
+            return Ok(());
         }
+    };
+
+    if config.ordered_link {
+        let network = network_for_wrapped(config.kind);
+        run_model(build_model_wrapped(network, config.lossy), mode);
+    } else {
+        let network = network_for_base(config.kind);
+        run_model(build_model(network, config.lossy), mode);
     }
 
     Ok(())
