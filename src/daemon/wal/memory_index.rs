@@ -514,3 +514,109 @@ impl WalIndexReader for MemoryWalIndexReader {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    use crate::core::{EventId, NamespaceId, SegmentId, Seq1, TxnId};
+
+    #[test]
+    fn memory_index_records_event_and_watermarks() {
+        let index = MemoryWalIndex::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
+        let mut txn = index.writer().begin_txn().expect("begin txn");
+        let seq = txn
+            .next_origin_seq(&namespace, &origin)
+            .expect("next seq");
+        let event_id = EventId::new(origin, namespace.clone(), seq);
+        let sha = [9u8; 32];
+        let segment_id = SegmentId::new(Uuid::from_bytes([2u8; 16]));
+        let txn_id = TxnId::new(Uuid::from_bytes([3u8; 16]));
+
+        txn.record_event(
+            &namespace,
+            &event_id,
+            sha,
+            None,
+            segment_id,
+            12,
+            64,
+            1_700_000_000_000,
+            txn_id,
+            None,
+        )
+        .expect("record event");
+        txn.update_watermark(&namespace, &origin, 1, 1, Some(sha), Some(sha))
+            .expect("update watermark");
+        txn.commit().expect("commit");
+
+        let reader = index.reader();
+        let stored = reader
+            .lookup_event_sha(&namespace, &event_id)
+            .expect("lookup");
+        assert_eq!(stored, Some(sha));
+
+        let rows = reader.load_watermarks().expect("load watermarks");
+        let row = rows.iter().find(|row| row.origin == origin).expect("row");
+        assert_eq!(row.applied_seq, 1);
+        assert_eq!(row.durable_seq, 1);
+
+        let max = reader
+            .max_origin_seq(&namespace, &origin)
+            .expect("max origin seq");
+        assert_eq!(max, Seq0::new(1));
+
+        let mut next = index.writer().begin_txn().expect("begin txn");
+        let seq2 = next
+            .next_origin_seq(&namespace, &origin)
+            .expect("next seq");
+        assert_eq!(seq2, Seq1::from_u64(2).expect("seq1"));
+    }
+
+    #[test]
+    fn memory_index_rejects_client_request_id_mismatch() {
+        let index = MemoryWalIndex::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        let request_id = ClientRequestId::new(Uuid::from_bytes([5u8; 16]));
+        let event_id = EventId::new(
+            origin,
+            namespace.clone(),
+            Seq1::from_u64(1).expect("seq1"),
+        );
+
+        let mut first = index.writer().begin_txn().expect("begin txn");
+        first
+            .upsert_client_request(
+                &namespace,
+                &origin,
+                request_id,
+                [1u8; 32],
+                TxnId::new(Uuid::from_bytes([6u8; 16])),
+                &[event_id],
+                10,
+            )
+            .expect("upsert client request");
+        first.commit().expect("commit");
+
+        let mut second = index.writer().begin_txn().expect("begin txn");
+        let err = second
+            .upsert_client_request(
+                &namespace,
+                &origin,
+                request_id,
+                [2u8; 32],
+                TxnId::new(Uuid::from_bytes([7u8; 16])),
+                &[event_id],
+                11,
+            )
+            .expect_err("reuse mismatch");
+        assert!(matches!(
+            err,
+            WalIndexError::ClientRequestIdReuseMismatch { .. }
+        ));
+    }
+}
