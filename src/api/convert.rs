@@ -318,6 +318,9 @@ impl From<internal_query::QueryResult> for QueryResult {
             internal_query::QueryResult::AdminDoctor(output) => QueryResult::AdminDoctor(output),
             internal_query::QueryResult::AdminScrub(output) => QueryResult::AdminScrub(output),
             internal_query::QueryResult::AdminFlush(output) => QueryResult::AdminFlush(output),
+            internal_query::QueryResult::AdminCheckpoint(output) => {
+                QueryResult::AdminCheckpoint(output)
+            }
             internal_query::QueryResult::AdminFingerprint(output) => {
                 QueryResult::AdminFingerprint(output)
             }

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, Sender};
 
+use super::QueryResult;
 use super::broadcast::{BroadcastEvent, DropReason};
 use super::core::{Daemon, HandleOutcome, NormalizedReadConsistency, ReadGateStatus};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
@@ -26,10 +27,11 @@ use super::ipc::{
 use super::ops::OpError;
 use super::remote::RemoteUrl;
 use super::subscription::{SubscribeReply, prepare_subscription, subscriber_limits};
+use crate::api::{AdminCheckpointGroup, AdminCheckpointOutput};
 use crate::core::error::details as error_details;
 use crate::core::{
-    CliErrorCode, DurabilityClass, ErrorPayload, EventFrameV1, EventId, Limits, ProtocolErrorCode,
-    ReplicaId, Sha256, decode_event_body,
+    CliErrorCode, DurabilityClass, ErrorPayload, EventFrameV1, EventId, Limits, NamespaceId,
+    ProtocolErrorCode, ReplicaId, Sha256, StoreId, decode_event_body,
 };
 
 /// Message sent from socket handlers to state thread.
@@ -64,6 +66,14 @@ struct DurabilityWaiter {
     deadline: Instant,
 }
 
+struct CheckpointWaiter {
+    respond: Sender<ServerReply>,
+    store_id: StoreId,
+    namespace: NamespaceId,
+    min_checkpoint_wall_ms: u64,
+    groups: Vec<String>,
+}
+
 enum RequestOutcome {
     Continue,
     Shutdown,
@@ -80,6 +90,7 @@ pub fn run_state_loop(
     git_result_rx: Receiver<GitResult>,
 ) {
     let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<ServerReply>>> = HashMap::new();
+    let mut checkpoint_waiters: Vec<CheckpointWaiter> = Vec::new();
     let mut read_gate_waiters: Vec<ReadGateWaiter> = Vec::new();
     let mut durability_waiters: Vec<DurabilityWaiter> = Vec::new();
     let repl_capacity = daemon.limits().max_repl_ingest_queue_events.max(1);
@@ -188,6 +199,7 @@ pub fn run_state_loop(
                             respond,
                             &git_tx,
                             &mut sync_waiters,
+                            &mut checkpoint_waiters,
                             &mut durability_waiters,
                         );
 
@@ -264,12 +276,14 @@ pub fn run_state_loop(
                         daemon.fire_due_wal_checkpoints();
                         daemon.fire_due_lock_heartbeats();
                         daemon.fire_due_exports();
+                        flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
                         flush_sync_waiters(&daemon, &mut sync_waiters);
                         flush_read_gate_waiters(
                             &mut daemon,
                             &mut read_gate_waiters,
                             &git_tx,
                             &mut sync_waiters,
+                            &mut checkpoint_waiters,
                             &mut durability_waiters,
                         );
                         flush_durability_waiters(&mut durability_waiters);
@@ -289,12 +303,14 @@ pub fn run_state_loop(
                 daemon.fire_due_wal_checkpoints();
                 daemon.fire_due_lock_heartbeats();
                 daemon.fire_due_exports();
+                flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,
                     &mut read_gate_waiters,
                     &git_tx,
                     &mut sync_waiters,
+                    &mut checkpoint_waiters,
                     &mut durability_waiters,
                 );
                 flush_durability_waiters(&mut durability_waiters);
@@ -309,12 +325,14 @@ pub fn run_state_loop(
                     daemon.fire_due_wal_checkpoints();
                     daemon.fire_due_lock_heartbeats();
                     daemon.fire_due_exports();
+                    flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
                     flush_sync_waiters(&daemon, &mut sync_waiters);
                     flush_read_gate_waiters(
                         &mut daemon,
                         &mut read_gate_waiters,
                         &git_tx,
                         &mut sync_waiters,
+                        &mut checkpoint_waiters,
                         &mut durability_waiters,
                     );
                     flush_durability_waiters(&mut durability_waiters);
@@ -341,12 +359,14 @@ pub fn run_state_loop(
                 daemon.fire_due_wal_checkpoints();
                 daemon.fire_due_lock_heartbeats();
                 daemon.fire_due_exports();
+                flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,
                     &mut read_gate_waiters,
                     &git_tx,
                     &mut sync_waiters,
+                    &mut checkpoint_waiters,
                     &mut durability_waiters,
                 );
                 flush_durability_waiters(&mut durability_waiters);
@@ -361,6 +381,7 @@ fn process_request_message(
     respond: Sender<ServerReply>,
     git_tx: &Sender<GitOp>,
     sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+    checkpoint_waiters: &mut Vec<CheckpointWaiter>,
     durability_waiters: &mut Vec<DurabilityWaiter>,
 ) -> RequestOutcome {
     // Sync barrier: wait until repo is clean.
@@ -391,6 +412,63 @@ fn process_request_message(
                 let _ = respond.send(ServerReply::Response(Response::err(e)));
             }
         }
+        return RequestOutcome::Continue;
+    }
+
+    if let Request::AdminCheckpointWait { repo, namespace } = request {
+        let proof = match daemon.ensure_repo_loaded_strict(&repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(err)));
+                return RequestOutcome::Continue;
+            }
+        };
+        let namespace = match daemon.normalize_namespace(&proof, namespace) {
+            Ok(namespace) => namespace,
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(err)));
+                return RequestOutcome::Continue;
+            }
+        };
+        let store_id = proof.store_id();
+        let min_checkpoint_wall_ms = daemon.clock().wall_ms();
+        let groups = daemon.force_checkpoint_for_namespace(store_id, &namespace);
+        if groups.is_empty() {
+            let _ = respond.send(ServerReply::Response(Response::err(
+                OpError::InvalidRequest {
+                    field: Some("checkpoint".into()),
+                    reason: format!("no checkpoint groups scheduled for namespace {namespace}",),
+                },
+            )));
+            return RequestOutcome::Continue;
+        }
+
+        match checkpoint_wait_ready(
+            daemon,
+            store_id,
+            &namespace,
+            min_checkpoint_wall_ms,
+            &groups,
+        ) {
+            Ok(Some(output)) => {
+                let _ = respond.send(ServerReply::Response(Response::ok(ResponsePayload::query(
+                    QueryResult::AdminCheckpoint(output),
+                ))));
+            }
+            Ok(None) => {
+                checkpoint_waiters.push(CheckpointWaiter {
+                    respond,
+                    store_id,
+                    namespace,
+                    min_checkpoint_wall_ms,
+                    groups,
+                });
+            }
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(err)));
+            }
+        }
+
         return RequestOutcome::Continue;
     }
 
@@ -525,6 +603,7 @@ fn flush_read_gate_waiters(
     waiters: &mut Vec<ReadGateWaiter>,
     git_tx: &Sender<GitOp>,
     sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+    checkpoint_waiters: &mut Vec<CheckpointWaiter>,
     durability_waiters: &mut Vec<DurabilityWaiter>,
 ) {
     if waiters.is_empty() {
@@ -552,6 +631,7 @@ fn flush_read_gate_waiters(
                     waiter.respond,
                     git_tx,
                     sync_waiters,
+                    checkpoint_waiters,
                     durability_waiters,
                 );
             }
@@ -646,6 +726,86 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
                 }
                 remaining.push(waiter);
             }
+            Err(err) => {
+                let _ = waiter
+                    .respond
+                    .send(ServerReply::Response(Response::err(err)));
+            }
+        }
+    }
+
+    *waiters = remaining;
+}
+
+fn checkpoint_wait_ready(
+    daemon: &Daemon,
+    store_id: StoreId,
+    namespace: &NamespaceId,
+    min_checkpoint_wall_ms: u64,
+    groups: &[String],
+) -> Result<Option<AdminCheckpointOutput>, OpError> {
+    let snapshots = daemon.checkpoint_group_snapshots(store_id);
+    let mut matched = Vec::new();
+    for snapshot in snapshots {
+        if groups.iter().any(|group| group == &snapshot.group) {
+            matched.push(snapshot);
+        }
+    }
+
+    if matched.len() != groups.len() {
+        return Err(OpError::Internal("checkpoint group missing from scheduler"));
+    }
+
+    let ready = matched.iter().all(|snapshot| {
+        !snapshot.dirty
+            && !snapshot.in_flight
+            && snapshot
+                .last_checkpoint_wall_ms
+                .is_some_and(|wall_ms| wall_ms >= min_checkpoint_wall_ms)
+    });
+
+    if !ready {
+        return Ok(None);
+    }
+
+    let checkpoint_groups = matched
+        .into_iter()
+        .map(|snapshot| AdminCheckpointGroup {
+            group: snapshot.group,
+            namespaces: snapshot.namespaces,
+            git_ref: snapshot.git_ref,
+            dirty: snapshot.dirty,
+            in_flight: snapshot.in_flight,
+            last_checkpoint_wall_ms: snapshot.last_checkpoint_wall_ms,
+        })
+        .collect();
+
+    Ok(Some(AdminCheckpointOutput {
+        namespace: namespace.clone(),
+        checkpoint_groups,
+    }))
+}
+
+fn flush_checkpoint_waiters(daemon: &Daemon, waiters: &mut Vec<CheckpointWaiter>) {
+    if waiters.is_empty() {
+        return;
+    }
+
+    let mut remaining = Vec::new();
+    for waiter in waiters.drain(..) {
+        match checkpoint_wait_ready(
+            daemon,
+            waiter.store_id,
+            &waiter.namespace,
+            waiter.min_checkpoint_wall_ms,
+            &waiter.groups,
+        ) {
+            Ok(Some(output)) => {
+                let _ = waiter.respond.send(ServerReply::Response(Response::ok(
+                    ResponsePayload::query(QueryResult::AdminCheckpoint(output)),
+                )));
+            }
+            Ok(None) => remaining.push(waiter),
             Err(err) => {
                 let _ = waiter
                     .respond
@@ -1088,12 +1248,14 @@ mod tests {
 
         let mut waiters = vec![waiter];
         let mut sync_waiters = HashMap::new();
+        let mut checkpoint_waiters = Vec::new();
         let mut durability_waiters = Vec::new();
         flush_read_gate_waiters(
             &mut env.daemon,
             &mut waiters,
             &env.git_tx,
             &mut sync_waiters,
+            &mut checkpoint_waiters,
             &mut durability_waiters,
         );
         assert_eq!(waiters.len(), 1);
@@ -1112,6 +1274,7 @@ mod tests {
             &mut waiters,
             &env.git_tx,
             &mut sync_waiters,
+            &mut checkpoint_waiters,
             &mut durability_waiters,
         );
         assert!(waiters.is_empty());
@@ -1166,12 +1329,14 @@ mod tests {
 
         let mut waiters = vec![waiter];
         let mut sync_waiters = HashMap::new();
+        let mut checkpoint_waiters = Vec::new();
         let mut durability_waiters = Vec::new();
         flush_read_gate_waiters(
             &mut env.daemon,
             &mut waiters,
             &env.git_tx,
             &mut sync_waiters,
+            &mut checkpoint_waiters,
             &mut durability_waiters,
         );
         assert!(waiters.is_empty());

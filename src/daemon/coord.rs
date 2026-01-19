@@ -761,6 +761,10 @@ impl Daemon {
                 .admin_flush(&repo, namespace, checkpoint_now, git_tx)
                 .into(),
 
+            Request::AdminCheckpointWait { .. } => {
+                unreachable!("AdminCheckpointWait is handled by the daemon state loop")
+            }
+
             Request::AdminFingerprint {
                 repo,
                 read,

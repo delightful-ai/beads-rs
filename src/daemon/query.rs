@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::query_model::{
-    AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput, AdminMaintenanceModeOutput,
-    AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadPoliciesOutput,
-    AdminReloadReplicationOutput, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
-    BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
-    IssueSummary, Note, ReadyResult, StatusOutput, Tombstone,
+    AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
+    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminRotateReplicaIdOutput,
+    AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup,
+    DepCycles, DepEdge, EpicStatus, Issue, IssueSummary, Note, ReadyResult, StatusOutput,
+    Tombstone,
 };
 use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
 
@@ -502,6 +503,9 @@ pub enum QueryResult {
 
     /// Admin flush report.
     AdminFlush(AdminFlushOutput),
+
+    /// Admin checkpoint wait report.
+    AdminCheckpoint(AdminCheckpointOutput),
 
     /// Admin fingerprint report.
     AdminFingerprint(AdminFingerprintOutput),

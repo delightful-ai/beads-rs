@@ -5,12 +5,13 @@
 
 use crate::api::QueryResult;
 use crate::api::{
-    AdminClockAnomalyKind, AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode,
-    AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput, AdminHealthReport,
-    AdminHealthStatus, AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
-    AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminRotateReplicaIdOutput,
-    AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup,
-    DepEdge, EpicStatus, Issue, IssueSummary, Note, StatusOutput, SyncWarning, Tombstone,
+    AdminCheckpointOutput, AdminClockAnomalyKind, AdminDoctorOutput, AdminFingerprintKind,
+    AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput,
+    AdminHealthReport, AdminHealthStatus, AdminMaintenanceModeOutput, AdminMetricsOutput,
+    AdminRebuildIndexOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult,
+    DaemonInfo, DeletedLookup, DepEdge, EpicStatus, Issue, IssueSummary, Note, StatusOutput,
+    SyncWarning, Tombstone,
 };
 use crate::core::{HeadStatus, NamespaceId, ReplicaRole, Watermarks};
 use crate::daemon::ipc::ResponsePayload;
@@ -531,6 +532,7 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::AdminDoctor(out) => render_admin_doctor(out),
         QueryResult::AdminScrub(out) => render_admin_scrub(out),
         QueryResult::AdminFlush(out) => render_admin_flush(out),
+        QueryResult::AdminCheckpoint(out) => render_admin_checkpoint(out),
         QueryResult::AdminFingerprint(out) => render_admin_fingerprint(out),
         QueryResult::AdminReloadPolicies(out) => render_admin_reload_policies(out),
         QueryResult::AdminReloadReplication(out) => render_admin_reload_replication(out),
@@ -816,6 +818,29 @@ fn render_admin_flush(out: &AdminFlushOutput) -> String {
         for group in &out.checkpoint_groups {
             out_str.push_str(&format!("  {group}\n"));
         }
+    }
+    out_str.trim_end().into()
+}
+
+fn render_admin_checkpoint(out: &AdminCheckpointOutput) -> String {
+    let mut out_str = String::new();
+    out_str.push_str("Admin Checkpoint\n");
+    out_str.push_str("================\n\n");
+    out_str.push_str(&format!("Namespace: {}\n", out.namespace.as_str()));
+    if out.checkpoint_groups.is_empty() {
+        out_str.push_str("Checkpoint groups: none\n");
+        return out_str.trim_end().into();
+    }
+    out_str.push_str("Checkpoint groups:\n");
+    for group in &out.checkpoint_groups {
+        let last = match group.last_checkpoint_wall_ms {
+            Some(ms) => fmt_wall_ms(ms),
+            None => "n/a".to_string(),
+        };
+        out_str.push_str(&format!(
+            "  {} dirty={} in_flight={} last={}\n",
+            group.group, group.dirty, group.in_flight, last
+        ));
     }
     out_str.trim_end().into()
 }

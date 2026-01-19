@@ -381,6 +381,13 @@ pub enum Request {
         checkpoint_now: bool,
     },
 
+    /// Admin checkpoint wait (force checkpoint and block until complete).
+    AdminCheckpointWait {
+        repo: PathBuf,
+        #[serde(default)]
+        namespace: Option<String>,
+    },
+
     /// Admin fingerprint report.
     AdminFingerprint {
         repo: PathBuf,
