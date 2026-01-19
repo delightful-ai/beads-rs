@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
-use crate::fixtures::git::{init_bare_repo, init_repo, init_repo_with_origin, repo_has_branch};
+#[cfg(feature = "slow-tests")]
+use crate::fixtures::git::init_repo;
+use crate::fixtures::git::{init_bare_repo, init_repo_with_origin, repo_has_branch};
 #[cfg(feature = "slow-tests")]
 use crate::fixtures::git::init_repo;
 use crate::fixtures::git::{init_bare_repo, init_repo_with_origin, repo_has_branch};
