@@ -16,6 +16,27 @@ use crate::paths;
 
 const LOG_FILE_PREFIX: &str = "beads.log";
 
+pub mod schema {
+    pub const ACTOR_ID: &str = "actor_id";
+    pub const CHECKPOINT_GROUP: &str = "checkpoint_group";
+    pub const CLIENT_REQUEST_ID: &str = "client_request_id";
+    pub const DIRECTION: &str = "direction";
+    pub const NAMESPACE: &str = "namespace";
+    pub const ORIGIN_REPLICA_ID: &str = "origin_replica_id";
+    pub const ORIGIN_SEQ: &str = "origin_seq";
+    pub const PEER_ADDR: &str = "peer_addr";
+    pub const PEER_REPLICA_ID: &str = "peer_replica_id";
+    pub const READ_CONSISTENCY: &str = "read_consistency";
+    pub const REPLICA_ID: &str = "replica_id";
+    pub const REMOTE: &str = "remote";
+    pub const REPO: &str = "repo";
+    pub const REQUEST_TYPE: &str = "request_type";
+    pub const STORE_EPOCH: &str = "store_epoch";
+    pub const STORE_ID: &str = "store_id";
+    pub const TRACE_ID: &str = "trace_id";
+    pub const TXN_ID: &str = "txn_id";
+}
+
 #[derive(Clone, Debug)]
 pub struct SpanContext {
     pub name: &'static str,
