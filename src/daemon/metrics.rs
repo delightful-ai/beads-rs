@@ -6,6 +6,9 @@
 //! - value: numeric value (u64)
 //! - labels: list of { key, value } label pairs
 //!
+//! Example event (fields only):
+//! {"metric":"wal_append_ok","metric_kind":"counter","value":1,"labels":[{"key":"store","value":"primary"}]}
+//!
 //! JSON file logging includes current span + span list, so metrics logs retain
 //! span context without additional work.
 //!
