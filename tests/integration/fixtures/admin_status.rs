@@ -9,7 +9,7 @@ use beads_rs::Watermarks;
 use beads_rs::api::AdminStatusOutput;
 use beads_rs::api::QueryResult;
 use beads_rs::daemon::ipc::{
-    IpcClient, IpcError, ReadConsistency, Request, Response, ResponsePayload,
+    IpcClient, IpcConnection, IpcError, ReadConsistency, Request, Response, ResponsePayload,
 };
 
 #[derive(Debug, Error)]
@@ -22,12 +22,13 @@ pub enum StatusError {
     Unexpected(Box<ResponsePayload>),
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default)]
 pub struct StatusCollector {
     repo: PathBuf,
     read: ReadConsistency,
     samples: Vec<AdminStatusOutput>,
     client: IpcClient,
+    connection: Option<IpcConnection>,
 }
 
 impl StatusCollector {
@@ -41,6 +42,7 @@ impl StatusCollector {
             read: ReadConsistency::default(),
             samples: Vec::new(),
             client,
+            connection: None,
         }
     }
 
@@ -50,11 +52,19 @@ impl StatusCollector {
     }
 
     pub fn sample(&mut self) -> Result<&AdminStatusOutput, StatusError> {
+        let read = self.read.clone();
+        self.sample_with_read(read)
+    }
+
+    pub fn sample_with_read(
+        &mut self,
+        read: ReadConsistency,
+    ) -> Result<&AdminStatusOutput, StatusError> {
         let request = Request::AdminStatus {
             repo: self.repo.clone(),
-            read: self.read.clone(),
+            read,
         };
-        let response = self.client.send_request_no_autostart(&request)?;
+        let response = self.send_request(&request)?;
         let status = parse_admin_status(response)?;
         self.samples.push(status);
         Ok(self.samples.last().expect("sample inserted"))
@@ -75,6 +85,22 @@ impl StatusCollector {
 
     pub fn samples(&self) -> &[AdminStatusOutput] {
         &self.samples
+    }
+
+    fn send_request(&mut self, request: &Request) -> Result<Response, StatusError> {
+        if self.connection.is_none() {
+            self.connection = Some(self.client.connect()?);
+        }
+        let Some(connection) = self.connection.as_mut() else {
+            return Err(IpcError::Disconnected.into());
+        };
+        match connection.send_request(request) {
+            Ok(response) => Ok(response),
+            Err(err) => {
+                self.connection = None;
+                Err(StatusError::Ipc(err))
+            }
+        }
     }
 }
 
