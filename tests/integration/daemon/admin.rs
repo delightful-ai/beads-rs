@@ -29,20 +29,39 @@ use beads_rs::{
 };
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CheckpointMode {
+    Enabled,
+    Disabled,
+}
+
+impl CheckpointMode {
+    fn apply_env(self, cmd: &mut StdCommand) {
+        match self {
+            CheckpointMode::Enabled => {
+                cmd.env_remove("BD_TEST_DISABLE_CHECKPOINTS");
+            }
+            CheckpointMode::Disabled => {
+                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
+            }
+        }
+    }
+}
+
 struct AdminFixture {
     runtime_dir: TempDir,
     repo_dir: TempDir,
     #[allow(dead_code)]
     remote_dir: TempDir,
-    checkpoints_enabled: bool,
+    checkpoint_mode: CheckpointMode,
 }
 
 impl AdminFixture {
     fn new() -> Self {
-        Self::with_checkpoints(false)
+        Self::with_checkpoints(CheckpointMode::Disabled)
     }
 
-    fn with_checkpoints(checkpoints_enabled: bool) -> Self {
+    fn with_checkpoints(checkpoints_enabled: CheckpointMode) -> Self {
         let runtime_dir = TempDir::new().expect("create runtime dir");
         let repo_dir = TempDir::new().expect("create repo dir");
         let remote_dir = TempDir::new().expect("create remote dir");
@@ -53,7 +72,7 @@ impl AdminFixture {
             runtime_dir,
             repo_dir,
             remote_dir,
-            checkpoints_enabled,
+            checkpoint_mode: checkpoints_enabled,
         }
     }
 
@@ -80,11 +99,7 @@ impl AdminFixture {
             cmd.env("BD_TESTING", "1");
             cmd.env("BD_TEST_FAST", "1");
             cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-            if self.checkpoints_enabled {
-                cmd.env_remove("BD_TEST_DISABLE_CHECKPOINTS");
-            } else {
-                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
-            }
+            self.checkpoint_mode.apply_env(&mut cmd);
             cmd.env("BD_WAL_SYNC_MODE", "none");
             cmd.args(["daemon", "run"]);
             cmd.stdin(Stdio::null())
@@ -275,7 +290,7 @@ fn init_git_repo(repo_dir: &Path, remote_dir: &Path) {
 
 #[test]
 fn admin_status_includes_expected_fields() {
-    let fixture = AdminFixture::with_checkpoints(true);
+    let fixture = AdminFixture::with_checkpoints(CheckpointMode::Enabled);
     fixture.start_daemon();
     fixture.create_issue("admin status test");
 
