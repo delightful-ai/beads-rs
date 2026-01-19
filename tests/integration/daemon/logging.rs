@@ -80,12 +80,14 @@ impl LogDaemon {
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         if testing {
             cmd.env("BD_TESTING", "1");
+            cmd.env("BD_TEST_FAST", "1");
             cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
             cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
             cmd.env("BD_WAL_SYNC_MODE", "none");
         } else {
             cmd.env_remove("BD_TESTING");
             cmd.env_remove("RUST_TEST_THREADS");
+            cmd.env_remove("BD_TEST_FAST");
             cmd.env_remove("BD_TEST_DISABLE_GIT_SYNC");
             cmd.env_remove("BD_TEST_DISABLE_CHECKPOINTS");
             cmd.env_remove("BD_WAL_SYNC_MODE");
