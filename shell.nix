@@ -7,6 +7,7 @@ pkgs.mkShell {
     pkg-config
     zlib
     libgit2
+    sqlite
 
     # Dev tools
     just

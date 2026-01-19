@@ -28,6 +28,7 @@
             pkgs.openssl
             pkgs.zlib
             pkgs.libgit2
+            pkgs.sqlite
 
             # Dev tools
             pkgs.just

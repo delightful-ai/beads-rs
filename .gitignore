@@ -70,3 +70,9 @@ fuzz/coverage/
 
 # Local test rigs
 tmp/
+
+# Local perf artifacts
+bench_results/
+
+# Local continuity ledger (per instructions)
+CONTINUITY.md
