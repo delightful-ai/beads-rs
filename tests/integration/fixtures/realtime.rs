@@ -3,11 +3,13 @@
 use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
+use std::process::{Command as StdCommand, Stdio};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
-use beads_rs::daemon::ipc::IpcClient;
+use beads_rs::daemon::ipc::{IpcClient, Request, Response, ResponsePayload};
+use beads_rs::api::QueryResult;
 
 pub struct RealtimeFixture {
     runtime_dir: TempDir,
@@ -65,7 +67,37 @@ impl RealtimeFixture {
     }
 
     pub fn start_daemon(&self) {
-        self.bd().arg("init").assert().success();
+        let client = self.ipc_client().with_autostart(false);
+        if !ping_daemon(&client) {
+            let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("bd"));
+            cmd.current_dir(self.repo_dir.path());
+            cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
+            cmd.env("BD_WAL_DIR", self.runtime_dir.path());
+            cmd.env("BD_DATA_DIR", &self.data_dir);
+            cmd.env("BD_NO_AUTO_UPGRADE", "1");
+            cmd.env("BD_TESTING", "1");
+            cmd.args(["daemon", "run"]);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            cmd.spawn().expect("spawn daemon");
+
+            let ok = poll_until(Duration::from_secs(5), || ping_daemon(&client));
+            assert!(ok, "daemon failed to start");
+        }
+
+        let request = Request::Init {
+            repo: self.repo_dir.path().to_path_buf(),
+        };
+        let response = client
+            .send_request_no_autostart(&request)
+            .expect("init response");
+        match response {
+            Response::Ok {
+                ok: ResponsePayload::Initialized(_),
+            } => {}
+            other => panic!("unexpected init response: {other:?}"),
+        }
     }
 }
 
@@ -104,4 +136,29 @@ fn run_git(args: &[&str], cwd: &Path) -> Result<(), String> {
         "git {:?} failed in {:?} (status {}): stdout: {stdout} stderr: {stderr}",
         args, cwd, output.status
     ))
+}
+
+fn ping_daemon(client: &IpcClient) -> bool {
+    matches!(
+        client.send_request_no_autostart(&Request::Ping),
+        Ok(Response::Ok {
+            ok: ResponsePayload::Query(QueryResult::DaemonInfo(_)),
+        })
+    )
+}
+
+fn poll_until<F>(timeout: Duration, mut condition: F) -> bool
+where
+    F: FnMut() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    let mut backoff = Duration::from_millis(10);
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(backoff);
+        backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
+    }
+    condition()
 }
