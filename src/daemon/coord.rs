@@ -33,14 +33,14 @@ impl Daemon {
     }
 
     pub(crate) fn schedule_sync(&mut self, remote: RemoteUrl) {
-        if self.git_sync_disabled() {
+        if !self.git_sync_policy().allows_sync() {
             return;
         }
         self.scheduler_mut().schedule(remote);
     }
 
     pub(crate) fn schedule_sync_after(&mut self, remote: RemoteUrl, delay: Duration) {
-        if self.git_sync_disabled() {
+        if !self.git_sync_policy().allows_sync() {
             return;
         }
         self.scheduler_mut().schedule_after(remote, delay);
@@ -205,7 +205,7 @@ impl Daemon {
     /// - Repo is dirty
     /// - Not already syncing
     pub fn maybe_start_sync(&mut self, remote: &RemoteUrl, git_tx: &Sender<GitOp>) {
-        if self.git_sync_disabled() {
+        if !self.git_sync_policy().allows_sync() {
             return;
         }
         let store_id = match self.store_id_for_remote(remote) {
