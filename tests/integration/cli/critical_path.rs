@@ -162,8 +162,8 @@ fn test_init_creates_beads_branch() {
 
     repo.bd().arg("init").assert().success();
 
-    let has_branch = repo_has_branch(repo.path(), "beads/store").expect("failed to read branches");
-    assert!(has_branch, "beads/store branch not created");
+    let presence = repo_has_branch(repo.path(), "beads/store").expect("failed to read branches");
+    assert!(presence.is_present(), "beads/store branch not created");
 }
 
 #[cfg(feature = "slow-tests")]

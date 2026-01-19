@@ -7,6 +7,18 @@ use tempfile::Builder;
 
 static TEMPLATE_REPO_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchPresence {
+    Present,
+    Absent,
+}
+
+impl BranchPresence {
+    pub fn is_present(self) -> bool {
+        matches!(self, BranchPresence::Present)
+    }
+}
+
 pub fn init_bare_repo(path: &Path) -> Result<(), String> {
     Repository::init_bare(path)
         .map_err(|err| format!("git init --bare failed for {path:?}: {err}"))?;
@@ -25,11 +37,16 @@ pub fn init_repo_with_origin(repo_dir: &Path, remote_dir: &Path) -> Result<(), S
     Ok(())
 }
 
-pub fn repo_has_branch(repo_dir: &Path, branch: &str) -> Result<bool, String> {
+pub fn repo_has_branch(repo_dir: &Path, branch: &str) -> Result<BranchPresence, String> {
     let repo = Repository::open(repo_dir)
         .map_err(|err| format!("open repo failed for {repo_dir:?}: {err}"))?;
     let refname = format!("refs/heads/{branch}");
-    Ok(repo.find_reference(&refname).is_ok())
+    let presence = if repo.find_reference(&refname).is_ok() {
+        BranchPresence::Present
+    } else {
+        BranchPresence::Absent
+    };
+    Ok(presence)
 }
 
 fn configure_test_repo(repo: &Repository) -> Result<(), String> {
