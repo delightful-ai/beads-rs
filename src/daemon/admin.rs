@@ -440,6 +440,11 @@ impl Daemon {
         };
         let store_id = proof.store_id();
 
+        // Reload replication config from disk
+        if let Err(err) = self.reload_replication_config(repo) {
+            return Response::err(err);
+        }
+
         if let Err(err) = self.reload_replication_runtime(store_id) {
             return Response::err(err);
         }

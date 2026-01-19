@@ -1417,6 +1417,17 @@ impl Daemon {
         self.ensure_replication_runtime(store_id)
     }
 
+    pub(crate) fn reload_replication_config(&mut self, repo_path: &Path) -> Result<(), OpError> {
+        let config = crate::config::load_for_repo(Some(repo_path)).map_err(|e| {
+            OpError::ValidationFailed {
+                field: "replication".into(),
+                reason: format!("failed to reload config: {e}"),
+            }
+        })?;
+        self.replication = config.replication;
+        Ok(())
+    }
+
     fn ingest_remote_batch(
         &mut self,
         store_id: StoreId,
