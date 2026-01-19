@@ -5,6 +5,7 @@ pub mod checkpoint;
 pub mod checkpoint_diff;
 pub mod daemon_runtime;
 pub mod event_body;
+pub mod git;
 pub mod identity;
 pub mod ipc_stream;
 pub mod load_gen;

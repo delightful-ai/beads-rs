@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
-use beads_rs::daemon::ipc::{IpcClient, Request, Response, ResponsePayload};
+use super::git::apply_test_git_env;
 use beads_rs::api::QueryResult;
+use beads_rs::daemon::ipc::{IpcClient, Request, Response, ResponsePayload};
 
 pub struct RealtimeFixture {
     runtime_dir: TempDir,
@@ -112,8 +113,6 @@ impl Drop for RealtimeFixture {
 fn init_git_repo(repo_dir: &Path, remote_dir: &Path) -> Result<(), String> {
     run_git(&["init", "--bare"], remote_dir)?;
     run_git(&["init"], repo_dir)?;
-    run_git(&["config", "user.email", "test@test.com"], repo_dir)?;
-    run_git(&["config", "user.name", "Test"], repo_dir)?;
 
     let remote = remote_dir
         .to_str()
@@ -123,7 +122,9 @@ fn init_git_repo(repo_dir: &Path, remote_dir: &Path) -> Result<(), String> {
 }
 
 fn run_git(args: &[&str], cwd: &Path) -> Result<(), String> {
-    let output = StdCommand::new("git")
+    let mut cmd = StdCommand::new("git");
+    apply_test_git_env(&mut cmd);
+    let output = cmd
         .args(args)
         .current_dir(cwd)
         .output()
