@@ -1,6 +1,6 @@
 //! Repository discovery and state loading.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use git2::Repository;
 
@@ -11,17 +11,83 @@ use crate::git::sync::{LoadedStore, read_state_at_oid};
 
 /// Open the git repository containing the current directory.
 pub fn discover() -> Result<(Repository, PathBuf), Error> {
-    let repo = Repository::discover(".").map_err(|e| SyncError::OpenRepo(PathBuf::from("."), e))?;
+    let start = PathBuf::from(".");
+    if should_fast_discover()
+        && let Some(root) = fast_repo_root(&start)
+        && let Ok(repo) = Repository::open(&root)
+    {
+        return Ok((repo, root));
+    }
+    let repo = Repository::discover(&start).map_err(|e| SyncError::OpenRepo(start.clone(), e))?;
     let path = repo
         .workdir()
         .ok_or_else(|| {
             SyncError::OpenRepo(
-                PathBuf::from("."),
+                start.clone(),
                 git2::Error::from_str("bare repository not supported"),
             )
         })?
         .to_owned();
     Ok((repo, path))
+}
+
+/// Discover the repository root for a given starting path.
+pub fn discover_root(start: impl AsRef<Path>) -> Result<PathBuf, Error> {
+    let start = start.as_ref();
+    let root =
+        discover_root_inner(start).map_err(|e| SyncError::OpenRepo(start.to_path_buf(), e))?;
+    Ok(root)
+}
+
+/// Discover the repository root for a given starting path, if any.
+pub fn discover_root_optional(start: impl AsRef<Path>) -> Option<PathBuf> {
+    discover_root_inner(start.as_ref()).ok()
+}
+
+fn discover_root_inner(start: &Path) -> Result<PathBuf, git2::Error> {
+    if should_fast_discover()
+        && let Some(root) = fast_repo_root(start)
+    {
+        return Ok(root);
+    }
+    let repo = Repository::discover(start)?;
+    repo.workdir()
+        .map(|path| path.to_owned())
+        .ok_or_else(|| git2::Error::from_str("bare repository not supported"))
+}
+
+fn should_fast_discover() -> bool {
+    if let Some(dir) = std::env::var_os("GIT_DIR")
+        && !dir.is_empty()
+    {
+        return false;
+    }
+    if let Some(dir) = std::env::var_os("GIT_WORK_TREE")
+        && !dir.is_empty()
+    {
+        return false;
+    }
+    true
+}
+
+fn fast_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            return Some(make_absolute(dir));
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn make_absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Load CanonicalState from the beads store ref.

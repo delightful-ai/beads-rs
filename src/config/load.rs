@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::daemon::OpError;
+use crate::repo;
 use crate::{Error, Result};
 
 use super::merge::{apply_env_overrides, merge_layers};
@@ -17,8 +18,7 @@ pub fn repo_config_path(repo_root: &Path) -> PathBuf {
 
 pub fn discover_repo_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    let repo = git2::Repository::discover(cwd).ok()?;
-    repo.workdir().map(|path| path.to_path_buf())
+    repo::discover_root_optional(cwd)
 }
 
 pub fn load_user_config() -> Result<Option<ConfigLayer>> {
@@ -208,10 +208,7 @@ mod tests {
         assert_eq!(loaded.logging.file.retention_max_files, Some(7));
         assert!(loaded.checkpoint_groups.contains_key("core"));
         assert_eq!(
-            loaded
-                .checkpoint_groups
-                .get("core")
-                .and_then(|group| group.debounce_ms),
+            loaded.checkpoint_groups.get("core").unwrap().debounce_ms,
             Some(123)
         );
     }
