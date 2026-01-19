@@ -8,11 +8,12 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, Sender};
+use tracing::Span;
 
 use super::QueryResult;
 use super::broadcast::{BroadcastEvent, DropReason};
@@ -45,6 +46,206 @@ pub struct RequestMessage {
     pub respond: Sender<ServerReply>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadConsistencyTag {
+    Default,
+    RequireMinSeen,
+}
+
+impl ReadConsistencyTag {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReadConsistencyTag::Default => "default",
+            ReadConsistencyTag::RequireMinSeen => "require_min_seen",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RequestContext {
+    request_type: &'static str,
+    repo: Option<PathBuf>,
+    namespace: Option<String>,
+    actor_id: Option<String>,
+    client_request_id: Option<String>,
+    read_consistency: Option<ReadConsistencyTag>,
+}
+
+impl RequestContext {
+    fn from_request(request: &Request) -> Self {
+        match request {
+            Request::Create { repo, meta, .. } => Self::from_mutation("create", repo, meta),
+            Request::Update { repo, meta, .. } => Self::from_mutation("update", repo, meta),
+            Request::AddLabels { repo, meta, .. } => Self::from_mutation("add_labels", repo, meta),
+            Request::RemoveLabels { repo, meta, .. } => {
+                Self::from_mutation("remove_labels", repo, meta)
+            }
+            Request::SetParent { repo, meta, .. } => Self::from_mutation("set_parent", repo, meta),
+            Request::Close { repo, meta, .. } => Self::from_mutation("close", repo, meta),
+            Request::Reopen { repo, meta, .. } => Self::from_mutation("reopen", repo, meta),
+            Request::Delete { repo, meta, .. } => Self::from_mutation("delete", repo, meta),
+            Request::AddDep { repo, meta, .. } => Self::from_mutation("add_dep", repo, meta),
+            Request::RemoveDep { repo, meta, .. } => Self::from_mutation("remove_dep", repo, meta),
+            Request::AddNote { repo, meta, .. } => Self::from_mutation("add_note", repo, meta),
+            Request::Claim { repo, meta, .. } => Self::from_mutation("claim", repo, meta),
+            Request::Unclaim { repo, meta, .. } => Self::from_mutation("unclaim", repo, meta),
+            Request::ExtendClaim { repo, meta, .. } => {
+                Self::from_mutation("extend_claim", repo, meta)
+            }
+            Request::Show { repo, read, .. } => Self::from_read("show", repo, read),
+            Request::ShowMultiple { repo, read, .. } => {
+                Self::from_read("show_multiple", repo, read)
+            }
+            Request::List { repo, read, .. } => Self::from_read("list", repo, read),
+            Request::Ready { repo, read, .. } => Self::from_read("ready", repo, read),
+            Request::DepTree { repo, read, .. } => Self::from_read("dep_tree", repo, read),
+            Request::DepCycles { repo, read, .. } => Self::from_read("dep_cycles", repo, read),
+            Request::Deps { repo, read, .. } => Self::from_read("deps", repo, read),
+            Request::Notes { repo, read, .. } => Self::from_read("notes", repo, read),
+            Request::Blocked { repo, read } => Self::from_read("blocked", repo, read),
+            Request::Stale { repo, read, .. } => Self::from_read("stale", repo, read),
+            Request::Count { repo, read, .. } => Self::from_read("count", repo, read),
+            Request::Deleted { repo, read, .. } => Self::from_read("deleted", repo, read),
+            Request::EpicStatus { repo, read, .. } => Self::from_read("epic_status", repo, read),
+            Request::Refresh { repo } => Self::from_repo("refresh", repo),
+            Request::Sync { repo } => Self::from_repo("sync", repo),
+            Request::SyncWait { repo } => Self::from_repo("sync_wait", repo),
+            Request::Init { repo } => Self::from_repo("init", repo),
+            Request::Status { repo, read } => Self::from_read("status", repo, read),
+            Request::AdminStatus { repo, read } => Self::from_read("admin_status", repo, read),
+            Request::AdminMetrics { repo, read } => Self::from_read("admin_metrics", repo, read),
+            Request::AdminDoctor { repo, read, .. } => Self::from_read("admin_doctor", repo, read),
+            Request::AdminScrub { repo, read, .. } => Self::from_read("admin_scrub", repo, read),
+            Request::AdminFlush {
+                repo, namespace, ..
+            } => Self::from_namespace("admin_flush", repo, namespace),
+            Request::AdminCheckpointWait { repo, namespace } => {
+                Self::from_namespace("admin_checkpoint_wait", repo, namespace)
+            }
+            Request::AdminFingerprint { repo, read, .. } => {
+                Self::from_read("admin_fingerprint", repo, read)
+            }
+            Request::AdminReloadPolicies { repo } => Self::from_repo("admin_reload_policies", repo),
+            Request::AdminReloadReplication { repo } => {
+                Self::from_repo("admin_reload_replication", repo)
+            }
+            Request::AdminRotateReplicaId { repo } => {
+                Self::from_repo("admin_rotate_replica_id", repo)
+            }
+            Request::AdminMaintenanceMode { repo, .. } => {
+                Self::from_repo("admin_maintenance_mode", repo)
+            }
+            Request::AdminRebuildIndex { repo } => Self::from_repo("admin_rebuild_index", repo),
+            Request::Validate { repo, read } => Self::from_read("validate", repo, read),
+            Request::Subscribe { repo, read } => Self::from_read("subscribe", repo, read),
+            Request::Ping => Self::without_repo("ping"),
+            Request::Shutdown => Self::without_repo("shutdown"),
+        }
+    }
+
+    fn from_mutation(
+        request_type: &'static str,
+        repo: &Path,
+        meta: &super::ipc::MutationMeta,
+    ) -> Self {
+        Self {
+            request_type,
+            repo: Some(repo.to_path_buf()),
+            namespace: meta.namespace.clone(),
+            actor_id: meta.actor_id.clone(),
+            client_request_id: meta.client_request_id.clone(),
+            read_consistency: None,
+        }
+    }
+
+    fn from_read(request_type: &'static str, repo: &Path, read: &ReadConsistency) -> Self {
+        Self {
+            request_type,
+            repo: Some(repo.to_path_buf()),
+            namespace: read.namespace.clone(),
+            actor_id: None,
+            client_request_id: None,
+            read_consistency: Some(read_consistency_tag(read)),
+        }
+    }
+
+    fn from_repo(request_type: &'static str, repo: &Path) -> Self {
+        Self {
+            request_type,
+            repo: Some(repo.to_path_buf()),
+            namespace: None,
+            actor_id: None,
+            client_request_id: None,
+            read_consistency: None,
+        }
+    }
+
+    fn from_namespace(request_type: &'static str, repo: &Path, namespace: &Option<String>) -> Self {
+        Self {
+            request_type,
+            repo: Some(repo.to_path_buf()),
+            namespace: namespace.clone(),
+            actor_id: None,
+            client_request_id: None,
+            read_consistency: None,
+        }
+    }
+
+    fn without_repo(request_type: &'static str) -> Self {
+        Self {
+            request_type,
+            repo: None,
+            namespace: None,
+            actor_id: None,
+            client_request_id: None,
+            read_consistency: None,
+        }
+    }
+}
+
+fn read_consistency_tag(read: &ReadConsistency) -> ReadConsistencyTag {
+    if read.require_min_seen.is_some() {
+        ReadConsistencyTag::RequireMinSeen
+    } else {
+        ReadConsistencyTag::Default
+    }
+}
+
+fn request_span(context: &RequestContext) -> Span {
+    let span = tracing::info_span!(
+        "ipc_request",
+        request_type = context.request_type,
+        repo = tracing::field::Empty,
+        namespace = tracing::field::Empty,
+        actor_id = tracing::field::Empty,
+        client_request_id = tracing::field::Empty,
+        read_consistency = tracing::field::Empty,
+    );
+    if let Some(repo) = &context.repo {
+        let repo_display = repo.display();
+        span.record("repo", tracing::field::display(repo_display));
+    }
+    if let Some(namespace) = &context.namespace {
+        span.record("namespace", tracing::field::display(namespace));
+    }
+    if let Some(actor_id) = &context.actor_id {
+        span.record("actor_id", tracing::field::display(actor_id));
+    }
+    if let Some(client_request_id) = &context.client_request_id {
+        span.record(
+            "client_request_id",
+            tracing::field::display(client_request_id),
+        );
+    }
+    if let Some(read_consistency) = context.read_consistency {
+        span.record(
+            "read_consistency",
+            tracing::field::display(read_consistency.as_str()),
+        );
+    }
+    span
+}
+
 struct ReadGateRequest {
     repo: PathBuf,
     read: ReadConsistency,
@@ -55,6 +256,7 @@ struct ReadGateWaiter {
     respond: Sender<ServerReply>,
     repo: PathBuf,
     read: NormalizedReadConsistency,
+    span: Span,
     started_at: Instant,
     deadline: Instant,
 }
@@ -62,6 +264,7 @@ struct ReadGateWaiter {
 struct DurabilityWaiter {
     respond: Sender<ServerReply>,
     wait: DurabilityWait,
+    span: Span,
     started_at: Instant,
     deadline: Instant,
 }
@@ -139,6 +342,10 @@ pub fn run_state_loop(
             recv(req_rx) -> msg => {
                 match msg {
                     Ok(RequestMessage { request, respond }) => {
+                        let context = RequestContext::from_request(&request);
+                        let span = request_span(&context);
+                        let _guard = span.enter();
+
                         if let Some(read_gate) = read_gate_request(&request) {
                             let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
                                 Ok(remote) => remote,
@@ -180,6 +387,7 @@ pub fn run_state_loop(
                                             respond,
                                             repo: read_gate.repo,
                                             read,
+                                            span: span.clone(),
                                             started_at,
                                             deadline,
                                         });
@@ -496,9 +704,11 @@ fn process_request_message(
             let deadline = started_at
                 .checked_add(wait.wait_timeout)
                 .unwrap_or(started_at);
+            let span = tracing::Span::current();
             durability_waiters.push(DurabilityWaiter {
                 respond,
                 wait,
+                span,
                 started_at,
                 deadline,
             });
@@ -613,6 +823,8 @@ fn flush_read_gate_waiters(
     let now = Instant::now();
     let mut remaining = Vec::new();
     for waiter in waiters.drain(..) {
+        let span = waiter.span.clone();
+        let _guard = span.enter();
         let loaded = match daemon.ensure_repo_fresh(&waiter.repo, git_tx) {
             Ok(remote) => remote,
             Err(err) => {
@@ -673,6 +885,8 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
     let now = Instant::now();
     let mut remaining = Vec::new();
     for waiter in waiters.drain(..) {
+        let span = waiter.span.clone();
+        let _guard = span.enter();
         let requested = waiter.wait.requested;
         let DurabilityClass::ReplicatedFsync { k } = requested else {
             let _ = waiter
@@ -1130,12 +1344,13 @@ mod tests {
 
     use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
-        ActorId, Applied, BeadId, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
-        EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, ReplicaRole,
-        ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermark,
-        Watermarks,
+        ActorId, Applied, BeadId, BeadType, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
+        EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
+        ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
+        Watermark, Watermarks,
     };
     use crate::daemon::core::insert_store_for_tests;
+    use crate::daemon::ipc::MutationMeta;
     use crate::daemon::ipc::OpResponse;
     use crate::daemon::ops::OpResult;
     use crate::daemon::repl::PeerAckTable;
@@ -1182,6 +1397,63 @@ mod tests {
             HeadStatus::Known([seq as u8; 32])
         };
         Watermark::new(Seq0::new(seq), head).expect("watermark")
+    }
+
+    #[test]
+    fn request_context_extracts_create_fields() {
+        let repo = PathBuf::from("/tmp/repo");
+        let meta = MutationMeta {
+            namespace: Some("core".to_string()),
+            client_request_id: Some("req-123".to_string()),
+            actor_id: Some("actor@example.com".to_string()),
+            durability: None,
+        };
+        let request = Request::Create {
+            repo: repo.clone(),
+            id: None,
+            parent: None,
+            title: "title".to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            meta,
+        };
+
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.request_type, "create");
+        assert_eq!(context.repo, Some(repo));
+        assert_eq!(context.namespace.as_deref(), Some("core"));
+        assert_eq!(context.actor_id.as_deref(), Some("actor@example.com"));
+        assert_eq!(context.client_request_id.as_deref(), Some("req-123"));
+        assert_eq!(context.read_consistency, None);
+    }
+
+    #[test]
+    fn request_context_extracts_show_fields() {
+        let repo = PathBuf::from("/tmp/repo");
+        let read = ReadConsistency {
+            namespace: Some("core".to_string()),
+            require_min_seen: None,
+            wait_timeout_ms: None,
+        };
+        let request = Request::Show {
+            repo: repo.clone(),
+            id: "bd-123".to_string(),
+            read,
+        };
+
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.request_type, "show");
+        assert_eq!(context.repo, Some(repo));
+        assert_eq!(context.namespace.as_deref(), Some("core"));
+        assert_eq!(context.read_consistency, Some(ReadConsistencyTag::Default));
     }
 
     #[test]
@@ -1242,6 +1514,7 @@ mod tests {
             respond: respond_tx,
             repo: env.repo_path.clone(),
             read: normalized,
+            span: tracing::Span::none(),
             started_at,
             deadline,
         };
@@ -1323,6 +1596,7 @@ mod tests {
             respond: respond_tx,
             repo: env.repo_path.clone(),
             read: normalized,
+            span: tracing::Span::none(),
             started_at,
             deadline,
         };
@@ -1447,6 +1721,7 @@ mod tests {
         let mut waiters = vec![DurabilityWaiter {
             respond: respond_tx,
             wait,
+            span: tracing::Span::none(),
             started_at,
             deadline,
         }];
@@ -1555,6 +1830,7 @@ mod tests {
         let mut waiters = vec![DurabilityWaiter {
             respond: respond_tx,
             wait,
+            span: tracing::Span::none(),
             started_at,
             deadline,
         }];
