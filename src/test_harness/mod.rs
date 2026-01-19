@@ -364,12 +364,13 @@ impl TestNode {
             insert_store_for_tests(&mut inner.daemon, store_id, remote, &repo_path)
                 .expect("insert store");
             configure_runtime_for_options(&mut inner.daemon, store_id, &options);
+            let limits = inner.daemon.limits().clone();
             if let Some(store) = inner.daemon.store_runtime_by_id_mut(store_id) {
                 replay_event_wal(
                     store_id,
                     store.wal_index.as_ref(),
                     &mut store.state,
-                    inner.daemon.limits(),
+                    &limits,
                 )
                 .expect("replay wal");
             }
