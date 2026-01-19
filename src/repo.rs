@@ -71,23 +71,22 @@ fn should_fast_discover() -> bool {
 }
 
 fn fast_repo_root(start: &Path) -> Option<PathBuf> {
-    let mut current = Some(start);
+    // Convert to absolute path before traversing so parent() works correctly
+    // on relative paths like "." (where ".".parent() returns Some("") not the actual parent)
+    let start = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(start)
+    };
+
+    let mut current = Some(start.as_path());
     while let Some(dir) = current {
         if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
-            return Some(make_absolute(dir));
+            return Some(dir.to_path_buf());
         }
         current = dir.parent();
     }
     None
-}
-
-fn make_absolute(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    std::env::current_dir()
-        .map(|cwd| cwd.join(path))
-        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Load CanonicalState from the beads store ref.
