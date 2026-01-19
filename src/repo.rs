@@ -47,6 +47,7 @@ pub fn discover_root_optional(start: impl AsRef<Path>) -> Option<PathBuf> {
 fn discover_root_inner(start: &Path) -> Result<PathBuf, git2::Error> {
     if should_fast_discover()
         && let Some(root) = fast_repo_root(start)
+        && Repository::open(&root).is_ok()
     {
         return Ok(root);
     }

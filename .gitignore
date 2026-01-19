@@ -57,8 +57,9 @@ Temporary Items
 # bv (beads viewer) local config and caches
 .bv/
 
-# Local Claude Code settings (project hooks live globally)
+# Local Claude Code settings and caches
 .claude/settings.local.json
+.claude/tsc-cache/
 
 # Samply profiling output
 samply-*.json
