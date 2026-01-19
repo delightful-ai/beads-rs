@@ -10,6 +10,27 @@ use std::time::{Duration, Instant};
 
 use super::remote::RemoteUrl;
 
+const DEFAULT_DEBOUNCE_MS: u64 = 500;
+const TEST_FAST_DEBOUNCE_MS: u64 = 50;
+
+fn default_delay() -> Duration {
+    if env_flag_truthy("BD_TEST_FAST") {
+        Duration::from_millis(TEST_FAST_DEBOUNCE_MS)
+    } else {
+        Duration::from_millis(DEFAULT_DEBOUNCE_MS)
+    }
+}
+
+fn env_flag_truthy(name: &str) -> bool {
+    let Ok(raw) = std::env::var(name) else {
+        return false;
+    };
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "n" | "off"
+    )
+}
+
 /// Manages sync scheduling with debounce.
 ///
 /// When a mutation occurs, we schedule a sync after a delay (default 500ms).
@@ -41,7 +62,7 @@ impl SyncScheduler {
         SyncScheduler {
             pending: HashMap::new(),
             heap: BinaryHeap::new(),
-            default_delay: Duration::from_millis(500),
+            default_delay: default_delay(),
         }
     }
 
