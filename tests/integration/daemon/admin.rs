@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
-use crate::fixtures::git::apply_test_git_env;
+use crate::fixtures::git::{init_bare_repo, init_repo_with_origin};
 use beads_rs::api::{
     AdminClockAnomaly, AdminClockAnomalyKind, AdminHealthReport, AdminHealthRisk, AdminHealthStats,
     AdminHealthSummary, AdminMetricsOutput, AdminReloadPoliciesOutput, AdminScrubOutput,
@@ -269,14 +269,8 @@ impl Drop for AdminFixture {
 }
 
 fn init_git_repo(repo_dir: &Path, remote_dir: &Path) {
-    run_git(&["init", "--bare"], remote_dir, "git init --bare");
-
-    run_git(&["init"], repo_dir, "git init");
-    run_git(
-        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        repo_dir,
-        "git remote add origin",
-    );
+    init_bare_repo(remote_dir).expect("git init --bare");
+    init_repo_with_origin(repo_dir, remote_dir).expect("git init with origin");
 }
 
 #[test]
@@ -565,10 +559,4 @@ where
         backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
     }
     condition()
-}
-
-fn run_git(args: &[&str], cwd: &Path, label: &str) {
-    let mut cmd = StdCommand::new("git");
-    apply_test_git_env(&mut cmd);
-    cmd.args(args).current_dir(cwd).output().expect(label);
 }

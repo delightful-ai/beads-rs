@@ -9,11 +9,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use crate::fixtures::git::apply_test_git_env;
+use crate::fixtures::git::{init_bare_repo, init_repo_with_origin};
 use crate::fixtures::store_lock::unlock_store;
 use assert_cmd::Command;
 use tempfile::TempDir;
@@ -35,23 +34,8 @@ impl DaemonFixture {
         let repo_dir = TempDir::new().expect("create repo dir");
         let remote_dir = TempDir::new().expect("create remote dir");
 
-        // Create bare remote
-        run_git(&["init", "--bare"], remote_dir.path(), "git init --bare");
-
-        // Initialize git repo
-        run_git(&["init"], repo_dir.path(), "git init");
-
-        // Add remote origin
-        run_git(
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote_dir.path().to_str().unwrap(),
-            ],
-            repo_dir.path(),
-            "git remote add origin",
-        );
+        init_bare_repo(remote_dir.path()).expect("git init --bare");
+        init_repo_with_origin(repo_dir.path(), remote_dir.path()).expect("git init with origin");
 
         Self {
             runtime_dir,
@@ -165,12 +149,6 @@ impl Drop for DaemonFixture {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
         }
     }
-}
-
-fn run_git(args: &[&str], cwd: &Path, label: &str) {
-    let mut cmd = StdCommand::new("git");
-    apply_test_git_env(&mut cmd);
-    cmd.args(args).current_dir(cwd).output().expect(label);
 }
 
 // =============================================================================
