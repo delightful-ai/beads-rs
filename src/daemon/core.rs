@@ -22,6 +22,7 @@ use super::checkpoint_scheduler::{
     CheckpointGroupConfig, CheckpointGroupKey, CheckpointGroupSnapshot, CheckpointScheduler,
 };
 use super::executor::DurabilityWait;
+use super::export_worker::{ExportJob, ExportWorkerHandle};
 use super::git_lane::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, GitLaneState,
 };
@@ -45,7 +46,7 @@ use super::wal::{
     WalIndexError, WalReplayError, open_segment_reader,
 };
 
-use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
+use crate::compat::ExportContext;
 use crate::config::CheckpointGroupConfig as ConfigCheckpointGroup;
 use crate::core::error::details as error_details;
 use crate::paths;
@@ -104,6 +105,7 @@ use crate::git::checkpoint::{
 const STORE_LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const LOAD_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REPL_MAX_CONNECTIONS: usize = 32;
+const EXPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub(crate) struct ParsedMutationMeta {
@@ -191,8 +193,10 @@ pub struct Daemon {
     /// Checkpoint scheduler for debounce/max interval.
     checkpoint_scheduler: CheckpointScheduler,
 
-    /// Go-compatibility export context.
-    export_ctx: Option<ExportContext>,
+    /// Go-compatibility export worker (best-effort).
+    export_worker: Option<ExportWorkerHandle>,
+    /// Pending Go-compat exports per store.
+    export_pending: BTreeMap<StoreId, ExportPending>,
 
     /// Realtime safety limits.
     limits: Limits,
@@ -216,6 +220,11 @@ pub struct Daemon {
 struct ReplicationHandles {
     manager: Option<ReplicationManagerHandle>,
     server: Option<ReplicationServerHandle>,
+}
+
+struct ExportPending {
+    remote: RemoteUrl,
+    deadline: Instant,
 }
 
 impl ReplicationHandles {
@@ -247,9 +256,9 @@ impl Daemon {
     /// Create a new daemon with config settings.
     pub fn new_with_config(actor: ActorId, config: crate::config::Config) -> Self {
         let limits = config.limits.clone();
-        // Initialize Go-compat export context (best effort - don't fail daemon startup)
-        let export_ctx = match ExportContext::new() {
-            Ok(ctx) => Some(ctx),
+        // Initialize Go-compat export worker (best effort - don't fail daemon startup)
+        let export_worker = match ExportContext::new() {
+            Ok(ctx) => Some(ExportWorkerHandle::start(ctx)),
             Err(e) => {
                 tracing::warn!("Failed to initialize Go-compat export: {}", e);
                 None
@@ -267,7 +276,8 @@ impl Daemon {
             checkpoint_scheduler: CheckpointScheduler::new_with_queue_limit(
                 limits.max_checkpoint_job_queue,
             ),
-            export_ctx,
+            export_worker,
+            export_pending: BTreeMap::new(),
             limits,
             replication: config.replication.clone(),
             checkpoint_groups: config.checkpoint_groups.clone(),
@@ -296,6 +306,12 @@ impl Daemon {
 
     pub fn begin_shutdown(&mut self) {
         self.shutting_down = true;
+    }
+
+    pub fn shutdown_export_worker(&mut self) {
+        if let Some(worker) = self.export_worker.take() {
+            worker.shutdown();
+        }
     }
 
     pub fn is_shutting_down(&self) -> bool {
@@ -1673,37 +1689,82 @@ impl Daemon {
         self.emit_checkpoint_queue_depth();
     }
 
-    /// Export state to Go-compatible JSONL format.
+    /// Schedule export of core namespace state to Go-compatible JSONL format.
     ///
-    /// Called after successful sync to keep .beads/issues.jsonl in sync.
-    pub(crate) fn export_go_compat(&self, store_id: StoreId, remote: &RemoteUrl) {
-        let Some(ref ctx) = self.export_ctx else {
+    /// Export runs asynchronously and is debounced to avoid per-mutation work.
+    pub(crate) fn export_go_compat(&mut self, store_id: StoreId, remote: &RemoteUrl) {
+        if self.export_worker.is_none() {
             return;
-        };
-
-        let Some(store) = self.stores.get(&store_id) else {
+        }
+        if !self.stores.contains_key(&store_id) {
             return;
-        };
-        let empty_state = CanonicalState::new();
-        let export_state = store
-            .state
-            .get(&NamespaceId::core())
-            .unwrap_or(&empty_state);
+        }
 
-        // Export to canonical location
-        let export_path = match export_jsonl(export_state, ctx, remote.as_str()) {
-            Ok(path) => path,
-            Err(e) => {
-                tracing::warn!("Go-compat export failed for {:?}: {}", remote, e);
-                return;
+        let deadline = Instant::now() + EXPORT_DEBOUNCE;
+        self.export_pending.insert(
+            store_id,
+            ExportPending {
+                remote: remote.clone(),
+                deadline,
+            },
+        );
+    }
+
+    pub fn next_export_deadline(&mut self) -> Option<Instant> {
+        self.export_pending
+            .values()
+            .map(|pending| pending.deadline)
+            .min()
+    }
+
+    pub fn fire_due_exports(&mut self) {
+        if self.export_pending.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let due: Vec<StoreId> = self
+            .export_pending
+            .iter()
+            .filter_map(|(store_id, pending)| {
+                (pending.deadline <= now).then_some(*store_id)
+            })
+            .collect();
+
+        let mut jobs = Vec::new();
+        for store_id in due {
+            let Some(pending) = self.export_pending.remove(&store_id) else {
+                continue;
+            };
+            let Some(store) = self.stores.get(&store_id) else {
+                continue;
+            };
+            let empty_state = CanonicalState::new();
+            let core_state = store
+                .state
+                .get(&NamespaceId::core())
+                .unwrap_or(&empty_state)
+                .clone();
+            let known_paths = self
+                .git_lanes
+                .get(&store_id)
+                .map(|lane| lane.known_paths.clone())
+                .unwrap_or_default();
+
+            jobs.push(ExportJob {
+                remote: pending.remote,
+                core_state,
+                known_paths,
+            });
+        }
+
+        if let Some(worker) = self.export_worker.as_ref() {
+            for job in jobs {
+                if worker.enqueue(job).is_err() {
+                    tracing::warn!("Go-compat export queue failed");
+                    break;
+                }
             }
-        };
-
-        // Create/update symlinks in each clone
-        if let Some(repo_state) = self.git_lanes.get(&store_id)
-            && let Err(e) = ensure_symlinks(&export_path, &repo_state.known_paths)
-        {
-            tracing::warn!("Go-compat symlink update failed for {:?}: {}", remote, e);
         }
     }
 

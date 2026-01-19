@@ -91,6 +91,7 @@ pub fn run_state_loop(
         let next_checkpoint = daemon.next_checkpoint_deadline();
         let next_wal_checkpoint = daemon.next_wal_checkpoint_deadline();
         let next_lock_heartbeat = daemon.next_lock_heartbeat_deadline();
+        let next_export = daemon.next_export_deadline();
         let next_read_gate = read_gate_waiters.iter().map(|waiter| waiter.deadline).min();
         let next_durability = durability_waiters
             .iter()
@@ -102,6 +103,7 @@ pub fn run_state_loop(
             next_checkpoint,
             next_wal_checkpoint,
             next_lock_heartbeat,
+            next_export,
             next_read_gate,
             next_durability,
         ]
@@ -192,6 +194,7 @@ pub fn run_state_loop(
                         if matches!(outcome, RequestOutcome::Shutdown) {
                             daemon.begin_shutdown();
                             daemon.shutdown_replication();
+                            daemon.shutdown_export_worker();
                             daemon.drain_ipc_inflight(Duration::from_millis(daemon.limits().dead_ms));
 
                             // Sync all dirty repos before exiting (avoid double-borrow).
@@ -260,6 +263,7 @@ pub fn run_state_loop(
                         daemon.fire_due_checkpoints(&git_tx);
                         daemon.fire_due_wal_checkpoints();
                         daemon.fire_due_lock_heartbeats();
+                        daemon.fire_due_exports();
                         flush_sync_waiters(&daemon, &mut sync_waiters);
                         flush_read_gate_waiters(
                             &mut daemon,
@@ -272,6 +276,7 @@ pub fn run_state_loop(
                     }
                     Err(_) => {
                         // Channel closed - time to exit
+                        daemon.shutdown_export_worker();
                         let _ = git_tx.send(GitOp::Shutdown);
                         return;
                     }
@@ -283,6 +288,7 @@ pub fn run_state_loop(
                 daemon.fire_due_checkpoints(&git_tx);
                 daemon.fire_due_wal_checkpoints();
                 daemon.fire_due_lock_heartbeats();
+                daemon.fire_due_exports();
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,
@@ -302,6 +308,7 @@ pub fn run_state_loop(
                     daemon.fire_due_checkpoints(&git_tx);
                     daemon.fire_due_wal_checkpoints();
                     daemon.fire_due_lock_heartbeats();
+                    daemon.fire_due_exports();
                     flush_sync_waiters(&daemon, &mut sync_waiters);
                     flush_read_gate_waiters(
                         &mut daemon,
@@ -333,6 +340,7 @@ pub fn run_state_loop(
                 daemon.fire_due_checkpoints(&git_tx);
                 daemon.fire_due_wal_checkpoints();
                 daemon.fire_due_lock_heartbeats();
+                daemon.fire_due_exports();
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,
