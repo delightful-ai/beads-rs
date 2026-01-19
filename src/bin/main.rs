@@ -18,6 +18,14 @@ fn main() {
     );
     let _telemetry_guard = init_tracing(cli.verbose, is_daemon);
 
+    let command = cli::command_name(&cli.command);
+    let span = tracing::info_span!(
+        "cli_command",
+        command = %command,
+        repo = ?cli.repo
+    );
+    let _guard = span.enter();
+
     if let Err(e) = cli::run(cli) {
         tracing::error!("error: {}", e);
         std::process::exit(1);
