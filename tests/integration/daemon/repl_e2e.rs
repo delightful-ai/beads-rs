@@ -258,6 +258,7 @@ fn repl_checkpoint_bootstrap_under_churn() {
     let mut options = ReplRigOptions::default();
     options.seed = 73;
     options.wal_segment_max_bytes = Some(64 * 1024);
+    options.checkpoints_enabled = true;
 
     let rig = ReplRig::new(2, options);
 

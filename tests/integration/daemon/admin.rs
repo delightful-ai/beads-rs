@@ -34,10 +34,15 @@ struct AdminFixture {
     repo_dir: TempDir,
     #[allow(dead_code)]
     remote_dir: TempDir,
+    checkpoints_enabled: bool,
 }
 
 impl AdminFixture {
     fn new() -> Self {
+        Self::with_checkpoints(false)
+    }
+
+    fn with_checkpoints(checkpoints_enabled: bool) -> Self {
         let runtime_dir = TempDir::new().expect("create runtime dir");
         let repo_dir = TempDir::new().expect("create repo dir");
         let remote_dir = TempDir::new().expect("create remote dir");
@@ -48,6 +53,7 @@ impl AdminFixture {
             runtime_dir,
             repo_dir,
             remote_dir,
+            checkpoints_enabled,
         }
     }
 
@@ -73,7 +79,11 @@ impl AdminFixture {
             cmd.env("BD_NO_AUTO_UPGRADE", "1");
             cmd.env("BD_TESTING", "1");
             cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-            cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
+            if self.checkpoints_enabled {
+                cmd.env_remove("BD_TEST_DISABLE_CHECKPOINTS");
+            } else {
+                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
+            }
             cmd.env("BD_WAL_SYNC_MODE", "none");
             cmd.args(["daemon", "run"]);
             cmd.stdin(Stdio::null())
@@ -270,7 +280,7 @@ fn init_git_repo(repo_dir: &Path, remote_dir: &Path) {
 
 #[test]
 fn admin_status_includes_expected_fields() {
-    let fixture = AdminFixture::new();
+    let fixture = AdminFixture::with_checkpoints(true);
     fixture.start_daemon();
     fixture.create_issue("admin status test");
 
