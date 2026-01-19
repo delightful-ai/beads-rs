@@ -977,6 +977,11 @@ fn invalid_id_details(err: &InvalidId) -> error_details::InvalidIdDetails {
             raw: raw.clone(),
             reason: reason.clone(),
         },
+        InvalidId::TraceId { raw, reason } => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::TraceId,
+            raw: raw.clone(),
+            reason: reason.clone(),
+        },
         InvalidId::SegmentId { raw, reason } => error_details::InvalidIdDetails {
             kind: error_details::InvalidIdKind::SegmentId,
             raw: raw.clone(),
