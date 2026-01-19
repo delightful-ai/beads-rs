@@ -78,7 +78,7 @@ impl LoadGenerator {
         let started = Instant::now();
         if workers == 1 {
             let config = self.config.clone();
-            let client = self.client.clone();
+            let client = self.client.clone().with_autostart(config.autostart);
             let interval = config
                 .rate_per_sec
                 .filter(|rate| *rate > 0)
@@ -88,6 +88,14 @@ impl LoadGenerator {
             let mut successes = 0;
             let mut failures = 0;
             let mut seq = self.counter.fetch_add(total, Ordering::Relaxed);
+            let mut connect_error = None;
+            let mut connection = match client.connect() {
+                Ok(conn) => Some(conn),
+                Err(err) => {
+                    connect_error = Some(err);
+                    None
+                }
+            };
 
             for _ in 0..total {
                 attempts += 1;
@@ -115,23 +123,28 @@ impl LoadGenerator {
                         actor_id: config.actor_id.clone(),
                     },
                 };
-                let result = if config.autostart {
-                    client.send_request(&request)
-                } else {
-                    client.send_request_no_autostart(&request)
-                };
-                match result {
-                    Ok(Response::Ok { .. }) => successes += 1,
-                    Ok(Response::Err { err }) => {
-                        failures += 1;
-                        if errors.len() < config.max_errors {
-                            errors.push(LoadError::Remote(err));
+                match connection.as_mut() {
+                    Some(conn) => match conn.send_request(&request) {
+                        Ok(Response::Ok { .. }) => successes += 1,
+                        Ok(Response::Err { err }) => {
+                            failures += 1;
+                            if errors.len() < config.max_errors {
+                                errors.push(LoadError::Remote(err));
+                            }
                         }
-                    }
-                    Err(err) => {
+                        Err(err) => {
+                            failures += 1;
+                            if errors.len() < config.max_errors {
+                                errors.push(LoadError::Ipc(err));
+                            }
+                        }
+                    },
+                    None => {
                         failures += 1;
                         if errors.len() < config.max_errors {
-                            errors.push(LoadError::Ipc(err));
+                            if let Some(err) = connect_error.take() {
+                                errors.push(LoadError::Ipc(err));
+                            }
                         }
                     }
                 }
@@ -159,7 +172,7 @@ impl LoadGenerator {
         for worker in 0..workers {
             let repo = self.repo.clone();
             let config = self.config.clone();
-            let client = client.clone();
+            let client = client.clone().with_autostart(config.autostart);
             let errors = Arc::clone(&errors);
             let attempts = Arc::clone(&attempts);
             let successes = Arc::clone(&successes);
@@ -170,6 +183,14 @@ impl LoadGenerator {
                     .rate_per_sec
                     .filter(|rate| *rate > 0)
                     .map(|rate| Duration::from_secs_f64(1.0 / rate as f64));
+                let mut connect_error = None;
+                let mut connection = match client.connect() {
+                    Ok(conn) => Some(conn),
+                    Err(err) => {
+                        connect_error = Some(err);
+                        None
+                    }
+                };
                 for i in 0..per_worker {
                     let idx = worker * per_worker + i;
                     if idx >= total {
@@ -200,22 +221,25 @@ impl LoadGenerator {
                             actor_id: config.actor_id.clone(),
                         },
                     };
-                    let result = if config.autostart {
-                        client.send_request(&request)
-                    } else {
-                        client.send_request_no_autostart(&request)
-                    };
-                    match result {
-                        Ok(Response::Ok { .. }) => {
-                            successes.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Ok(Response::Err { err }) => {
+                    match connection.as_mut() {
+                        Some(conn) => match conn.send_request(&request) {
+                            Ok(Response::Ok { .. }) => {
+                                successes.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(Response::Err { err }) => {
+                                failures.fetch_add(1, Ordering::Relaxed);
+                                record_error(&errors, LoadError::Remote(err), config.max_errors);
+                            }
+                            Err(err) => {
+                                failures.fetch_add(1, Ordering::Relaxed);
+                                record_error(&errors, LoadError::Ipc(err), config.max_errors);
+                            }
+                        },
+                        None => {
                             failures.fetch_add(1, Ordering::Relaxed);
-                            record_error(&errors, LoadError::Remote(err), config.max_errors);
-                        }
-                        Err(err) => {
-                            failures.fetch_add(1, Ordering::Relaxed);
-                            record_error(&errors, LoadError::Ipc(err), config.max_errors);
+                            if let Some(err) = connect_error.take() {
+                                record_error(&errors, LoadError::Ipc(err), config.max_errors);
+                            }
                         }
                     }
                     if let Some(interval) = interval {
