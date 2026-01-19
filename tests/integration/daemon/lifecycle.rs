@@ -8,7 +8,7 @@
 //! - Concurrent access during restart
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
