@@ -5,6 +5,7 @@
 use std::fs;
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::git::apply_test_git_env;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -27,42 +28,26 @@ struct TestRepo {
 impl TestRepo {
     fn new() -> Self {
         let remote_dir = TempDir::new().expect("failed to create remote dir");
-        std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .current_dir(remote_dir.path())
-            .output()
-            .expect("failed to init bare repo");
+        run_git(
+            &["init", "--bare"],
+            remote_dir.path(),
+            "failed to init bare repo",
+        );
 
         let work_dir = TempDir::new().expect("failed to create work dir");
 
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to git init");
+        run_git(&["init"], work_dir.path(), "failed to git init");
 
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to configure git email");
-
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to configure git name");
-
-        std::process::Command::new("git")
-            .args([
+        run_git(
+            &[
                 "remote",
                 "add",
                 "origin",
                 remote_dir.path().to_str().unwrap(),
-            ])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to add remote");
+            ],
+            work_dir.path(),
+            "failed to add remote",
+        );
 
         let runtime_dir = TempDir::new().expect("failed to create runtime dir");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
@@ -95,6 +80,12 @@ impl Drop for TestRepo {
     fn drop(&mut self) {
         shutdown_daemon(self.runtime_dir.path());
     }
+}
+
+fn run_git(args: &[&str], cwd: &std::path::Path, label: &str) {
+    let mut cmd = std::process::Command::new("git");
+    apply_test_git_env(&mut cmd);
+    cmd.args(args).current_dir(cwd).output().expect(label);
 }
 
 /// Sample Go beads JSONL export with various issue types.

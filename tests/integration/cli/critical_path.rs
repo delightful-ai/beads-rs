@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::git::apply_test_git_env;
 #[cfg(feature = "slow-tests")]
 use crate::fixtures::git::init_repo;
 use crate::fixtures::git::{init_bare_repo, init_repo_with_origin, repo_has_branch};
@@ -35,6 +36,12 @@ fn bd_with_runtime(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command 
     cmd.env("BD_TESTING", "1");
     cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
     cmd
+}
+
+fn run_git(args: &[&str], cwd: &Path, label: &str) -> std::process::Output {
+    let mut cmd = std::process::Command::new("git");
+    apply_test_git_env(&mut cmd);
+    cmd.args(args).current_dir(cwd).output().expect(label)
 }
 
 #[cfg(feature = "slow-tests")]
@@ -113,43 +120,27 @@ impl TestRepo {
     fn new() -> Self {
         // Create bare remote first
         let remote_dir = TempDir::new().expect("failed to create remote dir");
-        std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .current_dir(remote_dir.path())
-            .output()
-            .expect("failed to init bare repo");
+        run_git(
+            &["init", "--bare"],
+            remote_dir.path(),
+            "failed to init bare repo",
+        );
 
         // Create working directory
         let work_dir = TempDir::new().expect("failed to create work dir");
 
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to git init");
+        run_git(&["init"], work_dir.path(), "failed to git init");
 
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to configure git email");
-
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to configure git name");
-
-        std::process::Command::new("git")
-            .args([
+        run_git(
+            &[
                 "remote",
                 "add",
                 "origin",
                 remote_dir.path().to_str().unwrap(),
-            ])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to add remote");
+            ],
+            work_dir.path(),
+            "failed to add remote",
+        );
 
         let runtime_dir = TempDir::new().expect("failed to create runtime dir");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
@@ -189,11 +180,7 @@ fn test_init_creates_beads_branch() {
 
     repo.bd().arg("init").assert().success();
 
-    let output = std::process::Command::new("git")
-        .args(["branch", "-a"])
-        .current_dir(repo.path())
-        .output()
-        .expect("failed to list branches");
+    let output = run_git(&["branch", "-a"], repo.path(), "failed to list branches");
     let branches = String::from_utf8_lossy(&output.stdout);
     assert!(
         branches.contains("beads/store"),
@@ -2748,23 +2735,7 @@ fn test_init_fails_without_origin_remote() {
     let runtime_dir = TempDir::new().expect("failed to create runtime dir");
     let data_dir = data_dir_for_runtime(runtime_dir.path());
 
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(work_dir.path())
-        .output()
-        .expect("failed to git init");
-
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(work_dir.path())
-        .output()
-        .expect("failed to configure git email");
-
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(work_dir.path())
-        .output()
-        .expect("failed to configure git name");
+    run_git(&["init"], work_dir.path(), "failed to git init");
 
     let mut cmd = bd_with_runtime(work_dir.path(), runtime_dir.path(), &data_dir);
     cmd.arg("init").assert().failure();
