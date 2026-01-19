@@ -11,6 +11,24 @@ use thiserror::Error;
 use beads_rs::daemon::ipc::{IpcClient, IpcError, MutationMeta, Request, Response};
 use beads_rs::{BeadType, Priority};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Autostart {
+    Enabled,
+    Disabled,
+}
+
+impl Autostart {
+    fn is_enabled(self) -> bool {
+        matches!(self, Autostart::Enabled)
+    }
+}
+
+impl Default for Autostart {
+    fn default() -> Self {
+        Autostart::Enabled
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum LoadError {
     #[error(transparent)]
@@ -26,7 +44,7 @@ pub struct LoadConfig {
     pub rate_per_sec: Option<u64>,
     pub namespace: Option<String>,
     pub actor_id: Option<String>,
-    pub autostart: bool,
+    pub autostart: Autostart,
     pub max_errors: usize,
 }
 
@@ -61,7 +79,7 @@ impl LoadGenerator {
                 rate_per_sec: None,
                 namespace: None,
                 actor_id: None,
-                autostart: true,
+                autostart: Autostart::Enabled,
                 max_errors: 16,
             },
             counter: Arc::new(AtomicUsize::new(0)),
@@ -78,7 +96,10 @@ impl LoadGenerator {
         let started = Instant::now();
         if workers == 1 {
             let config = self.config.clone();
-            let client = self.client.clone().with_autostart(config.autostart);
+            let client = self
+                .client
+                .clone()
+                .with_autostart(config.autostart.is_enabled());
             let interval = config
                 .rate_per_sec
                 .filter(|rate| *rate > 0)
@@ -172,7 +193,7 @@ impl LoadGenerator {
         for worker in 0..workers {
             let repo = self.repo.clone();
             let config = self.config.clone();
-            let client = client.clone().with_autostart(config.autostart);
+            let client = client.clone().with_autostart(config.autostart.is_enabled());
             let errors = Arc::clone(&errors);
             let attempts = Arc::clone(&attempts);
             let successes = Arc::clone(&successes);
@@ -280,7 +301,7 @@ mod tests {
     fn fixtures_load_gen_reports_failures_when_daemon_missing() {
         let temp = tempfile::TempDir::new().expect("temp repo");
         let mut generator = LoadGenerator::new(temp.path().to_path_buf());
-        generator.config_mut().autostart = false;
+        generator.config_mut().autostart = Autostart::Disabled;
         generator.config_mut().total_requests = 1;
         let report = generator.run();
         assert_eq!(report.attempts, report.successes + report.failures);

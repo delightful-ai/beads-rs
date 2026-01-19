@@ -11,7 +11,7 @@ use beads_rs::NamespaceId;
 use beads_rs::api::AdminStatusOutput;
 
 use crate::fixtures::admin_status::{StatusCollector, assert_monotonic_watermarks};
-use crate::fixtures::load_gen::{LoadGenerator, LoadReport};
+use crate::fixtures::load_gen::{Autostart, LoadGenerator, LoadReport};
 use crate::fixtures::realtime::RealtimeFixture;
 
 #[test]
@@ -28,7 +28,7 @@ fn admin_status_monotonic_under_load() {
     config.workers = 2;
     config.total_requests = 40;
     config.namespace = Some(namespace.as_str().to_string());
-    config.autostart = false;
+    config.autostart = Autostart::Disabled;
     let timeout = load_timeout(config.total_requests, config.workers);
 
     let handle = thread::spawn(move || generator.run());
@@ -87,7 +87,7 @@ fn run_load(
     config.workers = 1;
     config.total_requests = total;
     config.namespace = Some(namespace.as_str().to_string());
-    config.autostart = false;
+    config.autostart = Autostart::Disabled;
     generator.run()
 }
 
