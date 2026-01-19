@@ -153,8 +153,8 @@ impl ReplRig {
         }
 
         for node in &nodes {
-            shutdown_daemon(&node.runtime_dir);
             node.start_daemon();
+            node.reload_replication();
         }
 
         let proxies = spawn_proxies(proxy_specs);
@@ -673,7 +673,6 @@ fn bootstrap_replica(node: &NodeSeed, store_id_override: Option<StoreId>) -> (St
         .assert()
         .success();
     let meta = read_store_meta(&node.data_dir, store_id_override);
-    shutdown_daemon(&node.runtime_dir);
     (meta.store_id(), meta.replica_id)
 }
 
