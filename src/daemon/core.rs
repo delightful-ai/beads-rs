@@ -107,14 +107,22 @@ const LOAD_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REPL_MAX_CONNECTIONS: usize = 32;
 const EXPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 
-fn read_test_disable_git_sync() -> bool {
-    let Ok(raw) = std::env::var("BD_TEST_DISABLE_GIT_SYNC") else {
+fn read_test_flag(name: &str) -> bool {
+    let Ok(raw) = std::env::var(name) else {
         return false;
     };
     !matches!(
         raw.trim().to_ascii_lowercase().as_str(),
         "0" | "false" | "no" | "n" | "off"
     )
+}
+
+fn read_test_disable_git_sync() -> bool {
+    read_test_flag("BD_TEST_DISABLE_GIT_SYNC")
+}
+
+fn read_test_disable_checkpoints() -> bool {
+    read_test_flag("BD_TEST_DISABLE_CHECKPOINTS")
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +220,8 @@ pub struct Daemon {
     limits: Limits,
     /// Disable background git sync (test-only).
     test_disable_git_sync: bool,
+    /// Disable checkpoint scheduling (test-only).
+    test_disable_checkpoints: bool,
     /// Replication settings loaded from config (env overrides applied during load).
     replication: crate::config::ReplicationConfig,
     /// Default checkpoint group specs from config.
@@ -269,6 +279,7 @@ impl Daemon {
     pub fn new_with_config(actor: ActorId, config: crate::config::Config) -> Self {
         let limits = config.limits.clone();
         let test_disable_git_sync = read_test_disable_git_sync();
+        let test_disable_checkpoints = read_test_disable_checkpoints();
         // Initialize Go-compat export worker (best effort - don't fail daemon startup)
         let export_worker = match ExportContext::new() {
             Ok(ctx) => Some(ExportWorkerHandle::start(ctx)),
@@ -293,6 +304,7 @@ impl Daemon {
             export_pending: BTreeMap::new(),
             limits,
             test_disable_git_sync,
+            test_disable_checkpoints,
             replication: config.replication.clone(),
             checkpoint_groups: config.checkpoint_groups.clone(),
             namespace_defaults: config.namespace_defaults.namespaces.clone(),
@@ -320,6 +332,10 @@ impl Daemon {
 
     pub(crate) fn git_sync_disabled(&self) -> bool {
         self.test_disable_git_sync
+    }
+
+    fn checkpoints_disabled(&self) -> bool {
+        self.test_disable_checkpoints
     }
 
     pub fn begin_shutdown(&mut self) {
@@ -411,6 +427,9 @@ impl Daemon {
     }
 
     fn register_default_checkpoint_groups(&mut self, store_id: StoreId) -> Result<(), OpError> {
+        if self.checkpoints_disabled() {
+            return Ok(());
+        }
         let store = self
             .stores
             .get(&store_id)
