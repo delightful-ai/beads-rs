@@ -190,6 +190,7 @@ mod tests {
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
             client_request_id: header.client_request_id,
+            trace_id: None,
             kind: crate::core::EventKindV1::TxnV1(crate::core::TxnV1 {
                 delta: crate::core::TxnDeltaV1::new(),
                 hlc_max: crate::core::HlcMax {

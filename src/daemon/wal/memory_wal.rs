@@ -336,6 +336,7 @@ mod tests {
             event_time_ms: 1_700_000_000_100,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,
+            trace_id: None,
             kind: crate::core::EventKindV1::TxnV1(crate::core::TxnV1 {
                 delta: crate::core::TxnDeltaV1::new(),
                 hlc_max: crate::core::HlcMax {

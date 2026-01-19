@@ -537,6 +537,7 @@ impl MutationEngine {
             event_time_ms: draft.event_time_ms,
             txn_id: draft.txn_id,
             client_request_id: draft.client_request_id,
+            trace_id: None,
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta: draft.delta,
                 hlc_max: draft.hlc_max,

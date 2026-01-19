@@ -570,7 +570,7 @@ mod tests {
     use crate::core::domain::DepKind;
     use crate::core::event::{EventKindV1, HlcMax};
     use crate::core::identity::{
-        ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TxnId,
+        ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
     };
     use crate::core::namespace::NamespaceId;
     use crate::core::wire_bead::WireStamp;
@@ -589,6 +589,7 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let txn_id = TxnId::new(Uuid::from_bytes([3u8; 16]));
         let client_request_id = ClientRequestId::new(Uuid::from_bytes([4u8; 16]));
+        let trace_id = TraceId::from(client_request_id);
 
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-apply1").unwrap());
         patch.created_at = Some(WireStamp(10, 1));
@@ -620,6 +621,7 @@ mod tests {
             event_time_ms: 100,
             txn_id,
             client_request_id: Some(client_request_id),
+            trace_id: Some(trace_id),
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta,
                 hlc_max: HlcMax {

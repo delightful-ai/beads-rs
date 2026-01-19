@@ -2,7 +2,7 @@
 
 use crate::core::{
     ActorId, ClientRequestId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax,
-    NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
+    NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TraceId, TxnDeltaV1, TxnId, TxnV1,
     encode_event_body_canonical, hash_event_body,
 };
 
@@ -46,6 +46,7 @@ impl EventFactory {
             event_time_ms,
             txn_id,
             client_request_id,
+            trace_id: client_request_id.map(TraceId::from),
             kind: EventKindV1::TxnV1(TxnV1 {
                 hlc_max: HlcMax {
                     actor_id: self.actor.clone(),
