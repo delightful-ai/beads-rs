@@ -135,7 +135,10 @@ where
                 shutdown: Arc::clone(&shutdown),
             };
 
-            joins.push(thread::spawn(move || run_peer_loop(plan, runtime)));
+            let peer_span = tracing::Span::current();
+            joins.push(thread::spawn(move || {
+                peer_span.in_scope(|| run_peer_loop(plan, runtime));
+            }));
         }
 
         ReplicationManagerHandle { shutdown, joins }
@@ -378,15 +381,21 @@ where
     let (inbound_tx, inbound_rx) = crossbeam::channel::unbounded::<InboundMessage>();
     let reader_shutdown = shutdown.clone();
     let reader_limits = limits.clone();
+    let reader_span = tracing::Span::current();
     let reader_handle = thread::spawn(move || {
-        run_reader_loop(&mut reader, inbound_tx, reader_shutdown, reader_limits);
+        reader_span.in_scope(|| {
+            run_reader_loop(&mut reader, inbound_tx, reader_shutdown, reader_limits);
+        });
     });
 
     let subscription = broadcaster.subscribe(subscriber_limits(&limits))?;
     let (event_tx, event_rx) = crossbeam::channel::unbounded::<BroadcastEvent>();
     let event_shutdown = shutdown.clone();
+    let event_span = tracing::Span::current();
     let event_handle = thread::spawn(move || {
-        run_event_forwarder(subscription, event_tx, event_shutdown);
+        event_span.in_scope(|| {
+            run_event_forwarder(subscription, event_tx, event_shutdown);
+        });
     });
 
     let mut config = SessionConfig::new(local_store, local_replica_id, &limits);
