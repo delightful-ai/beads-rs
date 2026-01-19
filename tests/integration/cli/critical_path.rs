@@ -14,9 +14,6 @@ use crate::fixtures::daemon_runtime::shutdown_daemon;
 use crate::fixtures::git::init_repo;
 use crate::fixtures::git::{init_bare_repo, init_repo_with_origin, repo_has_branch};
 #[cfg(feature = "slow-tests")]
-use crate::fixtures::git::init_repo;
-use crate::fixtures::git::{init_bare_repo, init_repo_with_origin, repo_has_branch};
-#[cfg(feature = "slow-tests")]
 use crate::fixtures::store_lock::unlock_store;
 use assert_cmd::Command;
 use predicates::prelude::*;
