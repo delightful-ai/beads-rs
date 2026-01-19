@@ -75,14 +75,86 @@ impl LoadGenerator {
     pub fn run(&self) -> LoadReport {
         let workers = self.config.workers.max(1);
         let total = self.config.total_requests.max(1);
+        let started = Instant::now();
+        if workers == 1 {
+            let config = self.config.clone();
+            let client = self.client.clone();
+            let interval = config
+                .rate_per_sec
+                .filter(|rate| *rate > 0)
+                .map(|rate| Duration::from_secs_f64(1.0 / rate as f64));
+            let mut errors = Vec::new();
+            let mut attempts = 0;
+            let mut successes = 0;
+            let mut failures = 0;
+            let mut seq = self.counter.fetch_add(total, Ordering::Relaxed);
+
+            for _ in 0..total {
+                attempts += 1;
+                let title = format!("load-{seq:06}");
+                seq = seq.saturating_add(1);
+                let request = Request::Create {
+                    repo: self.repo.clone(),
+                    id: None,
+                    parent: None,
+                    title,
+                    bead_type: BeadType::Task,
+                    priority: Priority::MEDIUM,
+                    description: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    assignee: None,
+                    external_ref: None,
+                    estimated_minutes: None,
+                    labels: Vec::new(),
+                    dependencies: Vec::new(),
+                    meta: MutationMeta {
+                        namespace: config.namespace.clone(),
+                        durability: None,
+                        client_request_id: None,
+                        actor_id: config.actor_id.clone(),
+                    },
+                };
+                let result = if config.autostart {
+                    client.send_request(&request)
+                } else {
+                    client.send_request_no_autostart(&request)
+                };
+                match result {
+                    Ok(Response::Ok { .. }) => successes += 1,
+                    Ok(Response::Err { err }) => {
+                        failures += 1;
+                        if errors.len() < config.max_errors {
+                            errors.push(LoadError::Remote(err));
+                        }
+                    }
+                    Err(err) => {
+                        failures += 1;
+                        if errors.len() < config.max_errors {
+                            errors.push(LoadError::Ipc(err));
+                        }
+                    }
+                }
+                if let Some(interval) = interval {
+                    thread::sleep(interval);
+                }
+            }
+
+            return LoadReport {
+                attempts,
+                successes,
+                failures,
+                errors,
+                elapsed: started.elapsed(),
+            };
+        }
+
         let per_worker = total.div_ceil(workers);
         let errors = Arc::new(Mutex::new(Vec::new()));
         let attempts = Arc::new(AtomicUsize::new(0));
         let successes = Arc::new(AtomicUsize::new(0));
         let failures = Arc::new(AtomicUsize::new(0));
         let client = self.client.clone();
-
-        let started = Instant::now();
         let mut handles = Vec::with_capacity(workers);
         for worker in 0..workers {
             let repo = self.repo.clone();
