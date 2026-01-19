@@ -5,19 +5,24 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
+use std::process::{Command as StdCommand, Stdio};
+use std::time::{Duration, Instant};
 
-use assert_cmd::Command;
 use tempfile::TempDir;
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
 use beads_rs::api::{
     AdminClockAnomaly, AdminClockAnomalyKind, AdminHealthReport, AdminHealthRisk, AdminHealthStats,
-    AdminHealthSummary, AdminStatusOutput,
+    AdminHealthSummary, AdminMetricsOutput, AdminReloadPoliciesOutput, AdminScrubOutput,
+    AdminStatusOutput,
 };
+use beads_rs::api::{AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample};
+use beads_rs::core::BeadType;
+use beads_rs::daemon::ipc::{IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload};
+use beads_rs::daemon::ops::OpResult;
 use beads_rs::{
-    Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, ReplicateMode,
-    StoreId, Watermarks,
+    Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, Priority, ReplicaId,
+    ReplicateMode, StoreId, Watermarks,
 };
 use uuid::Uuid;
 
@@ -49,24 +54,192 @@ impl AdminFixture {
         dir
     }
 
-    fn bd(&self) -> Command {
-        let data_dir = self.data_dir();
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        cmd.current_dir(self.repo_dir.path());
-        cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
-        cmd.env("BD_WAL_DIR", self.runtime_dir.path());
-        cmd.env("BD_DATA_DIR", &data_dir);
-        cmd.env("BD_NO_AUTO_UPGRADE", "1");
-        cmd.env("BD_TESTING", "1");
-        cmd
+    fn ipc_client(&self) -> IpcClient {
+        IpcClient::for_runtime_dir(self.runtime_dir.path()).with_autostart(false)
     }
 
     fn start_daemon(&self) {
-        self.bd().arg("init").assert().success();
+        let client = self.ipc_client();
+        if !ping_daemon(&client) {
+            let data_dir = self.data_dir();
+            let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("bd"));
+            cmd.current_dir(self.repo_dir.path());
+            cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
+            cmd.env("BD_WAL_DIR", self.runtime_dir.path());
+            cmd.env("BD_DATA_DIR", &data_dir);
+            cmd.env("BD_NO_AUTO_UPGRADE", "1");
+            cmd.env("BD_TESTING", "1");
+            cmd.args(["daemon", "run"]);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            cmd.spawn().expect("spawn daemon");
+
+            let ok = poll_until(Duration::from_secs(5), || ping_daemon(&client));
+            assert!(ok, "daemon failed to start");
+        }
+
+        let request = Request::Init {
+            repo: self.repo_dir.path().to_path_buf(),
+        };
+        let response = client
+            .send_request_no_autostart(&request)
+            .expect("init response");
+        match response {
+            Response::Ok {
+                ok: ResponsePayload::Initialized(_),
+            } => {}
+            other => panic!("unexpected init response: {other:?}"),
+        }
     }
 
     fn create_issue(&self, title: &str) {
-        self.bd().args(["create", title]).assert().success();
+        let request = Request::Create {
+            repo: self.repo_dir.path().to_path_buf(),
+            id: None,
+            parent: None,
+            title: title.to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::default(),
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            meta: MutationMeta::default(),
+        };
+        let response = self.send_request(&request);
+        match response {
+            Response::Ok { ok: ResponsePayload::Op(op) } => match op.result {
+                OpResult::Created { .. } => {}
+                other => panic!("unexpected create result: {other:?}"),
+            },
+            Response::Err { err } => panic!("create error: {err:?}"),
+            other => panic!("unexpected create response: {other:?}"),
+        }
+    }
+
+    fn create_issue_result(&self, title: &str) -> Response {
+        let request = Request::Create {
+            repo: self.repo_dir.path().to_path_buf(),
+            id: None,
+            parent: None,
+            title: title.to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::default(),
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            meta: MutationMeta::default(),
+        };
+        self.send_request(&request)
+    }
+
+    fn admin_status(&self) -> AdminStatusOutput {
+        match self.send_query(Request::AdminStatus {
+            repo: self.repo_dir.path().to_path_buf(),
+            read: ReadConsistency::default(),
+        }) {
+            beads_rs::api::QueryResult::AdminStatus(status) => status,
+            other => panic!("unexpected admin status payload: {other:?}"),
+        }
+    }
+
+    fn admin_metrics(&self) -> AdminMetricsOutput {
+        match self.send_query(Request::AdminMetrics {
+            repo: self.repo_dir.path().to_path_buf(),
+            read: ReadConsistency::default(),
+        }) {
+            beads_rs::api::QueryResult::AdminMetrics(metrics) => metrics,
+            other => panic!("unexpected admin metrics payload: {other:?}"),
+        }
+    }
+
+    fn admin_doctor(&self) -> beads_rs::api::AdminDoctorOutput {
+        match self.send_query(Request::AdminDoctor {
+            repo: self.repo_dir.path().to_path_buf(),
+            read: ReadConsistency::default(),
+            max_records_per_namespace: None,
+            verify_checkpoint_cache: false,
+        }) {
+            beads_rs::api::QueryResult::AdminDoctor(output) => output,
+            other => panic!("unexpected admin doctor payload: {other:?}"),
+        }
+    }
+
+    fn admin_scrub(&self, max_records_per_namespace: Option<u64>) -> AdminScrubOutput {
+        match self.send_query(Request::AdminScrub {
+            repo: self.repo_dir.path().to_path_buf(),
+            read: ReadConsistency::default(),
+            max_records_per_namespace,
+            verify_checkpoint_cache: false,
+        }) {
+            beads_rs::api::QueryResult::AdminScrub(output) => output,
+            other => panic!("unexpected admin scrub payload: {other:?}"),
+        }
+    }
+
+    fn admin_reload_policies(&self) -> AdminReloadPoliciesOutput {
+        match self.send_query(Request::AdminReloadPolicies {
+            repo: self.repo_dir.path().to_path_buf(),
+        }) {
+            beads_rs::api::QueryResult::AdminReloadPolicies(output) => output,
+            other => panic!("unexpected admin reload policies payload: {other:?}"),
+        }
+    }
+
+    fn admin_fingerprint(
+        &self,
+        mode: AdminFingerprintMode,
+        sample: Option<AdminFingerprintSample>,
+    ) -> AdminFingerprintOutput {
+        match self.send_query(Request::AdminFingerprint {
+            repo: self.repo_dir.path().to_path_buf(),
+            read: ReadConsistency::default(),
+            mode,
+            sample,
+        }) {
+            beads_rs::api::QueryResult::AdminFingerprint(output) => output,
+            other => panic!("unexpected admin fingerprint payload: {other:?}"),
+        }
+    }
+
+    fn admin_maintenance(&self, enabled: bool) -> Response {
+        self.send_request(&Request::AdminMaintenanceMode {
+            repo: self.repo_dir.path().to_path_buf(),
+            enabled,
+        })
+    }
+
+    fn admin_rebuild_index(&self) -> Response {
+        self.send_request(&Request::AdminRebuildIndex {
+            repo: self.repo_dir.path().to_path_buf(),
+        })
+    }
+
+    fn send_query(&self, request: Request) -> beads_rs::api::QueryResult {
+        let response = self.send_request(&request);
+        match response {
+            Response::Ok {
+                ok: ResponsePayload::Query(result),
+            } => result,
+            Response::Err { err } => panic!("admin request failed: {err:?}"),
+            other => panic!("unexpected admin response: {other:?}"),
+        }
+    }
+
+    fn send_request(&self, request: &Request) -> Response {
+        self.ipc_client()
+            .send_request_no_autostart(request)
+            .expect("ipc request")
     }
 }
 
@@ -114,25 +287,10 @@ fn admin_status_includes_expected_fields() {
     fixture.start_daemon();
     fixture.create_issue("admin status test");
 
-    let output = fixture
-        .bd()
-        .args(["admin", "status", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
-    assert_eq!(payload["result"], "admin_status");
-    let data = &payload["data"];
-    assert!(data["store_id"].is_string());
-    assert!(data["replica_id"].is_string());
-    assert!(data["namespaces"].is_array());
-    assert!(data["watermarks_applied"].is_object());
-    assert!(data["watermarks_durable"].is_object());
-    assert!(data["wal"].is_array());
-    assert!(data["checkpoints"].is_array());
+    let status = fixture.admin_status();
+    assert!(status.namespaces.contains(&NamespaceId::core()));
+    assert!(!status.wal.is_empty());
+    assert!(!status.checkpoints.is_empty());
 }
 
 #[test]
@@ -141,25 +299,13 @@ fn admin_metrics_includes_counters() {
     fixture.start_daemon();
     fixture.create_issue("admin metrics test");
 
-    let output = fixture
-        .bd()
-        .args(["admin", "metrics", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
-    assert_eq!(payload["result"], "admin_metrics");
-    let counters = payload["data"]["counters"]
-        .as_array()
-        .expect("counters array");
-    let has_wal_append = counters
+    let metrics = fixture.admin_metrics();
+    let has_wal_append = metrics
+        .counters
         .iter()
-        .any(|counter| counter["name"].as_str() == Some("wal_append_ok"));
+        .any(|counter| counter.name == "wal_append_ok");
     assert!(
-        has_wal_append || !counters.is_empty(),
+        has_wal_append || !metrics.counters.is_empty(),
         "expected wal_append_ok or any counters"
     );
 }
@@ -170,21 +316,9 @@ fn admin_doctor_includes_checks() {
     fixture.start_daemon();
     fixture.create_issue("admin doctor test");
 
-    let output = fixture
-        .bd()
-        .args(["admin", "doctor", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
-    assert_eq!(payload["result"], "admin_doctor");
-    let report = &payload["data"]["report"];
-    assert!(report["checked_at_ms"].is_number());
-    assert!(report["checks"].is_array());
-    assert!(report["summary"].is_object());
+    let report = fixture.admin_doctor().report;
+    assert!(report.checked_at_ms > 0);
+    assert!(!report.checks.is_empty());
 }
 
 #[test]
@@ -193,19 +327,8 @@ fn admin_scrub_reports_segment_header_failure() {
     fixture.start_daemon();
     fixture.create_issue("admin scrub test");
 
-    let status_output = fixture
-        .bd()
-        .args(["admin", "status", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let status_payload: serde_json::Value =
-        serde_json::from_slice(&status_output).expect("parse status json");
-    let store_id = status_payload["data"]["store_id"]
-        .as_str()
-        .expect("store_id");
+    let status = fixture.admin_status();
+    let store_id = status.store_id.to_string();
 
     let wal_dir = fixture
         .data_dir()
@@ -217,25 +340,13 @@ fn admin_scrub_reports_segment_header_failure() {
     let bad_path = wal_dir.join("segment-invalid.wal");
     fs::write(&bad_path, b"bad wal").expect("write invalid wal segment");
 
-    let output = fixture
-        .bd()
-        .args(["admin", "scrub", "--json", "--max-records", "1"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
-    assert_eq!(payload["result"], "admin_scrub");
-    let checks = payload["data"]["report"]["checks"]
-        .as_array()
-        .expect("checks array");
-    let wal_frames = checks
+    let report = fixture.admin_scrub(Some(1)).report;
+    let wal_frames = report
+        .checks
         .iter()
-        .find(|check| check["id"].as_str() == Some("wal_frames"))
+        .find(|check| check.id == beads_rs::api::AdminHealthCheckId::WalFrames)
         .expect("wal_frames check");
-    assert_eq!(wal_frames["status"], "fail");
+    assert_eq!(wal_frames.status, beads_rs::api::AdminHealthStatus::Fail);
 }
 
 #[test]
@@ -244,19 +355,7 @@ fn admin_reload_policies_reports_safe_and_restart_changes() {
     fixture.start_daemon();
     fixture.create_issue("admin reload policies");
 
-    let status_output = fixture
-        .bd()
-        .args(["admin", "status", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let status_payload: serde_json::Value =
-        serde_json::from_slice(&status_output).expect("parse status json");
-    let store_id = status_payload["data"]["store_id"]
-        .as_str()
-        .expect("store_id");
+    let store_id = fixture.admin_status().store_id.to_string();
 
     let mut core_policy = NamespacePolicy::core_default();
     core_policy.ready_eligible = false;
@@ -272,45 +371,30 @@ fn admin_reload_policies_reports_safe_and_restart_changes() {
         .join("namespaces.toml");
     fs::write(&policy_path, toml).expect("write namespaces.toml");
 
-    let output = fixture
-        .bd()
-        .args(["admin", "reload-policies", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
-    assert_eq!(payload["result"], "admin_reload_policies");
-
-    let applied = payload["data"]["applied"]
-        .as_array()
-        .expect("applied array");
-    let requires_restart = payload["data"]["requires_restart"]
-        .as_array()
-        .expect("requires_restart array");
+    let output = fixture.admin_reload_policies();
+    let applied = output.applied;
+    let requires_restart = output.requires_restart;
 
     let applied_core = applied
         .iter()
-        .find(|diff| diff["namespace"].as_str() == Some("core"))
+        .find(|diff| diff.namespace == NamespaceId::core())
         .expect("applied core diff");
-    let applied_changes = applied_core["changes"].as_array().expect("applied changes");
+    let applied_changes = &applied_core.changes;
     assert!(
         applied_changes
             .iter()
-            .any(|change| change["field"].as_str() == Some("ready_eligible"))
+            .any(|change| change.field == "ready_eligible")
     );
 
     let restart_core = requires_restart
         .iter()
-        .find(|diff| diff["namespace"].as_str() == Some("core"))
+        .find(|diff| diff.namespace == NamespaceId::core())
         .expect("restart core diff");
-    let restart_changes = restart_core["changes"].as_array().expect("restart changes");
+    let restart_changes = &restart_core.changes;
     assert!(
         restart_changes
             .iter()
-            .any(|change| change["field"].as_str() == Some("replicate_mode"))
+            .any(|change| change.field == "replicate_mode")
     );
 }
 
@@ -320,29 +404,11 @@ fn admin_fingerprint_full_includes_shards() {
     fixture.start_daemon();
     fixture.create_issue("admin fingerprint full");
 
-    let output = fixture
-        .bd()
-        .args(["admin", "fingerprint", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let payload: serde_json::Value = serde_json::from_slice(&output).expect("parse json");
-    assert_eq!(payload["result"], "admin_fingerprint");
-    assert_eq!(payload["data"]["mode"], "full");
-    let namespaces = payload["data"]["namespaces"]
-        .as_array()
-        .expect("namespaces array");
-    assert!(!namespaces.is_empty(), "expected at least one namespace");
-    for namespace in namespaces {
-        assert!(namespace["state_sha256"].is_string());
-        assert!(namespace["tombstones_sha256"].is_string());
-        assert!(namespace["deps_sha256"].is_string());
-        assert!(namespace["namespace_root"].is_string());
-        let shards = namespace["shards"].as_array().expect("shards array");
-        assert_eq!(shards.len(), 256 * 3);
+    let output = fixture.admin_fingerprint(AdminFingerprintMode::Full, None);
+    assert_eq!(output.mode, AdminFingerprintMode::Full);
+    assert!(!output.namespaces.is_empty(), "expected at least one namespace");
+    for namespace in &output.namespaces {
+        assert_eq!(namespace.shards.len(), 256 * 3);
     }
 }
 
@@ -352,45 +418,27 @@ fn admin_fingerprint_sample_is_deterministic() {
     fixture.start_daemon();
     fixture.create_issue("admin fingerprint sample");
 
-    let args = [
-        "admin",
-        "fingerprint",
-        "--json",
-        "--sample",
-        "3",
-        "--nonce",
-        "fixed-nonce",
-    ];
-    let output_a = fixture
-        .bd()
-        .args(args)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let output_b = fixture
-        .bd()
-        .args(args)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let sample = AdminFingerprintSample {
+        shard_count: 3,
+        nonce: "fixed-nonce".to_string(),
+    };
+    let output_a = fixture.admin_fingerprint(AdminFingerprintMode::Sample, Some(sample.clone()));
+    let output_b = fixture.admin_fingerprint(AdminFingerprintMode::Sample, Some(sample));
 
-    let payload_a: serde_json::Value = serde_json::from_slice(&output_a).expect("parse json");
-    let payload_b: serde_json::Value = serde_json::from_slice(&output_b).expect("parse json");
-    assert_eq!(payload_a["result"], "admin_fingerprint");
-    assert_eq!(payload_a["data"]["mode"], "sample");
-    assert_eq!(payload_a["data"]["sample"]["shard_count"], 3);
-    assert_eq!(payload_a["data"]["sample"]["nonce"], "fixed-nonce");
+    assert_eq!(output_a.mode, AdminFingerprintMode::Sample);
+    assert_eq!(output_a.sample.as_ref().expect("sample").shard_count, 3);
+    assert_eq!(output_a.sample.as_ref().expect("sample").nonce, "fixed-nonce");
 
-    let ns_a = payload_a["data"]["namespaces"][0].clone();
-    let ns_b = payload_b["data"]["namespaces"][0].clone();
-    assert_eq!(ns_a["namespace_root"], ns_b["namespace_root"]);
-    assert_eq!(ns_a["shards"], ns_b["shards"]);
-    let shards = ns_a["shards"].as_array().expect("shards array");
-    assert_eq!(shards.len(), 3 * 3);
+    let ns_a = &output_a.namespaces[0];
+    let ns_b = &output_b.namespaces[0];
+    assert_eq!(ns_a.namespace_root, ns_b.namespace_root);
+    assert_eq!(ns_a.shards.len(), 3 * 3);
+    assert_eq!(ns_a.shards.len(), ns_b.shards.len());
+    for (a, b) in ns_a.shards.iter().zip(&ns_b.shards) {
+        assert_eq!(a.kind, b.kind);
+        assert_eq!(a.index, b.index);
+        assert_eq!(a.sha256, b.sha256);
+    }
 }
 
 #[test]
@@ -442,29 +490,26 @@ fn admin_maintenance_blocks_mutations() {
     fixture.start_daemon();
     fixture.create_issue("maintenance baseline");
 
-    fixture
-        .bd()
-        .args(["admin", "maintenance", "on"])
-        .assert()
-        .success();
+    match fixture.admin_maintenance(true) {
+        Response::Ok {
+            ok: ResponsePayload::Query(beads_rs::api::QueryResult::AdminMaintenanceMode(_)),
+        } => {}
+        other => panic!("unexpected maintenance on response: {other:?}"),
+    }
 
-    fixture
-        .bd()
-        .args(["create", "maintenance blocked"])
-        .assert()
-        .failure();
+    match fixture.create_issue_result("maintenance blocked") {
+        Response::Err { .. } => {}
+        other => panic!("unexpected create response while in maintenance: {other:?}"),
+    }
 
-    fixture
-        .bd()
-        .args(["admin", "maintenance", "off"])
-        .assert()
-        .success();
+    match fixture.admin_maintenance(false) {
+        Response::Ok {
+            ok: ResponsePayload::Query(beads_rs::api::QueryResult::AdminMaintenanceMode(_)),
+        } => {}
+        other => panic!("unexpected maintenance off response: {other:?}"),
+    }
 
-    fixture
-        .bd()
-        .args(["create", "maintenance allowed"])
-        .assert()
-        .success();
+    fixture.create_issue("maintenance allowed");
 }
 
 #[test]
@@ -473,21 +518,47 @@ fn admin_rebuild_index_requires_maintenance() {
     fixture.start_daemon();
     fixture.create_issue("rebuild baseline");
 
-    fixture
-        .bd()
-        .args(["admin", "rebuild-index"])
-        .assert()
-        .failure();
+    match fixture.admin_rebuild_index() {
+        Response::Err { .. } => {}
+        other => panic!("unexpected rebuild-index response: {other:?}"),
+    }
 
-    fixture
-        .bd()
-        .args(["admin", "maintenance", "on"])
-        .assert()
-        .success();
+    match fixture.admin_maintenance(true) {
+        Response::Ok {
+            ok: ResponsePayload::Query(beads_rs::api::QueryResult::AdminMaintenanceMode(_)),
+        } => {}
+        other => panic!("unexpected maintenance on response: {other:?}"),
+    }
 
-    fixture
-        .bd()
-        .args(["admin", "rebuild-index"])
-        .assert()
-        .success();
+    match fixture.admin_rebuild_index() {
+        Response::Ok {
+            ok: ResponsePayload::Query(beads_rs::api::QueryResult::AdminRebuildIndex(_)),
+        } => {}
+        other => panic!("unexpected rebuild-index response: {other:?}"),
+    }
+}
+
+fn ping_daemon(client: &IpcClient) -> bool {
+    matches!(
+        client.send_request_no_autostart(&Request::Ping),
+        Ok(Response::Ok {
+            ok: ResponsePayload::Query(beads_rs::api::QueryResult::DaemonInfo(_)),
+        })
+    )
+}
+
+fn poll_until<F>(timeout: Duration, mut condition: F) -> bool
+where
+    F: FnMut() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    let mut backoff = Duration::from_millis(10);
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(backoff);
+        backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
+    }
+    condition()
 }
