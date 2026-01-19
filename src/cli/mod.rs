@@ -1032,6 +1032,127 @@ where
     Cli::parse_from(normalize_args(raw))
 }
 
+pub fn command_name(command: &Commands) -> String {
+    match command {
+        Commands::Init => "init".to_string(),
+        Commands::Create(_) => "create".to_string(),
+        Commands::Show(_) => "show".to_string(),
+        Commands::List(_) => "list".to_string(),
+        Commands::Search(_) => "search".to_string(),
+        Commands::Ready(_) => "ready".to_string(),
+        Commands::Blocked => "blocked".to_string(),
+        Commands::Stale(_) => "stale".to_string(),
+        Commands::Count(_) => "count".to_string(),
+        Commands::Deleted(_) => "deleted".to_string(),
+        Commands::Sync => "sync".to_string(),
+        Commands::Subscribe(_) => "subscribe".to_string(),
+        Commands::Store { cmd } => format!("store.{}", store_cmd_name(cmd)),
+        Commands::Admin { cmd } => match cmd {
+            AdminCmd::Maintenance { cmd } => {
+                format!("admin.maintenance.{}", maintenance_cmd_name(cmd))
+            }
+            _ => format!("admin.{}", admin_cmd_name(cmd)),
+        },
+        Commands::Upgrade(_) => "upgrade".to_string(),
+        Commands::Update(_) => "update".to_string(),
+        Commands::Close(_) => "close".to_string(),
+        Commands::Reopen { .. } => "reopen".to_string(),
+        Commands::Delete(_) => "delete".to_string(),
+        Commands::Claim(_) => "claim".to_string(),
+        Commands::Unclaim { .. } => "unclaim".to_string(),
+        Commands::Comments(args) => match &args.cmd {
+            Some(CommentsCmd::Add(_)) => "comments.add".to_string(),
+            None => "comments".to_string(),
+        },
+        Commands::Comment(_) => "comment".to_string(),
+        Commands::Dep { cmd } => format!("dep.{}", dep_cmd_name(cmd)),
+        Commands::Label { cmd } => format!("label.{}", label_cmd_name(cmd)),
+        Commands::Epic { cmd } => format!("epic.{}", epic_cmd_name(cmd)),
+        Commands::Status => "status".to_string(),
+        Commands::Prime => "prime".to_string(),
+        Commands::Onboard(_) => "onboard".to_string(),
+        Commands::Setup { cmd } => format!("setup.{}", setup_cmd_name(cmd)),
+        Commands::Migrate { cmd } => format!("migrate.{}", migrate_cmd_name(cmd)),
+        Commands::Daemon { cmd } => format!("daemon.{}", daemon_cmd_name(cmd)),
+    }
+}
+
+fn dep_cmd_name(cmd: &DepCmd) -> &'static str {
+    match cmd {
+        DepCmd::Add(_) => "add",
+        DepCmd::Rm(_) => "rm",
+        DepCmd::Tree { .. } => "tree",
+        DepCmd::Cycles => "cycles",
+    }
+}
+
+fn label_cmd_name(cmd: &LabelCmd) -> &'static str {
+    match cmd {
+        LabelCmd::Add(_) => "add",
+        LabelCmd::Remove(_) => "remove",
+        LabelCmd::List { .. } => "list",
+        LabelCmd::ListAll => "list-all",
+    }
+}
+
+fn epic_cmd_name(cmd: &EpicCmd) -> &'static str {
+    match cmd {
+        EpicCmd::Status(_) => "status",
+        EpicCmd::CloseEligible(_) => "close-eligible",
+    }
+}
+
+fn store_cmd_name(cmd: &StoreCmd) -> &'static str {
+    match cmd {
+        StoreCmd::Unlock(_) => "unlock",
+        StoreCmd::Fsck(_) => "fsck",
+    }
+}
+
+fn admin_cmd_name(cmd: &AdminCmd) -> &'static str {
+    match cmd {
+        AdminCmd::Status => "status",
+        AdminCmd::Metrics => "metrics",
+        AdminCmd::Doctor(_) => "doctor",
+        AdminCmd::Scrub(_) => "scrub",
+        AdminCmd::Flush(_) => "flush",
+        AdminCmd::Fingerprint(_) => "fingerprint",
+        AdminCmd::ReloadPolicies => "reload-policies",
+        AdminCmd::RotateReplicaId => "rotate-replica-id",
+        AdminCmd::Maintenance { .. } => "maintenance",
+        AdminCmd::RebuildIndex => "rebuild-index",
+    }
+}
+
+fn maintenance_cmd_name(cmd: &AdminMaintenanceCmd) -> &'static str {
+    match cmd {
+        AdminMaintenanceCmd::On => "on",
+        AdminMaintenanceCmd::Off => "off",
+    }
+}
+
+fn setup_cmd_name(cmd: &SetupCmd) -> &'static str {
+    match cmd {
+        SetupCmd::Claude(_) => "claude",
+        SetupCmd::Cursor(_) => "cursor",
+        SetupCmd::Aider(_) => "aider",
+    }
+}
+
+fn migrate_cmd_name(cmd: &MigrateCmd) -> &'static str {
+    match cmd {
+        MigrateCmd::Detect => "detect",
+        MigrateCmd::To(_) => "to",
+        MigrateCmd::FromGo(_) => "from-go",
+    }
+}
+
+fn daemon_cmd_name(cmd: &DaemonCmd) -> &'static str {
+    match cmd {
+        DaemonCmd::Run => "run",
+    }
+}
+
 /// Run the CLI (used by bin).
 pub fn run(cli: Cli) -> Result<()> {
     if !matches!(cli.command, Commands::Daemon { .. } | Commands::Upgrade(_)) {
