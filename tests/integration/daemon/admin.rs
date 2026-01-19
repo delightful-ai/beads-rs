@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::git::apply_test_git_env;
 use beads_rs::api::{
     AdminClockAnomaly, AdminClockAnomalyKind, AdminHealthReport, AdminHealthRisk, AdminHealthStats,
     AdminHealthSummary, AdminMetricsOutput, AdminReloadPoliciesOutput, AdminScrubOutput,
@@ -18,7 +19,9 @@ use beads_rs::api::{
 };
 use beads_rs::api::{AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample};
 use beads_rs::core::BeadType;
-use beads_rs::daemon::ipc::{IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload};
+use beads_rs::daemon::ipc::{
+    IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+};
 use beads_rs::daemon::ops::OpResult;
 use beads_rs::{
     Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, Priority, ReplicaId,
@@ -114,7 +117,9 @@ impl AdminFixture {
         };
         let response = self.send_request(&request);
         match response {
-            Response::Ok { ok: ResponsePayload::Op(op) } => match op.result {
+            Response::Ok {
+                ok: ResponsePayload::Op(op),
+            } => match op.result {
                 OpResult::Created { .. } => {}
                 other => panic!("unexpected create result: {other:?}"),
             },
@@ -251,35 +256,14 @@ impl Drop for AdminFixture {
 }
 
 fn init_git_repo(repo_dir: &Path, remote_dir: &Path) {
-    StdCommand::new("git")
-        .args(["init", "--bare"])
-        .current_dir(remote_dir)
-        .output()
-        .expect("git init --bare");
+    run_git(&["init", "--bare"], remote_dir, "git init --bare");
 
-    StdCommand::new("git")
-        .args(["init"])
-        .current_dir(repo_dir)
-        .output()
-        .expect("git init");
-
-    StdCommand::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(repo_dir)
-        .output()
-        .expect("git config email");
-
-    StdCommand::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(repo_dir)
-        .output()
-        .expect("git config name");
-
-    StdCommand::new("git")
-        .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
-        .current_dir(repo_dir)
-        .output()
-        .expect("git remote add origin");
+    run_git(&["init"], repo_dir, "git init");
+    run_git(
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+        repo_dir,
+        "git remote add origin",
+    );
 }
 
 #[test]
@@ -407,7 +391,10 @@ fn admin_fingerprint_full_includes_shards() {
 
     let output = fixture.admin_fingerprint(AdminFingerprintMode::Full, None);
     assert_eq!(output.mode, AdminFingerprintMode::Full);
-    assert!(!output.namespaces.is_empty(), "expected at least one namespace");
+    assert!(
+        !output.namespaces.is_empty(),
+        "expected at least one namespace"
+    );
     for namespace in &output.namespaces {
         assert_eq!(namespace.shards.len(), 256 * 3);
     }
@@ -428,7 +415,10 @@ fn admin_fingerprint_sample_is_deterministic() {
 
     assert_eq!(output_a.mode, AdminFingerprintMode::Sample);
     assert_eq!(output_a.sample.as_ref().expect("sample").shard_count, 3);
-    assert_eq!(output_a.sample.as_ref().expect("sample").nonce, "fixed-nonce");
+    assert_eq!(
+        output_a.sample.as_ref().expect("sample").nonce,
+        "fixed-nonce"
+    );
 
     let ns_a = &output_a.namespaces[0];
     let ns_b = &output_b.namespaces[0];
@@ -562,4 +552,10 @@ where
         backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
     }
     condition()
+}
+
+fn run_git(args: &[&str], cwd: &Path, label: &str) {
+    let mut cmd = StdCommand::new("git");
+    apply_test_git_env(&mut cmd);
+    cmd.args(args).current_dir(cwd).output().expect(label);
 }

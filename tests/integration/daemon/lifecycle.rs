@@ -8,14 +8,15 @@
 //! - Concurrent access during restart
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
+use crate::fixtures::git::apply_test_git_env;
+use crate::fixtures::store_lock::unlock_store;
 use assert_cmd::Command;
 use tempfile::TempDir;
-use crate::fixtures::store_lock::unlock_store;
 
 // =============================================================================
 // Test Fixture
@@ -35,42 +36,22 @@ impl DaemonFixture {
         let remote_dir = TempDir::new().expect("create remote dir");
 
         // Create bare remote
-        StdCommand::new("git")
-            .args(["init", "--bare"])
-            .current_dir(remote_dir.path())
-            .output()
-            .expect("git init --bare");
+        run_git(&["init", "--bare"], remote_dir.path(), "git init --bare");
 
         // Initialize git repo
-        StdCommand::new("git")
-            .args(["init"])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git init");
-
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git config email");
-
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git config name");
+        run_git(&["init"], repo_dir.path(), "git init");
 
         // Add remote origin
-        StdCommand::new("git")
-            .args([
+        run_git(
+            &[
                 "remote",
                 "add",
                 "origin",
                 remote_dir.path().to_str().unwrap(),
-            ])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git remote add origin");
+            ],
+            repo_dir.path(),
+            "git remote add origin",
+        );
 
         Self {
             runtime_dir,
@@ -181,6 +162,12 @@ impl Drop for DaemonFixture {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
         }
     }
+}
+
+fn run_git(args: &[&str], cwd: &Path, label: &str) {
+    let mut cmd = StdCommand::new("git");
+    apply_test_git_env(&mut cmd);
+    cmd.args(args).current_dir(cwd).output().expect(label);
 }
 
 // =============================================================================
