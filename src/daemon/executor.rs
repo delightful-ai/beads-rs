@@ -242,6 +242,7 @@ impl Daemon {
             store_id = %store.store_id,
             store_epoch = store.store_epoch.get(),
             replica_id = %origin_replica_id,
+            actor_id = %ctx.actor_id,
             durability = ?durability,
             txn_id = %sequenced.event_body.txn_id,
             client_request_id = ?ctx.client_request_id,
@@ -1306,6 +1307,8 @@ mod tests {
 
     #[test]
     fn mutation_span_includes_realtime_context() {
+        use crate::telemetry::schema;
+
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
@@ -1360,15 +1363,16 @@ mod tests {
             .unwrap_or_default();
 
         for key in [
-            "store_id",
-            "store_epoch",
-            "replica_id",
-            "txn_id",
-            "client_request_id",
-            "trace_id",
-            "namespace",
-            "origin_replica_id",
-            "origin_seq",
+            schema::STORE_ID,
+            schema::STORE_EPOCH,
+            schema::REPLICA_ID,
+            schema::ACTOR_ID,
+            schema::TXN_ID,
+            schema::CLIENT_REQUEST_ID,
+            schema::TRACE_ID,
+            schema::NAMESPACE,
+            schema::ORIGIN_REPLICA_ID,
+            schema::ORIGIN_SEQ,
         ] {
             assert!(
                 fields.contains_key(key),

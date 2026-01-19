@@ -1457,6 +1457,160 @@ mod tests {
     }
 
     #[test]
+    fn request_span_includes_schema_fields() {
+        use crate::telemetry::schema;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+        use tracing::Subscriber;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::Registry;
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default)]
+        struct FieldVisitor {
+            fields: BTreeMap<String, String>,
+        }
+
+        impl FieldVisitor {
+            fn record(&mut self, field: &Field, value: String) {
+                self.fields.insert(field.name().to_string(), value);
+            }
+        }
+
+        impl Visit for FieldVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.record(field, format!("{value:?}"));
+            }
+
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.record(field, value.to_string());
+            }
+
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                self.record(field, value.to_string());
+            }
+        }
+
+        #[derive(Default)]
+        struct SpanFields {
+            fields: BTreeMap<String, String>,
+        }
+
+        struct CaptureLayer {
+            spans: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+        }
+
+        impl CaptureLayer {
+            fn new(spans: Arc<Mutex<Vec<BTreeMap<String, String>>>>) -> Self {
+                Self { spans }
+            }
+        }
+
+        impl<S> Layer<S> for CaptureLayer
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                id: &tracing::Id,
+                ctx: Context<'_, S>,
+            ) {
+                let mut visitor = FieldVisitor::default();
+                attrs.record(&mut visitor);
+                if let Some(span) = ctx.span(id) {
+                    span.extensions_mut().insert(SpanFields {
+                        fields: visitor.fields,
+                    });
+                }
+            }
+
+            fn on_record(
+                &self,
+                id: &tracing::Id,
+                values: &tracing::span::Record<'_>,
+                ctx: Context<'_, S>,
+            ) {
+                if let Some(span) = ctx.span(id) {
+                    let mut visitor = FieldVisitor::default();
+                    values.record(&mut visitor);
+                    let mut extensions = span.extensions_mut();
+                    if extensions.get_mut::<SpanFields>().is_none() {
+                        extensions.insert(SpanFields::default());
+                    }
+                    let fields = extensions.get_mut::<SpanFields>().expect("span fields");
+                    fields.fields.extend(visitor.fields);
+                }
+            }
+
+            fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+                let Some(span) = ctx.span(&id) else {
+                    return;
+                };
+                if span.metadata().name() != "ipc_request" {
+                    return;
+                }
+                let fields = span
+                    .extensions()
+                    .get::<SpanFields>()
+                    .map(|fields| fields.fields.clone())
+                    .unwrap_or_default();
+                self.spans.lock().expect("span capture").push(fields);
+            }
+        }
+
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let layer = CaptureLayer::new(spans.clone());
+        let subscriber = Registry::default().with(layer);
+
+        tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+            let repo = PathBuf::from("/tmp/repo");
+            let meta = MutationMeta {
+                namespace: Some("core".to_string()),
+                client_request_id: Some("req-123".to_string()),
+                actor_id: Some("actor@example.com".to_string()),
+                durability: None,
+            };
+            let request = Request::Create {
+                repo: repo.clone(),
+                id: None,
+                parent: None,
+                title: "title".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+                meta,
+            };
+            let context = RequestContext::from_request(&request);
+            let span = request_span(&context);
+            let _guard = span.enter();
+        });
+
+        let captured = spans.lock().expect("span capture");
+        let fields = captured.last().cloned().unwrap_or_default();
+        for key in [
+            schema::REQUEST_TYPE,
+            schema::REPO,
+            schema::NAMESPACE,
+            schema::ACTOR_ID,
+            schema::CLIENT_REQUEST_ID,
+        ] {
+            assert!(
+                fields.contains_key(key),
+                "ipc_request span missing {key}: {fields:?}"
+            );
+        }
+    }
+
+    #[test]
     fn stream_event_decode_failure_is_wal_corrupt() {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
