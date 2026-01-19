@@ -123,6 +123,7 @@ impl Daemon {
             namespace,
             durability,
             client_request_id,
+            trace_id,
             actor_id,
         } = meta;
         let (
@@ -154,6 +155,7 @@ impl Daemon {
             namespace: namespace.clone(),
             actor_id,
             client_request_id,
+            trace_id,
         };
 
         let parsed_request = ParsedMutationRequest::parse(request, &ctx.actor_id)?;
@@ -243,6 +245,7 @@ impl Daemon {
             durability = ?durability,
             txn_id = %sequenced.event_body.txn_id,
             client_request_id = ?ctx.client_request_id,
+            trace_id = %ctx.trace_id,
             namespace = %namespace,
             origin_replica_id = %origin_replica_id,
             origin_seq = origin_seq.get()
@@ -1131,8 +1134,8 @@ mod tests {
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, CanonicalState, Claim, ClientRequestId,
         DurabilityReceipt, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Stamp, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnId, TxnOpV1, WireBeadPatch,
-        WireNoteV1, WireStamp, Workflow, WriteStamp,
+        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId, TxnOpV1,
+        WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::daemon::Clock;
     use crate::daemon::Daemon;
@@ -1362,6 +1365,7 @@ mod tests {
             "replica_id",
             "txn_id",
             "client_request_id",
+            "trace_id",
             "namespace",
             "origin_replica_id",
             "origin_seq",
@@ -1510,6 +1514,7 @@ mod tests {
             namespace: NamespaceId::core(),
             actor_id: actor.clone(),
             client_request_id: Some(client_request_id),
+            trace_id: TraceId::from(client_request_id),
         };
         let request = ParsedMutationRequest::parse(
             MutationRequest::AddLabels {

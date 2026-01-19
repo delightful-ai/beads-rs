@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::Sender;
+use uuid::Uuid;
 
 use super::core::{
     Daemon, HandleOutcome, LoadedStore, NormalizedReadConsistency, ParsedMutationMeta,
@@ -19,7 +20,7 @@ use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
     ActorId, BeadId, CanonicalState, CliErrorCode, ClientRequestId, CoreError, DurabilityClass,
-    ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, WallClock,
+    ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, TraceId, WallClock,
 };
 use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::{SyncError, SyncOutcome};
@@ -402,12 +403,16 @@ impl Daemon {
         let namespace = self.normalize_namespace(proof, meta.namespace)?;
         let durability = parse_durability_meta(meta.durability)?;
         let client_request_id = parse_optional_client_request_id(meta.client_request_id)?;
+        let trace_id = client_request_id
+            .map(TraceId::from)
+            .unwrap_or_else(|| TraceId::new(Uuid::new_v4()));
         let actor_id = parse_optional_actor_id(meta.actor_id, self.actor())?;
 
         Ok(ParsedMutationMeta {
             namespace,
             durability,
             client_request_id,
+            trace_id,
             actor_id,
         })
     }

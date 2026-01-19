@@ -11,8 +11,8 @@ use crate::core::{
     ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, CoreError, DepKey,
     DepKind, DepSpec, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
     NamespaceId, NoteAppendV1, NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity,
-    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepDeleteV1,
-    WireDepV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
+    TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch,
+    WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
     encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
 };
 use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
@@ -22,6 +22,7 @@ pub struct MutationContext {
     pub namespace: NamespaceId,
     pub actor_id: ActorId,
     pub client_request_id: Option<ClientRequestId>,
+    pub trace_id: TraceId,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +39,7 @@ pub struct EventDraft {
     pub txn_id: TxnId,
     pub request_sha256: [u8; 32],
     pub client_request_id: Option<ClientRequestId>,
+    pub trace_id: TraceId,
 }
 
 #[derive(Clone, Debug)]
@@ -503,6 +505,7 @@ impl MutationEngine {
         let MutationContext {
             actor_id,
             client_request_id,
+            trace_id,
             ..
         } = ctx;
 
@@ -517,6 +520,7 @@ impl MutationEngine {
             txn_id: txn_id_for_stamp(&store, &stamp),
             request_sha256,
             client_request_id,
+            trace_id,
         })
     }
 
@@ -537,7 +541,7 @@ impl MutationEngine {
             event_time_ms: draft.event_time_ms,
             txn_id: draft.txn_id,
             client_request_id: draft.client_request_id,
-            trace_id: None,
+            trace_id: Some(draft.trace_id),
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta: draft.delta,
                 hlc_max: draft.hlc_max,
@@ -2057,6 +2061,7 @@ mod tests {
             namespace: NamespaceId::core(),
             actor_id: actor.clone(),
             client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
         };
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), 0.into());
         let state = make_state_with_bead("bd-123", &actor);
@@ -2104,6 +2109,7 @@ mod tests {
             namespace: NamespaceId::core(),
             actor_id: actor.clone(),
             client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
         };
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([3u8; 16])), 0.into());
         let state = make_state_with_bead("bd-456", &actor);
@@ -2137,6 +2143,7 @@ mod tests {
             namespace: NamespaceId::core(),
             actor_id: actor.clone(),
             client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
         };
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([5u8; 16])), 0.into());
         let state = make_state_with_bead("bd-789", &actor);
@@ -2166,6 +2173,7 @@ mod tests {
             namespace: NamespaceId::core(),
             actor_id: actor.clone(),
             client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
         };
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([7u8; 16])), 0.into());
         let state = make_state_with_bead("bd-000", &actor);

@@ -4,7 +4,8 @@ use beads_rs::daemon::mutation_engine::{
     MutationContext, MutationEngine, MutationRequest, ParsedMutationRequest,
 };
 use beads_rs::daemon::ops::{BeadPatch, OpError, Patch};
-use beads_rs::{ActorId, BeadType, DepKind, Limits, NamespaceId, Priority};
+use beads_rs::{ActorId, BeadType, DepKind, Limits, NamespaceId, Priority, TraceId};
+use uuid::Uuid;
 
 use super::identity;
 
@@ -13,12 +14,15 @@ pub fn default_context() -> MutationContext {
         namespace: NamespaceId::core(),
         actor_id: ActorId::new("fixture").expect("actor id"),
         client_request_id: None,
+        trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
     }
 }
 
 pub fn context_with_client_request_id(seed: u8) -> MutationContext {
+    let client_request_id = identity::client_request_id(seed);
     MutationContext {
-        client_request_id: Some(identity::client_request_id(seed)),
+        client_request_id: Some(client_request_id),
+        trace_id: TraceId::from(client_request_id),
         ..default_context()
     }
 }

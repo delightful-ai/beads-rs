@@ -92,7 +92,7 @@ use crate::core::{
     ActorId, Applied, ApplyError, CanonicalState, CliErrorCode, ClientRequestId, ContentHash,
     DurabilityClass, EventBody, EventId, EventKindV1, HeadStatus, Limits, NamespaceId,
     NamespacePolicy, PrevVerified, ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0,
-    Seq1, Sha256, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark,
+    Seq1, Sha256, StoreId, StoreIdentity, StoreState, TraceId, VerifiedEvent, WallClock, Watermark,
     WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
@@ -162,6 +162,7 @@ pub(crate) struct ParsedMutationMeta {
     pub(crate) namespace: NamespaceId,
     pub(crate) durability: DurabilityClass,
     pub(crate) client_request_id: Option<ClientRequestId>,
+    pub(crate) trace_id: TraceId,
     pub(crate) actor_id: ActorId,
 }
 
@@ -1313,6 +1314,7 @@ impl Daemon {
             .batch
             .first()
             .and_then(|event| event.body.client_request_id);
+        let trace_id = request.batch.first().and_then(|event| event.body.trace_id);
         let span = tracing::info_span!(
             "repl_ingest_request",
             store_id = %request.store_id,
@@ -1323,6 +1325,7 @@ impl Daemon {
             origin_seq = ?origin_seq,
             txn_id = ?txn_id,
             client_request_id = ?client_request_id,
+            trace_id = ?trace_id,
             batch_len = request.batch.len()
         );
         let _guard = span.enter();
