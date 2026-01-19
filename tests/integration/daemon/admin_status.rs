@@ -119,11 +119,12 @@ fn collect_until_load_complete(
 ) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        collector.sample().expect("admin status sample");
+        let _ = collector
+            .sample_when_applied_advances(interval)
+            .expect("admin status sample");
         if handle.is_finished() && collector.samples().len() >= min_samples {
             break;
         }
-        thread::sleep(interval);
     }
     assert!(
         handle.is_finished(),
