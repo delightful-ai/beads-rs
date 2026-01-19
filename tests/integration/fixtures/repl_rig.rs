@@ -52,6 +52,21 @@ pub struct TailnetTraceConfig {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurabilityEligibility {
+    Eligible,
+    Ineligible,
+}
+
+impl DurabilityEligibility {
+    fn matches(self, value: bool) -> bool {
+        match self {
+            DurabilityEligibility::Eligible => value,
+            DurabilityEligibility::Ineligible => !value,
+        }
+    }
+}
+
 impl Default for ReplRigOptions {
     fn default() -> Self {
         Self {
@@ -241,7 +256,7 @@ impl ReplRig {
         &self,
         idx: usize,
         peer: ReplicaId,
-        expected: bool,
+        expected: DurabilityEligibility,
         timeout: Duration,
     ) {
         let ok = poll_until(timeout, || {
@@ -250,7 +265,7 @@ impl ReplRig {
                 .replica_liveness
                 .iter()
                 .find(|row| row.replica_id == peer)
-                .map(|row| row.durability_eligible == expected)
+                .map(|row| expected.matches(row.durability_eligible))
                 .unwrap_or(false)
         });
         if ok {
@@ -258,7 +273,7 @@ impl ReplRig {
         }
         let status = self.nodes[idx].admin_status();
         panic!(
-            "durability_eligible did not become {expected} for {peer} on node {idx}: {status:?}"
+            "durability_eligible did not become {expected:?} for {peer} on node {idx}: {status:?}"
         );
     }
 
