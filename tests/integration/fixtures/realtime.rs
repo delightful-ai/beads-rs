@@ -60,6 +60,7 @@ impl RealtimeFixture {
         cmd.env("BD_DATA_DIR", &self.data_dir);
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd.env("BD_TESTING", "1");
+        cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
         cmd.env("BD_WAL_SYNC_MODE", "none");
         cmd
     }
@@ -78,6 +79,7 @@ impl RealtimeFixture {
             cmd.env("BD_DATA_DIR", &self.data_dir);
             cmd.env("BD_NO_AUTO_UPGRADE", "1");
             cmd.env("BD_TESTING", "1");
+            cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
             cmd.env("BD_WAL_SYNC_MODE", "none");
             cmd.args(["daemon", "run"]);
             cmd.stdin(Stdio::null())
