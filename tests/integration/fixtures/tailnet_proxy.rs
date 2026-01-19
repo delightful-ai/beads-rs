@@ -205,7 +205,10 @@ fn wait_for_ready(path: &PathBuf, timeout: Duration) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("tailnet proxy did not signal readiness at {}", path.display());
+            panic!(
+                "tailnet proxy did not signal readiness at {}",
+                path.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }

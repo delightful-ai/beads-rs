@@ -5,13 +5,13 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use beads_rs::{
-    ErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, WatermarkError, Watermarks,
-};
 use beads_rs::api::AdminStatusOutput;
 use beads_rs::api::QueryResult;
 use beads_rs::daemon::ipc::{
     IpcClient, IpcConnection, IpcError, ReadConsistency, Request, Response, ResponsePayload,
+};
+use beads_rs::{
+    ErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, WatermarkError, Watermarks,
 };
 
 #[derive(Debug, Error)]
@@ -68,10 +68,7 @@ impl StatusCollector {
             return self.sample().map(Some);
         }
 
-        let last = self
-            .samples
-            .last()
-            .expect("samples should be non-empty");
+        let last = self.samples.last().expect("samples should be non-empty");
         let required = next_applied_requirement(last, &self.read)?;
 
         let mut read = self.read.clone();
