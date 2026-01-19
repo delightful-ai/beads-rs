@@ -2306,7 +2306,7 @@ fn write_checkpoint_tree(
     outcome
 }
 
-fn replay_event_wal(
+pub(crate) fn replay_event_wal(
     store_id: StoreId,
     wal_index: &dyn WalIndex,
     state: &mut StoreState,

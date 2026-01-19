@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,13 +13,17 @@ use uuid::Uuid;
 
 use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
 use crate::core::{
-    ActorId, BeadId, EventId, EventShaLookupError, Limits, NamespaceId, ReplicaId, Seq0, Sha256,
-    StoreEpoch, StoreId, StoreIdentity,
+    ActorId, BeadId, DurabilityClass, EventId, EventShaLookupError, Limits, NamespaceId,
+    ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0, Sha256, StoreEpoch, StoreId,
+    StoreIdentity,
 };
 use crate::daemon::Clock;
 use crate::daemon::admission::AdmissionController;
-use crate::daemon::core::{Daemon, HandleOutcome, insert_store_for_tests};
+use crate::daemon::core::{Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal};
+use crate::daemon::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
+use crate::daemon::executor::DurabilityWait;
 use crate::daemon::ipc::{MutationMeta, Request, Response, ResponsePayload};
+use crate::daemon::ops::OpError;
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repl::frame::{FrameReader, encode_frame};
 use crate::daemon::repl::proto::{
@@ -119,6 +124,9 @@ pub struct TestNode {
 
 struct TestNodeInner {
     daemon: Daemon,
+    actor: ActorId,
+    clock: TestClock,
+    options: NodeOptions,
     store_id: StoreId,
     replica_id: ReplicaId,
     repo_path: PathBuf,
@@ -169,6 +177,33 @@ pub enum WalBackend {
     Memory,
 }
 
+fn configure_runtime_for_options(daemon: &mut Daemon, store_id: StoreId, options: &NodeOptions) {
+    if let Some(runtime) = daemon.store_runtime_by_id_mut(store_id) {
+        let config = SegmentConfig::from_limits(&options.limits).with_sync_mode(options.sync_mode);
+        runtime.event_wal = match options.wal_backend {
+            WalBackend::Disk => {
+                EventWal::new_with_config(paths::store_dir(store_id), runtime.meta.clone(), config)
+            }
+            WalBackend::Memory => EventWal::new_memory_with_config(
+                paths::store_dir(store_id),
+                runtime.meta.clone(),
+                config,
+            ),
+        };
+        if options.wal_index == WalIndexBackend::Memory {
+            runtime.wal_index = Arc::new(MemoryWalIndex::new());
+            let store_dir = paths::store_dir(store_id);
+            rebuild_index(
+                &store_dir,
+                &runtime.meta,
+                runtime.wal_index.as_ref(),
+                &options.limits,
+            )
+            .expect("rebuild memory wal index");
+        }
+    }
+}
+
 pub fn new_in_memory_store(start_ms: u64, label: &str) -> (TestWorld, TestNode, StoreId) {
     let world = TestWorld::new(start_ms);
     let store_id = StoreId::new(Uuid::new_v4());
@@ -216,7 +251,7 @@ impl TestNode {
         std::fs::create_dir_all(&data_dir).expect("create data dir");
 
         let actor = ActorId::new(format!("test-{label}")).expect("actor id");
-        let mut daemon = Daemon::new_with_limits(actor, options.limits.clone());
+        let mut daemon = Daemon::new_with_limits(actor.clone(), options.limits.clone());
         *daemon.clock_mut() = Clock::with_time_source_and_max_forward_drift(
             Box::new(clock.clone()),
             options.limits.hlc_max_forward_drift_ms,
@@ -228,33 +263,7 @@ impl TestNode {
             let _guard = paths::override_data_dir_for_tests(Some(data_dir.clone()));
             insert_store_for_tests(&mut daemon, store_id, remote, &repo_path)
                 .expect("insert store");
-            if let Some(runtime) = daemon.store_runtime_by_id_mut(store_id) {
-                let config =
-                    SegmentConfig::from_limits(&options.limits).with_sync_mode(options.sync_mode);
-                runtime.event_wal = match options.wal_backend {
-                    WalBackend::Disk => EventWal::new_with_config(
-                        paths::store_dir(store_id),
-                        runtime.meta.clone(),
-                        config,
-                    ),
-                    WalBackend::Memory => EventWal::new_memory_with_config(
-                        paths::store_dir(store_id),
-                        runtime.meta.clone(),
-                        config,
-                    ),
-                };
-                if options.wal_index == WalIndexBackend::Memory {
-                    runtime.wal_index = Arc::new(MemoryWalIndex::new());
-                    let store_dir = paths::store_dir(store_id);
-                    rebuild_index(
-                        &store_dir,
-                        &runtime.meta,
-                        runtime.wal_index.as_ref(),
-                        &options.limits,
-                    )
-                    .expect("rebuild memory wal index");
-                }
-            }
+            configure_runtime_for_options(&mut daemon, store_id, &options);
         }
 
         let replica_id = {
@@ -268,6 +277,9 @@ impl TestNode {
 
         let inner = TestNodeInner {
             daemon,
+            actor,
+            clock: clock.clone(),
+            options: options.clone(),
             store_id,
             replica_id,
             repo_path,
@@ -277,7 +289,6 @@ impl TestNode {
             _git_rx: git_rx,
         };
 
-        let _ = clock; // keep clock alive for the node's lifetime
         Self {
             inner: Rc::new(RefCell::new(inner)),
         }
@@ -308,12 +319,68 @@ impl TestNode {
     }
 
     pub fn apply_request(&self, req: Request) -> Response {
-        self.with_daemon_mut(|daemon, git_tx| match daemon.handle_request(req, git_tx) {
+        match self.handle_request(req) {
             HandleOutcome::Response(response) => response,
             HandleOutcome::DurabilityWait(_) => {
                 panic!("durability wait not supported in test harness")
             }
-        })
+        }
+    }
+
+    pub fn handle_request(&self, req: Request) -> HandleOutcome {
+        self.with_daemon_mut(|daemon, git_tx| daemon.handle_request(req, git_tx))
+    }
+
+    pub fn restart(&self) {
+        let (store_id, repo_path, data_dir, actor, options, clock) = {
+            let inner = self.inner.borrow();
+            (
+                inner.store_id,
+                inner.repo_path.clone(),
+                inner.data_dir.clone(),
+                inner.actor.clone(),
+                inner.options.clone(),
+                inner.clock.clone(),
+            )
+        };
+
+        let mut daemon = Daemon::new_with_limits(actor.clone(), options.limits.clone());
+        *daemon.clock_mut() = Clock::with_time_source_and_max_forward_drift(
+            Box::new(clock.clone()),
+            options.limits.hlc_max_forward_drift_ms,
+        );
+
+        let (git_tx, git_rx) = unbounded();
+        let remote = RemoteUrl(format!("test://{store_id}"));
+
+        let mut inner = self.inner.borrow_mut();
+        let _old = std::mem::replace(&mut inner.daemon, daemon);
+        inner.git_tx = git_tx;
+        inner._git_rx = git_rx;
+        drop(_old);
+
+        {
+            let _guard = paths::override_data_dir_for_tests(Some(data_dir.clone()));
+            insert_store_for_tests(&mut inner.daemon, store_id, remote, &repo_path)
+                .expect("insert store");
+            configure_runtime_for_options(&mut inner.daemon, store_id, &options);
+            if let Some(store) = inner.daemon.store_runtime_by_id_mut(store_id) {
+                replay_event_wal(
+                    store_id,
+                    store.wal_index.as_ref(),
+                    &mut store.state,
+                    inner.daemon.limits(),
+                )
+                .expect("replay wal");
+            }
+        }
+
+        inner.replica_id = inner
+            .daemon
+            .store_runtime_by_id(store_id)
+            .expect("store runtime")
+            .meta
+            .replica_id;
     }
 
     pub fn create_issue(&self, title: &str) -> String {
@@ -622,6 +689,58 @@ impl ReplicationRig {
         &self.nodes
     }
 
+    pub fn write_replica_roster(&self) -> Vec<ReplicaEntry> {
+        let entries: Vec<ReplicaEntry> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, node)| ReplicaEntry {
+                replica_id: node.replica_id(),
+                name: format!("node-{idx}"),
+                role: ReplicaRole::Peer,
+                durability_eligible: true,
+                allowed_namespaces: Some(vec![NamespaceId::core()]),
+                expire_after_ms: None,
+            })
+            .collect();
+
+        for node in &self.nodes {
+            let data_dir = node.inner.borrow().data_dir.clone();
+            let _guard = paths::override_data_dir_for_tests(Some(data_dir));
+            let roster = ReplicaRoster {
+                replicas: entries.clone(),
+            };
+            let raw = toml::to_string(&roster).expect("serialize replica roster");
+            fs::write(paths::replicas_path(node.store_id()), raw).expect("write replica roster");
+        }
+
+        entries
+    }
+
+    pub fn apply_request_with_wait(
+        &mut self,
+        node_idx: usize,
+        request: Request,
+        max_steps: usize,
+    ) -> Response {
+        let node = self.node(node_idx);
+        match node.handle_request(request) {
+            HandleOutcome::Response(response) => response,
+            HandleOutcome::DurabilityWait(wait) => self.await_durability(wait, max_steps),
+        }
+    }
+
+    pub fn restart_node(&mut self, idx: usize) {
+        self.nodes[idx].restart();
+        let limits = self.nodes[0].with_daemon(|daemon| daemon.limits().clone());
+        let now_ms = self.clock.now_ms();
+        for link in &mut self.links {
+            if link.from == idx || link.to == idx {
+                link.reset_sessions(&limits, now_ms);
+            }
+        }
+    }
+
     pub fn set_network_profile_all(&mut self, profile: NetworkProfile, seed: u64) {
         for (idx, link) in self.links.iter_mut().enumerate() {
             let net = &mut link.transport.network;
@@ -704,6 +823,64 @@ impl ReplicationRig {
 
     pub fn pump_until_converged(&mut self, max_steps: usize, namespaces: &[NamespaceId]) {
         self.pump_until(max_steps, |rig| rig.converged(namespaces));
+    }
+
+    fn await_durability(&mut self, wait: DurabilityWait, max_steps: usize) -> Response {
+        let DurabilityWait {
+            coordinator,
+            namespace,
+            origin,
+            seq,
+            requested,
+            wait_timeout,
+            response,
+        } = wait;
+        let started_at = Instant::now();
+        let deadline = started_at.checked_add(wait_timeout).unwrap_or(started_at);
+
+        let DurabilityClass::ReplicatedFsync { k } = requested else {
+            return Response::ok(ResponsePayload::Op(response));
+        };
+
+        let mut response = response;
+        for _ in 0..max_steps {
+            match coordinator.poll_replicated(&namespace, origin, seq, k) {
+                Ok(ReplicatedPoll::Satisfied { acked_by }) => {
+                    response.receipt = DurabilityCoordinator::achieved_receipt(
+                        response.receipt,
+                        requested,
+                        k,
+                        acked_by,
+                    );
+                    return Response::ok(ResponsePayload::Op(response));
+                }
+                Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        let waited_ms = (now.duration_since(started_at).as_millis())
+                            .min(u64::MAX as u128) as u64;
+                        let pending =
+                            DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
+                        let pending_receipt =
+                            DurabilityCoordinator::pending_receipt(response.receipt, requested);
+                        let err = OpError::DurabilityTimeout {
+                            requested,
+                            waited_ms,
+                            pending_replica_ids: Some(pending),
+                            receipt: Box::new(pending_receipt),
+                        };
+                        return Response::err(err);
+                    }
+                }
+                Err(err) => return Response::err(err),
+            }
+
+            if self.pump(1) == 0 {
+                self.advance_ms(1);
+            }
+        }
+
+        panic!("durability wait exceeded {max_steps} steps");
     }
 
     fn connect_all(&mut self) {
@@ -817,6 +994,22 @@ impl RigLink {
             to_node,
             last_want_sent: None,
             last_want_sent_at_ms: None,
+        }
+    }
+
+    fn reset_sessions(&mut self, limits: &Limits, now_ms: u64) {
+        self.transport.network.reset();
+        let identity = self.from_node.store_identity();
+        let from_replica = self.from_node.replica_id();
+        let to_replica = self.to_node.replica_id();
+        self.outbound = new_session(SessionRole::Outbound, identity, from_replica, limits);
+        self.inbound = new_session(SessionRole::Inbound, identity, to_replica, limits);
+        self.outbound_store = self.from_node.session_store();
+        self.inbound_store = self.to_node.session_store();
+        self.last_want_sent = None;
+        self.last_want_sent_at_ms = None;
+        if let Some(action) = self.outbound.begin_handshake(&self.outbound_store, now_ms) {
+            self.apply_action(action, Endpoint::Outbound, now_ms);
         }
     }
 
@@ -1036,6 +1229,10 @@ impl NetworkController {
         self.inner.borrow_mut().advance(delta_ms);
     }
 
+    pub fn reset(&self) {
+        self.inner.borrow_mut().reset();
+    }
+
     pub fn drop_next(&self, direction: Direction) {
         self.inner.borrow_mut().drop_next(direction);
     }
@@ -1243,6 +1440,11 @@ impl NetworkSimulator {
     fn advance(&mut self, delta_ms: u64) {
         self.now_ms = self.now_ms.saturating_add(delta_ms);
         self.flush();
+    }
+
+    fn reset(&mut self) {
+        self.a_to_b = SimulatedLink::new();
+        self.b_to_a = SimulatedLink::new();
     }
 
     fn drop_next(&mut self, direction: Direction) {
