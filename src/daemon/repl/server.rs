@@ -112,7 +112,10 @@ where
             active_connections,
         };
 
-        let join = thread::spawn(move || run_accept_loop(listener, runtime));
+        let accept_span = tracing::Span::current();
+        let join = thread::spawn(move || {
+            accept_span.in_scope(|| run_accept_loop(listener, runtime));
+        });
 
         Ok(ReplicationServerHandle {
             shutdown,
@@ -258,10 +261,13 @@ where
                     runtime.max_connections,
                 ) {
                     let runtime = runtime.clone();
+                    let session_span = tracing::Span::current();
                     thread::spawn(move || {
-                        if let Err(err) = run_inbound_session(stream, runtime, guard) {
-                            tracing::warn!("replication inbound session error: {err}");
-                        }
+                        session_span.in_scope(|| {
+                            if let Err(err) = run_inbound_session(stream, runtime, guard) {
+                                tracing::warn!("replication inbound session error: {err}");
+                            }
+                        });
                     });
                 } else {
                     send_overloaded(stream, &runtime.limits);
@@ -420,8 +426,11 @@ where
     let (inbound_tx, inbound_rx) = crossbeam::channel::unbounded::<InboundMessage>();
     let reader_shutdown = shutdown.clone();
     let reader_limits = limits.clone();
+    let reader_span = tracing::Span::current();
     let reader_handle = thread::spawn(move || {
-        run_reader_loop(&mut reader, inbound_tx, reader_shutdown, reader_limits);
+        reader_span.in_scope(|| {
+            run_reader_loop(&mut reader, inbound_tx, reader_shutdown, reader_limits);
+        });
     });
 
     let mut accepted_set = BTreeSet::new();
@@ -460,8 +469,11 @@ where
         let subscription = broadcaster.subscribe(subscriber_limits(&limits))?;
         let (event_tx, event_rx) = crossbeam::channel::unbounded::<BroadcastEvent>();
         let event_shutdown = shutdown.clone();
+        let event_span = tracing::Span::current();
         let event_handle = thread::spawn(move || {
-            run_event_forwarder(subscription, event_tx, event_shutdown);
+            event_span.in_scope(|| {
+                run_event_forwarder(subscription, event_tx, event_shutdown);
+            });
         });
         (event_rx, Some(event_handle))
     } else {
