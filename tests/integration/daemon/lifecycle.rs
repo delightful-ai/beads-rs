@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use tempfile::TempDir;
+use crate::fixtures::store_lock::unlock_store;
 
 // =============================================================================
 // Test Fixture
@@ -132,11 +133,8 @@ impl DaemonFixture {
     }
 
     fn unlock_store(&self) {
-        let store_id = self.store_id().to_string();
-        self.bd()
-            .args(["store", "unlock", "--store-id", store_id.as_str()])
-            .assert()
-            .success();
+        let store_id = self.store_id();
+        unlock_store(&self.data_dir(), store_id).expect("unlock store");
     }
 
     fn kill_daemon_forcefully(&self) {

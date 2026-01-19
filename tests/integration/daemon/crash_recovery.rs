@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::fixtures::realtime::RealtimeFixture;
+use crate::fixtures::store_lock::unlock_store;
 use beads_rs::api::QueryResult;
 use beads_rs::core::{BeadType, NamespaceId, Priority, StoreId, StoreMeta};
 use beads_rs::daemon::ipc::{IpcClient, MutationMeta, Request, Response, ResponsePayload};
@@ -181,16 +182,7 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
     let wal_segment = latest_wal_segment(&store_dir, &NamespaceId::core());
     ensure_partial_tail(&wal_segment);
 
-    fixture
-        .bd()
-        .args([
-            "store",
-            "unlock",
-            "--store-id",
-            store_id.to_string().as_str(),
-        ])
-        .assert()
-        .success();
+    unlock_store(fixture.data_dir(), store_id).expect("unlock store");
 
     let len_before = fs::metadata(&wal_segment).expect("segment metadata").len();
     let output = fixture
@@ -253,16 +245,7 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
     let _ = handle.join();
 
     let store_id = store_id_from_data_dir(fixture.data_dir());
-    fixture
-        .bd()
-        .args([
-            "store",
-            "unlock",
-            "--store-id",
-            store_id.to_string().as_str(),
-        ])
-        .assert()
-        .success();
+    unlock_store(fixture.data_dir(), store_id).expect("unlock store");
 
     let output = fixture
         .bd()

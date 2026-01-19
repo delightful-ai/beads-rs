@@ -16,6 +16,7 @@ pub mod repl_peer;
 pub mod repl_rig;
 pub mod repl_transport;
 pub mod store_dir;
+pub mod store_lock;
 pub mod tailnet_proxy;
 pub mod wal;
 pub mod wal_corrupt;

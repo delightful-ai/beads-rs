@@ -28,6 +28,7 @@ use beads_rs::daemon::ipc::{
 use beads_rs::daemon::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
+use super::store_lock::unlock_store;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
 
 pub type FaultProfile = TailnetProfile;
@@ -469,11 +470,7 @@ impl Node {
     }
 
     fn unlock_store(&self, store_id: StoreId) {
-        let store_id = store_id.to_string();
-        self.bd_cmd()
-            .args(["store", "unlock", "--store-id", store_id.as_str()])
-            .assert()
-            .success();
+        unlock_store(&self.data_dir, store_id).expect("unlock store");
     }
 
     fn start_daemon(&self) {
