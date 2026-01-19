@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
-use crate::fixtures::git::apply_test_git_env;
+use crate::fixtures::git::{init_bare_repo, init_repo, init_repo_with_origin, repo_has_branch};
 #[cfg(feature = "slow-tests")]
 use crate::fixtures::git::init_repo;
 use crate::fixtures::git::{init_bare_repo, init_repo_with_origin, repo_has_branch};
@@ -36,12 +36,6 @@ fn bd_with_runtime(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command 
     cmd.env("BD_TESTING", "1");
     cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
     cmd
-}
-
-fn run_git(args: &[&str], cwd: &Path, label: &str) -> std::process::Output {
-    let mut cmd = std::process::Command::new("git");
-    apply_test_git_env(&mut cmd);
-    cmd.args(args).current_dir(cwd).output().expect(label)
 }
 
 #[cfg(feature = "slow-tests")]
@@ -120,27 +114,13 @@ impl TestRepo {
     fn new() -> Self {
         // Create bare remote first
         let remote_dir = TempDir::new().expect("failed to create remote dir");
-        run_git(
-            &["init", "--bare"],
-            remote_dir.path(),
-            "failed to init bare repo",
-        );
+        init_bare_repo(remote_dir.path()).expect("failed to init bare repo");
 
         // Create working directory
         let work_dir = TempDir::new().expect("failed to create work dir");
 
-        run_git(&["init"], work_dir.path(), "failed to git init");
-
-        run_git(
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote_dir.path().to_str().unwrap(),
-            ],
-            work_dir.path(),
-            "failed to add remote",
-        );
+        init_repo_with_origin(work_dir.path(), remote_dir.path())
+            .expect("failed to init repo with origin");
 
         let runtime_dir = TempDir::new().expect("failed to create runtime dir");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
@@ -180,12 +160,8 @@ fn test_init_creates_beads_branch() {
 
     repo.bd().arg("init").assert().success();
 
-    let output = run_git(&["branch", "-a"], repo.path(), "failed to list branches");
-    let branches = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        branches.contains("beads/store"),
-        "beads/store branch not created: {branches}"
-    );
+    let has_branch = repo_has_branch(repo.path(), "beads/store").expect("failed to read branches");
+    assert!(has_branch, "beads/store branch not created");
 }
 
 #[cfg(feature = "slow-tests")]
@@ -2735,7 +2711,7 @@ fn test_init_fails_without_origin_remote() {
     let runtime_dir = TempDir::new().expect("failed to create runtime dir");
     let data_dir = data_dir_for_runtime(runtime_dir.path());
 
-    run_git(&["init"], work_dir.path(), "failed to git init");
+    init_repo(work_dir.path()).expect("failed to git init");
 
     let mut cmd = bd_with_runtime(work_dir.path(), runtime_dir.path(), &data_dir);
     cmd.arg("init").assert().failure();

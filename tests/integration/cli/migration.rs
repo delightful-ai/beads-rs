@@ -5,7 +5,7 @@
 use std::fs;
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
-use crate::fixtures::git::apply_test_git_env;
+use crate::fixtures::git::{init_bare_repo, init_repo_with_origin};
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -28,26 +28,12 @@ struct TestRepo {
 impl TestRepo {
     fn new() -> Self {
         let remote_dir = TempDir::new().expect("failed to create remote dir");
-        run_git(
-            &["init", "--bare"],
-            remote_dir.path(),
-            "failed to init bare repo",
-        );
+        init_bare_repo(remote_dir.path()).expect("failed to init bare repo");
 
         let work_dir = TempDir::new().expect("failed to create work dir");
 
-        run_git(&["init"], work_dir.path(), "failed to git init");
-
-        run_git(
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote_dir.path().to_str().unwrap(),
-            ],
-            work_dir.path(),
-            "failed to add remote",
-        );
+        init_repo_with_origin(work_dir.path(), remote_dir.path())
+            .expect("failed to init repo with origin");
 
         let runtime_dir = TempDir::new().expect("failed to create runtime dir");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
@@ -80,12 +66,6 @@ impl Drop for TestRepo {
     fn drop(&mut self) {
         shutdown_daemon(self.runtime_dir.path());
     }
-}
-
-fn run_git(args: &[&str], cwd: &std::path::Path, label: &str) {
-    let mut cmd = std::process::Command::new("git");
-    apply_test_git_env(&mut cmd);
-    cmd.args(args).current_dir(cwd).output().expect(label);
 }
 
 /// Sample Go beads JSONL export with various issue types.
