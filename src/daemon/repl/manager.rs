@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::Sender;
 use thiserror::Error;
 
+#[cfg(test)]
+use std::sync::OnceLock;
+
 use crate::core::error::details::{BootstrapRequiredDetails, SnapshotRangeReason};
 use crate::core::{
     ErrorPayload, EventFrameV1, NamespaceId, NamespacePolicy, ProtocolErrorCode, ReplicaId,
@@ -206,6 +209,38 @@ struct PeerRuntime<S> {
     shutdown: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct ConnectStartEvent {
+    addr: String,
+    at: Instant,
+}
+
+#[cfg(test)]
+struct ConnectStartHookGuard {
+    prev: Option<Sender<ConnectStartEvent>>,
+}
+
+#[cfg(test)]
+static CONNECT_START_HOOK: OnceLock<Mutex<Option<Sender<ConnectStartEvent>>>> = OnceLock::new();
+
+#[cfg(test)]
+fn set_connect_start_hook(sender: Sender<ConnectStartEvent>) -> ConnectStartHookGuard {
+    let lock = CONNECT_START_HOOK.get_or_init(|| Mutex::new(None));
+    let mut guard = lock.lock().expect("connect start hook lock");
+    let prev = guard.replace(sender);
+    ConnectStartHookGuard { prev }
+}
+
+#[cfg(test)]
+impl Drop for ConnectStartHookGuard {
+    fn drop(&mut self) {
+        let lock = CONNECT_START_HOOK.get_or_init(|| Mutex::new(None));
+        let mut guard = lock.lock().expect("connect start hook lock");
+        *guard = self.prev.take();
+    }
+}
+
 fn eligible_namespaces(
     policies: &BTreeMap<NamespaceId, NamespacePolicy>,
     role: ReplicaRole,
@@ -260,6 +295,19 @@ where
 
     while !runtime.shutdown.load(Ordering::Relaxed) {
         let connect_start = Instant::now();
+        #[cfg(test)]
+        let hook = CONNECT_START_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("connect start hook lock")
+            .clone();
+        #[cfg(test)]
+        if let Some(tx) = hook {
+            let _ = tx.try_send(ConnectStartEvent {
+                addr: plan.addr.clone(),
+                at: connect_start,
+            });
+        }
         match TcpStream::connect(&plan.addr) {
             Ok(stream) => {
                 backoff.reset();
@@ -1118,7 +1166,7 @@ mod tests {
             peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
             policies: test_policy(),
             roster: None,
-            peers: vec![test_peer_config(peer_replica, addr)],
+            peers: vec![test_peer_config(peer_replica, addr.clone())],
             wal_reader: None,
             limits: test_limits(),
             backoff: BackoffPolicy {
@@ -1173,7 +1221,7 @@ mod tests {
             peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
             policies,
             roster: None,
-            peers: vec![test_peer_config(peer_replica, addr)],
+            peers: vec![test_peer_config(peer_replica, addr.clone())],
             wal_reader: None,
             limits: test_limits(),
             backoff: BackoffPolicy {
@@ -1363,7 +1411,7 @@ mod tests {
             peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
             policies,
             roster: None,
-            peers: vec![test_peer_config(peer_replica, addr)],
+            peers: vec![test_peer_config(peer_replica, addr.clone())],
             wal_reader: None,
             limits: test_limits(),
             backoff: BackoffPolicy {
@@ -1436,7 +1484,7 @@ mod tests {
             peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
             policies: test_policy(),
             roster: None,
-            peers: vec![test_peer_config(peer_replica, addr)],
+            peers: vec![test_peer_config(peer_replica, addr.clone())],
             wal_reader: None,
             limits: test_limits(),
             backoff: BackoffPolicy {
@@ -1446,6 +1494,8 @@ mod tests {
         };
         let manager = ReplicationManager::new(SharedSessionStore::new(TestStore), config);
 
+        let (start_tx, start_rx) = crossbeam::channel::bounded(8);
+        let _hook = set_connect_start_hook(start_tx);
         let handle = manager.start();
         let (seen_tx, seen_rx) = crossbeam::channel::bounded(2);
         thread::spawn(move || {
@@ -1467,13 +1517,28 @@ mod tests {
             }
         });
 
-        let first_at = seen_rx
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut starts = Vec::new();
+        while starts.len() < 2 && Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = start_rx.recv_timeout(remaining).expect("connect start");
+            if event.addr == addr {
+                starts.push(event.at);
+            }
+        }
+        assert_eq!(starts.len(), 2, "expected two connect attempts");
+        let first_start = starts[0];
+        let _first_at = seen_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("first connection");
-        let second_at = seen_rx
+        let second_start = starts[1];
+        let _second_at = seen_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("second connection");
-        assert!(second_at.duration_since(first_at) >= Duration::from_millis(20));
+        assert!(
+            second_start.duration_since(first_start) >= Duration::from_millis(20),
+            "backoff should delay connect attempts by at least base duration"
+        );
         handle.shutdown();
     }
 }

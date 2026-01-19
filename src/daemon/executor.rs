@@ -1318,7 +1318,9 @@ mod tests {
 
         let spans = Arc::new(Mutex::new(Vec::new()));
         let layer = CaptureLayer::new(spans.clone());
-        let subscriber = Registry::default().with(layer);
+        let subscriber = Registry::default()
+            .with(layer)
+            .with(tracing_subscriber::filter::LevelFilter::TRACE);
 
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
         let client_request_id = ClientRequestId::new(Uuid::from_bytes([6u8; 16]));

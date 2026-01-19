@@ -585,7 +585,11 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                last_physical_ms = excluded.last_physical_ms, \
                last_logical = excluded.last_logical",
         )?;
-        stmt.execute(params![hlc.actor_id.as_str(), last_physical_ms, last_logical])?;
+        stmt.execute(params![
+            hlc.actor_id.as_str(),
+            last_physical_ms,
+            last_logical
+        ])?;
         Ok(())
     }
 
@@ -1781,23 +1785,13 @@ mod tests {
         let meta = test_meta();
         let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
 
-        let idle_before = index
-            .pool
-            .conns
-            .lock()
-            .expect("pool lock")
-            .len();
+        let idle_before = index.pool.conns.lock().expect("pool lock").len();
         assert_eq!(idle_before, 0);
 
         let txn = index.writer().begin_txn().unwrap();
         txn.commit().unwrap();
 
-        let idle_after = index
-            .pool
-            .conns
-            .lock()
-            .expect("pool lock")
-            .len();
+        let idle_after = index.pool.conns.lock().expect("pool lock").len();
         assert_eq!(idle_after, 1);
     }
 

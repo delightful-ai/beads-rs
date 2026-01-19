@@ -1726,9 +1726,7 @@ impl Daemon {
         let due: Vec<StoreId> = self
             .export_pending
             .iter()
-            .filter_map(|(store_id, pending)| {
-                (pending.deadline <= now).then_some(*store_id)
-            })
+            .filter_map(|(store_id, pending)| (pending.deadline <= now).then_some(*store_id))
             .collect();
 
         let mut jobs = Vec::new();
