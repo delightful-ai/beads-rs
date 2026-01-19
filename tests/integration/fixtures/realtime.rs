@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
-use super::git::apply_test_git_env;
+use super::git::{init_bare_repo, init_repo_with_origin};
 use beads_rs::api::QueryResult;
 use beads_rs::daemon::ipc::{IpcClient, Request, Response, ResponsePayload};
 
@@ -117,34 +117,9 @@ impl Drop for RealtimeFixture {
 }
 
 fn init_git_repo(repo_dir: &Path, remote_dir: &Path) -> Result<(), String> {
-    run_git(&["init", "--bare"], remote_dir)?;
-    run_git(&["init"], repo_dir)?;
-
-    let remote = remote_dir
-        .to_str()
-        .ok_or_else(|| format!("remote dir path is not utf8: {remote_dir:?}"))?;
-    run_git(&["remote", "add", "origin", remote], repo_dir)?;
+    init_bare_repo(remote_dir)?;
+    init_repo_with_origin(repo_dir, remote_dir)?;
     Ok(())
-}
-
-fn run_git(args: &[&str], cwd: &Path) -> Result<(), String> {
-    let mut cmd = StdCommand::new("git");
-    apply_test_git_env(&mut cmd);
-    let output = cmd
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|err| format!("git {:?} failed to start in {:?}: {err}", args, cwd))?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!(
-        "git {:?} failed in {:?} (status {}): stdout: {stdout} stderr: {stderr}",
-        args, cwd, output.status
-    ))
 }
 
 fn ping_daemon(client: &IpcClient) -> bool {
