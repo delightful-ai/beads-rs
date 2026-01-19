@@ -837,9 +837,7 @@ fn plan_links(
             };
             let trace = options.tailnet_trace.as_ref().map(|trace| TailnetTrace {
                 mode: trace.mode,
-                path: trace
-                    .dir
-                    .join(format!("trace-{from}-{to}.jsonl")),
+                path: trace.dir.join(format!("trace-{from}-{to}.jsonl")),
                 timeout_ms: trace.timeout_ms,
             });
             let needs_proxy = profile.is_some() || trace.is_some();

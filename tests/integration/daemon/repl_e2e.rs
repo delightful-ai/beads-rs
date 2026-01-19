@@ -6,9 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::fixtures::load_gen::LoadGenerator;
 use crate::fixtures::receipt;
-use crate::fixtures::repl_rig::{
-    FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig,
-};
+use crate::fixtures::repl_rig::{FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig};
 use crate::fixtures::tailnet_proxy::TailnetTraceMode;
 use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
@@ -76,9 +74,7 @@ fn wait_for_checkpoint(rig: &ReplRig, idx: usize, namespace: &NamespaceId, timeo
             return;
         }
         if Instant::now() >= deadline {
-            panic!(
-                "checkpoint for {namespace:?} did not complete in time: {status:?}"
-            );
+            panic!("checkpoint for {namespace:?} did not complete in time: {status:?}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -272,20 +268,8 @@ fn repl_checkpoint_bootstrap_under_churn() {
     churn_node(rig.node(0), 400, 2);
     churn_node(rig.node(1), 400, 2);
 
-    wait_for_wal_segments(
-        &rig,
-        0,
-        &NamespaceId::core(),
-        2,
-        Duration::from_secs(30),
-    );
-    wait_for_wal_segments(
-        &rig,
-        1,
-        &NamespaceId::core(),
-        2,
-        Duration::from_secs(30),
-    );
+    wait_for_wal_segments(&rig, 0, &NamespaceId::core(), 2, Duration::from_secs(30));
+    wait_for_wal_segments(&rig, 1, &NamespaceId::core(), 2, Duration::from_secs(30));
     wait_for_checkpoint(&rig, 0, &NamespaceId::core(), Duration::from_secs(120));
 
     let tail_ids = [

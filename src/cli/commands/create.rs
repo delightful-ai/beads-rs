@@ -2,8 +2,8 @@ use std::io::{BufRead, Write};
 
 use super::super::render;
 use super::super::{
-    CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_json,
-    print_ok, resolve_description, send, send_raw,
+    CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_json, print_ok,
+    resolve_description, send, send_raw,
 };
 use crate::api::QueryResult;
 use crate::core::BeadType;

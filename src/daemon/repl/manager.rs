@@ -1256,11 +1256,7 @@ mod tests {
             live_stream_enabled: true,
             max_frame_bytes: 200,
         };
-        session.handle_message(
-            ReplMessage::Welcome(welcome),
-            &mut store,
-            now_ms(),
-        );
+        session.handle_message(ReplMessage::Welcome(welcome), &mut store, now_ms());
         assert!(matches!(session.phase(), SessionPhase::Streaming));
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1294,8 +1290,7 @@ mod tests {
         let (frame1, frame2) = loop {
             let f1 = make_frame(namespace.clone(), origin, 1, payload_len);
             let f2 = make_frame(namespace.clone(), origin, 2, payload_len);
-            let len_single = events_envelope_len(&session, std::slice::from_ref(&f1))
-                .expect("len");
+            let len_single = events_envelope_len(&session, std::slice::from_ref(&f1)).expect("len");
             let len_double = events_envelope_len(&session, &[f1.clone(), f2.clone()]).expect("len");
             if len_single < max_frame && len_double > max_frame {
                 break (f1, f2);

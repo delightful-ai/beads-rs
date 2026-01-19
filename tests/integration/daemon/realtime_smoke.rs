@@ -55,5 +55,8 @@ fn realtime_smoke_applies_and_persists() {
         .iter()
         .find(|wal| wal.namespace == namespace)
         .expect("wal namespace entry");
-    assert!(wal.segment_count > 0, "expected wal segments for core namespace");
+    assert!(
+        wal.segment_count > 0,
+        "expected wal segments for core namespace"
+    );
 }

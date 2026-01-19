@@ -65,10 +65,12 @@ crate::enum_str! {
 impl DepKind {
     pub fn parse(raw: &str) -> Result<Self, CoreError> {
         let s = raw.trim().to_lowercase().replace('-', "_");
-        Self::parse_str(&s).ok_or_else(|| InvalidDepKind {
-            raw: raw.to_string(),
-        }
-        .into())
+        Self::parse_str(&s).ok_or_else(|| {
+            InvalidDepKind {
+                raw: raw.to_string(),
+            }
+            .into()
+        })
     }
 
     /// Returns true if this dependency kind requires DAG enforcement (no cycles).

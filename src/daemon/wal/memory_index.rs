@@ -528,9 +528,7 @@ mod tests {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
         let mut txn = index.writer().begin_txn().expect("begin txn");
-        let seq = txn
-            .next_origin_seq(&namespace, &origin)
-            .expect("next seq");
+        let seq = txn.next_origin_seq(&namespace, &origin).expect("next seq");
         let event_id = EventId::new(origin, namespace.clone(), seq);
         let sha = [9u8; 32];
         let segment_id = SegmentId::new(Uuid::from_bytes([2u8; 16]));
@@ -570,9 +568,7 @@ mod tests {
         assert_eq!(max, Seq0::new(1));
 
         let mut next = index.writer().begin_txn().expect("begin txn");
-        let seq2 = next
-            .next_origin_seq(&namespace, &origin)
-            .expect("next seq");
+        let seq2 = next.next_origin_seq(&namespace, &origin).expect("next seq");
         assert_eq!(seq2, Seq1::from_u64(2).expect("seq1"));
     }
 
@@ -582,11 +578,7 @@ mod tests {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
         let request_id = ClientRequestId::new(Uuid::from_bytes([5u8; 16]));
-        let event_id = EventId::new(
-            origin,
-            namespace.clone(),
-            Seq1::from_u64(1).expect("seq1"),
-        );
+        let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).expect("seq1"));
         let event_ids = [event_id.clone()];
 
         let mut first = index.writer().begin_txn().expect("begin txn");

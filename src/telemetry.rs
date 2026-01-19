@@ -170,7 +170,11 @@ pub fn init(config: TelemetryConfig) -> TelemetryGuard {
 }
 
 fn build_env_filter(verbosity: u8, config_filter: Option<&str>) -> EnvFilter {
-    build_env_filter_inner(verbosity, config_filter, std::env::var("LOG").ok().as_deref())
+    build_env_filter_inner(
+        verbosity,
+        config_filter,
+        std::env::var("LOG").ok().as_deref(),
+    )
 }
 
 fn build_env_filter_inner(

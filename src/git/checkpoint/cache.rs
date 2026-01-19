@@ -481,7 +481,9 @@ mod tests {
         let mut out = Vec::new();
         if let Ok(entries) = fs::read_dir(group_dir) {
             for entry in entries.flatten() {
-                if let Ok(file_type) = entry.file_type() && !file_type.is_dir() {
+                if let Ok(file_type) = entry.file_type()
+                    && !file_type.is_dir()
+                {
                     continue;
                 }
                 let name = entry.file_name();

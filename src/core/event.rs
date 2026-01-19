@@ -1085,12 +1085,13 @@ fn decode_wire_bead_patch(
             }
             "status" => {
                 let raw = decode_text(dec, limits)?;
-                patch.status = Some(WorkflowStatus::parse(raw).ok_or_else(|| {
-                    DecodeError::InvalidField {
-                        field: "status",
-                        reason: format!("unknown status {raw}"),
-                    }
-                })?);
+                patch.status =
+                    Some(
+                        WorkflowStatus::parse(raw).ok_or_else(|| DecodeError::InvalidField {
+                            field: "status",
+                            reason: format!("unknown status {raw}"),
+                        })?,
+                    );
             }
             "title" => {
                 patch.title = Some(decode_text(dec, limits)?.to_string());

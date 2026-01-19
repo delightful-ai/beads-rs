@@ -1,7 +1,9 @@
 use serde::Serialize;
 
 use super::super::render;
-use super::super::{Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, print_json, send};
+use super::super::{
+    Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, print_json, send,
+};
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};

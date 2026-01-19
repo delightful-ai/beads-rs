@@ -1,7 +1,7 @@
 use super::super::render;
 use super::super::{Ctx, ShowArgs, normalize_bead_id, print_ok, send};
-use crate::api::IssueSummary;
 use crate::Result;
+use crate::api::IssueSummary;
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::Filters;
@@ -107,10 +107,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     }
 }
 
-fn fetch_summary_map(
-    ctx: &Ctx,
-    ids: &BTreeSet<String>,
-) -> Result<HashMap<String, IssueSummary>> {
+fn fetch_summary_map(ctx: &Ctx, ids: &BTreeSet<String>) -> Result<HashMap<String, IssueSummary>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }

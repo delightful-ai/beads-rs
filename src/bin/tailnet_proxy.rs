@@ -213,7 +213,10 @@ const TRACE_VERSION: u32 = 1;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TraceRecord {
-    Header { version: u32, max_frame_bytes: usize },
+    Header {
+        version: u32,
+        max_frame_bytes: usize,
+    },
     Step {
         seq: u64,
         direction: Direction,
@@ -239,8 +242,8 @@ impl TraceWriter {
             fs::create_dir_all(parent)
                 .map_err(|err| format!("trace dir create failed {:?}: {err}", parent))?;
         }
-        let file =
-            File::create(path).map_err(|err| format!("trace file create failed {path:?}: {err}"))?;
+        let file = File::create(path)
+            .map_err(|err| format!("trace file create failed {path:?}: {err}"))?;
         let mut writer = std::io::BufWriter::new(file);
         let header = TraceRecord::Header {
             version: TRACE_VERSION,
@@ -325,8 +328,7 @@ impl TraceReader {
                 }
             }
         }
-        let max_frame_bytes =
-            max_frame_bytes.ok_or_else(|| "trace missing header".to_string())?;
+        let max_frame_bytes = max_frame_bytes.ok_or_else(|| "trace missing header".to_string())?;
         Ok(Self {
             max_frame_bytes,
             steps,
@@ -523,7 +525,10 @@ fn run_trace_session(
 }
 
 enum IncomingFrame {
-    Frame { direction: Direction, payload: Vec<u8> },
+    Frame {
+        direction: Direction,
+        payload: Vec<u8>,
+    },
     Eof,
 }
 
@@ -538,7 +543,8 @@ fn run_trace_record(
     let (tx, rx) = mpsc::channel::<IncomingFrame>();
     let a_tx = tx.clone();
     let b_tx = tx.clone();
-    let a_reader = thread::spawn(move || trace_reader(Direction::AtoB, client_read, a_tx, max_frame_bytes));
+    let a_reader =
+        thread::spawn(move || trace_reader(Direction::AtoB, client_read, a_tx, max_frame_bytes));
     let b_reader =
         thread::spawn(move || trace_reader(Direction::BtoA, upstream_read, b_tx, max_frame_bytes));
 

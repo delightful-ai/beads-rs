@@ -241,10 +241,7 @@ mod tests {
         assert_eq!(config.replication.max_connections, Some(12));
         assert!(!config.logging.stdout);
         assert!(matches!(config.logging.stdout_format, LogFormat::Compact));
-        assert_eq!(
-            config.logging.filter.as_deref(),
-            Some("beads_rs=debug")
-        );
+        assert_eq!(config.logging.filter.as_deref(), Some("beads_rs=debug"));
         assert!(config.logging.file.enabled);
         assert_eq!(
             config.logging.file.dir.as_ref().unwrap().to_string_lossy(),
