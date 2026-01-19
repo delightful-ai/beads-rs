@@ -107,6 +107,16 @@ const LOAD_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REPL_MAX_CONNECTIONS: usize = 32;
 const EXPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 
+fn read_test_disable_git_sync() -> bool {
+    let Ok(raw) = std::env::var("BD_TEST_DISABLE_GIT_SYNC") else {
+        return false;
+    };
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "n" | "off"
+    )
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ParsedMutationMeta {
     pub(crate) namespace: NamespaceId,
@@ -200,6 +210,8 @@ pub struct Daemon {
 
     /// Realtime safety limits.
     limits: Limits,
+    /// Disable background git sync (test-only).
+    test_disable_git_sync: bool,
     /// Replication settings loaded from config (env overrides applied during load).
     replication: crate::config::ReplicationConfig,
     /// Default checkpoint group specs from config.
@@ -256,6 +268,7 @@ impl Daemon {
     /// Create a new daemon with config settings.
     pub fn new_with_config(actor: ActorId, config: crate::config::Config) -> Self {
         let limits = config.limits.clone();
+        let test_disable_git_sync = read_test_disable_git_sync();
         // Initialize Go-compat export worker (best effort - don't fail daemon startup)
         let export_worker = match ExportContext::new() {
             Ok(ctx) => Some(ExportWorkerHandle::start(ctx)),
@@ -279,6 +292,7 @@ impl Daemon {
             export_worker,
             export_pending: BTreeMap::new(),
             limits,
+            test_disable_git_sync,
             replication: config.replication.clone(),
             checkpoint_groups: config.checkpoint_groups.clone(),
             namespace_defaults: config.namespace_defaults.namespaces.clone(),
@@ -302,6 +316,10 @@ impl Daemon {
     /// Get the safety limits.
     pub fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    pub(crate) fn git_sync_disabled(&self) -> bool {
+        self.test_disable_git_sync
     }
 
     pub fn begin_shutdown(&mut self) {

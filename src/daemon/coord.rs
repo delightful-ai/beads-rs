@@ -33,7 +33,17 @@ impl Daemon {
     }
 
     pub(crate) fn schedule_sync(&mut self, remote: RemoteUrl) {
+        if self.git_sync_disabled() {
+            return;
+        }
         self.scheduler_mut().schedule(remote);
+    }
+
+    pub(crate) fn schedule_sync_after(&mut self, remote: RemoteUrl, delay: Duration) {
+        if self.git_sync_disabled() {
+            return;
+        }
+        self.scheduler_mut().schedule_after(remote, delay);
     }
 
     /// Ensure repo is loaded and reasonably fresh from remote.
@@ -167,7 +177,7 @@ impl Daemon {
         }
 
         if schedule_sync {
-            self.scheduler_mut().schedule(remote.clone());
+            self.schedule_sync(remote.clone());
         }
     }
 
@@ -195,6 +205,9 @@ impl Daemon {
     /// - Repo is dirty
     /// - Not already syncing
     pub fn maybe_start_sync(&mut self, remote: &RemoteUrl, git_tx: &Sender<GitOp>) {
+        if self.git_sync_disabled() {
+            return;
+        }
         let store_id = match self.store_id_for_remote(remote) {
             Some(id) => id,
             None => return,
@@ -359,12 +372,12 @@ impl Daemon {
         }
 
         if reschedule_sync {
-            self.scheduler_mut().schedule(remote.clone());
+            self.schedule_sync(remote.clone());
         }
 
         if let Some(backoff) = backoff_ms {
             let backoff = Duration::from_millis(backoff);
-            self.scheduler_mut().schedule_after(remote.clone(), backoff);
+            self.schedule_sync_after(remote.clone(), backoff);
         }
 
         // Export Go-compatible JSONL after successful sync
