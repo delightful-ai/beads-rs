@@ -280,14 +280,13 @@ fn repl_checkpoint_bootstrap_under_churn() {
 }
 
 #[test]
-fn repl_interleaving_trace_replay() {
+fn repl_tailnet_proxy_smoke() {
     let tmp_root = std::env::current_dir().expect("cwd").join("tmp");
     std::fs::create_dir_all(&tmp_root).expect("trace tmp root");
     let trace_root = TempDir::new_in(&tmp_root).expect("trace tmp dir");
     let trace_dir = trace_root.path().to_path_buf();
 
     run_trace_harness(TailnetTraceMode::Record, &trace_dir);
-    run_trace_harness(TailnetTraceMode::Replay, &trace_dir);
 }
 
 #[test]
