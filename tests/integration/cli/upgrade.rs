@@ -14,6 +14,7 @@ use tempfile::TempDir;
 fn bd_cmd() -> Command {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
     cmd.env("BD_TESTING", "1");
+    cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
     cmd.env("BD_WAL_SYNC_MODE", "none");
     cmd
 }

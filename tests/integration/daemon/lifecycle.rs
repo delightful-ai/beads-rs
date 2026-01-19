@@ -94,6 +94,7 @@ impl DaemonFixture {
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd.env("BD_TESTING", "1");
         cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
+        cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
         cmd.env("BD_WAL_SYNC_MODE", "none");
         cmd
     }
@@ -309,6 +310,7 @@ fn test_concurrent_restart_safety() {
                 cmd.env("BD_NO_AUTO_UPGRADE", "1");
                 cmd.env("BD_TESTING", "1");
                 cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
+                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
                 cmd.env("BD_WAL_SYNC_MODE", "none");
                 cmd.args(["status"]).assert().success();
             })
@@ -355,6 +357,7 @@ fn test_thundering_herd_single_daemon() {
                 cmd.env("BD_NO_AUTO_UPGRADE", "1");
                 cmd.env("BD_TESTING", "1");
                 cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
+                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
                 cmd.env("BD_WAL_SYNC_MODE", "none");
                 cmd.arg("init").assert().success();
             })
