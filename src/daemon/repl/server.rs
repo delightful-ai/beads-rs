@@ -234,9 +234,10 @@ where
     let local_addr = listener.local_addr().ok();
     let span = tracing::info_span!(
         "repl_accept_loop",
+        direction = "inbound",
         store_id = %runtime.local_store.store_id,
         store_epoch = runtime.local_store.store_epoch.get(),
-        local_replica_id = %runtime.local_replica_id,
+        replica_id = %runtime.local_replica_id,
         listen_addr = ?local_addr
     );
     let _guard = span.enter();
@@ -309,7 +310,7 @@ where
         direction = "inbound",
         store_id = %runtime.local_store.store_id,
         store_epoch = runtime.local_store.store_epoch.get(),
-        local_replica_id = %runtime.local_replica_id,
+        replica_id = %runtime.local_replica_id,
         peer_replica_id = field::Empty,
         peer_addr = ?peer_addr
     );

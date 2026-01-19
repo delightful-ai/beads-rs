@@ -232,6 +232,7 @@ impl Daemon {
         let _ = git_tx.send(GitOp::Sync {
             repo: path,
             remote: remote.clone(),
+            store_id,
             state: store.state.get_or_default(&NamespaceId::core()),
             actor,
         });
