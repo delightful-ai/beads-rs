@@ -28,6 +28,7 @@ fn bd_with_runtime(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command 
     cmd.env("BD_DATA_DIR", data_dir);
     cmd.env("BD_NO_AUTO_UPGRADE", "1");
     cmd.env("BD_TESTING", "1");
+    cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
     cmd
 }
 
