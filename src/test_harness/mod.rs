@@ -327,7 +327,7 @@ impl TestNode {
         }
     }
 
-    pub fn handle_request(&self, req: Request) -> HandleOutcome {
+    pub(crate) fn handle_request(&self, req: Request) -> HandleOutcome {
         self.with_daemon_mut(|daemon, git_tx| daemon.handle_request(req, git_tx))
     }
 
