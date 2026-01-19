@@ -1,6 +1,8 @@
 //! WAL SQLite index + traits.
 
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use minicbor::{Decoder, Encoder};
@@ -17,6 +19,8 @@ use crate::core::{
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
 const BUSY_TIMEOUT_MS: u64 = 5_000;
 const CACHE_SIZE_KB: i64 = -16_000;
+const MAX_IDLE_CONNECTIONS: usize = 8;
+const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum WalIndexError {
@@ -244,9 +248,86 @@ impl IndexDurabilityMode {
     }
 }
 
-pub struct SqliteWalIndex {
+struct SqliteConnectionPool {
     db_path: PathBuf,
     mode: IndexDurabilityMode,
+    max_idle: usize,
+    conns: Mutex<Vec<Connection>>,
+}
+
+impl SqliteConnectionPool {
+    fn new(db_path: PathBuf, mode: IndexDurabilityMode) -> Self {
+        Self {
+            db_path,
+            mode,
+            max_idle: MAX_IDLE_CONNECTIONS,
+            conns: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn get(self: &Arc<Self>) -> Result<PooledConnection, WalIndexError> {
+        let conn = {
+            let mut guard = self
+                .conns
+                .lock()
+                .expect("wal index connection pool lock poisoned");
+            guard.pop()
+        };
+        let conn = match conn {
+            Some(conn) => conn,
+            None => open_connection(&self.db_path, self.mode, false)?,
+        };
+        Ok(PooledConnection {
+            pool: Arc::clone(self),
+            conn: Some(conn),
+        })
+    }
+
+    fn put(&self, conn: Connection) {
+        let mut guard = self
+            .conns
+            .lock()
+            .expect("wal index connection pool lock poisoned");
+        if guard.len() < self.max_idle {
+            guard.push(conn);
+        }
+    }
+}
+
+struct PooledConnection {
+    pool: Arc<SqliteConnectionPool>,
+    conn: Option<Connection>,
+}
+
+impl Deref for PooledConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn
+            .as_ref()
+            .expect("pooled wal index connection missing")
+    }
+}
+
+impl DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.conn
+            .as_mut()
+            .expect("pooled wal index connection missing")
+    }
+}
+
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.put(conn);
+        }
+    }
+}
+
+pub struct SqliteWalIndex {
+    mode: IndexDurabilityMode,
+    pool: Arc<SqliteConnectionPool>,
 }
 
 impl SqliteWalIndex {
@@ -277,7 +358,9 @@ impl SqliteWalIndex {
         ensure_permissions(&db_path)?;
         drop(conn);
 
-        Ok(Self { db_path, mode })
+        let pool = Arc::new(SqliteConnectionPool::new(db_path.clone(), mode));
+
+        Ok(Self { mode, pool })
     }
 
     pub fn durability_mode(&self) -> IndexDurabilityMode {
@@ -285,7 +368,7 @@ impl SqliteWalIndex {
     }
 
     pub fn checkpoint_truncate(&self) -> Result<(), WalIndexError> {
-        let conn = open_connection(&self.db_path, self.mode, false)?;
+        let conn = self.pool.get()?;
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             let _: i64 = row.get(0)?;
             let _: i64 = row.get(1)?;
@@ -299,15 +382,13 @@ impl SqliteWalIndex {
 impl WalIndex for SqliteWalIndex {
     fn writer(&self) -> Box<dyn WalIndexWriter> {
         Box::new(SqliteWalIndexWriter {
-            db_path: self.db_path.clone(),
-            mode: self.mode,
+            pool: Arc::clone(&self.pool),
         })
     }
 
     fn reader(&self) -> Box<dyn WalIndexReader> {
         Box::new(SqliteWalIndexReader {
-            db_path: self.db_path.clone(),
-            mode: self.mode,
+            pool: Arc::clone(&self.pool),
         })
     }
 
@@ -321,13 +402,12 @@ impl WalIndex for SqliteWalIndex {
 }
 
 struct SqliteWalIndexWriter {
-    db_path: PathBuf,
-    mode: IndexDurabilityMode,
+    pool: Arc<SqliteConnectionPool>,
 }
 
 impl WalIndexWriter for SqliteWalIndexWriter {
     fn begin_txn(&self) -> Result<Box<dyn WalIndexTxn>, WalIndexError> {
-        let conn = open_connection(&self.db_path, self.mode, false)?;
+        let conn = self.pool.get()?;
         conn.execute_batch("BEGIN IMMEDIATE")?;
         Ok(Box::new(SqliteWalIndexTxn {
             conn,
@@ -337,7 +417,7 @@ impl WalIndexWriter for SqliteWalIndexWriter {
 }
 
 struct SqliteWalIndexTxn {
-    conn: Connection,
+    conn: PooledConnection,
     committed: bool,
 }
 
@@ -349,13 +429,11 @@ impl WalIndexTxn for SqliteWalIndexTxn {
     ) -> Result<Seq1, WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
-        let next_seq: Option<u64> = self
-            .conn
-            .query_row(
-                "SELECT next_seq FROM origin_seq WHERE namespace = ?1 AND origin_replica_id = ?2",
-                params![namespace, origin_blob],
-                |row| row.get::<_, u64>(0),
-            )
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT next_seq FROM origin_seq WHERE namespace = ?1 AND origin_replica_id = ?2",
+        )?;
+        let next_seq: Option<u64> = stmt
+            .query_row(params![namespace, origin_blob], |row| row.get::<_, u64>(0))
             .optional()?;
 
         let next_raw = next_seq.unwrap_or(1);
@@ -367,11 +445,11 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             })?;
         let next = Seq1::from_u64(next_raw)
             .ok_or_else(|| WalIndexError::EventIdDecode("origin_seq must be >= 1".to_string()))?;
-        self.conn.execute(
+        let mut stmt = self.conn.prepare_cached(
             "INSERT INTO origin_seq (namespace, origin_replica_id, next_seq) VALUES (?1, ?2, ?3) \
              ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET next_seq = excluded.next_seq",
-            params![namespace, origin_blob, updated],
         )?;
+        stmt.execute(params![namespace, origin_blob, updated])?;
         Ok(next)
     }
 
@@ -383,11 +461,11 @@ impl WalIndexTxn for SqliteWalIndexTxn {
     ) -> Result<(), WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
-        self.conn.execute(
+        let mut stmt = self.conn.prepare_cached(
             "INSERT INTO origin_seq (namespace, origin_replica_id, next_seq) VALUES (?1, ?2, ?3) \
              ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET next_seq = excluded.next_seq",
-            params![namespace, origin_blob, next_seq.get() as i64],
         )?;
+        stmt.execute(params![namespace, origin_blob, next_seq.get() as i64])?;
         Ok(())
     }
 
@@ -413,11 +491,13 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let txn_blob = uuid_blob(txn_id.as_uuid());
         let client_blob = client_request_id.map(|id| uuid_blob(id.as_uuid()));
 
-        let inserted = self.conn.execute(
-            "INSERT OR IGNORE INTO events \
-             (namespace, origin_replica_id, origin_seq, sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
+        let inserted = {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT OR IGNORE INTO events \
+                 (namespace, origin_replica_id, origin_seq, sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )?;
+            stmt.execute(params![
                 namespace,
                 origin_blob,
                 eid_seq,
@@ -429,16 +509,16 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 event_time_ms as i64,
                 txn_blob,
                 client_blob,
-            ],
-        )?;
+            ])?
+        };
         if inserted == 0 {
-            let existing: Option<Vec<u8>> = self
-                .conn
-                .query_row(
-                    "SELECT sha FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
-                    params![namespace, origin_blob, eid_seq],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT sha FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
+            )?;
+            let existing: Option<Vec<u8>> = stmt
+                .query_row(params![namespace, origin_blob, eid_seq], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
                 .optional()?;
             if let Some(existing) = existing {
                 let existing_sha = blob_32(existing)?;
@@ -474,7 +554,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let applied_blob = applied_head_sha.map(|value| value.to_vec());
         let durable_blob = durable_head_sha.map(|value| value.to_vec());
 
-        self.conn.execute(
+        let mut stmt = self.conn.prepare_cached(
             "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET \
@@ -482,15 +562,15 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                durable_seq = excluded.durable_seq, \
                applied_head_sha = excluded.applied_head_sha, \
                durable_head_sha = excluded.durable_head_sha",
-            params![
-                namespace,
-                origin_blob,
-                applied as i64,
-                durable as i64,
-                applied_blob,
-                durable_blob,
-            ],
         )?;
+        stmt.execute(params![
+            namespace,
+            origin_blob,
+            applied as i64,
+            durable as i64,
+            applied_blob,
+            durable_blob,
+        ])?;
         Ok(())
     }
 
@@ -499,13 +579,13 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             WalIndexError::HlcRowDecode("last_physical_ms out of range".to_string())
         })?;
         let last_logical = i64::from(hlc.last_logical);
-        self.conn.execute(
+        let mut stmt = self.conn.prepare_cached(
             "INSERT INTO hlc (actor_id, last_physical_ms, last_logical) VALUES (?1, ?2, ?3) \
              ON CONFLICT(actor_id) DO UPDATE SET \
                last_physical_ms = excluded.last_physical_ms, \
                last_logical = excluded.last_logical",
-            params![hlc.actor_id.as_str(), last_physical_ms, last_logical],
         )?;
+        stmt.execute(params![hlc.actor_id.as_str(), last_physical_ms, last_logical])?;
         Ok(())
     }
 
@@ -515,7 +595,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let path_str = segment.segment_path.to_string_lossy();
         let sealed = if segment.sealed { 1 } else { 0 };
         let final_len = segment.final_len.map(|value| value as i64);
-        self.conn.execute(
+        let mut stmt = self.conn.prepare_cached(
             "INSERT INTO segments (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
              ON CONFLICT(namespace, segment_id) DO UPDATE SET \
@@ -524,16 +604,16 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                last_indexed_offset = excluded.last_indexed_offset, \
                sealed = excluded.sealed, \
                final_len = excluded.final_len",
-            params![
-                namespace,
-                segment_blob,
-                path_str.as_ref(),
-                segment.created_at_ms as i64,
-                segment.last_indexed_offset as i64,
-                sealed,
-                final_len,
-            ],
         )?;
+        stmt.execute(params![
+            namespace,
+            segment_blob,
+            path_str.as_ref(),
+            segment.created_at_ms as i64,
+            segment.last_indexed_offset as i64,
+            sealed,
+            final_len,
+        ])?;
         Ok(())
     }
 
@@ -555,11 +635,13 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let txn_blob = uuid_blob(txn_id.as_uuid());
         let event_ids_blob = encode_event_ids(event_ids)?;
 
-        let inserted = self.conn.execute(
-            "INSERT INTO client_requests (namespace, origin_replica_id, client_request_id, created_at_ms, request_sha256, txn_id, event_ids) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT(namespace, origin_replica_id, client_request_id) DO NOTHING",
-            params![
+        let inserted = {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT INTO client_requests (namespace, origin_replica_id, client_request_id, created_at_ms, request_sha256, txn_id, event_ids) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(namespace, origin_replica_id, client_request_id) DO NOTHING",
+            )?;
+            stmt.execute(params![
                 namespace,
                 &origin_blob,
                 &client_blob,
@@ -567,17 +649,17 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 &request_blob,
                 &txn_blob,
                 &event_ids_blob,
-            ],
-        )?;
+            ])?
+        };
         if inserted == 0 {
-            let existing = self
-                .conn
-                .query_row(
-                    "SELECT request_sha256 FROM client_requests \
-                     WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
-                    params![namespace, &origin_blob, &client_blob],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT request_sha256 FROM client_requests \
+                 WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
+            )?;
+            let existing = stmt
+                .query_row(params![namespace, &origin_blob, &client_blob], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
                 .optional()?;
             let Some(existing_sha) = existing else {
                 return Err(WalIndexError::EventIdDecode(
@@ -609,7 +691,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let role = replica_role_str(row.role);
         let durability_eligible = if row.durability_eligible { 1 } else { 0 };
 
-        self.conn.execute(
+        let mut stmt = self.conn.prepare_cached(
             "INSERT INTO replica_liveness (replica_id, last_seen_ms, last_handshake_ms, role, durability_eligible) \
              VALUES (?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT(replica_id) DO UPDATE SET \
@@ -617,14 +699,14 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                last_handshake_ms = MAX(replica_liveness.last_handshake_ms, excluded.last_handshake_ms), \
                role = excluded.role, \
                durability_eligible = excluded.durability_eligible",
-            params![
-                replica_blob,
-                last_seen_ms,
-                last_handshake_ms,
-                role,
-                durability_eligible,
-            ],
         )?;
+        stmt.execute(params![
+            replica_blob,
+            last_seen_ms,
+            last_handshake_ms,
+            role,
+            durability_eligible,
+        ])?;
         Ok(())
     }
 
@@ -650,8 +732,7 @@ impl Drop for SqliteWalIndexTxn {
 }
 
 struct SqliteWalIndexReader {
-    db_path: PathBuf,
-    mode: IndexDurabilityMode,
+    pool: Arc<SqliteConnectionPool>,
 }
 
 impl SqliteWalIndexReader {
@@ -659,7 +740,7 @@ impl SqliteWalIndexReader {
         &self,
         f: impl FnOnce(&Connection) -> Result<T, WalIndexError>,
     ) -> Result<T, WalIndexError> {
-        let conn = open_connection(&self.db_path, self.mode, false)?;
+        let conn = self.pool.get()?;
         f(&conn)
     }
 }
@@ -674,12 +755,13 @@ impl WalIndexReader for SqliteWalIndexReader {
             let namespace = ns.as_str();
             let origin_blob = uuid_blob(eid.origin_replica_id.as_uuid());
             let origin_seq = eid.origin_seq.get() as i64;
-            let row: Option<Vec<u8>> = conn
-                .query_row(
-                    "SELECT sha FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
-                    params![namespace, origin_blob, origin_seq],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
+            let mut stmt = conn.prepare_cached(
+                "SELECT sha FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
+            )?;
+            let row: Option<Vec<u8>> = stmt
+                .query_row(params![namespace, origin_blob, origin_seq], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
                 .optional()?;
             row.map(blob_32).transpose()
         })
@@ -688,7 +770,7 @@ impl WalIndexReader for SqliteWalIndexReader {
     fn list_segments(&self, ns: &NamespaceId) -> Result<Vec<SegmentRow>, WalIndexError> {
         self.with_conn(|conn| {
             let namespace = ns.as_str();
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len \
                  FROM segments WHERE namespace = ?1 ORDER BY created_at_ms ASC, segment_id ASC",
             )?;
@@ -734,7 +816,7 @@ impl WalIndexReader for SqliteWalIndexReader {
 
     fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha \
                  FROM watermarks",
             )?;
@@ -783,7 +865,7 @@ impl WalIndexReader for SqliteWalIndexReader {
     fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError> {
         self.with_conn(|conn| {
             let mut stmt =
-                conn.prepare("SELECT actor_id, last_physical_ms, last_logical FROM hlc")?;
+                conn.prepare_cached("SELECT actor_id, last_physical_ms, last_logical FROM hlc")?;
             let mut rows = stmt.query([])?;
             let mut hlc_rows = Vec::new();
             while let Some(row) = rows.next()? {
@@ -812,7 +894,7 @@ impl WalIndexReader for SqliteWalIndexReader {
 
     fn load_replica_liveness(&self) -> Result<Vec<ReplicaLivenessRow>, WalIndexError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT replica_id, last_seen_ms, last_handshake_ms, role, durability_eligible \
                  FROM replica_liveness",
             )?;
@@ -859,7 +941,7 @@ impl WalIndexReader for SqliteWalIndexReader {
         self.with_conn(|conn| {
             let namespace = ns.as_str();
             let origin_blob = uuid_blob(origin.as_uuid());
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT origin_seq, sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id \
                  FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq > ?3 \
                  ORDER BY origin_seq ASC",
@@ -931,20 +1013,19 @@ impl WalIndexReader for SqliteWalIndexReader {
             let origin_blob = uuid_blob(origin.as_uuid());
             let client_blob = uuid_blob(client_request_id.as_uuid());
 
-            let row = conn
-                .query_row(
-                    "SELECT request_sha256, txn_id, event_ids, created_at_ms FROM client_requests \
-                     WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
-                    params![namespace, origin_blob, client_blob],
-                    |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, Vec<u8>>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                            row.get::<_, i64>(3)?,
-                        ))
-                    },
-                )
+            let mut stmt = conn.prepare_cached(
+                "SELECT request_sha256, txn_id, event_ids, created_at_ms FROM client_requests \
+                 WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
+            )?;
+            let row = stmt
+                .query_row(params![namespace, origin_blob, client_blob], |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
                 .optional()?;
 
             match row {
@@ -967,11 +1048,12 @@ impl WalIndexReader for SqliteWalIndexReader {
         self.with_conn(|conn| {
             let namespace = ns.as_str();
             let origin_blob = uuid_blob(origin.as_uuid());
-            let max_seq: Option<i64> = conn.query_row(
+            let mut stmt = conn.prepare_cached(
                 "SELECT MAX(origin_seq) FROM events WHERE namespace = ?1 AND origin_replica_id = ?2",
-                params![namespace, origin_blob],
-                |row| row.get::<_, Option<i64>>(0),
             )?;
+            let max_seq: Option<i64> = stmt.query_row(params![namespace, origin_blob], |row| {
+                row.get::<_, Option<i64>>(0)
+            })?;
             match max_seq {
                 Some(seq) => {
                     let raw = u64::try_from(seq).map_err(|_| {
@@ -1205,6 +1287,7 @@ fn open_connection(
     let conn = Connection::open_with_flags(path, flags)?;
     apply_pragmas(&conn, mode)?;
     conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
+    conn.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
     Ok(conn)
 }
 
@@ -1690,6 +1773,48 @@ mod tests {
                 last_logical: 2,
             }]
         );
+    }
+
+    #[test]
+    fn sqlite_index_pools_connections_after_txn() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+
+        let idle_before = index
+            .pool
+            .conns
+            .lock()
+            .expect("pool lock")
+            .len();
+        assert_eq!(idle_before, 0);
+
+        let txn = index.writer().begin_txn().unwrap();
+        txn.commit().unwrap();
+
+        let idle_after = index
+            .pool
+            .conns
+            .lock()
+            .expect("pool lock")
+            .len();
+        assert_eq!(idle_after, 1);
+    }
+
+    #[test]
+    fn sqlite_index_pool_caps_idle_connections() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+
+        let mut held = Vec::new();
+        for _ in 0..(MAX_IDLE_CONNECTIONS + 4) {
+            held.push(index.pool.get().unwrap());
+        }
+        drop(held);
+
+        let idle = index.pool.conns.lock().expect("pool lock").len();
+        assert_eq!(idle, MAX_IDLE_CONNECTIONS);
     }
 
     #[test]
