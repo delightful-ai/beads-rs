@@ -60,6 +60,8 @@ pub struct StoreMeta {
     pub replication_protocol_version: u32,
     pub index_schema_version: u32,
     pub created_at_ms: u64,
+    #[serde(default)]
+    pub orset_counter: u64,
 }
 
 impl StoreMeta {
@@ -78,6 +80,7 @@ impl StoreMeta {
             replication_protocol_version: versions.replication_protocol_version,
             index_schema_version: versions.index_schema_version,
             created_at_ms,
+            orset_counter: 0,
         }
     }
 
@@ -110,12 +113,13 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(0));
         let versions = StoreMetaVersions::new(1, 2, 3, 4, 5);
-        let meta = StoreMeta::new(
+        let mut meta = StoreMeta::new(
             identity,
             ReplicaId::new(Uuid::from_bytes([8u8; 16])),
             versions,
             1_726_000_000_000,
         );
+        meta.orset_counter = 42;
 
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: StoreMeta = serde_json::from_str(&json).unwrap();

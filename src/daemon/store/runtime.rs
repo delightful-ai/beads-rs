@@ -479,6 +479,18 @@ impl StoreRuntime {
         write_store_meta(&path, &self.meta)?;
         Ok((old, new))
     }
+
+    pub fn next_orset_counter(&mut self) -> Result<u64, StoreRuntimeError> {
+        let next = self
+            .meta
+            .orset_counter
+            .checked_add(1)
+            .expect("orset counter overflow");
+        self.meta.orset_counter = next;
+        let path = paths::store_meta_path(self.meta.store_id());
+        write_store_meta(&path, &self.meta)?;
+        Ok(next)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1110,6 +1122,38 @@ mod tests {
             StoreRuntimeError::UnsupportedStoreMetaVersion { expected: got_expected, got }
                 if got_expected == expected && got == versions
         ));
+    }
+
+    #[test]
+    fn store_runtime_persists_orset_counter() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([32u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let mut runtime = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        let first = runtime.next_orset_counter().expect("increment");
+        let second = runtime.next_orset_counter().expect("increment");
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+
+        let meta_path = paths::store_meta_path(store_id);
+        let meta = read_store_meta_optional(&meta_path)
+            .expect("read meta")
+            .expect("meta exists");
+        assert_eq!(meta.orset_counter, 2);
     }
 
     #[test]
