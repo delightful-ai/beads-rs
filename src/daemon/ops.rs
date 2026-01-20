@@ -14,8 +14,8 @@ use thiserror::Error;
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     ActorId, Applied, BeadFields, BeadId, BeadType, CliErrorCode, ClientRequestId, DurabilityClass,
-    DurabilityReceipt, ErrorCode, InvalidId, Label, Labels, Lww, NamespaceId, Priority,
-    ProtocolErrorCode, ReplicaId, Stamp, WallClock, Watermarks, WorkflowStatus,
+    DurabilityReceipt, ErrorCode, InvalidId, Lww, NamespaceId, Priority, ProtocolErrorCode,
+    ReplicaId, Stamp, WallClock, Watermarks, WorkflowStatus,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_lock::StoreLockError;
@@ -205,16 +205,10 @@ impl BeadPatch {
         if let Patch::Set(v) = &self.bead_type {
             fields.bead_type = Lww::new(*v, stamp.clone());
         }
-        if let Patch::Set(v) = &self.labels {
-            let mut labels = Labels::new();
-            for raw in v {
-                let label = Label::parse(raw.clone()).map_err(|e| OpError::ValidationFailed {
-                    field: "labels".into(),
-                    reason: e.to_string(),
-                })?;
-                labels.insert(label);
-            }
-            fields.labels = Lww::new(labels, stamp.clone());
+        if !self.labels.is_keep() {
+            return Err(OpError::Internal(
+                "labels patch must be applied via label store",
+            ));
         }
         match &self.external_ref {
             Patch::Set(v) => fields.external_ref = Lww::new(Some(v.clone()), stamp.clone()),

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::deps::DepEdge;
 use crate::core::{
-    Bead, Claim, NamespaceId, SegmentId, Tombstone as CoreTombstone, WallClock, Workflow,
+    BeadView, Claim, NamespaceId, SegmentId, Tombstone as CoreTombstone, WallClock, Workflow,
     WriteStamp,
 };
 
@@ -287,8 +287,9 @@ pub struct IssueSummary {
 }
 
 impl Issue {
-    pub fn from_bead(namespace: &NamespaceId, bead: &Bead) -> Self {
-        let updated = bead.updated_stamp();
+    pub fn from_view(namespace: &NamespaceId, view: &BeadView) -> Self {
+        let bead = &view.bead;
+        let updated = view.updated_stamp();
 
         let (assignee, assignee_at, assignee_expires) = match &bead.fields.claim.value {
             Claim::Claimed { assignee, expires } => (
@@ -310,7 +311,7 @@ impl Issue {
                 _ => (None, None, None, None),
             };
 
-        let notes = bead.notes.sorted().into_iter().map(Note::from).collect();
+        let notes = view.notes.iter().map(Note::from).collect();
 
         Self {
             id: bead.core.id.as_str().to_string(),
@@ -322,13 +323,7 @@ impl Issue {
             status: bead.fields.workflow.value.status().to_string(),
             priority: bead.fields.priority.value.value(),
             issue_type: bead.fields.bead_type.value.as_str().to_string(),
-            labels: bead
-                .fields
-                .labels
-                .value
-                .iter()
-                .map(|l| l.as_str().to_string())
-                .collect(),
+            labels: view.labels.iter().map(|l| l.as_str().to_string()).collect(),
             assignee,
             assignee_at,
             assignee_expires,
@@ -344,7 +339,7 @@ impl Issue {
             external_ref: bead.fields.external_ref.value.clone(),
             source_repo: bead.fields.source_repo.value.clone(),
             estimated_minutes: bead.fields.estimated_minutes.value,
-            content_hash: bead.content_hash().to_hex(),
+            content_hash: view.content_hash().to_hex(),
             notes,
             deps_incoming: Vec::new(),
             deps_outgoing: Vec::new(),
@@ -353,8 +348,9 @@ impl Issue {
 }
 
 impl IssueSummary {
-    pub fn from_bead(namespace: &NamespaceId, bead: &Bead) -> Self {
-        let updated = bead.updated_stamp();
+    pub fn from_view(namespace: &NamespaceId, view: &BeadView) -> Self {
+        let bead = &view.bead;
+        let updated = view.updated_stamp();
         Self {
             id: bead.core.id.as_str().to_string(),
             namespace: namespace.clone(),
@@ -365,13 +361,7 @@ impl IssueSummary {
             status: bead.fields.workflow.value.status().to_string(),
             priority: bead.fields.priority.value.value(),
             issue_type: bead.fields.bead_type.value.as_str().to_string(),
-            labels: bead
-                .fields
-                .labels
-                .value
-                .iter()
-                .map(|l| l.as_str().to_string())
-                .collect(),
+            labels: view.labels.iter().map(|l| l.as_str().to_string()).collect(),
             assignee: bead
                 .fields
                 .claim
@@ -384,8 +374,8 @@ impl IssueSummary {
             updated_at: updated.at.clone(),
             updated_by: updated.by.as_str().to_string(),
             estimated_minutes: bead.fields.estimated_minutes.value,
-            content_hash: bead.content_hash().to_hex(),
-            note_count: bead.notes.len(),
+            content_hash: view.content_hash().to_hex(),
+            note_count: view.notes.len(),
         }
     }
 

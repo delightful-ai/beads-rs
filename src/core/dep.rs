@@ -12,6 +12,7 @@ use super::crdt::Lww;
 use super::domain::DepKind;
 use super::error::{CoreError, InvalidDependency};
 use super::identity::BeadId;
+use super::orset::OrSetValue;
 use super::time::Stamp;
 
 /// Parsed dependency spec from CLI/IPC input.
@@ -111,6 +112,18 @@ impl DepKey {
     /// Get the dependency kind.
     pub fn kind(&self) -> DepKind {
         self.kind
+    }
+}
+
+impl OrSetValue for DepKey {
+    fn collision_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(self.from.as_str().as_bytes());
+        bytes.push(0);
+        bytes.extend(self.to.as_str().as_bytes());
+        bytes.push(0);
+        bytes.extend(self.kind.as_str().as_bytes());
+        bytes
     }
 }
 

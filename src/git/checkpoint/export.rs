@@ -328,10 +328,13 @@ fn build_namespace_shards(
     };
     let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
-    for (id, bead) in state.iter_live() {
+    for (id, _) in state.iter_live() {
         let shard = shard_for_bead(id);
         let path = shard_path(namespace, CheckpointFileKind::State, &shard);
-        let wire = WireBeadFull::from(bead);
+        let Some(view) = state.bead_view(id) else {
+            continue;
+        };
+        let wire = WireBeadFull::from(&view);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
@@ -416,7 +419,6 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::bead::{BeadCore, BeadFields};
-    use crate::core::collections::Labels;
     use crate::core::composite::{Claim, Workflow};
     use crate::core::crdt::Lww;
     use crate::core::domain::{BeadType, DepKind, Priority};
@@ -440,7 +442,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -608,7 +609,8 @@ mod tests {
             &shard_for_bead(&bead_id),
         );
         let state_payload = snapshot.shards.get(&state_path).expect("state shard");
-        let mut expected = to_canon_json_bytes(&WireBeadFull::from(&bead)).unwrap();
+        let view = core_state.bead_view(&bead_id).expect("bead view");
+        let mut expected = to_canon_json_bytes(&WireBeadFull::from(&view)).unwrap();
         expected.push(b'\n');
         assert_eq!(state_payload.bytes.as_ref(), expected);
 
@@ -832,9 +834,10 @@ mod tests {
         let mut ids = vec![id_a.clone(), id_b.clone()];
         ids.sort();
         let mut expected = Vec::new();
+        let view_state = state.get(&namespace).expect("state");
         for id in ids {
-            let bead = if id == id_a { &bead_a } else { &bead_b };
-            let mut line = to_canon_json_bytes(&WireBeadFull::from(bead)).unwrap();
+            let view = view_state.bead_view(&id).expect("bead view");
+            let mut line = to_canon_json_bytes(&WireBeadFull::from(&view)).unwrap();
             line.push(b'\n');
             expected.extend_from_slice(&line);
         }

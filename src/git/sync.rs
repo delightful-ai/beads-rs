@@ -804,11 +804,11 @@ fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
                 });
             }
             Some(old_bead) => {
-                let field_changed = bead.updated_stamp() != old_bead.updated_stamp();
+                let field_changed = before.updated_stamp_for(id) != after.updated_stamp_for(id);
                 if field_changed || dep_changed {
                     diff.updated += 1;
                     let mut changed_fields = if field_changed {
-                        detect_changed_fields(old_bead, bead)
+                        detect_changed_fields(before, after, id, old_bead, bead)
                     } else {
                         Vec::new()
                     };
@@ -870,7 +870,13 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
 }
 
 /// Detect which fields changed between two beads by comparing LWW stamps.
-fn detect_changed_fields(old: &crate::core::Bead, new: &crate::core::Bead) -> Vec<&'static str> {
+fn detect_changed_fields(
+    before: &CanonicalState,
+    after: &CanonicalState,
+    id: &BeadId,
+    old: &crate::core::Bead,
+    new: &crate::core::Bead,
+) -> Vec<&'static str> {
     let mut changed = Vec::new();
 
     if old.fields.title.stamp != new.fields.title.stamp {
@@ -891,9 +897,6 @@ fn detect_changed_fields(old: &crate::core::Bead, new: &crate::core::Bead) -> Ve
     if old.fields.bead_type.stamp != new.fields.bead_type.stamp {
         changed.push("type");
     }
-    if old.fields.labels.stamp != new.fields.labels.stamp {
-        changed.push("labels");
-    }
     if old.fields.external_ref.stamp != new.fields.external_ref.stamp {
         changed.push("external_ref");
     }
@@ -909,8 +912,14 @@ fn detect_changed_fields(old: &crate::core::Bead, new: &crate::core::Bead) -> Ve
     if old.fields.claim.stamp != new.fields.claim.stamp {
         changed.push("claim");
     }
+    let before_labels = before.labels_for_any(id);
+    let after_labels = after.labels_for_any(id);
+    if before_labels != after_labels || before.label_stamp(id) != after.label_stamp(id) {
+        changed.push("labels");
+    }
+
     // Check notes (compare note counts as a simple heuristic)
-    if old.notes.len() != new.notes.len() {
+    if before.notes_for(id).len() != after.notes_for(id).len() {
         changed.push("notes");
     }
 
@@ -1274,7 +1283,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::new(2).unwrap(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Default::default(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),

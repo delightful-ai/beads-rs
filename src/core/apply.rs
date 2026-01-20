@@ -5,13 +5,14 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 use super::bead::{BeadCore, BeadFields};
-use super::collections::Labels;
+use super::collections::{Label, Labels};
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::{DepEdge, DepKey, DepLife};
 use super::domain::{BeadType, Priority};
-use super::event::{EventBody, EventKindV1, TxnV1};
-use super::identity::{ActorId, BeadId, NoteId};
+use super::event::{EventBody, EventKindV1, Sha256, TxnV1};
+use super::identity::{ActorId, BeadId, NoteId, ReplicaId};
+use super::orset::{Dot, OrSetValue};
 use super::state::CanonicalState;
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
@@ -19,6 +20,8 @@ use super::wire_bead::{
     NotesPatch, TxnOpV1, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch,
     WireTombstoneV1,
 };
+use sha2::{Digest, Sha256 as Sha256Hasher};
+use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NoteKey {
@@ -43,8 +46,6 @@ pub enum ApplyError {
     BeadCollision { id: BeadId },
     #[error("note collision for {bead_id}:{note_id}")]
     NoteCollision { bead_id: BeadId, note_id: NoteId },
-    #[error("note append missing bead {id}")]
-    MissingBead { id: BeadId },
     #[error("invalid claim patch for {id}: {reason}")]
     InvalidClaimPatch { id: BeadId, reason: String },
     #[error("invalid dependency: {reason}")]
@@ -112,14 +113,32 @@ fn apply_bead_upsert(
         return Err(ApplyError::MissingCreationStamp { id: id.clone() });
     }
 
-    if let Some(bead) = state.get_live_mut(&id) {
-        if let (Some(at), Some(by)) = (patch.created_at, patch.created_by.as_ref()) {
-            let incoming = Stamp::new(WriteStamp::new(at.0, at.1), by.clone());
-            if bead.core.created() != &incoming {
-                return Err(ApplyError::BeadCollision { id: id.clone() });
+    if state.get_live(&id).is_some() {
+        let field_changed = {
+            let bead = state.get_live_mut(&id).expect("live bead checked above");
+            if let (Some(at), Some(by)) = (patch.created_at, patch.created_by.as_ref()) {
+                let incoming = Stamp::new(WriteStamp::new(at.0, at.1), by.clone());
+                if bead.core.created() != &incoming {
+                    return Err(ApplyError::BeadCollision { id: id.clone() });
+                }
+            }
+            apply_patch_to_bead(bead, patch, event_stamp, outcome)?
+        };
+
+        let mut changed = field_changed;
+        if let Some(labels) = &patch.labels {
+            if apply_label_patch(state, &id, labels, event_stamp) {
+                changed = true;
             }
         }
-        let changed = apply_patch_to_bead(bead, patch, event_stamp, outcome)?;
+        if let NotesPatch::AtLeast(notes) = &patch.notes {
+            for note in notes {
+                let note = note_to_core(note);
+                if apply_note(state, id.clone(), note, outcome)? {
+                    changed = true;
+                }
+            }
+        }
         if changed {
             outcome.changed_beads.insert(id);
         }
@@ -139,16 +158,21 @@ fn apply_bead_upsert(
     }
 
     let core = BeadCore::new(id.clone(), created, patch.created_on_branch.clone());
-    let mut bead = super::Bead::new(core, fields_from_patch(patch, event_stamp)?);
-    if let NotesPatch::AtLeast(notes) = &patch.notes {
-        for note in notes {
-            let note = note_to_core(note);
-            apply_note(&mut bead, note, outcome)?;
-        }
-    }
+    let bead = super::Bead::new(core, fields_from_patch(patch, event_stamp)?);
     state
         .insert(bead)
         .map_err(|_| ApplyError::BeadCollision { id: id.clone() })?;
+
+    if let Some(labels) = &patch.labels {
+        apply_label_patch(state, &id, labels, event_stamp);
+    }
+    if let NotesPatch::AtLeast(notes) = &patch.notes {
+        for note in notes {
+            let note = note_to_core(note);
+            apply_note(state, id.clone(), note, outcome)?;
+        }
+    }
+
     outcome.changed_beads.insert(id);
     Ok(())
 }
@@ -182,8 +206,8 @@ fn apply_bead_delete(
         return Ok(());
     }
 
-    if let Some(bead) = state.get_live(&id)
-        && bead.updated_stamp() > tombstone.deleted
+    if let Some(updated) = state.updated_stamp_for(&id)
+        && updated > tombstone.deleted
     {
         return Ok(());
     }
@@ -270,9 +294,6 @@ fn fields_from_patch(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<BeadF
     if let Some(bead_type) = patch.bead_type {
         fields.bead_type = Lww::new(bead_type, event_stamp.clone());
     }
-    if let Some(labels) = &patch.labels {
-        fields.labels = Lww::new(labels.clone(), event_stamp.clone());
-    }
     if !patch.external_ref.is_keep() {
         let existing = fields.external_ref.value.clone();
         fields.external_ref = Lww::new(
@@ -358,9 +379,6 @@ fn apply_patch_to_bead(
     if let Some(bead_type) = patch.bead_type {
         changed |= update_lww(&mut bead.fields.bead_type, bead_type, event_stamp);
     }
-    if let Some(labels) = &patch.labels {
-        changed |= update_lww(&mut bead.fields.labels, labels.clone(), event_stamp);
-    }
     if !patch.external_ref.is_keep() {
         let existing = bead.fields.external_ref.value.clone();
         changed |= update_lww(
@@ -406,16 +424,47 @@ fn apply_patch_to_bead(
         changed |= update_lww(&mut bead.fields.claim, claim_value, event_stamp);
     }
 
-    if let NotesPatch::AtLeast(notes) = &patch.notes {
-        for note in notes {
-            let note = note_to_core(note);
-            if apply_note(bead, note, outcome)? {
-                changed = true;
-            }
+    Ok(changed)
+}
+
+fn apply_label_patch(
+    state: &mut CanonicalState,
+    bead_id: &BeadId,
+    labels: &Labels,
+    event_stamp: &Stamp,
+) -> bool {
+    let existing = state.labels_for_any(bead_id);
+    let mut changed = false;
+
+    for label in labels.iter() {
+        if existing.contains(label.as_str()) {
+            continue;
+        }
+        let dot = legacy_dot_from_bytes(&label.collision_bytes(), event_stamp);
+        let change = state.apply_label_add(
+            bead_id.clone(),
+            label.clone(),
+            dot,
+            Sha256([0; 32]),
+            event_stamp.clone(),
+        );
+        if !change.is_empty() {
+            changed = true;
         }
     }
 
-    Ok(changed)
+    for label in existing.iter() {
+        if labels.contains(label.as_str()) {
+            continue;
+        }
+        let ctx = state.label_dvv(bead_id, label);
+        let change = state.apply_label_remove(bead_id.clone(), label, &ctx, event_stamp.clone());
+        if !change.is_empty() {
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 fn build_workflow(
@@ -486,34 +535,33 @@ fn apply_note_append(
     note: &WireNoteV1,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let Some(bead) = state.get_live_mut(&bead_id) else {
-        return Err(ApplyError::MissingBead { id: bead_id });
-    };
     let note = note_to_core(note);
-    if apply_note(bead, note, outcome)? {
-        outcome.changed_beads.insert(bead_id);
+    if apply_note(state, bead_id.clone(), note, outcome)? {
+        if state.get_live(&bead_id).is_some() {
+            outcome.changed_beads.insert(bead_id);
+        }
     }
     Ok(())
 }
 
 fn apply_note(
-    bead: &mut super::Bead,
+    state: &mut CanonicalState,
+    bead_id: BeadId,
     note: Note,
     outcome: &mut ApplyOutcome,
 ) -> Result<bool, ApplyError> {
-    if let Some(existing) = bead.notes.get(&note.id) {
-        if existing == &note {
-            return Ok(false);
+    if let Some(existing) = state.insert_note(bead_id.clone(), note.clone()) {
+        if existing != note {
+            return Err(ApplyError::NoteCollision {
+                bead_id,
+                note_id: note.id.clone(),
+            });
         }
-        return Err(ApplyError::NoteCollision {
-            bead_id: bead.id().clone(),
-            note_id: note.id.clone(),
-        });
+        return Ok(false);
     }
 
-    bead.notes.insert(note.clone());
     outcome.changed_notes.insert(NoteKey {
-        bead_id: bead.id().clone(),
+        bead_id,
         note_id: note.id,
     });
     Ok(true)
@@ -526,6 +574,25 @@ fn note_to_core(note: &WireNoteV1) -> Note {
         note.author.clone(),
         WriteStamp::new(note.at.0, note.at.1),
     )
+}
+
+fn legacy_dot_from_bytes(value_bytes: &[u8], stamp: &Stamp) -> Dot {
+    let mut hasher = Sha256Hasher::new();
+    hasher.update(value_bytes);
+    hasher.update(stamp.at.wall_ms.to_le_bytes());
+    hasher.update(stamp.at.counter.to_le_bytes());
+    hasher.update(stamp.by.as_str().as_bytes());
+    let digest = hasher.finalize();
+
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes.copy_from_slice(&digest[..16]);
+    let mut counter_bytes = [0u8; 8];
+    counter_bytes.copy_from_slice(&digest[16..24]);
+
+    Dot {
+        replica: ReplicaId::from(Uuid::from_bytes(uuid_bytes)),
+        counter: u64::from_le_bytes(counter_bytes),
+    }
 }
 
 fn update_lww<T: Clone + PartialEq>(field: &mut Lww<T>, value: T, stamp: &Stamp) -> bool {
@@ -555,7 +622,6 @@ fn default_fields(stamp: Stamp) -> BeadFields {
         acceptance_criteria: Lww::new(None, stamp.clone()),
         priority: Lww::new(Priority::default(), stamp.clone()),
         bead_type: Lww::new(BeadType::Task, stamp.clone()),
-        labels: Lww::new(Labels::new(), stamp.clone()),
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),

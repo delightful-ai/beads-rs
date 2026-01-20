@@ -8,12 +8,15 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256 as Sha2};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use uuid::Uuid;
 
 use crate::core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepEdge,
-    DepKey, DepKind, Labels, Lww, Note, NoteId, Priority, Stamp, Tombstone, Workflow, WriteStamp,
+    DepKey, DepKind, Dot, Labels, Lww, Note, NoteId, Priority, ReplicaId, Sha256, Stamp, Tombstone,
+    Workflow, WriteStamp,
 };
 use crate::daemon::IpcError;
 use crate::daemon::OpError;
@@ -239,7 +242,6 @@ pub fn import_go_export(
             acceptance_criteria: Lww::new(issue.acceptance_criteria.clone(), updated_stamp.clone()),
             priority: Lww::new(priority, updated_stamp.clone()),
             bead_type: Lww::new(bead_type, updated_stamp.clone()),
-            labels: Lww::new(labels, updated_stamp.clone()),
             external_ref: Lww::new(issue.external_ref.clone(), updated_stamp.clone()),
             source_repo: Lww::new(None, updated_stamp.clone()),
             estimated_minutes: Lww::new(
@@ -251,13 +253,31 @@ pub fn import_go_export(
         };
 
         let core = BeadCore::new(id.clone(), created_stamp, None);
-        let mut bead = Bead::new(core, fields);
+        let bead = Bead::new(core, fields);
+
+        state.insert_live(bead);
+        report.live_beads += 1;
+
+        if labels.is_empty() {
+            // No labels to insert; leave label stamp unset.
+        } else {
+            for label in labels.iter() {
+                let dot = legacy_dot_from_bytes(label.as_str().as_bytes(), &updated_stamp);
+                state.apply_label_add(
+                    id.clone(),
+                    label.clone(),
+                    dot,
+                    Sha256([0; 32]),
+                    updated_stamp.clone(),
+                );
+            }
+        }
 
         // Legacy notes (single string) become a synthetic note.
         if let Some(notes) = issue.notes.clone().filter(|s| !s.trim().is_empty()) {
             let note_id = NoteId::new("legacy-notes".to_string())?;
             let note = Note::new(note_id, notes, actor.clone(), updated_stamp.at.clone());
-            bead.notes.insert(note);
+            state.insert_note(id.clone(), note);
             report.notes += 1;
         }
 
@@ -288,13 +308,10 @@ pub fn import_go_export(
                 // Include issue ID to ensure global uniqueness across all imported comments
                 let note_id = NoteId::new(format!("go-comment-{}-{}", id.as_str(), c.id))?;
                 let note = Note::new(note_id, c.text.clone(), author, at);
-                bead.notes.insert(note);
+                state.insert_note(id.clone(), note);
                 report.notes += 1;
             }
         }
-
-        state.insert_live(bead);
-        report.live_beads += 1;
 
         // Dependencies collected for later insert.
         if let Some(deps) = issue.dependencies {
@@ -357,6 +374,25 @@ fn parse_rfc3339_ms(raw: &str) -> Result<u64> {
         return Ok(0);
     }
     Ok((nanos / 1_000_000) as u64)
+}
+
+fn legacy_dot_from_bytes(bytes: &[u8], stamp: &Stamp) -> Dot {
+    let mut hasher = Sha2::new();
+    hasher.update(bytes);
+    hasher.update(stamp.at.wall_ms.to_le_bytes());
+    hasher.update(stamp.at.counter.to_le_bytes());
+    hasher.update(stamp.by.as_str().as_bytes());
+    let digest = hasher.finalize();
+
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes.copy_from_slice(&digest[..16]);
+    let mut counter_bytes = [0u8; 8];
+    counter_bytes.copy_from_slice(&digest[16..24]);
+
+    Dot {
+        replica: ReplicaId::from(Uuid::from_bytes(uuid_bytes)),
+        counter: u64::from_le_bytes(counter_bytes),
+    }
 }
 
 fn parse_issue_type(raw: &str) -> Result<BeadType> {

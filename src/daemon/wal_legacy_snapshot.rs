@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::remote::RemoteUrl;
-use crate::core::{Bead, BeadId, CanonicalState, DepEdge, DepKey, Limits, Tombstone, TombstoneKey};
+use crate::core::{
+    Bead, BeadId, CanonicalState, DepEdge, DepKey, LabelStore, Limits, NoteStore, Tombstone,
+    TombstoneKey,
+};
 
 /// WAL format version.
 const WAL_VERSION: u32 = 1;
@@ -45,6 +48,10 @@ mod wal_state {
         live: Vec<Bead>,
         tombstones: Vec<Tombstone>,
         deps: Vec<WalDep>,
+        #[serde(default)]
+        labels: LabelStore,
+        #[serde(default)]
+        notes: NoteStore,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -59,6 +66,10 @@ mod wal_state {
         live: BTreeMap<BeadId, Bead>,
         tombstones: BTreeMap<TombstoneKey, Tombstone>,
         deps: BTreeMap<DepKey, DepEdge>,
+        #[serde(default)]
+        labels: LabelStore,
+        #[serde(default)]
+        notes: NoteStore,
     }
 
     #[derive(Deserialize)]
@@ -85,6 +96,8 @@ mod wal_state {
                     edge: dep.clone(),
                 })
                 .collect(),
+            labels: state.label_store().clone(),
+            notes: state.note_store().clone(),
         };
         snapshot.serialize(serializer)
     }
@@ -93,8 +106,15 @@ mod wal_state {
     where
         D: Deserializer<'de>,
     {
-        let (live, tombstones, deps) = match WalStateRepr::deserialize(deserializer)? {
-            WalStateRepr::Vecs(snapshot) => (snapshot.live, snapshot.tombstones, snapshot.deps),
+        let (live, tombstones, deps, labels, notes) = match WalStateRepr::deserialize(deserializer)?
+        {
+            WalStateRepr::Vecs(snapshot) => (
+                snapshot.live,
+                snapshot.tombstones,
+                snapshot.deps,
+                snapshot.labels,
+                snapshot.notes,
+            ),
             WalStateRepr::Maps(snapshot) => (
                 snapshot.live.into_values().collect(),
                 snapshot.tombstones.into_values().collect(),
@@ -103,6 +123,8 @@ mod wal_state {
                     .into_iter()
                     .map(|(key, edge)| WalDep { key, edge })
                     .collect(),
+                snapshot.labels,
+                snapshot.notes,
             ),
         };
         let mut state = CanonicalState::new();
@@ -115,6 +137,8 @@ mod wal_state {
         for dep in deps {
             state.insert_dep(dep.key, dep.edge);
         }
+        state.set_label_store(labels);
+        state.set_note_store(notes);
         Ok(state)
     }
 }
@@ -458,7 +482,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::new(2).unwrap(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Default::default(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),

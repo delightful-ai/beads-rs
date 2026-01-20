@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::composite::Note;
 use super::error::{CoreError, InvalidLabel};
 use super::identity::NoteId;
+use super::orset::OrSetValue;
 
 /// Validated label - non-empty, no newlines.
 ///
@@ -69,6 +70,12 @@ impl TryFrom<String> for Label {
 impl From<Label> for String {
     fn from(l: Label) -> String {
         l.0
+    }
+}
+
+impl OrSetValue for Label {
+    fn collision_bytes(&self) -> Vec<u8> {
+        self.as_str().as_bytes().to_vec()
     }
 }
 

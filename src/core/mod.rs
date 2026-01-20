@@ -41,7 +41,7 @@ pub mod watermark;
 pub mod wire_bead;
 
 pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
-pub use bead::{Bead, BeadCore, BeadFields};
+pub use bead::{Bead, BeadCore, BeadFields, BeadView};
 pub use collections::{Label, Labels, NoteLog};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
@@ -77,14 +77,15 @@ pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
 pub use namespaced_state::StoreState;
 pub use orset::{Dot, Dvv, OrSet, OrSetChange, OrSetValue};
 pub use replica_roster::{ReplicaEntry, ReplicaRole, ReplicaRoster, ReplicaRosterError};
-pub use state::{CanonicalState, DepIndexes, LiveLookupError};
+pub use state::{CanonicalState, DepIndexes, DepStore, LabelStore, LiveLookupError, NoteStore};
 pub use store_meta::{StoreMeta, StoreMetaVersions};
 pub mod store_state {
     pub use super::namespaced_state::*;
 }
-pub use dep_tombstone_store::{DepStore, TombstoneStore};
+pub use dep_tombstone_store::TombstoneStore;
 pub mod stores {
     pub use super::dep_tombstone_store::*;
+    pub use super::state::{DepStore, LabelStore, NoteStore};
 }
 pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};

@@ -10,9 +10,9 @@ use super::remote::RemoteUrl;
 use crate::core::{
     ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, CoreError, DepKey,
     DepKind, DepSpec, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
-    NamespaceId, NoteAppendV1, NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity,
-    TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch,
-    WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
+    NamespaceId, NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId,
+    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepDeleteV1,
+    WireDepV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
     encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
 };
 use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
@@ -950,10 +950,11 @@ impl MutationEngine {
         patch: ParsedBeadPatch,
         cas: Option<String>,
     ) -> Result<PlannedDelta, OpError> {
-        let bead = state.require_live(&id).map_live_err(&id)?;
+        state.require_live(&id).map_live_err(&id)?;
 
         if let Some(expected) = cas.as_ref() {
-            let actual = bead.content_hash().to_hex();
+            let view = state.bead_view(&id).expect("live bead should have view");
+            let actual = view.content_hash().to_hex();
             if expected != &actual {
                 return Err(OpError::CasMismatch {
                     expected: expected.clone(),
@@ -984,8 +985,8 @@ impl MutationEngine {
         id: BeadId,
         labels: Labels,
     ) -> Result<PlannedDelta, OpError> {
-        let bead = state.require_live(&id).map_live_err(&id)?;
-        let mut merged = bead.fields.labels.value.clone();
+        state.require_live(&id).map_live_err(&id)?;
+        let mut merged = state.labels_for(&id);
         for label in labels.iter() {
             merged.insert(label.clone());
         }
@@ -1013,8 +1014,8 @@ impl MutationEngine {
         id: BeadId,
         labels: Labels,
     ) -> Result<PlannedDelta, OpError> {
-        let bead = state.require_live(&id).map_live_err(&id)?;
-        let mut merged = bead.fields.labels.value.clone();
+        state.require_live(&id).map_live_err(&id)?;
+        let mut merged = state.labels_for(&id);
         for label in labels.iter() {
             merged.remove(label.as_str());
         }
@@ -1284,8 +1285,8 @@ impl MutationEngine {
         content: String,
     ) -> Result<PlannedDelta, OpError> {
         enforce_note_limit(&content, &self.limits)?;
-        let bead = state.require_live(&id).map_live_err(&id)?;
-        let note_id = generate_unique_note_id(&bead.notes, NoteId::generate);
+        state.require_live(&id).map_live_err(&id)?;
+        let note_id = generate_unique_note_id(state, &id, NoteId::generate);
 
         let note = WireNoteV1 {
             id: note_id.clone(),
@@ -1989,12 +1990,12 @@ fn encode_base36(bytes: &[u8], len: usize) -> String {
     s
 }
 
-fn generate_unique_note_id<F>(notes: &NoteLog, mut next_id: F) -> NoteId
+fn generate_unique_note_id<F>(state: &CanonicalState, bead_id: &BeadId, mut next_id: F) -> NoteId
 where
     F: FnMut() -> NoteId,
 {
     let mut note_id = next_id();
-    while notes.contains(&note_id) {
+    while state.note_id_exists(bead_id, &note_id) {
         note_id = next_id();
     }
     note_id
@@ -2023,7 +2024,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),

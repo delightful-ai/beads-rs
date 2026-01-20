@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use crate::core::bead::Bead;
+use crate::core::BeadView;
 use crate::core::composite::{Claim, Note, Workflow};
 use crate::core::dep::{DepEdge, DepKey};
 use crate::core::domain::DepKind;
@@ -99,7 +99,8 @@ impl GoIssue {
     /// Convert a Rust Bead to a Go-compatible issue.
     ///
     /// `is_blocked` should be true if the bead has unfinished blocking dependencies.
-    pub fn from_bead(bead: &Bead, deps: &[(DepKey, &DepEdge)], is_blocked: bool) -> Self {
+    pub fn from_view(view: &BeadView, deps: &[(DepKey, &DepEdge)], is_blocked: bool) -> Self {
+        let bead = &view.bead;
         let status = derive_status(&bead.fields.workflow.value, is_blocked);
 
         let (closed_at, close_reason) = match bead.fields.workflow.value.closure() {
@@ -115,13 +116,7 @@ impl GoIssue {
             Claim::Unclaimed => None,
         };
 
-        let labels: Vec<String> = bead
-            .fields
-            .labels
-            .value
-            .iter()
-            .map(|l| l.as_str().to_string())
-            .collect();
+        let labels: Vec<String> = view.labels.iter().map(|l| l.as_str().to_string()).collect();
 
         let dependencies: Vec<GoDependency> = deps
             .iter()
@@ -129,18 +124,16 @@ impl GoIssue {
             .map(|(key, edge)| GoDependency::from_edge(key, edge, bead.core.id.as_str()))
             .collect();
 
-        let comments: Vec<GoComment> = bead
+        let comments: Vec<GoComment> = view
             .notes
-            .sorted()
             .iter()
             .enumerate()
             .map(|(i, note)| GoComment::from_note(note, bead.core.id.as_str(), i as i64 + 1))
             .collect();
 
         // Concatenate notes text for the legacy "notes" field (optional)
-        let notes_text: String = bead
+        let notes_text: String = view
             .notes
-            .sorted()
             .iter()
             .map(|n| n.content.as_str())
             .collect::<Vec<_>>()
@@ -163,7 +156,7 @@ impl GoIssue {
             assignee,
             estimated_minutes: bead.fields.estimated_minutes.value,
             created_at: stamp_to_rfc3339(bead.core.created()),
-            updated_at: stamp_to_rfc3339(&bead.updated_stamp()),
+            updated_at: stamp_to_rfc3339(view.updated_stamp()),
             closed_at,
             close_reason,
             external_ref: bead.fields.external_ref.value.clone(),

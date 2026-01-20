@@ -48,8 +48,9 @@ impl Daemon {
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         match state.require_live(id).map_live_err(id) {
-            Ok(bead) => {
-                let issue = Issue::from_bead(read.namespace(), bead);
+            Ok(_) => {
+                let view = state.bead_view(id).expect("live bead should have view");
+                let issue = Issue::from_view(read.namespace(), &view);
                 Response::ok(ResponsePayload::query(QueryResult::Issue(issue)))
             }
             Err(e) => Response::err(e),
@@ -89,8 +90,10 @@ impl Daemon {
                 Ok(id) => id,
                 Err(_) => continue, // Skip invalid IDs silently
             };
-            if let Ok(bead) = state.require_live(&id) {
-                summaries.push(IssueSummary::from_bead(read.namespace(), bead));
+            if let Ok(_) = state.require_live(&id) {
+                if let Some(view) = state.bead_view(&id) {
+                    summaries.push(IssueSummary::from_view(read.namespace(), &view));
+                }
             }
         }
 
@@ -141,16 +144,19 @@ impl Daemon {
 
         let mut views: Vec<IssueSummary> = state
             .iter_live()
-            .filter(|(id, bead)| {
+            .filter_map(|(id, _)| {
                 // If parent filter specified, only include children of that parent.
                 if let Some(ref children) = children_of_parent
                     && !children.contains(id)
                 {
-                    return false;
+                    return None;
                 }
-                filters.matches(bead)
+                let view = state.bead_view(id)?;
+                if !filters.matches(&view) {
+                    return None;
+                }
+                Some(IssueSummary::from_view(read.namespace(), &view))
             })
-            .map(|(_, bead)| IssueSummary::from_bead(read.namespace(), bead))
             .collect();
 
         // Sort
@@ -255,21 +261,20 @@ impl Daemon {
         let mut blocked_count = 0usize;
         let mut closed_count = 0usize;
 
-        let mut views: Vec<IssueSummary> = state
-            .iter_live()
-            .filter(|(id, bead)| {
-                if bead.fields.workflow.value.is_closed() {
-                    closed_count += 1;
-                    return false;
-                }
-                if blocked.contains(id) {
-                    blocked_count += 1;
-                    return false;
-                }
-                true
-            })
-            .map(|(_, bead)| IssueSummary::from_bead(read.namespace(), bead))
-            .collect();
+        let mut views: Vec<IssueSummary> = Vec::new();
+        for (id, bead) in state.iter_live() {
+            if bead.fields.workflow.value.is_closed() {
+                closed_count += 1;
+                continue;
+            }
+            if blocked.contains(id) {
+                blocked_count += 1;
+                continue;
+            }
+            if let Some(view) = state.bead_view(id) {
+                views.push(IssueSummary::from_view(read.namespace(), &view));
+            }
+        }
 
         // Sort by priority (low to high), then created_at (oldest first).
         sort_ready_issues(&mut views);
@@ -428,12 +433,11 @@ impl Daemon {
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
-        let bead = match state.get_live(id) {
-            Some(b) => b,
-            None => return Response::err(OpError::NotFound(id.clone())),
-        };
+        if state.get_live(id).is_none() {
+            return Response::err(OpError::NotFound(id.clone()));
+        }
 
-        let notes: Vec<Note> = bead.notes.sorted().into_iter().map(Note::from).collect();
+        let notes: Vec<Note> = state.notes_for(id).into_iter().map(Note::from).collect();
 
         Response::ok(ResponsePayload::query(QueryResult::Notes(notes)))
     }
@@ -604,11 +608,11 @@ impl Daemon {
         let mut out: Vec<BlockedIssue> = Vec::new();
 
         for (from, deps) in blocked_by {
-            let bead = match state.get_live(&from) {
-                Some(b) => b,
+            let view = match state.bead_view(&from) {
+                Some(view) => view,
                 None => continue,
             };
-            if bead.fields.workflow.value.is_closed() {
+            if view.bead.fields.workflow.value.is_closed() {
                 continue;
             }
 
@@ -618,7 +622,7 @@ impl Daemon {
             blocked_by_ids.dedup();
 
             out.push(BlockedIssue {
-                issue: IssueSummary::from_bead(read.namespace(), bead),
+                issue: IssueSummary::from_view(read.namespace(), &view),
                 blocked_by_count: blocked_by_ids.len(),
                 blocked_by: blocked_by_ids,
             });
@@ -688,8 +692,12 @@ impl Daemon {
                 continue;
             }
 
+            let Some(view) = state.bead_view(id) else {
+                continue;
+            };
+
             // Stale check.
-            let updated_ms = bead.updated_stamp().at.wall_ms;
+            let updated_ms = view.updated_stamp().at.wall_ms;
             if updated_ms > cutoff_ms {
                 continue;
             }
@@ -713,7 +721,7 @@ impl Daemon {
                 }
             }
 
-            out.push(IssueSummary::from_bead(read.namespace(), bead));
+            out.push(IssueSummary::from_view(read.namespace(), &view));
         }
 
         // Stalest first (oldest updated_at).
@@ -777,10 +785,13 @@ impl Daemon {
             }
         }
 
-        let mut matched: Vec<(&BeadId, &crate::core::Bead)> = Vec::new();
+        let mut matched = Vec::new();
 
         for (id, bead) in state.iter_live() {
-            if !base_filters.matches(bead) {
+            let Some(view) = state.bead_view(id) else {
+                continue;
+            };
+            if !base_filters.matches(&view) {
                 continue;
             }
 
@@ -807,7 +818,7 @@ impl Daemon {
                 }
             }
 
-            matched.push((id, bead));
+            matched.push(view);
         }
 
         let Some(group_by) = group_by else {
@@ -820,12 +831,14 @@ impl Daemon {
 
         let mut counts: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
-        for (id, bead) in &matched {
+        for view in &matched {
+            let bead = &view.bead;
+            let id = bead.id();
             match group_by {
                 "status" => {
                     let group = if bead.fields.workflow.value.is_closed() {
                         "closed".to_string()
-                    } else if blocked_by.contains_key(*id) {
+                    } else if blocked_by.contains_key(id) {
                         "blocked".to_string()
                     } else {
                         bead.fields.workflow.value.status().to_string()
@@ -850,10 +863,10 @@ impl Daemon {
                     *counts.entry(group).or_insert(0) += 1;
                 }
                 "label" => {
-                    if bead.fields.labels.value.is_empty() {
+                    if view.labels.is_empty() {
                         *counts.entry("(no labels)".to_string()).or_insert(0) += 1;
                     } else {
-                        for l in bead.fields.labels.value.iter() {
+                        for l in view.labels.iter() {
                             *counts.entry(l.as_str().to_string()).or_insert(0) += 1;
                         }
                     }
@@ -1144,6 +1157,10 @@ fn compute_epic_statuses(
             continue;
         }
 
+        let Some(view) = state.bead_view(id) else {
+            continue;
+        };
+
         let child_ids = children.get(id).cloned().unwrap_or_default();
         let total_children = child_ids.len();
         let closed_children = child_ids
@@ -1162,7 +1179,7 @@ fn compute_epic_statuses(
         }
 
         out.push(EpicStatus {
-            epic: IssueSummary::from_bead(namespace, bead),
+            epic: IssueSummary::from_view(namespace, &view),
             total_children,
             closed_children,
             eligible_for_close,
@@ -1226,7 +1243,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),

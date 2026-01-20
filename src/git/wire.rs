@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use super::error::WireError;
 use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure,
-    ContentHash, DepEdge, DepKey, DepKind, Label, Labels, Lww, Priority, Stamp, Tombstone,
-    WallClock, Workflow, WriteStamp, sha256_bytes,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, BeadView, CanonicalState, Claim,
+    Closure, ContentHash, DepEdge, DepKey, DepKind, Dot, Label, Labels, Lww, Note, Priority,
+    ReplicaId, Sha256, Stamp, Tombstone, WallClock, Workflow, WriteStamp, sha256_bytes,
 };
+use sha2::{Digest, Sha256 as Sha2};
+use uuid::Uuid;
 
 // =============================================================================
 // Wire format types (intermediate representation for JSON)
@@ -117,6 +119,14 @@ struct WireDep {
     deleted_by: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct ParsedWireBead {
+    bead: Bead,
+    labels: Labels,
+    label_stamp: Stamp,
+    notes: Vec<Note>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct WireMeta {
     format_version: u32,
@@ -160,11 +170,14 @@ pub fn serialize_state(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
     let mut lines = Vec::new();
 
     // Sort by ID
-    let mut beads: Vec<_> = state.iter_live().collect();
-    beads.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let mut ids: Vec<_> = state.iter_live().map(|(id, _)| id.clone()).collect();
+    ids.sort();
 
-    for (_, bead) in beads {
-        let wire = bead_to_wire(bead);
+    for id in ids {
+        let Some(view) = state.bead_view(&id) else {
+            continue;
+        };
+        let wire = bead_to_wire(&view);
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
@@ -258,8 +271,15 @@ pub fn serialize_meta(
 // Deserialization
 // =============================================================================
 
-/// Parse state.jsonl bytes into beads.
+/// Parse state.jsonl bytes into beads (legacy view).
 pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
+    Ok(parse_state_full(bytes)?
+        .into_iter()
+        .map(|parsed| parsed.bead)
+        .collect())
+}
+
+fn parse_state_full(bytes: &[u8]) -> Result<Vec<ParsedWireBead>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut beads = Vec::new();
 
@@ -268,8 +288,8 @@ pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
             continue;
         }
         let wire: WireBead = serde_json::from_str(line)?;
-        let bead = wire_to_bead(wire)?;
-        beads.push(bead);
+        let parsed = wire_to_parts(wire)?;
+        beads.push(parsed);
     }
 
     Ok(beads)
@@ -365,13 +385,33 @@ pub fn parse_legacy_state(
     tombstones_bytes: &[u8],
     deps_bytes: &[u8],
 ) -> Result<CanonicalState, WireError> {
-    let beads = parse_state(state_bytes)?;
+    let beads = parse_state_full(state_bytes)?;
     let tombstones = parse_tombstones(tombstones_bytes)?;
     let deps = parse_deps(deps_bytes)?;
 
     let mut state = CanonicalState::new();
-    for bead in beads {
-        state.insert_live(bead);
+    for parsed in beads {
+        let bead_id = parsed.bead.core.id.clone();
+        state.insert_live(parsed.bead);
+
+        if parsed.labels.is_empty() {
+            state.set_label_stamp(bead_id.clone(), parsed.label_stamp.clone());
+        } else {
+            for label in parsed.labels.iter() {
+                let dot = legacy_dot_from_bytes(label.as_str().as_bytes(), &parsed.label_stamp);
+                state.apply_label_add(
+                    bead_id.clone(),
+                    label.clone(),
+                    dot,
+                    Sha256([0; 32]),
+                    parsed.label_stamp.clone(),
+                );
+            }
+        }
+
+        for note in parsed.notes {
+            state.insert_note(bead_id.clone(), note);
+        }
     }
     for tombstone in tombstones {
         state.insert_tombstone(tombstone);
@@ -488,10 +528,11 @@ fn str_to_bead_type(s: &str) -> Result<BeadType, WireError> {
     }
 }
 
-/// Convert Bead to wire format with sparse _v.
-fn bead_to_wire(bead: &Bead) -> WireBead {
+/// Convert Bead view to wire format with sparse _v.
+fn bead_to_wire(view: &BeadView) -> WireBead {
+    let bead = &view.bead;
     // Find bead-level stamp (max of all field stamps)
-    let bead_stamp = bead.updated_stamp();
+    let bead_stamp = view.updated_stamp();
 
     // Build sparse _v: only include fields with different stamps
     let mut v_map: BTreeMap<String, (WireStamp, String)> = BTreeMap::new();
@@ -516,7 +557,17 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
     check_field!(bead.fields.acceptance_criteria, "acceptance_criteria");
     check_field!(bead.fields.priority, "priority");
     check_field!(bead.fields.bead_type, "type");
-    check_field!(bead.fields.labels, "labels");
+    if let Some(label_stamp) = view.label_stamp.as_ref() {
+        if label_stamp != bead_stamp {
+            v_map.insert(
+                "labels".to_string(),
+                (
+                    stamp_to_wire(&label_stamp.at),
+                    label_stamp.by.as_str().to_string(),
+                ),
+            );
+        }
+    }
     check_field!(bead.fields.external_ref, "external_ref");
     check_field!(bead.fields.source_repo, "source_repo");
     check_field!(bead.fields.estimated_minutes, "estimated_minutes");
@@ -550,10 +601,10 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
         };
 
     // Convert notes
-    let notes: Vec<WireNote> = bead
-        .notes
-        .sorted()
-        .iter()
+    let mut notes_sorted: Vec<&Note> = view.notes.iter().collect();
+    notes_sorted.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+    let notes: Vec<WireNote> = notes_sorted
+        .into_iter()
         .map(|n| WireNote {
             id: n.id.as_str().to_string(),
             content: n.content.clone(),
@@ -573,13 +624,7 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
         acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
         priority: bead.fields.priority.value.value(),
         bead_type: bead.fields.bead_type.value.as_str().to_string(),
-        labels: bead
-            .fields
-            .labels
-            .value
-            .iter()
-            .map(|l| l.as_str().to_string())
-            .collect(),
+        labels: view.labels.iter().map(|l| l.as_str().to_string()).collect(),
         external_ref: bead.fields.external_ref.value.clone(),
         source_repo: bead.fields.source_repo.value.clone(),
         estimated_minutes: bead.fields.estimated_minutes.value,
@@ -598,8 +643,7 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
     }
 }
 
-/// Convert wire format to Bead, handling sparse _v.
-fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
+fn wire_to_parts(wire: WireBead) -> Result<ParsedWireBead, WireError> {
     // Default stamp is bead-level
     let default_stamp = Stamp::new(
         wire_to_stamp(wire.at),
@@ -618,6 +662,8 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
         }
         Ok(default_stamp.clone())
     };
+
+    let label_stamp = get_stamp("labels")?;
 
     // Parse core
     let core = BeadCore::new(
@@ -651,6 +697,28 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
         }
     };
 
+    let labels = wire
+        .labels
+        .into_iter()
+        .map(Label::parse)
+        .collect::<std::result::Result<Labels, _>>()
+        .map_err(|e| WireError::InvalidValue(e.to_string()))?;
+
+    let notes = wire
+        .notes
+        .into_iter()
+        .map(|wire_note| {
+            Note::new(
+                crate::core::NoteId::new(wire_note.id)
+                    .map_err(|e| WireError::InvalidValue(e.to_string()))?,
+                wire_note.content,
+                ActorId::new(wire_note.author)
+                    .map_err(|e| WireError::InvalidValue(e.to_string()))?,
+                wire_to_stamp(wire_note.at),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     // Build fields
     let fields = BeadFields {
         title: Lww::new(wire.title, get_stamp("title")?),
@@ -662,14 +730,6 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
             get_stamp("priority")?,
         ),
         bead_type: Lww::new(str_to_bead_type(&wire.bead_type)?, get_stamp("type")?),
-        labels: Lww::new(
-            wire.labels
-                .into_iter()
-                .map(Label::parse)
-                .collect::<std::result::Result<Labels, _>>()
-                .map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            get_stamp("labels")?,
-        ),
         external_ref: Lww::new(wire.external_ref, get_stamp("external_ref")?),
         source_repo: Lww::new(wire.source_repo, get_stamp("source_repo")?),
         estimated_minutes: Lww::new(wire.estimated_minutes, get_stamp("estimated_minutes")?),
@@ -677,22 +737,38 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
         claim: Lww::new(claim_value, get_stamp("claim")?),
     };
 
-    let mut bead = Bead::new(core, fields);
+    let bead = Bead::new(core, fields);
 
-    // Parse notes
-    for wire_note in wire.notes {
-        use crate::core::Note;
-        let note = Note::new(
-            crate::core::NoteId::new(wire_note.id)
-                .map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            wire_note.content,
-            ActorId::new(wire_note.author).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            wire_to_stamp(wire_note.at),
-        );
-        bead.notes.insert(note);
+    Ok(ParsedWireBead {
+        bead,
+        labels,
+        label_stamp,
+        notes,
+    })
+}
+
+/// Convert wire format to Bead, handling sparse _v (legacy view).
+fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
+    Ok(wire_to_parts(wire)?.bead)
+}
+
+fn legacy_dot_from_bytes(bytes: &[u8], stamp: &Stamp) -> Dot {
+    let mut hasher = Sha2::new();
+    hasher.update(bytes);
+    hasher.update(stamp.at.wall_ms.to_le_bytes());
+    hasher.update(stamp.at.counter.to_le_bytes());
+    hasher.update(stamp.by.as_str().as_bytes());
+    let digest = hasher.finalize();
+
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes.copy_from_slice(&digest[..16]);
+    let mut counter_bytes = [0u8; 8];
+    counter_bytes.copy_from_slice(&digest[16..24]);
+
+    Dot {
+        replica: ReplicaId::from(Uuid::from_bytes(uuid_bytes)),
+        counter: u64::from_le_bytes(counter_bytes),
     }
-
-    Ok(bead)
 }
 
 #[cfg(test)]
@@ -717,7 +793,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),

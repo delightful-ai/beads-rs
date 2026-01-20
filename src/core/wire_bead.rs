@@ -10,7 +10,6 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::Bead;
 use super::bead::{BeadCore, BeadFields};
 use super::collections::Labels;
 use super::composite::{Claim, Closure, Note, Workflow};
@@ -18,6 +17,7 @@ use super::crdt::Lww;
 use super::domain::{BeadType, DepKind, Priority};
 use super::identity::{ActorId, BeadId, NoteId};
 use super::time::{Stamp, WallClock, WriteStamp};
+use super::{Bead, BeadView};
 
 /// Wire stamp encoded as [wall_ms, counter].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,9 +281,10 @@ pub struct WireBeadFull {
     pub v: Option<BTreeMap<String, WireFieldStamp>>,
 }
 
-impl From<&Bead> for WireBeadFull {
-    fn from(bead: &Bead) -> Self {
-        let bead_stamp = bead.updated_stamp();
+impl From<&BeadView> for WireBeadFull {
+    fn from(view: &BeadView) -> Self {
+        let bead = &view.bead;
+        let bead_stamp = view.updated_stamp();
 
         let mut v_map: BTreeMap<String, WireFieldStamp> = BTreeMap::new();
         macro_rules! check_field {
@@ -303,7 +304,14 @@ impl From<&Bead> for WireBeadFull {
         check_field!(bead.fields.acceptance_criteria, "acceptance_criteria");
         check_field!(bead.fields.priority, "priority");
         check_field!(bead.fields.bead_type, "type");
-        check_field!(bead.fields.labels, "labels");
+        if let Some(label_stamp) = view.label_stamp.as_ref() {
+            if label_stamp != bead_stamp {
+                v_map.insert(
+                    "labels".to_string(),
+                    (WireStamp::from(&label_stamp.at), label_stamp.by.clone()),
+                );
+            }
+        }
         check_field!(bead.fields.external_ref, "external_ref");
         check_field!(bead.fields.source_repo, "source_repo");
         check_field!(bead.fields.estimated_minutes, "estimated_minutes");
@@ -333,12 +341,9 @@ impl From<&Bead> for WireBeadFull {
                 (None, None, None)
             };
 
-        let notes = bead
-            .notes
-            .sorted()
-            .into_iter()
-            .map(WireNoteV1::from)
-            .collect();
+        let mut notes = view.notes.clone();
+        notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+        let notes = notes.into_iter().map(WireNoteV1::from).collect();
 
         WireBeadFull {
             id: bead.core.id.clone(),
@@ -351,7 +356,7 @@ impl From<&Bead> for WireBeadFull {
             acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
             priority: bead.fields.priority.value,
             bead_type: bead.fields.bead_type.value,
-            labels: bead.fields.labels.value.clone(),
+            labels: view.labels.clone(),
             external_ref: bead.fields.external_ref.value.clone(),
             source_repo: bead.fields.source_repo.value.clone(),
             estimated_minutes: bead.fields.estimated_minutes.value,
@@ -368,6 +373,18 @@ impl From<&Bead> for WireBeadFull {
             by: bead_stamp.by.clone(),
             v: if v_map.is_empty() { None } else { Some(v_map) },
         }
+    }
+}
+
+impl WireBeadFull {
+    pub fn label_stamp(&self) -> Stamp {
+        let bead_stamp = Stamp::new(WriteStamp::from(self.at), self.by.clone());
+        if let Some(v_map) = &self.v
+            && let Some((at, by)) = v_map.get("labels")
+        {
+            return Stamp::new(WriteStamp::from(at), by.clone());
+        }
+        bead_stamp
     }
 }
 
@@ -408,19 +425,13 @@ impl From<WireBeadFull> for Bead {
             ),
             priority: Lww::new(wire.priority, field_stamp("priority")),
             bead_type: Lww::new(wire.bead_type, field_stamp("type")),
-            labels: Lww::new(wire.labels, field_stamp("labels")),
             external_ref: Lww::new(wire.external_ref, field_stamp("external_ref")),
             source_repo: Lww::new(wire.source_repo, field_stamp("source_repo")),
             estimated_minutes: Lww::new(wire.estimated_minutes, field_stamp("estimated_minutes")),
             workflow: Lww::new(workflow_value, field_stamp("workflow")),
             claim: Lww::new(claim_value, field_stamp("claim")),
         };
-
-        let mut bead = Bead::new(core, fields);
-        for note in wire.notes {
-            bead.notes.insert(Note::from(note));
-        }
-        bead
+        Bead::new(core, fields)
     }
 }
 
@@ -754,6 +765,7 @@ impl<'de> Deserialize<'de> for TxnDeltaV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::BeadView;
     use crate::core::collections::Labels;
     use crate::core::composite::Note;
     use crate::core::identity::ActorId;
@@ -810,23 +822,24 @@ mod tests {
             acceptance_criteria: Lww::new(None, base.clone()),
             priority: Lww::new(Priority::default(), base.clone()),
             bead_type: Lww::new(BeadType::Task, base.clone()),
-            labels: Lww::new(Labels::new(), base.clone()),
             external_ref: Lww::new(None, base.clone()),
             source_repo: Lww::new(None, base.clone()),
             estimated_minutes: Lww::new(None, base.clone()),
             workflow: Lww::new(Workflow::Open, base.clone()),
             claim: Lww::new(Claim::Unclaimed, base.clone()),
         };
-        let mut bead = Bead::new(core, fields);
-        bead.notes.insert(Note::new(
+        let bead = Bead::new(core, fields);
+        let labels = Labels::new();
+        let notes = vec![Note::new(
             note_id("note-3"),
             "n".to_string(),
             actor_id("carol"),
             WriteStamp::new(5, 1),
-        ));
+        )];
 
-        let wire = WireBeadFull::from(&bead);
-        let rebuilt = Bead::from(wire);
+        let view = BeadView::new(bead.clone(), labels, notes.clone(), Some(base.clone()));
+        let wire = WireBeadFull::from(&view);
+        let rebuilt = Bead::from(wire.clone());
 
         assert_eq!(bead.core.id, rebuilt.core.id);
         assert_eq!(bead.core.created(), rebuilt.core.created());
@@ -835,7 +848,11 @@ mod tests {
             bead.fields.description.stamp,
             rebuilt.fields.description.stamp
         );
-        assert_eq!(bead.notes, rebuilt.notes);
+        assert_eq!(wire.label_stamp(), base);
+        assert_eq!(
+            wire.notes,
+            notes.iter().map(WireNoteV1::from).collect::<Vec<_>>()
+        );
     }
 
     #[test]

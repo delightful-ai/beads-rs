@@ -137,6 +137,10 @@ impl<V: OrSetValue> OrSet<V> {
         self.entries.keys()
     }
 
+    pub fn dots_for(&self, value: &V) -> Option<&BTreeSet<Dot>> {
+        self.entries.get(value)
+    }
+
     pub fn cc(&self) -> &Dvv {
         &self.cc
     }

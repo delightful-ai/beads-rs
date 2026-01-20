@@ -13,14 +13,208 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256 as Sha256Hasher};
 
-use super::bead::Bead;
-use super::dep::{DepEdge, DepKey, DepLife};
+use super::bead::{Bead, BeadView};
+use super::collections::{Label, Labels};
+use super::composite::Note;
+use super::dep::{DepEdge, DepKey};
 use super::domain::DepKind;
 use super::error::CoreError;
-use super::identity::BeadId;
+use super::event::Sha256;
+use super::identity::{BeadId, NoteId, ReplicaId};
+use super::orset::{Dot, Dvv, OrSet, OrSetChange};
 use super::time::{Stamp, WallClock};
 use super::tombstone::{Tombstone, TombstoneKey};
+use uuid::Uuid;
+
+/// Label membership for a single bead.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LabelState {
+    set: OrSet<Label>,
+    stamp: Option<Stamp>,
+}
+
+impl LabelState {
+    pub fn new() -> Self {
+        Self {
+            set: OrSet::new(),
+            stamp: None,
+        }
+    }
+
+    pub fn stamp(&self) -> Option<&Stamp> {
+        self.stamp.as_ref()
+    }
+
+    fn labels(&self) -> Labels {
+        self.set.values().cloned().collect()
+    }
+
+    fn dots_for(&self, label: &Label) -> Option<&BTreeSet<Dot>> {
+        self.set.dots_for(label)
+    }
+
+    fn join(a: &Self, b: &Self) -> Self {
+        Self {
+            set: OrSet::join(&a.set, &b.set),
+            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
+        }
+    }
+}
+
+/// Canonical label store keyed by bead id.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LabelStore {
+    by_bead: BTreeMap<BeadId, LabelState>,
+}
+
+impl LabelStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn state(&self, id: &BeadId) -> Option<&LabelState> {
+        self.by_bead.get(id)
+    }
+
+    fn state_mut(&mut self, id: &BeadId) -> &mut LabelState {
+        self.by_bead
+            .entry(id.clone())
+            .or_insert_with(LabelState::new)
+    }
+
+    pub fn join(a: &Self, b: &Self) -> Self {
+        let mut merged = LabelStore::new();
+        let ids: BTreeSet<_> = a.by_bead.keys().chain(b.by_bead.keys()).cloned().collect();
+        for id in ids {
+            let next = match (a.by_bead.get(&id), b.by_bead.get(&id)) {
+                (Some(left), Some(right)) => LabelState::join(left, right),
+                (Some(left), None) => left.clone(),
+                (None, Some(right)) => right.clone(),
+                (None, None) => continue,
+            };
+            merged.by_bead.insert(id, next);
+        }
+        merged
+    }
+}
+
+/// Canonical dependency store (OR-Set membership only).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DepStore {
+    set: OrSet<DepKey>,
+    stamp: Option<Stamp>,
+}
+
+impl DepStore {
+    pub fn new() -> Self {
+        Self {
+            set: OrSet::new(),
+            stamp: None,
+        }
+    }
+
+    pub fn stamp(&self) -> Option<&Stamp> {
+        self.stamp.as_ref()
+    }
+
+    pub fn contains(&self, key: &DepKey) -> bool {
+        self.set.contains(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.set.values().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &DepKey> {
+        self.set.values()
+    }
+
+    pub fn dots_for(&self, key: &DepKey) -> Option<&BTreeSet<Dot>> {
+        self.set.dots_for(key)
+    }
+
+    pub fn join(a: &Self, b: &Self) -> Self {
+        Self {
+            set: OrSet::join(&a.set, &b.set),
+            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
+        }
+    }
+}
+
+impl Default for DepStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Canonical note store keyed by bead id.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct NoteStore {
+    by_bead: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
+}
+
+impl NoteStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, id: BeadId, note: Note) -> Option<Note> {
+        let entry = self.by_bead.entry(id).or_default();
+        if let Some(existing) = entry.get(&note.id) {
+            return Some(existing.clone());
+        }
+        entry.insert(note.id.clone(), note);
+        None
+    }
+
+    pub fn get(&self, id: &BeadId, note_id: &NoteId) -> Option<&Note> {
+        self.by_bead.get(id).and_then(|notes| notes.get(note_id))
+    }
+
+    pub fn note_id_exists(&self, id: &BeadId, note_id: &NoteId) -> bool {
+        self.by_bead
+            .get(id)
+            .is_some_and(|notes| notes.contains_key(note_id))
+    }
+
+    pub fn notes_for(&self, id: &BeadId) -> Vec<&Note> {
+        let Some(notes) = self.by_bead.get(id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<&Note> = notes.values().collect();
+        out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+        out
+    }
+
+    pub fn join(a: &Self, b: &Self) -> Self {
+        let mut merged = NoteStore::new();
+        for (id, notes) in a.by_bead.iter().chain(b.by_bead.iter()) {
+            let entry = merged.by_bead.entry(id.clone()).or_default();
+            for (note_id, note) in notes {
+                entry.entry(note_id.clone()).or_insert_with(|| note.clone());
+            }
+        }
+        merged
+    }
+}
+
+fn max_stamp(a: Option<&Stamp>, b: Option<&Stamp>) -> Option<Stamp> {
+    match (a, b) {
+        (Some(left), Some(right)) => Some(if left >= right {
+            left.clone()
+        } else {
+            right.clone()
+        }),
+        (Some(stamp), None) | (None, Some(stamp)) => Some(stamp.clone()),
+        (None, None) => None,
+    }
+}
 
 /// Derived indexes for efficient dependency lookups.
 ///
@@ -98,7 +292,16 @@ pub enum BeadEntry {
 pub struct CanonicalState {
     beads: BTreeMap<BeadId, BeadEntry>,
     collision_tombstones: BTreeMap<TombstoneKey, Tombstone>,
-    deps: BTreeMap<DepKey, DepEdge>,
+    /// Legacy dep edge map (LWW provenance). Retained for compatibility until
+    /// OR-Set wire serialization fully lands.
+    #[serde(default)]
+    deps: BTreeMap<DepKey, super::dep::DepEdge>,
+    #[serde(default)]
+    labels: LabelStore,
+    #[serde(default)]
+    dep_store: DepStore,
+    #[serde(default)]
+    notes: NoteStore,
     /// Derived indexes for O(1) dependency lookups.
     /// Not serialized - rebuilt on load and updated incrementally.
     #[serde(skip, default)]
@@ -165,7 +368,11 @@ impl CanonicalState {
     }
 
     pub fn dep_count(&self) -> usize {
-        self.deps.len()
+        self.dep_store.len()
+    }
+
+    pub fn dep_contains(&self, key: &DepKey) -> bool {
+        self.dep_store.contains(key)
     }
 
     pub fn iter_live(&self) -> impl Iterator<Item = (&BeadId, &Bead)> {
@@ -193,6 +400,204 @@ impl CanonicalState {
 
     pub fn get_dep(&self, key: &DepKey) -> Option<&DepEdge> {
         self.deps.get(key)
+    }
+
+    pub fn labels_for(&self, id: &BeadId) -> Labels {
+        if self.get_live(id).is_none() {
+            return Labels::new();
+        }
+        self.labels
+            .state(id)
+            .map(LabelState::labels)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn labels_for_any(&self, id: &BeadId) -> Labels {
+        self.labels
+            .state(id)
+            .map(LabelState::labels)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn label_dvv(&self, id: &BeadId, label: &Label) -> Dvv {
+        let dots = self
+            .labels
+            .state(id)
+            .and_then(|state| state.dots_for(label));
+        Self::dvv_from_dots(dots)
+    }
+
+    pub fn label_stamp(&self, id: &BeadId) -> Option<&Stamp> {
+        self.labels.state(id).and_then(|state| state.stamp())
+    }
+
+    pub(crate) fn set_label_stamp(&mut self, id: BeadId, stamp: Stamp) {
+        let state = self.labels.state_mut(&id);
+        let replace = match state.stamp.as_ref() {
+            Some(existing) => &stamp > existing,
+            None => true,
+        };
+        if replace {
+            state.stamp = Some(stamp);
+        }
+    }
+
+    pub fn notes_for(&self, id: &BeadId) -> Vec<&Note> {
+        if self.get_live(id).is_none() {
+            return Vec::new();
+        }
+        self.notes.notes_for(id)
+    }
+
+    pub fn note_id_exists(&self, id: &BeadId, note_id: &NoteId) -> bool {
+        self.notes.note_id_exists(id, note_id)
+    }
+
+    pub(crate) fn label_store(&self) -> &LabelStore {
+        &self.labels
+    }
+
+    pub(crate) fn note_store(&self) -> &NoteStore {
+        &self.notes
+    }
+
+    pub(crate) fn set_label_store(&mut self, labels: LabelStore) {
+        self.labels = labels;
+    }
+
+    pub(crate) fn set_note_store(&mut self, notes: NoteStore) {
+        self.notes = notes;
+    }
+
+    pub(crate) fn dep_dvv(&self, key: &DepKey) -> Dvv {
+        Self::dvv_from_dots(self.dep_store.dots_for(key))
+    }
+
+    pub fn bead_view(&self, id: &BeadId) -> Option<BeadView> {
+        let bead = self.get(id)?.clone();
+        let labels = self.labels_for(id);
+        let notes = self
+            .notes
+            .notes_for(id)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let label_stamp = self.label_stamp(id).cloned();
+        Some(BeadView::new(bead, labels, notes, label_stamp))
+    }
+
+    pub fn updated_stamp_for(&self, id: &BeadId) -> Option<Stamp> {
+        self.bead_view(id).map(|view| view.updated_stamp().clone())
+    }
+
+    pub fn content_hash_for(&self, id: &BeadId) -> Option<super::identity::ContentHash> {
+        self.bead_view(id).map(|view| view.content_hash().clone())
+    }
+
+    fn updated_stamp_for_merge(&self, id: &BeadId, bead: &Bead) -> Stamp {
+        let labels = self.labels_for_any(id);
+        let notes = self
+            .notes
+            .notes_for(id)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let label_stamp = self.label_stamp(id).cloned();
+        BeadView::new(bead.clone(), labels, notes, label_stamp)
+            .updated_stamp()
+            .clone()
+    }
+
+    pub fn apply_label_add(
+        &mut self,
+        id: BeadId,
+        label: Label,
+        dot: Dot,
+        op_hash: Sha256,
+        stamp: Stamp,
+    ) -> OrSetChange<Label> {
+        let state = self.labels.state_mut(&id);
+        let change = state.set.apply_add(dot, label, op_hash);
+        if !change.is_empty() {
+            state.stamp = Some(stamp);
+        }
+        change
+    }
+
+    pub fn apply_label_remove(
+        &mut self,
+        id: BeadId,
+        label: &Label,
+        ctx: &Dvv,
+        stamp: Stamp,
+    ) -> OrSetChange<Label> {
+        let state = self.labels.state_mut(&id);
+        let change = state.set.apply_remove(label, ctx);
+        if !change.is_empty() {
+            state.stamp = Some(stamp);
+        }
+        change
+    }
+
+    pub fn apply_dep_add(
+        &mut self,
+        key: DepKey,
+        dot: Dot,
+        op_hash: Sha256,
+        stamp: Stamp,
+    ) -> OrSetChange<DepKey> {
+        let change = self.dep_store.set.apply_add(dot, key.clone(), op_hash);
+        if !change.is_empty() {
+            self.dep_store.stamp = Some(stamp.clone());
+            for added in &change.added {
+                self.dep_indexes.add(added.from(), added.to(), added.kind());
+                self.deps
+                    .entry(added.clone())
+                    .and_modify(|edge| {
+                        let next = DepEdge::new(stamp.clone());
+                        *edge = DepEdge::join(edge, &next);
+                    })
+                    .or_insert_with(|| DepEdge::new(stamp.clone()));
+            }
+            for removed in &change.removed {
+                self.dep_indexes
+                    .remove(removed.from(), removed.to(), removed.kind());
+            }
+        }
+        change
+    }
+
+    pub fn apply_dep_remove(
+        &mut self,
+        key: &DepKey,
+        ctx: &Dvv,
+        stamp: Stamp,
+    ) -> OrSetChange<DepKey> {
+        let change = self.dep_store.set.apply_remove(key, ctx);
+        if !change.is_empty() {
+            self.dep_store.stamp = Some(stamp.clone());
+            for removed in &change.removed {
+                self.dep_indexes
+                    .remove(removed.from(), removed.to(), removed.kind());
+                self.deps
+                    .entry(removed.clone())
+                    .and_modify(|edge| {
+                        let mut next = DepEdge::new(stamp.clone());
+                        next.delete(stamp.clone());
+                        *edge = DepEdge::join(edge, &next);
+                    })
+                    .or_insert_with(|| {
+                        let mut edge = DepEdge::new(stamp.clone());
+                        edge.delete(stamp.clone());
+                        edge
+                    });
+            }
+        }
+        change
+    }
+
+    pub fn insert_note(&mut self, id: BeadId, note: Note) -> Option<Note> {
+        self.notes.insert(id, note)
     }
 
     /// Get a live bead by ID (alias for get).
@@ -239,9 +644,9 @@ impl CanonicalState {
     /// Used for clock synchronization after sync.
     pub fn max_write_stamp(&self) -> Option<super::time::WriteStamp> {
         self.beads
-            .values()
-            .filter_map(|entry| match entry {
-                BeadEntry::Live(bead) => Some(bead.updated_stamp().at.clone()),
+            .iter()
+            .filter_map(|(id, entry)| match entry {
+                BeadEntry::Live(_) => self.updated_stamp_for(id).map(|s| s.at.clone()),
                 _ => None,
             })
             .max()
@@ -299,38 +704,41 @@ impl CanonicalState {
     ///
     /// Maintains the dep indexes incrementally.
     pub fn insert_dep(&mut self, key: DepKey, edge: DepEdge) {
-        let from = key.from().clone();
-        let to = key.to().clone();
-        let kind = key.kind();
+        let merged = match self.deps.get(&key) {
+            Some(existing) => DepEdge::join(existing, &edge),
+            None => edge,
+        };
 
-        if let Some(existing) = self.deps.get(&key) {
-            let was_active = existing.is_active();
-            let merged = DepEdge::join(existing, &edge);
-            let is_active = merged.is_active();
-
-            // Update index if activity state changed
-            match (was_active, is_active) {
-                (true, false) => {
-                    // Active -> Deleted: remove from index
-                    self.dep_indexes.remove(&from, &to, kind);
-                }
-                (false, true) => {
-                    // Deleted -> Active: add to index
-                    self.dep_indexes.add(&from, &to, kind);
-                }
-                _ => {
-                    // No change in activity state
-                }
-            }
-
-            self.deps.insert(key, merged);
+        let change = if merged.is_active() {
+            let dot = Self::legacy_dot_for_dep(&merged.created, &key);
+            self.dep_store
+                .set
+                .apply_add(dot, key.clone(), Sha256([0; 32]))
         } else {
-            // New edge
-            if edge.is_active() {
-                self.dep_indexes.add(&from, &to, kind);
+            let ctx = Self::dvv_from_dots(self.dep_store.dots_for(&key));
+            self.dep_store.set.apply_remove(&key, &ctx)
+        };
+
+        if !change.is_empty() {
+            let stamp = if merged.is_active() {
+                merged.created.clone()
+            } else {
+                merged
+                    .deleted_stamp()
+                    .cloned()
+                    .unwrap_or_else(|| merged.created.clone())
+            };
+            self.dep_store.stamp = Some(stamp);
+            for added in &change.added {
+                self.dep_indexes.add(added.from(), added.to(), added.kind());
             }
-            self.deps.insert(key, edge);
+            for removed in &change.removed {
+                self.dep_indexes
+                    .remove(removed.from(), removed.to(), removed.kind());
+            }
         }
+
+        self.deps.insert(key, merged);
     }
 
     /// Remove a live bead by ID, returning it if present.
@@ -355,7 +763,23 @@ impl CanonicalState {
 
     /// Remove a dependency edge.
     pub fn remove_dep(&mut self, key: &DepKey) -> Option<DepEdge> {
-        self.deps.remove(key)
+        let edge = self.deps.remove(key);
+        if edge.is_some() {
+            let ctx = Self::dvv_from_dots(self.dep_store.dots_for(key));
+            let change = self.dep_store.set.apply_remove(key, &ctx);
+            if !change.is_empty() {
+                self.dep_store.stamp = edge
+                    .as_ref()
+                    .and_then(|edge| edge.deleted_stamp().cloned())
+                    .or_else(|| edge.as_ref().map(|edge| edge.created.clone()))
+                    .or(self.dep_store.stamp.clone());
+                for removed in &change.removed {
+                    self.dep_indexes
+                        .remove(removed.from(), removed.to(), removed.kind());
+                }
+            }
+        }
+        edge
     }
 
     /// Insert a tombstone directly.
@@ -372,6 +796,35 @@ impl CanonicalState {
             .entry(key)
             .and_modify(|t| *t = Tombstone::join(t, &tombstone))
             .or_insert(tombstone);
+    }
+
+    fn legacy_dot_for_dep(stamp: &Stamp, key: &DepKey) -> Dot {
+        let mut hasher = Sha256Hasher::new();
+        hasher.update(key.collision_bytes());
+        hasher.update(stamp.at.wall_ms.to_le_bytes());
+        hasher.update(stamp.at.counter.to_le_bytes());
+        hasher.update(stamp.by.as_str().as_bytes());
+        let digest = hasher.finalize();
+
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes.copy_from_slice(&digest[..16]);
+        let mut counter_bytes = [0u8; 8];
+        counter_bytes.copy_from_slice(&digest[16..24]);
+
+        Dot {
+            replica: ReplicaId::from(Uuid::from_bytes(uuid_bytes)),
+            counter: u64::from_le_bytes(counter_bytes),
+        }
+    }
+
+    fn dvv_from_dots(dots: Option<&BTreeSet<Dot>>) -> Dvv {
+        let mut ctx = Dvv::default();
+        if let Some(dots) = dots {
+            for dot in dots {
+                ctx.observe(*dot);
+            }
+        }
+        ctx
     }
 
     // =========================================================================
@@ -400,6 +853,10 @@ impl CanonicalState {
                 .and_modify(|t| *t = Tombstone::join(t, tomb))
                 .or_insert_with(|| tomb.clone());
         }
+
+        result.labels = LabelStore::join(&a.labels, &b.labels);
+        result.dep_store = DepStore::join(&a.dep_store, &b.dep_store);
+        result.notes = NoteStore::join(&a.notes, &b.notes);
 
         // Collect all bead IDs from both sides (including collision tombstones).
         let all_ids: BTreeSet<_> = a
@@ -458,7 +915,8 @@ impl CanonicalState {
 
             if let (Some(bead), Some(tomb)) = (final_bead.as_ref(), final_tomb.as_ref()) {
                 // RESURRECTION RULE: bead wins if strictly newer than deletion
-                if bead.updated_stamp() > tomb.deleted {
+                let updated = result.updated_stamp_for_merge(&id, bead);
+                if updated > tomb.deleted {
                     final_tomb = None;
                 } else {
                     final_bead = None;
@@ -474,7 +932,7 @@ impl CanonicalState {
             }
         }
 
-        // Merge deps: union by key, join if both exist
+        // Merge legacy dep edges: union by key, join if both exist.
         for (key, edge) in a.deps.iter().chain(b.deps.iter()) {
             result
                 .deps
@@ -483,7 +941,7 @@ impl CanonicalState {
                 .or_insert_with(|| edge.clone());
         }
 
-        // Rebuild derived indexes from merged deps
+        // Rebuild derived indexes from merged dep store
         result.rebuild_dep_indexes();
 
         if errors.is_empty() {
@@ -526,9 +984,13 @@ impl CanonicalState {
     /// Returns the dep key alongside the edge since the key is not stored in the edge.
     /// Uses the derived index for O(neighbors) lookup instead of O(all deps).
     pub fn deps_from(&self, id: &BeadId) -> Vec<(DepKey, &DepEdge)> {
+        if self.get_live(id).is_none() {
+            return Vec::new();
+        }
         self.dep_indexes
             .out_edges(id)
             .iter()
+            .filter(|(to, _)| self.get_live(to).is_some())
             .filter_map(|(to, kind)| {
                 let key = DepKey::new(id.clone(), to.clone(), *kind).ok()?;
                 self.deps.get(&key).map(|edge| (key, edge))
@@ -541,9 +1003,13 @@ impl CanonicalState {
     /// Returns the dep key alongside the edge since the key is not stored in the edge.
     /// Uses the derived index for O(neighbors) lookup instead of O(all deps).
     pub fn deps_to(&self, id: &BeadId) -> Vec<(DepKey, &DepEdge)> {
+        if self.get_live(id).is_none() {
+            return Vec::new();
+        }
         self.dep_indexes
             .in_edges(id)
             .iter()
+            .filter(|(from, _)| self.get_live(from).is_some())
             .filter_map(|(from, kind)| {
                 let key = DepKey::new(from.clone(), id.clone(), *kind).ok()?;
                 self.deps.get(&key).map(|edge| (key, edge))
@@ -555,11 +1021,32 @@ impl CanonicalState {
     ///
     /// Call this after deserializing state or after `join()`.
     pub fn rebuild_dep_indexes(&mut self) {
-        self.dep_indexes = DepIndexes::new();
-        for (key, edge) in &self.deps {
-            if edge.is_active() {
-                self.dep_indexes.add(key.from(), key.to(), key.kind());
+        if self.dep_store.is_empty() && !self.deps.is_empty() {
+            let mut max_stamp: Option<Stamp> = None;
+            for (key, edge) in &self.deps {
+                if !edge.is_active() {
+                    continue;
+                }
+                let dot = Self::legacy_dot_for_dep(&edge.created, key);
+                let change = self
+                    .dep_store
+                    .set
+                    .apply_add(dot, key.clone(), Sha256([0; 32]));
+                if !change.is_empty() {
+                    max_stamp = max_stamp
+                        .as_ref()
+                        .and_then(|current| Some(current.max(&edge.created).clone()))
+                        .or(Some(edge.created.clone()));
+                }
             }
+            if max_stamp.is_some() {
+                self.dep_store.stamp = max_stamp;
+            }
+        }
+
+        self.dep_indexes = DepIndexes::new();
+        for key in self.dep_store.values() {
+            self.dep_indexes.add(key.from(), key.to(), key.kind());
         }
     }
 
@@ -583,8 +1070,8 @@ impl CanonicalState {
 
         let mut adjacency: BTreeMap<BeadId, Vec<BeadId>> = BTreeMap::new();
         let mut nodes: BTreeSet<BeadId> = BTreeSet::new();
-        for (key, edge) in self.iter_deps() {
-            if edge.life.value != DepLife::Active {
+        for key in self.dep_store.values() {
+            if self.get_live(key.from()).is_none() || self.get_live(key.to()).is_none() {
                 continue;
             }
             nodes.insert(key.from().clone());
@@ -735,7 +1222,6 @@ mod tests {
 
     fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -748,7 +1234,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -983,7 +1468,6 @@ mod tests {
     #[test]
     fn invariant_insert_removes_tombstone() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1007,7 +1491,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1025,7 +1508,6 @@ mod tests {
     #[test]
     fn invariant_delete_removes_live() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1043,7 +1525,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1066,7 +1547,6 @@ mod tests {
     #[test]
     fn resurrection_newer_bead_wins() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1089,7 +1569,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, new_stamp.clone()),
             priority: Lww::new(Priority::default(), new_stamp.clone()),
             bead_type: Lww::new(BeadType::Task, new_stamp.clone()),
-            labels: Lww::new(Labels::new(), new_stamp.clone()),
             external_ref: Lww::new(None, new_stamp.clone()),
             source_repo: Lww::new(None, new_stamp.clone()),
             estimated_minutes: Lww::new(None, new_stamp.clone()),
@@ -1110,7 +1589,6 @@ mod tests {
     #[test]
     fn deletion_wins_when_newer() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1129,7 +1607,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, old_stamp.clone()),
             priority: Lww::new(Priority::default(), old_stamp.clone()),
             bead_type: Lww::new(BeadType::Task, old_stamp.clone()),
-            labels: Lww::new(Labels::new(), old_stamp.clone()),
             external_ref: Lww::new(None, old_stamp.clone()),
             source_repo: Lww::new(None, old_stamp.clone()),
             estimated_minutes: Lww::new(None, old_stamp.clone()),
@@ -1154,7 +1631,6 @@ mod tests {
     #[test]
     fn require_live_returns_bead_when_exists() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1171,7 +1647,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1253,7 +1728,6 @@ mod tests {
     #[test]
     fn require_live_mut_returns_mutable_bead() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1270,7 +1744,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),

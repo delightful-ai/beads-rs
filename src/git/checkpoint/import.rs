@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::json_canon::CanonJsonError;
 use super::layout::{CheckpointFileKind, MANIFEST_FILE, META_FILE, parse_shard_path};
@@ -16,8 +17,8 @@ use super::{CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermark
 use crate::core::error::CoreError;
 use crate::core::wire_bead::{WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1};
 use crate::core::{
-    CanonicalState, ContentHash, DepEdge, DepKey, Limits, NamespaceId, StoreState, Tombstone,
-    WriteStamp, sha256_bytes,
+    CanonicalState, ContentHash, DepEdge, DepKey, Dot, Limits, NamespaceId, ReplicaId, Sha256,
+    Stamp, StoreState, Tombstone, WriteStamp, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -253,9 +254,37 @@ pub fn import_checkpoint(
                 &shard.namespace,
                 limits,
                 |line, wire| {
-                    let bead = crate::core::Bead::from(wire);
                     let ns = line.namespace.clone();
-                    state.ensure_namespace(ns).insert_live(bead);
+                    let bead_id = wire.id.clone();
+                    let label_stamp = wire.label_stamp();
+                    let labels = wire.labels.clone();
+                    let notes = wire.notes.clone();
+
+                    let bead = crate::core::Bead::from(wire);
+                    let state = state.ensure_namespace(ns);
+                    state.insert_live(bead);
+
+                    if labels.is_empty() {
+                        state.set_label_stamp(bead_id.clone(), label_stamp.clone());
+                    } else {
+                        for label in labels.iter() {
+                            let dot =
+                                legacy_dot_from_bytes(label.as_str().as_bytes(), &label_stamp);
+                            state.apply_label_add(
+                                bead_id.clone(),
+                                label.clone(),
+                                dot,
+                                Sha256([0; 32]),
+                                label_stamp.clone(),
+                            );
+                        }
+                    }
+
+                    for note in notes {
+                        let note = crate::core::Note::from(note);
+                        state.insert_note(bead_id.clone(), note);
+                    }
+
                     Ok(())
                 },
             )?,
@@ -581,6 +610,25 @@ fn dep_from_wire(
     })?;
 
     Ok((key, edge))
+}
+
+fn legacy_dot_from_bytes(bytes: &[u8], stamp: &Stamp) -> Dot {
+    let mut hasher = Sha2::new();
+    hasher.update(bytes);
+    hasher.update(stamp.at.wall_ms.to_le_bytes());
+    hasher.update(stamp.at.counter.to_le_bytes());
+    hasher.update(stamp.by.as_str().as_bytes());
+    let digest = hasher.finalize();
+
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes.copy_from_slice(&digest[..16]);
+    let mut counter_bytes = [0u8; 8];
+    counter_bytes.copy_from_slice(&digest[16..24]);
+
+    Dot {
+        replica: ReplicaId::from(Uuid::from_bytes(uuid_bytes)),
+        counter: u64::from_le_bytes(counter_bytes),
+    }
 }
 
 struct StampFromWire;
