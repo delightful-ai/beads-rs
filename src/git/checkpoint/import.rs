@@ -15,7 +15,7 @@ use super::json_canon::CanonJsonError;
 use super::layout::{CheckpointFileKind, MANIFEST_FILE, META_FILE, parse_shard_path};
 use super::{CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks};
 use crate::core::error::CoreError;
-use crate::core::wire_bead::{WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1};
+use crate::core::wire_bead::{WireBeadFull, WireDepEdgeV1, WireStamp, WireTombstoneV1};
 use crate::core::{
     CanonicalState, ContentHash, DepEdge, DepKey, Dot, Limits, NamespaceId, ReplicaId, Sha256,
     Stamp, StoreState, Tombstone, WriteStamp, sha256_bytes,
@@ -299,7 +299,7 @@ pub fn import_checkpoint(
                     Ok(())
                 },
             )?,
-            CheckpointFileKind::Deps => parse_jsonl_file::<WireDepV1, _>(
+            CheckpointFileKind::Deps => parse_jsonl_file::<WireDepEdgeV1, _>(
                 &full_path,
                 &shard.namespace,
                 limits,
@@ -580,7 +580,7 @@ fn tombstone_from_wire(
 }
 
 fn dep_from_wire(
-    wire: &WireDepV1,
+    wire: &WireDepEdgeV1,
     path: &Path,
     line: JsonlLineContext,
 ) -> Result<(DepKey, DepEdge), CheckpointImportError> {

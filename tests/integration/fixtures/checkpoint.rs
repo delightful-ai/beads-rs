@@ -15,7 +15,7 @@ use beads_rs::git::checkpoint::{
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
     Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, Tombstone, Watermarks,
-    WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1, Workflow, WriteStamp, sha256_bytes,
+    WireBeadFull, WireDepEdgeV1, WireStamp, WireTombstoneV1, Workflow, WriteStamp, sha256_bytes,
 };
 
 use super::identity;
@@ -425,9 +425,9 @@ fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
     }
 }
 
-fn wire_dep(key: &DepKey, edge: &DepEdge) -> WireDepV1 {
+fn wire_dep(key: &DepKey, edge: &DepEdge) -> WireDepEdgeV1 {
     let deleted = edge.deleted_stamp();
-    WireDepV1 {
+    WireDepEdgeV1 {
         from: key.from().clone(),
         to: key.to().clone(),
         kind: key.kind(),

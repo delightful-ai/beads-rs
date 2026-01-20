@@ -19,8 +19,8 @@ use crate::core::dep::DepKey;
 use crate::core::tombstone::TombstoneKey;
 use crate::core::{
     ContentHash, DepEdge, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId,
-    ReplicaRoster, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireDepV1,
-    WireStamp, WireTombstoneV1, sha256_bytes,
+    ReplicaRoster, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull,
+    WireDepEdgeV1, WireStamp, WireTombstoneV1, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -399,9 +399,9 @@ fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
     }
 }
 
-fn wire_dep(key: &DepKey, edge: &DepEdge) -> WireDepV1 {
+fn wire_dep(key: &DepKey, edge: &DepEdge) -> WireDepEdgeV1 {
     let deleted = edge.deleted_stamp();
-    WireDepV1 {
+    WireDepEdgeV1 {
         from: key.from().clone(),
         to: key.to().clone(),
         kind: key.kind(),
