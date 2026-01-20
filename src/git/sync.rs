@@ -487,8 +487,7 @@ impl SyncProcess<Fetched> {
         let mut merged = CanonicalState::join(local_state, &remote_state)
             .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
 
-        // Garbage collect soft-deleted deps. Tombstones are GC'd only if configured.
-        merged.gc_deleted_deps();
+        // Garbage collect tombstones if configured.
         if let Some(ttl_ms) = config.tombstone_ttl_ms {
             let removed = merged.gc_tombstones(ttl_ms, WallClock::now());
             if removed > 0 {
@@ -1259,7 +1258,7 @@ mod tests {
     use super::*;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
-        Priority, ReplicaId, Sha256, Tombstone, Workflow,
+        Priority, ReplicaId, Sha256, Stamp, Tombstone, Workflow,
     };
     #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;

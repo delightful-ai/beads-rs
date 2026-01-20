@@ -9,7 +9,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
-use uuid::Uuid;
 
 use super::json_canon::CanonJsonError;
 use super::layout::{CheckpointFileKind, MANIFEST_FILE, META_FILE, parse_shard_path};
@@ -299,7 +298,7 @@ pub fn import_checkpoint(
                 |line, wire| {
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &full_path, line)?;
-                    let entry = dep_stores.entry(ns.clone()).or_insert_with(DepStore::new);
+                    let entry = dep_stores.entry(ns.clone()).or_default();
                     *entry = DepStore::join(entry, &dep_store);
                     Ok(())
                 },

@@ -15,12 +15,12 @@ use super::layout::{
 use super::manifest::{CheckpointManifest, ManifestFile};
 use super::meta::{CheckpointMeta, IncludedHeads, IncludedWatermarks};
 use super::types::{CheckpointShardPayload, CheckpointSnapshot};
-use crate::core::dep::DepKey;
 use crate::core::tombstone::TombstoneKey;
+use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1};
 use crate::core::{
-    ContentHash, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRoster,
-    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireDepEntryV1,
-    WireDepStoreV1, WireStamp, WireTombstoneV1, sha256_bytes,
+    ContentHash, Dot, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRoster,
+    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireStamp,
+    WireTombstoneV1, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -437,6 +437,7 @@ mod tests {
     use crate::core::bead::{BeadCore, BeadFields};
     use crate::core::composite::{Claim, Workflow};
     use crate::core::crdt::Lww;
+    use crate::core::dep::DepKey;
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};

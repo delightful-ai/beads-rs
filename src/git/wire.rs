@@ -12,11 +12,9 @@ use serde::{Deserialize, Serialize};
 use super::error::WireError;
 use crate::core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, BeadView, CanonicalState, Claim,
-    Closure, ContentHash, DepKey, DepKind, DepStore, Dot, Dvv, Label, LabelStore, Lww, Note,
-    NoteId, NoteStore, OrSet, Priority, ReplicaId, Stamp, Tombstone, WallClock, Workflow,
-    WriteStamp, sha256_bytes,
+    Closure, ContentHash, DepKey, DepStore, Dot, Dvv, Label, LabelStore, Lww, Note, NoteId,
+    NoteStore, OrSet, Priority, Stamp, Tombstone, WallClock, Workflow, WriteStamp, sha256_bytes,
 };
-use uuid::Uuid;
 
 use crate::core::state::LabelState;
 
@@ -822,7 +820,9 @@ fn wire_to_parts(wire: WireBead) -> Result<ParsedWireBead, WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{DepKind, ReplicaId};
     use proptest::prelude::*;
+    use uuid::Uuid;
 
     fn actor_id(actor: &str) -> ActorId {
         ActorId::new(actor).unwrap_or_else(|e| panic!("invalid actor id {actor}: {e}"))

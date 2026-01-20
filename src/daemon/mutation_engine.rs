@@ -1245,8 +1245,8 @@ impl MutationEngine {
         let existing_parents: Vec<BeadId> = state
             .deps_from(&id)
             .into_iter()
-            .filter(|(key, _)| key.kind() == DepKind::Parent)
-            .map(|(key, _)| key.to().clone())
+            .filter(|key| key.kind() == DepKind::Parent)
+            .map(|key| key.to().clone())
             .collect();
 
         let mut delta = TxnDeltaV1::new();
@@ -1737,7 +1737,7 @@ fn would_create_cycle(state: &CanonicalState, from: &BeadId, to: &BeadId, kind: 
         if !visited.insert(current.clone()) {
             continue;
         }
-        for (key, _) in state.deps_from(&current) {
+        for key in state.deps_from(&current) {
             if key.kind().requires_dag() && !visited.contains(key.to()) {
                 queue.push(key.to().clone());
             }

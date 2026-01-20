@@ -22,7 +22,7 @@ use super::domain::DepKind;
 use super::error::CoreError;
 use super::event::Sha256;
 use super::identity::{BeadId, NoteId};
-use super::orset::{Dot, Dvv, OrSet, OrSetChange, OrSetValue};
+use super::orset::{Dot, Dvv, OrSet, OrSetChange};
 use super::time::{Stamp, WallClock};
 use super::tombstone::{Tombstone, TombstoneKey};
 
@@ -456,17 +456,6 @@ impl CanonicalState {
 
     pub fn label_stamp(&self, id: &BeadId) -> Option<&Stamp> {
         self.labels.state(id).and_then(|state| state.stamp())
-    }
-
-    pub(crate) fn set_label_stamp(&mut self, id: BeadId, stamp: Stamp) {
-        let state = self.labels.state_mut(&id);
-        let replace = match state.stamp.as_ref() {
-            Some(existing) => &stamp > existing,
-            None => true,
-        };
-        if replace {
-            state.stamp = Some(stamp);
-        }
     }
 
     pub fn notes_for(&self, id: &BeadId) -> Vec<&Note> {
