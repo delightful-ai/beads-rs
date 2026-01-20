@@ -1016,6 +1016,21 @@ mod tests {
                 max: BTreeMap::new(),
             },
         };
+        let label_add = WireLabelAddV1 {
+            bead_id: bead_id("bd-order"),
+            label: Label::parse("triage".to_string()).unwrap(),
+            dot: WireDotV1 {
+                replica: ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])),
+                counter: 2,
+            },
+        };
+        let label_remove = WireLabelRemoveV1 {
+            bead_id: bead_id("bd-order"),
+            label: Label::parse("triage".to_string()).unwrap(),
+            ctx: WireDvvV1 {
+                max: BTreeMap::from([(ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])), 2)]),
+            },
+        };
         let append = NoteAppendV1 {
             bead_id: bead_id("bd-order"),
             note: WireNoteV1 {
@@ -1028,7 +1043,9 @@ mod tests {
         delta.insert(TxnOpV1::NoteAppend(append)).unwrap();
         delta.insert(TxnOpV1::DepRemove(dep_remove)).unwrap();
         delta.insert(TxnOpV1::BeadDelete(delete)).unwrap();
+        delta.insert(TxnOpV1::LabelRemove(label_remove)).unwrap();
         delta.insert(TxnOpV1::DepAdd(dep_add)).unwrap();
+        delta.insert(TxnOpV1::LabelAdd(label_add)).unwrap();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(bead_id(
                 "bd-order",
@@ -1038,6 +1055,8 @@ mod tests {
         let mut iter = delta.iter();
         assert!(matches!(iter.next(), Some(TxnOpV1::BeadUpsert(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::BeadDelete(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::LabelAdd(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::LabelRemove(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::DepAdd(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::DepRemove(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::NoteAppend(_))));
@@ -1078,7 +1097,29 @@ mod tests {
                 to: bead_id("bd-rt-dep2"),
                 kind: DepKind::Related,
                 ctx: WireDvvV1 {
-                    max: BTreeMap::new(),
+                    max: BTreeMap::from([
+                        (ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])), 5),
+                        (ReplicaId::from(uuid::Uuid::from_bytes([3u8; 16])), 2),
+                    ]),
+                },
+            }))
+            .unwrap();
+        delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id("bd-rt"),
+                label: Label::parse("triage".to_string()).unwrap(),
+                dot: WireDotV1 {
+                    replica: ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])),
+                    counter: 9,
+                },
+            }))
+            .unwrap();
+        delta
+            .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+                bead_id: bead_id("bd-rt"),
+                label: Label::parse("triage".to_string()).unwrap(),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([(ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])), 9)]),
                 },
             }))
             .unwrap();
