@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 use super::bead::{BeadCore, BeadFields};
-use super::collections::{Label, Labels};
+use super::collections::Labels;
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::{DepEdge, DepKey, DepLife};
@@ -126,10 +126,10 @@ fn apply_bead_upsert(
         };
 
         let mut changed = field_changed;
-        if let Some(labels) = &patch.labels {
-            if apply_label_patch(state, &id, labels, event_stamp) {
-                changed = true;
-            }
+        if let Some(labels) = &patch.labels
+            && apply_label_patch(state, &id, labels, event_stamp)
+        {
+            changed = true;
         }
         if let NotesPatch::AtLeast(notes) = &patch.notes {
             for note in notes {
@@ -343,7 +343,7 @@ fn apply_patch_to_bead(
     bead: &mut super::Bead,
     patch: &WireBeadPatch,
     event_stamp: &Stamp,
-    outcome: &mut ApplyOutcome,
+    _outcome: &mut ApplyOutcome,
 ) -> Result<bool, ApplyError> {
     let mut changed = false;
 
@@ -536,10 +536,8 @@ fn apply_note_append(
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let note = note_to_core(note);
-    if apply_note(state, bead_id.clone(), note, outcome)? {
-        if state.get_live(&bead_id).is_some() {
-            outcome.changed_beads.insert(bead_id);
-        }
+    if apply_note(state, bead_id.clone(), note, outcome)? && state.get_live(&bead_id).is_some() {
+        outcome.changed_beads.insert(bead_id);
     }
     Ok(())
 }

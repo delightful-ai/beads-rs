@@ -13,8 +13,8 @@ use beads_rs::git::checkpoint::{
 };
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
-    DepKind, Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp,
-    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
+    DepKind, Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreEpoch,
+    StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
 };
 
 use crate::fixtures::checkpoint::{
@@ -368,7 +368,6 @@ fn make_bead(id: &BeadId, stamp: &Stamp, title: &str) -> Bead {
         acceptance_criteria: Lww::new(None, stamp.clone()),
         priority: Lww::new(Priority::default(), stamp.clone()),
         bead_type: Lww::new(BeadType::Task, stamp.clone()),
-        labels: Lww::new(Labels::new(), stamp.clone()),
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),

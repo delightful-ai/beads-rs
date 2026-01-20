@@ -532,7 +532,7 @@ fn str_to_bead_type(s: &str) -> Result<BeadType, WireError> {
 fn bead_to_wire(view: &BeadView) -> WireBead {
     let bead = &view.bead;
     // Find bead-level stamp (max of all field stamps)
-    let bead_stamp = view.updated_stamp();
+    let bead_stamp = view.updated_stamp().clone();
 
     // Build sparse _v: only include fields with different stamps
     let mut v_map: BTreeMap<String, (WireStamp, String)> = BTreeMap::new();
@@ -557,16 +557,16 @@ fn bead_to_wire(view: &BeadView) -> WireBead {
     check_field!(bead.fields.acceptance_criteria, "acceptance_criteria");
     check_field!(bead.fields.priority, "priority");
     check_field!(bead.fields.bead_type, "type");
-    if let Some(label_stamp) = view.label_stamp.as_ref() {
-        if label_stamp != bead_stamp {
-            v_map.insert(
-                "labels".to_string(),
-                (
-                    stamp_to_wire(&label_stamp.at),
-                    label_stamp.by.as_str().to_string(),
-                ),
-            );
-        }
+    if let Some(label_stamp) = view.label_stamp.as_ref()
+        && label_stamp != &bead_stamp
+    {
+        v_map.insert(
+            "labels".to_string(),
+            (
+                stamp_to_wire(&label_stamp.at),
+                label_stamp.by.as_str().to_string(),
+            ),
+        );
     }
     check_field!(bead.fields.external_ref, "external_ref");
     check_field!(bead.fields.source_repo, "source_repo");
@@ -708,16 +708,18 @@ fn wire_to_parts(wire: WireBead) -> Result<ParsedWireBead, WireError> {
         .notes
         .into_iter()
         .map(|wire_note| {
-            Note::new(
-                crate::core::NoteId::new(wire_note.id)
-                    .map_err(|e| WireError::InvalidValue(e.to_string()))?,
+            let note_id = crate::core::NoteId::new(wire_note.id)
+                .map_err(|e| WireError::InvalidValue(e.to_string()))?;
+            let author = ActorId::new(wire_note.author)
+                .map_err(|e| WireError::InvalidValue(e.to_string()))?;
+            Ok(Note::new(
+                note_id,
                 wire_note.content,
-                ActorId::new(wire_note.author)
-                    .map_err(|e| WireError::InvalidValue(e.to_string()))?,
+                author,
                 wire_to_stamp(wire_note.at),
-            )
+            ))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, WireError>>()?;
 
     // Build fields
     let fields = BeadFields {
@@ -745,11 +747,6 @@ fn wire_to_parts(wire: WireBead) -> Result<ParsedWireBead, WireError> {
         label_stamp,
         notes,
     })
-}
-
-/// Convert wire format to Bead, handling sparse _v (legacy view).
-fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
-    Ok(wire_to_parts(wire)?.bead)
 }
 
 fn legacy_dot_from_bytes(bytes: &[u8], stamp: &Stamp) -> Dot {

@@ -90,10 +90,8 @@ impl Daemon {
                 Ok(id) => id,
                 Err(_) => continue, // Skip invalid IDs silently
             };
-            if let Ok(_) = state.require_live(&id) {
-                if let Some(view) = state.bead_view(&id) {
-                    summaries.push(IssueSummary::from_view(read.namespace(), &view));
-                }
+            if let Some(view) = state.bead_view(&id) {
+                summaries.push(IssueSummary::from_view(read.namespace(), &view));
             }
         }
 
@@ -1204,7 +1202,7 @@ mod tests {
     use super::{dep_cycles_from_state, sort_ready_issues};
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge,
-        DepKey, DepKind, Labels, Lww, NamespaceId, Priority, Stamp, Workflow, WriteStamp,
+        DepKey, DepKind, Lww, NamespaceId, Priority, Stamp, Workflow, WriteStamp,
     };
 
     fn issue_summary(id: &str, priority: u8, created_at_ms: u64) -> IssueSummary {
@@ -1273,8 +1271,14 @@ mod tests {
         let stamp = Stamp::new(WriteStamp::new(1_000, 0), actor);
         let bead = make_bead("bd-123", &stamp);
         let namespace = NamespaceId::parse("wf").unwrap();
+        let mut state = CanonicalState::new();
 
-        let summary = IssueSummary::from_bead(&namespace, &bead);
+        state.insert(bead).expect("insert bead");
+        let view = state
+            .bead_view(&BeadId::parse("bd-123").unwrap())
+            .expect("bead view");
+
+        let summary = IssueSummary::from_view(&namespace, &view);
 
         assert_eq!(summary.namespace, namespace);
     }
@@ -1285,8 +1289,14 @@ mod tests {
         let stamp = Stamp::new(WriteStamp::new(2_000, 0), actor);
         let bead = make_bead("bd-456", &stamp);
         let namespace = NamespaceId::parse("wf").unwrap();
+        let mut state = CanonicalState::new();
 
-        let issue = Issue::from_bead(&namespace, &bead);
+        state.insert(bead).expect("insert bead");
+        let view = state
+            .bead_view(&BeadId::parse("bd-456").unwrap())
+            .expect("bead view");
+
+        let issue = Issue::from_view(&namespace, &view);
 
         assert_eq!(issue.namespace, namespace);
     }
@@ -1299,6 +1309,8 @@ mod tests {
 
         let a = "bd-aaa";
         let b = "bd-bbb";
+        state.insert(make_bead(a, &stamp)).expect("insert bead a");
+        state.insert(make_bead(b, &stamp)).expect("insert bead b");
 
         let ab = DepKey::new(
             crate::core::BeadId::parse(a).unwrap(),

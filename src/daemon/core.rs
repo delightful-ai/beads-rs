@@ -2680,12 +2680,12 @@ mod tests {
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Labels,
-        Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority,
-        ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
-        TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp,
-        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww,
+        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry,
+        ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
+        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
+        VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
+        WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -3814,7 +3814,7 @@ mod tests {
     }
 
     #[test]
-    fn ingest_reports_apply_failure_after_append() {
+    fn ingest_accepts_orphan_note_after_append() {
         let tmp = TempStoreDir::new();
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
@@ -3825,7 +3825,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         let note_id = NoteId::new("note-1").unwrap();
         let note = WireNoteV1 {
-            id: note_id,
+            id: note_id.clone(),
             content: "hi".to_string(),
             author: ActorId::new("alice").unwrap(),
             at: WireStamp(now_ms, 0),
@@ -3845,16 +3845,9 @@ mod tests {
         std::fs::create_dir_all(&repo_path).unwrap();
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
 
-        let err = daemon
+        let _outcome = daemon
             .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event], now_ms)
-            .expect_err("apply failure should reject batch");
-        assert_eq!(err.code, ProtocolErrorCode::Corruption.into());
-        let details = err
-            .to_payload()
-            .details_as::<error_details::CorruptionDetails>()
-            .unwrap()
-            .expect("corruption details");
-        assert!(details.reason.contains("apply_event rejected for core/"));
+            .expect("ingest should accept orphan note");
 
         let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
         let segments = store_runtime
@@ -3863,6 +3856,14 @@ mod tests {
             .list_segments(&namespace)
             .expect("segments");
         assert_eq!(segments.len(), 1);
+        let state = store_runtime
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(
+            state.note_id_exists(&BeadId::parse("bd-missing").unwrap(), &note_id),
+            "orphan note stored"
+        );
     }
 
     #[test]

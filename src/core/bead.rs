@@ -338,21 +338,18 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
 
     // closed_at/by/reason/on_branch
     if let Workflow::Closed(closure) = &bead.fields.workflow.value {
-        if let Some(at) = closure.closed_at() {
-            h.update(at.wall_ms.to_string().as_bytes());
-            h.update(b",");
-            h.update(at.counter.to_string().as_bytes());
-        }
+        let closed_stamp = &bead.fields.workflow.stamp;
+        h.update(closed_stamp.at.wall_ms.to_string().as_bytes());
+        h.update(b",");
+        h.update(closed_stamp.at.counter.to_string().as_bytes());
         h.update([0]);
-        if let Some(by) = closure.closed_by() {
-            h.update(by.as_str().as_bytes());
-        }
+        h.update(closed_stamp.by.as_str().as_bytes());
         h.update([0]);
-        if let Some(reason) = closure.reason() {
+        if let Some(reason) = closure.reason.as_ref() {
             h.update(reason.as_bytes());
         }
         h.update([0]);
-        if let Some(branch) = closure.closed_on_branch() {
+        if let Some(branch) = closure.on_branch.as_ref() {
             h.update(branch.as_bytes());
         }
     }
@@ -370,5 +367,5 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
     }
     h.update([0]);
 
-    ContentHash::from_sha256(h.finalize().into())
+    ContentHash::from_bytes(h.finalize().into())
 }

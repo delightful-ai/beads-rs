@@ -567,7 +567,7 @@ mod tests {
         core_state.insert_tombstone(tombstone.clone());
         core_state.insert_dep(dep_key.clone(), dep_edge.clone());
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state);
+        state.set_namespace_state(namespace.clone(), core_state.clone());
 
         let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
         let mut watermarks = Watermarks::<Durable>::new();

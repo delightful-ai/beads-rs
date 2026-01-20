@@ -284,7 +284,7 @@ pub struct WireBeadFull {
 impl From<&BeadView> for WireBeadFull {
     fn from(view: &BeadView) -> Self {
         let bead = &view.bead;
-        let bead_stamp = view.updated_stamp();
+        let bead_stamp = view.updated_stamp().clone();
 
         let mut v_map: BTreeMap<String, WireFieldStamp> = BTreeMap::new();
         macro_rules! check_field {
@@ -304,13 +304,13 @@ impl From<&BeadView> for WireBeadFull {
         check_field!(bead.fields.acceptance_criteria, "acceptance_criteria");
         check_field!(bead.fields.priority, "priority");
         check_field!(bead.fields.bead_type, "type");
-        if let Some(label_stamp) = view.label_stamp.as_ref() {
-            if label_stamp != bead_stamp {
-                v_map.insert(
-                    "labels".to_string(),
-                    (WireStamp::from(&label_stamp.at), label_stamp.by.clone()),
-                );
-            }
+        if let Some(label_stamp) = view.label_stamp.as_ref()
+            && label_stamp != &bead_stamp
+        {
+            v_map.insert(
+                "labels".to_string(),
+                (WireStamp::from(&label_stamp.at), label_stamp.by.clone()),
+            );
         }
         check_field!(bead.fields.external_ref, "external_ref");
         check_field!(bead.fields.source_repo, "source_repo");

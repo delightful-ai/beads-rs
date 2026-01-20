@@ -493,20 +493,23 @@ mod tests {
         assert_eq!(report.notes, 2);
 
         // Verify distinct note IDs
-        let bead_aaa = state.get_live(&BeadId::parse("bd-aaa").unwrap()).unwrap();
-        let bead_bbb = state.get_live(&BeadId::parse("bd-bbb").unwrap()).unwrap();
+        let bead_aaa = BeadId::parse("bd-aaa").unwrap();
+        let bead_bbb = BeadId::parse("bd-bbb").unwrap();
 
-        assert_eq!(bead_aaa.notes.len(), 1);
-        assert_eq!(bead_bbb.notes.len(), 1);
+        let notes_aaa = state.notes_for(&bead_aaa);
+        let notes_bbb = state.notes_for(&bead_bbb);
 
-        let (note_id_aaa, _) = bead_aaa.notes.iter().next().unwrap();
-        let (note_id_bbb, _) = bead_bbb.notes.iter().next().unwrap();
+        assert_eq!(notes_aaa.len(), 1);
+        assert_eq!(notes_bbb.len(), 1);
+
+        let note_id_aaa = notes_aaa[0].id.as_str();
+        let note_id_bbb = notes_bbb[0].id.as_str();
 
         // Note IDs should be different despite same comment id=1
-        assert_ne!(note_id_aaa.as_str(), note_id_bbb.as_str());
+        assert_ne!(note_id_aaa, note_id_bbb);
         // Verify the format includes issue ID
-        assert!(note_id_aaa.as_str().contains("bd-aaa"));
-        assert!(note_id_bbb.as_str().contains("bd-bbb"));
+        assert!(note_id_aaa.contains("bd-aaa"));
+        assert!(note_id_bbb.contains("bd-bbb"));
     }
 
     #[test]
@@ -529,12 +532,13 @@ mod tests {
 
         assert_eq!(report.notes, 3);
 
-        let bead = state.get_live(&BeadId::parse("bd-xyz").unwrap()).unwrap();
-        assert_eq!(bead.notes.len(), 3);
+        let bead = BeadId::parse("bd-xyz").unwrap();
+        let notes = state.notes_for(&bead);
+        assert_eq!(notes.len(), 3);
 
         // All note IDs should be unique
         let note_ids: std::collections::HashSet<_> =
-            bead.notes.iter().map(|(id, _)| id.as_str()).collect();
+            notes.iter().map(|note| note.id.as_str()).collect();
         assert_eq!(note_ids.len(), 3);
     }
 }

@@ -23,7 +23,7 @@ use super::domain::DepKind;
 use super::error::CoreError;
 use super::event::Sha256;
 use super::identity::{BeadId, NoteId, ReplicaId};
-use super::orset::{Dot, Dvv, OrSet, OrSetChange};
+use super::orset::{Dot, Dvv, OrSet, OrSetChange, OrSetValue};
 use super::time::{Stamp, WallClock};
 use super::tombstone::{Tombstone, TombstoneKey};
 use uuid::Uuid;
@@ -63,6 +63,12 @@ impl LabelState {
     }
 }
 
+impl Default for LabelState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Canonical label store keyed by bead id.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LabelStore {
@@ -79,9 +85,7 @@ impl LabelStore {
     }
 
     fn state_mut(&mut self, id: &BeadId) -> &mut LabelState {
-        self.by_bead
-            .entry(id.clone())
-            .or_insert_with(LabelState::new)
+        self.by_bead.entry(id.clone()).or_default()
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
@@ -469,10 +473,6 @@ impl CanonicalState {
         self.notes = notes;
     }
 
-    pub(crate) fn dep_dvv(&self, key: &DepKey) -> Dvv {
-        Self::dvv_from_dots(self.dep_store.dots_for(key))
-    }
-
     pub fn bead_view(&self, id: &BeadId) -> Option<BeadView> {
         let bead = self.get(id)?.clone();
         let labels = self.labels_for(id);
@@ -491,7 +491,7 @@ impl CanonicalState {
     }
 
     pub fn content_hash_for(&self, id: &BeadId) -> Option<super::identity::ContentHash> {
-        self.bead_view(id).map(|view| view.content_hash().clone())
+        self.bead_view(id).map(|view| *view.content_hash())
     }
 
     fn updated_stamp_for_merge(&self, id: &BeadId, bead: &Bead) -> Stamp {
@@ -1035,7 +1035,7 @@ impl CanonicalState {
                 if !change.is_empty() {
                     max_stamp = max_stamp
                         .as_ref()
-                        .and_then(|current| Some(current.max(&edge.created).clone()))
+                        .map(|current| current.max(&edge.created).clone())
                         .or(Some(edge.created.clone()));
                 }
             }
@@ -1667,6 +1667,9 @@ mod tests {
         let a = bead_id("bd-aaa");
         let b = bead_id("bd-bbb");
         let c = bead_id("bd-ccc");
+        for id in [&a, &b, &c] {
+            state.insert(make_bead(id, &stamp)).unwrap();
+        }
 
         let ab = DepKey::new(a.clone(), b.clone(), DepKind::Blocks)
             .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
@@ -1865,6 +1868,9 @@ mod tests {
         let from = BeadId::parse("bd-aaa").unwrap();
         let to1 = BeadId::parse("bd-bbb").unwrap();
         let to2 = BeadId::parse("bd-ccc").unwrap();
+        for id in [&from, &to1, &to2] {
+            state.insert(make_bead(id, &stamp)).unwrap();
+        }
 
         // Add two deps from the same source
         let key1 = DepKey::new(from.clone(), to1.clone(), DepKind::Blocks).unwrap();
@@ -1889,6 +1895,9 @@ mod tests {
         let from1 = BeadId::parse("bd-aaa").unwrap();
         let from2 = BeadId::parse("bd-bbb").unwrap();
         let to = BeadId::parse("bd-ccc").unwrap();
+        for id in [&from1, &from2, &to] {
+            state.insert(make_bead(id, &stamp)).unwrap();
+        }
 
         // Add two deps to the same target
         let key1 = DepKey::new(from1.clone(), to.clone(), DepKind::Blocks).unwrap();

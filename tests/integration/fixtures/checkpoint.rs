@@ -14,9 +14,8 @@ use beads_rs::git::checkpoint::{
 };
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
-    Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, Tombstone,
-    Watermarks, WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1, Workflow, WriteStamp,
-    sha256_bytes,
+    Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, Tombstone, Watermarks,
+    WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1, Workflow, WriteStamp, sha256_bytes,
 };
 
 use super::identity;
@@ -252,7 +251,6 @@ fn make_bead(id: &BeadId, stamp: &Stamp, title: &str) -> Bead {
         acceptance_criteria: Lww::new(None, stamp.clone()),
         priority: Lww::new(Priority::default(), stamp.clone()),
         bead_type: Lww::new(BeadType::Task, stamp.clone()),
-        labels: Lww::new(Labels::new(), stamp.clone()),
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
@@ -364,10 +362,11 @@ fn build_shards_for_state(
 ) -> BTreeMap<String, CheckpointShardPayload> {
     let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
-    for (id, bead) in state.iter_live() {
+    for (id, _bead) in state.iter_live() {
         let shard = shard_for_bead(id);
         let path = shard_path(namespace, CheckpointFileKind::State, &shard);
-        push_jsonl_line(&mut payloads, path, &WireBeadFull::from(bead)).expect("bead jsonl");
+        let view = state.bead_view(id).expect("bead view");
+        push_jsonl_line(&mut payloads, path, &WireBeadFull::from(&view)).expect("bead jsonl");
     }
 
     for (key, tombstone) in state.iter_tombstones() {
