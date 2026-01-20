@@ -559,6 +559,7 @@ impl SyncProcess<Merged> {
         let state_bytes = wire::serialize_state(&state)?;
         let tombs_bytes = wire::serialize_tombstones(&state)?;
         let deps_bytes = wire::serialize_deps(&state)?;
+        let notes_bytes = wire::serialize_notes(&state)?;
         let mut meta_last_stamp = state.max_write_stamp();
         if let Some(parent_stamp) = parent_meta_stamp {
             meta_last_stamp = match meta_last_stamp {
@@ -566,7 +567,12 @@ impl SyncProcess<Merged> {
                 None => Some(parent_stamp),
             };
         }
-        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let checksums = wire::StoreChecksums::from_bytes(
+            &state_bytes,
+            &tombs_bytes,
+            &deps_bytes,
+            Some(&notes_bytes),
+        );
         let meta_bytes =
             wire::serialize_meta(root_slug.as_deref(), meta_last_stamp.as_ref(), &checksums)?;
 
@@ -574,6 +580,7 @@ impl SyncProcess<Merged> {
         let state_oid = repo.blob(&state_bytes)?;
         let tombs_oid = repo.blob(&tombs_bytes)?;
         let deps_oid = repo.blob(&deps_bytes)?;
+        let notes_oid = repo.blob(&notes_bytes)?;
         let meta_oid = repo.blob(&meta_bytes)?;
 
         // Build tree
@@ -581,6 +588,7 @@ impl SyncProcess<Merged> {
         builder.insert("state.jsonl", state_oid, 0o100644)?;
         builder.insert("tombstones.jsonl", tombs_oid, 0o100644)?;
         builder.insert("deps.jsonl", deps_oid, 0o100644)?;
+        builder.insert("notes.jsonl", notes_oid, 0o100644)?;
         builder.insert("meta.json", meta_oid, 0o100644)?;
         let tree_oid = builder.write()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -749,6 +757,16 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         .find_object(deps_entry.id(), Some(ObjectType::Blob))?
         .peel_to_blob()?;
 
+    // Read notes.jsonl (optional in legacy format)
+    let notes_bytes = if let Some(notes_entry) = tree.get_name("notes.jsonl") {
+        let notes_blob = repo
+            .find_object(notes_entry.id(), Some(ObjectType::Blob))?
+            .peel_to_blob()?;
+        notes_blob.content().to_vec()
+    } else {
+        Vec::new()
+    };
+
     // Read meta.json for root_slug + last_write_stamp + checksums
     let mut root_slug = None;
     let mut last_write_stamp = None;
@@ -769,6 +787,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
             state_blob.content(),
             tombs_blob.content(),
             deps_blob.content(),
+            &notes_bytes,
         )?;
     }
 
@@ -776,6 +795,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         state_blob.content(),
         tombs_blob.content(),
         deps_blob.content(),
+        &notes_bytes,
     )?;
 
     Ok(LoadedStore {
@@ -1163,13 +1183,20 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
         let state_bytes = wire::serialize_state(&state)?;
         let tombs_bytes = wire::serialize_tombstones(&state)?;
         let deps_bytes = wire::serialize_deps(&state)?;
-        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let notes_bytes = wire::serialize_notes(&state)?;
+        let checksums = wire::StoreChecksums::from_bytes(
+            &state_bytes,
+            &tombs_bytes,
+            &deps_bytes,
+            Some(&notes_bytes),
+        );
         let meta_bytes = wire::serialize_meta(Some(&root_slug), None, &checksums)?;
 
         // Write blobs
         let state_oid = repo.blob(&state_bytes)?;
         let tombs_oid = repo.blob(&tombs_bytes)?;
         let deps_oid = repo.blob(&deps_bytes)?;
+        let notes_oid = repo.blob(&notes_bytes)?;
         let meta_oid = repo.blob(&meta_bytes)?;
 
         // Build tree
@@ -1177,6 +1204,7 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
         builder.insert("state.jsonl", state_oid, 0o100644)?;
         builder.insert("tombstones.jsonl", tombs_oid, 0o100644)?;
         builder.insert("deps.jsonl", deps_oid, 0o100644)?;
+        builder.insert("notes.jsonl", notes_oid, 0o100644)?;
         builder.insert("meta.json", meta_oid, 0o100644)?;
         let tree_oid = builder.write()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -1306,13 +1334,20 @@ mod tests {
         let state_bytes = wire::serialize_state(&state).unwrap();
         let tombs_bytes = wire::serialize_tombstones(&state).unwrap();
         let deps_bytes = wire::serialize_deps(&state).unwrap();
-        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let notes_bytes = wire::serialize_notes(&state).unwrap();
+        let checksums = wire::StoreChecksums::from_bytes(
+            &state_bytes,
+            &tombs_bytes,
+            &deps_bytes,
+            Some(&notes_bytes),
+        );
         let meta_bytes =
             wire::serialize_meta(Some("test"), last_stamp.as_ref(), &checksums).unwrap();
 
         let state_oid = repo.blob(&state_bytes).unwrap();
         let tombs_oid = repo.blob(&tombs_bytes).unwrap();
         let deps_oid = repo.blob(&deps_bytes).unwrap();
+        let notes_oid = repo.blob(&notes_bytes).unwrap();
         let meta_oid = repo.blob(&meta_bytes).unwrap();
 
         let mut builder = repo.treebuilder(None).unwrap();
@@ -1321,6 +1356,7 @@ mod tests {
             .insert("tombstones.jsonl", tombs_oid, 0o100644)
             .unwrap();
         builder.insert("deps.jsonl", deps_oid, 0o100644).unwrap();
+        builder.insert("notes.jsonl", notes_oid, 0o100644).unwrap();
         builder.insert("meta.json", meta_oid, 0o100644).unwrap();
         let tree_oid = builder.write().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();

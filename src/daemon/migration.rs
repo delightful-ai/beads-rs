@@ -117,12 +117,19 @@ mod tests {
         let state_bytes = wire::serialize_state(&state).unwrap();
         let tombs_bytes = wire::serialize_tombstones(&state).unwrap();
         let deps_bytes = wire::serialize_deps(&state).unwrap();
-        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let notes_bytes = wire::serialize_notes(&state).unwrap();
+        let checksums = wire::StoreChecksums::from_bytes(
+            &state_bytes,
+            &tombs_bytes,
+            &deps_bytes,
+            Some(&notes_bytes),
+        );
         let meta_bytes = wire::serialize_meta(Some(root_slug), Some(&stamp), &checksums).unwrap();
 
         let state_oid = repo.blob(&state_bytes).unwrap();
         let tombs_oid = repo.blob(&tombs_bytes).unwrap();
         let deps_oid = repo.blob(&deps_bytes).unwrap();
+        let notes_oid = repo.blob(&notes_bytes).unwrap();
         let meta_oid = repo.blob(&meta_bytes).unwrap();
 
         let mut builder = repo.treebuilder(None).unwrap();
@@ -131,6 +138,7 @@ mod tests {
             .insert("tombstones.jsonl", tombs_oid, 0o100644)
             .unwrap();
         builder.insert("deps.jsonl", deps_oid, 0o100644).unwrap();
+        builder.insert("notes.jsonl", notes_oid, 0o100644).unwrap();
         builder.insert("meta.json", meta_oid, 0o100644).unwrap();
         let tree_oid = builder.write().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
