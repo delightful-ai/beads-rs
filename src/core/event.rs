@@ -2329,6 +2329,7 @@ mod tests {
     use super::*;
     use crate::core::collections::Label;
     use crate::core::identity::{BeadId, NoteId, StoreEpoch};
+    use crate::core::time::WallClock;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -2795,7 +2796,7 @@ mod tests {
         let mut body = sample_body();
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
         patch.assignee = WirePatch::Keep;
-        patch.assignee_expires = WirePatch::Set(super::time::WallClock(123));
+        patch.assignee_expires = WirePatch::Set(WallClock(123));
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
