@@ -458,3 +458,101 @@ pub type AdminRotateReplicaIdOutput = crate::api::AdminRotateReplicaIdOutput;
 pub type AdminReloadReplicationOutput = crate::api::AdminReloadReplicationOutput;
 pub type AdminScrubOutput = crate::api::AdminScrubOutput;
 pub type AdminStatusOutput = crate::api::AdminStatusOutput;
+
+#[cfg(test)]
+mod tests {
+    use super::{Issue, IssueSummary};
+    use crate::core::orset::Dot;
+    use crate::core::{
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Label, Lww,
+        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Sha256, Stamp, Workflow,
+        WriteStamp,
+    };
+    use uuid::Uuid;
+
+    fn actor_id(raw: &str) -> ActorId {
+        ActorId::new(raw).unwrap_or_else(|e| panic!("invalid actor id {raw}: {e}"))
+    }
+
+    fn bead_id(raw: &str) -> BeadId {
+        BeadId::parse(raw).unwrap_or_else(|e| panic!("invalid bead id {raw}: {e}"))
+    }
+
+    fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
+        let core = BeadCore::new(id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), stamp.clone()),
+            description: Lww::new("desc".to_string(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
+    fn dot(replica_byte: u8, counter: u64) -> Dot {
+        Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([replica_byte; 16])),
+            counter,
+        }
+    }
+
+    #[test]
+    fn issue_summary_updated_at_tracks_label_change() {
+        let base_stamp = Stamp::new(WriteStamp::new(1_000, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-label");
+        state
+            .insert(make_bead(&id, &base_stamp))
+            .expect("insert bead");
+
+        let before_view = state.bead_view(&id).expect("bead view");
+        let before = IssueSummary::from_view(&NamespaceId::core(), &before_view);
+        assert_eq!(before.updated_at, base_stamp.at);
+
+        let label = Label::parse("urgent").expect("label");
+        let label_stamp = Stamp::new(WriteStamp::new(2_000, 0), actor_id("bob"));
+        state.apply_label_add(
+            id.clone(),
+            label,
+            dot(1, 1),
+            Sha256([0; 32]),
+            label_stamp.clone(),
+        );
+
+        let view = state.bead_view(&id).expect("bead view");
+        let summary = IssueSummary::from_view(&NamespaceId::core(), &view);
+        assert_eq!(summary.updated_at, label_stamp.at);
+        assert_eq!(summary.updated_by, label_stamp.by.as_str());
+    }
+
+    #[test]
+    fn issue_updated_at_tracks_note_change() {
+        let base_stamp = Stamp::new(WriteStamp::new(1_000, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-note");
+        state
+            .insert(make_bead(&id, &base_stamp))
+            .expect("insert bead");
+
+        let note_author = actor_id("carol");
+        let note = CoreNote::new(
+            NoteId::new("note-1").expect("note id"),
+            "note".to_string(),
+            note_author.clone(),
+            WriteStamp::new(3_000, 0),
+        );
+        state.insert_note(id.clone(), note);
+
+        let view = state.bead_view(&id).expect("bead view");
+        let issue = Issue::from_view(&NamespaceId::core(), &view);
+        assert_eq!(issue.updated_at, WriteStamp::new(3_000, 0));
+        assert_eq!(issue.updated_by, note_author.as_str());
+    }
+}
