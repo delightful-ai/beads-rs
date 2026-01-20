@@ -3,7 +3,7 @@
 //! Notes rule: bead_upsert deltas should omit notes; if notes are present they
 //! mean set-union only (never truncation).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::de;
@@ -11,12 +11,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use super::bead::{BeadCore, BeadFields};
-use super::collections::{Label, Labels};
+use super::collections::Label;
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
+use super::dep::DepKey;
 use super::domain::{BeadType, DepKind, Priority};
 use super::identity::{ActorId, BeadId, NoteId, ReplicaId};
 use super::orset::{Dot, Dvv};
+use super::state::LabelState;
 use super::time::{Stamp, WallClock, WriteStamp};
 use super::{Bead, BeadView};
 
@@ -260,6 +262,29 @@ impl WorkflowStatus {
 /// Field-level stamp map entry: (at, by).
 pub type WireFieldStamp = (WireStamp, ActorId);
 
+/// OR-Set label state snapshot for checkpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireLabelStateV1 {
+    pub entries: BTreeMap<Label, BTreeSet<Dot>>,
+    pub cc: Dvv,
+}
+
+/// OR-Set dep entry snapshot for checkpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepEntryV1 {
+    pub key: DepKey,
+    pub dots: Vec<Dot>,
+}
+
+/// OR-Set dep store snapshot for checkpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepStoreV1 {
+    pub cc: Dvv,
+    pub entries: Vec<WireDepEntryV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<WireFieldStamp>,
+}
+
 /// Full bead wire representation (checkpoint snapshots).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireBeadFull {
@@ -280,7 +305,7 @@ pub struct WireBeadFull {
     pub priority: Priority,
     #[serde(rename = "type")]
     pub bead_type: BeadType,
-    pub labels: Labels,
+    pub labels: WireLabelStateV1,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -320,8 +345,23 @@ pub struct WireBeadFull {
     pub v: Option<BTreeMap<String, WireFieldStamp>>,
 }
 
-impl From<&BeadView> for WireBeadFull {
-    fn from(view: &BeadView) -> Self {
+fn label_state_to_wire(state: Option<&LabelState>) -> WireLabelStateV1 {
+    let mut entries: BTreeMap<Label, BTreeSet<Dot>> = BTreeMap::new();
+    let cc = state.map(|state| state.cc().clone()).unwrap_or_default();
+
+    if let Some(state) = state {
+        for label in state.values() {
+            if let Some(dots) = state.dots_for(label) {
+                entries.insert(label.clone(), dots.clone());
+            }
+        }
+    }
+
+    WireLabelStateV1 { entries, cc }
+}
+
+impl WireBeadFull {
+    pub fn from_view(view: &BeadView, label_state: Option<&LabelState>) -> Self {
         let bead = &view.bead;
         let bead_stamp = view.updated_stamp().clone();
 
@@ -384,6 +424,8 @@ impl From<&BeadView> for WireBeadFull {
         notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
         let notes = notes.into_iter().map(WireNoteV1::from).collect();
 
+        let labels = label_state_to_wire(label_state);
+
         WireBeadFull {
             id: bead.core.id.clone(),
             created_at: WireStamp::from(&bead.core.created().at),
@@ -395,7 +437,7 @@ impl From<&BeadView> for WireBeadFull {
             acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
             priority: bead.fields.priority.value,
             bead_type: bead.fields.bead_type.value,
-            labels: view.labels.clone(),
+            labels,
             external_ref: bead.fields.external_ref.value.clone(),
             source_repo: bead.fields.source_repo.value.clone(),
             estimated_minutes: bead.fields.estimated_minutes.value,
@@ -595,20 +637,6 @@ pub struct WireDepRemoveV1 {
     pub to: BeadId,
     pub kind: DepKind,
     pub ctx: WireDvvV1,
-}
-
-/// Snapshot representation of a dependency edge (used in checkpoints/legacy wire).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireDepEdgeV1 {
-    pub from: BeadId,
-    pub to: BeadId,
-    pub kind: DepKind,
-    pub created_at: WireStamp,
-    pub created_by: ActorId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_at: Option<WireStamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_by: Option<ActorId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -945,7 +973,7 @@ mod tests {
         )];
 
         let view = BeadView::new(bead.clone(), labels, notes.clone(), Some(base.clone()));
-        let wire = WireBeadFull::from(&view);
+        let wire = WireBeadFull::from_view(&view, None);
         let rebuilt = Bead::from(wire.clone());
 
         assert_eq!(bead.core.id, rebuilt.core.id);

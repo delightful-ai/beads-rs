@@ -94,7 +94,7 @@ pub use watermark::{
 };
 pub use wire_bead::{
     NoteAppendV1, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull, WireBeadPatch,
-    WireDepAddV1, WireDepEdgeV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireFieldStamp,
-    WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1,
+    WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1,
+    WireLabelRemoveV1, WireLabelStateV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1,
     WorkflowStatus,
 };

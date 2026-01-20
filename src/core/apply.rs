@@ -916,7 +916,7 @@ mod tests {
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
 
-        assert!(state.get_dep(&key).is_none());
+        assert!(!state.dep_contains(&key));
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -932,7 +932,7 @@ mod tests {
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
 
-        assert!(state.get_dep(&key).is_none());
+        assert!(!state.dep_contains(&key));
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -948,8 +948,7 @@ mod tests {
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();
 
-        let edge = state.get_dep(&key).unwrap();
-        assert!(edge.is_active());
+        assert!(state.dep_contains(&key));
     }
 
     #[test]
