@@ -6,14 +6,14 @@ use std::path::Path;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use beads_rs::core::ContentHash;
+use beads_rs::core::{ContentHash, Dot};
 use beads_rs::git::checkpoint::{
     CheckpointExport, CheckpointExportInput, CheckpointImportError, CheckpointSnapshotInput,
     IncludedHeads, IncludedWatermarks, export_checkpoint, import_checkpoint,
 };
 use beads_rs::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
-    DepKind, Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreEpoch,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
+    Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Sha256, Stamp, StoreEpoch,
     StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
 };
 
@@ -153,15 +153,18 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
     let tombstone = Tombstone::new(other_id.clone(), stamp.clone(), Some("removed".into()));
     state.insert_tombstone(tombstone);
 
+    let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
     let dep_key = DepKey::new(bead_id.clone(), other_id.clone(), DepKind::Blocks).expect("dep key");
-    let dep_edge = DepEdge::new(stamp.clone());
-    state.insert_dep(dep_key, dep_edge);
+    let dot = Dot {
+        replica: origin,
+        counter: 1,
+    };
+    state.apply_dep_add(dep_key, dot, Sha256([0; 32]), stamp.clone());
 
     let mut store_state = StoreState::new();
     *store_state.ensure_namespace(core.clone()) = state.clone();
 
     let mut watermarks = Watermarks::<Durable>::new();
-    let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
     watermarks
         .observe_at_least(&core, &origin, Seq0::new(2), HeadStatus::Known([2u8; 32]))
         .expect("watermark");
