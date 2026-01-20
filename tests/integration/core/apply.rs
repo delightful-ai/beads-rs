@@ -3,14 +3,14 @@
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
     ActorId, CanonicalState, EventBody, EventKindV1, HlcMax, TxnDeltaV1, TxnOpV1, WireBeadPatch,
-    WireNoteV1, WireStamp, apply_event, sha256_bytes,
+    apply_event, sha256_bytes,
 };
 
 use crate::fixtures::apply_harness::{
     ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
 };
 use crate::fixtures::event_body::{
-    actor_id, bead_id, event_body_with_delta, note_id, sample_event_body,
+    actor_id, bead_id, event_body_with_delta, note_id, sample_event_body, sample_note,
 };
 
 fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -> EventBody {
@@ -60,14 +60,13 @@ fn note_collision_is_deterministic() {
     let note_id = note_id(2);
 
     let mut delta = TxnDeltaV1::new();
-    let note = WireNoteV1 {
-        id: note_id.clone(),
-        content: "different-content".to_string(),
-        author: actor_id(9),
-        at: WireStamp(12_345, 1),
-    };
+    let mut note = sample_note(2, 1);
+    note.content = "different-content".to_string();
     delta
-        .insert(TxnOpV1::NoteAppend(NoteAppendV1 { bead_id, note }))
+        .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
+            bead_id: bead_id.clone(),
+            note,
+        }))
         .expect("unique note append");
 
     let event = event_body_with_delta(2, delta);
