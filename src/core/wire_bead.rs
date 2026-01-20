@@ -11,11 +11,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use super::bead::{BeadCore, BeadFields};
-use super::collections::Labels;
+use super::collections::{Label, Labels};
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::domain::{BeadType, DepKind, Priority};
-use super::identity::{ActorId, BeadId, NoteId};
+use super::identity::{ActorId, BeadId, NoteId, ReplicaId};
+use super::orset::{Dot, Dvv};
 use super::time::{Stamp, WallClock, WriteStamp};
 use super::{Bead, BeadView};
 
@@ -47,7 +48,7 @@ impl From<&WireStamp> for WriteStamp {
     }
 }
 
-/// Note wire representation (used in note_append and optional bead_upsert notes).
+/// Note wire representation (used in note_append).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireNoteV1 {
     pub id: NoteId,
@@ -86,20 +87,6 @@ impl From<WireNoteV1> for Note {
             note.author,
             WriteStamp::from(note.at),
         )
-    }
-}
-
-/// Notes patch semantics: omitted vs at-least.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub enum NotesPatch {
-    #[default]
-    Omitted,
-    AtLeast(Vec<WireNoteV1>),
-}
-
-impl NotesPatch {
-    pub fn is_omitted(&self) -> bool {
-        matches!(self, NotesPatch::Omitted)
     }
 }
 
@@ -144,28 +131,80 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for WirePatch<T> {
     }
 }
 
-impl Serialize for NotesPatch {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            NotesPatch::Omitted => Option::<Vec<WireNoteV1>>::None.serialize(serializer),
-            NotesPatch::AtLeast(notes) => Some(notes).serialize(serializer),
+/// Wire Dot for OR-Set ops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDotV1 {
+    pub replica: ReplicaId,
+    pub counter: u64,
+}
+
+impl From<Dot> for WireDotV1 {
+    fn from(dot: Dot) -> Self {
+        Self {
+            replica: dot.replica,
+            counter: dot.counter,
         }
     }
 }
 
-impl<'de> Deserialize<'de> for NotesPatch {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let notes = Option::<Vec<WireNoteV1>>::deserialize(deserializer)?;
-        Ok(match notes {
-            Some(notes) => NotesPatch::AtLeast(notes),
-            None => NotesPatch::Omitted,
-        })
+impl From<&Dot> for WireDotV1 {
+    fn from(dot: &Dot) -> Self {
+        Self {
+            replica: dot.replica,
+            counter: dot.counter,
+        }
+    }
+}
+
+impl From<WireDotV1> for Dot {
+    fn from(dot: WireDotV1) -> Self {
+        Self {
+            replica: dot.replica,
+            counter: dot.counter,
+        }
+    }
+}
+
+impl From<&WireDotV1> for Dot {
+    fn from(dot: &WireDotV1) -> Self {
+        Self {
+            replica: dot.replica,
+            counter: dot.counter,
+        }
+    }
+}
+
+/// Wire DVV for OR-Set ops.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDvvV1 {
+    pub max: BTreeMap<ReplicaId, u64>,
+}
+
+impl From<&Dvv> for WireDvvV1 {
+    fn from(dvv: &Dvv) -> Self {
+        Self {
+            max: dvv.max.clone(),
+        }
+    }
+}
+
+impl From<Dvv> for WireDvvV1 {
+    fn from(dvv: Dvv) -> Self {
+        Self { max: dvv.max }
+    }
+}
+
+impl From<WireDvvV1> for Dvv {
+    fn from(dvv: WireDvvV1) -> Self {
+        Self { max: dvv.max }
+    }
+}
+
+impl From<&WireDvvV1> for Dvv {
+    fn from(dvv: &WireDvvV1) -> Self {
+        Self {
+            max: dvv.max.clone(),
+        }
     }
 }
 
@@ -458,8 +497,6 @@ pub struct WireBeadPatch {
     pub priority: Option<Priority>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub bead_type: Option<BeadType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub labels: Option<Labels>,
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
     pub external_ref: WirePatch<String>,
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
@@ -478,9 +515,6 @@ pub struct WireBeadPatch {
     pub assignee: WirePatch<ActorId>,
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
     pub assignee_expires: WirePatch<WallClock>,
-
-    #[serde(default, skip_serializing_if = "NotesPatch::is_omitted")]
-    pub notes: NotesPatch,
 }
 
 impl WireBeadPatch {
@@ -496,7 +530,6 @@ impl WireBeadPatch {
             acceptance_criteria: WirePatch::Keep,
             priority: None,
             bead_type: None,
-            labels: None,
             external_ref: WirePatch::Keep,
             source_repo: WirePatch::Keep,
             estimated_minutes: WirePatch::Keep,
@@ -505,7 +538,6 @@ impl WireBeadPatch {
             closed_on_branch: WirePatch::Keep,
             assignee: WirePatch::Keep,
             assignee_expires: WirePatch::Keep,
-            notes: NotesPatch::default(),
         }
     }
 }
@@ -536,7 +568,38 @@ impl WireTombstoneV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireDepV1 {
+pub struct WireLabelAddV1 {
+    pub bead_id: BeadId,
+    pub label: Label,
+    pub dot: WireDotV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireLabelRemoveV1 {
+    pub bead_id: BeadId,
+    pub label: Label,
+    pub ctx: WireDvvV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepAddV1 {
+    pub from: BeadId,
+    pub to: BeadId,
+    pub kind: DepKind,
+    pub dot: WireDotV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepRemoveV1 {
+    pub from: BeadId,
+    pub to: BeadId,
+    pub kind: DepKind,
+    pub ctx: WireDvvV1,
+}
+
+/// Snapshot representation of a dependency edge (used in checkpoints/legacy wire).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepEdgeV1 {
     pub from: BeadId,
     pub to: BeadId,
     pub kind: DepKind,
@@ -546,15 +609,6 @@ pub struct WireDepV1 {
     pub deleted_at: Option<WireStamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_by: Option<ActorId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireDepDeleteV1 {
-    pub from: BeadId,
-    pub to: BeadId,
-    pub kind: DepKind,
-    pub deleted_at: WireStamp,
-    pub deleted_by: ActorId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -568,8 +622,10 @@ pub struct NoteAppendV1 {
 pub enum TxnOpV1 {
     BeadUpsert(Box<WireBeadPatch>),
     BeadDelete(WireTombstoneV1),
-    DepUpsert(WireDepV1),
-    DepDelete(WireDepDeleteV1),
+    LabelAdd(WireLabelAddV1),
+    LabelRemove(WireLabelRemoveV1),
+    DepAdd(WireDepAddV1),
+    DepRemove(WireDepRemoveV1),
     NoteAppend(NoteAppendV1),
 }
 
@@ -583,12 +639,22 @@ impl TxnOpV1 {
                 id: delete.id.clone(),
                 lineage: delete.lineage_stamp(),
             },
-            TxnOpV1::DepUpsert(dep) => TxnOpKey::DepUpsert {
+            TxnOpV1::LabelAdd(op) => TxnOpKey::LabelAdd {
+                bead_id: op.bead_id.clone(),
+                label: op.label.clone(),
+                dot: op.dot.into(),
+            },
+            TxnOpV1::LabelRemove(op) => TxnOpKey::LabelRemove {
+                bead_id: op.bead_id.clone(),
+                label: op.label.clone(),
+            },
+            TxnOpV1::DepAdd(dep) => TxnOpKey::DepAdd {
                 from: dep.from.clone(),
                 to: dep.to.clone(),
                 kind: dep.kind,
+                dot: dep.dot.into(),
             },
-            TxnOpV1::DepDelete(dep) => TxnOpKey::DepDelete {
+            TxnOpV1::DepRemove(dep) => TxnOpKey::DepRemove {
                 from: dep.from.clone(),
                 to: dep.to.clone(),
                 kind: dep.kind,
@@ -610,12 +676,22 @@ pub enum TxnOpKey {
         id: BeadId,
         lineage: Option<Stamp>,
     },
-    DepUpsert {
+    LabelAdd {
+        bead_id: BeadId,
+        label: Label,
+        dot: Dot,
+    },
+    LabelRemove {
+        bead_id: BeadId,
+        label: Label,
+    },
+    DepAdd {
         from: BeadId,
         to: BeadId,
         kind: DepKind,
+        dot: Dot,
     },
-    DepDelete {
+    DepRemove {
         from: BeadId,
         to: BeadId,
         kind: DepKind,
@@ -631,8 +707,10 @@ impl TxnOpKey {
         match self {
             TxnOpKey::BeadUpsert { .. } => "bead_upsert",
             TxnOpKey::BeadDelete { .. } => "bead_delete",
-            TxnOpKey::DepUpsert { .. } => "dep_upsert",
-            TxnOpKey::DepDelete { .. } => "dep_delete",
+            TxnOpKey::LabelAdd { .. } => "label_add",
+            TxnOpKey::LabelRemove { .. } => "label_remove",
+            TxnOpKey::DepAdd { .. } => "dep_add",
+            TxnOpKey::DepRemove { .. } => "dep_remove",
             TxnOpKey::NoteAppend { .. } => "note_append",
         }
     }
@@ -650,14 +728,35 @@ impl TxnOpKey {
                 ),
                 None => format!("bead_delete:{}", id.as_str()),
             },
-            TxnOpKey::DepUpsert { from, to, kind } => format!(
-                "dep_upsert:{}:{}:{}",
+            TxnOpKey::LabelAdd {
+                bead_id,
+                label,
+                dot,
+            } => format!(
+                "label_add:{}:{}:{}:{}",
+                bead_id.as_str(),
+                label.as_str(),
+                dot.replica.to_string(),
+                dot.counter
+            ),
+            TxnOpKey::LabelRemove { bead_id, label } => {
+                format!("label_remove:{}:{}", bead_id.as_str(), label.as_str())
+            }
+            TxnOpKey::DepAdd {
+                from,
+                to,
+                kind,
+                dot,
+            } => format!(
+                "dep_add:{}:{}:{}:{}:{}",
                 from.as_str(),
                 to.as_str(),
-                kind.as_str()
+                kind.as_str(),
+                dot.replica.to_string(),
+                dot.counter
             ),
-            TxnOpKey::DepDelete { from, to, kind } => format!(
-                "dep_delete:{}:{}:{}",
+            TxnOpKey::DepRemove { from, to, kind } => format!(
+                "dep_remove:{}:{}:{}",
                 from.as_str(),
                 to.as_str(),
                 kind.as_str()
@@ -706,8 +805,10 @@ impl TxnDeltaV1 {
     pub fn from_parts(
         bead_upserts: Vec<WireBeadPatch>,
         bead_deletes: Vec<WireTombstoneV1>,
-        dep_upserts: Vec<WireDepV1>,
-        dep_deletes: Vec<WireDepDeleteV1>,
+        label_adds: Vec<WireLabelAddV1>,
+        label_removes: Vec<WireLabelRemoveV1>,
+        dep_adds: Vec<WireDepAddV1>,
+        dep_removes: Vec<WireDepRemoveV1>,
         note_appends: Vec<NoteAppendV1>,
     ) -> Result<Self, TxnDeltaError> {
         let mut delta = TxnDeltaV1::new();
@@ -717,11 +818,17 @@ impl TxnDeltaV1 {
         for delete in bead_deletes {
             delta.insert(TxnOpV1::BeadDelete(delete))?;
         }
-        for dep in dep_upserts {
-            delta.insert(TxnOpV1::DepUpsert(dep))?;
+        for op in label_adds {
+            delta.insert(TxnOpV1::LabelAdd(op))?;
         }
-        for dep in dep_deletes {
-            delta.insert(TxnOpV1::DepDelete(dep))?;
+        for op in label_removes {
+            delta.insert(TxnOpV1::LabelRemove(op))?;
+        }
+        for dep in dep_adds {
+            delta.insert(TxnOpV1::DepAdd(dep))?;
+        }
+        for dep in dep_removes {
+            delta.insert(TxnOpV1::DepRemove(dep))?;
         }
         for na in note_appends {
             delta.insert(TxnOpV1::NoteAppend(na))?;
@@ -768,7 +875,7 @@ mod tests {
     use crate::core::BeadView;
     use crate::core::collections::Labels;
     use crate::core::composite::Note;
-    use crate::core::identity::ActorId;
+    use crate::core::identity::{ActorId, ReplicaId};
     use crate::core::time::Stamp;
 
     fn actor_id(actor: &str) -> ActorId {
@@ -862,26 +969,10 @@ mod tests {
         patch.created_by = Some(actor_id("alice"));
         patch.title = Some("title".to_string());
         patch.design = WirePatch::Clear;
-        patch.labels = Some(Labels::new());
-        patch.notes = NotesPatch::AtLeast(vec![WireNoteV1 {
-            id: note_id("note-4"),
-            content: "note".to_string(),
-            author: actor_id("alice"),
-            at: WireStamp(11, 2),
-        }]);
 
         let json = serde_json::to_string(&patch).unwrap();
         let back: WireBeadPatch = serde_json::from_str(&json).unwrap();
         assert_eq!(patch, back);
-    }
-
-    #[test]
-    fn wire_bead_patch_omits_notes_when_omitted() {
-        let patch = WireBeadPatch::new(bead_id("bd-omit"));
-        let json = serde_json::to_string(&patch).unwrap();
-        assert!(!json.contains("\"notes\""));
-        let back: WireBeadPatch = serde_json::from_str(&json).unwrap();
-        assert!(back.notes.is_omitted());
     }
 
     #[test]
@@ -908,21 +999,22 @@ mod tests {
             lineage_created_at: None,
             lineage_created_by: None,
         };
-        let dep_upsert = WireDepV1 {
+        let dep_add = WireDepAddV1 {
             from: bead_id("bd-order"),
             to: bead_id("bd-up"),
             kind: DepKind::Blocks,
-            created_at: WireStamp(3, 1),
-            created_by: actor_id("bob"),
-            deleted_at: None,
-            deleted_by: None,
+            dot: WireDotV1 {
+                replica: ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])),
+                counter: 1,
+            },
         };
-        let dep_delete = WireDepDeleteV1 {
+        let dep_remove = WireDepRemoveV1 {
             from: bead_id("bd-order"),
             to: bead_id("bd-down"),
             kind: DepKind::Related,
-            deleted_at: WireStamp(4, 2),
-            deleted_by: actor_id("carol"),
+            ctx: WireDvvV1 {
+                max: BTreeMap::new(),
+            },
         };
         let append = NoteAppendV1 {
             bead_id: bead_id("bd-order"),
@@ -934,9 +1026,9 @@ mod tests {
             },
         };
         delta.insert(TxnOpV1::NoteAppend(append)).unwrap();
-        delta.insert(TxnOpV1::DepDelete(dep_delete)).unwrap();
+        delta.insert(TxnOpV1::DepRemove(dep_remove)).unwrap();
         delta.insert(TxnOpV1::BeadDelete(delete)).unwrap();
-        delta.insert(TxnOpV1::DepUpsert(dep_upsert)).unwrap();
+        delta.insert(TxnOpV1::DepAdd(dep_add)).unwrap();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(bead_id(
                 "bd-order",
@@ -946,8 +1038,8 @@ mod tests {
         let mut iter = delta.iter();
         assert!(matches!(iter.next(), Some(TxnOpV1::BeadUpsert(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::BeadDelete(_))));
-        assert!(matches!(iter.next(), Some(TxnOpV1::DepUpsert(_))));
-        assert!(matches!(iter.next(), Some(TxnOpV1::DepDelete(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::DepAdd(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::DepRemove(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::NoteAppend(_))));
     }
 
@@ -970,23 +1062,24 @@ mod tests {
             }))
             .unwrap();
         delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: bead_id("bd-rt"),
                 to: bead_id("bd-rt-dep"),
                 kind: DepKind::Blocks,
-                created_at: WireStamp(4, 0),
-                created_by: actor_id("alice"),
-                deleted_at: None,
-                deleted_by: None,
+                dot: WireDotV1 {
+                    replica: ReplicaId::from(uuid::Uuid::from_bytes([2u8; 16])),
+                    counter: 7,
+                },
             }))
             .unwrap();
         delta
-            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
                 from: bead_id("bd-rt"),
                 to: bead_id("bd-rt-dep2"),
                 kind: DepKind::Related,
-                deleted_at: WireStamp(5, 1),
-                deleted_by: actor_id("bob"),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::new(),
+                },
             }))
             .unwrap();
         delta

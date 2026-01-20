@@ -5,10 +5,9 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 use super::bead::{BeadCore, BeadFields};
-use super::collections::Labels;
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
-use super::dep::{DepEdge, DepKey, DepLife};
+use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
 use super::event::{EventBody, EventKindV1, Sha256, TxnV1};
 use super::identity::{ActorId, BeadId, NoteId, ReplicaId};
@@ -17,8 +16,8 @@ use super::state::CanonicalState;
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
 use super::wire_bead::{
-    NotesPatch, TxnOpV1, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch,
-    WireTombstoneV1,
+    NoteAppendV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireLabelAddV1,
+    WireLabelRemoveV1, WireNoteV1, WirePatch, WireTombstoneV1,
 };
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use uuid::Uuid;
@@ -69,11 +68,17 @@ pub fn apply_event(
             TxnOpV1::BeadDelete(delete) => {
                 apply_bead_delete(state, delete, &mut outcome)?;
             }
-            TxnOpV1::DepUpsert(dep) => {
-                apply_dep_upsert(state, dep, &mut outcome)?;
+            TxnOpV1::LabelAdd(op) => {
+                apply_label_add(state, op, &stamp, &mut outcome)?;
             }
-            TxnOpV1::DepDelete(dep) => {
-                apply_dep_delete(state, dep, &mut outcome)?;
+            TxnOpV1::LabelRemove(op) => {
+                apply_label_remove(state, op, &stamp, &mut outcome)?;
+            }
+            TxnOpV1::DepAdd(dep) => {
+                apply_dep_add(state, dep, &stamp, &mut outcome)?;
+            }
+            TxnOpV1::DepRemove(dep) => {
+                apply_dep_remove(state, dep, &stamp, &mut outcome)?;
             }
             TxnOpV1::NoteAppend(append) => {
                 apply_note_append(state, append.bead_id.clone(), &append.note, &mut outcome)?;
@@ -125,20 +130,7 @@ fn apply_bead_upsert(
             apply_patch_to_bead(bead, patch, event_stamp, outcome)?
         };
 
-        let mut changed = field_changed;
-        if let Some(labels) = &patch.labels
-            && apply_label_patch(state, &id, labels, event_stamp)
-        {
-            changed = true;
-        }
-        if let NotesPatch::AtLeast(notes) = &patch.notes {
-            for note in notes {
-                let note = note_to_core(note);
-                if apply_note(state, id.clone(), note, outcome)? {
-                    changed = true;
-                }
-            }
-        }
+        let changed = field_changed;
         if changed {
             outcome.changed_beads.insert(id);
         }
@@ -162,16 +154,6 @@ fn apply_bead_upsert(
     state
         .insert(bead)
         .map_err(|_| ApplyError::BeadCollision { id: id.clone() })?;
-
-    if let Some(labels) = &patch.labels {
-        apply_label_patch(state, &id, labels, event_stamp);
-    }
-    if let NotesPatch::AtLeast(notes) = &patch.notes {
-        for note in notes {
-            let note = note_to_core(note);
-            apply_note(state, id.clone(), note, outcome)?;
-        }
-    }
 
     outcome.changed_beads.insert(id);
     Ok(())
@@ -223,45 +205,69 @@ fn apply_bead_delete(
     Ok(())
 }
 
-fn apply_dep_upsert(
+fn apply_label_add(
     state: &mut CanonicalState,
-    dep: &WireDepV1,
+    op: &WireLabelAddV1,
+    event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
-        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
-    let created = Stamp::new(WriteStamp::from(dep.created_at), dep.created_by.clone());
-    let edge = match (dep.deleted_at, dep.deleted_by.as_ref()) {
-        (Some(at), Some(by)) => {
-            let deleted = Stamp::new(WriteStamp::from(at), by.clone());
-            let life = Lww::new(DepLife::Deleted, deleted);
-            DepEdge::with_life(created, life)
-        }
-        (None, None) => DepEdge::new(created),
-        _ => {
-            return Err(ApplyError::InvalidDependency {
-                reason: "deleted_at and deleted_by must be set together".into(),
-            });
-        }
-    };
-
-    state.insert_dep(key.clone(), edge);
-    outcome.changed_deps.insert(key);
+    let dot = op.dot.into();
+    let change = state.apply_label_add(
+        op.bead_id.clone(),
+        op.label.clone(),
+        dot,
+        Sha256([0; 32]),
+        event_stamp.clone(),
+    );
+    if !change.is_empty() {
+        outcome.changed_beads.insert(op.bead_id.clone());
+    }
     Ok(())
 }
 
-fn apply_dep_delete(
+fn apply_label_remove(
     state: &mut CanonicalState,
-    dep: &WireDepDeleteV1,
+    op: &WireLabelRemoveV1,
+    event_stamp: &Stamp,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let ctx = (&op.ctx).into();
+    let change = state.apply_label_remove(op.bead_id.clone(), &op.label, &ctx, event_stamp.clone());
+    if !change.is_empty() {
+        outcome.changed_beads.insert(op.bead_id.clone());
+    }
+    Ok(())
+}
+
+fn apply_dep_add(
+    state: &mut CanonicalState,
+    dep: &WireDepAddV1,
+    event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
         .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
-    let deleted = Stamp::new(WriteStamp::from(dep.deleted_at), dep.deleted_by.clone());
-    let life = Lww::new(DepLife::Deleted, deleted.clone());
-    let edge = DepEdge::with_life(deleted, life);
-    state.insert_dep(key.clone(), edge);
-    outcome.changed_deps.insert(key);
+    let dot = dep.dot.into();
+    let change = state.apply_dep_add(key.clone(), dot, Sha256([0; 32]), event_stamp.clone());
+    for changed in change.added.iter().chain(change.removed.iter()) {
+        outcome.changed_deps.insert(changed.clone());
+    }
+    Ok(())
+}
+
+fn apply_dep_remove(
+    state: &mut CanonicalState,
+    dep: &WireDepRemoveV1,
+    event_stamp: &Stamp,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
+        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
+    let ctx = (&dep.ctx).into();
+    let change = state.apply_dep_remove(&key, &ctx, event_stamp.clone());
+    for changed in change.added.iter().chain(change.removed.iter()) {
+        outcome.changed_deps.insert(changed.clone());
+    }
     Ok(())
 }
 
@@ -425,46 +431,6 @@ fn apply_patch_to_bead(
     }
 
     Ok(changed)
-}
-
-fn apply_label_patch(
-    state: &mut CanonicalState,
-    bead_id: &BeadId,
-    labels: &Labels,
-    event_stamp: &Stamp,
-) -> bool {
-    let existing = state.labels_for_any(bead_id);
-    let mut changed = false;
-
-    for label in labels.iter() {
-        if existing.contains(label.as_str()) {
-            continue;
-        }
-        let dot = legacy_dot_from_bytes(&label.collision_bytes(), event_stamp);
-        let change = state.apply_label_add(
-            bead_id.clone(),
-            label.clone(),
-            dot,
-            Sha256([0; 32]),
-            event_stamp.clone(),
-        );
-        if !change.is_empty() {
-            changed = true;
-        }
-    }
-
-    for label in existing.iter() {
-        if labels.contains(label.as_str()) {
-            continue;
-        }
-        let ctx = state.label_dvv(bead_id, label);
-        let change = state.apply_label_remove(bead_id.clone(), label, &ctx, event_stamp.clone());
-        if !change.is_empty() {
-            changed = true;
-        }
-    }
-
-    changed
 }
 
 fn build_workflow(

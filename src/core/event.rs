@@ -17,8 +17,9 @@ use super::limits::Limits;
 use super::namespace::NamespaceId;
 use super::watermark::Seq1;
 use super::wire_bead::{
-    NoteAppendV1, NotesPatch, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepDeleteV1, WireDepV1,
-    WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
+    NoteAppendV1, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1,
+    WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WirePatch, WireStamp,
+    WireTombstoneV1, WorkflowStatus,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -593,16 +594,20 @@ fn encode_txn_delta(
 ) -> Result<(), EncodeError> {
     let mut bead_upserts: Vec<&WireBeadPatch> = Vec::new();
     let mut bead_deletes: Vec<&WireTombstoneV1> = Vec::new();
-    let mut dep_upserts: Vec<&WireDepV1> = Vec::new();
-    let mut dep_deletes: Vec<&WireDepDeleteV1> = Vec::new();
+    let mut label_adds: Vec<&WireLabelAddV1> = Vec::new();
+    let mut label_removes: Vec<&WireLabelRemoveV1> = Vec::new();
+    let mut dep_adds: Vec<&WireDepAddV1> = Vec::new();
+    let mut dep_removes: Vec<&WireDepRemoveV1> = Vec::new();
     let mut note_appends: Vec<&NoteAppendV1> = Vec::new();
 
     for op in delta.iter() {
         match op {
             TxnOpV1::BeadUpsert(up) => bead_upserts.push(up),
             TxnOpV1::BeadDelete(delete) => bead_deletes.push(delete),
-            TxnOpV1::DepUpsert(dep) => dep_upserts.push(dep),
-            TxnOpV1::DepDelete(dep) => dep_deletes.push(dep),
+            TxnOpV1::LabelAdd(op) => label_adds.push(op),
+            TxnOpV1::LabelRemove(op) => label_removes.push(op),
+            TxnOpV1::DepAdd(dep) => dep_adds.push(dep),
+            TxnOpV1::DepRemove(dep) => dep_removes.push(dep),
             TxnOpV1::NoteAppend(append) => note_appends.push(append),
         }
     }
@@ -614,10 +619,16 @@ fn encode_txn_delta(
     if !bead_deletes.is_empty() {
         len += 1;
     }
-    if !dep_upserts.is_empty() {
+    if !label_adds.is_empty() {
         len += 1;
     }
-    if !dep_deletes.is_empty() {
+    if !label_removes.is_empty() {
+        len += 1;
+    }
+    if !dep_adds.is_empty() {
+        len += 1;
+    }
+    if !dep_removes.is_empty() {
         len += 1;
     }
     if !note_appends.is_empty() {
@@ -644,19 +655,35 @@ fn encode_txn_delta(
         }
     }
 
-    if !dep_upserts.is_empty() {
-        enc.str("dep_upserts")?;
-        enc.array(dep_upserts.len() as u64)?;
-        for dep in dep_upserts {
-            encode_wire_dep(enc, dep)?;
+    if !label_adds.is_empty() {
+        enc.str("label_adds")?;
+        enc.array(label_adds.len() as u64)?;
+        for op in label_adds {
+            encode_wire_label_add(enc, op)?;
         }
     }
 
-    if !dep_deletes.is_empty() {
-        enc.str("dep_deletes")?;
-        enc.array(dep_deletes.len() as u64)?;
-        for dep in dep_deletes {
-            encode_wire_dep_delete(enc, dep)?;
+    if !label_removes.is_empty() {
+        enc.str("label_removes")?;
+        enc.array(label_removes.len() as u64)?;
+        for op in label_removes {
+            encode_wire_label_remove(enc, op)?;
+        }
+    }
+
+    if !dep_adds.is_empty() {
+        enc.str("dep_adds")?;
+        enc.array(dep_adds.len() as u64)?;
+        for dep in dep_adds {
+            encode_wire_dep_add(enc, dep)?;
+        }
+    }
+
+    if !dep_removes.is_empty() {
+        enc.str("dep_removes")?;
+        enc.array(dep_removes.len() as u64)?;
+        for dep in dep_removes {
+            encode_wire_dep_remove(enc, dep)?;
         }
     }
 
@@ -689,8 +716,10 @@ fn decode_txn_delta(
     let mut version = None;
     let mut bead_upserts: Vec<WireBeadPatch> = Vec::new();
     let mut bead_deletes: Vec<WireTombstoneV1> = Vec::new();
-    let mut dep_upserts: Vec<WireDepV1> = Vec::new();
-    let mut dep_deletes: Vec<WireDepDeleteV1> = Vec::new();
+    let mut label_adds: Vec<WireLabelAddV1> = Vec::new();
+    let mut label_removes: Vec<WireLabelRemoveV1> = Vec::new();
+    let mut dep_adds: Vec<WireDepAddV1> = Vec::new();
+    let mut dep_removes: Vec<WireDepRemoveV1> = Vec::new();
     let mut note_appends: Vec<NoteAppendV1> = Vec::new();
     let mut ops_total: usize = 0;
 
@@ -732,24 +761,44 @@ fn decode_txn_delta(
                     bead_deletes.push(decode_wire_tombstone(dec, limits, depth + 2)?);
                 }
             }
-            "dep_upserts" => {
+            "label_adds" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
                 ops_total = ops_total.saturating_add(arr_len);
                 if ops_total > limits.max_ops_per_txn {
                     return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
                 }
                 for _ in 0..arr_len {
-                    dep_upserts.push(decode_wire_dep(dec, limits, depth + 2)?);
+                    label_adds.push(decode_wire_label_add(dec, limits, depth + 2)?);
                 }
             }
-            "dep_deletes" => {
+            "label_removes" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
                 ops_total = ops_total.saturating_add(arr_len);
                 if ops_total > limits.max_ops_per_txn {
                     return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
                 }
                 for _ in 0..arr_len {
-                    dep_deletes.push(decode_wire_dep_delete(dec, limits, depth + 2)?);
+                    label_removes.push(decode_wire_label_remove(dec, limits, depth + 2)?);
+                }
+            }
+            "dep_adds" => {
+                let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
+                for _ in 0..arr_len {
+                    dep_adds.push(decode_wire_dep_add(dec, limits, depth + 2)?);
+                }
+            }
+            "dep_removes" => {
+                let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
+                for _ in 0..arr_len {
+                    dep_removes.push(decode_wire_dep_remove(dec, limits, depth + 2)?);
                 }
             }
             "note_appends" => {
@@ -825,14 +874,24 @@ fn decode_txn_delta(
             .insert(TxnOpV1::BeadDelete(delete))
             .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
     }
-    for dep in dep_upserts {
+    for op in label_adds {
         delta
-            .insert(TxnOpV1::DepUpsert(dep))
+            .insert(TxnOpV1::LabelAdd(op))
             .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
     }
-    for dep in dep_deletes {
+    for op in label_removes {
         delta
-            .insert(TxnOpV1::DepDelete(dep))
+            .insert(TxnOpV1::LabelRemove(op))
+            .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
+    }
+    for dep in dep_adds {
+        delta
+            .insert(TxnOpV1::DepAdd(dep))
+            .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
+    }
+    for dep in dep_removes {
+        delta
+            .insert(TxnOpV1::DepRemove(dep))
             .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
     }
     for na in note_appends {
@@ -875,9 +934,6 @@ fn encode_wire_bead_patch(
     if patch.bead_type.is_some() {
         len += 1;
     }
-    if patch.labels.is_some() {
-        len += 1;
-    }
     if !patch.external_ref.is_keep() {
         len += 1;
     }
@@ -900,9 +956,6 @@ fn encode_wire_bead_patch(
         len += 1;
     }
     if !patch.assignee_expires.is_keep() {
-        len += 1;
-    }
-    if !patch.notes.is_omitted() {
         len += 1;
     }
 
@@ -958,27 +1011,6 @@ fn encode_wire_bead_patch(
     }
     enc.str("id")?;
     enc.str(patch.id.as_str())?;
-    if let Some(labels) = &patch.labels {
-        enc.str("labels")?;
-        enc.array(labels.len() as u64)?;
-        for label in labels.iter() {
-            enc.str(label.as_str())?;
-        }
-    }
-    if !patch.notes.is_omitted() {
-        enc.str("notes")?;
-        match &patch.notes {
-            NotesPatch::Omitted => {
-                enc.array(0)?;
-            }
-            NotesPatch::AtLeast(notes) => {
-                enc.array(notes.len() as u64)?;
-                for note in notes {
-                    encode_wire_note(enc, note)?;
-                }
-            }
-        }
-    }
     if let Some(priority) = patch.priority {
         enc.str("priority")?;
         enc.u32(priority.value().into())?;
@@ -1058,29 +1090,6 @@ fn decode_wire_bead_patch(
                 let raw = decode_text(dec, limits)?;
                 patch.id = parse_bead_id(raw)?;
                 id_set = true;
-            }
-            "labels" => {
-                let arr_len = decode_array_len(dec, limits, depth + 1)?;
-                let mut labels = super::collections::Labels::new();
-                for _ in 0..arr_len {
-                    let raw = decode_text(dec, limits)?;
-                    let label = super::collections::Label::parse(raw.to_string()).map_err(|e| {
-                        DecodeError::InvalidField {
-                            field: "labels",
-                            reason: e.to_string(),
-                        }
-                    })?;
-                    labels.insert(label);
-                }
-                patch.labels = Some(labels);
-            }
-            "notes" => {
-                let arr_len = decode_array_len(dec, limits, depth + 1)?;
-                let mut notes = Vec::with_capacity(arr_len);
-                for _ in 0..arr_len {
-                    notes.push(decode_wire_note(dec, limits, depth + 2)?);
-                }
-                patch.notes = NotesPatch::AtLeast(notes);
             }
             "priority" => {
                 let val = decode_u32(dec, "priority")?;
@@ -1311,142 +1320,235 @@ fn decode_wire_tombstone(
     })
 }
 
-fn encode_wire_dep(enc: &mut Encoder<&mut Vec<u8>>, dep: &WireDepV1) -> Result<(), EncodeError> {
-    let mut len = 5;
-    let has_deleted = dep.deleted_at.is_some() || dep.deleted_by.is_some();
-    if has_deleted {
-        len += 2;
-    }
-
-    enc.map(len as u64)?;
-    enc.str("from")?;
-    enc.str(dep.from.as_str())?;
-    enc.str("to")?;
-    enc.str(dep.to.as_str())?;
-    enc.str("kind")?;
-    enc.str(dep.kind.as_str())?;
-    enc.str("created_at")?;
-    encode_wire_stamp(enc, &dep.created_at)?;
-    enc.str("created_by")?;
-    enc.str(dep.created_by.as_str())?;
-
-    if let (Some(at), Some(by)) = (dep.deleted_at, dep.deleted_by.as_ref()) {
-        enc.str("deleted_at")?;
-        encode_wire_stamp(enc, &at)?;
-        enc.str("deleted_by")?;
-        enc.str(by.as_str())?;
-    } else {
-        debug_assert!(
-            dep.deleted_at.is_none() && dep.deleted_by.is_none(),
-            "deleted fields must be set together"
-        );
-    }
-
+fn encode_wire_dot(enc: &mut Encoder<&mut Vec<u8>>, dot: &WireDotV1) -> Result<(), EncodeError> {
+    enc.map(2)?;
+    enc.str("replica")?;
+    let replica = dot.replica.to_string();
+    enc.str(replica.as_str())?;
+    enc.str("counter")?;
+    enc.u64(dot.counter)?;
     Ok(())
 }
 
-fn decode_wire_dep(
+fn decode_wire_dot(
     dec: &mut Decoder,
     limits: &Limits,
     depth: usize,
-) -> Result<WireDepV1, DecodeError> {
+) -> Result<WireDotV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut seen_keys = BTreeSet::new();
-    let mut from = None;
-    let mut to = None;
-    let mut kind = None;
-    let mut created_at = None;
-    let mut created_by = None;
-    let mut deleted_at = None;
-    let mut deleted_by = None;
+    let mut replica = None;
+    let mut counter = None;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
         ensure_unique_key(&mut seen_keys, key)?;
         match key {
-            "from" => {
+            "replica" => {
                 let raw = decode_text(dec, limits)?;
-                from = Some(parse_bead_id(raw)?);
+                replica = Some(parse_uuid_field::<ReplicaId>("replica", raw)?);
             }
-            "to" => {
-                let raw = decode_text(dec, limits)?;
-                to = Some(parse_bead_id(raw)?);
-            }
-            "kind" => {
-                let raw = decode_text(dec, limits)?;
-                kind = Some(parse_dep_kind(raw)?);
-            }
-            "created_at" => {
-                created_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
-            }
-            "created_by" => {
-                let raw = decode_text(dec, limits)?;
-                created_by = Some(parse_actor_id(raw, "created_by")?);
-            }
-            "deleted_at" => {
-                deleted_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
-            }
-            "deleted_by" => {
-                let raw = decode_text(dec, limits)?;
-                deleted_by = Some(parse_actor_id(raw, "deleted_by")?);
+            "counter" => {
+                counter = Some(decode_u64(dec, "counter")?);
             }
             other => {
                 return Err(DecodeError::InvalidField {
-                    field: "dep_upsert",
+                    field: "dot",
                     reason: format!("unknown key {other}"),
                 });
             }
         }
     }
 
-    if deleted_at.is_some() ^ deleted_by.is_some() {
-        return Err(DecodeError::InvalidField {
-            field: "dep_upsert",
-            reason: "deleted_at and deleted_by must be set together".into(),
-        });
-    }
-
-    Ok(WireDepV1 {
-        from: from.ok_or(DecodeError::MissingField("from"))?,
-        to: to.ok_or(DecodeError::MissingField("to"))?,
-        kind: kind.ok_or(DecodeError::MissingField("kind"))?,
-        created_at: created_at.ok_or(DecodeError::MissingField("created_at"))?,
-        created_by: created_by.ok_or(DecodeError::MissingField("created_by"))?,
-        deleted_at,
-        deleted_by,
+    Ok(WireDotV1 {
+        replica: replica.ok_or(DecodeError::MissingField("replica"))?,
+        counter: counter.ok_or(DecodeError::MissingField("counter"))?,
     })
 }
 
-fn encode_wire_dep_delete(
+fn encode_wire_dvv(enc: &mut Encoder<&mut Vec<u8>>, dvv: &WireDvvV1) -> Result<(), EncodeError> {
+    enc.map(dvv.max.len() as u64)?;
+    for (replica, counter) in &dvv.max {
+        let replica = replica.to_string();
+        enc.str(replica.as_str())?;
+        enc.u64(*counter)?;
+    }
+    Ok(())
+}
+
+fn decode_wire_dvv(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireDvvV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut max = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+
+    for _ in 0..map_len {
+        let raw = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen, raw)?;
+        let replica = parse_uuid_field::<ReplicaId>("replica", raw)?;
+        let counter = decode_u64(dec, "counter")?;
+        max.insert(replica, counter);
+    }
+
+    Ok(WireDvvV1 { max })
+}
+
+fn encode_wire_label_add(
     enc: &mut Encoder<&mut Vec<u8>>,
-    dep: &WireDepDeleteV1,
+    op: &WireLabelAddV1,
 ) -> Result<(), EncodeError> {
-    enc.map(5)?;
+    enc.map(3)?;
+    enc.str("bead_id")?;
+    enc.str(op.bead_id.as_str())?;
+    enc.str("label")?;
+    enc.str(op.label.as_str())?;
+    enc.str("dot")?;
+    encode_wire_dot(enc, &op.dot)?;
+    Ok(())
+}
+
+fn decode_wire_label_add(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireLabelAddV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
+    let mut bead_id = None;
+    let mut label = None;
+    let mut dot = None;
+
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
+        match key {
+            "bead_id" => {
+                let raw = decode_text(dec, limits)?;
+                bead_id = Some(parse_bead_id(raw)?);
+            }
+            "label" => {
+                let raw = decode_text(dec, limits)?;
+                label = Some(
+                    super::collections::Label::parse(raw.to_string()).map_err(|e| {
+                        DecodeError::InvalidField {
+                            field: "label",
+                            reason: e.to_string(),
+                        }
+                    })?,
+                );
+            }
+            "dot" => {
+                dot = Some(decode_wire_dot(dec, limits, depth + 1)?);
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "label_add",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    Ok(WireLabelAddV1 {
+        bead_id: bead_id.ok_or(DecodeError::MissingField("bead_id"))?,
+        label: label.ok_or(DecodeError::MissingField("label"))?,
+        dot: dot.ok_or(DecodeError::MissingField("dot"))?,
+    })
+}
+
+fn encode_wire_label_remove(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    op: &WireLabelRemoveV1,
+) -> Result<(), EncodeError> {
+    enc.map(3)?;
+    enc.str("bead_id")?;
+    enc.str(op.bead_id.as_str())?;
+    enc.str("label")?;
+    enc.str(op.label.as_str())?;
+    enc.str("ctx")?;
+    encode_wire_dvv(enc, &op.ctx)?;
+    Ok(())
+}
+
+fn decode_wire_label_remove(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireLabelRemoveV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
+    let mut bead_id = None;
+    let mut label = None;
+    let mut ctx = None;
+
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
+        match key {
+            "bead_id" => {
+                let raw = decode_text(dec, limits)?;
+                bead_id = Some(parse_bead_id(raw)?);
+            }
+            "label" => {
+                let raw = decode_text(dec, limits)?;
+                label = Some(
+                    super::collections::Label::parse(raw.to_string()).map_err(|e| {
+                        DecodeError::InvalidField {
+                            field: "label",
+                            reason: e.to_string(),
+                        }
+                    })?,
+                );
+            }
+            "ctx" => {
+                ctx = Some(decode_wire_dvv(dec, limits, depth + 1)?);
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "label_remove",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    Ok(WireLabelRemoveV1 {
+        bead_id: bead_id.ok_or(DecodeError::MissingField("bead_id"))?,
+        label: label.ok_or(DecodeError::MissingField("label"))?,
+        ctx: ctx.ok_or(DecodeError::MissingField("ctx"))?,
+    })
+}
+
+fn encode_wire_dep_add(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    dep: &WireDepAddV1,
+) -> Result<(), EncodeError> {
+    enc.map(4)?;
     enc.str("from")?;
     enc.str(dep.from.as_str())?;
     enc.str("to")?;
     enc.str(dep.to.as_str())?;
     enc.str("kind")?;
     enc.str(dep.kind.as_str())?;
-    enc.str("deleted_at")?;
-    encode_wire_stamp(enc, &dep.deleted_at)?;
-    enc.str("deleted_by")?;
-    enc.str(dep.deleted_by.as_str())?;
+    enc.str("dot")?;
+    encode_wire_dot(enc, &dep.dot)?;
     Ok(())
 }
 
-fn decode_wire_dep_delete(
+fn decode_wire_dep_add(
     dec: &mut Decoder,
     limits: &Limits,
     depth: usize,
-) -> Result<WireDepDeleteV1, DecodeError> {
+) -> Result<WireDepAddV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut seen_keys = BTreeSet::new();
     let mut from = None;
     let mut to = None;
     let mut kind = None;
-    let mut deleted_at = None;
-    let mut deleted_by = None;
+    let mut dot = None;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
@@ -1464,28 +1566,87 @@ fn decode_wire_dep_delete(
                 let raw = decode_text(dec, limits)?;
                 kind = Some(parse_dep_kind(raw)?);
             }
-            "deleted_at" => {
-                deleted_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
-            }
-            "deleted_by" => {
-                let raw = decode_text(dec, limits)?;
-                deleted_by = Some(parse_actor_id(raw, "deleted_by")?);
+            "dot" => {
+                dot = Some(decode_wire_dot(dec, limits, depth + 1)?);
             }
             other => {
                 return Err(DecodeError::InvalidField {
-                    field: "dep_delete",
+                    field: "dep_add",
                     reason: format!("unknown key {other}"),
                 });
             }
         }
     }
 
-    Ok(WireDepDeleteV1 {
+    Ok(WireDepAddV1 {
         from: from.ok_or(DecodeError::MissingField("from"))?,
         to: to.ok_or(DecodeError::MissingField("to"))?,
         kind: kind.ok_or(DecodeError::MissingField("kind"))?,
-        deleted_at: deleted_at.ok_or(DecodeError::MissingField("deleted_at"))?,
-        deleted_by: deleted_by.ok_or(DecodeError::MissingField("deleted_by"))?,
+        dot: dot.ok_or(DecodeError::MissingField("dot"))?,
+    })
+}
+
+fn encode_wire_dep_remove(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    dep: &WireDepRemoveV1,
+) -> Result<(), EncodeError> {
+    enc.map(4)?;
+    enc.str("from")?;
+    enc.str(dep.from.as_str())?;
+    enc.str("to")?;
+    enc.str(dep.to.as_str())?;
+    enc.str("kind")?;
+    enc.str(dep.kind.as_str())?;
+    enc.str("ctx")?;
+    encode_wire_dvv(enc, &dep.ctx)?;
+    Ok(())
+}
+
+fn decode_wire_dep_remove(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireDepRemoveV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
+    let mut from = None;
+    let mut to = None;
+    let mut kind = None;
+    let mut ctx = None;
+
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
+        match key {
+            "from" => {
+                let raw = decode_text(dec, limits)?;
+                from = Some(parse_bead_id(raw)?);
+            }
+            "to" => {
+                let raw = decode_text(dec, limits)?;
+                to = Some(parse_bead_id(raw)?);
+            }
+            "kind" => {
+                let raw = decode_text(dec, limits)?;
+                kind = Some(parse_dep_kind(raw)?);
+            }
+            "ctx" => {
+                ctx = Some(decode_wire_dvv(dec, limits, depth + 1)?);
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "dep_remove",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    Ok(WireDepRemoveV1 {
+        from: from.ok_or(DecodeError::MissingField("from"))?,
+        to: to.ok_or(DecodeError::MissingField("to"))?,
+        kind: kind.ok_or(DecodeError::MissingField("kind"))?,
+        ctx: ctx.ok_or(DecodeError::MissingField("ctx"))?,
     })
 }
 
@@ -2015,30 +2176,12 @@ pub fn validate_event_body_limits(
     let mut note_appends = 0usize;
     for op in delta.iter() {
         match op {
-            TxnOpV1::BeadUpsert(patch) => {
-                if let Some(labels) = &patch.labels
-                    && labels.len() > limits.max_labels_per_bead
-                {
-                    return Err(EventValidationError::TooManyLabels {
-                        count: labels.len(),
-                        max: limits.max_labels_per_bead,
-                    });
-                }
-                if let NotesPatch::AtLeast(notes) = &patch.notes {
-                    for note in notes {
-                        let bytes = note.content.len();
-                        if bytes > limits.max_note_bytes {
-                            return Err(EventValidationError::NoteTooLarge {
-                                bytes,
-                                max: limits.max_note_bytes,
-                            });
-                        }
-                    }
-                }
-            }
+            TxnOpV1::BeadUpsert(_) => {}
             TxnOpV1::BeadDelete(_) => {}
-            TxnOpV1::DepUpsert(_) => {}
-            TxnOpV1::DepDelete(_) => {}
+            TxnOpV1::LabelAdd(_) => {}
+            TxnOpV1::LabelRemove(_) => {}
+            TxnOpV1::DepAdd(_) => {}
+            TxnOpV1::DepRemove(_) => {}
             TxnOpV1::NoteAppend(append) => {
                 note_appends += 1;
                 let bytes = append.note.content.len();

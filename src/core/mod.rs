@@ -93,7 +93,8 @@ pub use watermark::{
     Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, Watermarks,
 };
 pub use wire_bead::{
-    NoteAppendV1, NotesPatch, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull,
-    WireBeadPatch, WireDepDeleteV1, WireDepV1, WireFieldStamp, WireNoteV1, WirePatch, WireStamp,
-    WireTombstoneV1, WorkflowStatus,
+    NoteAppendV1, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull, WireBeadPatch,
+    WireDepAddV1, WireDepEdgeV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireFieldStamp,
+    WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1,
+    WorkflowStatus,
 };
