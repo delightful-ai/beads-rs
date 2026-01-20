@@ -2,8 +2,8 @@
 
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
-    ActorId, ApplyError, CanonicalState, EventBody, EventKindV1, HlcMax, TxnDeltaV1, TxnOpV1,
-    WireBeadPatch, WireNoteV1, WireStamp, apply_event,
+    ActorId, CanonicalState, EventBody, EventKindV1, HlcMax, TxnDeltaV1, TxnOpV1, WireBeadPatch,
+    WireNoteV1, WireStamp, apply_event, sha256_bytes,
 };
 
 use crate::fixtures::apply_harness::{
@@ -51,7 +51,7 @@ fn apply_event_is_idempotent() {
 }
 
 #[test]
-fn note_collision_is_error() {
+fn note_collision_is_deterministic() {
     let mut state = CanonicalState::new();
     let base = sample_event_body(1);
     apply_event(&mut state, &base).expect("apply base");
@@ -71,8 +71,21 @@ fn note_collision_is_error() {
         .expect("unique note append");
 
     let event = event_body_with_delta(2, delta);
-    let err = apply_event(&mut state, &event).unwrap_err();
-    assert!(matches!(err, ApplyError::NoteCollision { .. }));
+    apply_event(&mut state, &event).expect("apply collision");
+
+    let stored = state
+        .notes_for(&bead_id)
+        .into_iter()
+        .find(|note| note.id == note_id)
+        .expect("note stored");
+    let hash_base = sha256_bytes("note-02".as_bytes());
+    let hash_incoming = sha256_bytes("different-content".as_bytes());
+    let expected = if hash_base >= hash_incoming {
+        "note-02"
+    } else {
+        "different-content"
+    };
+    assert_eq!(stored.content, expected);
 }
 
 #[test]
