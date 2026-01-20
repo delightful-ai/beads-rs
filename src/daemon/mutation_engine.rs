@@ -13,7 +13,7 @@ use crate::core::{
     TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepAddV1,
     WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
     WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
-    sha256_bytes, to_canon_json_bytes,
+    sha256_bytes, to_canon_json_bytes, validate_event_body,
 };
 use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
 
@@ -555,6 +555,13 @@ impl MutationEngine {
             }),
         };
 
+        validate_event_body(&event_body, &self.limits).map_err(|err| {
+            OpError::ValidationFailed {
+                field: "event".into(),
+                reason: err.to_string(),
+            }
+        })?;
+
         let event_bytes = encode_event_body_canonical(&event_body)
             .map_err(|_| OpError::Internal("event_body encode failed"))?;
         self.enforce_record_size(&event_bytes, draft.client_request_id)?;
@@ -1060,6 +1067,8 @@ impl MutationEngine {
 
         let mut patch = WireBeadPatch::new(id.clone());
         patch.status = Some(WorkflowStatus::Closed);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
         if let Some(reason) = reason.clone() {
             patch.closed_reason = WirePatch::Set(reason);
         }
@@ -1093,6 +1102,8 @@ impl MutationEngine {
 
         let mut patch = WireBeadPatch::new(id.clone());
         patch.status = Some(WorkflowStatus::Open);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1355,6 +1366,8 @@ impl MutationEngine {
         patch.assignee = WirePatch::Set(stamp.by.clone());
         patch.assignee_expires = WirePatch::Set(expires);
         patch.status = Some(WorkflowStatus::InProgress);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1384,7 +1397,10 @@ impl MutationEngine {
 
         let mut patch = WireBeadPatch::new(id.clone());
         patch.assignee = WirePatch::Clear;
+        patch.assignee_expires = WirePatch::Clear;
         patch.status = Some(WorkflowStatus::Open);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1405,13 +1421,17 @@ impl MutationEngine {
     ) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
 
-        if let crate::core::Claim::Claimed { assignee, .. } = &bead.fields.claim.value {
-            if assignee != &stamp.by {
+        let assignee = match &bead.fields.claim.value {
+            crate::core::Claim::Claimed { assignee, .. } => {
+                if assignee != &stamp.by {
+                    return Err(OpError::NotClaimedByYou);
+                }
+                assignee.clone()
+            }
+            crate::core::Claim::Unclaimed => {
                 return Err(OpError::NotClaimedByYou);
             }
-        } else {
-            return Err(OpError::NotClaimedByYou);
-        }
+        };
 
         let expires = WallClock(
             stamp
@@ -1421,7 +1441,7 @@ impl MutationEngine {
         );
 
         let mut patch = WireBeadPatch::new(id.clone());
-        patch.assignee = WirePatch::Keep;
+        patch.assignee = WirePatch::Set(assignee);
         patch.assignee_expires = WirePatch::Set(expires);
 
         let mut delta = TxnDeltaV1::new();
@@ -1769,6 +1789,8 @@ fn normalize_patch(
 
     if let Patch::Set(status) = &patch.status {
         wire.status = Some(*status);
+        wire.closed_reason = WirePatch::Clear;
+        wire.closed_on_branch = WirePatch::Clear;
     }
 
     let canonical = CanonicalBeadPatch {
