@@ -3695,7 +3695,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_sync_resolves_collisions_for_dirty_state() {
+    fn complete_sync_preserves_local_state_on_collision() {
         let _tmp = test_store_dir();
         let remote = test_remote();
         let mut daemon = Daemon::new(test_actor());
@@ -3703,6 +3703,7 @@ mod tests {
 
         let winner = make_bead("bd-abc", 1000, "alice");
         let loser = make_bead("bd-abc", 2000, "bob");
+        let loser_created = loser.core.created().clone();
 
         let mut synced_state = CanonicalState::new();
         synced_state.insert_live(winner.clone());
@@ -3737,11 +3738,15 @@ mod tests {
             .state
             .get(&NamespaceId::core())
             .expect("core state");
-        assert_eq!(core_state.live_count(), 2);
+        assert_eq!(core_state.live_count(), 1);
 
         let id = BeadId::parse("bd-abc").unwrap();
         let merged = core_state.get_live(&id).unwrap();
-        assert_eq!(merged.core.created(), winner.core.created());
+        assert_eq!(merged.core.created(), &loser_created);
+
+        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
+        assert!(repo_state.dirty);
+        assert!(!repo_state.sync_in_progress);
     }
 
     #[test]
