@@ -125,6 +125,10 @@ impl<V: OrSetValue> OrSet<V> {
         }
     }
 
+    pub(crate) fn from_parts(entries: BTreeMap<V, BTreeSet<Dot>>, cc: Dvv) -> Self {
+        Self { entries, cc }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

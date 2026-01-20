@@ -43,6 +43,10 @@ impl LabelState {
         }
     }
 
+    pub(crate) fn from_parts(set: OrSet<Label>, stamp: Option<Stamp>) -> Self {
+        Self { set, stamp }
+    }
+
     pub fn stamp(&self) -> Option<&Stamp> {
         self.stamp.as_ref()
     }
@@ -80,12 +84,20 @@ impl LabelStore {
         Self::default()
     }
 
-    fn state(&self, id: &BeadId) -> Option<&LabelState> {
+    pub(crate) fn state(&self, id: &BeadId) -> Option<&LabelState> {
         self.by_bead.get(id)
     }
 
-    fn state_mut(&mut self, id: &BeadId) -> &mut LabelState {
+    pub(crate) fn state_mut(&mut self, id: &BeadId) -> &mut LabelState {
         self.by_bead.entry(id.clone()).or_default()
+    }
+
+    pub(crate) fn insert_state(&mut self, id: BeadId, state: LabelState) {
+        self.by_bead.insert(id, state);
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BeadId, &LabelState)> {
+        self.by_bead.iter()
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
@@ -119,8 +131,15 @@ impl DepStore {
         }
     }
 
+    pub(crate) fn from_parts(set: OrSet<DepKey>, stamp: Option<Stamp>) -> Self {
+        Self { set, stamp }
+    }
     pub fn stamp(&self) -> Option<&Stamp> {
         self.stamp.as_ref()
+    }
+
+    pub(crate) fn cc(&self) -> &Dvv {
+        self.set.cc()
     }
 
     pub fn contains(&self, key: &DepKey) -> bool {
@@ -194,6 +213,10 @@ impl NoteStore {
         let mut out: Vec<&Note> = notes.values().collect();
         out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
         out
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BeadId, &BTreeMap<NoteId, Note>)> {
+        self.by_bead.iter()
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
@@ -470,12 +493,26 @@ impl CanonicalState {
         &self.notes
     }
 
+    pub(crate) fn dep_store(&self) -> &DepStore {
+        &self.dep_store
+    }
+
     pub(crate) fn set_label_store(&mut self, labels: LabelStore) {
         self.labels = labels;
     }
 
     pub(crate) fn set_note_store(&mut self, notes: NoteStore) {
         self.notes = notes;
+    }
+
+    pub(crate) fn set_dep_store(&mut self, dep_store: DepStore) {
+        self.dep_store = dep_store;
+        self.deps.clear();
+        if let Some(stamp) = self.dep_store.stamp.clone() {
+            for key in self.dep_store.values() {
+                self.deps.insert(key.clone(), DepEdge::new(stamp.clone()));
+            }
+        }
     }
 
     pub fn bead_view(&self, id: &BeadId) -> Option<BeadView> {
