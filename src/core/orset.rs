@@ -413,4 +413,56 @@ mod tests {
         set.apply_add(dot(1, 1), "a".to_string(), Sha256([3u8; 32]));
         assert!(set.is_empty());
     }
+
+    #[test]
+    fn orset_add_wins_over_remove_ctx() {
+        let mut set = OrSet::new();
+        let value = "x".to_string();
+        let dot_a = dot(1, 1);
+        let dot_b = dot(2, 1);
+        set.apply_add(dot_a, value.clone(), Sha256([1u8; 32]));
+        set.apply_add(dot_b, value.clone(), Sha256([2u8; 32]));
+
+        let mut ctx = Dvv::default();
+        ctx.observe(dot_a);
+        set.apply_remove(&value, &ctx);
+
+        assert!(set.contains(&value));
+    }
+
+    #[test]
+    fn orset_remove_with_ctx_drops_all_dots() {
+        let mut set = OrSet::new();
+        let value = "y".to_string();
+        let dot_a = dot(1, 1);
+        let dot_b = dot(2, 1);
+        set.apply_add(dot_a, value.clone(), Sha256([4u8; 32]));
+        set.apply_add(dot_b, value.clone(), Sha256([5u8; 32]));
+
+        let mut ctx = Dvv::default();
+        ctx.observe(dot_a);
+        ctx.observe(dot_b);
+        set.apply_remove(&value, &ctx);
+
+        assert!(!set.contains(&value));
+    }
+
+    #[test]
+    fn orset_join_preserves_concurrent_add() {
+        let value = "z".to_string();
+        let dot_a = dot(1, 1);
+        let dot_b = dot(2, 1);
+
+        let mut a = OrSet::new();
+        a.apply_add(dot_a, value.clone(), Sha256([6u8; 32]));
+
+        let mut b = OrSet::new();
+        b.apply_add(dot_b, value.clone(), Sha256([7u8; 32]));
+        let mut ctx = Dvv::default();
+        ctx.observe(dot_a);
+        b.apply_remove(&value, &ctx);
+
+        let joined = OrSet::join(&a, &b);
+        assert!(joined.contains(&value));
+    }
 }
