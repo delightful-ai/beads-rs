@@ -1200,10 +1200,14 @@ impl CanonicalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::collections::Label;
+    use crate::core::composite::Note;
     use crate::core::dep::DepLife;
-    use crate::core::identity::ActorId;
+    use crate::core::identity::{ActorId, NoteId, ReplicaId};
+    use crate::core::orset::Dot;
     use crate::core::time::{Stamp, WriteStamp};
     use proptest::prelude::*;
+    use uuid::Uuid;
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -1685,6 +1689,35 @@ mod tests {
         let cycles = state.dependency_cycles();
         assert_eq!(cycles.len(), 1);
         assert_eq!(cycles[0], vec![a.clone(), b.clone(), c.clone(), a.clone()]);
+    }
+
+    #[test]
+    fn updated_stamp_includes_labels_and_notes() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let id = bead_id("bd-aaa");
+        state.insert(make_bead(&id, &base)).unwrap();
+
+        let label = Label::parse("urgent").unwrap();
+        let label_stamp = make_stamp(2000, 0, "bob");
+        let dot = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        state.apply_label_add(id.clone(), label, dot, Sha256([0; 32]), label_stamp.clone());
+
+        let updated = state.updated_stamp_for(&id).expect("updated stamp");
+        assert_eq!(updated.at.wall_ms, label_stamp.at.wall_ms);
+
+        let note_id = NoteId::new("note-1").unwrap();
+        let note_author = ActorId::new("carol").unwrap();
+        let note_stamp = WriteStamp::new(3000, 0);
+        let note = Note::new(note_id, "hi".to_string(), note_author.clone(), note_stamp);
+        state.insert_note(id.clone(), note);
+
+        let updated = state.updated_stamp_for(&id).expect("updated stamp");
+        assert_eq!(updated.at.wall_ms, 3000);
+        assert_eq!(updated.by, note_author);
     }
 
     #[test]
