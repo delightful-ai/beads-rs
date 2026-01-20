@@ -1003,6 +1003,13 @@ mod tests {
         Bead::new(core, fields)
     }
 
+    fn dot(replica_byte: u8, counter: u64) -> Dot {
+        Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([replica_byte; 16])),
+            counter,
+        }
+    }
+
     fn base58_id_strategy() -> impl Strategy<Value = String> {
         proptest::string::string_regex("[1-9A-HJ-NP-Za-km-z]{5,8}")
             .unwrap_or_else(|e| panic!("regex failed: {e}"))
@@ -1155,6 +1162,90 @@ mod tests {
         assert_eq!(serialize_state(&parsed).unwrap(), state_bytes);
         assert_eq!(serialize_deps(&parsed).unwrap(), deps_bytes);
         assert_eq!(serialize_notes(&parsed).unwrap(), notes_bytes);
+    }
+
+    #[test]
+    fn roundtrip_orset_metadata_preserves_dots_and_context() {
+        let stamp = Stamp::new(WriteStamp::new(10, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-orset-meta");
+        state.insert(make_bead(&id, &stamp)).unwrap();
+
+        let label_a = Label::parse("urgent").unwrap();
+        let label_b = Label::parse("backend").unwrap();
+        state.apply_label_add(
+            id.clone(),
+            label_a.clone(),
+            dot(1, 1),
+            Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state.apply_label_add(
+            id.clone(),
+            label_b.clone(),
+            dot(2, 2),
+            Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let label_ctx = state.label_dvv(&id, &label_a);
+        state.apply_label_remove(id.clone(), &label_a, &label_ctx, stamp.clone());
+
+        let dep_key_a = DepKey::new(id.clone(), bead_id("bd-target-a"), DepKind::Blocks).unwrap();
+        let dep_key_b = DepKey::new(id.clone(), bead_id("bd-target-b"), DepKind::Related).unwrap();
+        state.apply_dep_add(dep_key_a.clone(), dot(3, 3), Sha256([0; 32]), stamp.clone());
+        state.apply_dep_add(dep_key_b.clone(), dot(4, 4), Sha256([0; 32]), stamp.clone());
+        let dep_ctx = state.dep_dvv(&dep_key_b);
+        state.apply_dep_remove(&dep_key_b, &dep_ctx, stamp.clone());
+
+        let note_id = NoteId::new("note-meta").unwrap();
+        let note = Note::new(
+            note_id,
+            "metadata note".to_string(),
+            actor_id("bob"),
+            WriteStamp::new(11, 0),
+        );
+        state.insert_note(id.clone(), note);
+
+        let state_bytes = serialize_state(&state).unwrap();
+        let tomb_bytes = serialize_tombstones(&state).unwrap();
+        let deps_bytes = serialize_deps(&state).unwrap();
+        let notes_bytes = serialize_notes(&state).unwrap();
+
+        let parsed =
+            parse_legacy_state(&state_bytes, &tomb_bytes, &deps_bytes, &notes_bytes).unwrap();
+
+        let original_labels = state.label_store().state(&id).expect("label state missing");
+        let parsed_labels = parsed
+            .label_store()
+            .state(&id)
+            .expect("label state missing");
+        assert_eq!(original_labels.cc(), parsed_labels.cc());
+        assert_eq!(
+            original_labels.dots_for(&label_a),
+            parsed_labels.dots_for(&label_a)
+        );
+        assert_eq!(
+            original_labels.dots_for(&label_b),
+            parsed_labels.dots_for(&label_b)
+        );
+        assert_eq!(original_labels.stamp(), parsed_labels.stamp());
+
+        let original_deps = state.dep_store();
+        let parsed_deps = parsed.dep_store();
+        assert_eq!(original_deps.cc(), parsed_deps.cc());
+        assert_eq!(
+            original_deps.dots_for(&dep_key_a),
+            parsed_deps.dots_for(&dep_key_a)
+        );
+        assert_eq!(
+            original_deps.dots_for(&dep_key_b),
+            parsed_deps.dots_for(&dep_key_b)
+        );
+        assert_eq!(original_deps.stamp(), parsed_deps.stamp());
+
+        let original_notes = state.notes_for(&id);
+        let parsed_notes = parsed.notes_for(&id);
+        assert_eq!(original_notes, parsed_notes);
     }
 
     proptest! {
