@@ -17,10 +17,11 @@ use std::time::Instant;
 
 use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 
-use super::collision::{Collision, detect_collisions, resolve_collisions};
 use super::error::SyncError;
 use super::wire;
-use crate::core::{BeadId, CanonicalState, Stamp, WallClock, WriteStamp};
+#[cfg(test)]
+use crate::core::Stamp;
+use crate::core::{BeadId, CanonicalState, WallClock, WriteStamp};
 
 // =============================================================================
 // Phase markers (zero-sized types for typestate)
@@ -59,8 +60,6 @@ pub struct Fetched {
 pub struct Merged {
     /// Merged state (local + remote).
     pub state: CanonicalState,
-    /// Collisions that were resolved.
-    pub collisions: Vec<Collision>,
     /// Parent oid for commit (local ref, not remote).
     pub parent_oid: Oid,
     /// Diff summary for commit message.
@@ -265,7 +264,7 @@ impl SyncConfig {
 /// ```ignore
 /// let synced = SyncProcess::new(repo_path)
 ///     .fetch(&repo)?
-///     .merge(&local_state, stamp)?
+///     .merge(&local_state)?
 ///     .commit(&repo)?
 ///     .push(&repo)?;
 /// ```
@@ -447,14 +446,9 @@ impl SyncProcess<Fetched> {
     /// Merge local state with remote, transition to Merged phase.
     ///
     /// Handles:
-    /// - ID collisions (detects and resolves)
     /// - CRDT pairwise merge (no base needed)
     /// - Resurrection rule (bead beats tombstone if newer)
-    pub fn merge(
-        self,
-        local_state: &CanonicalState,
-        resolution_stamp: Stamp,
-    ) -> Result<SyncProcess<Merged>, SyncError> {
+    pub fn merge(self, local_state: &CanonicalState) -> Result<SyncProcess<Merged>, SyncError> {
         let SyncProcess {
             repo_path,
             config,
@@ -483,7 +477,6 @@ impl SyncProcess<Fetched> {
                 config,
                 phase: Merged {
                     state: local_state.clone(),
-                    collisions: Vec::new(),
                     parent_oid,
                     diff,
                     root_slug,
@@ -492,19 +485,8 @@ impl SyncProcess<Fetched> {
             });
         }
 
-        // Detect ID collisions
-        let collisions = detect_collisions(local_state, &remote_state);
-
-        // Resolve collisions if any
-        let (local_resolved, remote_resolved) = if collisions.is_empty() {
-            (local_state.clone(), remote_state)
-        } else {
-            resolve_collisions(local_state, &remote_state, &collisions, resolution_stamp)
-                .map_err(SyncError::CollisionResolution)?
-        };
-
         // Pairwise CRDT merge
-        let mut merged = CanonicalState::join(&local_resolved, &remote_resolved)
+        let mut merged = CanonicalState::join(local_state, &remote_state)
             .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
 
         // Garbage collect soft-deleted deps. Tombstones are GC'd only if configured.
@@ -517,14 +499,13 @@ impl SyncProcess<Fetched> {
         }
 
         // Compute diff for commit message
-        let diff = compute_diff(&remote_resolved, &merged);
+        let diff = compute_diff(&remote_state, &merged);
 
         Ok(SyncProcess {
             repo_path,
             config,
             phase: Merged {
                 state: merged,
-                collisions,
                 parent_oid,
                 diff,
                 root_slug,
@@ -953,7 +934,6 @@ pub fn sync_with_retry(
     repo: &Repository,
     repo_path: &Path,
     local_state: &CanonicalState,
-    resolution_stamp: Stamp,
     max_retries: usize,
 ) -> Result<SyncOutcome, SyncError> {
     let mut retries = 0;
@@ -969,10 +949,7 @@ pub fn sync_with_retry(
             force_push = fetched.phase.force_push.clone();
         }
         let parent_meta_stamp = fetched.phase.parent_meta_stamp.clone();
-        let result = fetched
-            .merge(local_state, resolution_stamp.clone())?
-            .commit(repo)?
-            .push(repo);
+        let result = fetched.merge(local_state)?.commit(repo)?.push(repo);
 
         match result {
             Ok(state) => {
@@ -1456,9 +1433,7 @@ mod tests {
             },
         };
 
-        let merged = fetched
-            .merge(&local_state, make_stamp(2, "bob"))
-            .expect("merge");
+        let merged = fetched.merge(&local_state).expect("merge");
         assert!(merged.phase.state.get_tombstone(&id).is_some());
     }
 
@@ -1667,21 +1642,7 @@ mod tests {
         let _remote_oid = write_store_commit(&remote_repo, None, "remote");
         let _local_oid = write_store_commit(&local_repo, None, "local");
 
-        let actor =
-            crate::core::ActorId::new("tester").unwrap_or_else(|e| panic!("invalid actor id: {e}"));
-        let resolution_stamp = Stamp {
-            at: WriteStamp::new(10, 0),
-            by: actor,
-        };
-
-        let outcome = sync_with_retry(
-            &local_repo,
-            &local_dir,
-            &CanonicalState::new(),
-            resolution_stamp,
-            1,
-        )
-        .unwrap();
+        let outcome = sync_with_retry(&local_repo, &local_dir, &CanonicalState::new(), 1).unwrap();
 
         assert!(outcome.divergence.is_some());
     }
@@ -1718,14 +1679,7 @@ mod tests {
         }
         fs::write(&lock_path, b"lock").unwrap();
 
-        let resolution_stamp = make_stamp(10, "tester");
-        let result = sync_with_retry(
-            &local_repo,
-            &local_dir,
-            &CanonicalState::new(),
-            resolution_stamp,
-            0,
-        );
+        let result = sync_with_retry(&local_repo, &local_dir, &CanonicalState::new(), 0);
 
         match result {
             Err(SyncError::TooManyRetries(retries)) => assert_eq!(retries, 1),
@@ -2212,20 +2166,10 @@ mod tests {
                 Err(e) => return Err(TestCaseError::fail(format!("remote tracking: {e}"))),
             };
 
-            let actor = match crate::core::ActorId::new("tester") {
-                Ok(actor) => actor,
-                Err(e) => return Err(TestCaseError::fail(format!("actor: {e}"))),
-            };
-            let resolution_stamp = Stamp {
-                at: WriteStamp::new(10, 0),
-                by: actor,
-            };
-
             let outcome = match sync_with_retry(
                 &local_repo,
                 &local_dir,
                 &CanonicalState::new(),
-                resolution_stamp,
                 1,
             ) {
                 Ok(outcome) => outcome,

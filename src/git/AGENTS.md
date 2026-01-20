@@ -8,7 +8,6 @@ NEVER: implement workflow/business rules (that belongs in `core/` + `daemon/ops.
 - State lives on `refs/heads/beads/store`; keep it isolated from code branches.
 - Preserve the sync model in `src/git/sync.rs`: linear history, retry on non-fast-forward, no merge commits.
 - Wire format changes live in `src/git/wire.rs`; prefer additive changes and keep parsing tolerant.
-- If you touch collision handling, read `src/git/collision.rs` first; callers should not need to “guess”.
 
 ## Verification
 - `cargo test`
