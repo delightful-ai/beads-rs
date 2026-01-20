@@ -121,9 +121,6 @@ pub struct BeadPatch {
     pub bead_type: Patch<BeadType>,
 
     #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub labels: Patch<Vec<String>>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
     pub external_ref: Patch<String>,
 
     #[serde(default, skip_serializing_if = "Patch::is_keep")]
@@ -155,14 +152,6 @@ impl BeadPatch {
             });
         }
 
-        if let Patch::Set(labels) = &self.labels {
-            for raw in labels {
-                crate::core::Label::parse(raw.clone()).map_err(|e| OpError::ValidationFailed {
-                    field: "labels".into(),
-                    reason: e.to_string(),
-                })?;
-            }
-        }
         Ok(())
     }
 
@@ -174,7 +163,6 @@ impl BeadPatch {
             && self.acceptance_criteria.is_keep()
             && self.priority.is_keep()
             && self.bead_type.is_keep()
-            && self.labels.is_keep()
             && self.external_ref.is_keep()
             && self.source_repo.is_keep()
             && self.estimated_minutes.is_keep()
@@ -204,11 +192,6 @@ impl BeadPatch {
         }
         if let Patch::Set(v) = &self.bead_type {
             fields.bead_type = Lww::new(*v, stamp.clone());
-        }
-        if !self.labels.is_keep() {
-            return Err(OpError::Internal(
-                "labels patch must be applied via label store",
-            ));
         }
         match &self.external_ref {
             Patch::Set(v) => fields.external_ref = Lww::new(Some(v.clone()), stamp.clone()),

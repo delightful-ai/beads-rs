@@ -135,7 +135,6 @@ pub struct ParsedBeadPatch {
     pub acceptance_criteria: Patch<String>,
     pub priority: Patch<Priority>,
     pub bead_type: Patch<BeadType>,
-    pub labels: Patch<Labels>,
     pub external_ref: Patch<String>,
     pub source_repo: Patch<String>,
     pub estimated_minutes: Patch<u32>,
@@ -151,7 +150,6 @@ impl ParsedBeadPatch {
             acceptance_criteria,
             priority,
             bead_type,
-            labels,
             external_ref,
             source_repo,
             estimated_minutes,
@@ -171,14 +169,6 @@ impl ParsedBeadPatch {
             });
         }
 
-        if !labels.is_keep() {
-            return Err(OpError::ValidationFailed {
-                field: "labels".into(),
-                reason: "labels patch must be applied via label store".into(),
-            });
-        }
-        let labels = Patch::Keep;
-
         Ok(Self {
             title,
             description,
@@ -186,7 +176,6 @@ impl ParsedBeadPatch {
             acceptance_criteria,
             priority,
             bead_type,
-            labels,
             external_ref,
             source_repo,
             estimated_minutes,
@@ -1571,8 +1560,6 @@ struct CanonicalBeadPatch {
     #[serde(skip_serializing_if = "Patch::is_keep")]
     bead_type: Patch<BeadType>,
     #[serde(skip_serializing_if = "Patch::is_keep")]
-    labels: Patch<Vec<String>>,
-    #[serde(skip_serializing_if = "Patch::is_keep")]
     external_ref: Patch<String>,
     #[serde(skip_serializing_if = "Patch::is_keep")]
     source_repo: Patch<String>,
@@ -1781,8 +1768,6 @@ fn normalize_patch(
         wire.bead_type = Some(*bead_type);
     }
 
-    let canon_labels = Patch::Keep;
-
     wire.external_ref = patch_to_wire(&patch.external_ref);
     wire.source_repo = patch_to_wire(&patch.source_repo);
     wire.estimated_minutes = patch_to_wire_u32(&patch.estimated_minutes);
@@ -1800,7 +1785,6 @@ fn normalize_patch(
         acceptance_criteria: patch.acceptance_criteria.clone(),
         priority: patch.priority.clone(),
         bead_type: patch.bead_type.clone(),
-        labels: canon_labels,
         external_ref: patch.external_ref.clone(),
         source_repo: patch.source_repo.clone(),
         estimated_minutes: patch.estimated_minutes.clone(),
