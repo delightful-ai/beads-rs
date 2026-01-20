@@ -450,11 +450,11 @@ fn parse_deps(bytes: &[u8]) -> Result<ParsedDeps, WireError> {
         return Ok(ParsedDeps::OrSet(DepStore::new()));
     }
 
-    if non_empty.len() == 1 {
-        if let Ok(wire) = serde_json::from_str::<WireDepStore>(non_empty[0]) {
-            let dep_store = wire_dep_store_to_state(wire)?;
-            return Ok(ParsedDeps::OrSet(dep_store));
-        }
+    if non_empty.len() == 1
+        && let Ok(wire) = serde_json::from_str::<WireDepStore>(non_empty[0])
+    {
+        let dep_store = wire_dep_store_to_state(wire)?;
+        return Ok(ParsedDeps::OrSet(dep_store));
     }
 
     Ok(ParsedDeps::Legacy(parse_deps_legacy(&non_empty)?))
