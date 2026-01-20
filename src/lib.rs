@@ -43,6 +43,6 @@ pub use crate::core::{
     WireDepEdgeV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1,
     WireLabelRemoveV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, Workflow, WorkflowStatus,
     WriteStamp, apply_event, decode_event_body, decode_event_hlc_max, encode_event_body_canonical,
-    hash_event_body, sha256_bytes, to_canon_json_bytes, validate_event_body_limits,
-    verify_event_frame,
+    hash_event_body, sha256_bytes, to_canon_json_bytes, validate_event_body,
+    validate_event_body_limits, verify_event_frame,
 };

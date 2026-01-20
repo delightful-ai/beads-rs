@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use super::domain::DepKind;
 use super::identity::{
-    ActorId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TraceId, TxnId,
+    ActorId, BeadId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TraceId, TxnId,
 };
 use super::limits::Limits;
 use super::namespace::NamespaceId;
@@ -229,6 +229,10 @@ pub enum EventValidationError {
     TooManyLabels { count: usize, max: usize },
     #[error("note_appends count {count} exceeds max {max}")]
     TooManyNoteAppends { count: usize, max: usize },
+    #[error("invalid workflow patch for {id}: {reason}")]
+    InvalidWorkflowPatch { id: BeadId, reason: String },
+    #[error("invalid claim patch for {id}: {reason}")]
+    InvalidClaimPatch { id: BeadId, reason: String },
 }
 
 #[derive(Debug, Error)]
@@ -2205,6 +2209,48 @@ pub fn validate_event_body_limits(
     Ok(())
 }
 
+pub fn validate_event_body_semantics(body: &EventBody) -> Result<(), EventValidationError> {
+    let delta = match &body.kind {
+        EventKindV1::TxnV1(txn) => &txn.delta,
+    };
+
+    for op in delta.iter() {
+        if let TxnOpV1::BeadUpsert(patch) = op {
+            validate_bead_patch_semantics(patch)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_event_body(body: &EventBody, limits: &Limits) -> Result<(), EventValidationError> {
+    validate_event_body_limits(body, limits)?;
+    validate_event_body_semantics(body)?;
+    Ok(())
+}
+
+fn validate_bead_patch_semantics(patch: &WireBeadPatch) -> Result<(), EventValidationError> {
+    if patch.status.is_some() && (patch.closed_reason.is_keep() || patch.closed_on_branch.is_keep())
+    {
+        return Err(EventValidationError::InvalidWorkflowPatch {
+            id: patch.id.clone(),
+            reason: "status updates must include explicit closed_reason and closed_on_branch"
+                .to_string(),
+        });
+    }
+
+    let assignee_keep = patch.assignee.is_keep();
+    let expires_keep = patch.assignee_expires.is_keep();
+    if assignee_keep ^ expires_keep {
+        return Err(EventValidationError::InvalidClaimPatch {
+            id: patch.id.clone(),
+            reason: "claim updates must include explicit assignee and assignee_expires".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 pub fn verify_event_frame(
     frame: &EventFrameV1,
     limits: &Limits,
@@ -2233,7 +2279,7 @@ pub fn verify_event_frame(
         return Err(EventFrameError::HashMismatch);
     }
 
-    validate_event_body_limits(&body, limits)?;
+    validate_event_body(&body, limits)?;
 
     match lookup.lookup_event_sha(&frame.eid)? {
         None => {}
@@ -2281,6 +2327,7 @@ pub fn verify_event_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::collections::Label;
     use crate::core::identity::{BeadId, NoteId, StoreEpoch};
     use std::collections::BTreeMap;
     use uuid::Uuid;
@@ -2368,6 +2415,25 @@ mod tests {
                 from: BeadId::parse("bd-test1").unwrap(),
                 to: BeadId::parse("bd-dep2").unwrap(),
                 kind: DepKind::Related,
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([(dep_replica, 2)]),
+                },
+            }))
+            .unwrap();
+        txn.delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: BeadId::parse("bd-test1").unwrap(),
+                label: Label::parse("triage".to_string()).unwrap(),
+                dot: WireDotV1 {
+                    replica: dep_replica,
+                    counter: 2,
+                },
+            }))
+            .unwrap();
+        txn.delta
+            .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+                bead_id: BeadId::parse("bd-test1").unwrap(),
+                label: Label::parse("triage".to_string()).unwrap(),
                 ctx: WireDvvV1 {
                     max: BTreeMap::from([(dep_replica, 2)]),
                 },
@@ -2709,6 +2775,39 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_keep_workflow_patch_fields() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.status = Some(WorkflowStatus::Closed);
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidWorkflowPatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_keep_claim_patch_fields() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.assignee = WirePatch::Keep;
+        patch.assignee_expires = WirePatch::Set(super::time::WallClock(123));
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidClaimPatch { .. }
+        ));
+    }
+
+    #[test]
     fn decode_accepts_unknown_event_body_fields() {
         let body = sample_body();
         let encoded = encode_body_with_unknown_fields(&body);
@@ -2799,6 +2898,41 @@ mod tests {
         );
         let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
         assert!(matches!(err, DecodeError::DuplicateKey(key) if key == "id"));
+    }
+
+    #[test]
+    fn decode_rejects_legacy_labels_patch() {
+        let body = sample_body();
+        let txn = txn(&body);
+        let bytes = encode_body_with_custom_delta_and_hlc(
+            &body,
+            |enc| {
+                enc.map(2).unwrap();
+                enc.str("bead_upserts").unwrap();
+                enc.array(1).unwrap();
+                enc.map(1).unwrap();
+                enc.str("bead").unwrap();
+                enc.map(2).unwrap();
+                enc.str("id").unwrap();
+                enc.str("bd-test1").unwrap();
+                enc.str("labels").unwrap();
+                enc.array(1).unwrap();
+                enc.str("triage").unwrap();
+                enc.str("v").unwrap();
+                enc.u32(1).unwrap();
+            },
+            |enc| {
+                encode_hlc_max(enc, &txn.hlc_max).unwrap();
+            },
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::InvalidField {
+                field: "bead_patch",
+                ..
+            }
+        ));
     }
 
     #[test]
