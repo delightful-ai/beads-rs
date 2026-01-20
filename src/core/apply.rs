@@ -105,6 +105,31 @@ fn creation_stamp(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<Stamp, A
     }
 }
 
+fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
+    let id = bead.id();
+    let labels = state.labels_for_any(id);
+    let notes = state
+        .note_store()
+        .notes_for(id)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let label_stamp = state.label_stamp(id).cloned();
+    *BeadView::new(bead.clone(), labels, notes, label_stamp).content_hash()
+}
+
+fn bead_collision_cmp(state: &CanonicalState, existing: &Bead, incoming: &Bead) -> Ordering {
+    existing
+        .core
+        .created()
+        .cmp(incoming.core.created())
+        .then_with(|| {
+            bead_content_hash_for_collision(state, existing)
+                .as_bytes()
+                .cmp(bead_content_hash_for_collision(state, incoming).as_bytes())
+        })
+}
+
 fn apply_bead_upsert(
     state: &mut CanonicalState,
     patch: &WireBeadPatch,
@@ -116,20 +141,46 @@ fn apply_bead_upsert(
         return Err(ApplyError::MissingCreationStamp { id: id.clone() });
     }
 
-    if state.get_live(&id).is_some() {
+    if let Some(existing) = state.get_live(&id).cloned() {
+        if let (Some(at), Some(by)) = (patch.created_at, patch.created_by.as_ref()) {
+            let incoming_created = Stamp::new(WriteStamp::new(at.0, at.1), by.clone());
+            if state.has_lineage_tombstone(&id, &incoming_created) {
+                return Ok(());
+            }
+            if existing.core.created() != &incoming_created {
+                let core = BeadCore::new(
+                    id.clone(),
+                    incoming_created.clone(),
+                    patch.created_on_branch.clone(),
+                );
+                let incoming = Bead::new(core, fields_from_patch(patch, event_stamp)?);
+                let ordering = bead_collision_cmp(state, &existing, &incoming);
+                let (winner, loser_stamp, incoming_won) = if ordering == Ordering::Less {
+                    (incoming, existing.core.created().clone(), true)
+                } else {
+                    (existing, incoming.core.created().clone(), false)
+                };
+
+                state.insert_tombstone(Tombstone::new_collision(
+                    id.clone(),
+                    event_stamp.clone(),
+                    loser_stamp,
+                    None,
+                ));
+                if incoming_won {
+                    state.insert_live(winner);
+                }
+                outcome.changed_beads.insert(id);
+                return Ok(());
+            }
+        }
+
         let field_changed = {
             let bead = state.get_live_mut(&id).expect("live bead checked above");
-            if let (Some(at), Some(by)) = (patch.created_at, patch.created_by.as_ref()) {
-                let incoming = Stamp::new(WriteStamp::new(at.0, at.1), by.clone());
-                if bead.core.created() != &incoming {
-                    return Err(ApplyError::BeadCollision { id: id.clone() });
-                }
-            }
             apply_patch_to_bead(bead, patch, event_stamp, outcome)?
         };
 
-        let changed = field_changed;
-        if changed {
+        if field_changed {
             outcome.changed_beads.insert(id);
         }
         return Ok(());
@@ -506,6 +557,17 @@ fn apply_note_append(
     Ok(())
 }
 
+fn note_collision_cmp(existing: &Note, incoming: &Note) -> Ordering {
+    existing
+        .at
+        .cmp(&incoming.at)
+        .then_with(|| existing.author.cmp(&incoming.author))
+        .then_with(|| {
+            sha256_bytes(existing.content.as_bytes())
+                .cmp(&sha256_bytes(incoming.content.as_bytes()))
+        })
+}
+
 fn apply_note(
     state: &mut CanonicalState,
     bead_id: BeadId,
@@ -513,11 +575,16 @@ fn apply_note(
     outcome: &mut ApplyOutcome,
 ) -> Result<bool, ApplyError> {
     if let Some(existing) = state.insert_note(bead_id.clone(), note.clone()) {
-        if existing != note {
-            return Err(ApplyError::NoteCollision {
+        if existing == note {
+            return Ok(false);
+        }
+        if note_collision_cmp(&existing, &note) == Ordering::Less {
+            state.replace_note(bead_id.clone(), note.clone());
+            outcome.changed_notes.insert(NoteKey {
                 bead_id,
                 note_id: note.id.clone(),
             });
+            return Ok(true);
         }
         return Ok(false);
     }
@@ -669,14 +736,24 @@ mod tests {
     }
 
     #[test]
-    fn note_collision_is_detected() {
+    fn note_collision_is_deterministic() {
         let mut state = CanonicalState::new();
         let event = sample_event("note-a");
         apply_event(&mut state, &event).unwrap();
 
         let event_b = sample_event("note-b");
-        let err = apply_event(&mut state, &event_b).unwrap_err();
-        assert!(matches!(err, ApplyError::NoteCollision { .. }));
+        apply_event(&mut state, &event_b).unwrap();
+
+        let bead_id = BeadId::parse("bd-apply1").unwrap();
+        let note_id = NoteId::new("note-apply").unwrap();
+        let stored = state
+            .note_store()
+            .get(&bead_id, &note_id)
+            .expect("note should be stored");
+        let hash_a = sha256_bytes("note-a".as_bytes());
+        let hash_b = sha256_bytes("note-b".as_bytes());
+        let expected = if hash_a >= hash_b { "note-a" } else { "note-b" };
+        assert_eq!(stored.content, expected);
     }
 
     #[test]

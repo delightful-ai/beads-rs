@@ -200,6 +200,11 @@ impl NoteStore {
         None
     }
 
+    pub fn replace(&mut self, id: BeadId, note: Note) -> Option<Note> {
+        let entry = self.by_bead.entry(id).or_default();
+        entry.insert(note.id.clone(), note)
+    }
+
     pub fn get(&self, id: &BeadId, note_id: &NoteId) -> Option<&Note> {
         self.by_bead.get(id).and_then(|notes| notes.get(note_id))
     }
@@ -644,6 +649,10 @@ impl CanonicalState {
 
     pub fn insert_note(&mut self, id: BeadId, note: Note) -> Option<Note> {
         self.notes.insert(id, note)
+    }
+
+    pub fn replace_note(&mut self, id: BeadId, note: Note) -> Option<Note> {
+        self.notes.replace(id, note)
     }
 
     /// Get a live bead by ID (alias for get).
