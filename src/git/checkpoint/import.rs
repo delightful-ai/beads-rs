@@ -1,6 +1,6 @@
 //! Checkpoint import + verification.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
@@ -15,9 +15,12 @@ use super::json_canon::CanonJsonError;
 use super::layout::{CheckpointFileKind, MANIFEST_FILE, META_FILE, parse_shard_path};
 use super::{CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks};
 use crate::core::error::CoreError;
-use crate::core::wire_bead::{WireBeadFull, WireDepEdgeV1, WireStamp, WireTombstoneV1};
+use crate::core::state::LabelState;
+use crate::core::wire_bead::{
+    WireBeadFull, WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1,
+};
 use crate::core::{
-    CanonicalState, ContentHash, DepEdge, DepKey, Dot, Limits, NamespaceId, ReplicaId, Sha256,
+    CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore, Limits, NamespaceId, OrSet,
     Stamp, StoreState, Tombstone, WriteStamp, sha256_bytes,
 };
 
@@ -213,6 +216,8 @@ pub fn import_checkpoint(
     }
 
     let mut state = StoreState::new();
+    let mut label_stores: BTreeMap<NamespaceId, LabelStore> = BTreeMap::new();
+    let mut dep_stores: BTreeMap<NamespaceId, DepStore> = BTreeMap::new();
     let allowed_namespaces: BTreeSet<NamespaceId> = manifest_namespaces.iter().cloned().collect();
 
     for (rel_path, entry) in &manifest.files {
@@ -257,28 +262,16 @@ pub fn import_checkpoint(
                     let ns = line.namespace.clone();
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
-                    let labels = wire.labels.clone();
-                    let notes = wire.notes.clone();
+                    let label_state = label_state_from_wire(wire.labels.clone(), label_stamp);
+                    label_stores
+                        .entry(ns.clone())
+                        .or_default()
+                        .insert_state(bead_id.clone(), label_state);
 
+                    let notes = wire.notes.clone();
                     let bead = crate::core::Bead::from(wire);
                     let state = state.ensure_namespace(ns);
                     state.insert_live(bead);
-
-                    if labels.is_empty() {
-                        state.set_label_stamp(bead_id.clone(), label_stamp.clone());
-                    } else {
-                        for label in labels.iter() {
-                            let dot =
-                                legacy_dot_from_bytes(label.as_str().as_bytes(), &label_stamp);
-                            state.apply_label_add(
-                                bead_id.clone(),
-                                label.clone(),
-                                dot,
-                                Sha256([0; 32]),
-                                label_stamp.clone(),
-                            );
-                        }
-                    }
 
                     for note in notes {
                         let note = crate::core::Note::from(note);
@@ -299,20 +292,28 @@ pub fn import_checkpoint(
                     Ok(())
                 },
             )?,
-            CheckpointFileKind::Deps => parse_jsonl_file::<WireDepEdgeV1, _>(
+            CheckpointFileKind::Deps => parse_jsonl_file::<WireDepStoreV1, _>(
                 &full_path,
                 &shard.namespace,
                 limits,
                 |line, wire| {
                     let ns = line.namespace.clone();
-                    let (key, edge) = dep_from_wire(&wire, &full_path, line)?;
-                    state.ensure_namespace(ns).insert_dep(key, edge);
+                    let dep_store = dep_store_from_wire(&wire, &full_path, line)?;
+                    let entry = dep_stores.entry(ns.clone()).or_insert_with(DepStore::new);
+                    *entry = DepStore::join(entry, &dep_store);
                     Ok(())
                 },
             )?,
         };
 
         verify_stats(&stats, entry, &full_path)?;
+    }
+
+    for (ns, labels) in label_stores {
+        state.ensure_namespace(ns).set_label_store(labels);
+    }
+    for (ns, deps) in dep_stores {
+        state.ensure_namespace(ns).set_dep_store(deps);
     }
 
     Ok(CheckpointImport {
@@ -579,56 +580,33 @@ fn tombstone_from_wire(
     })
 }
 
-fn dep_from_wire(
-    wire: &WireDepEdgeV1,
+fn label_state_from_wire(wire: WireLabelStateV1, stamp: Stamp) -> LabelState {
+    let set = OrSet::from_parts(wire.entries, wire.cc);
+    LabelState::from_parts(set, Some(stamp))
+}
+
+fn dep_store_from_wire(
+    wire: &WireDepStoreV1,
     path: &Path,
     line: JsonlLineContext,
-) -> Result<(DepKey, DepEdge), CheckpointImportError> {
-    let created = StampFromWire::stamp(wire.created_at, &wire.created_by);
-    let mut edge = DepEdge::new(created.clone());
-    match (wire.deleted_at, wire.deleted_by.clone()) {
-        (None, None) => {}
-        (Some(at), Some(by)) => {
-            let deleted = StampFromWire::stamp(at, &by);
-            edge.delete(deleted);
-        }
-        _ => {
+) -> Result<DepStore, CheckpointImportError> {
+    let mut entries: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
+    for entry in &wire.entries {
+        let dots: BTreeSet<Dot> = entry.dots.iter().copied().collect();
+        if entries.insert(entry.key.clone(), dots).is_some() {
             return Err(CheckpointImportError::InvalidDep {
                 path: path.to_path_buf(),
                 line: line.line_no,
-                reason: "deleted_at and deleted_by must be set together".into(),
+                reason: "duplicate dep key in shard".into(),
             });
         }
     }
-
-    let key = DepKey::new(wire.from.clone(), wire.to.clone(), wire.kind).map_err(|err| {
-        CheckpointImportError::InvalidDep {
-            path: path.to_path_buf(),
-            line: line.line_no,
-            reason: err.to_string(),
-        }
-    })?;
-
-    Ok((key, edge))
-}
-
-fn legacy_dot_from_bytes(bytes: &[u8], stamp: &Stamp) -> Dot {
-    let mut hasher = Sha2::new();
-    hasher.update(bytes);
-    hasher.update(stamp.at.wall_ms.to_le_bytes());
-    hasher.update(stamp.at.counter.to_le_bytes());
-    hasher.update(stamp.by.as_str().as_bytes());
-    let digest = hasher.finalize();
-
-    let mut uuid_bytes = [0u8; 16];
-    uuid_bytes.copy_from_slice(&digest[..16]);
-    let mut counter_bytes = [0u8; 8];
-    counter_bytes.copy_from_slice(&digest[16..24]);
-
-    Dot {
-        replica: ReplicaId::from(Uuid::from_bytes(uuid_bytes)),
-        counter: u64::from_le_bytes(counter_bytes),
-    }
+    let set = OrSet::from_parts(entries, wire.cc.clone());
+    let stamp = wire
+        .stamp
+        .as_ref()
+        .map(|(at, by)| StampFromWire::stamp(*at, by));
+    Ok(DepStore::from_parts(set, stamp))
 }
 
 struct StampFromWire;
@@ -646,7 +624,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, BeadId, BeadType, CanonicalState, Labels, NamespaceId, Priority, ReplicaId,
+        ActorId, BeadId, BeadType, CanonicalState, Dvv, NamespaceId, Priority, ReplicaId,
         StoreEpoch, StoreId, WorkflowStatus,
     };
     use crate::git::checkpoint::ManifestFile;
@@ -698,7 +676,10 @@ mod tests {
             acceptance_criteria: None,
             priority: Priority::MEDIUM,
             bead_type: BeadType::Task,
-            labels: Labels::new(),
+            labels: WireLabelStateV1 {
+                entries: Default::default(),
+                cc: Dvv::default(),
+            },
             external_ref: None,
             source_repo: None,
             estimated_minutes: None,
@@ -753,14 +734,14 @@ mod tests {
 
         let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
         let shard_path = "namespaces/core/state/00.jsonl";
-        let line = br#"{"id":"bd-abc","created_at":[1,0],"created_by":"me","title":"t","description":"d","priority":"p2","type":"task","labels":[],"status":"open","_at":[1,0],"_by":"me"}"#;
-        write_file(&dir.join(shard_path), line);
+        let line = serde_json::to_vec(&sample_wire_bead_full("bd-abc")).unwrap();
+        write_file(&dir.join(shard_path), &line);
 
         let file_bytes = line.len() as u64;
         manifest.files.insert(
             shard_path.to_string(),
             ManifestFile {
-                sha256: ContentHash::from_bytes(sha256_bytes(line).0),
+                sha256: ContentHash::from_bytes(sha256_bytes(&line).0),
                 bytes: file_bytes,
             },
         );

@@ -19,8 +19,6 @@ use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 
 use super::error::SyncError;
 use super::wire;
-#[cfg(test)]
-use crate::core::Stamp;
 use crate::core::{BeadId, CanonicalState, WallClock, WriteStamp};
 
 // =============================================================================
@@ -844,16 +842,8 @@ fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
 }
 
 fn dep_change_ids(before: &CanonicalState, after: &CanonicalState) -> BTreeSet<BeadId> {
-    let before_active: BTreeSet<_> = before
-        .iter_deps()
-        .filter(|(_, edge)| edge.is_active())
-        .map(|(key, _)| key.clone())
-        .collect();
-    let after_active: BTreeSet<_> = after
-        .iter_deps()
-        .filter(|(_, edge)| edge.is_active())
-        .map(|(key, _)| key.clone())
-        .collect();
+    let before_active: BTreeSet<_> = before.dep_store().values().cloned().collect();
+    let after_active: BTreeSet<_> = after.dep_store().values().cloned().collect();
 
     before_active
         .symmetric_difference(&after_active)
@@ -1268,12 +1258,13 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepEdge, DepKey, DepKind,
-        Lww, Priority, Tombstone, Workflow,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
+        Priority, ReplicaId, Sha256, Tombstone, Workflow,
     };
     #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
         Stamp::new(WriteStamp::new(wall_ms, 0), ActorId::new(actor).unwrap())
@@ -1400,7 +1391,11 @@ mod tests {
             DepKind::Blocks,
         )
         .unwrap();
-        after.insert_dep(dep_key, DepEdge::new(stamp));
+        let dep_dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        after.apply_dep_add(dep_key, dep_dot, Sha256([0; 32]), stamp);
 
         let diff = compute_diff(&before, &after);
         assert_eq!(diff.created, 0);
