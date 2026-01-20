@@ -1177,14 +1177,14 @@ mod tests {
             id.clone(),
             label_a.clone(),
             dot(1, 1),
-            Sha256([0; 32]),
+            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(2, 2),
-            Sha256([0; 32]),
+            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         let label_ctx = state.label_dvv(&id, &label_a);
@@ -1192,8 +1192,18 @@ mod tests {
 
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-target-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-target-b"), DepKind::Related).unwrap();
-        state.apply_dep_add(dep_key_a.clone(), dot(3, 3), Sha256([0; 32]), stamp.clone());
-        state.apply_dep_add(dep_key_b.clone(), dot(4, 4), Sha256([0; 32]), stamp.clone());
+        state.apply_dep_add(
+            dep_key_a.clone(),
+            dot(3, 3),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state.apply_dep_add(
+            dep_key_b.clone(),
+            dot(4, 4),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
         let dep_ctx = state.dep_dvv(&dep_key_b);
         state.apply_dep_remove(&dep_key_b, &dep_ctx, stamp.clone());
 
@@ -1246,6 +1256,119 @@ mod tests {
         let original_notes = state.notes_for(&id);
         let parsed_notes = parsed.notes_for(&id);
         assert_eq!(original_notes, parsed_notes);
+    }
+
+    #[test]
+    fn serialize_orset_is_deterministic_across_insertion_order() {
+        let stamp = Stamp::new(WriteStamp::new(12, 0), actor_id("alice"));
+        let id = bead_id("bd-orset-order");
+
+        let mut state_a = CanonicalState::new();
+        state_a.insert(make_bead(&id, &stamp)).unwrap();
+        let label_a = Label::parse("alpha").unwrap();
+        let label_b = Label::parse("beta").unwrap();
+        state_a.apply_label_add(
+            id.clone(),
+            label_a.clone(),
+            dot(5, 1),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_a.apply_label_add(
+            id.clone(),
+            label_b.clone(),
+            dot(6, 2),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
+        let dep_key_b = DepKey::new(id.clone(), bead_id("bd-order-b"), DepKind::Related).unwrap();
+        state_a.apply_dep_add(
+            dep_key_a.clone(),
+            dot(7, 3),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_a.apply_dep_add(
+            dep_key_b.clone(),
+            dot(8, 4),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let note_a = Note::new(
+            NoteId::new("note-a").unwrap(),
+            "first".to_string(),
+            actor_id("bob"),
+            WriteStamp::new(13, 0),
+        );
+        let note_b = Note::new(
+            NoteId::new("note-b").unwrap(),
+            "second".to_string(),
+            actor_id("carol"),
+            WriteStamp::new(14, 0),
+        );
+        state_a.insert_note(id.clone(), note_a);
+        state_a.insert_note(id.clone(), note_b);
+
+        let mut state_b = CanonicalState::new();
+        state_b.insert(make_bead(&id, &stamp)).unwrap();
+        state_b.apply_label_add(
+            id.clone(),
+            label_b,
+            dot(6, 2),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_b.apply_label_add(
+            id.clone(),
+            label_a,
+            dot(5, 1),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_b.apply_dep_add(
+            dep_key_b,
+            dot(8, 4),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_b.apply_dep_add(
+            dep_key_a,
+            dot(7, 3),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_b.insert_note(
+            id.clone(),
+            Note::new(
+                NoteId::new("note-b").unwrap(),
+                "second".to_string(),
+                actor_id("carol"),
+                WriteStamp::new(14, 0),
+            ),
+        );
+        state_b.insert_note(
+            id.clone(),
+            Note::new(
+                NoteId::new("note-a").unwrap(),
+                "first".to_string(),
+                actor_id("bob"),
+                WriteStamp::new(13, 0),
+            ),
+        );
+
+        assert_eq!(
+            serialize_state(&state_a).unwrap(),
+            serialize_state(&state_b).unwrap()
+        );
+        assert_eq!(
+            serialize_deps(&state_a).unwrap(),
+            serialize_deps(&state_b).unwrap()
+        );
+        assert_eq!(
+            serialize_notes(&state_a).unwrap(),
+            serialize_notes(&state_b).unwrap()
+        );
     }
 
     proptest! {
