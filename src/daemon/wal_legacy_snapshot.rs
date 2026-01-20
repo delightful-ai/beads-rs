@@ -15,7 +15,7 @@ use thiserror::Error;
 use super::remote::RemoteUrl;
 use crate::core::{
     Bead, BeadId, CanonicalState, DepKey, DepStore, Dot, Dvv, LabelStore, Limits, NoteStore, OrSet,
-    OrSetValue, Tombstone, TombstoneKey,
+    OrSetValue, Stamp, Tombstone, TombstoneKey,
 };
 
 /// WAL format version.
@@ -48,11 +48,62 @@ mod wal_state {
         live: Vec<Bead>,
         tombstones: Vec<Tombstone>,
         #[serde(default)]
-        deps: DepStore,
+        deps: WalDepStore,
         #[serde(default)]
         labels: LabelStore,
         #[serde(default)]
         notes: NoteStore,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct WalDepEntry {
+        key: DepKey,
+        dots: Vec<Dot>,
+    }
+
+    #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+    struct WalDepStore {
+        cc: Dvv,
+        entries: Vec<WalDepEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stamp: Option<Stamp>,
+    }
+
+    impl WalDepStore {
+        fn from_dep_store(store: &DepStore) -> Self {
+            let mut entries = Vec::new();
+            for key in store.values() {
+                let mut dots: Vec<Dot> = store
+                    .dots_for(key)
+                    .map(|dots| dots.iter().copied().collect())
+                    .unwrap_or_default();
+                dots.sort();
+                entries.push(WalDepEntry {
+                    key: key.clone(),
+                    dots,
+                });
+            }
+            entries.sort_by(|a, b| a.key.cmp(&b.key));
+            Self {
+                cc: store.cc().clone(),
+                entries,
+                stamp: store.stamp().cloned(),
+            }
+        }
+
+        fn into_dep_store(self) -> DepStore {
+            let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
+            for entry in self.entries {
+                let dots: BTreeSet<Dot> = entry.dots.into_iter().collect();
+                if dots.is_empty() {
+                    map.entry(entry.key).or_default();
+                } else {
+                    map.insert(entry.key, dots);
+                }
+            }
+            let set = OrSet::from_parts(map, self.cc);
+            DepStore::from_parts(set, self.stamp)
+        }
     }
 
     #[derive(Deserialize)]
@@ -102,7 +153,7 @@ mod wal_state {
                 .iter_tombstones()
                 .map(|(_, tomb)| tomb.clone())
                 .collect(),
-            deps: state.dep_store().clone(),
+            deps: WalDepStore::from_dep_store(state.dep_store()),
             labels: state.label_store().clone(),
             notes: state.note_store().clone(),
         };
@@ -118,7 +169,7 @@ mod wal_state {
             WalStateRepr::V2(snapshot) => (
                 snapshot.live,
                 snapshot.tombstones,
-                snapshot.deps,
+                snapshot.deps.into_dep_store(),
                 snapshot.labels,
                 snapshot.notes,
             ),
