@@ -118,7 +118,8 @@ pub fn export_jsonl(
         };
         let deps: Vec<_> = state.deps_from(id);
         let is_blocked = is_bead_blocked(id, state);
-        issues.push(GoIssue::from_view(&view, &deps, is_blocked));
+        let dep_stamp = state.dep_store().stamp();
+        issues.push(GoIssue::from_view(&view, &deps, is_blocked, dep_stamp));
     }
 
     // Sort by ID for stable diffs

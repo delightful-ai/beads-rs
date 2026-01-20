@@ -14,9 +14,9 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepEdge,
-    DepKey, DepKind, Dot, Labels, Lww, Note, NoteId, Priority, ReplicaId, Sha256, Stamp, Tombstone,
-    Workflow, WriteStamp,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepKey,
+    DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId, Sha256, Stamp,
+    Tombstone, Workflow, WriteStamp,
 };
 use crate::daemon::IpcError;
 use crate::daemon::OpError;
@@ -109,7 +109,7 @@ pub fn import_go_export(
     let reader = BufReader::new(file);
 
     let mut state = CanonicalState::new();
-    let mut deps_to_insert: Vec<(DepKey, DepEdge)> = Vec::new();
+    let mut deps_to_insert: Vec<(DepKey, Dot, Stamp)> = Vec::new();
     let mut report = GoImportReport::default();
 
     let mut chosen_slug: Option<String> = root_slug
@@ -177,8 +177,8 @@ pub fn import_go_export(
             // Dependencies from tombstones are still imported.
             if let Some(deps) = issue.dependencies {
                 for dep in deps {
-                    if let Ok((key, edge)) = dep_to_edge(&dep, actor, slug) {
-                        deps_to_insert.push((key, edge));
+                    if let Ok((key, dot, stamp)) = dep_to_add(&dep, actor, slug) {
+                        deps_to_insert.push((key, dot, stamp));
                     } else {
                         report.warnings.push(format!(
                             "line {}: skipped invalid dep {:?}",
@@ -316,8 +316,8 @@ pub fn import_go_export(
         // Dependencies collected for later insert.
         if let Some(deps) = issue.dependencies {
             for dep in deps {
-                match dep_to_edge(&dep, actor, slug) {
-                    Ok((key, edge)) => deps_to_insert.push((key, edge)),
+                match dep_to_add(&dep, actor, slug) {
+                    Ok((key, dot, stamp)) => deps_to_insert.push((key, dot, stamp)),
                     Err(e) => report.warnings.push(format!(
                         "line {}: invalid dep {} -> {} ({}) : {}",
                         line_no + 1,
@@ -331,8 +331,8 @@ pub fn import_go_export(
         }
     }
 
-    for (key, edge) in deps_to_insert {
-        state.insert_dep(key, edge);
+    for (key, dot, stamp) in deps_to_insert {
+        state.apply_dep_add(key, dot, Sha256([0; 32]), stamp);
         report.deps += 1;
     }
 
@@ -346,7 +346,11 @@ pub fn import_go_export(
     Ok((state, report))
 }
 
-fn dep_to_edge(dep: &GoDependency, actor: &ActorId, root_slug: &str) -> Result<(DepKey, DepEdge)> {
+fn dep_to_add(
+    dep: &GoDependency,
+    actor: &ActorId,
+    root_slug: &str,
+) -> Result<(DepKey, Dot, Stamp)> {
     let from = BeadId::parse(&dep.issue_id)?.with_slug(root_slug)?;
     let to = BeadId::parse(&dep.depends_on_id)?.with_slug(root_slug)?;
     let kind = parse_dep_kind(&dep.dep_type)?;
@@ -359,7 +363,8 @@ fn dep_to_edge(dep: &GoDependency, actor: &ActorId, root_slug: &str) -> Result<(
     let created_by = ActorId::new(created_by_raw)?;
     let created_stamp = Stamp::new(WriteStamp::new(created_ms, 0), created_by);
     let key = DepKey::new(from, to, kind).map_err(crate::core::CoreError::from)?;
-    Ok((key, DepEdge::new(created_stamp)))
+    let dot = legacy_dot_from_bytes(&key.collision_bytes(), &created_stamp);
+    Ok((key, dot, created_stamp))
 }
 
 fn parse_rfc3339_ms(raw: &str) -> Result<u64> {

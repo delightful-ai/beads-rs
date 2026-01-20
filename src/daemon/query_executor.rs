@@ -17,7 +17,7 @@ use super::query_model::{
     IssueSummary, Note, ReadyResult, StatusOutput, StatusSummary, SyncStatus, SyncWarning,
     Tombstone,
 };
-use crate::core::{BeadId, CanonicalState, DepKind, DepLife, WallClock};
+use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
 
 impl Daemon {
     /// Get a single bead.
@@ -130,13 +130,11 @@ impl Daemon {
         let children_of_parent: Option<std::collections::HashSet<&BeadId>> =
             filters.parent.as_ref().map(|parent_id| {
                 state
-                    .iter_deps()
-                    .filter(|(key, edge)| {
-                        edge.life.value == DepLife::Active
-                            && key.kind() == DepKind::Parent
-                            && key.to() == parent_id
-                    })
-                    .map(|(key, _)| key.from())
+                    .dep_indexes()
+                    .in_edges(parent_id)
+                    .iter()
+                    .filter(|(_, kind)| *kind == DepKind::Parent)
+                    .map(|(from, _)| from)
                     .collect()
             });
 
@@ -244,10 +242,9 @@ impl Daemon {
 
         // Collect IDs that are blocked by *blocking* deps (kind=blocks).
         let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
-        for (key, edge) in state.iter_deps() {
-            // Only count active `blocks` edges where the target is not closed.
-            if edge.life.value == DepLife::Active
-                && key.kind() == crate::core::DepKind::Blocks
+        for key in state.dep_store().values() {
+            // Only count `blocks` edges where the target is not closed.
+            if key.kind() == crate::core::DepKind::Blocks
                 && let Some(to_bead) = state.get_live(key.to())
                 && !to_bead.fields.workflow.value.is_closed()
             {
@@ -334,9 +331,9 @@ impl Daemon {
                 continue;
             }
 
-            for (key, edge) in state.iter_deps() {
-                if key.from() == &current && edge.life.value == DepLife::Active {
-                    edges.push(DepEdge::from((key, edge)));
+            for (to, kind) in state.dep_indexes().out_edges(&current) {
+                if let Ok(key) = DepKey::new(current.clone(), to.clone(), *kind) {
+                    edges.push(DepEdge::from(&key));
                     if !visited.contains(key.to()) {
                         queue.push_back(key.to().clone());
                     }
@@ -385,16 +382,15 @@ impl Daemon {
         let mut incoming = Vec::new();
         let mut outgoing = Vec::new();
 
-        for (key, edge) in state.iter_deps() {
-            if edge.life.value != DepLife::Active {
-                continue;
+        for (to, kind) in state.dep_indexes().out_edges(id) {
+            if let Ok(key) = DepKey::new(id.clone(), to.clone(), *kind) {
+                outgoing.push(DepEdge::from(&key));
             }
+        }
 
-            if key.from() == id {
-                outgoing.push(DepEdge::from((key, edge)));
-            }
-            if key.to() == id {
-                incoming.push(DepEdge::from((key, edge)));
+        for (from, kind) in state.dep_indexes().in_edges(id) {
+            if let Ok(key) = DepKey::new(from.clone(), id.clone(), *kind) {
+                incoming.push(DepEdge::from(&key));
             }
         }
 
@@ -1000,10 +996,7 @@ impl Daemon {
         let mut errors = Vec::new();
 
         // Check for orphan dependencies
-        for (key, edge) in state.iter_deps() {
-            if edge.life.value != DepLife::Active {
-                continue;
-            }
+        for key in state.dep_store().values() {
             if state.get_live(key.from()).is_none() {
                 errors.push(format!(
                     "orphan dep: {} depends on {} but {} doesn't exist",
@@ -1037,10 +1030,8 @@ impl Daemon {
                 if !visited.insert(current.clone()) {
                     continue;
                 }
-                for (key, edge) in state.iter_deps() {
-                    if key.from() == &current && edge.life.value == DepLife::Active {
-                        queue.push_back(key.to().clone());
-                    }
+                for (to, _) in state.dep_indexes().out_edges(&current) {
+                    queue.push_back(to.clone());
                 }
             }
         }
@@ -1085,10 +1076,7 @@ fn compute_blocked_by(state: &CanonicalState) -> std::collections::BTreeMap<Bead
     let mut blocked: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
 
-    for (key, edge) in state.iter_deps() {
-        if edge.life.value != DepLife::Active {
-            continue;
-        }
+    for key in state.dep_store().values() {
         if key.kind() != DepKind::Blocks {
             continue;
         }
@@ -1133,10 +1121,7 @@ fn compute_epic_statuses(
     // Build epic -> children mapping from parent edges.
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
-    for (key, edge) in state.iter_deps() {
-        if edge.life.value != DepLife::Active {
-            continue;
-        }
+    for key in state.dep_store().values() {
         if key.kind() != DepKind::Parent {
             continue;
         }
@@ -1201,9 +1186,10 @@ mod tests {
     use super::{Issue, IssueSummary};
     use super::{dep_cycles_from_state, sort_ready_issues};
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge,
-        DepKey, DepKind, Lww, NamespaceId, Priority, Stamp, Workflow, WriteStamp,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey,
+        DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Sha256, Stamp, Workflow, WriteStamp,
     };
+    use uuid::Uuid;
 
     fn issue_summary(id: &str, priority: u8, created_at_ms: u64) -> IssueSummary {
         let stamp = WriteStamp::new(created_at_ms, 0);
@@ -1324,9 +1310,16 @@ mod tests {
             DepKind::Blocks,
         )
         .expect("dep key");
-
-        state.insert_dep(ab, DepEdge::new(stamp.clone()));
-        state.insert_dep(ba, DepEdge::new(stamp));
+        let dep_dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let dep_dot_2 = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
+            counter: 1,
+        };
+        state.apply_dep_add(ab, dep_dot, Sha256([0; 32]), stamp.clone());
+        state.apply_dep_add(ba, dep_dot_2, Sha256([0; 32]), stamp);
 
         let cycles = dep_cycles_from_state(&state);
         assert_eq!(

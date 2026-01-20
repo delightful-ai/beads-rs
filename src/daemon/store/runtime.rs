@@ -973,12 +973,13 @@ mod tests {
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, DepEdge, DepKey, StoreState};
+    use crate::core::{ActorId, CanonicalState, DepKey, Dot, ReplicaId, Sha256, StoreState};
     use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
     use crate::paths;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use uuid::Uuid;
 
     fn write_meta_for(store_id: StoreId, replica_id: ReplicaId, now_ms: u64) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
@@ -1262,11 +1263,13 @@ mod tests {
         };
         let bead = crate::core::Bead::new(core, fields);
         let dep_key = DepKey::new(bead_id.clone(), dep_to, DepKind::Blocks).expect("dep key");
-        let dep_edge = DepEdge::new(stamp.clone());
-
         let mut core_state = CanonicalState::new();
         core_state.insert(bead).expect("insert bead");
-        core_state.insert_dep(dep_key.clone(), dep_edge);
+        let dep_dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        core_state.apply_dep_add(dep_key.clone(), dep_dot, Sha256([0; 32]), stamp.clone());
         let mut store_state = StoreState::new();
         store_state.set_namespace_state(namespace.clone(), core_state);
         runtime.state = store_state;
