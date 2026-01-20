@@ -51,12 +51,20 @@ impl LabelState {
         self.stamp.as_ref()
     }
 
-    fn labels(&self) -> Labels {
+    pub(crate) fn labels(&self) -> Labels {
         self.set.values().cloned().collect()
     }
 
-    fn dots_for(&self, label: &Label) -> Option<&BTreeSet<Dot>> {
+    pub(crate) fn values(&self) -> impl Iterator<Item = &Label> {
+        self.set.values()
+    }
+
+    pub(crate) fn dots_for(&self, label: &Label) -> Option<&BTreeSet<Dot>> {
         self.set.dots_for(label)
+    }
+
+    pub(crate) fn cc(&self) -> &Dvv {
+        self.set.cc()
     }
 
     fn join(a: &Self, b: &Self) -> Self {
@@ -94,10 +102,6 @@ impl LabelStore {
 
     pub(crate) fn insert_state(&mut self, id: BeadId, state: LabelState) {
         self.by_bead.insert(id, state);
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BeadId, &LabelState)> {
-        self.by_bead.iter()
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
