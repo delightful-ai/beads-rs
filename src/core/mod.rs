@@ -7,8 +7,8 @@
 //! - crdt: Lww<T> (Layer 3)
 //! - orset: OrSet (Layer 3)
 //! - composite: Note, Claim, Closure, Workflow (Layer 5)
-//! - collections: Labels, NoteLog (Layer 4)
-//! - dep: DepKey, DepEdge (Layer 6)
+//! - collections: Labels (Layer 4)
+//! - dep: DepKey (Layer 6)
 //! - tombstone: Tombstone (Layer 7)
 //! - bead: BeadCore, BeadFields, Bead (Layer 8)
 //! - state: CanonicalState (Layer 9)
@@ -42,10 +42,10 @@ pub mod wire_bead;
 
 pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
 pub use bead::{Bead, BeadCore, BeadFields, BeadView};
-pub use collections::{Label, Labels, NoteLog};
+pub use collections::{Label, Labels};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
-pub use dep::{DepEdge, DepKey, DepLife, DepSpec};
+pub use dep::{DepKey, DepSpec};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
     DurabilityClass, DurabilityOutcome, DurabilityParseError, DurabilityProofV1, DurabilityReceipt,

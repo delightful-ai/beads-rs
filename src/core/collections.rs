@@ -2,17 +2,13 @@
 //!
 //! Label: validated label string (non-empty, no newlines)
 //! Labels: sorted set of Label values
-//! NoteLog: notes keyed by id, sorted output by (stamp, id)
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::composite::Note;
 use super::error::{CoreError, InvalidLabel};
-use super::identity::NoteId;
 use super::orset::OrSetValue;
 
 /// Validated label - non-empty, no newlines.
@@ -121,62 +117,6 @@ impl Labels {
 impl FromIterator<Label> for Labels {
     fn from_iter<T: IntoIterator<Item = Label>>(iter: T) -> Self {
         Self(iter.into_iter().collect())
-    }
-}
-
-/// Notes keyed by ID - enforces uniqueness, sorted output.
-///
-/// Merge semantics: union by ID (notes are immutable).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NoteLog(BTreeMap<NoteId, Note>);
-
-impl NoteLog {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&mut self, note: Note) {
-        self.0.insert(note.id.clone(), note);
-    }
-
-    pub fn get(&self, id: &NoteId) -> Option<&Note> {
-        self.0.get(id)
-    }
-
-    pub fn contains(&self, id: &NoteId) -> bool {
-        self.0.contains_key(id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Merge = union by ID.
-    ///
-    /// Notes are immutable, so if same ID exists in both, they should be identical.
-    /// We keep left's version in case of mismatch (shouldn't happen in practice).
-    pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = a.0.clone();
-        for (id, note) in &b.0 {
-            merged.entry(id.clone()).or_insert_with(|| note.clone());
-        }
-        Self(merged)
-    }
-
-    /// Principal form: sorted by (at, id) for stable output.
-    pub fn sorted(&self) -> Vec<&Note> {
-        let mut v: Vec<_> = self.0.values().collect();
-        v.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
-        v
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&NoteId, &Note)> {
-        self.0.iter()
     }
 }
 

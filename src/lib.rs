@@ -33,7 +33,7 @@ pub use crate::core::{
     ErrorPayload, EventBody, EventBytes, EventFrameError, EventFrameV1, EventId, EventKindV1,
     EventShaLookup, EventShaLookupError, EventValidationError, GcAuthority, HeadStatus, HlcMax,
     Labels, Limits, LocalFsyncProof, Lww, NamespaceId, NamespacePolicies, NamespacePoliciesError,
-    NamespacePolicy, NamespaceVisibility, Note, NoteId, NoteKey, NoteLog, Opaque, PrevDeferred,
+    NamespacePolicy, NamespaceVisibility, Note, NoteId, NoteKey, Opaque, PrevDeferred,
     PrevVerified, Priority, ProtocolErrorCode, ReceiptMergeError, ReplicaEntry, ReplicaId,
     ReplicaRole, ReplicaRoster, ReplicaRosterError, ReplicateMode, ReplicatedProof,
     RetentionPolicy, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
