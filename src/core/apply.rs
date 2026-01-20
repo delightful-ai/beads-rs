@@ -1,16 +1,17 @@
 //! Deterministic EventBody application into CanonicalState.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use thiserror::Error;
 
-use super::bead::{BeadCore, BeadFields};
+use super::bead::{Bead, BeadCore, BeadFields, BeadView};
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
-use super::event::{EventBody, EventKindV1, Sha256, TxnV1};
-use super::identity::{ActorId, BeadId, NoteId};
+use super::event::{EventBody, EventKindV1, Sha256, TxnV1, sha256_bytes};
+use super::identity::{ActorId, BeadId, ContentHash, NoteId};
 use super::state::CanonicalState;
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
