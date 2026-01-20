@@ -11,10 +11,9 @@ cover CLI/UI rendering, auth, or performance-only concerns.
 - The core model is mostly LWW-based and deterministic.
 - Two ops are order-dependent today: workflow and claim updates depend on
   existing state during apply.
-- Note handling is strict in live apply (collision error, missing bead error),
-  but merges can silently pick a winner in the presence of collisions.
-- Deps are convergent but keep earliest created metadata, which limits
-  redundancy/compaction.
+- Note handling is total in apply with a deterministic collision winner, but
+  merges still pick a left-biased winner on collision.
+- Deps are OR-Set membership without per-edge provenance.
 - WAL/replication provide per-origin ordering + hash-chain checks, but apply
   errors after WAL commit can leave durable events unapplied.
 
@@ -26,15 +25,15 @@ cover CLI/UI rendering, auth, or performance-only concerns.
 | title, description | LWW register | update_lww on event stamp | Yes | LWW join: `src/core/crdt.rs:25` ; updates: `src/core/apply.rs:329` |
 | design, acceptance_criteria | LWW register of Option | update_lww on event stamp | Yes | Updates: `src/core/apply.rs:339` |
 | priority, bead_type | LWW register | update_lww on event stamp | Yes | Updates: `src/core/apply.rs:355` |
-| labels | LWW register of entire set | update_lww on event stamp | Yes (full-set LWW, not add-wins) | Patch is full set: `src/daemon/mutation_engine.rs:1016` ; update: `src/core/apply.rs:361` |
+| labels | OR-Set per label (add-wins) | apply_label_add/remove on event stamp | Yes (deterministic OR-Set) | Ops: `src/core/apply.rs:261`; state: `src/core/state.rs:24` |
 | external_ref, source_repo | LWW register of Option | update_lww on event stamp | Yes | Updates: `src/core/apply.rs:364` |
 | estimated_minutes | LWW register of Option | update_lww on event stamp | Yes | Updates: `src/core/apply.rs:380` |
 | workflow | LWW register of Workflow | build_workflow reads existing state on Keep | **No** (order-dependent) | Apply: `src/core/apply.rs:389`, `src/core/apply.rs:421`; Close patch uses Keep by default: `src/daemon/mutation_engine.rs:1053` |
 | claim | LWW register of Claim | build_claim reads existing state on Keep | **No** (order-dependent) | Apply: `src/core/apply.rs:399`, `src/core/apply.rs:442`; ExtendClaim uses Keep: `src/daemon/mutation_engine.rs:1412` |
-| notes (per bead) | Grow-only set keyed by note_id | union by id; collisions error on apply | Conditional (depends on causal delivery) | Missing bead error: `src/core/apply.rs:483`; collision error: `src/core/apply.rs:499`; merge keeps left: `src/core/collections.rs:152` |
+| notes (per bead) | Grow-only set keyed by note_id | union by id; deterministic collision winner | Yes (apply is total; no MissingBead) | Apply: `src/core/apply.rs:557`; merge keeps left: `src/core/state.rs:197` |
 | tombstones (global) | LWW on deletion stamp | delete ignored if bead updated newer (resurrection) | Yes (deterministic) | Resurrection check: `src/core/apply.rs:185`; merge LWW: `src/core/tombstone.rs:83` |
 | tombstones (lineage) | LWW on deletion stamp | unconditional delete for matching lineage | Yes (deterministic) | Lineage delete path: `src/core/apply.rs:169` |
-| deps (edge life) | LWW on life + min(created) | insert_dep join (life LWW, created min) | Yes (deterministic) | DepEdge join: `src/core/dep.rs:209`; apply upsert: `src/core/apply.rs:202` |
+| deps (edge membership) | OR-Set on DepKey | apply_dep_add/remove | Yes (deterministic OR-Set) | Ops: `src/core/apply.rs:300`; state: `src/core/state.rs:133` |
 
 ## Known CRDT-safety risks
 
@@ -45,15 +44,10 @@ cover CLI/UI rendering, auth, or performance-only concerns.
    - ExtendClaim uses assignee Keep with new expires. `src/daemon/mutation_engine.rs:1412`
    - Fix: make these ops self-contained (explicit Set/Clear for all affected fields).
 
-2. Note append requires bead to already exist
-   - `apply_note_append` errors if bead missing. `src/core/apply.rs:483`
-   - Without causal delivery across origins, a replica can diverge on out-of-order events.
-   - Fix: either enforce causal delivery for note ops or make note apply total (buffer/no-op or create stub).
-
-3. Note collision handling is inconsistent
-   - Live apply errors on collision. `src/core/apply.rs:499`
-   - Merge (`NoteLog::join`) silently picks left. `src/core/collections.rs:152`
-   - Fix: either treat collision as corruption everywhere (error/metric) or define deterministic resolution.
+2. Note collision handling is inconsistent
+   - Apply uses deterministic winner based on (at, author, content hash). `src/core/apply.rs:569`
+   - Merge (`NoteStore::join`) still keeps left on collision. `src/core/state.rs:197`
+   - Fix: align merge with apply's deterministic note collision resolution.
 
 4. Lineage tombstones always win
    - Lineage delete path is unconditional. `src/core/apply.rs:169`
@@ -66,8 +60,7 @@ cover CLI/UI rendering, auth, or performance-only concerns.
   NoteId generator + uniqueness loop: `src/core/identity.rs:711`, `src/daemon/mutation_engine.rs:1992`
 - Mutation planner computes patches from current local state; LWW wins on conflict.
   Label removal rewrites full set: `src/daemon/mutation_engine.rs:1016`
-- Note append occurs only after the creator has observed the bead (causality assumed).
-  Missing bead is an apply error: `src/core/apply.rs:483`
+- Note append can arrive before bead creation; apply is total and stores orphan notes.
 
 ## Recommended CRDT-safe adjustments (minimal changes)
 
@@ -79,10 +72,7 @@ cover CLI/UI rendering, auth, or performance-only concerns.
    - Claim/Extend/Unclaim should emit explicit assignee and expires.
    - Avoid Keep in claim-related patches.
 
-3. Make note apply total
-   - Either enforce causal delivery for note ops or allow buffering/stubs.
-
-4. Align note collision policy
+3. Align note collision policy
    - If collisions are corruption, surface consistently (apply and merge).
 
 ## System pipeline audit (realtime + sync)
