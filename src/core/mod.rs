@@ -5,6 +5,7 @@
 //! - identity: ActorId, BeadId, NoteId (Layer 1)
 //! - domain: BeadType, DepKind, Priority (Layer 2)
 //! - crdt: Lww<T> (Layer 3)
+//! - orset: OrSet (Layer 3)
 //! - composite: Note, Claim, Closure, Workflow (Layer 5)
 //! - collections: Labels, NoteLog (Layer 4)
 //! - dep: DepKey, DepEdge (Layer 6)
@@ -30,6 +31,7 @@ pub mod meta;
 pub mod namespace;
 pub mod namespace_policies;
 mod namespaced_state;
+pub mod orset;
 pub mod replica_roster;
 pub mod state;
 pub mod store_meta;
@@ -73,6 +75,7 @@ pub use namespace::{
 };
 pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
 pub use namespaced_state::StoreState;
+pub use orset::{Dot, Dvv, OrSet, OrSetChange, OrSetValue};
 pub use replica_roster::{ReplicaEntry, ReplicaRole, ReplicaRoster, ReplicaRosterError};
 pub use state::{CanonicalState, DepIndexes, LiveLookupError};
 pub use store_meta::{StoreMeta, StoreMetaVersions};
