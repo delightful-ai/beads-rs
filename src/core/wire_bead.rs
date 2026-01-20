@@ -736,7 +736,7 @@ impl TxnOpKey {
                 "label_add:{}:{}:{}:{}",
                 bead_id.as_str(),
                 label.as_str(),
-                dot.replica.to_string(),
+                dot.replica,
                 dot.counter
             ),
             TxnOpKey::LabelRemove { bead_id, label } => {
@@ -752,7 +752,7 @@ impl TxnOpKey {
                 from.as_str(),
                 to.as_str(),
                 kind.as_str(),
-                dot.replica.to_string(),
+                dot.replica,
                 dot.counter
             ),
             TxnOpKey::DepRemove { from, to, kind } => format!(

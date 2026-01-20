@@ -10,17 +10,14 @@ use super::crdt::Lww;
 use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
 use super::event::{EventBody, EventKindV1, Sha256, TxnV1};
-use super::identity::{ActorId, BeadId, NoteId, ReplicaId};
-use super::orset::{Dot, OrSetValue};
+use super::identity::{ActorId, BeadId, NoteId};
 use super::state::CanonicalState;
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
 use super::wire_bead::{
-    NoteAppendV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireLabelAddV1,
-    WireLabelRemoveV1, WireNoteV1, WirePatch, WireTombstoneV1,
+    TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireLabelAddV1, WireLabelRemoveV1,
+    WireNoteV1, WirePatch, WireTombstoneV1,
 };
-use sha2::{Digest, Sha256 as Sha256Hasher};
-use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NoteKey {
@@ -540,25 +537,6 @@ fn note_to_core(note: &WireNoteV1) -> Note {
     )
 }
 
-fn legacy_dot_from_bytes(value_bytes: &[u8], stamp: &Stamp) -> Dot {
-    let mut hasher = Sha256Hasher::new();
-    hasher.update(value_bytes);
-    hasher.update(stamp.at.wall_ms.to_le_bytes());
-    hasher.update(stamp.at.counter.to_le_bytes());
-    hasher.update(stamp.by.as_str().as_bytes());
-    let digest = hasher.finalize();
-
-    let mut uuid_bytes = [0u8; 16];
-    uuid_bytes.copy_from_slice(&digest[..16]);
-    let mut counter_bytes = [0u8; 8];
-    counter_bytes.copy_from_slice(&digest[16..24]);
-
-    Dot {
-        replica: ReplicaId::from(Uuid::from_bytes(uuid_bytes)),
-        counter: u64::from_le_bytes(counter_bytes),
-    }
-}
-
 fn update_lww<T: Clone + PartialEq>(field: &mut Lww<T>, value: T, stamp: &Stamp) -> bool {
     let candidate = Lww::new(value, stamp.clone());
     let merged = Lww::join(field, &candidate);
@@ -603,7 +581,7 @@ mod tests {
         ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
     };
     use crate::core::namespace::NamespaceId;
-    use crate::core::wire_bead::WireStamp;
+    use crate::core::wire_bead::{WireDotV1, WireDvvV1, WireStamp};
     use crate::core::{Seq1, TxnDeltaV1};
     use uuid::Uuid;
 
@@ -719,49 +697,49 @@ mod tests {
         let from = BeadId::parse("bd-from").unwrap();
         let to = BeadId::parse("bd-to").unwrap();
         let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let replica_id = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
 
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
                 from: from.clone(),
                 to: to.clone(),
                 kind: DepKind::Blocks,
-                deleted_at: WireStamp(10, 0),
-                deleted_by: actor_id("alice"),
+                ctx: WireDvvV1 {
+                    max: std::collections::BTreeMap::from([(replica_id, 10)]),
+                },
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
 
-        let edge = state.get_dep(&key).unwrap();
-        assert!(edge.is_deleted());
+        assert!(state.get_dep(&key).is_none());
 
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: from.clone(),
                 to: to.clone(),
                 kind: DepKind::Blocks,
-                created_at: WireStamp(5, 0),
-                created_by: actor_id("bob"),
-                deleted_at: None,
-                deleted_by: None,
+                dot: WireDotV1 {
+                    replica: replica_id,
+                    counter: 5,
+                },
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
 
-        let edge = state.get_dep(&key).unwrap();
-        assert!(edge.is_deleted());
+        assert!(state.get_dep(&key).is_none());
 
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: from.clone(),
                 to: to.clone(),
                 kind: DepKind::Blocks,
-                created_at: WireStamp(20, 0),
-                created_by: actor_id("carol"),
-                deleted_at: None,
-                deleted_by: None,
+                dot: WireDotV1 {
+                    replica: replica_id,
+                    counter: 20,
+                },
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();

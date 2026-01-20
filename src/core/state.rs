@@ -431,6 +431,11 @@ impl CanonicalState {
         Self::dvv_from_dots(dots)
     }
 
+    pub(crate) fn dep_dvv(&self, key: &DepKey) -> Dvv {
+        let dots = self.dep_store.dots_for(key);
+        Self::dvv_from_dots(dots)
+    }
+
     pub fn label_stamp(&self, id: &BeadId) -> Option<&Stamp> {
         self.labels.state(id).and_then(|state| state.stamp())
     }

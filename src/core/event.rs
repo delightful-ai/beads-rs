@@ -1,6 +1,6 @@
 //! Event body encoding + hashing for realtime WAL and replication.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
 use bytes::Bytes;
@@ -2282,6 +2282,7 @@ pub fn verify_event_frame(
 mod tests {
     use super::*;
     use crate::core::identity::{BeadId, NoteId, StoreEpoch};
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     fn actor_id(actor: &str) -> ActorId {
@@ -2350,24 +2351,26 @@ mod tests {
                 lineage_created_by: Some(actor_id("bob")),
             }))
             .unwrap();
+        let dep_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         txn.delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: BeadId::parse("bd-test1").unwrap(),
                 to: BeadId::parse("bd-dep").unwrap(),
                 kind: DepKind::Blocks,
-                created_at: WireStamp(15, 0),
-                created_by: actor_id("alice"),
-                deleted_at: Some(WireStamp(18, 2)),
-                deleted_by: Some(actor_id("carol")),
+                dot: WireDotV1 {
+                    replica: dep_replica,
+                    counter: 1,
+                },
             }))
             .unwrap();
         txn.delta
-            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
                 from: BeadId::parse("bd-test1").unwrap(),
                 to: BeadId::parse("bd-dep2").unwrap(),
                 kind: DepKind::Related,
-                deleted_at: WireStamp(22, 0),
-                deleted_by: actor_id("alice"),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([(dep_replica, 2)]),
+                },
             }))
             .unwrap();
         txn.delta

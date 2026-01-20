@@ -21,21 +21,21 @@ use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
 use super::ipc::{MutationMeta, OpResponse, Response, ResponsePayload};
 use super::mutation_engine::{
-    EventDraft, IdContext, MutationContext, MutationEngine, MutationRequest, ParsedMutationRequest,
-    SequencedEvent,
+    DotAllocator, EventDraft, IdContext, MutationContext, MutationEngine, MutationRequest,
+    ParsedMutationRequest, SequencedEvent,
 };
 use super::ops::{BeadPatch, OpError, OpResult};
-use super::store_runtime::{StoreRuntimeError, load_replica_roster};
+use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
     WalIndexError, WalIndexTxn, WalReplayError, open_segment_reader,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    Applied, BeadId, BeadType, CanonicalState, DepKind, DurabilityClass, DurabilityReceipt,
+    Applied, BeadId, BeadType, CanonicalState, DepKind, Dot, DurabilityClass, DurabilityReceipt,
     Durable, EventBody, EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId,
-    Priority, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark,
-    WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
+    Priority, ReplicaId, Seq1, Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock,
+    Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
     hash_event_body,
 };
 use crate::daemon::metrics;
@@ -206,19 +206,25 @@ impl Daemon {
             .copied()
             .unwrap_or_else(Watermark::genesis);
 
-        let state_snapshot = {
-            let store = self.store_runtime(&proof)?;
-            store.state.get_or_default(&namespace)
+        let (now_ms, stamp) = {
+            let clock = self.clock_for_actor_mut(&ctx.actor_id);
+            let now_ms = clock.wall_ms();
+            let write_stamp = clock.tick();
+            (now_ms, Stamp::new(write_stamp, ctx.actor_id.clone()))
         };
         let draft = {
-            let clock = self.clock_for_actor_mut(&ctx.actor_id);
+            let store_runtime = self.store_runtime_mut(&proof)?;
+            let state_snapshot = store_runtime.state.get_or_default(&namespace);
+            let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, store_runtime);
             engine.plan(
                 &state_snapshot,
-                clock,
+                now_ms,
+                stamp,
                 store,
                 id_ctx.as_ref(),
                 ctx.clone(),
                 parsed_request.clone(),
+                &mut dot_alloc,
             )
         }?;
 
@@ -778,6 +784,30 @@ struct LocalAppendPlan {
     sequenced: SequencedEvent,
 }
 
+struct RuntimeDotAllocator<'a> {
+    replica_id: ReplicaId,
+    runtime: &'a mut StoreRuntime,
+}
+
+impl<'a> RuntimeDotAllocator<'a> {
+    fn new(replica_id: ReplicaId, runtime: &'a mut StoreRuntime) -> Self {
+        Self {
+            replica_id,
+            runtime,
+        }
+    }
+}
+
+impl DotAllocator for RuntimeDotAllocator<'_> {
+    fn next_dot(&mut self) -> Result<Dot, OpError> {
+        let counter = self.runtime.next_orset_counter()?;
+        Ok(Dot {
+            replica: self.replica_id,
+            counter,
+        })
+    }
+}
+
 fn plan_local_append(
     engine: &MutationEngine,
     draft: EventDraft,
@@ -1199,6 +1229,30 @@ mod tests {
         Clock::with_time_source(source)
     }
 
+    struct TestDotAllocator {
+        replica_id: ReplicaId,
+        counter: u64,
+    }
+
+    impl TestDotAllocator {
+        fn new(replica_id: ReplicaId) -> Self {
+            Self {
+                replica_id,
+                counter: 0,
+            }
+        }
+    }
+
+    impl DotAllocator for TestDotAllocator {
+        fn next_dot(&mut self) -> Result<Dot, OpError> {
+            self.counter += 1;
+            Ok(Dot {
+                replica: self.replica_id,
+                counter: self.counter,
+            })
+        }
+    }
+
     #[derive(Clone, Debug, Default)]
     struct SpanFields {
         fields: BTreeMap<String, String>,
@@ -1530,14 +1584,19 @@ mod tests {
 
         let origin_seq = Seq1::new(std::num::NonZeroU64::new(1).unwrap());
         let mut clock = fixed_clock(1_700_000_000_000);
+        let now_ms = clock.wall_ms();
+        let stamp = Stamp::new(clock.tick(), actor.clone());
+        let mut dots = TestDotAllocator::new(replica_id);
         let draft = engine
             .plan(
                 &state,
-                &mut clock,
+                now_ms,
+                stamp,
                 store,
                 None,
                 ctx.clone(),
                 request.clone(),
+                &mut dots,
             )
             .unwrap();
         let sequenced = engine
