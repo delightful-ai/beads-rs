@@ -404,10 +404,6 @@ fn encode_event_body_map(
         enc.str("client_request_id")?;
         enc.str(&client_request_id.as_uuid().to_string())?;
     }
-    if let Some(trace_id) = &body.trace_id {
-        enc.str("trace_id")?;
-        enc.str(&trace_id.as_uuid().to_string())?;
-    }
 
     match &body.kind {
         EventKindV1::TxnV1(txn) => {
@@ -446,6 +442,11 @@ fn encode_event_body_map(
 
     enc.str("store_id")?;
     enc.str(&body.store.store_id.as_uuid().to_string())?;
+
+    if let Some(trace_id) = &body.trace_id {
+        enc.str("trace_id")?;
+        enc.str(&trace_id.as_uuid().to_string())?;
+    }
 
     enc.str("txn_id")?;
     enc.str(&body.txn_id.as_uuid().to_string())?;
