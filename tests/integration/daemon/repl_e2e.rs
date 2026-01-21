@@ -45,6 +45,16 @@ fn wait_for_sample(rig: &ReplRig, ids: &[String], timeout: Duration) {
     wait_for_sample_on(rig, ids, &nodes, timeout);
 }
 
+fn wal_total_bytes(rig: &ReplRig, node_idx: usize) -> u64 {
+    let status = rig.admin_status(node_idx);
+    let wal = status
+        .wal
+        .iter()
+        .find(|entry| entry.namespace == NamespaceId::core())
+        .expect("core namespace wal");
+    wal.total_bytes
+}
+
 fn churn_node(node: &crate::fixtures::repl_rig::Node, total: usize, workers: usize) {
     let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
     let mut generator = LoadGenerator::with_client(node.repo_dir().to_path_buf(), client);
@@ -401,6 +411,9 @@ fn repl_daemon_stress_wal_rotation_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.seed = 43;
     options.wal_segment_max_bytes = Some(8 * 1024);
+    let segment_max_bytes = options
+        .wal_segment_max_bytes
+        .expect("wal_segment_max_bytes set") as u64;
 
     let rig = ReplRig::new(2, options);
 
