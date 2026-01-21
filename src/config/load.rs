@@ -133,7 +133,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::config::{
-        CheckpointGroupConfig, DefaultsConfig, LogFormat, LogRotation, LoggingConfig,
+        CheckpointGroupConfig, DefaultsConfig, LogFormat, LogRotation, LoggingConfig, PathsConfig,
         ReplicationConfig, ReplicationPeerConfig,
     };
     use crate::core::{NamespaceId, ReplicaId, ReplicaRole};
@@ -175,6 +175,7 @@ mod tests {
                     retention_max_files: Some(7),
                 },
             },
+            paths: PathsConfig::default(),
             limits: crate::core::Limits::default(),
             replication: ReplicationConfig {
                 listen_addr: "127.0.0.1:9999".to_string(),

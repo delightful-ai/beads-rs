@@ -2,16 +2,48 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-
-#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
+use crate::config::PathsConfig;
 use crate::core::{NamespaceId, StoreId};
+
+// =============================================================================
+// Config-based path overrides (from beads.toml)
+// =============================================================================
+
+static PATHS_CONFIG: OnceLock<Mutex<PathsConfig>> = OnceLock::new();
+
+/// Initialize path overrides from config.
+///
+/// This should be called early in CLI/daemon startup after config is loaded.
+/// If called multiple times, the latest config wins.
+pub fn init_from_config(config: &PathsConfig) {
+    let lock = PATHS_CONFIG.get_or_init(|| Mutex::new(config.clone()));
+    let mut guard = lock.lock().expect("paths config lock poisoned");
+    *guard = config.clone();
+}
+
+/// Get the config-based data_dir override, if set.
+pub fn config_data_dir_override() -> Option<PathBuf> {
+    PATHS_CONFIG
+        .get()
+        .and_then(|lock| lock.lock().ok().and_then(|c| c.data_dir.clone()))
+}
+
+/// Get the config-based runtime_dir override, if set.
+pub fn config_runtime_dir_override() -> Option<PathBuf> {
+    PATHS_CONFIG
+        .get()
+        .and_then(|lock| lock.lock().ok().and_then(|c| c.runtime_dir.clone()))
+}
 
 /// Base directory for persistent data (WAL, exports, caches).
 ///
-/// Uses `BD_DATA_DIR` if set, otherwise `$XDG_DATA_HOME/beads-rs` or
-/// `~/.local/share/beads-rs`.
+/// Priority order:
+/// 1. Thread-local test override
+/// 2. `BD_DATA_DIR` env var
+/// 3. Config-based override (from beads.toml)
+/// 4. `$XDG_DATA_HOME/beads-rs` or `~/.local/share/beads-rs`
 pub(crate) fn data_dir() -> PathBuf {
     if let Some(dir) = thread_local_data_dir_override() {
         return dir;
@@ -26,6 +58,10 @@ pub(crate) fn data_dir() -> PathBuf {
         && !dir.trim().is_empty()
     {
         return PathBuf::from(dir);
+    }
+
+    if let Some(dir) = config_data_dir_override() {
+        return dir;
     }
 
     std::env::var("XDG_DATA_HOME")

@@ -16,6 +16,8 @@ pub struct Config {
     pub defaults: DefaultsConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub paths: PathsConfig,
     pub limits: Limits,
     pub replication: ReplicationConfig,
     #[serde(default = "default_namespace_policies")]
@@ -30,6 +32,7 @@ impl Default for Config {
             auto_upgrade: true,
             defaults: DefaultsConfig::default(),
             logging: LoggingConfig::default(),
+            paths: PathsConfig::default(),
             limits: Limits::default(),
             replication: ReplicationConfig::default(),
             namespace_defaults: default_namespace_policies(),
@@ -195,6 +198,8 @@ pub struct ConfigLayer {
     #[serde(default)]
     pub logging: LoggingConfigOverride,
     #[serde(default)]
+    pub paths: PathsConfigOverride,
+    #[serde(default)]
     pub limits: LimitsOverride,
     #[serde(default)]
     pub replication: ReplicationConfigOverride,
@@ -209,6 +214,7 @@ impl ConfigLayer {
         }
         self.defaults.apply_to(&mut base.defaults);
         self.logging.apply_to(&mut base.logging);
+        self.paths.apply_to(&mut base.paths);
         self.limits.apply_to(&mut base.limits);
         self.replication.apply_to(&mut base.replication);
         if let Some(namespace_defaults) = &self.namespace_defaults {
@@ -587,5 +593,32 @@ pub fn default_checkpoint_groups() -> BTreeMap<String, CheckpointGroupConfig> {
 fn merge_namespace_policies(base: &mut NamespacePolicies, overlay: &NamespacePolicies) {
     for (namespace, policy) in &overlay.namespaces {
         base.namespaces.insert(namespace.clone(), policy.clone());
+    }
+}
+
+/// Configuration for data and runtime directory paths.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PathsConfig {
+    pub data_dir: Option<PathBuf>,
+    pub runtime_dir: Option<PathBuf>,
+}
+
+/// Override layer for paths configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PathsConfigOverride {
+    pub data_dir: Option<PathBuf>,
+    pub runtime_dir: Option<PathBuf>,
+}
+
+impl PathsConfigOverride {
+    pub fn apply_to(&self, target: &mut PathsConfig) {
+        if let Some(dir) = self.data_dir.as_ref() {
+            target.data_dir = Some(dir.clone());
+        }
+        if let Some(dir) = self.runtime_dir.as_ref() {
+            target.runtime_dir = Some(dir.clone());
+        }
     }
 }

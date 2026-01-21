@@ -42,6 +42,10 @@ fn init_tracing(verbose: u8, is_daemon: bool) -> telemetry::TelemetryGuard {
             cfg
         }
     };
+
+    // Initialize path overrides from config before any IPC/daemon operations.
+    beads_rs::paths::init_from_config(&cfg.paths);
+
     let mut logging = cfg.logging;
     if is_daemon {
         telemetry::apply_daemon_logging_defaults(&mut logging);

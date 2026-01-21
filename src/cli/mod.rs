@@ -1307,7 +1307,7 @@ fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn load_cli_config(repo: &Path) -> Config {
-    match load_for_repo(Some(repo)) {
+    let cfg = match load_for_repo(Some(repo)) {
         Ok(cfg) => cfg,
         Err(err) => {
             tracing::warn!("config load failed, using defaults: {err}");
@@ -1315,7 +1315,9 @@ fn load_cli_config(repo: &Path) -> Config {
             apply_env_overrides(&mut cfg);
             cfg
         }
-    }
+    };
+    crate::paths::init_from_config(&cfg.paths);
+    cfg
 }
 
 fn resolve_namespace(cli_value: Option<&str>, config: &Config) -> Result<Option<NamespaceId>> {

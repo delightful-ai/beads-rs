@@ -26,6 +26,10 @@ fn wake_listener(socket: &Path) {
 ///
 /// This never returns on success until a shutdown signal is received.
 pub fn run_daemon() -> Result<()> {
+    // Load config first so path overrides are available for socket directory.
+    let config = crate::config::load_or_init();
+    crate::paths::init_from_config(&config.paths);
+
     // Ensure socket directory exists with safe permissions.
     let dir = ensure_socket_dir()?;
     let socket = dir.join("daemon.sock");
@@ -84,8 +88,6 @@ pub fn run_daemon() -> Result<()> {
     let (git_tx, git_rx) = crossbeam::channel::unbounded();
     let (git_result_tx, git_result_rx) = crossbeam::channel::unbounded::<GitResult>();
 
-    // Load config (limits, upgrade policy, etc).
-    let config = crate::config::load_or_init();
     // Resolve actor ID (config/env override, fallback to username@hostname).
     let actor = match config.defaults.actor.clone() {
         Some(actor) => actor,

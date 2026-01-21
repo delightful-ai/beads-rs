@@ -86,6 +86,22 @@ fn per_user_tmp_dir() -> PathBuf {
 
 fn socket_dir_candidates() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+
+    // Env override (works even without config init)
+    if let Ok(dir) = std::env::var("BD_RUNTIME_DIR")
+        && !dir.trim().is_empty()
+    {
+        dirs.push(PathBuf::from(dir).join("beads"));
+    }
+
+    // Config-based override (from beads.toml)
+    if let Some(runtime_dir) = crate::paths::config_runtime_dir_override() {
+        let candidate = runtime_dir.join("beads");
+        if !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
+    }
+
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR")
         && !dir.trim().is_empty()
     {

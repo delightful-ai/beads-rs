@@ -152,6 +152,20 @@ where
         }
     }
 
+    if let Some(raw) = lookup("BD_DATA_DIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            config.paths.data_dir = Some(PathBuf::from(trimmed));
+        }
+    }
+
+    if let Some(raw) = lookup("BD_RUNTIME_DIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            config.paths.runtime_dir = Some(PathBuf::from(trimmed));
+        }
+    }
+
     if test_fast_enabled(&mut lookup) {
         apply_test_fast_overrides(config);
     }
@@ -366,5 +380,28 @@ mod tests {
         apply_env_overrides_from(&mut config, lookup);
 
         assert_eq!(config.logging.filter.as_deref(), Some("metrics=info"));
+    }
+
+    #[test]
+    fn env_path_overrides_apply() {
+        let lookup = |key: &str| -> Option<String> {
+            match key {
+                "BD_DATA_DIR" => Some("/tmp/bd-test-data".to_string()),
+                "BD_RUNTIME_DIR" => Some("/tmp/bd-test-runtime".to_string()),
+                _ => None,
+            }
+        };
+
+        let mut config = Config::default();
+        apply_env_overrides_from(&mut config, lookup);
+
+        assert_eq!(
+            config.paths.data_dir,
+            Some(PathBuf::from("/tmp/bd-test-data"))
+        );
+        assert_eq!(
+            config.paths.runtime_dir,
+            Some(PathBuf::from("/tmp/bd-test-runtime"))
+        );
     }
 }
