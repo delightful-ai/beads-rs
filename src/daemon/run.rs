@@ -3,6 +3,7 @@
 //! `bd daemon run` starts the background service.
 
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -13,6 +14,13 @@ use crate::daemon::Request;
 use crate::daemon::ipc::ensure_socket_dir;
 use crate::daemon::server::{RequestMessage, handle_client};
 use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop, run_state_loop};
+use signal_hook::iterator::Signals;
+
+fn wake_listener(socket: &Path) {
+    if let Err(err) = UnixStream::connect(socket) {
+        tracing::debug!("shutdown wake connect failed: {}", err);
+    }
+}
 
 /// Run the daemon in the current process.
 ///
@@ -59,11 +67,17 @@ pub fn run_daemon() -> Result<()> {
 
     // Set up signal handling for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));
-    {
-        let shutdown = shutdown.clone();
-        let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown.clone());
-        let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, shutdown.clone());
-    }
+    let (shutdown_tx, shutdown_rx) = crossbeam::channel::bounded(1);
+    let mut signals = Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT])
+        .map_err(IpcError::from)?;
+    let shutdown_flag = Arc::clone(&shutdown);
+    let shutdown_notify = shutdown_tx.clone();
+    std::thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            shutdown_flag.store(true, Ordering::Relaxed);
+            let _ = shutdown_notify.send(());
+        }
+    });
 
     // Create channels.
     let (req_tx, req_rx) = crossbeam::channel::unbounded::<RequestMessage>();
@@ -98,33 +112,50 @@ pub fn run_daemon() -> Result<()> {
         run_git_loop(git_worker, git_rx);
     });
 
-    // Set socket to non-blocking for shutdown checks.
-    listener.set_nonblocking(true).map_err(IpcError::from)?;
+    // Ensure listener is blocking; wake with a self-connect on shutdown.
+    listener.set_nonblocking(false).map_err(IpcError::from)?;
 
-    // Run socket acceptor with shutdown check.
-    loop {
-        if shutdown.load(Ordering::Relaxed) {
-            tracing::info!("shutdown signal received");
-            break;
-        }
+    let accept_shutdown = Arc::clone(&shutdown);
+    let accept_limits = Arc::clone(&limits);
+    let accept_req_tx = req_tx.clone();
+    let accept_handle = std::thread::spawn(move || {
+        loop {
+            if accept_shutdown.load(Ordering::Relaxed) {
+                tracing::info!("shutdown signal received (accept loop)");
+                break;
+            }
 
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let req_tx = req_tx.clone();
-                let limits = Arc::clone(&limits);
-                std::thread::spawn(move || {
-                    let _ = stream.set_nonblocking(false);
-                    handle_client(stream, req_tx, limits);
-                });
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(e) => {
-                tracing::error!("accept error: {}", e);
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if accept_shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let req_tx = accept_req_tx.clone();
+                    let limits = Arc::clone(&accept_limits);
+                    std::thread::spawn(move || {
+                        let _ = stream.set_nonblocking(false);
+                        handle_client(stream, req_tx, limits);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    if accept_shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if accept_shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tracing::error!("accept error: {}", e);
+                }
             }
         }
-    }
+    });
+
+    let _ = shutdown_rx.recv();
+    tracing::info!("shutdown signal received");
+    wake_listener(&socket);
+    let _ = accept_handle.join();
 
     // On signal shutdown, ask state thread to flush and exit cleanly.
     if shutdown.load(Ordering::Relaxed) {
