@@ -950,10 +950,10 @@ impl RigLink {
                 self.inbound.mark_closed();
             }
         }
-        if matches!(endpoint, Endpoint::Outbound) {
-            if let Some(action) = self.outbound.begin_handshake(&self.outbound_store, now_ms) {
-                self.apply_action(action, Endpoint::Outbound, now_ms);
-            }
+        if matches!(endpoint, Endpoint::Outbound)
+            && let Some(action) = self.outbound.begin_handshake(&self.outbound_store, now_ms)
+        {
+            self.apply_action(action, Endpoint::Outbound, now_ms);
         }
     }
 }

@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
+use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -193,15 +193,18 @@ impl ReplRig {
 
     pub fn crash_node(&self, idx: usize) {
         crash_daemon(&self.nodes[idx].runtime_dir);
+        self.nodes[idx].reset_ipc_connections();
     }
 
     pub fn restart_node(&self, idx: usize) {
         self.nodes[idx].unlock_store(self.store_id);
+        self.nodes[idx].reset_ipc_connections();
         self.nodes[idx].start_daemon();
     }
 
     pub fn shutdown_node(&self, idx: usize) {
         shutdown_daemon(&self.nodes[idx].runtime_dir);
+        self.nodes[idx].reset_ipc_connections();
     }
 
     pub fn reload_replication(&self, idx: usize) {
@@ -503,8 +506,9 @@ impl Node {
                         beads_rs::daemon::ops::OpResult::Created { id } => id,
                         other => panic!("unexpected create result: {other:?}"),
                     };
-                    self.record_min_seen(&id, &op.receipt.min_seen);
-                    id
+                    let id_str = id.as_str().to_string();
+                    self.record_min_seen(&id_str, &op.receipt.min_seen);
+                    id_str
                 }
                 ResponsePayload::Query(QueryResult::Issue(issue)) => issue.id,
                 other => panic!("unexpected create payload: {other:?}"),
@@ -577,6 +581,11 @@ impl Node {
             } => {}
             other => panic!("unexpected admin reload replication response: {other:?}"),
         }
+    }
+
+    fn reset_ipc_connections(&self) {
+        *self.admin_conn.lock().expect("admin conn lock") = None;
+        *self.ipc_conn.lock().expect("ipc conn lock") = None;
     }
 
     fn admin_status_with_read(
