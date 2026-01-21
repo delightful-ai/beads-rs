@@ -1827,16 +1827,12 @@ mod tests {
                 }
                 Relation::Same => {
                     local_head = write_chain(&local_repo, None, 1, "base");
-                    if let Err(e) = push_store(&local_repo) {
-                        return Err(e);
-                    }
+                    push_store(&local_repo)?;
                     remote_head = local_head;
                 }
                 Relation::LocalAhead => {
                     local_head = write_chain(&local_repo, None, 1, "base");
-                    if let Err(e) = push_store(&local_repo) {
-                        return Err(e);
-                    }
+                    push_store(&local_repo)?;
                     remote_head = local_head;
 
                     let steps = nonzero_steps(local_steps);
@@ -1844,9 +1840,7 @@ mod tests {
                 }
                 Relation::RemoteAhead => {
                     local_head = write_chain(&local_repo, None, 1, "base");
-                    if let Err(e) = push_store(&local_repo) {
-                        return Err(e);
-                    }
+                    push_store(&local_repo)?;
                     remote_head = local_head;
 
                     let steps = nonzero_steps(remote_steps);
@@ -1854,9 +1848,7 @@ mod tests {
                 }
                 Relation::Diverged => {
                     local_head = write_chain(&local_repo, None, 1, "base");
-                    if let Err(e) = push_store(&local_repo) {
-                        return Err(e);
-                    }
+                    push_store(&local_repo)?;
                     remote_head = local_head;
 
                     let local_extra = nonzero_steps(local_steps);
@@ -2122,15 +2114,11 @@ mod tests {
                 }
                 Relation::Same => {
                     let _ = write_chain(&local_repo, None, 1, "base");
-                    if let Err(e) = push_store(&local_repo) {
-                        return Err(e);
-                    }
+                    push_store(&local_repo)?;
                 }
                 Relation::LocalAhead => {
                     let _ = write_chain(&local_repo, None, 1, "base");
-                    if let Err(e) = push_store(&local_repo) {
-                        return Err(e);
-                    }
+                    push_store(&local_repo)?;
                     let parent = match local_ref(&local_repo) {
                         Ok(oid) => oid,
                         Err(e) => return Err(e),
@@ -2139,9 +2127,7 @@ mod tests {
                 }
                 Relation::RemoteAhead => {
                     let _ = write_chain(&local_repo, None, 1, "base");
-                    if let Err(e) = push_store(&local_repo) {
-                        return Err(e);
-                    }
+                    push_store(&local_repo)?;
                     let parent = match remote_ref(&remote_repo) {
                         Ok(oid) => oid,
                         Err(e) => return Err(e),
@@ -2150,9 +2136,7 @@ mod tests {
                 }
                 Relation::Diverged => {
                     let _ = write_chain(&local_repo, None, 1, "base");
-                    if let Err(e) = push_store(&local_repo) {
-                        return Err(e);
-                    }
+                    push_store(&local_repo)?;
                     let local_parent = match local_ref(&local_repo) {
                         Ok(oid) => oid,
                         Err(e) => return Err(e),
@@ -2255,9 +2239,7 @@ mod tests {
             }
 
             let base = write_store_commit(&local_repo, None, "base");
-            if let Err(e) = push_store(&local_repo) {
-                return Err(e);
-            }
+            push_store(&local_repo)?;
             let _ = SyncProcess::new(local_dir.clone()).fetch(&local_repo);
             let local_oid = write_store_commit(&local_repo, Some(base), "local");
             let _ = write_chain(&remote_repo, None, rewrite_steps, "force");
