@@ -60,14 +60,14 @@ fn run_export_loop(ctx: ExportContext, rx: Receiver<ExportCommand>) {
                     }
                 };
 
-                if !job.known_paths.is_empty() {
-                    if let Err(err) = ensure_symlinks(&export_path, &job.known_paths) {
-                        tracing::warn!(
-                            remote = %job.remote,
-                            error = %err,
-                            "Go-compat symlink update failed"
-                        );
-                    }
+                if !job.known_paths.is_empty()
+                    && let Err(err) = ensure_symlinks(&export_path, &job.known_paths)
+                {
+                    tracing::warn!(
+                        remote = %job.remote,
+                        error = %err,
+                        "Go-compat symlink update failed"
+                    );
                 }
             }
             ExportCommand::Shutdown => break,
