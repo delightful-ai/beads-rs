@@ -190,24 +190,31 @@ fn build_env_filter_inner(
     if let Some(raw) = log_env {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
-            return builder.parse(trimmed).unwrap_or_else(|err| {
+            let filter = builder.parse(trimmed).unwrap_or_else(|err| {
                 eprintln!("invalid LOG filter: {err}");
                 builder.from_env_lossy()
             });
+            return add_default_metrics_filter(filter);
         }
     }
 
     if let Some(raw) = config_filter {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
-            return builder.parse(trimmed).unwrap_or_else(|err| {
+            let filter = builder.parse(trimmed).unwrap_or_else(|err| {
                 eprintln!("invalid logging.filter: {err}");
                 builder.from_env_lossy()
             });
+            return add_default_metrics_filter(filter);
         }
     }
 
-    builder.from_env_lossy()
+    add_default_metrics_filter(builder.from_env_lossy())
+}
+
+fn add_default_metrics_filter(filter: EnvFilter) -> EnvFilter {
+    let directive = "metrics=info".parse().expect("metrics filter directive");
+    filter.add_directive(directive)
 }
 
 #[derive(Clone, Debug, Default)]
