@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::Sender;
+use uuid::Uuid;
 
 use super::core::{
     Daemon, HandleOutcome, LoadedStore, NormalizedReadConsistency, ParsedMutationMeta,
@@ -19,7 +20,7 @@ use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
     ActorId, BeadId, CanonicalState, CliErrorCode, ClientRequestId, CoreError, DurabilityClass,
-    ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, WallClock,
+    ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, TraceId, WallClock,
 };
 use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::{SyncError, SyncOutcome};
@@ -33,7 +34,17 @@ impl Daemon {
     }
 
     pub(crate) fn schedule_sync(&mut self, remote: RemoteUrl) {
+        if !self.git_sync_policy().allows_sync() {
+            return;
+        }
         self.scheduler_mut().schedule(remote);
+    }
+
+    pub(crate) fn schedule_sync_after(&mut self, remote: RemoteUrl, delay: Duration) {
+        if !self.git_sync_policy().allows_sync() {
+            return;
+        }
+        self.scheduler_mut().schedule_after(remote, delay);
     }
 
     /// Ensure repo is loaded and reasonably fresh from remote.
@@ -167,7 +178,7 @@ impl Daemon {
         }
 
         if schedule_sync {
-            self.scheduler_mut().schedule(remote.clone());
+            self.schedule_sync(remote.clone());
         }
     }
 
@@ -195,6 +206,9 @@ impl Daemon {
     /// - Repo is dirty
     /// - Not already syncing
     pub fn maybe_start_sync(&mut self, remote: &RemoteUrl, git_tx: &Sender<GitOp>) {
+        if !self.git_sync_policy().allows_sync() {
+            return;
+        }
         let store_id = match self.store_id_for_remote(remote) {
             Some(id) => id,
             None => return,
@@ -218,6 +232,7 @@ impl Daemon {
         let _ = git_tx.send(GitOp::Sync {
             repo: path,
             remote: remote.clone(),
+            store_id,
             state: store.state.get_or_default(&NamespaceId::core()),
             actor,
         });
@@ -359,12 +374,12 @@ impl Daemon {
         }
 
         if reschedule_sync {
-            self.scheduler_mut().schedule(remote.clone());
+            self.schedule_sync(remote.clone());
         }
 
         if let Some(backoff) = backoff_ms {
             let backoff = Duration::from_millis(backoff);
-            self.scheduler_mut().schedule_after(remote.clone(), backoff);
+            self.schedule_sync_after(remote.clone(), backoff);
         }
 
         // Export Go-compatible JSONL after successful sync
@@ -389,12 +404,16 @@ impl Daemon {
         let namespace = self.normalize_namespace(proof, meta.namespace)?;
         let durability = parse_durability_meta(meta.durability)?;
         let client_request_id = parse_optional_client_request_id(meta.client_request_id)?;
+        let trace_id = client_request_id
+            .map(TraceId::from)
+            .unwrap_or_else(|| TraceId::new(Uuid::new_v4()));
         let actor_id = parse_optional_actor_id(meta.actor_id, self.actor())?;
 
         Ok(ParsedMutationMeta {
             namespace,
             durability,
             client_request_id,
+            trace_id,
             actor_id,
         })
     }
@@ -747,6 +766,10 @@ impl Daemon {
             } => self
                 .admin_flush(&repo, namespace, checkpoint_now, git_tx)
                 .into(),
+
+            Request::AdminCheckpointWait { .. } => {
+                unreachable!("AdminCheckpointWait is handled by the daemon state loop")
+            }
 
             Request::AdminFingerprint {
                 repo,

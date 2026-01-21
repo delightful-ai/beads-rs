@@ -170,6 +170,7 @@ mod tests {
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([3u8; 16])),
             client_request_id: None,
+            trace_id: None,
             kind: "txn_v1".to_string(),
             delta: TxnDeltaV1::new(),
             hlc_max: None,

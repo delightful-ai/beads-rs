@@ -171,6 +171,13 @@ pub struct AdminFlushOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminCheckpointOutput {
+    pub namespace: NamespaceId,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub checkpoint_groups: Vec<AdminCheckpointGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminFlushSegment {
     pub segment_id: SegmentId,
     pub created_at_ms: u64,

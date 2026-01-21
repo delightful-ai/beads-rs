@@ -409,8 +409,8 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, EventKindV1, HlcMax, NamespaceId, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1,
-        TxnV1,
+        ActorId, EventKindV1, HlcMax, NamespaceId, StoreEpoch, StoreId, StoreIdentity, TraceId,
+        TxnDeltaV1, TxnV1,
     };
 
     fn event_body_for_header(header: &RecordHeader) -> EventBody {
@@ -423,6 +423,7 @@ mod tests {
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
             client_request_id: header.client_request_id,
+            trace_id: header.client_request_id.map(TraceId::from),
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta: TxnDeltaV1::new(),
                 hlc_max: HlcMax {

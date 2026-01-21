@@ -54,6 +54,8 @@ struct Args {
     one_way_loss: Option<String>,
     #[arg(long)]
     max_frame_bytes: Option<usize>,
+    #[arg(long)]
+    ready_file: Option<PathBuf>,
     #[arg(long, default_value = "off", value_enum)]
     trace_mode: TraceMode,
     #[arg(long)]
@@ -415,6 +417,12 @@ fn main() {
 
     let listener = TcpListener::bind(&args.listen)
         .unwrap_or_else(|err| panic!("listen {} failed: {err}", args.listen));
+    if let Some(path) = args.ready_file.as_ref()
+        && let Err(err) = write_ready_file(path)
+    {
+        eprintln!("ready file {} failed: {err}", path.display());
+        std::process::exit(2);
+    }
     let mut connection_idx = 0u64;
 
     loop {
@@ -476,6 +484,14 @@ fn main() {
         let _ = a_to_b.join();
         let _ = b_to_a.join();
     }
+}
+
+fn write_ready_file(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let contents = format!("pid={}\n", std::process::id());
+    fs::write(path, contents.as_bytes())
 }
 
 fn connect_with_retry(addr: &str, timeout: Duration) -> Result<TcpStream, String> {

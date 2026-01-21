@@ -9,6 +9,27 @@ use std::time::Instant;
 
 use crate::core::WriteStamp;
 
+const DEFAULT_BACKOFF_BASE_MS: u64 = 500;
+const TEST_FAST_BACKOFF_BASE_MS: u64 = 50;
+
+fn backoff_base_ms() -> u64 {
+    if env_flag_truthy("BD_TEST_FAST") {
+        TEST_FAST_BACKOFF_BASE_MS
+    } else {
+        DEFAULT_BACKOFF_BASE_MS
+    }
+}
+
+fn env_flag_truthy(name: &str) -> bool {
+    let Ok(raw) = std::env::var(name) else {
+        return false;
+    };
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "n" | "off"
+    )
+}
+
 #[derive(Clone, Debug)]
 pub struct FetchErrorRecord {
     pub message: String,
@@ -178,7 +199,7 @@ impl GitLaneState {
 
     /// Calculate backoff delay for retries (exponential).
     pub fn backoff_ms(&self) -> u64 {
-        let base = 500u64;
+        let base = backoff_base_ms();
         let max_exponent = 6; // Max ~32 seconds
         let exponent = self.consecutive_failures.min(max_exponent);
         base * 2u64.pow(exponent)
@@ -215,19 +236,21 @@ mod tests {
     #[test]
     fn backoff_exponential() {
         let mut state = GitLaneState::new();
-        assert_eq!(state.backoff_ms(), 500);
+        let base = backoff_base_ms();
+        let max_backoff = base * 2u64.pow(6);
+        assert_eq!(state.backoff_ms(), base);
 
         state.consecutive_failures = 1;
-        assert_eq!(state.backoff_ms(), 1000);
+        assert_eq!(state.backoff_ms(), base * 2);
 
         state.consecutive_failures = 2;
-        assert_eq!(state.backoff_ms(), 2000);
+        assert_eq!(state.backoff_ms(), base * 4);
 
         state.consecutive_failures = 6;
-        assert_eq!(state.backoff_ms(), 32000);
+        assert_eq!(state.backoff_ms(), max_backoff);
 
         // Should cap at 6
         state.consecutive_failures = 10;
-        assert_eq!(state.backoff_ms(), 32000);
+        assert_eq!(state.backoff_ms(), max_backoff);
     }
 }

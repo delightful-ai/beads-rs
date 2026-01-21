@@ -62,7 +62,7 @@ pub use event::{
 };
 pub use identity::{
     ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, EventId, NoteId,
-    ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, TxnId,
+    ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
 };
 pub use json_canon::{CanonJsonError, to_canon_json_bytes};
 pub use limits::Limits;

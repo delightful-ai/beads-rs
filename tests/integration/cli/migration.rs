@@ -5,6 +5,7 @@
 use std::fs;
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::git::{init_bare_repo, init_repo_with_origin};
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -27,42 +28,12 @@ struct TestRepo {
 impl TestRepo {
     fn new() -> Self {
         let remote_dir = TempDir::new().expect("failed to create remote dir");
-        std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .current_dir(remote_dir.path())
-            .output()
-            .expect("failed to init bare repo");
+        init_bare_repo(remote_dir.path()).expect("failed to init bare repo");
 
         let work_dir = TempDir::new().expect("failed to create work dir");
 
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to git init");
-
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to configure git email");
-
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to configure git name");
-
-        std::process::Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                remote_dir.path().to_str().unwrap(),
-            ])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to add remote");
+        init_repo_with_origin(work_dir.path(), remote_dir.path())
+            .expect("failed to init repo with origin");
 
         let runtime_dir = TempDir::new().expect("failed to create runtime dir");
         let data_dir = data_dir_for_runtime(runtime_dir.path());

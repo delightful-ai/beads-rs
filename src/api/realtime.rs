@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{
     ActorId, Applied, ClientRequestId, EventBody as CoreEventBody, EventId, EventKindV1, HlcMax,
-    NamespaceId, ReplicaId, Seq1, StoreIdentity, TxnDeltaV1, TxnId, Watermarks,
+    NamespaceId, ReplicaId, Seq1, StoreIdentity, TraceId, TxnDeltaV1, TxnId, Watermarks,
 };
 
 // =============================================================================
@@ -39,6 +39,8 @@ pub struct EventBody {
     pub txn_id: TxnId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<ClientRequestId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<TraceId>,
     pub kind: String,
     pub delta: TxnDeltaV1,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,6 +61,7 @@ impl From<&CoreEventBody> for EventBody {
             event_time_ms: body.event_time_ms,
             txn_id: body.txn_id,
             client_request_id: body.client_request_id,
+            trace_id: body.trace_id,
             kind: body.kind.as_str().to_string(),
             delta,
             hlc_max,

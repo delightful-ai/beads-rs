@@ -123,6 +123,7 @@ impl Daemon {
             namespace,
             durability,
             client_request_id,
+            trace_id,
             actor_id,
         } = meta;
         let (
@@ -154,6 +155,7 @@ impl Daemon {
             namespace: namespace.clone(),
             actor_id,
             client_request_id,
+            trace_id,
         };
 
         let parsed_request = ParsedMutationRequest::parse(request, &ctx.actor_id)?;
@@ -240,9 +242,11 @@ impl Daemon {
             store_id = %store.store_id,
             store_epoch = store.store_epoch.get(),
             replica_id = %origin_replica_id,
+            actor_id = %ctx.actor_id,
             durability = ?durability,
             txn_id = %sequenced.event_body.txn_id,
             client_request_id = ?ctx.client_request_id,
+            trace_id = %ctx.trace_id,
             namespace = %namespace,
             origin_replica_id = %origin_replica_id,
             origin_seq = origin_seq.get()
@@ -1131,8 +1135,8 @@ mod tests {
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, CanonicalState, Claim, ClientRequestId,
         DurabilityReceipt, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Stamp, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnId, TxnOpV1, WireBeadPatch,
-        WireNoteV1, WireStamp, Workflow, WriteStamp,
+        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId, TxnOpV1,
+        WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::daemon::Clock;
     use crate::daemon::Daemon;
@@ -1303,6 +1307,8 @@ mod tests {
 
     #[test]
     fn mutation_span_includes_realtime_context() {
+        use crate::telemetry::schema;
+
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
@@ -1357,14 +1363,16 @@ mod tests {
             .unwrap_or_default();
 
         for key in [
-            "store_id",
-            "store_epoch",
-            "replica_id",
-            "txn_id",
-            "client_request_id",
-            "namespace",
-            "origin_replica_id",
-            "origin_seq",
+            schema::STORE_ID,
+            schema::STORE_EPOCH,
+            schema::REPLICA_ID,
+            schema::ACTOR_ID,
+            schema::TXN_ID,
+            schema::CLIENT_REQUEST_ID,
+            schema::TRACE_ID,
+            schema::NAMESPACE,
+            schema::ORIGIN_REPLICA_ID,
+            schema::ORIGIN_SEQ,
         ] {
             assert!(
                 fields.contains_key(key),
@@ -1510,6 +1518,7 @@ mod tests {
             namespace: NamespaceId::core(),
             actor_id: actor.clone(),
             client_request_id: Some(client_request_id),
+            trace_id: TraceId::from(client_request_id),
         };
         let request = ParsedMutationRequest::parse(
             MutationRequest::AddLabels {

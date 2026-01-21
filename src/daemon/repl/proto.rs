@@ -1498,7 +1498,7 @@ mod tests {
     use super::*;
     use crate::core::{
         ActorId, BeadId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId,
-        NoteAppendV1, ReplicaId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1, WireBeadPatch,
+        NoteAppendV1, ReplicaId, StoreIdentity, TraceId, TxnDeltaV1, TxnId, TxnV1, WireBeadPatch,
         WireNoteV1, WireStamp, encode_event_body_canonical, hash_event_body,
     };
     use uuid::Uuid;
@@ -1509,6 +1509,7 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let txn_id = TxnId::new(Uuid::from_bytes([3u8; 16]));
         let client_request_id = ClientRequestId::new(Uuid::from_bytes([4u8; 16]));
+        let trace_id = TraceId::from(client_request_id);
 
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
         patch.created_at = Some(WireStamp(10, 1));
@@ -1542,6 +1543,7 @@ mod tests {
             event_time_ms: 123,
             txn_id,
             client_request_id: Some(client_request_id),
+            trace_id: Some(trace_id),
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta,
                 hlc_max: HlcMax {

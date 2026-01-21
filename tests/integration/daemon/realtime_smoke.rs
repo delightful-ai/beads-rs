@@ -3,7 +3,7 @@
 use beads_rs::NamespaceId;
 
 use crate::fixtures::admin_status::StatusCollector;
-use crate::fixtures::load_gen::LoadGenerator;
+use crate::fixtures::load_gen::{Autostart, LoadGenerator};
 use crate::fixtures::realtime::RealtimeFixture;
 
 #[test]
@@ -20,7 +20,7 @@ fn realtime_smoke_applies_and_persists() {
     config.workers = 1;
     config.total_requests = 2;
     config.namespace = Some(namespace.as_str().to_string());
-    config.autostart = false;
+    config.autostart = Autostart::Disabled;
 
     let report = generator.run();
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);

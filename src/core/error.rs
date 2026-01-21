@@ -36,6 +36,8 @@ pub enum InvalidId {
     TxnId { raw: String, reason: String },
     #[error("client request id `{raw}` is invalid: {reason}")]
     ClientRequestId { raw: String, reason: String },
+    #[error("trace id `{raw}` is invalid: {reason}")]
+    TraceId { raw: String, reason: String },
     #[error("segment id `{raw}` is invalid: {reason}")]
     SegmentId { raw: String, reason: String },
 }
@@ -1053,6 +1055,7 @@ pub mod details {
         ReplicaId,
         TxnId,
         ClientRequestId,
+        TraceId,
         SegmentId,
     }
 }

@@ -502,6 +502,7 @@ mod tests {
             event_time_ms: 123,
             txn_id,
             client_request_id: None,
+            trace_id: None,
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta: TxnDeltaV1::new(),
                 hlc_max: HlcMax {

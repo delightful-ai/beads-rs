@@ -113,43 +113,13 @@ impl TestRepo {
     fn new() -> Self {
         // Create bare remote first
         let remote_dir = TempDir::new().expect("failed to create remote dir");
-        std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .current_dir(remote_dir.path())
-            .output()
-            .expect("failed to init bare repo");
+        init_bare_repo(remote_dir.path()).expect("failed to init bare repo");
 
         // Create working directory
         let work_dir = TempDir::new().expect("failed to create work dir");
 
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to git init");
-
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to configure git email");
-
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to configure git name");
-
-        std::process::Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                remote_dir.path().to_str().unwrap(),
-            ])
-            .current_dir(work_dir.path())
-            .output()
-            .expect("failed to add remote");
+        init_repo_with_origin(work_dir.path(), remote_dir.path())
+            .expect("failed to init repo with origin");
 
         let runtime_dir = TempDir::new().expect("failed to create runtime dir");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
@@ -189,16 +159,8 @@ fn test_init_creates_beads_branch() {
 
     repo.bd().arg("init").assert().success();
 
-    let output = std::process::Command::new("git")
-        .args(["branch", "-a"])
-        .current_dir(repo.path())
-        .output()
-        .expect("failed to list branches");
-    let branches = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        branches.contains("beads/store"),
-        "beads/store branch not created: {branches}"
-    );
+    let presence = repo_has_branch(repo.path(), "beads/store").expect("failed to read branches");
+    assert!(presence.is_present(), "beads/store branch not created");
 }
 
 #[cfg(feature = "slow-tests")]
@@ -2748,23 +2710,7 @@ fn test_init_fails_without_origin_remote() {
     let runtime_dir = TempDir::new().expect("failed to create runtime dir");
     let data_dir = data_dir_for_runtime(runtime_dir.path());
 
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(work_dir.path())
-        .output()
-        .expect("failed to git init");
-
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(work_dir.path())
-        .output()
-        .expect("failed to configure git email");
-
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(work_dir.path())
-        .output()
-        .expect("failed to configure git name");
+    init_repo(work_dir.path()).expect("failed to git init");
 
     let mut cmd = bd_with_runtime(work_dir.path(), runtime_dir.path(), &data_dir);
     cmd.arg("init").assert().failure();

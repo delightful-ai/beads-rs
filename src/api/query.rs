@@ -3,10 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::api::admin::{
-    AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput, AdminMaintenanceModeOutput,
-    AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadPoliciesOutput,
-    AdminReloadReplicationOutput, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
-    DaemonInfo,
+    AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
+    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminRotateReplicaIdOutput,
+    AdminScrubOutput, AdminStatusOutput, DaemonInfo,
 };
 use crate::api::deps::{DepCycles, DepEdge};
 use crate::api::issues::{
@@ -85,6 +85,9 @@ pub enum QueryResult {
 
     /// Admin flush report.
     AdminFlush(AdminFlushOutput),
+
+    /// Admin checkpoint wait report.
+    AdminCheckpoint(AdminCheckpointOutput),
 
     /// Admin fingerprint report.
     AdminFingerprint(AdminFingerprintOutput),

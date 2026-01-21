@@ -3,8 +3,8 @@
 use beads_rs::core::{Label, NoteAppendV1, NotesPatch};
 use beads_rs::{
     ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, Labels,
-    NamespaceId, NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1,
-    TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,
+    NamespaceId, NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TraceId,
+    TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,
     WorkflowStatus,
 };
 use uuid::Uuid;
@@ -87,6 +87,7 @@ pub fn event_body_with_delta(seed: u8, delta: TxnDeltaV1) -> EventBody {
     let origin_replica_id = ReplicaId::new(Uuid::from_bytes([seed.wrapping_add(1); 16]));
     let txn_id = TxnId::new(Uuid::from_bytes([seed.wrapping_add(2); 16]));
     let client_request_id = ClientRequestId::new(Uuid::from_bytes([seed.wrapping_add(3); 16]));
+    let trace_id = TraceId::from(client_request_id);
     let event_time_ms = 1_700_000_000_000u64 + seed as u64;
 
     EventBody {
@@ -98,6 +99,7 @@ pub fn event_body_with_delta(seed: u8, delta: TxnDeltaV1) -> EventBody {
         event_time_ms,
         txn_id,
         client_request_id: Some(client_request_id),
+        trace_id: Some(trace_id),
         kind: EventKindV1::TxnV1(TxnV1 {
             delta,
             hlc_max: HlcMax {

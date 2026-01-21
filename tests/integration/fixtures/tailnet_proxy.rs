@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
+
+use tempfile::TempDir;
 
 #[derive(Clone, Debug)]
 pub struct TailnetProfile {
@@ -103,6 +104,7 @@ pub struct TailnetTrace {
 pub struct TailnetProxy {
     child: Child,
     listen_addr: String,
+    _ready_dir: TempDir,
 }
 
 impl TailnetProxy {
@@ -127,6 +129,8 @@ impl TailnetProxy {
         trace: Option<TailnetTrace>,
     ) -> Self {
         let bin = assert_cmd::cargo::cargo_bin!("tailnet_proxy");
+        let ready_dir = TempDir::new().expect("ready dir");
+        let ready_path = ready_dir.path().join("ready");
         let mut cmd = Command::new(bin);
         cmd.args([
             "--listen",
@@ -138,6 +142,7 @@ impl TailnetProxy {
             "--seed",
             &seed.to_string(),
         ]);
+        cmd.arg("--ready-file").arg(&ready_path);
         push_opt_arg(&mut cmd, "--base-latency-ms", profile.base_latency_ms);
         push_opt_arg(&mut cmd, "--jitter-ms", profile.jitter_ms);
         push_opt_arg(&mut cmd, "--loss-rate", profile.loss_rate);
@@ -164,11 +169,15 @@ impl TailnetProxy {
             push_opt_arg(&mut cmd, "--trace-timeout-ms", trace.timeout_ms);
         }
         let mut child = cmd.spawn().expect("spawn tailnet proxy");
-        wait_for_listen(&listen_addr, Duration::from_secs(2));
+        wait_for_ready(&ready_path, Duration::from_secs(2));
         if let Some(status) = child.try_wait().expect("check proxy status") {
             panic!("tailnet proxy exited early: {status}");
         }
-        Self { child, listen_addr }
+        Self {
+            child,
+            listen_addr,
+            _ready_dir: ready_dir,
+        }
     }
 
     pub fn listen_addr(&self) -> &str {
@@ -189,24 +198,17 @@ fn push_opt_arg<T: ToString>(cmd: &mut Command, flag: &str, value: Option<T>) {
     }
 }
 
-fn wait_for_listen(addr: &str, timeout: Duration) {
+fn wait_for_ready(path: &PathBuf, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
-        match TcpListener::bind(addr) {
-            Ok(listener) => {
-                drop(listener);
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
-                return;
-            }
-            Err(err) => {
-                if Instant::now() >= deadline {
-                    panic!("tailnet proxy did not start listening on {addr}: {err}");
-                }
-            }
+        if path.exists() {
+            return;
         }
         if Instant::now() >= deadline {
-            panic!("tailnet proxy did not start listening on {addr}");
+            panic!(
+                "tailnet proxy did not signal readiness at {}",
+                path.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }

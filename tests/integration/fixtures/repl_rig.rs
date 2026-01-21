@@ -28,6 +28,7 @@ use beads_rs::daemon::ipc::{
 use beads_rs::daemon::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
+use super::store_lock::unlock_store;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
 
 pub type FaultProfile = TailnetProfile;
@@ -49,6 +50,21 @@ pub struct TailnetTraceConfig {
     pub mode: TailnetTraceMode,
     pub dir: PathBuf,
     pub timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurabilityEligibility {
+    Eligible,
+    Ineligible,
+}
+
+impl DurabilityEligibility {
+    fn matches(self, value: bool) -> bool {
+        match self {
+            DurabilityEligibility::Eligible => value,
+            DurabilityEligibility::Ineligible => !value,
+        }
+    }
 }
 
 impl Default for ReplRigOptions {
@@ -152,8 +168,8 @@ impl ReplRig {
         }
 
         for node in &nodes {
-            shutdown_daemon(&node.runtime_dir);
             node.start_daemon();
+            node.reload_replication();
         }
 
         let proxies = spawn_proxies(proxy_specs);
@@ -240,7 +256,7 @@ impl ReplRig {
         &self,
         idx: usize,
         peer: ReplicaId,
-        expected: bool,
+        expected: DurabilityEligibility,
         timeout: Duration,
     ) {
         let ok = poll_until(timeout, || {
@@ -249,7 +265,7 @@ impl ReplRig {
                 .replica_liveness
                 .iter()
                 .find(|row| row.replica_id == peer)
-                .map(|row| row.durability_eligible == expected)
+                .map(|row| expected.matches(row.durability_eligible))
                 .unwrap_or(false)
         });
         if ok {
@@ -257,7 +273,7 @@ impl ReplRig {
         }
         let status = self.nodes[idx].admin_status();
         panic!(
-            "durability_eligible did not become {expected} for {peer} on node {idx}: {status:?}"
+            "durability_eligible did not become {expected:?} for {peer} on node {idx}: {status:?}"
         );
     }
 
@@ -469,11 +485,7 @@ impl Node {
     }
 
     fn unlock_store(&self, store_id: StoreId) {
-        let store_id = store_id.to_string();
-        self.bd_cmd()
-            .args(["store", "unlock", "--store-id", store_id.as_str()])
-            .assert()
-            .success();
+        unlock_store(&self.data_dir, store_id).expect("unlock store");
     }
 
     fn start_daemon(&self) {
@@ -676,7 +688,6 @@ fn bootstrap_replica(node: &NodeSeed, store_id_override: Option<StoreId>) -> (St
         .assert()
         .success();
     let meta = read_store_meta(&node.data_dir, store_id_override);
-    shutdown_daemon(&node.runtime_dir);
     (meta.store_id(), meta.replica_id)
 }
 

@@ -339,6 +339,61 @@ impl From<ClientRequestId> for Uuid {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+pub struct TraceId(Uuid);
+
+impl TraceId {
+    pub fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, CoreError> {
+        parse_uuid_id(s, |raw, reason| InvalidId::TraceId { raw, reason }).map(Self)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for TraceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TraceId({})", self.0)
+    }
+}
+
+impl fmt::Display for TraceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for TraceId {
+    type Error = CoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        TraceId::parse_str(&s)
+    }
+}
+
+impl From<Uuid> for TraceId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<TraceId> for Uuid {
+    fn from(id: TraceId) -> Uuid {
+        id.0
+    }
+}
+
+impl From<ClientRequestId> for TraceId {
+    fn from(id: ClientRequestId) -> Self {
+        Self(Uuid::from(id))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SegmentId(Uuid);
 
 impl SegmentId {
@@ -1013,8 +1068,14 @@ mod tests {
     }
 
     #[test]
+    fn trace_id_serde_roundtrip() {
+        let id = TraceId::new(Uuid::from_bytes([6u8; 16]));
+        roundtrip(&id);
+    }
+
+    #[test]
     fn segment_id_serde_roundtrip() {
-        let id = SegmentId::new(Uuid::from_bytes([6u8; 16]));
+        let id = SegmentId::new(Uuid::from_bytes([7u8; 16]));
         roundtrip(&id);
     }
 }

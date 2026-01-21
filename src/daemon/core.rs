@@ -92,7 +92,7 @@ use crate::core::{
     ActorId, Applied, ApplyError, CanonicalState, CliErrorCode, ClientRequestId, ContentHash,
     DurabilityClass, EventBody, EventId, EventKindV1, HeadStatus, Limits, NamespaceId,
     NamespacePolicy, PrevVerified, ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0,
-    Seq1, Sha256, StoreId, StoreIdentity, StoreState, VerifiedEvent, WallClock, Watermark,
+    Seq1, Sha256, StoreId, StoreIdentity, StoreState, TraceId, VerifiedEvent, WallClock, Watermark,
     WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
@@ -107,11 +107,62 @@ const LOAD_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REPL_MAX_CONNECTIONS: usize = 32;
 const EXPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GitSyncPolicy {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckpointPolicy {
+    Enabled,
+    Disabled,
+}
+
+impl GitSyncPolicy {
+    fn from_env() -> Self {
+        if env_flag_truthy("BD_TEST_DISABLE_GIT_SYNC") {
+            Self::Disabled
+        } else {
+            Self::Enabled
+        }
+    }
+
+    pub(crate) fn allows_sync(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+impl CheckpointPolicy {
+    fn from_env() -> Self {
+        if env_flag_truthy("BD_TEST_DISABLE_CHECKPOINTS") {
+            Self::Disabled
+        } else {
+            Self::Enabled
+        }
+    }
+
+    pub(crate) fn allows_checkpoints(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+fn env_flag_truthy(name: &str) -> bool {
+    let Ok(raw) = std::env::var(name) else {
+        return false;
+    };
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "n" | "off"
+    )
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ParsedMutationMeta {
     pub(crate) namespace: NamespaceId,
     pub(crate) durability: DurabilityClass,
     pub(crate) client_request_id: Option<ClientRequestId>,
+    pub(crate) trace_id: TraceId,
     pub(crate) actor_id: ActorId,
 }
 
@@ -200,6 +251,10 @@ pub struct Daemon {
 
     /// Realtime safety limits.
     limits: Limits,
+    /// Git sync policy (test-only overrides).
+    git_sync_policy: GitSyncPolicy,
+    /// Checkpoint scheduling policy (test-only overrides).
+    checkpoint_policy: CheckpointPolicy,
     /// Replication settings loaded from config (env overrides applied during load).
     replication: crate::config::ReplicationConfig,
     /// Default checkpoint group specs from config.
@@ -256,6 +311,8 @@ impl Daemon {
     /// Create a new daemon with config settings.
     pub fn new_with_config(actor: ActorId, config: crate::config::Config) -> Self {
         let limits = config.limits.clone();
+        let git_sync_policy = GitSyncPolicy::from_env();
+        let checkpoint_policy = CheckpointPolicy::from_env();
         // Initialize Go-compat export worker (best effort - don't fail daemon startup)
         let export_worker = match ExportContext::new() {
             Ok(ctx) => Some(ExportWorkerHandle::start(ctx)),
@@ -279,6 +336,8 @@ impl Daemon {
             export_worker,
             export_pending: BTreeMap::new(),
             limits,
+            git_sync_policy,
+            checkpoint_policy,
             replication: config.replication.clone(),
             checkpoint_groups: config.checkpoint_groups.clone(),
             namespace_defaults: config.namespace_defaults.namespaces.clone(),
@@ -302,6 +361,14 @@ impl Daemon {
     /// Get the safety limits.
     pub fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    pub(crate) fn git_sync_policy(&self) -> GitSyncPolicy {
+        self.git_sync_policy
+    }
+
+    fn checkpoint_policy(&self) -> CheckpointPolicy {
+        self.checkpoint_policy
     }
 
     pub fn begin_shutdown(&mut self) {
@@ -393,6 +460,9 @@ impl Daemon {
     }
 
     fn register_default_checkpoint_groups(&mut self, store_id: StoreId) -> Result<(), OpError> {
+        if !self.checkpoint_policy().allows_checkpoints() {
+            return Ok(());
+        }
         let store = self
             .stores
             .get(&store_id)
@@ -1244,6 +1314,7 @@ impl Daemon {
             .batch
             .first()
             .and_then(|event| event.body.client_request_id);
+        let trace_id = request.batch.first().and_then(|event| event.body.trace_id);
         let span = tracing::info_span!(
             "repl_ingest_request",
             store_id = %request.store_id,
@@ -1254,6 +1325,7 @@ impl Daemon {
             origin_seq = ?origin_seq,
             txn_id = ?txn_id,
             client_request_id = ?client_request_id,
+            trace_id = ?trace_id,
             batch_len = request.batch.len()
         );
         let _guard = span.enter();
@@ -2237,7 +2309,7 @@ fn write_checkpoint_tree(
     outcome
 }
 
-fn replay_event_wal(
+pub(crate) fn replay_event_wal(
     store_id: StoreId,
     wal_index: &dyn WalIndex,
     state: &mut StoreState,
@@ -2901,6 +2973,7 @@ mod tests {
             event_time_ms,
             txn_id: TxnId::new(Uuid::from_bytes([seq as u8; 16])),
             client_request_id: None,
+            trace_id: None,
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta,
                 hlc_max: HlcMax {

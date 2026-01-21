@@ -76,6 +76,7 @@ pub enum GitOp {
     Sync {
         repo: PathBuf,
         remote: RemoteUrl,
+        store_id: StoreId,
         state: CanonicalState,
         actor: ActorId,
     },
@@ -370,10 +371,17 @@ impl GitWorker {
             GitOp::Sync {
                 repo,
                 remote,
+                store_id,
                 state,
                 actor,
             } => {
-                let span = tracing::info_span!("sync", remote = %remote, repo = %repo.display());
+                let span = tracing::info_span!(
+                    "sync",
+                    store_id = %store_id,
+                    remote = %remote,
+                    repo = %repo.display(),
+                    actor_id = %actor
+                );
                 let _guard = span.enter();
                 let started = Instant::now();
                 let result = self.sync(&repo, &state, &actor);

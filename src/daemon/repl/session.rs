@@ -1458,6 +1458,7 @@ mod tests {
             event_time_ms: 10,
             txn_id: TxnId::new(Uuid::from_bytes([seq as u8; 16])),
             client_request_id: None,
+            trace_id: None,
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta: TxnDeltaV1::new(),
                 hlc_max: HlcMax {

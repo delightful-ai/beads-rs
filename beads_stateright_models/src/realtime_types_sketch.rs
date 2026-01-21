@@ -11,16 +11,16 @@ pub mod core {
         DurabilityProofV1, DurabilityReceipt, EncodeError, ErrorCode, ErrorPayload, EventBody,
         EventBytes, EventFrameError, EventFrameV1, EventId, EventKindV1, EventValidationError,
         HlcMax, Limits, NamespaceId, Opaque, PrevDeferred, PrevVerified, ReplicaId, Seq0, Seq1,
-        Sha256, StoreEpoch, StoreId, StoreIdentity, StoreState, TxnDeltaV1, TxnId, TxnV1,
+        Sha256, StoreEpoch, StoreId, StoreIdentity, StoreState, TraceId, TxnDeltaV1, TxnId, TxnV1,
         Watermark, Watermarks,
     };
 }
 
 pub mod adapters {
     pub use beads_rs::model::{
-        digest, durability, event_factory, repl_ingest, BufferedEventSnapshot,
-        BufferedPrevSnapshot, GapBufferByNsOrigin, GapBufferByNsOriginSnapshot, GapBufferSnapshot,
-        HeadSnapshot, IngestDecision, MemoryWalIndex, OriginStreamSnapshot, OriginStreamState,
-        PeerAckTable, WatermarkSnapshot,
+        BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOrigin,
+        GapBufferByNsOriginSnapshot, GapBufferSnapshot, HeadSnapshot, IngestDecision,
+        MemoryWalIndex, OriginStreamSnapshot, OriginStreamState, PeerAckTable, WatermarkSnapshot,
+        digest, durability, event_factory, repl_ingest,
     };
 }

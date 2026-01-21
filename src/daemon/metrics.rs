@@ -1,5 +1,17 @@
 //! Minimal metrics emission helpers.
 //!
+//! Metrics log schema (target = "metrics"):
+//! - metric: metric name (string)
+//! - metric_kind: "counter" | "gauge" | "histogram"
+//! - value: numeric value (u64)
+//! - labels: list of { key, value } label pairs
+//!
+//! Example event (fields only):
+//! {"metric":"wal_append_ok","metric_kind":"counter","value":1,"labels":[{"key":"store","value":"primary"}]}
+//!
+//! JSON file logging includes current span + span list, so metrics logs retain
+//! span context without additional work.
+//!
 //! These helpers emit structured metrics via tracing by default. A test sink can
 //! be installed to capture emissions in unit tests.
 
@@ -81,6 +93,7 @@ impl MetricSink for TracingSink {
                 tracing::info!(
                     target: "metrics",
                     metric = event.name,
+                    metric_kind = "counter",
                     value,
                     labels = ?event.labels
                 );
@@ -89,6 +102,7 @@ impl MetricSink for TracingSink {
                 tracing::info!(
                     target: "metrics",
                     metric = event.name,
+                    metric_kind = "gauge",
                     value,
                     labels = ?event.labels
                 );
@@ -97,6 +111,7 @@ impl MetricSink for TracingSink {
                 tracing::info!(
                     target: "metrics",
                     metric = event.name,
+                    metric_kind = "histogram",
                     value,
                     labels = ?event.labels
                 );

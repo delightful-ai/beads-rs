@@ -8,12 +8,14 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, Sender};
+use tracing::Span;
 
+use super::QueryResult;
 use super::broadcast::{BroadcastEvent, DropReason};
 use super::core::{Daemon, HandleOutcome, NormalizedReadConsistency, ReadGateStatus};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
@@ -26,10 +28,11 @@ use super::ipc::{
 use super::ops::OpError;
 use super::remote::RemoteUrl;
 use super::subscription::{SubscribeReply, prepare_subscription, subscriber_limits};
+use crate::api::{AdminCheckpointGroup, AdminCheckpointOutput};
 use crate::core::error::details as error_details;
 use crate::core::{
-    CliErrorCode, DurabilityClass, ErrorPayload, EventFrameV1, EventId, Limits, ProtocolErrorCode,
-    ReplicaId, Sha256, decode_event_body,
+    CliErrorCode, DurabilityClass, ErrorPayload, EventFrameV1, EventId, Limits, NamespaceId,
+    ProtocolErrorCode, ReplicaId, Sha256, StoreId, decode_event_body,
 };
 
 /// Message sent from socket handlers to state thread.
@@ -43,6 +46,206 @@ pub struct RequestMessage {
     pub respond: Sender<ServerReply>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadConsistencyTag {
+    Default,
+    RequireMinSeen,
+}
+
+impl ReadConsistencyTag {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReadConsistencyTag::Default => "default",
+            ReadConsistencyTag::RequireMinSeen => "require_min_seen",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RequestContext {
+    request_type: &'static str,
+    repo: Option<PathBuf>,
+    namespace: Option<String>,
+    actor_id: Option<String>,
+    client_request_id: Option<String>,
+    read_consistency: Option<ReadConsistencyTag>,
+}
+
+impl RequestContext {
+    fn from_request(request: &Request) -> Self {
+        match request {
+            Request::Create { repo, meta, .. } => Self::from_mutation("create", repo, meta),
+            Request::Update { repo, meta, .. } => Self::from_mutation("update", repo, meta),
+            Request::AddLabels { repo, meta, .. } => Self::from_mutation("add_labels", repo, meta),
+            Request::RemoveLabels { repo, meta, .. } => {
+                Self::from_mutation("remove_labels", repo, meta)
+            }
+            Request::SetParent { repo, meta, .. } => Self::from_mutation("set_parent", repo, meta),
+            Request::Close { repo, meta, .. } => Self::from_mutation("close", repo, meta),
+            Request::Reopen { repo, meta, .. } => Self::from_mutation("reopen", repo, meta),
+            Request::Delete { repo, meta, .. } => Self::from_mutation("delete", repo, meta),
+            Request::AddDep { repo, meta, .. } => Self::from_mutation("add_dep", repo, meta),
+            Request::RemoveDep { repo, meta, .. } => Self::from_mutation("remove_dep", repo, meta),
+            Request::AddNote { repo, meta, .. } => Self::from_mutation("add_note", repo, meta),
+            Request::Claim { repo, meta, .. } => Self::from_mutation("claim", repo, meta),
+            Request::Unclaim { repo, meta, .. } => Self::from_mutation("unclaim", repo, meta),
+            Request::ExtendClaim { repo, meta, .. } => {
+                Self::from_mutation("extend_claim", repo, meta)
+            }
+            Request::Show { repo, read, .. } => Self::from_read("show", repo, read),
+            Request::ShowMultiple { repo, read, .. } => {
+                Self::from_read("show_multiple", repo, read)
+            }
+            Request::List { repo, read, .. } => Self::from_read("list", repo, read),
+            Request::Ready { repo, read, .. } => Self::from_read("ready", repo, read),
+            Request::DepTree { repo, read, .. } => Self::from_read("dep_tree", repo, read),
+            Request::DepCycles { repo, read, .. } => Self::from_read("dep_cycles", repo, read),
+            Request::Deps { repo, read, .. } => Self::from_read("deps", repo, read),
+            Request::Notes { repo, read, .. } => Self::from_read("notes", repo, read),
+            Request::Blocked { repo, read } => Self::from_read("blocked", repo, read),
+            Request::Stale { repo, read, .. } => Self::from_read("stale", repo, read),
+            Request::Count { repo, read, .. } => Self::from_read("count", repo, read),
+            Request::Deleted { repo, read, .. } => Self::from_read("deleted", repo, read),
+            Request::EpicStatus { repo, read, .. } => Self::from_read("epic_status", repo, read),
+            Request::Refresh { repo } => Self::from_repo("refresh", repo),
+            Request::Sync { repo } => Self::from_repo("sync", repo),
+            Request::SyncWait { repo } => Self::from_repo("sync_wait", repo),
+            Request::Init { repo } => Self::from_repo("init", repo),
+            Request::Status { repo, read } => Self::from_read("status", repo, read),
+            Request::AdminStatus { repo, read } => Self::from_read("admin_status", repo, read),
+            Request::AdminMetrics { repo, read } => Self::from_read("admin_metrics", repo, read),
+            Request::AdminDoctor { repo, read, .. } => Self::from_read("admin_doctor", repo, read),
+            Request::AdminScrub { repo, read, .. } => Self::from_read("admin_scrub", repo, read),
+            Request::AdminFlush {
+                repo, namespace, ..
+            } => Self::from_namespace("admin_flush", repo, namespace),
+            Request::AdminCheckpointWait { repo, namespace } => {
+                Self::from_namespace("admin_checkpoint_wait", repo, namespace)
+            }
+            Request::AdminFingerprint { repo, read, .. } => {
+                Self::from_read("admin_fingerprint", repo, read)
+            }
+            Request::AdminReloadPolicies { repo } => Self::from_repo("admin_reload_policies", repo),
+            Request::AdminReloadReplication { repo } => {
+                Self::from_repo("admin_reload_replication", repo)
+            }
+            Request::AdminRotateReplicaId { repo } => {
+                Self::from_repo("admin_rotate_replica_id", repo)
+            }
+            Request::AdminMaintenanceMode { repo, .. } => {
+                Self::from_repo("admin_maintenance_mode", repo)
+            }
+            Request::AdminRebuildIndex { repo } => Self::from_repo("admin_rebuild_index", repo),
+            Request::Validate { repo, read } => Self::from_read("validate", repo, read),
+            Request::Subscribe { repo, read } => Self::from_read("subscribe", repo, read),
+            Request::Ping => Self::without_repo("ping"),
+            Request::Shutdown => Self::without_repo("shutdown"),
+        }
+    }
+
+    fn from_mutation(
+        request_type: &'static str,
+        repo: &Path,
+        meta: &super::ipc::MutationMeta,
+    ) -> Self {
+        Self {
+            request_type,
+            repo: Some(repo.to_path_buf()),
+            namespace: meta.namespace.clone(),
+            actor_id: meta.actor_id.clone(),
+            client_request_id: meta.client_request_id.clone(),
+            read_consistency: None,
+        }
+    }
+
+    fn from_read(request_type: &'static str, repo: &Path, read: &ReadConsistency) -> Self {
+        Self {
+            request_type,
+            repo: Some(repo.to_path_buf()),
+            namespace: read.namespace.clone(),
+            actor_id: None,
+            client_request_id: None,
+            read_consistency: Some(read_consistency_tag(read)),
+        }
+    }
+
+    fn from_repo(request_type: &'static str, repo: &Path) -> Self {
+        Self {
+            request_type,
+            repo: Some(repo.to_path_buf()),
+            namespace: None,
+            actor_id: None,
+            client_request_id: None,
+            read_consistency: None,
+        }
+    }
+
+    fn from_namespace(request_type: &'static str, repo: &Path, namespace: &Option<String>) -> Self {
+        Self {
+            request_type,
+            repo: Some(repo.to_path_buf()),
+            namespace: namespace.clone(),
+            actor_id: None,
+            client_request_id: None,
+            read_consistency: None,
+        }
+    }
+
+    fn without_repo(request_type: &'static str) -> Self {
+        Self {
+            request_type,
+            repo: None,
+            namespace: None,
+            actor_id: None,
+            client_request_id: None,
+            read_consistency: None,
+        }
+    }
+}
+
+fn read_consistency_tag(read: &ReadConsistency) -> ReadConsistencyTag {
+    if read.require_min_seen.is_some() {
+        ReadConsistencyTag::RequireMinSeen
+    } else {
+        ReadConsistencyTag::Default
+    }
+}
+
+fn request_span(context: &RequestContext) -> Span {
+    let span = tracing::info_span!(
+        "ipc_request",
+        request_type = context.request_type,
+        repo = tracing::field::Empty,
+        namespace = tracing::field::Empty,
+        actor_id = tracing::field::Empty,
+        client_request_id = tracing::field::Empty,
+        read_consistency = tracing::field::Empty,
+    );
+    if let Some(repo) = &context.repo {
+        let repo_display = repo.display();
+        span.record("repo", tracing::field::display(repo_display));
+    }
+    if let Some(namespace) = &context.namespace {
+        span.record("namespace", tracing::field::display(namespace));
+    }
+    if let Some(actor_id) = &context.actor_id {
+        span.record("actor_id", tracing::field::display(actor_id));
+    }
+    if let Some(client_request_id) = &context.client_request_id {
+        span.record(
+            "client_request_id",
+            tracing::field::display(client_request_id),
+        );
+    }
+    if let Some(read_consistency) = context.read_consistency {
+        span.record(
+            "read_consistency",
+            tracing::field::display(read_consistency.as_str()),
+        );
+    }
+    span
+}
+
 struct ReadGateRequest {
     repo: PathBuf,
     read: ReadConsistency,
@@ -53,6 +256,7 @@ struct ReadGateWaiter {
     respond: Sender<ServerReply>,
     repo: PathBuf,
     read: NormalizedReadConsistency,
+    span: Span,
     started_at: Instant,
     deadline: Instant,
 }
@@ -60,8 +264,17 @@ struct ReadGateWaiter {
 struct DurabilityWaiter {
     respond: Sender<ServerReply>,
     wait: DurabilityWait,
+    span: Span,
     started_at: Instant,
     deadline: Instant,
+}
+
+struct CheckpointWaiter {
+    respond: Sender<ServerReply>,
+    store_id: StoreId,
+    namespace: NamespaceId,
+    min_checkpoint_wall_ms: u64,
+    groups: Vec<String>,
 }
 
 enum RequestOutcome {
@@ -80,6 +293,7 @@ pub fn run_state_loop(
     git_result_rx: Receiver<GitResult>,
 ) {
     let mut sync_waiters: HashMap<RemoteUrl, Vec<Sender<ServerReply>>> = HashMap::new();
+    let mut checkpoint_waiters: Vec<CheckpointWaiter> = Vec::new();
     let mut read_gate_waiters: Vec<ReadGateWaiter> = Vec::new();
     let mut durability_waiters: Vec<DurabilityWaiter> = Vec::new();
     let repl_capacity = daemon.limits().max_repl_ingest_queue_events.max(1);
@@ -128,6 +342,10 @@ pub fn run_state_loop(
             recv(req_rx) -> msg => {
                 match msg {
                     Ok(RequestMessage { request, respond }) => {
+                        let context = RequestContext::from_request(&request);
+                        let span = request_span(&context);
+                        let _guard = span.enter();
+
                         if let Some(read_gate) = read_gate_request(&request) {
                             let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
                                 Ok(remote) => remote,
@@ -169,6 +387,7 @@ pub fn run_state_loop(
                                             respond,
                                             repo: read_gate.repo,
                                             read,
+                                            span: span.clone(),
                                             started_at,
                                             deadline,
                                         });
@@ -188,6 +407,7 @@ pub fn run_state_loop(
                             respond,
                             &git_tx,
                             &mut sync_waiters,
+                            &mut checkpoint_waiters,
                             &mut durability_waiters,
                         );
 
@@ -264,12 +484,14 @@ pub fn run_state_loop(
                         daemon.fire_due_wal_checkpoints();
                         daemon.fire_due_lock_heartbeats();
                         daemon.fire_due_exports();
+                        flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
                         flush_sync_waiters(&daemon, &mut sync_waiters);
                         flush_read_gate_waiters(
                             &mut daemon,
                             &mut read_gate_waiters,
                             &git_tx,
                             &mut sync_waiters,
+                            &mut checkpoint_waiters,
                             &mut durability_waiters,
                         );
                         flush_durability_waiters(&mut durability_waiters);
@@ -289,12 +511,14 @@ pub fn run_state_loop(
                 daemon.fire_due_wal_checkpoints();
                 daemon.fire_due_lock_heartbeats();
                 daemon.fire_due_exports();
+                flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,
                     &mut read_gate_waiters,
                     &git_tx,
                     &mut sync_waiters,
+                    &mut checkpoint_waiters,
                     &mut durability_waiters,
                 );
                 flush_durability_waiters(&mut durability_waiters);
@@ -309,12 +533,14 @@ pub fn run_state_loop(
                     daemon.fire_due_wal_checkpoints();
                     daemon.fire_due_lock_heartbeats();
                     daemon.fire_due_exports();
+                    flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
                     flush_sync_waiters(&daemon, &mut sync_waiters);
                     flush_read_gate_waiters(
                         &mut daemon,
                         &mut read_gate_waiters,
                         &git_tx,
                         &mut sync_waiters,
+                        &mut checkpoint_waiters,
                         &mut durability_waiters,
                     );
                     flush_durability_waiters(&mut durability_waiters);
@@ -341,12 +567,14 @@ pub fn run_state_loop(
                 daemon.fire_due_wal_checkpoints();
                 daemon.fire_due_lock_heartbeats();
                 daemon.fire_due_exports();
+                flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
                 flush_sync_waiters(&daemon, &mut sync_waiters);
                 flush_read_gate_waiters(
                     &mut daemon,
                     &mut read_gate_waiters,
                     &git_tx,
                     &mut sync_waiters,
+                    &mut checkpoint_waiters,
                     &mut durability_waiters,
                 );
                 flush_durability_waiters(&mut durability_waiters);
@@ -361,6 +589,7 @@ fn process_request_message(
     respond: Sender<ServerReply>,
     git_tx: &Sender<GitOp>,
     sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+    checkpoint_waiters: &mut Vec<CheckpointWaiter>,
     durability_waiters: &mut Vec<DurabilityWaiter>,
 ) -> RequestOutcome {
     // Sync barrier: wait until repo is clean.
@@ -394,6 +623,63 @@ fn process_request_message(
         return RequestOutcome::Continue;
     }
 
+    if let Request::AdminCheckpointWait { repo, namespace } = request {
+        let proof = match daemon.ensure_repo_loaded_strict(&repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(err)));
+                return RequestOutcome::Continue;
+            }
+        };
+        let namespace = match daemon.normalize_namespace(&proof, namespace) {
+            Ok(namespace) => namespace,
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(err)));
+                return RequestOutcome::Continue;
+            }
+        };
+        let store_id = proof.store_id();
+        let min_checkpoint_wall_ms = daemon.clock().wall_ms();
+        let groups = daemon.force_checkpoint_for_namespace(store_id, &namespace);
+        if groups.is_empty() {
+            let _ = respond.send(ServerReply::Response(Response::err(
+                OpError::InvalidRequest {
+                    field: Some("checkpoint".into()),
+                    reason: format!("no checkpoint groups scheduled for namespace {namespace}",),
+                },
+            )));
+            return RequestOutcome::Continue;
+        }
+
+        match checkpoint_wait_ready(
+            daemon,
+            store_id,
+            &namespace,
+            min_checkpoint_wall_ms,
+            &groups,
+        ) {
+            Ok(Some(output)) => {
+                let _ = respond.send(ServerReply::Response(Response::ok(ResponsePayload::query(
+                    QueryResult::AdminCheckpoint(output),
+                ))));
+            }
+            Ok(None) => {
+                checkpoint_waiters.push(CheckpointWaiter {
+                    respond,
+                    store_id,
+                    namespace,
+                    min_checkpoint_wall_ms,
+                    groups,
+                });
+            }
+            Err(err) => {
+                let _ = respond.send(ServerReply::Response(Response::err(err)));
+            }
+        }
+
+        return RequestOutcome::Continue;
+    }
+
     if let Request::Subscribe { repo, read } = request {
         match prepare_subscription(daemon, &repo, read, git_tx) {
             Ok(reply) => {
@@ -418,9 +704,11 @@ fn process_request_message(
             let deadline = started_at
                 .checked_add(wait.wait_timeout)
                 .unwrap_or(started_at);
+            let span = tracing::Span::current();
             durability_waiters.push(DurabilityWaiter {
                 respond,
                 wait,
+                span,
                 started_at,
                 deadline,
             });
@@ -525,6 +813,7 @@ fn flush_read_gate_waiters(
     waiters: &mut Vec<ReadGateWaiter>,
     git_tx: &Sender<GitOp>,
     sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+    checkpoint_waiters: &mut Vec<CheckpointWaiter>,
     durability_waiters: &mut Vec<DurabilityWaiter>,
 ) {
     if waiters.is_empty() {
@@ -534,6 +823,8 @@ fn flush_read_gate_waiters(
     let now = Instant::now();
     let mut remaining = Vec::new();
     for waiter in waiters.drain(..) {
+        let span = waiter.span.clone();
+        let _guard = span.enter();
         let loaded = match daemon.ensure_repo_fresh(&waiter.repo, git_tx) {
             Ok(remote) => remote,
             Err(err) => {
@@ -552,6 +843,7 @@ fn flush_read_gate_waiters(
                     waiter.respond,
                     git_tx,
                     sync_waiters,
+                    checkpoint_waiters,
                     durability_waiters,
                 );
             }
@@ -593,6 +885,8 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
     let now = Instant::now();
     let mut remaining = Vec::new();
     for waiter in waiters.drain(..) {
+        let span = waiter.span.clone();
+        let _guard = span.enter();
         let requested = waiter.wait.requested;
         let DurabilityClass::ReplicatedFsync { k } = requested else {
             let _ = waiter
@@ -646,6 +940,86 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
                 }
                 remaining.push(waiter);
             }
+            Err(err) => {
+                let _ = waiter
+                    .respond
+                    .send(ServerReply::Response(Response::err(err)));
+            }
+        }
+    }
+
+    *waiters = remaining;
+}
+
+fn checkpoint_wait_ready(
+    daemon: &Daemon,
+    store_id: StoreId,
+    namespace: &NamespaceId,
+    min_checkpoint_wall_ms: u64,
+    groups: &[String],
+) -> Result<Option<AdminCheckpointOutput>, OpError> {
+    let snapshots = daemon.checkpoint_group_snapshots(store_id);
+    let mut matched = Vec::new();
+    for snapshot in snapshots {
+        if groups.iter().any(|group| group == &snapshot.group) {
+            matched.push(snapshot);
+        }
+    }
+
+    if matched.len() != groups.len() {
+        return Err(OpError::Internal("checkpoint group missing from scheduler"));
+    }
+
+    let ready = matched.iter().all(|snapshot| {
+        !snapshot.dirty
+            && !snapshot.in_flight
+            && snapshot
+                .last_checkpoint_wall_ms
+                .is_some_and(|wall_ms| wall_ms >= min_checkpoint_wall_ms)
+    });
+
+    if !ready {
+        return Ok(None);
+    }
+
+    let checkpoint_groups = matched
+        .into_iter()
+        .map(|snapshot| AdminCheckpointGroup {
+            group: snapshot.group,
+            namespaces: snapshot.namespaces,
+            git_ref: snapshot.git_ref,
+            dirty: snapshot.dirty,
+            in_flight: snapshot.in_flight,
+            last_checkpoint_wall_ms: snapshot.last_checkpoint_wall_ms,
+        })
+        .collect();
+
+    Ok(Some(AdminCheckpointOutput {
+        namespace: namespace.clone(),
+        checkpoint_groups,
+    }))
+}
+
+fn flush_checkpoint_waiters(daemon: &Daemon, waiters: &mut Vec<CheckpointWaiter>) {
+    if waiters.is_empty() {
+        return;
+    }
+
+    let mut remaining = Vec::new();
+    for waiter in waiters.drain(..) {
+        match checkpoint_wait_ready(
+            daemon,
+            waiter.store_id,
+            &waiter.namespace,
+            waiter.min_checkpoint_wall_ms,
+            &waiter.groups,
+        ) {
+            Ok(Some(output)) => {
+                let _ = waiter.respond.send(ServerReply::Response(Response::ok(
+                    ResponsePayload::query(QueryResult::AdminCheckpoint(output)),
+                )));
+            }
+            Ok(None) => remaining.push(waiter),
             Err(err) => {
                 let _ = waiter
                     .respond
@@ -970,12 +1344,13 @@ mod tests {
 
     use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
-        ActorId, Applied, BeadId, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
-        EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, ReplicaRole,
-        ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermark,
-        Watermarks,
+        ActorId, Applied, BeadId, BeadType, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
+        EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
+        ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
+        Watermark, Watermarks,
     };
     use crate::daemon::core::insert_store_for_tests;
+    use crate::daemon::ipc::MutationMeta;
     use crate::daemon::ipc::OpResponse;
     use crate::daemon::ops::OpResult;
     use crate::daemon::repl::PeerAckTable;
@@ -1022,6 +1397,217 @@ mod tests {
             HeadStatus::Known([seq as u8; 32])
         };
         Watermark::new(Seq0::new(seq), head).expect("watermark")
+    }
+
+    #[test]
+    fn request_context_extracts_create_fields() {
+        let repo = PathBuf::from("/tmp/repo");
+        let meta = MutationMeta {
+            namespace: Some("core".to_string()),
+            client_request_id: Some("req-123".to_string()),
+            actor_id: Some("actor@example.com".to_string()),
+            durability: None,
+        };
+        let request = Request::Create {
+            repo: repo.clone(),
+            id: None,
+            parent: None,
+            title: "title".to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            meta,
+        };
+
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.request_type, "create");
+        assert_eq!(context.repo, Some(repo));
+        assert_eq!(context.namespace.as_deref(), Some("core"));
+        assert_eq!(context.actor_id.as_deref(), Some("actor@example.com"));
+        assert_eq!(context.client_request_id.as_deref(), Some("req-123"));
+        assert_eq!(context.read_consistency, None);
+    }
+
+    #[test]
+    fn request_context_extracts_show_fields() {
+        let repo = PathBuf::from("/tmp/repo");
+        let read = ReadConsistency {
+            namespace: Some("core".to_string()),
+            require_min_seen: None,
+            wait_timeout_ms: None,
+        };
+        let request = Request::Show {
+            repo: repo.clone(),
+            id: "bd-123".to_string(),
+            read,
+        };
+
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.request_type, "show");
+        assert_eq!(context.repo, Some(repo));
+        assert_eq!(context.namespace.as_deref(), Some("core"));
+        assert_eq!(context.read_consistency, Some(ReadConsistencyTag::Default));
+    }
+
+    #[test]
+    fn request_span_includes_schema_fields() {
+        use crate::telemetry::schema;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+        use tracing::Subscriber;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::Registry;
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default)]
+        struct FieldVisitor {
+            fields: BTreeMap<String, String>,
+        }
+
+        impl FieldVisitor {
+            fn record(&mut self, field: &Field, value: String) {
+                self.fields.insert(field.name().to_string(), value);
+            }
+        }
+
+        impl Visit for FieldVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.record(field, format!("{value:?}"));
+            }
+
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.record(field, value.to_string());
+            }
+
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                self.record(field, value.to_string());
+            }
+        }
+
+        #[derive(Default)]
+        struct SpanFields {
+            fields: BTreeMap<String, String>,
+        }
+
+        struct CaptureLayer {
+            spans: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+        }
+
+        impl CaptureLayer {
+            fn new(spans: Arc<Mutex<Vec<BTreeMap<String, String>>>>) -> Self {
+                Self { spans }
+            }
+        }
+
+        impl<S> Layer<S> for CaptureLayer
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                id: &tracing::Id,
+                ctx: Context<'_, S>,
+            ) {
+                let mut visitor = FieldVisitor::default();
+                attrs.record(&mut visitor);
+                if let Some(span) = ctx.span(id) {
+                    span.extensions_mut().insert(SpanFields {
+                        fields: visitor.fields,
+                    });
+                }
+            }
+
+            fn on_record(
+                &self,
+                id: &tracing::Id,
+                values: &tracing::span::Record<'_>,
+                ctx: Context<'_, S>,
+            ) {
+                if let Some(span) = ctx.span(id) {
+                    let mut visitor = FieldVisitor::default();
+                    values.record(&mut visitor);
+                    let mut extensions = span.extensions_mut();
+                    if extensions.get_mut::<SpanFields>().is_none() {
+                        extensions.insert(SpanFields::default());
+                    }
+                    let fields = extensions.get_mut::<SpanFields>().expect("span fields");
+                    fields.fields.extend(visitor.fields);
+                }
+            }
+
+            fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+                let Some(span) = ctx.span(&id) else {
+                    return;
+                };
+                if span.metadata().name() != "ipc_request" {
+                    return;
+                }
+                let fields = span
+                    .extensions()
+                    .get::<SpanFields>()
+                    .map(|fields| fields.fields.clone())
+                    .unwrap_or_default();
+                self.spans.lock().expect("span capture").push(fields);
+            }
+        }
+
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let layer = CaptureLayer::new(spans.clone());
+        let subscriber = Registry::default().with(layer);
+
+        tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+            let repo = PathBuf::from("/tmp/repo");
+            let meta = MutationMeta {
+                namespace: Some("core".to_string()),
+                client_request_id: Some("req-123".to_string()),
+                actor_id: Some("actor@example.com".to_string()),
+                durability: None,
+            };
+            let request = Request::Create {
+                repo: repo.clone(),
+                id: None,
+                parent: None,
+                title: "title".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+                meta,
+            };
+            let context = RequestContext::from_request(&request);
+            let span = request_span(&context);
+            let _guard = span.enter();
+        });
+
+        let captured = spans.lock().expect("span capture");
+        let fields = captured.last().cloned().unwrap_or_default();
+        for key in [
+            schema::REQUEST_TYPE,
+            schema::REPO,
+            schema::NAMESPACE,
+            schema::ACTOR_ID,
+            schema::CLIENT_REQUEST_ID,
+        ] {
+            assert!(
+                fields.contains_key(key),
+                "ipc_request span missing {key}: {fields:?}"
+            );
+        }
     }
 
     #[test]
@@ -1082,18 +1668,21 @@ mod tests {
             respond: respond_tx,
             repo: env.repo_path.clone(),
             read: normalized,
+            span: tracing::Span::none(),
             started_at,
             deadline,
         };
 
         let mut waiters = vec![waiter];
         let mut sync_waiters = HashMap::new();
+        let mut checkpoint_waiters = Vec::new();
         let mut durability_waiters = Vec::new();
         flush_read_gate_waiters(
             &mut env.daemon,
             &mut waiters,
             &env.git_tx,
             &mut sync_waiters,
+            &mut checkpoint_waiters,
             &mut durability_waiters,
         );
         assert_eq!(waiters.len(), 1);
@@ -1112,6 +1701,7 @@ mod tests {
             &mut waiters,
             &env.git_tx,
             &mut sync_waiters,
+            &mut checkpoint_waiters,
             &mut durability_waiters,
         );
         assert!(waiters.is_empty());
@@ -1160,18 +1750,21 @@ mod tests {
             respond: respond_tx,
             repo: env.repo_path.clone(),
             read: normalized,
+            span: tracing::Span::none(),
             started_at,
             deadline,
         };
 
         let mut waiters = vec![waiter];
         let mut sync_waiters = HashMap::new();
+        let mut checkpoint_waiters = Vec::new();
         let mut durability_waiters = Vec::new();
         flush_read_gate_waiters(
             &mut env.daemon,
             &mut waiters,
             &env.git_tx,
             &mut sync_waiters,
+            &mut checkpoint_waiters,
             &mut durability_waiters,
         );
         assert!(waiters.is_empty());
@@ -1282,6 +1875,7 @@ mod tests {
         let mut waiters = vec![DurabilityWaiter {
             respond: respond_tx,
             wait,
+            span: tracing::Span::none(),
             started_at,
             deadline,
         }];
@@ -1390,6 +1984,7 @@ mod tests {
         let mut waiters = vec![DurabilityWaiter {
             respond: respond_tx,
             wait,
+            span: tracing::Span::none(),
             started_at,
             deadline,
         }];

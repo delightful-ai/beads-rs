@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use beads_rs::core::{
     ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
+    StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnDeltaV1, TxnId, TxnV1,
     encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
@@ -157,6 +157,7 @@ fn event_body(
         event_time_ms,
         txn_id,
         client_request_id,
+        trace_id: client_request_id.map(TraceId::from),
         kind: EventKindV1::TxnV1(TxnV1 {
             delta: TxnDeltaV1::new(),
             hlc_max: HlcMax {

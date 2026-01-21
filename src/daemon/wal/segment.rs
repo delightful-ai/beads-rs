@@ -41,12 +41,16 @@ impl SegmentConfig {
     }
 
     pub fn from_limits(limits: &crate::core::Limits) -> Self {
-        Self {
+        let mut config = Self {
             max_record_bytes: limits.max_wal_record_bytes,
             max_segment_bytes: limits.wal_segment_max_bytes as u64,
             max_segment_age_ms: limits.wal_segment_max_age_ms,
             sync_mode: SegmentSyncMode::Data,
+        };
+        if let Some(sync_mode) = sync_mode_override() {
+            config.sync_mode = sync_mode;
         }
+        config
     }
 
     pub fn with_sync_mode(mut self, sync_mode: SegmentSyncMode) -> Self {
@@ -60,6 +64,33 @@ pub enum SegmentSyncMode {
     None,
     Data,
     All,
+}
+
+fn sync_mode_override() -> Option<SegmentSyncMode> {
+    if let Ok(raw) = std::env::var("BD_WAL_SYNC_MODE") {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some(mode) = parse_sync_mode(trimmed) {
+            return Some(mode);
+        }
+        tracing::warn!("invalid BD_WAL_SYNC_MODE, ignoring: {raw}");
+        return None;
+    }
+    if std::env::var_os("BD_TEST_FAST").is_some() {
+        return Some(SegmentSyncMode::None);
+    }
+    None
+}
+
+fn parse_sync_mode(raw: &str) -> Option<SegmentSyncMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" | "0" => Some(SegmentSyncMode::None),
+        "data" | "fdatasync" | "1" => Some(SegmentSyncMode::Data),
+        "all" | "fsync" | "2" => Some(SegmentSyncMode::All),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -581,6 +612,7 @@ mod tests {
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
             client_request_id: header.client_request_id,
+            trace_id: None,
             kind: crate::core::EventKindV1::TxnV1(crate::core::TxnV1 {
                 delta: crate::core::TxnDeltaV1::new(),
                 hlc_max: crate::core::HlcMax {

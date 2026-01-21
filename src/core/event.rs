@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use super::domain::DepKind;
 use super::identity::{
-    ActorId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TxnId,
+    ActorId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TraceId, TxnId,
 };
 use super::limits::Limits;
 use super::namespace::NamespaceId;
@@ -151,6 +151,7 @@ pub struct EventBody {
     pub event_time_ms: u64,
     pub txn_id: TxnId,
     pub client_request_id: Option<ClientRequestId>,
+    pub trace_id: Option<TraceId>,
     pub kind: EventKindV1,
 }
 
@@ -388,6 +389,9 @@ fn encode_event_body_map(
     if body.client_request_id.is_some() {
         len += 1;
     }
+    if body.trace_id.is_some() {
+        len += 1;
+    }
     match &body.kind {
         EventKindV1::TxnV1(_) => {
             len += 2;
@@ -399,6 +403,10 @@ fn encode_event_body_map(
     if let Some(client_request_id) = &body.client_request_id {
         enc.str("client_request_id")?;
         enc.str(&client_request_id.as_uuid().to_string())?;
+    }
+    if let Some(trace_id) = &body.trace_id {
+        enc.str("trace_id")?;
+        enc.str(&trace_id.as_uuid().to_string())?;
     }
 
     match &body.kind {
@@ -462,6 +470,7 @@ fn decode_event_body_map(
     let mut event_time_ms = None;
     let mut txn_id: Option<TxnId> = None;
     let mut client_request_id: Option<ClientRequestId> = None;
+    let mut trace_id: Option<TraceId> = None;
     let mut kind: Option<EventKindTag> = None;
     let mut delta: Option<TxnDeltaV1> = None;
     let mut hlc_max: Option<HlcMax> = None;
@@ -473,6 +482,10 @@ fn decode_event_body_map(
             "client_request_id" => {
                 let raw = decode_text(dec, limits)?;
                 client_request_id = Some(parse_uuid_field("client_request_id", raw)?);
+            }
+            "trace_id" => {
+                let raw = decode_text(dec, limits)?;
+                trace_id = Some(parse_uuid_field("trace_id", raw)?);
             }
             "delta" => {
                 delta = Some(decode_txn_delta(dec, limits, depth + 1)?);
@@ -568,6 +581,7 @@ fn decode_event_body_map(
         event_time_ms,
         txn_id,
         client_request_id,
+        trace_id,
         kind,
     })
 }
@@ -2148,6 +2162,7 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let txn_id = TxnId::new(Uuid::from_bytes([3u8; 16]));
         let client_request_id = ClientRequestId::new(Uuid::from_bytes([4u8; 16]));
+        let trace_id = TraceId::from(client_request_id);
 
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
         patch.created_at = Some(WireStamp(10, 1));
@@ -2166,6 +2181,7 @@ mod tests {
             event_time_ms: 123,
             txn_id,
             client_request_id: Some(client_request_id),
+            trace_id: Some(trace_id),
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta,
                 hlc_max: HlcMax {
@@ -2232,6 +2248,9 @@ mod tests {
         if body.client_request_id.is_some() {
             len += 1;
         }
+        if body.trace_id.is_some() {
+            len += 1;
+        }
         len += 2;
         len += 1;
 
@@ -2245,6 +2264,10 @@ mod tests {
         if let Some(client_request_id) = &body.client_request_id {
             enc.str("client_request_id").unwrap();
             enc.str(&client_request_id.as_uuid().to_string()).unwrap();
+        }
+        if let Some(trace_id) = &body.trace_id {
+            enc.str("trace_id").unwrap();
+            enc.str(&trace_id.as_uuid().to_string()).unwrap();
         }
 
         let txn = txn(body);
@@ -2327,6 +2350,9 @@ mod tests {
         if body.client_request_id.is_some() {
             len += 1;
         }
+        if body.trace_id.is_some() {
+            len += 1;
+        }
         len += 1;
 
         enc.map(len as u64).unwrap();
@@ -2334,6 +2360,10 @@ mod tests {
         if let Some(client_request_id) = &body.client_request_id {
             enc.str("client_request_id").unwrap();
             enc.str(&client_request_id.as_uuid().to_string()).unwrap();
+        }
+        if let Some(trace_id) = &body.trace_id {
+            enc.str("trace_id").unwrap();
+            enc.str(&trace_id.as_uuid().to_string()).unwrap();
         }
 
         enc.str("delta").unwrap();
@@ -2381,12 +2411,19 @@ mod tests {
         if body.client_request_id.is_some() {
             len += 1;
         }
+        if body.trace_id.is_some() {
+            len += 1;
+        }
 
         enc.map(len as u64).unwrap();
 
         if let Some(client_request_id) = &body.client_request_id {
             enc.str("client_request_id").unwrap();
             enc.str(&client_request_id.as_uuid().to_string()).unwrap();
+        }
+        if let Some(trace_id) = &body.trace_id {
+            enc.str("trace_id").unwrap();
+            enc.str(&trace_id.as_uuid().to_string()).unwrap();
         }
 
         enc.str("delta").unwrap();

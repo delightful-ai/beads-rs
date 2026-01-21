@@ -65,6 +65,7 @@ fn event_frame_with_txn(
         event_time_ms,
         txn_id,
         client_request_id: None,
+        trace_id: None,
         kind: EventKindV1::TxnV1(TxnV1 {
             delta: TxnDeltaV1::new(),
             hlc_max: HlcMax {

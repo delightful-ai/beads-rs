@@ -457,6 +457,7 @@ impl IssueSummary {
 // =============================================================================
 
 pub type AdminDoctorOutput = crate::api::AdminDoctorOutput;
+pub type AdminCheckpointOutput = crate::api::AdminCheckpointOutput;
 pub type AdminFingerprintOutput = crate::api::AdminFingerprintOutput;
 pub type AdminFlushOutput = crate::api::AdminFlushOutput;
 pub type AdminMaintenanceModeOutput = crate::api::AdminMaintenanceModeOutput;

@@ -70,23 +70,35 @@ fn churn_node(node: &crate::fixtures::repl_rig::Node, total: usize, workers: usi
 }
 
 fn wait_for_checkpoint(rig: &ReplRig, idx: usize, namespace: &NamespaceId, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let status = rig.node(idx).admin_status();
-        let ok = status
-            .checkpoints
-            .iter()
-            .find(|group| group.namespaces.contains(namespace))
-            .is_some_and(|group| {
-                group.last_checkpoint_wall_ms.is_some() && !group.in_flight && !group.dirty
-            });
-        if ok {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("checkpoint for {namespace:?} did not complete in time: {status:?}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    let node = rig.node(idx);
+    let runtime_dir = node.runtime_dir().to_path_buf();
+    let repo_dir = node.repo_dir().to_path_buf();
+    let namespace_label = namespace.as_str().to_string();
+    let request_namespace = namespace_label.clone();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let client = IpcClient::for_runtime_dir(&runtime_dir).with_autostart(false);
+        let request = Request::AdminCheckpointWait {
+            repo: repo_dir,
+            namespace: Some(request_namespace),
+        };
+        let response = client.send_request_no_autostart(&request);
+        let _ = tx.send(response);
+    });
+
+    let response = match rx.recv_timeout(timeout) {
+        Ok(response) => response,
+        Err(_) => panic!("checkpoint for {namespace_label} did not complete in time",),
+    };
+
+    match response {
+        Ok(Response::Ok {
+            ok: ResponsePayload::Query(QueryResult::AdminCheckpoint(_)),
+        }) => {}
+        Ok(Response::Err { err }) => panic!("checkpoint wait error: {err:?}"),
+        Ok(other) => panic!("unexpected checkpoint wait response: {other:?}"),
+        Err(err) => panic!("checkpoint wait ipc error: {err:?}"),
     }
 }
 
@@ -258,6 +270,7 @@ fn repl_checkpoint_bootstrap_under_churn() {
     let mut options = ReplRigOptions::default();
     options.seed = 73;
     options.wal_segment_max_bytes = Some(64 * 1024);
+    options.checkpoints_enabled = true;
 
     let rig = ReplRig::new(2, options);
 

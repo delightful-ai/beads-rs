@@ -16,6 +16,13 @@ pub enum Direction {
     BtoA,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NextFrameAction {
+    Deliver,
+    Drop,
+    Reorder,
+}
+
 #[derive(Clone, Debug)]
 struct ScheduledFrame {
     deliver_at_ms: u64,
@@ -25,26 +32,23 @@ struct ScheduledFrame {
 #[derive(Clone, Debug)]
 struct SimulatedLink {
     queue: VecDeque<ScheduledFrame>,
-    drop_next: bool,
+    next_action: NextFrameAction,
     delay_next_ms: u64,
-    reorder_next: bool,
 }
 
 impl SimulatedLink {
     fn new() -> Self {
         Self {
             queue: VecDeque::new(),
-            drop_next: false,
+            next_action: NextFrameAction::Deliver,
             delay_next_ms: 0,
-            reorder_next: false,
         }
     }
 
     fn enqueue(&mut self, now_ms: u64, frame: Vec<u8>) {
-        if self.drop_next {
-            self.drop_next = false;
+        if matches!(self.next_action, NextFrameAction::Drop) {
+            self.next_action = NextFrameAction::Deliver;
             self.delay_next_ms = 0;
-            self.reorder_next = false;
             return;
         }
 
@@ -55,12 +59,12 @@ impl SimulatedLink {
             frame,
         };
 
-        if self.reorder_next && !self.queue.is_empty() {
+        if matches!(self.next_action, NextFrameAction::Reorder) && !self.queue.is_empty() {
             self.queue.insert(0, entry);
         } else {
             self.queue.push_back(entry);
         }
-        self.reorder_next = false;
+        self.next_action = NextFrameAction::Deliver;
     }
 
     fn drain_ready(&mut self, now_ms: u64, deliver: &Sender<Vec<u8>>) {
@@ -113,8 +117,8 @@ impl NetworkSimulator {
 
     fn drop_next(&mut self, direction: Direction) {
         match direction {
-            Direction::AtoB => self.a_to_b.drop_next = true,
-            Direction::BtoA => self.b_to_a.drop_next = true,
+            Direction::AtoB => self.a_to_b.next_action = NextFrameAction::Drop,
+            Direction::BtoA => self.b_to_a.next_action = NextFrameAction::Drop,
         }
     }
 
@@ -127,8 +131,8 @@ impl NetworkSimulator {
 
     fn reorder_next(&mut self, direction: Direction) {
         match direction {
-            Direction::AtoB => self.a_to_b.reorder_next = true,
-            Direction::BtoA => self.b_to_a.reorder_next = true,
+            Direction::AtoB => self.a_to_b.next_action = NextFrameAction::Reorder,
+            Direction::BtoA => self.b_to_a.next_action = NextFrameAction::Reorder,
         }
     }
 }

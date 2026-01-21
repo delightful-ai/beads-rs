@@ -8,11 +8,12 @@
 //! - Concurrent access during restart
 
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command as StdCommand;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
+use crate::fixtures::git::{init_bare_repo, init_repo_with_origin};
+use crate::fixtures::store_lock::unlock_store;
 use assert_cmd::Command;
 use tempfile::TempDir;
 
@@ -33,43 +34,8 @@ impl DaemonFixture {
         let repo_dir = TempDir::new().expect("create repo dir");
         let remote_dir = TempDir::new().expect("create remote dir");
 
-        // Create bare remote
-        StdCommand::new("git")
-            .args(["init", "--bare"])
-            .current_dir(remote_dir.path())
-            .output()
-            .expect("git init --bare");
-
-        // Initialize git repo
-        StdCommand::new("git")
-            .args(["init"])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git init");
-
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git config email");
-
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git config name");
-
-        // Add remote origin
-        StdCommand::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                remote_dir.path().to_str().unwrap(),
-            ])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git remote add origin");
+        init_bare_repo(remote_dir.path()).expect("git init --bare");
+        init_repo_with_origin(repo_dir.path(), remote_dir.path()).expect("git init with origin");
 
         Self {
             runtime_dir,
@@ -111,6 +77,10 @@ impl DaemonFixture {
         cmd.env("BD_DATA_DIR", &data_dir);
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd.env("BD_TESTING", "1");
+        cmd.env("BD_TEST_FAST", "1");
+        cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
+        cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
+        cmd.env("BD_WAL_SYNC_MODE", "none");
         cmd
     }
 
@@ -132,11 +102,8 @@ impl DaemonFixture {
     }
 
     fn unlock_store(&self) {
-        let store_id = self.store_id().to_string();
-        self.bd()
-            .args(["store", "unlock", "--store-id", store_id.as_str()])
-            .assert()
-            .success();
+        let store_id = self.store_id();
+        unlock_store(&self.data_dir(), store_id).expect("unlock store");
     }
 
     fn kill_daemon_forcefully(&self) {
@@ -321,6 +288,10 @@ fn test_concurrent_restart_safety() {
                 cmd.env("BD_DATA_DIR", &data_path);
                 cmd.env("BD_NO_AUTO_UPGRADE", "1");
                 cmd.env("BD_TESTING", "1");
+                cmd.env("BD_TEST_FAST", "1");
+                cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
+                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
+                cmd.env("BD_WAL_SYNC_MODE", "none");
                 cmd.args(["status"]).assert().success();
             })
         })
@@ -365,6 +336,10 @@ fn test_thundering_herd_single_daemon() {
                 cmd.env("BD_DATA_DIR", &data_path);
                 cmd.env("BD_NO_AUTO_UPGRADE", "1");
                 cmd.env("BD_TESTING", "1");
+                cmd.env("BD_TEST_FAST", "1");
+                cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
+                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
+                cmd.env("BD_WAL_SYNC_MODE", "none");
                 cmd.arg("init").assert().success();
             })
         })

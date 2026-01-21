@@ -16,6 +16,27 @@ use crate::paths;
 
 const LOG_FILE_PREFIX: &str = "beads.log";
 
+pub mod schema {
+    pub const ACTOR_ID: &str = "actor_id";
+    pub const CHECKPOINT_GROUP: &str = "checkpoint_group";
+    pub const CLIENT_REQUEST_ID: &str = "client_request_id";
+    pub const DIRECTION: &str = "direction";
+    pub const NAMESPACE: &str = "namespace";
+    pub const ORIGIN_REPLICA_ID: &str = "origin_replica_id";
+    pub const ORIGIN_SEQ: &str = "origin_seq";
+    pub const PEER_ADDR: &str = "peer_addr";
+    pub const PEER_REPLICA_ID: &str = "peer_replica_id";
+    pub const READ_CONSISTENCY: &str = "read_consistency";
+    pub const REPLICA_ID: &str = "replica_id";
+    pub const REMOTE: &str = "remote";
+    pub const REPO: &str = "repo";
+    pub const REQUEST_TYPE: &str = "request_type";
+    pub const STORE_EPOCH: &str = "store_epoch";
+    pub const STORE_ID: &str = "store_id";
+    pub const TRACE_ID: &str = "trace_id";
+    pub const TXN_ID: &str = "txn_id";
+}
+
 #[derive(Clone, Debug)]
 pub struct SpanContext {
     pub name: &'static str,
@@ -82,26 +103,34 @@ pub fn is_test_env() -> bool {
 }
 
 pub fn apply_daemon_logging_defaults(logging: &mut LoggingConfig) {
-    apply_daemon_logging_defaults_inner(
-        logging,
-        is_test_env(),
-        std::env::var_os("BD_LOG_FILE").is_some(),
-    );
+    apply_daemon_logging_defaults_inner(logging, logging_defaults_mode());
 }
 
-fn apply_daemon_logging_defaults_inner(
-    logging: &mut LoggingConfig,
-    is_test_env: bool,
-    has_log_file_env: bool,
-) {
-    if is_test_env {
-        return;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoggingDefaultsMode {
+    TestEnv,
+    LogFileEnv,
+    Default,
+}
+
+fn logging_defaults_mode() -> LoggingDefaultsMode {
+    if is_test_env() {
+        LoggingDefaultsMode::TestEnv
+    } else if std::env::var_os("BD_LOG_FILE").is_some() {
+        LoggingDefaultsMode::LogFileEnv
+    } else {
+        LoggingDefaultsMode::Default
     }
-    if has_log_file_env {
-        return;
-    }
-    if !logging.file.enabled {
-        logging.file.enabled = true;
+}
+
+fn apply_daemon_logging_defaults_inner(logging: &mut LoggingConfig, mode: LoggingDefaultsMode) {
+    match mode {
+        LoggingDefaultsMode::TestEnv | LoggingDefaultsMode::LogFileEnv => {}
+        LoggingDefaultsMode::Default => {
+            if !logging.file.enabled {
+                logging.file.enabled = true;
+            }
+        }
     }
 }
 
@@ -677,10 +706,32 @@ mod tests {
     fn daemon_logging_defaults_skip_in_tests() {
         let mut logging = LoggingConfig::default();
         logging.file.enabled = false;
-        apply_daemon_logging_defaults_inner(&mut logging, true, false);
+        apply_daemon_logging_defaults_inner(&mut logging, LoggingDefaultsMode::TestEnv);
         assert!(
             !logging.file.enabled,
             "daemon logging defaults should skip in tests"
+        );
+    }
+
+    #[test]
+    fn daemon_logging_defaults_skip_with_log_file_env() {
+        let mut logging = LoggingConfig::default();
+        logging.file.enabled = false;
+        apply_daemon_logging_defaults_inner(&mut logging, LoggingDefaultsMode::LogFileEnv);
+        assert!(
+            !logging.file.enabled,
+            "daemon logging defaults should skip when BD_LOG_FILE is set"
+        );
+    }
+
+    #[test]
+    fn daemon_logging_defaults_apply_in_default_mode() {
+        let mut logging = LoggingConfig::default();
+        logging.file.enabled = false;
+        apply_daemon_logging_defaults_inner(&mut logging, LoggingDefaultsMode::Default);
+        assert!(
+            logging.file.enabled,
+            "daemon logging defaults should enable file logging in default mode"
         );
     }
 
