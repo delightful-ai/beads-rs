@@ -579,7 +579,10 @@ impl Node {
         }
     }
 
-    fn admin_status_with_read(&self, read: ReadConsistency) -> Result<AdminStatusOutput, ErrorPayload> {
+    fn admin_status_with_read(
+        &self,
+        read: ReadConsistency,
+    ) -> Result<AdminStatusOutput, ErrorPayload> {
         let request = Request::AdminStatus {
             repo: self.repo_dir.clone(),
             read,
@@ -620,16 +623,10 @@ impl Node {
             let conn = client.connect()?;
             *guard = Some(conn);
         }
-        guard
-            .as_mut()
-            .expect("admin conn")
-            .send_request(request)
+        guard.as_mut().expect("admin conn").send_request(request)
     }
 
-    fn send_request(
-        &self,
-        request: &Request,
-    ) -> Result<Response, beads_rs::daemon::ipc::IpcError> {
+    fn send_request(&self, request: &Request) -> Result<Response, beads_rs::daemon::ipc::IpcError> {
         let mut guard = self.ipc_conn.lock().expect("ipc conn lock");
         if guard.is_none() {
             let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
