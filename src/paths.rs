@@ -229,3 +229,47 @@ pub(crate) fn config_dir() -> PathBuf {
         })
         .join("beads-rs")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static PATHS_CONFIG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_paths_config() -> std::sync::MutexGuard<'static, ()> {
+        PATHS_CONFIG_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("paths config lock poisoned")
+    }
+
+    #[test]
+    fn init_from_config_updates_overrides() {
+        let _guard = lock_paths_config();
+
+        let initial = PathsConfig {
+            data_dir: Some(PathBuf::from("/tmp/beads-paths-one")),
+            runtime_dir: Some(PathBuf::from("/tmp/beads-runtime-one")),
+        };
+        init_from_config(&initial);
+        assert_eq!(
+            config_data_dir_override(),
+            Some(PathBuf::from("/tmp/beads-paths-one"))
+        );
+        assert_eq!(
+            config_runtime_dir_override(),
+            Some(PathBuf::from("/tmp/beads-runtime-one"))
+        );
+
+        let update = PathsConfig {
+            data_dir: Some(PathBuf::from("/tmp/beads-paths-two")),
+            runtime_dir: None,
+        };
+        init_from_config(&update);
+        assert_eq!(
+            config_data_dir_override(),
+            Some(PathBuf::from("/tmp/beads-paths-two"))
+        );
+        assert_eq!(config_runtime_dir_override(), None);
+    }
+}

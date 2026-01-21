@@ -85,13 +85,21 @@ fn per_user_tmp_dir() -> PathBuf {
 }
 
 fn socket_dir_candidates() -> Vec<PathBuf> {
+    socket_dir_candidates_with(|key| std::env::var(key).ok())
+}
+
+fn socket_dir_candidates_with<F>(mut lookup: F) -> Vec<PathBuf>
+where
+    F: FnMut(&str) -> Option<String>,
+{
     let mut dirs = Vec::new();
 
     // Env override (works even without config init)
-    if let Ok(dir) = std::env::var("BD_RUNTIME_DIR")
-        && !dir.trim().is_empty()
-    {
-        dirs.push(PathBuf::from(dir).join("beads"));
+    if let Some(dir) = lookup("BD_RUNTIME_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            dirs.push(PathBuf::from(trimmed).join("beads"));
+        }
     }
 
     // Config-based override (from beads.toml)
@@ -102,15 +110,17 @@ fn socket_dir_candidates() -> Vec<PathBuf> {
         }
     }
 
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR")
-        && !dir.trim().is_empty()
-    {
-        dirs.push(PathBuf::from(dir).join("beads"));
+    if let Some(dir) = lookup("XDG_RUNTIME_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            dirs.push(PathBuf::from(trimmed).join("beads"));
+        }
     }
-    if let Ok(home) = std::env::var("HOME")
-        && !home.trim().is_empty()
-    {
-        dirs.push(PathBuf::from(home).join(".beads"));
+    if let Some(home) = lookup("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            dirs.push(PathBuf::from(trimmed).join(".beads"));
+        }
     }
     dirs.push(per_user_tmp_dir());
     dirs
@@ -879,5 +889,20 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn socket_dir_candidates_prefers_runtime_env() {
+        let temp = TempDir::new().expect("temp dir");
+        let dirs = socket_dir_candidates_with(|key| match key {
+            "BD_RUNTIME_DIR" => Some(
+                temp.path()
+                    .to_str()
+                    .expect("runtime dir is valid utf-8")
+                    .to_string(),
+            ),
+            _ => None,
+        });
+        assert_eq!(dirs.first(), Some(&temp.path().join("beads")));
     }
 }
