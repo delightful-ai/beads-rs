@@ -1607,6 +1607,32 @@ mod tests {
         }
     }
 
+    fn encode_body_bytes(envelope: &ReplEnvelope) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        encode_message_body(&mut enc, envelope).unwrap();
+        buf
+    }
+
+    fn map_keys_in_order(bytes: &[u8]) -> Vec<String> {
+        let limits = Limits::default();
+        let mut dec = Decoder::new(bytes);
+        let map_len = decode_map_len(&mut dec, &limits, 0).unwrap();
+        let mut keys = Vec::with_capacity(map_len);
+        for _ in 0..map_len {
+            let key = decode_text(&mut dec, &limits).unwrap();
+            keys.push(key.to_string());
+            dec.skip().unwrap();
+        }
+        keys
+    }
+
+    fn assert_map_keys(bytes: &[u8], expected: &[&str]) {
+        let keys = map_keys_in_order(bytes);
+        let expected: Vec<String> = expected.iter().map(|key| (*key).to_string()).collect();
+        assert_eq!(keys, expected);
+    }
+
     #[test]
     fn repl_message_roundtrip_hello() {
         let envelope = ReplEnvelope {
@@ -1616,6 +1642,116 @@ mod tests {
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn repl_envelope_key_order_is_stable() {
+        let envelope = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Hello(sample_hello()),
+        };
+        let bytes = encode_envelope(&envelope).unwrap();
+        assert_map_keys(&bytes, &["v", "type", "body"]);
+    }
+
+    #[test]
+    fn repl_message_body_key_order_is_stable() {
+        let hello = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Hello(sample_hello()),
+        };
+        assert_map_keys(
+            &encode_body_bytes(&hello),
+            &[
+                "protocol_version",
+                "min_protocol_version",
+                "store_id",
+                "store_epoch",
+                "sender_replica_id",
+                "hello_nonce",
+                "max_frame_bytes",
+                "requested_namespaces",
+                "offered_namespaces",
+                "seen_durable",
+                "capabilities",
+            ],
+        );
+
+        let welcome = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Welcome(sample_welcome()),
+        };
+        assert_map_keys(
+            &encode_body_bytes(&welcome),
+            &[
+                "protocol_version",
+                "store_id",
+                "store_epoch",
+                "receiver_replica_id",
+                "welcome_nonce",
+                "accepted_namespaces",
+                "receiver_seen_durable",
+                "live_stream_enabled",
+                "max_frame_bytes",
+            ],
+        );
+
+        let frame1 = sample_event_frame(1, None);
+        let frame2 = sample_event_frame(2, Some(frame1.sha256));
+        let events = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Events(Events {
+                events: vec![frame1, frame2],
+            }),
+        };
+        assert_map_keys(&encode_body_bytes(&events), &["events"]);
+
+        let ack = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Ack(Ack {
+                durable: WatermarkMap::new(),
+                durable_heads: None,
+                applied: None,
+                applied_heads: None,
+            }),
+        };
+        assert_map_keys(&encode_body_bytes(&ack), &["durable"]);
+
+        let want = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Want(Want {
+                want: WatermarkMap::new(),
+            }),
+        };
+        assert_map_keys(&encode_body_bytes(&want), &["want"]);
+
+        let ping = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Ping(Ping { nonce: 7 }),
+        };
+        assert_map_keys(&encode_body_bytes(&ping), &["nonce"]);
+
+        let pong = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Pong(Pong { nonce: 9 }),
+        };
+        assert_map_keys(&encode_body_bytes(&pong), &["nonce"]);
+
+        let payload = ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), "busy", true)
+            .with_details(crate::core::error::details::OverloadedDetails {
+                subsystem: None,
+                retry_after_ms: Some(10),
+                queue_bytes: Some(5),
+                queue_events: Some(1),
+            });
+        let error = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message: ReplMessage::Error(payload),
+        };
+        assert_map_keys(
+            &encode_body_bytes(&error),
+            &["code", "message", "retryable", "details"],
+        );
     }
 
     #[test]

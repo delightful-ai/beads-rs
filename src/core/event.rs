@@ -2545,6 +2545,24 @@ mod tests {
     }
 
     #[test]
+    fn canonical_event_body_keys_are_sorted() {
+        let body = sample_body();
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let limits = Limits::default();
+        let mut dec = Decoder::new(encoded.as_ref());
+        let map_len = decode_map_len(&mut dec, &limits, 0).unwrap();
+        let mut keys = Vec::with_capacity(map_len);
+        for _ in 0..map_len {
+            let key = decode_text(&mut dec, &limits).unwrap();
+            keys.push(key.to_string());
+            skip_value(&mut dec, &limits, 1).unwrap();
+        }
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted);
+    }
+
+    #[test]
     fn decode_accepts_unknown_event_body_fields() {
         let body = sample_body();
         let encoded = encode_body_with_unknown_fields(&body);
