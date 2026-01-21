@@ -86,6 +86,7 @@ impl TestRepo {
         cmd.env("BD_DATA_DIR", &self.data_dir);
         cmd.env("BD_NO_AUTO_UPGRADE", "1");
         cmd.env("BD_TESTING", "1");
+        cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
         cmd
     }
 }

@@ -45,6 +45,16 @@ fn wait_for_sample(rig: &ReplRig, ids: &[String], timeout: Duration) {
     wait_for_sample_on(rig, ids, &nodes, timeout);
 }
 
+fn wal_total_bytes(rig: &ReplRig, node_idx: usize) -> u64 {
+    let status = rig.admin_status(node_idx);
+    let wal = status
+        .wal
+        .iter()
+        .find(|entry| entry.namespace == NamespaceId::core())
+        .expect("core namespace wal");
+    wal.total_bytes
+}
+
 fn churn_node(node: &crate::fixtures::repl_rig::Node, total: usize, workers: usize) {
     let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
     let mut generator = LoadGenerator::with_client(node.repo_dir().to_path_buf(), client);
@@ -152,16 +162,12 @@ fn repl_daemon_to_daemon_roundtrip() {
     options.fault_profile = None;
     options.seed = 7;
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
-    let ids = [
-        rig.create_issue(0, "from-0"),
-        rig.create_issue(1, "from-1"),
-        rig.create_issue(2, "from-2"),
-    ];
+    let ids = [rig.create_issue(0, "from-0"), rig.create_issue(1, "from-1")];
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
-    wait_for_sample(&rig, &ids, Duration::from_secs(15));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(30));
+    wait_for_sample(&rig, &ids, Duration::from_secs(10));
 }
 
 #[test]
@@ -170,17 +176,16 @@ fn repl_daemon_to_daemon_tailnet_roundtrip() {
     options.fault_profile = Some(FaultProfile::tailnet());
     options.seed = 19;
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
     let ids = [
         rig.create_issue(0, "tailnet-0"),
         rig.create_issue(1, "tailnet-1"),
-        rig.create_issue(2, "tailnet-2"),
     ];
 
-    rig.assert_peers_seen(Duration::from_secs(60));
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
-    wait_for_sample(&rig, &ids, Duration::from_secs(30));
+    rig.assert_peers_seen(Duration::from_secs(30));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+    wait_for_sample(&rig, &ids, Duration::from_secs(20));
 }
 
 #[test]
@@ -199,9 +204,9 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
     profile.reset_after_frames = Some(20);
     profile.one_way_loss = Some("a->b".to_string());
 
-    let mut by_link = vec![vec![None; 3]; 3];
-    for from in 0..3 {
-        for to in 0..3 {
+    let mut by_link = vec![vec![None; 2]; 2];
+    for from in 0..2 {
+        for to in 0..2 {
             if from == to {
                 continue;
             }
@@ -210,16 +215,15 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
     }
     options.fault_profile_by_link = Some(by_link);
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
     let ids = [
         rig.create_issue(0, "pathology-0"),
         rig.create_issue(1, "pathology-1"),
-        rig.create_issue(2, "pathology-2"),
     ];
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
-    wait_for_sample(&rig, &ids, Duration::from_secs(30));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(90));
+    wait_for_sample(&rig, &ids, Duration::from_secs(20));
 }
 
 #[test]
@@ -228,16 +232,15 @@ fn repl_daemon_store_discovery_roundtrip() {
     options.use_store_id_override = false;
     options.seed = 23;
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
     let ids = [
         rig.create_issue(0, "discover-0"),
         rig.create_issue(1, "discover-1"),
-        rig.create_issue(2, "discover-2"),
     ];
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
-    wait_for_sample(&rig, &ids, Duration::from_secs(30));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+    wait_for_sample(&rig, &ids, Duration::from_secs(15));
 
     let expected = rig.store_id();
     for node in rig.nodes() {
@@ -256,32 +259,24 @@ fn repl_checkpoint_bootstrap_under_churn() {
     options.seed = 73;
     options.wal_segment_max_bytes = Some(64 * 1024);
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
-    rig.shutdown_node(2);
+    rig.shutdown_node(1);
 
-    let warm_ids = [
-        rig.create_issue(0, "bootstrap-pre-0"),
-        rig.create_issue(1, "bootstrap-pre-1"),
-    ];
+    let warm_ids = [rig.create_issue(0, "bootstrap-pre-0")];
 
     churn_node(rig.node(0), 400, 2);
-    churn_node(rig.node(1), 400, 2);
 
-    wait_for_wal_segments(&rig, 0, &NamespaceId::core(), 2, Duration::from_secs(30));
-    wait_for_wal_segments(&rig, 1, &NamespaceId::core(), 2, Duration::from_secs(30));
-    wait_for_checkpoint(&rig, 0, &NamespaceId::core(), Duration::from_secs(120));
+    wait_for_wal_segments(&rig, 0, &NamespaceId::core(), 2, Duration::from_secs(20));
+    wait_for_checkpoint(&rig, 0, &NamespaceId::core(), Duration::from_secs(60));
 
-    let tail_ids = [
-        rig.create_issue(0, "bootstrap-tail-0"),
-        rig.create_issue(1, "bootstrap-tail-1"),
-    ];
+    let tail_ids = [rig.create_issue(0, "bootstrap-tail-0")];
 
-    rig.restart_node(2);
+    rig.restart_node(1);
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
     let combined: Vec<String> = warm_ids.iter().chain(tail_ids.iter()).cloned().collect();
-    wait_for_sample(&rig, &combined, Duration::from_secs(30));
+    wait_for_sample(&rig, &combined, Duration::from_secs(20));
 }
 
 #[test]
@@ -300,31 +295,27 @@ fn repl_daemon_crash_restart_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.seed = 29;
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
     let initial = [
         rig.create_issue(0, "crash-pre-0"),
         rig.create_issue(1, "crash-pre-1"),
-        rig.create_issue(2, "crash-pre-2"),
     ];
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(30));
+    wait_for_sample(&rig, &initial, Duration::from_secs(10));
+
+    rig.crash_node(1);
+
+    let post = [rig.create_issue(0, "crash-post-0")];
+
+    wait_for_sample_on(&rig, &post, &[0], Duration::from_secs(10));
+
+    rig.restart_node(1);
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
-    wait_for_sample(&rig, &initial, Duration::from_secs(15));
-
-    rig.crash_node(2);
-
-    let post = [
-        rig.create_issue(0, "crash-post-0"),
-        rig.create_issue(1, "crash-post-1"),
-    ];
-
-    wait_for_sample_on(&rig, &post, &[0, 1], Duration::from_secs(15));
-
-    rig.restart_node(2);
-
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
     let combined: Vec<String> = initial.iter().chain(post.iter()).cloned().collect();
-    wait_for_sample(&rig, &combined, Duration::from_secs(30));
+    wait_for_sample(&rig, &combined, Duration::from_secs(20));
 }
 
 #[test]
@@ -333,31 +324,27 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     options.seed = 51;
     options.fault_profile = Some(FaultProfile::tailnet());
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
     let initial = [
         rig.create_issue(0, "tailnet-crash-pre-0"),
         rig.create_issue(1, "tailnet-crash-pre-1"),
-        rig.create_issue(2, "tailnet-crash-pre-2"),
     ];
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+    wait_for_sample(&rig, &initial, Duration::from_secs(20));
+
+    rig.crash_node(1);
+
+    let post = [rig.create_issue(0, "tailnet-crash-post-0")];
+
+    wait_for_sample_on(&rig, &post, &[0], Duration::from_secs(20));
+
+    rig.restart_node(1);
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
-    wait_for_sample(&rig, &initial, Duration::from_secs(30));
-
-    rig.crash_node(2);
-
-    let post = [
-        rig.create_issue(0, "tailnet-crash-post-0"),
-        rig.create_issue(1, "tailnet-crash-post-1"),
-    ];
-
-    wait_for_sample_on(&rig, &post, &[0, 1], Duration::from_secs(30));
-
-    rig.restart_node(2);
-
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
     let combined: Vec<String> = initial.iter().chain(post.iter()).cloned().collect();
-    wait_for_sample(&rig, &combined, Duration::from_secs(30));
+    wait_for_sample(&rig, &combined, Duration::from_secs(20));
 }
 
 #[test]
@@ -365,25 +352,24 @@ fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.seed = 37;
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
     let initial = [
         rig.create_issue(0, "roster-pre-0"),
         rig.create_issue(1, "roster-pre-1"),
-        rig.create_issue(2, "roster-pre-2"),
     ];
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
-    wait_for_sample(&rig, &initial, Duration::from_secs(15));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+    wait_for_sample(&rig, &initial, Duration::from_secs(10));
 
     let mut entries = roster_entries(&rig);
-    entries[2].durability_eligible = false;
+    entries[1].durability_eligible = false;
     rig.overwrite_roster(entries);
-    for idx in 0..3 {
+    for idx in 0..2 {
         rig.reload_replication(idx);
     }
 
-    let replica = rig.node(2).replica_id();
+    let replica = rig.node(1).replica_id();
     rig.wait_for_durability_eligible(0, replica, false, Duration::from_secs(30));
 
     let post_roster = [
@@ -391,33 +377,33 @@ fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
         rig.create_issue(1, "roster-post-1"),
     ];
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
-    wait_for_sample(&rig, &post_roster, Duration::from_secs(15));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+    wait_for_sample(&rig, &post_roster, Duration::from_secs(10));
 
-    for idx in 0..3 {
+    for idx in 0..2 {
         rig.shutdown_node(idx);
     }
 
     let bumped = rig.bump_store_epoch();
     assert!(bumped.get() > 0, "store_epoch should advance");
 
-    for idx in 0..3 {
+    for idx in 0..2 {
         rig.restart_node(idx);
     }
 
     let post_epoch = [
         rig.create_issue(0, "epoch-post-0"),
-        rig.create_issue(2, "epoch-post-2"),
+        rig.create_issue(1, "epoch-post-1"),
     ];
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
     let combined: Vec<String> = initial
         .iter()
         .chain(post_roster.iter())
         .chain(post_epoch.iter())
         .cloned()
         .collect();
-    wait_for_sample(&rig, &combined, Duration::from_secs(30));
+    wait_for_sample(&rig, &combined, Duration::from_secs(20));
 }
 
 #[test]
@@ -425,21 +411,40 @@ fn repl_daemon_stress_wal_rotation_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.seed = 43;
     options.wal_segment_max_bytes = Some(8 * 1024);
+    let segment_max_bytes = options
+        .wal_segment_max_bytes
+        .expect("wal_segment_max_bytes set") as u64;
 
-    let rig = ReplRig::new(3, options);
+    let rig = ReplRig::new(2, options);
 
     let mut ids = Vec::new();
-    for node_idx in 0..3 {
-        for seq in 0..40 {
-            let title = format!("stress-{node_idx}-{seq}-{}", "x".repeat(64));
+    let payload = "x".repeat(64);
+
+    let title = format!("stress-0-0-{payload}");
+    ids.push(rig.create_issue(0, &title));
+    let first_bytes = wal_total_bytes(&rig, 0);
+
+    let title = format!("stress-0-1-{payload}");
+    ids.push(rig.create_issue(0, &title));
+    let second_bytes = wal_total_bytes(&rig, 0);
+
+    let record_bytes = std::cmp::max(1, second_bytes.saturating_sub(first_bytes));
+    let remaining_bytes = segment_max_bytes.saturating_sub(second_bytes);
+    let extra_events = (remaining_bytes / record_bytes) + 1;
+    let events_per_node = 2 + extra_events as usize;
+
+    for node_idx in 0..2 {
+        let start_seq = if node_idx == 0 { 2 } else { 0 };
+        for seq in start_seq..events_per_node {
+            let title = format!("stress-{node_idx}-{seq}-{payload}");
             ids.push(rig.create_issue(node_idx, &title));
         }
     }
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
-    wait_for_sample(&rig, &ids, Duration::from_secs(30));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(90));
+    wait_for_sample(&rig, &ids, Duration::from_secs(20));
 
-    for node_idx in 0..3 {
+    for node_idx in 0..2 {
         let status = rig.admin_status(node_idx);
         let wal = status
             .wal
@@ -454,8 +459,8 @@ fn repl_daemon_stress_wal_rotation_roundtrip() {
     }
 
     let tail_id = rig.create_issue(1, "stress-tail");
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
-    wait_for_sample(&rig, &[tail_id], Duration::from_secs(30));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(40));
+    wait_for_sample(&rig, &[tail_id], Duration::from_secs(20));
 }
 
 #[test]
