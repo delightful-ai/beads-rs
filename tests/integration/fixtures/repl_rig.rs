@@ -1,11 +1,12 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
@@ -16,11 +17,14 @@ use uuid::Uuid;
 use beads_rs::StoreId;
 use beads_rs::api::{AdminStatusOutput, QueryResult};
 use beads_rs::config::{Config, ReplicationPeerConfig};
+use beads_rs::core::error::CliErrorCode;
 use beads_rs::core::{
-    NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch, StoreMeta,
-    Watermarks,
+    Applied, BeadType, ErrorPayload, NamespaceId, Priority, ProtocolErrorCode, ReplicaEntry,
+    ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch, StoreMeta, Watermarks,
 };
-use beads_rs::daemon::ipc::{IpcClient, ReadConsistency, Request, Response, ResponsePayload};
+use beads_rs::daemon::ipc::{
+    IpcClient, IpcConnection, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+};
 use beads_rs::daemon::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
@@ -66,6 +70,7 @@ pub struct ReplRig {
     _root: Option<TempDir>,
     store_id: StoreId,
     nodes: Vec<Node>,
+    issue_min_seen: Arc<Mutex<BTreeMap<String, Watermarks<Applied>>>>,
     _proxies: Vec<TailnetProxy>,
 }
 
@@ -92,6 +97,7 @@ impl ReplRig {
             None
         };
         let mut resolved_store_id = store_id_override;
+        let issue_min_seen = Arc::new(Mutex::new(BTreeMap::new()));
         let mut nodes = Vec::with_capacity(node_count);
         for idx in 0..node_count {
             let seed = build_node(&root_path, idx, &remote_dir);
@@ -104,7 +110,12 @@ impl ReplRig {
             } else {
                 resolved_store_id = Some(store_id);
             }
-            nodes.push(Node::new(seed, store_id_override, replica_id));
+            nodes.push(Node::new(
+                seed,
+                store_id_override,
+                replica_id,
+                issue_min_seen.clone(),
+            ));
         }
         let store_id = resolved_store_id.expect("store id resolved");
 
@@ -151,6 +162,7 @@ impl ReplRig {
             _root: root_guard,
             store_id,
             nodes,
+            issue_min_seen,
             _proxies: proxies,
         }
     }
@@ -181,15 +193,18 @@ impl ReplRig {
 
     pub fn crash_node(&self, idx: usize) {
         crash_daemon(&self.nodes[idx].runtime_dir);
+        self.nodes[idx].reset_ipc_connections();
     }
 
     pub fn restart_node(&self, idx: usize) {
         self.nodes[idx].unlock_store(self.store_id);
+        self.nodes[idx].reset_ipc_connections();
         self.nodes[idx].start_daemon();
     }
 
     pub fn shutdown_node(&self, idx: usize) {
         shutdown_daemon(&self.nodes[idx].runtime_dir);
+        self.nodes[idx].reset_ipc_connections();
     }
 
     pub fn reload_replication(&self, idx: usize) {
@@ -247,32 +262,84 @@ impl ReplRig {
     }
 
     pub fn assert_converged(&self, namespaces: &[NamespaceId], timeout: Duration) {
-        let ok = poll_until(timeout, || self.converged(namespaces));
-        if ok {
+        let deadline = Instant::now() + timeout;
+        let mut statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
+        {
+            Ok(statuses) => statuses,
+            Err(err) => panic!("admin status error: {err:?}"),
+        };
+        loop {
+            if self.converged_with_statuses(&statuses, namespaces) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline) {
+                Ok(statuses) => statuses,
+                Err(err) => panic!("admin status error: {err:?}"),
+            };
+        }
+        if self.converged_with_statuses(&statuses, namespaces) {
             return;
         }
-        let statuses: Vec<AdminStatusOutput> =
-            self.nodes.iter().map(|node| node.admin_status()).collect();
         panic!("replication did not converge: {statuses:?}");
     }
 
     pub fn assert_peers_seen(&self, timeout: Duration) {
-        let ok = poll_until(timeout, || self.peers_seen());
-        if ok {
+        let deadline = Instant::now() + timeout;
+        let mut statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
+        {
+            Ok(statuses) => statuses,
+            Err(err) => panic!("admin status error: {err:?}"),
+        };
+        loop {
+            if self.peers_seen_with_statuses(&statuses) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline) {
+                Ok(statuses) => statuses,
+                Err(err) => panic!("admin status error: {err:?}"),
+            };
+        }
+        if self.peers_seen_with_statuses(&statuses) {
             return;
         }
-        let statuses: Vec<AdminStatusOutput> =
-            self.nodes.iter().map(|node| node.admin_status()).collect();
         panic!("replication peers not observed: {statuses:?}");
     }
 
-    fn converged(&self, namespaces: &[NamespaceId]) -> bool {
+    fn admin_statuses_with_read(
+        &self,
+        mut read: ReadConsistency,
+        deadline: Instant,
+    ) -> Result<Vec<AdminStatusOutput>, ErrorPayload> {
+        let wait_timeout_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        read.wait_timeout_ms = Some(wait_timeout_ms);
+        self.nodes
+            .iter()
+            .map(|node| node.admin_status_with_read(read.clone()))
+            .collect()
+    }
+
+    fn converged_with_statuses(
+        &self,
+        statuses: &[AdminStatusOutput],
+        namespaces: &[NamespaceId],
+    ) -> bool {
         if self.nodes.len() < 2 {
             return true;
         }
-        let statuses: Vec<AdminStatusOutput> =
-            self.nodes.iter().map(|node| node.admin_status()).collect();
-        let base = &statuses[0];
+        let base = match statuses.first() {
+            Some(status) => status,
+            None => return false,
+        };
         for status in &statuses[1..] {
             if status.store_id != base.store_id {
                 return false;
@@ -297,13 +364,12 @@ impl ReplRig {
         true
     }
 
-    fn peers_seen(&self) -> bool {
+    fn peers_seen_with_statuses(&self, statuses: &[AdminStatusOutput]) -> bool {
         if self.nodes.len() < 2 {
             return true;
         }
         let expected: BTreeSet<ReplicaId> = self.nodes.iter().map(|node| node.replica_id).collect();
-        for node in &self.nodes {
-            let status = node.admin_status();
+        for status in statuses {
             let seen: BTreeSet<ReplicaId> = status
                 .replica_liveness
                 .iter()
@@ -330,7 +396,6 @@ impl Drop for ReplRig {
     }
 }
 
-#[derive(Debug)]
 pub struct Node {
     repo_dir: PathBuf,
     runtime_dir: PathBuf,
@@ -339,10 +404,18 @@ pub struct Node {
     listen_addr: String,
     store_id_override: Option<StoreId>,
     replica_id: ReplicaId,
+    admin_conn: Mutex<Option<IpcConnection>>,
+    ipc_conn: Mutex<Option<IpcConnection>>,
+    issue_min_seen: Arc<Mutex<BTreeMap<String, Watermarks<Applied>>>>,
 }
 
 impl Node {
-    fn new(seed: NodeSeed, store_id_override: Option<StoreId>, replica_id: ReplicaId) -> Self {
+    fn new(
+        seed: NodeSeed,
+        store_id_override: Option<StoreId>,
+        replica_id: ReplicaId,
+        issue_min_seen: Arc<Mutex<BTreeMap<String, Watermarks<Applied>>>>,
+    ) -> Self {
         Self {
             repo_dir: seed.repo_dir,
             runtime_dir: seed.runtime_dir,
@@ -351,6 +424,9 @@ impl Node {
             listen_addr: seed.listen_addr,
             store_id_override,
             replica_id,
+            admin_conn: Mutex::new(None),
+            ipc_conn: Mutex::new(None),
+            issue_min_seen,
         }
     }
 
@@ -405,62 +481,99 @@ impl Node {
     }
 
     pub fn create_issue(&self, title: &str) -> String {
-        let output = self
-            .bd_cmd()
-            .args(["--json=true", "create", title])
-            .output()
-            .expect("bd create");
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            panic!("bd create failed: stdout={stdout} stderr={stderr}");
-        }
-        let payload: ResponsePayload =
-            serde_json::from_slice(&output.stdout).expect("parse create payload");
-        match payload {
-            ResponsePayload::Op(op) => op.issue.expect("created issue").id,
-            ResponsePayload::Query(QueryResult::Issue(issue)) => issue.id,
-            other => panic!("unexpected payload: {other:?}"),
+        let request = Request::Create {
+            repo: self.repo_dir.clone(),
+            id: None,
+            parent: None,
+            title: title.to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::default(),
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            meta: MutationMeta::default(),
+        };
+        let response = self.send_request(&request).expect("bd create");
+        match response {
+            Response::Ok { ok } => match ok {
+                ResponsePayload::Op(op) => {
+                    let id = match op.result {
+                        beads_rs::daemon::ops::OpResult::Created { id } => id,
+                        other => panic!("unexpected create result: {other:?}"),
+                    };
+                    let id_str = id.as_str().to_string();
+                    self.record_min_seen(&id_str, &op.receipt.min_seen);
+                    id_str
+                }
+                ResponsePayload::Query(QueryResult::Issue(issue)) => issue.id,
+                other => panic!("unexpected create payload: {other:?}"),
+            },
+            Response::Err { err } => panic!("bd create failed: {err:?}"),
         }
     }
 
     pub fn wait_for_show(&self, issue_id: &str, timeout: Duration) {
-        let ok = poll_until(timeout, || {
-            let output = self
-                .bd_cmd()
-                .args(["--json=true", "show", issue_id])
-                .output()
-                .expect("bd show");
-            output.status.success()
-        });
-        assert!(ok, "issue {issue_id} failed to replicate");
+        let deadline = Instant::now() + timeout;
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            let wait_timeout_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            let read = ReadConsistency {
+                require_min_seen: self.min_seen_for(issue_id),
+                wait_timeout_ms: Some(wait_timeout_ms),
+                ..ReadConsistency::default()
+            };
+            let request = Request::Show {
+                repo: self.repo_dir.clone(),
+                id: issue_id.to_string(),
+                read,
+            };
+            let response = self.send_request(&request).expect("bd show");
+            match response {
+                Response::Ok { ok } => match ok {
+                    ResponsePayload::Query(QueryResult::Issue(issue)) => {
+                        assert_eq!(issue.id, issue_id);
+                        return;
+                    }
+                    other => panic!("unexpected show payload: {other:?}"),
+                },
+                Response::Err { err } => {
+                    let retry = err.code == CliErrorCode::NotFound.into()
+                        || err.code == ProtocolErrorCode::RequireMinSeenUnsatisfied.into()
+                        || err.code == ProtocolErrorCode::RequireMinSeenTimeout.into();
+                    if retry && Instant::now() < deadline {
+                        std::thread::sleep(backoff);
+                        backoff =
+                            std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
+                        continue;
+                    }
+                    panic!("issue {issue_id} failed to replicate: {err:?}");
+                }
+            }
+        }
     }
 
     pub fn admin_status(&self) -> AdminStatusOutput {
-        let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
-        let request = Request::AdminStatus {
-            repo: self.repo_dir.clone(),
-            read: ReadConsistency::default(),
-        };
-        let response = client
-            .send_request_no_autostart(&request)
-            .expect("admin status");
-        match response {
-            Response::Ok { ok } => match ok {
-                ResponsePayload::Query(QueryResult::AdminStatus(status)) => status,
-                other => panic!("unexpected admin status payload: {other:?}"),
-            },
-            Response::Err { err } => panic!("admin status error: {err:?}"),
+        match self.admin_status_with_read(ReadConsistency::default()) {
+            Ok(status) => status,
+            Err(err) => panic!("admin status error: {err:?}"),
         }
     }
 
     pub fn reload_replication(&self) {
-        let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
         let request = Request::AdminReloadReplication {
             repo: self.repo_dir.clone(),
         };
-        let response = client
-            .send_request_no_autostart(&request)
+        let response = self
+            .send_admin_request(&request)
             .expect("admin reload replication");
         match response {
             Response::Ok {
@@ -468,6 +581,68 @@ impl Node {
             } => {}
             other => panic!("unexpected admin reload replication response: {other:?}"),
         }
+    }
+
+    fn reset_ipc_connections(&self) {
+        *self.admin_conn.lock().expect("admin conn lock") = None;
+        *self.ipc_conn.lock().expect("ipc conn lock") = None;
+    }
+
+    fn admin_status_with_read(
+        &self,
+        read: ReadConsistency,
+    ) -> Result<AdminStatusOutput, ErrorPayload> {
+        let request = Request::AdminStatus {
+            repo: self.repo_dir.clone(),
+            read,
+        };
+        let response = self
+            .send_admin_request(&request)
+            .map_err(ErrorPayload::from)?;
+        match response {
+            Response::Ok { ok } => match ok {
+                ResponsePayload::Query(QueryResult::AdminStatus(status)) => Ok(status),
+                other => Err(ErrorPayload::new(
+                    ProtocolErrorCode::InternalError.into(),
+                    format!("unexpected admin status payload: {other:?}"),
+                    false,
+                )),
+            },
+            Response::Err { err } => Err(err),
+        }
+    }
+
+    fn record_min_seen(&self, issue_id: &str, min_seen: &Watermarks<Applied>) {
+        let mut guard = self.issue_min_seen.lock().expect("issue min_seen lock");
+        guard.insert(issue_id.to_string(), min_seen.clone());
+    }
+
+    fn min_seen_for(&self, issue_id: &str) -> Option<Watermarks<Applied>> {
+        let guard = self.issue_min_seen.lock().expect("issue min_seen lock");
+        guard.get(issue_id).cloned()
+    }
+
+    fn send_admin_request(
+        &self,
+        request: &Request,
+    ) -> Result<Response, beads_rs::daemon::ipc::IpcError> {
+        let mut guard = self.admin_conn.lock().expect("admin conn lock");
+        if guard.is_none() {
+            let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
+            let conn = client.connect()?;
+            *guard = Some(conn);
+        }
+        guard.as_mut().expect("admin conn").send_request(request)
+    }
+
+    fn send_request(&self, request: &Request) -> Result<Response, beads_rs::daemon::ipc::IpcError> {
+        let mut guard = self.ipc_conn.lock().expect("ipc conn lock");
+        if guard.is_none() {
+            let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
+            let conn = client.connect()?;
+            *guard = Some(conn);
+        }
+        guard.as_mut().expect("ipc conn").send_request(request)
     }
 }
 

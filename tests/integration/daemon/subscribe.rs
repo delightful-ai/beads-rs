@@ -2,6 +2,7 @@
 //! IPC streaming subscriptions.
 //!
 //! These tests exercise realtime streaming and include time-based waits.
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -227,14 +228,20 @@ fn collect_origin_seqs(
 ) -> Vec<u64> {
     const MAX_RECONNECTS: usize = 3;
     const MAX_WAIT: Duration = Duration::from_secs(30);
+    let read_timeout = Duration::from_millis(200);
 
     let mut seqs = Vec::with_capacity(total);
     let mut last_seq = start_seq;
     let mut reconnects = 0;
     let deadline = Instant::now() + MAX_WAIT;
 
+    client
+        .set_read_timeout(Some(read_timeout))
+        .expect("set subscribe timeout");
+
     while seqs.len() < total {
         if Instant::now() > deadline {
+            let _ = client.set_read_timeout(None);
             panic!(
                 "subscribe stream timed out after {:?} (got {} of {})",
                 MAX_WAIT,
@@ -256,9 +263,15 @@ fn collect_origin_seqs(
                 seqs.push(seq);
             }
             Ok(None) => continue,
+            Err(StreamClientError::Ipc(IpcError::Io(err)))
+                if matches!(err.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
+            {
+                continue;
+            }
             Err(StreamClientError::Ipc(IpcError::Disconnected)) => {
                 reconnects += 1;
                 if reconnects > MAX_RECONNECTS {
+                    let _ = client.set_read_timeout(None);
                     panic!("subscribe stream disconnected {} times", reconnects);
                 }
                 std::thread::sleep(Duration::from_millis(50 * reconnects as u64));
@@ -268,11 +281,15 @@ fn collect_origin_seqs(
                     ipc_client.clone(),
                 )
                 .expect("resubscribe");
+                client
+                    .set_read_timeout(Some(read_timeout))
+                    .expect("reset subscribe timeout");
             }
             Err(StreamClientError::Remote(err)) => {
                 if err.retryable && err.code == CliErrorCode::Disconnected.into() {
                     reconnects += 1;
                     if reconnects > MAX_RECONNECTS {
+                        let _ = client.set_read_timeout(None);
                         panic!(
                             "subscribe stream disconnected {} times (remote)",
                             reconnects
@@ -285,12 +302,20 @@ fn collect_origin_seqs(
                         ipc_client.clone(),
                     )
                     .expect("resubscribe");
+                    client
+                        .set_read_timeout(Some(read_timeout))
+                        .expect("reset subscribe timeout");
                 } else {
+                    let _ = client.set_read_timeout(None);
                     panic!("stream event: {err:?}");
                 }
             }
-            Err(err) => panic!("stream event: {err:?}"),
+            Err(err) => {
+                let _ = client.set_read_timeout(None);
+                panic!("stream event: {err:?}");
+            }
         }
     }
+    let _ = client.set_read_timeout(None);
     seqs
 }

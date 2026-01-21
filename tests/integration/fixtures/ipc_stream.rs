@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -72,6 +73,11 @@ impl StreamingClient {
 
     pub fn subscribed(&self) -> Option<&SubscribeInfo> {
         self.subscribed.as_ref()
+    }
+
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), StreamClientError> {
+        self.stream.set_read_timeout(timeout)?;
+        Ok(())
     }
 
     pub fn next_message(&mut self) -> Result<Option<StreamMessage>, StreamClientError> {

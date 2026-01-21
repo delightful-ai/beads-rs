@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -113,7 +114,7 @@ impl TestWorld {
 
 #[derive(Clone)]
 pub struct TestNode {
-    inner: Arc<RefCell<TestNodeInner>>,
+    inner: Rc<RefCell<TestNodeInner>>,
 }
 
 struct TestNodeInner {
@@ -278,7 +279,7 @@ impl TestNode {
 
         let _ = clock; // keep clock alive for the node's lifetime
         Self {
-            inner: Arc::new(RefCell::new(inner)),
+            inner: Rc::new(RefCell::new(inner)),
         }
     }
 
@@ -723,33 +724,24 @@ impl ReplicationRig {
                 let mut outbound =
                     new_session(SessionRole::Outbound, identity, from_replica, &limits);
                 let inbound = new_session(SessionRole::Inbound, identity, to_replica, &limits);
-                if let Some(action) = outbound.begin_handshake(&outbound_store, self.clock.now_ms())
-                {
-                    let mut link = RigLink::new(
-                        from,
-                        to,
-                        transport,
-                        outbound,
-                        inbound,
-                        outbound_store,
-                        inbound_store,
-                        from_node,
-                        to_node,
-                    );
+                let action = outbound.begin_handshake(&outbound_store, self.clock.now_ms());
+                let init = RigLinkInit {
+                    from,
+                    to,
+                    transport,
+                    outbound,
+                    inbound,
+                    outbound_store,
+                    inbound_store,
+                    from_node,
+                    to_node,
+                };
+                if let Some(action) = action {
+                    let mut link = RigLink::new(init);
                     link.apply_action(action, Endpoint::Outbound, self.clock.now_ms());
                     self.links.push(link);
                 } else {
-                    self.links.push(RigLink::new(
-                        from,
-                        to,
-                        transport,
-                        outbound,
-                        inbound,
-                        outbound_store,
-                        inbound_store,
-                        from_node,
-                        to_node,
-                    ));
+                    self.links.push(RigLink::new(init));
                 }
             }
         }
@@ -788,18 +780,31 @@ struct RigLink {
     last_want_sent_at_ms: Option<u64>,
 }
 
+struct RigLinkInit {
+    from: usize,
+    to: usize,
+    transport: ChannelTransport,
+    outbound: Session,
+    inbound: Session,
+    outbound_store: TestSessionStore,
+    inbound_store: TestSessionStore,
+    from_node: TestNode,
+    to_node: TestNode,
+}
+
 impl RigLink {
-    fn new(
-        from: usize,
-        to: usize,
-        transport: ChannelTransport,
-        outbound: Session,
-        inbound: Session,
-        outbound_store: TestSessionStore,
-        inbound_store: TestSessionStore,
-        from_node: TestNode,
-        to_node: TestNode,
-    ) -> Self {
+    fn new(init: RigLinkInit) -> Self {
+        let RigLinkInit {
+            from,
+            to,
+            transport,
+            outbound,
+            inbound,
+            outbound_store,
+            inbound_store,
+            from_node,
+            to_node,
+        } = init;
         Self {
             from,
             to,
@@ -945,10 +950,10 @@ impl RigLink {
                 self.inbound.mark_closed();
             }
         }
-        if matches!(endpoint, Endpoint::Outbound) {
-            if let Some(action) = self.outbound.begin_handshake(&self.outbound_store, now_ms) {
-                self.apply_action(action, Endpoint::Outbound, now_ms);
-            }
+        if matches!(endpoint, Endpoint::Outbound)
+            && let Some(action) = self.outbound.begin_handshake(&self.outbound_store, now_ms)
+        {
+            self.apply_action(action, Endpoint::Outbound, now_ms);
         }
     }
 }
@@ -1006,7 +1011,7 @@ fn ensure_tmp_root() -> PathBuf {
 
 #[derive(Clone)]
 pub struct NetworkController {
-    inner: Arc<RefCell<NetworkSimulator>>,
+    inner: Rc<RefCell<NetworkSimulator>>,
 }
 
 impl NetworkController {
@@ -1279,7 +1284,7 @@ impl NetworkSimulator {
 
 #[derive(Clone)]
 struct NetworkHandle {
-    inner: Arc<RefCell<NetworkSimulator>>,
+    inner: Rc<RefCell<NetworkSimulator>>,
     direction: Direction,
 }
 
@@ -1330,7 +1335,7 @@ impl ChannelTransport {
         let (a_tx, a_rx) = unbounded();
         let (b_tx, b_rx) = unbounded();
 
-        let simulator = Arc::new(RefCell::new(NetworkSimulator::new(a_tx, b_tx)));
+        let simulator = Rc::new(RefCell::new(NetworkSimulator::new(a_tx, b_tx)));
         let network = NetworkController {
             inner: simulator.clone(),
         };

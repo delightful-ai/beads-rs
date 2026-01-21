@@ -564,6 +564,11 @@ impl SubscriptionStream {
         let response = serde_json::from_str(&line)?;
         Ok(Some(response))
     }
+
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), IpcError> {
+        self.reader.get_ref().set_read_timeout(timeout)?;
+        Ok(())
+    }
 }
 
 /// Send a subscribe request and return a stream of responses.
