@@ -95,9 +95,7 @@ mod wal_state {
             let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
             for entry in self.entries {
                 let dots: BTreeSet<Dot> = entry.dots.into_iter().collect();
-                if dots.is_empty() {
-                    map.entry(entry.key).or_default();
-                } else {
+                if !dots.is_empty() {
                     map.insert(entry.key, dots);
                 }
             }
