@@ -1221,6 +1221,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn serialize_deps_sorts_by_dep_kind_canonical() {
+        let stamp = Stamp::new(WriteStamp::new(12, 0), actor_id("alice"));
+        let from = bead_id("bd-kind-from");
+        let to = bead_id("bd-kind-to");
+
+        let mut state = CanonicalState::new();
+        state.insert(make_bead(&from, &stamp)).unwrap();
+
+        let key_blocks = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key_discovered =
+            DepKey::new(from.clone(), to.clone(), DepKind::DiscoveredFrom).unwrap();
+        let key_parent = DepKey::new(from.clone(), to.clone(), DepKind::Parent).unwrap();
+        let key_related = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
+
+        state.apply_dep_add(
+            key_related,
+            dot(1, 4),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state.apply_dep_add(
+            key_parent,
+            dot(1, 3),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state.apply_dep_add(
+            key_discovered,
+            dot(1, 2),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state.apply_dep_add(
+            key_blocks,
+            dot(1, 1),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+
+        let bytes = serialize_deps(&state).unwrap();
+        let wire: WireDepStore =
+            serde_json::from_slice(&bytes).expect("deps.jsonl should deserialize");
+        let kinds: Vec<DepKind> = wire
+            .entries
+            .iter()
+            .map(|entry| entry.key.kind())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DepKind::Blocks,
+                DepKind::DiscoveredFrom,
+                DepKind::Parent,
+                DepKind::Related
+            ]
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
 
