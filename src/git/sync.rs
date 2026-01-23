@@ -749,11 +749,11 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
     let mut root_slug = None;
     let mut last_write_stamp = None;
     let mut checksums = None;
-    if let Some(meta_entry) = tree.get_name("meta.json")
-        && let Ok(meta_obj) = repo.find_object(meta_entry.id(), Some(ObjectType::Blob))
-        && let Ok(meta_blob) = meta_obj.peel_to_blob()
-        && let Ok(meta) = wire::parse_meta(meta_blob.content())
-    {
+    if let Some(meta_entry) = tree.get_name("meta.json") {
+        let meta_blob = repo
+            .find_object(meta_entry.id(), Some(ObjectType::Blob))?
+            .peel_to_blob()?;
+        let meta = wire::parse_meta(meta_blob.content())?;
         root_slug = meta.root_slug;
         last_write_stamp = meta.last_write_stamp;
         checksums = meta.checksums;
@@ -1524,7 +1524,9 @@ mod tests {
             Some(b"{not json".to_vec()),
         );
 
-        let err = read_state_at_oid(&repo, oid).unwrap_err();
+        let err = read_state_at_oid(&repo, oid)
+            .err()
+            .expect("expected invalid meta error");
         assert!(matches!(err, SyncError::Wire(_)));
     }
 
@@ -1544,7 +1546,9 @@ mod tests {
         let meta_bytes = wire::serialize_meta(Some("test"), None, &checksums).unwrap();
         let oid = write_store_commit_with_meta_bytes(&repo, None, "bad-checksums", Some(meta_bytes));
 
-        let err = read_state_at_oid(&repo, oid).unwrap_err();
+        let err = read_state_at_oid(&repo, oid)
+            .err()
+            .expect("expected checksum mismatch error");
         assert!(matches!(
             err,
             SyncError::Wire(WireError::ChecksumMismatch { blob: "state.jsonl", .. })
