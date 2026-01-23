@@ -1,6 +1,5 @@
 //! Store wrappers with auto-merge semantics.
 //!
-//! DepStore: dependency edges with upsert that auto-joins
 //! TombstoneStore: tombstones with upsert that auto-joins
 //!
 //! These ensure CRDT merge semantics are always applied correctly.
@@ -9,65 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::dep::{DepEdge, DepKey};
 use super::tombstone::{Tombstone, TombstoneKey};
-
-/// Canonical dependency store.
-///
-/// Keys are unique by construction. `upsert()` automatically joins
-/// if the key already exists.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DepStore {
-    by_key: BTreeMap<DepKey, DepEdge>,
-}
-
-impl DepStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert or merge - auto-joins if key exists.
-    pub fn upsert(&mut self, key: DepKey, edge: DepEdge) {
-        self.by_key
-            .entry(key)
-            .and_modify(|existing| *existing = DepEdge::join(existing, &edge))
-            .or_insert(edge);
-    }
-
-    pub fn get(&self, key: &DepKey) -> Option<&DepEdge> {
-        self.by_key.get(key)
-    }
-
-    pub fn remove(&mut self, key: &DepKey) -> Option<DepEdge> {
-        self.by_key.remove(key)
-    }
-
-    pub fn contains(&self, key: &DepKey) -> bool {
-        self.by_key.contains_key(key)
-    }
-
-    pub fn len(&self) -> usize {
-        self.by_key.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_key.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&DepKey, &DepEdge)> {
-        self.by_key.iter()
-    }
-
-    /// Merge two dep stores.
-    pub fn join(a: &Self, b: &Self) -> Self {
-        let mut result = a.clone();
-        for (key, edge) in &b.by_key {
-            result.upsert(key.clone(), edge.clone());
-        }
-        result
-    }
-}
 
 /// Canonical tombstone store.
 ///
@@ -130,34 +71,10 @@ impl TombstoneStore {
 mod tests {
     use super::*;
     use crate::core::BeadId;
-    use crate::core::{ActorId, DepKind, Stamp, WriteStamp};
+    use crate::core::{ActorId, Stamp, WriteStamp};
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
         Stamp::new(WriteStamp::new(wall_ms, 0), ActorId::new(actor).unwrap())
-    }
-
-    #[test]
-    fn dep_store_upsert_merges() {
-        let mut store = DepStore::new();
-        let key = DepKey::new(
-            BeadId::parse("bd-abc").unwrap(),
-            BeadId::parse("bd-xyz").unwrap(),
-            DepKind::Blocks,
-        )
-        .unwrap();
-
-        // Insert edge
-        let edge1 = DepEdge::new(make_stamp(1000, "alice"));
-        store.upsert(key.clone(), edge1);
-        assert!(store.get(&key).unwrap().is_active());
-
-        // Upsert with deletion
-        let mut edge2 = DepEdge::new(make_stamp(1000, "alice"));
-        edge2.delete(make_stamp(2000, "bob"));
-        store.upsert(key.clone(), edge2);
-
-        // Should be deleted now (merged)
-        assert!(store.get(&key).unwrap().is_deleted());
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub(crate) struct ExportJob {
 }
 
 enum ExportCommand {
-    Job(ExportJob),
+    Job(Box<ExportJob>),
     Shutdown,
 }
 
@@ -36,7 +36,9 @@ impl ExportWorkerHandle {
     }
 
     pub(crate) fn enqueue(&self, job: ExportJob) -> Result<(), ()> {
-        self.tx.send(ExportCommand::Job(job)).map_err(|_| ())
+        self.tx
+            .send(ExportCommand::Job(Box::new(job)))
+            .map_err(|_| ())
     }
 
     pub(crate) fn shutdown(&self) {
@@ -48,6 +50,7 @@ fn run_export_loop(ctx: ExportContext, rx: Receiver<ExportCommand>) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             ExportCommand::Job(job) => {
+                let job = *job;
                 let export_path = match export_jsonl(&job.core_state, &ctx, job.remote.as_str()) {
                     Ok(path) => path,
                     Err(err) => {
@@ -84,7 +87,6 @@ mod tests {
 
     fn build_state() -> CanonicalState {
         use crate::core::bead::{Bead, BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -104,7 +106,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::HIGH, stamp.clone()),
             bead_type: Lww::new(BeadType::Bug, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),

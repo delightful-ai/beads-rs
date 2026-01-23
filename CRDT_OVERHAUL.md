@@ -57,7 +57,7 @@ Code refs (current):
 The following are current code anchors that this plan modifies:
 
 - **Apply logic**: `src/core/apply.rs` (`build_workflow`, `build_claim`, `apply_note_append`, dep apply)
-- **Wire types**: `src/core/wire_bead.rs` (`WireBeadPatch`, `NotesPatch`, dep ops, TxnOpV1)
+- **Wire types**: `src/core/wire_bead.rs` (`WireBeadPatch`, `NoteAppendV1`, LabelAdd/LabelRemove, DepAdd/DepRemove, TxnOpV1)
 - **Notes**: `src/core/collections.rs` (NoteLog), `src/core/bead.rs` (notes in Bead)
 - **Deps**: `src/core/dep.rs` (DepEdge, DepLife)
 - **State**: `src/core/state.rs` (`CanonicalState::join`, tombstone resurrection rule)
@@ -298,9 +298,9 @@ Code refs (current):
 
 ### Removed
 
-- `WireDepV1`, `WireDepDeleteV1`
-- `WireBeadPatch.labels`
-- `NotesPatch` embedded in bead patch
+- Legacy dep ops (pre-OR-set): `WireDepV1`, `WireDepDeleteV1`
+- `WireBeadPatch.labels` (full-set labels)
+- Legacy `NotesPatch` embedded in bead patch
 
 ### Added (v1)
 
@@ -345,10 +345,9 @@ Add validation in `src/core/event.rs`:
 - enforce limits (notes, labels) as today
 
 Code refs (current):
-- NotesPatch + WireBeadPatch.labels exist: `src/core/wire_bead.rs:92-473`
-- TxnOpV1 dep ops: `src/core/wire_bead.rs:555-590`
-- TxnOpKey shape: `src/core/wire_bead.rs:593-657`
-- Event validation only checks sizes/limits: `src/core/event.rs:2000-2061`
+- WireLabelAdd/Remove, WireDepAdd/Remove, NoteAppend: `src/core/wire_bead.rs`
+- TxnOpKey shape (dot included for add ops): `src/core/wire_bead.rs`
+- Event validation checks sizes/limits: `src/core/event.rs`
 
 ---
 
@@ -564,8 +563,8 @@ Code refs (current):
 ## Explicit delete list (code we expect to remove)
 
 - `WireBeadPatch.labels` (`src/core/wire_bead.rs:450-452`)
-- `NotesPatch` on bead patch (`src/core/wire_bead.rs:92-173`, `src/core/wire_bead.rs:471-472`)
-- `WireDepV1` / `WireDepDeleteV1` (`src/core/wire_bead.rs:527-547`)
+- Legacy NotesPatch on bead patch (pre-OR-set; removed)
+- Legacy dep ops (`WireDepV1`, `WireDepDeleteV1`) (pre-OR-set; removed)
 - `DepEdge` + `DepLife` (`src/core/dep.rs:143-220`)
 - `NoteLog` on Bead (`src/core/bead.rs:138-199`, `src/core/collections.rs:120-173`)
 - git collision remap (`src/git/collision.rs`)
@@ -584,9 +583,9 @@ the legacy LWW/full-set paths and should be removed after the new model lands.
 - `Bead.notes` field and note accessors: `src/core/bead.rs:138-199`
 - `BeadFields.labels` LWW field: `src/core/bead.rs:82-115`
 - Dep LWW types (`DepLife`, `DepEdge`): `src/core/dep.rs:143-220`
-- Wire dep ops (`WireDepV1`, `WireDepDeleteV1`): `src/core/wire_bead.rs:527-547`
+- Legacy dep ops (`WireDepV1`, `WireDepDeleteV1`) (pre-OR-set; removed)
 - Full-set labels in bead patch (`WireBeadPatch.labels`): `src/core/wire_bead.rs:450-452`
-- NotesPatch encoding on patches: `src/core/wire_bead.rs:92-173`, `src/core/wire_bead.rs:471-472`
+- Legacy NotesPatch encoding on patches (pre-OR-set; removed)
 
 ### Apply / merge error paths
 
@@ -609,8 +608,8 @@ the legacy LWW/full-set paths and should be removed after the new model lands.
 
 ### Wire / event legacy branches
 
-- TxnOpV1 DepUpsert/DepDelete variants and keys: `src/core/wire_bead.rs:555-657`
-- Event validation branches for dep ops + NotesPatch on patch: `src/core/event.rs:2016-2041`
+- Legacy TxnOpV1 DepUpsert/DepDelete variants and keys (pre-OR-set; removed)
+- Legacy event validation branches for dep ops + NotesPatch on patch (pre-OR-set; removed)
 
 ### Git collision remap
 
@@ -619,7 +618,7 @@ the legacy LWW/full-set paths and should be removed after the new model lands.
 
 ### Tests / fixtures to delete or rewrite
 
-- NotesPatch and dep op fixtures: `tests/integration/fixtures/event_body.rs`
+- NoteAppend + OR-set dep op fixtures: `tests/integration/fixtures/event_body.rs`
 
 
 ---

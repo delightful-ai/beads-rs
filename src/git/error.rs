@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::core::{BeadId, ContentHash, CoreError};
+use crate::core::{ContentHash, CoreError};
 use crate::error::{Effect, Transience};
 
 /// Errors that can occur during git sync operations.
@@ -50,9 +50,6 @@ pub enum SyncError {
     #[error("too many sync retries ({0})")]
     TooManyRetries(usize),
 
-    #[error("ID collision detected: {0} and {1} have same ID but different content")]
-    IdCollision(BeadId, BeadId),
-
     #[error("no common ancestor between local and remote")]
     NoCommonAncestor,
 
@@ -61,9 +58,6 @@ pub enum SyncError {
 
     #[error("merge conflict: {errors:?}")]
     MergeConflict { errors: Vec<CoreError> },
-
-    #[error("collision resolution failed: {0}")]
-    CollisionResolution(CoreError),
 
     #[error(transparent)]
     PushRejected(#[from] PushRejected),
@@ -95,11 +89,9 @@ impl SyncError {
             | SyncError::WriteBlob(_)
             | SyncError::BuildTree(_)
             | SyncError::Commit(_)
-            | SyncError::IdCollision(_, _)
             | SyncError::NoCommonAncestor
             | SyncError::Wire(_)
             | SyncError::MergeConflict { .. }
-            | SyncError::CollisionResolution(_)
             | SyncError::Git(_) => Transience::Permanent,
         }
     }

@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::remote::RemoteUrl;
-use crate::core::{Bead, BeadId, CanonicalState, DepEdge, DepKey, Limits, Tombstone, TombstoneKey};
+use crate::core::{
+    Bead, BeadId, CanonicalState, DepKey, DepStore, Dot, Dvv, LabelStore, Limits, NoteStore, OrSet,
+    OrSetValue, Stamp, Tombstone, TombstoneKey,
+};
 
 /// WAL format version.
 const WAL_VERSION: u32 = 1;
@@ -38,53 +41,121 @@ mod wal_state {
     use super::*;
     use serde::de::Error as DeError;
     use serde::{Deserializer, Serializer};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[derive(Serialize, Deserialize)]
-    struct WalStateVec {
+    struct WalStateV2 {
         live: Vec<Bead>,
         tombstones: Vec<Tombstone>,
-        deps: Vec<WalDep>,
+        #[serde(default)]
+        deps: WalDepStore,
+        #[serde(default)]
+        labels: LabelStore,
+        #[serde(default)]
+        notes: NoteStore,
     }
 
-    #[derive(Serialize, Deserialize)]
-    struct WalDep {
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct WalDepEntry {
         key: DepKey,
-        #[serde(flatten)]
-        edge: DepEdge,
+        dots: Vec<Dot>,
+    }
+
+    #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+    struct WalDepStore {
+        cc: Dvv,
+        entries: Vec<WalDepEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stamp: Option<Stamp>,
+    }
+
+    impl WalDepStore {
+        fn from_dep_store(store: &DepStore) -> Self {
+            let mut entries = Vec::new();
+            for key in store.values() {
+                let mut dots: Vec<Dot> = store
+                    .dots_for(key)
+                    .map(|dots| dots.iter().copied().collect())
+                    .unwrap_or_default();
+                dots.sort();
+                entries.push(WalDepEntry {
+                    key: key.clone(),
+                    dots,
+                });
+            }
+            entries.sort_by(|a, b| a.key.cmp(&b.key));
+            Self {
+                cc: store.cc().clone(),
+                entries,
+                stamp: store.stamp().cloned(),
+            }
+        }
+
+        fn into_dep_store(self) -> DepStore {
+            let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
+            for entry in self.entries {
+                let dots: BTreeSet<Dot> = entry.dots.into_iter().collect();
+                if dots.is_empty() {
+                    map.entry(entry.key).or_default();
+                } else {
+                    map.insert(entry.key, dots);
+                }
+            }
+            let set = OrSet::from_parts(map, self.cc);
+            DepStore::from_parts(set, self.stamp)
+        }
     }
 
     #[derive(Deserialize)]
-    struct WalStateMap {
+    struct LegacyWalStateVec {
+        live: Vec<Bead>,
+        tombstones: Vec<Tombstone>,
+        deps: Vec<LegacyWalDep>,
+        #[serde(default)]
+        labels: LabelStore,
+        #[serde(default)]
+        notes: NoteStore,
+    }
+
+    #[derive(Deserialize)]
+    struct LegacyWalDep {
+        key: DepKey,
+        #[serde(flatten)]
+        _edge: BTreeMap<String, serde_json::Value>,
+    }
+
+    #[derive(Deserialize)]
+    struct LegacyWalStateMap {
         live: BTreeMap<BeadId, Bead>,
         tombstones: BTreeMap<TombstoneKey, Tombstone>,
-        deps: BTreeMap<DepKey, DepEdge>,
+        deps: BTreeMap<DepKey, serde_json::Value>,
+        #[serde(default)]
+        labels: LabelStore,
+        #[serde(default)]
+        notes: NoteStore,
     }
 
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum WalStateRepr {
-        Vecs(WalStateVec),
-        Maps(WalStateMap),
+        V2(WalStateV2),
+        LegacyVecs(LegacyWalStateVec),
+        LegacyMaps(LegacyWalStateMap),
     }
 
     pub fn serialize<S>(state: &CanonicalState, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let snapshot = WalStateVec {
+        let snapshot = WalStateV2 {
             live: state.iter_live().map(|(_, bead)| bead.clone()).collect(),
             tombstones: state
                 .iter_tombstones()
                 .map(|(_, tomb)| tomb.clone())
                 .collect(),
-            deps: state
-                .iter_deps()
-                .map(|(key, dep)| WalDep {
-                    key: key.clone(),
-                    edge: dep.clone(),
-                })
-                .collect(),
+            deps: WalDepStore::from_dep_store(state.dep_store()),
+            labels: state.label_store().clone(),
+            notes: state.note_store().clone(),
         };
         snapshot.serialize(serializer)
     }
@@ -93,16 +164,28 @@ mod wal_state {
     where
         D: Deserializer<'de>,
     {
-        let (live, tombstones, deps) = match WalStateRepr::deserialize(deserializer)? {
-            WalStateRepr::Vecs(snapshot) => (snapshot.live, snapshot.tombstones, snapshot.deps),
-            WalStateRepr::Maps(snapshot) => (
+        let (live, tombstones, deps, labels, notes) = match WalStateRepr::deserialize(deserializer)?
+        {
+            WalStateRepr::V2(snapshot) => (
+                snapshot.live,
+                snapshot.tombstones,
+                snapshot.deps.into_dep_store(),
+                snapshot.labels,
+                snapshot.notes,
+            ),
+            WalStateRepr::LegacyVecs(snapshot) => (
+                snapshot.live,
+                snapshot.tombstones,
+                dep_store_from_legacy(snapshot.deps.into_iter().map(|dep| dep.key)),
+                snapshot.labels,
+                snapshot.notes,
+            ),
+            WalStateRepr::LegacyMaps(snapshot) => (
                 snapshot.live.into_values().collect(),
                 snapshot.tombstones.into_values().collect(),
-                snapshot
-                    .deps
-                    .into_iter()
-                    .map(|(key, edge)| WalDep { key, edge })
-                    .collect(),
+                dep_store_from_legacy(snapshot.deps.into_keys()),
+                snapshot.labels,
+                snapshot.notes,
             ),
         };
         let mut state = CanonicalState::new();
@@ -112,10 +195,39 @@ mod wal_state {
         for tombstone in tombstones {
             state.insert_tombstone(tombstone);
         }
-        for dep in deps {
-            state.insert_dep(dep.key, dep.edge);
-        }
+        state.set_label_store(labels);
+        state.set_note_store(notes);
+        state.set_dep_store(deps);
         Ok(state)
+    }
+
+    fn dep_store_from_legacy<I>(deps: I) -> DepStore
+    where
+        I: IntoIterator<Item = DepKey>,
+    {
+        let mut entries: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
+        for key in deps {
+            let dot = legacy_dot_from_bytes(&key.collision_bytes());
+            entries.insert(key, BTreeSet::from([dot]));
+        }
+        let set = OrSet::from_parts(entries, Dvv::default());
+        DepStore::from_parts(set, None)
+    }
+
+    fn legacy_dot_from_bytes(bytes: &[u8]) -> Dot {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let digest = hasher.finalize();
+
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes.copy_from_slice(&digest[..16]);
+        let mut counter_bytes = [0u8; 8];
+        counter_bytes.copy_from_slice(&digest[16..24]);
+
+        Dot {
+            replica: crate::core::ReplicaId::from(uuid::Uuid::from_bytes(uuid_bytes)),
+            counter: u64::from_le_bytes(counter_bytes),
+        }
     }
 }
 
@@ -400,12 +512,13 @@ fn copy_then_remove(src: &Path, dest: &Path) -> Result<(), WalError> {
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Limits, Lww,
-        Priority, Stamp, Workflow, WriteStamp,
+        ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Limits, Lww,
+        Priority, ReplicaId, Sha256, Stamp, Workflow, WriteStamp,
     };
     use serde::Serialize;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     fn test_remote() -> RemoteUrl {
         RemoteUrl("git@github.com:test/repo.git".into())
@@ -458,7 +571,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::new(2).unwrap(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Default::default(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -490,7 +602,11 @@ mod tests {
             DepKind::Blocks,
         )
         .unwrap();
-        state.insert_dep(dep_key, DepEdge::new(stamp.clone()));
+        let dep_dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        state.apply_dep_add(dep_key, dep_dot, Sha256([0; 32]), stamp.clone());
 
         let entry = WalEntry::new(state, None, 7, 42);
         wal.write(&remote, &entry).unwrap();
@@ -507,7 +623,7 @@ mod tests {
         struct LegacyWalState {
             live: BTreeMap<BeadId, Bead>,
             tombstones: BTreeMap<TombstoneKey, Tombstone>,
-            deps: BTreeMap<DepKey, DepEdge>,
+            deps: BTreeMap<DepKey, serde_json::Value>,
         }
 
         #[derive(Serialize)]

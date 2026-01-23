@@ -183,10 +183,6 @@ impl From<model::DepEdge> for DepEdge {
             from: value.from,
             to: value.to,
             kind: value.kind,
-            created_at: value.created_at,
-            created_by: value.created_by,
-            deleted_at: value.deleted_at,
-            deleted_by: value.deleted_by,
         }
     }
 }

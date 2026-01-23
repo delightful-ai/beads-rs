@@ -7,8 +7,8 @@
 //! - crdt: Lww<T> (Layer 3)
 //! - orset: OrSet (Layer 3)
 //! - composite: Note, Claim, Closure, Workflow (Layer 5)
-//! - collections: Labels, NoteLog (Layer 4)
-//! - dep: DepKey, DepEdge (Layer 6)
+//! - collections: Labels (Layer 4)
+//! - dep: DepKey (Layer 6)
 //! - tombstone: Tombstone (Layer 7)
 //! - bead: BeadCore, BeadFields, Bead (Layer 8)
 //! - state: CanonicalState (Layer 9)
@@ -41,11 +41,11 @@ pub mod watermark;
 pub mod wire_bead;
 
 pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
-pub use bead::{Bead, BeadCore, BeadFields};
-pub use collections::{Label, Labels, NoteLog};
+pub use bead::{Bead, BeadCore, BeadFields, BeadView};
+pub use collections::{Label, Labels};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
-pub use dep::{DepEdge, DepKey, DepLife, DepSpec};
+pub use dep::{DepKey, DepSpec};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
     DurabilityClass, DurabilityOutcome, DurabilityParseError, DurabilityProofV1, DurabilityReceipt,
@@ -60,7 +60,7 @@ pub use event::{
     EventKindV1, EventShaLookup, EventShaLookupError, EventValidationError, HlcMax, Opaque,
     PrevDeferred, PrevVerified, Sha256, TxnV1, VerifiedEvent, VerifiedEventAny, decode_event_body,
     decode_event_hlc_max, encode_event_body_canonical, hash_event_body, sha256_bytes,
-    validate_event_body_limits, verify_event_frame,
+    validate_event_body, validate_event_body_limits, verify_event_frame,
 };
 pub use identity::{
     ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, EventId, NoteId,
@@ -77,14 +77,15 @@ pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
 pub use namespaced_state::StoreState;
 pub use orset::{Dot, Dvv, OrSet, OrSetChange, OrSetValue};
 pub use replica_roster::{ReplicaEntry, ReplicaRole, ReplicaRoster, ReplicaRosterError};
-pub use state::{CanonicalState, DepIndexes, LiveLookupError};
+pub use state::{CanonicalState, DepIndexes, DepStore, LabelStore, LiveLookupError, NoteStore};
 pub use store_meta::{StoreMeta, StoreMetaVersions};
 pub mod store_state {
     pub use super::namespaced_state::*;
 }
-pub use dep_tombstone_store::{DepStore, TombstoneStore};
+pub use dep_tombstone_store::TombstoneStore;
 pub mod stores {
     pub use super::dep_tombstone_store::*;
+    pub use super::state::{DepStore, LabelStore, NoteStore};
 }
 pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};
@@ -92,7 +93,8 @@ pub use watermark::{
     Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, Watermarks,
 };
 pub use wire_bead::{
-    NoteAppendV1, NotesPatch, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull,
-    WireBeadPatch, WireDepDeleteV1, WireDepV1, WireFieldStamp, WireNoteV1, WirePatch, WireStamp,
-    WireTombstoneV1, WorkflowStatus,
+    NoteAppendV1, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull, WireBeadPatch,
+    WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1,
+    WireLabelRemoveV1, WireLabelStateV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1,
+    WorkflowStatus,
 };

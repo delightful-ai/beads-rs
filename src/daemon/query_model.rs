@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    Bead, Claim, DepEdge as CoreDepEdge, DepKey as CoreDepKey, NamespaceId, SegmentId,
-    Tombstone as CoreTombstone, WallClock, Workflow, WriteStamp,
+    BeadView, Claim, DepKey as CoreDepKey, NamespaceId, SegmentId, Tombstone as CoreTombstone,
+    WallClock, Workflow, WriteStamp,
 };
 
 // =============================================================================
@@ -188,10 +188,6 @@ pub struct DepEdge {
     pub from: String,
     pub to: String,
     pub kind: String,
-    pub created_at: WriteStamp,
-    pub created_by: String,
-    pub deleted_at: Option<WriteStamp>,
-    pub deleted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,16 +195,12 @@ pub struct DepCycles {
     pub cycles: Vec<Vec<String>>,
 }
 
-impl From<(&CoreDepKey, &CoreDepEdge)> for DepEdge {
-    fn from((key, edge): (&CoreDepKey, &CoreDepEdge)) -> Self {
+impl From<&CoreDepKey> for DepEdge {
+    fn from(key: &CoreDepKey) -> Self {
         Self {
             from: key.from().as_str().to_string(),
             to: key.to().as_str().to_string(),
             kind: key.kind().as_str().to_string(),
-            created_at: edge.created.at.clone(),
-            created_by: edge.created.by.as_str().to_string(),
-            deleted_at: edge.deleted_stamp().map(|s| s.at.clone()),
-            deleted_by: edge.deleted_stamp().map(|s| s.by.as_str().to_string()),
         }
     }
 }
@@ -325,8 +317,9 @@ pub struct IssueSummary {
 }
 
 impl Issue {
-    pub fn from_bead(namespace: &NamespaceId, bead: &Bead) -> Self {
-        let updated = bead.updated_stamp();
+    pub fn from_view(namespace: &NamespaceId, view: &BeadView) -> Self {
+        let bead = &view.bead;
+        let updated = view.updated_stamp();
 
         let (assignee, assignee_at, assignee_expires) = match &bead.fields.claim.value {
             Claim::Claimed { assignee, expires } => (
@@ -348,7 +341,7 @@ impl Issue {
                 _ => (None, None, None, None),
             };
 
-        let notes = bead.notes.sorted().into_iter().map(Note::from).collect();
+        let notes = view.notes.iter().map(Note::from).collect();
 
         Self {
             id: bead.core.id.as_str().to_string(),
@@ -360,13 +353,7 @@ impl Issue {
             status: bead.fields.workflow.value.status().to_string(),
             priority: bead.fields.priority.value.value(),
             issue_type: bead.fields.bead_type.value.as_str().to_string(),
-            labels: bead
-                .fields
-                .labels
-                .value
-                .iter()
-                .map(|l| l.as_str().to_string())
-                .collect(),
+            labels: view.labels.iter().map(|l| l.as_str().to_string()).collect(),
             assignee,
             assignee_at,
             assignee_expires,
@@ -382,7 +369,7 @@ impl Issue {
             external_ref: bead.fields.external_ref.value.clone(),
             source_repo: bead.fields.source_repo.value.clone(),
             estimated_minutes: bead.fields.estimated_minutes.value,
-            content_hash: bead.content_hash().to_hex(),
+            content_hash: view.content_hash().to_hex(),
             notes,
             deps_incoming: Vec::new(),
             deps_outgoing: Vec::new(),
@@ -391,8 +378,9 @@ impl Issue {
 }
 
 impl IssueSummary {
-    pub fn from_bead(namespace: &NamespaceId, bead: &Bead) -> Self {
-        let updated = bead.updated_stamp();
+    pub fn from_view(namespace: &NamespaceId, view: &BeadView) -> Self {
+        let bead = &view.bead;
+        let updated = view.updated_stamp();
         Self {
             id: bead.core.id.as_str().to_string(),
             namespace: namespace.clone(),
@@ -403,13 +391,7 @@ impl IssueSummary {
             status: bead.fields.workflow.value.status().to_string(),
             priority: bead.fields.priority.value.value(),
             issue_type: bead.fields.bead_type.value.as_str().to_string(),
-            labels: bead
-                .fields
-                .labels
-                .value
-                .iter()
-                .map(|l| l.as_str().to_string())
-                .collect(),
+            labels: view.labels.iter().map(|l| l.as_str().to_string()).collect(),
             assignee: bead
                 .fields
                 .claim
@@ -422,8 +404,8 @@ impl IssueSummary {
             updated_at: updated.at.clone(),
             updated_by: updated.by.as_str().to_string(),
             estimated_minutes: bead.fields.estimated_minutes.value,
-            content_hash: bead.content_hash().to_hex(),
-            note_count: bead.notes.len(),
+            content_hash: view.content_hash().to_hex(),
+            note_count: view.notes.len(),
         }
     }
 
@@ -468,3 +450,101 @@ pub type AdminRotateReplicaIdOutput = crate::api::AdminRotateReplicaIdOutput;
 pub type AdminReloadReplicationOutput = crate::api::AdminReloadReplicationOutput;
 pub type AdminScrubOutput = crate::api::AdminScrubOutput;
 pub type AdminStatusOutput = crate::api::AdminStatusOutput;
+
+#[cfg(test)]
+mod tests {
+    use super::{Issue, IssueSummary};
+    use crate::core::orset::Dot;
+    use crate::core::{
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Label, Lww,
+        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Sha256, Stamp, Workflow,
+        WriteStamp,
+    };
+    use uuid::Uuid;
+
+    fn actor_id(raw: &str) -> ActorId {
+        ActorId::new(raw).unwrap_or_else(|e| panic!("invalid actor id {raw}: {e}"))
+    }
+
+    fn bead_id(raw: &str) -> BeadId {
+        BeadId::parse(raw).unwrap_or_else(|e| panic!("invalid bead id {raw}: {e}"))
+    }
+
+    fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
+        let core = BeadCore::new(id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), stamp.clone()),
+            description: Lww::new("desc".to_string(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
+    fn dot(replica_byte: u8, counter: u64) -> Dot {
+        Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([replica_byte; 16])),
+            counter,
+        }
+    }
+
+    #[test]
+    fn issue_summary_updated_at_tracks_label_change() {
+        let base_stamp = Stamp::new(WriteStamp::new(1_000, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-label");
+        state
+            .insert(make_bead(&id, &base_stamp))
+            .expect("insert bead");
+
+        let before_view = state.bead_view(&id).expect("bead view");
+        let before = IssueSummary::from_view(&NamespaceId::core(), &before_view);
+        assert_eq!(before.updated_at, base_stamp.at);
+
+        let label = Label::parse("urgent").expect("label");
+        let label_stamp = Stamp::new(WriteStamp::new(2_000, 0), actor_id("bob"));
+        state.apply_label_add(
+            id.clone(),
+            label,
+            dot(1, 1),
+            Sha256([0; 32]),
+            label_stamp.clone(),
+        );
+
+        let view = state.bead_view(&id).expect("bead view");
+        let summary = IssueSummary::from_view(&NamespaceId::core(), &view);
+        assert_eq!(summary.updated_at, label_stamp.at);
+        assert_eq!(summary.updated_by, label_stamp.by.as_str());
+    }
+
+    #[test]
+    fn issue_updated_at_tracks_note_change() {
+        let base_stamp = Stamp::new(WriteStamp::new(1_000, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-note");
+        state
+            .insert(make_bead(&id, &base_stamp))
+            .expect("insert bead");
+
+        let note_author = actor_id("carol");
+        let note = CoreNote::new(
+            NoteId::new("note-1").expect("note id"),
+            "note".to_string(),
+            note_author.clone(),
+            WriteStamp::new(3_000, 0),
+        );
+        state.insert_note(id.clone(), note);
+
+        let view = state.bead_view(&id).expect("bead view");
+        let issue = Issue::from_view(&NamespaceId::core(), &view);
+        assert_eq!(issue.updated_at, WriteStamp::new(3_000, 0));
+        assert_eq!(issue.updated_by, note_author.as_str());
+    }
+}

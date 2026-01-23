@@ -2,15 +2,15 @@
 
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
-    ActorId, ApplyError, CanonicalState, EventBody, EventKindV1, HlcMax, TxnDeltaV1, TxnOpV1,
-    WireBeadPatch, WireNoteV1, WireStamp, apply_event,
+    ActorId, CanonicalState, EventBody, EventKindV1, HlcMax, TxnDeltaV1, TxnOpV1, WireBeadPatch,
+    apply_event, sha256_bytes,
 };
 
 use crate::fixtures::apply_harness::{
     ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
 };
 use crate::fixtures::event_body::{
-    actor_id, bead_id, event_body_with_delta, note_id, sample_event_body,
+    actor_id, bead_id, event_body_with_delta, note_id, sample_event_body, sample_note,
 };
 
 fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -> EventBody {
@@ -51,7 +51,7 @@ fn apply_event_is_idempotent() {
 }
 
 #[test]
-fn note_collision_is_error() {
+fn note_collision_is_deterministic() {
     let mut state = CanonicalState::new();
     let base = sample_event_body(1);
     apply_event(&mut state, &base).expect("apply base");
@@ -60,19 +60,31 @@ fn note_collision_is_error() {
     let note_id = note_id(2);
 
     let mut delta = TxnDeltaV1::new();
-    let note = WireNoteV1 {
-        id: note_id.clone(),
-        content: "different-content".to_string(),
-        author: actor_id(9),
-        at: WireStamp(12_345, 1),
-    };
+    let mut note = sample_note(2, 1);
+    note.content = "different-content".to_string();
     delta
-        .insert(TxnOpV1::NoteAppend(NoteAppendV1 { bead_id, note }))
+        .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
+            bead_id: bead_id.clone(),
+            note,
+        }))
         .expect("unique note append");
 
     let event = event_body_with_delta(2, delta);
-    let err = apply_event(&mut state, &event).unwrap_err();
-    assert!(matches!(err, ApplyError::NoteCollision { .. }));
+    apply_event(&mut state, &event).expect("apply collision");
+
+    let stored = state
+        .notes_for(&bead_id)
+        .into_iter()
+        .find(|note| note.id == note_id)
+        .expect("note stored");
+    let hash_base = sha256_bytes("note-02".as_bytes());
+    let hash_incoming = sha256_bytes("different-content".as_bytes());
+    let expected = if hash_base >= hash_incoming {
+        "note-02"
+    } else {
+        "different-content"
+    };
+    assert_eq!(stored.content, expected);
 }
 
 #[test]

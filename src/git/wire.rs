@@ -5,16 +5,18 @@
 //! - `_v` object maps field names to stamps only when they differ from bead-level
 //! - If all fields share bead-level stamp, `_v` is omitted
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::error::WireError;
 use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure,
-    ContentHash, DepEdge, DepKey, DepKind, Label, Labels, Lww, Priority, Stamp, Tombstone,
-    WallClock, Workflow, WriteStamp, sha256_bytes,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, BeadView, CanonicalState, Claim,
+    Closure, ContentHash, DepKey, DepStore, Dot, Dvv, Label, LabelStore, Lww, Note, NoteId,
+    NoteStore, OrSet, Priority, Stamp, Tombstone, WallClock, Workflow, WriteStamp, sha256_bytes,
 };
+
+use crate::core::state::LabelState;
 
 // =============================================================================
 // Wire format types (intermediate representation for JSON)
@@ -22,6 +24,15 @@ use crate::core::{
 
 /// Write stamp as array: [wall_ms, counter]
 type WireStamp = (u64, u32);
+
+/// Field stamp as array: [(wall_ms, counter), actor]
+type WireFieldStamp = (WireStamp, String);
+
+#[derive(Serialize, Deserialize)]
+struct WireLabelState {
+    entries: BTreeMap<Label, BTreeSet<Dot>>,
+    cc: Dvv,
+}
 
 /// Bead wire format with sparse _v
 #[derive(Serialize, Deserialize)]
@@ -43,7 +54,7 @@ struct WireBead {
     priority: u8,
     #[serde(rename = "type")]
     bead_type: String,
-    labels: Vec<String>,
+    labels: WireLabelState,
     #[serde(skip_serializing_if = "Option::is_none")]
     external_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,10 +81,6 @@ struct WireBead {
     #[serde(skip_serializing_if = "Option::is_none")]
     assignee_expires: Option<u64>,
 
-    // Notes
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    notes: Vec<WireNote>,
-
     // Version metadata (sparse)
     #[serde(rename = "_at")]
     at: WireStamp,
@@ -92,6 +99,12 @@ struct WireNote {
 }
 
 #[derive(Serialize, Deserialize)]
+struct WireNoteEntry {
+    bead_id: String,
+    note: WireNote,
+}
+
+#[derive(Serialize, Deserialize)]
 struct WireTombstone {
     id: String,
     deleted_at: WireStamp,
@@ -105,16 +118,23 @@ struct WireTombstone {
 }
 
 #[derive(Serialize, Deserialize)]
-struct WireDep {
-    from: String,
-    to: String,
-    kind: String,
-    created_at: WireStamp,
-    created_by: String,
+struct WireDepStore {
+    cc: Dvv,
+    entries: Vec<WireDepEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    deleted_at: Option<WireStamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    deleted_by: Option<String>,
+    stamp: Option<WireFieldStamp>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireDepEntry {
+    key: DepKey,
+    dots: Vec<Dot>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ParsedWireBead {
+    bead: Bead,
+    label_state: LabelState,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -130,6 +150,8 @@ struct WireMeta {
     tombstones_sha256: Option<ContentHash>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deps_sha256: Option<ContentHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes_sha256: Option<ContentHash>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,14 +159,21 @@ pub struct StoreChecksums {
     pub state: ContentHash,
     pub tombstones: ContentHash,
     pub deps: ContentHash,
+    pub notes: Option<ContentHash>,
 }
 
 impl StoreChecksums {
-    pub fn from_bytes(state_bytes: &[u8], tombs_bytes: &[u8], deps_bytes: &[u8]) -> Self {
+    pub fn from_bytes(
+        state_bytes: &[u8],
+        tombs_bytes: &[u8],
+        deps_bytes: &[u8],
+        notes_bytes: Option<&[u8]>,
+    ) -> Self {
         Self {
             state: ContentHash::from_bytes(sha256_bytes(state_bytes).0),
             tombstones: ContentHash::from_bytes(sha256_bytes(tombs_bytes).0),
             deps: ContentHash::from_bytes(sha256_bytes(deps_bytes).0),
+            notes: notes_bytes.map(|bytes| ContentHash::from_bytes(sha256_bytes(bytes).0)),
         }
     }
 }
@@ -160,11 +189,15 @@ pub fn serialize_state(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
     let mut lines = Vec::new();
 
     // Sort by ID
-    let mut beads: Vec<_> = state.iter_live().collect();
-    beads.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let mut ids: Vec<_> = state.iter_live().map(|(id, _)| id.clone()).collect();
+    ids.sort();
 
-    for (_, bead) in beads {
-        let wire = bead_to_wire(bead);
+    for id in ids {
+        let Some(view) = state.bead_view(&id) else {
+            continue;
+        };
+        let label_state = state.label_store().state(&id);
+        let wire = bead_to_wire(&view, label_state);
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
@@ -210,20 +243,63 @@ pub fn serialize_tombstones(state: &CanonicalState) -> Result<Vec<u8>, WireError
 
 /// Serialize deps to deps.jsonl bytes.
 pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
+    let dep_store = state.dep_store();
+    let mut entries = Vec::new();
+
+    for key in dep_store.values() {
+        let mut dots: Vec<Dot> = dep_store
+            .dots_for(key)
+            .map(|dots| dots.iter().copied().collect())
+            .unwrap_or_default();
+        dots.sort();
+        entries.push(WireDepEntry {
+            key: key.clone(),
+            dots,
+        });
+    }
+
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let wire = WireDepStore {
+        cc: dep_store.cc().clone(),
+        entries,
+        stamp: dep_store.stamp().map(stamp_to_field),
+    };
+
+    let json = serde_json::to_string(&wire)?;
+    let mut output = json;
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    Ok(output.into_bytes())
+}
+
+/// Serialize notes to notes.jsonl bytes.
+pub fn serialize_notes(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
+    let mut entries = Vec::new();
+
+    for (bead_id, notes) in state.note_store().iter() {
+        for note in notes.values() {
+            entries.push((bead_id.clone(), note.clone()));
+        }
+    }
+
+    entries.sort_by(|(a_id, a_note), (b_id, b_note)| {
+        a_id.cmp(b_id)
+            .then_with(|| a_note.at.cmp(&b_note.at))
+            .then_with(|| a_note.id.cmp(&b_note.id))
+    });
+
     let mut lines = Vec::new();
-
-    let mut deps: Vec<_> = state.iter_deps().collect();
-    deps.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-    for (key, edge) in deps {
-        let wire = WireDep {
-            from: key.from().as_str().to_string(),
-            to: key.to().as_str().to_string(),
-            kind: dep_kind_to_str(key.kind()),
-            created_at: stamp_to_wire(&edge.created.at),
-            created_by: edge.created.by.as_str().to_string(),
-            deleted_at: edge.deleted_stamp().map(|s| stamp_to_wire(&s.at)),
-            deleted_by: edge.deleted_stamp().map(|s| s.by.as_str().to_string()),
+    for (bead_id, note) in entries {
+        let wire = WireNoteEntry {
+            bead_id: bead_id.as_str().to_string(),
+            note: WireNote {
+                id: note.id.as_str().to_string(),
+                content: note.content,
+                author: note.author.as_str().to_string(),
+                at: (note.at.wall_ms, note.at.counter),
+            },
         };
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
@@ -249,6 +325,7 @@ pub fn serialize_meta(
         state_sha256: Some(checksums.state),
         tombstones_sha256: Some(checksums.tombstones),
         deps_sha256: Some(checksums.deps),
+        notes_sha256: checksums.notes,
     };
     let json = serde_json::to_string_pretty(&meta)?;
     Ok(json.into_bytes())
@@ -260,6 +337,13 @@ pub fn serialize_meta(
 
 /// Parse state.jsonl bytes into beads.
 pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
+    Ok(parse_state_full(bytes)?
+        .into_iter()
+        .map(|parsed| parsed.bead)
+        .collect())
+}
+
+fn parse_state_full(bytes: &[u8]) -> Result<Vec<ParsedWireBead>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut beads = Vec::new();
 
@@ -268,8 +352,8 @@ pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
             continue;
         }
         let wire: WireBead = serde_json::from_str(line)?;
-        let bead = wire_to_bead(wire)?;
-        beads.push(bead);
+        let parsed = wire_to_parts(wire)?;
+        beads.push(parsed);
     }
 
     Ok(beads)
@@ -322,63 +406,74 @@ pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
 }
 
 /// Parse deps.jsonl bytes.
-pub fn parse_deps(bytes: &[u8]) -> Result<Vec<(DepKey, DepEdge)>, WireError> {
+fn parse_deps(bytes: &[u8]) -> Result<DepStore, WireError> {
     let content = parse_utf8(bytes)?;
-    let mut deps = Vec::new();
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(DepStore::new());
+    }
+
+    let wire: WireDepStore = serde_json::from_str(trimmed)?;
+    wire_dep_store_to_state(wire)
+}
+
+/// Parse notes.jsonl bytes.
+pub fn parse_notes(bytes: &[u8]) -> Result<Vec<(BeadId, Note)>, WireError> {
+    let content = parse_utf8(bytes)?;
+    let mut notes = Vec::new();
 
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        let wire: WireDep = serde_json::from_str(line)?;
-        let key = DepKey::new(
-            BeadId::parse(&wire.from).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            BeadId::parse(&wire.to).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            str_to_dep_kind(&wire.kind)?,
-        )
-        .map_err(|e| WireError::InvalidValue(e.reason))?;
-        let created = Stamp::new(
-            wire_to_stamp(wire.created_at),
-            ActorId::new(wire.created_by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
+        let wire: WireNoteEntry = serde_json::from_str(line)?;
+        let bead_id =
+            BeadId::parse(&wire.bead_id).map_err(|e| WireError::InvalidValue(e.to_string()))?;
+        let note_id =
+            NoteId::new(wire.note.id).map_err(|e| WireError::InvalidValue(e.to_string()))?;
+        let author =
+            ActorId::new(wire.note.author).map_err(|e| WireError::InvalidValue(e.to_string()))?;
+        let note = Note::new(
+            note_id,
+            wire.note.content,
+            author,
+            wire_to_stamp(wire.note.at),
         );
-        let deleted = match (wire.deleted_at, wire.deleted_by) {
-            (Some(at), Some(by)) => Some(Stamp::new(
-                wire_to_stamp(at),
-                ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            )),
-            _ => None,
-        };
-
-        let mut edge = DepEdge::new(created);
-        if let Some(del) = deleted {
-            edge.delete(del);
-        }
-        deps.push((key, edge));
+        notes.push((bead_id, note));
     }
 
-    Ok(deps)
+    Ok(notes)
 }
 
-/// Parse legacy git JSONL files into a canonical state.
+/// Parse git JSONL files into a canonical state.
 pub fn parse_legacy_state(
     state_bytes: &[u8],
     tombstones_bytes: &[u8],
     deps_bytes: &[u8],
+    notes_bytes: &[u8],
 ) -> Result<CanonicalState, WireError> {
-    let beads = parse_state(state_bytes)?;
+    let beads = parse_state_full(state_bytes)?;
     let tombstones = parse_tombstones(tombstones_bytes)?;
-    let deps = parse_deps(deps_bytes)?;
+    let dep_store = parse_deps(deps_bytes)?;
+    let notes = parse_notes(notes_bytes)?;
 
     let mut state = CanonicalState::new();
-    for bead in beads {
-        state.insert_live(bead);
+    let mut label_store = LabelStore::new();
+    let mut note_store = NoteStore::new();
+    for parsed in beads {
+        let bead_id = parsed.bead.core.id.clone();
+        state.insert_live(parsed.bead);
+        label_store.insert_state(bead_id.clone(), parsed.label_state);
     }
+    for (bead_id, note) in notes {
+        note_store.insert(bead_id, note);
+    }
+    state.set_label_store(label_store);
+    state.set_note_store(note_store);
     for tombstone in tombstones {
         state.insert_tombstone(tombstone);
     }
-    for (key, dep) in deps {
-        state.insert_dep(key, dep);
-    }
+    state.set_dep_store(dep_store);
     state.rebuild_dep_indexes();
     Ok(state)
 }
@@ -395,12 +490,18 @@ pub struct ParsedMeta {
 pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
     let content = parse_utf8(bytes)?;
     let meta: WireMeta = serde_json::from_str(content)?;
-    let checksums = match (meta.state_sha256, meta.tombstones_sha256, meta.deps_sha256) {
-        (None, None, None) => None,
-        (Some(state), Some(tombstones), Some(deps)) => Some(StoreChecksums {
+    let checksums = match (
+        meta.state_sha256,
+        meta.tombstones_sha256,
+        meta.deps_sha256,
+        meta.notes_sha256,
+    ) {
+        (None, None, None, None) => None,
+        (Some(state), Some(tombstones), Some(deps), notes) => Some(StoreChecksums {
             state,
             tombstones,
             deps,
+            notes,
         }),
         _ => {
             return Err(WireError::InvalidValue(
@@ -421,8 +522,10 @@ pub fn verify_store_checksums(
     state_bytes: &[u8],
     tombs_bytes: &[u8],
     deps_bytes: &[u8],
+    notes_bytes: &[u8],
 ) -> Result<(), WireError> {
-    let actual = StoreChecksums::from_bytes(state_bytes, tombs_bytes, deps_bytes);
+    let actual =
+        StoreChecksums::from_bytes(state_bytes, tombs_bytes, deps_bytes, Some(notes_bytes));
     if actual.state != expected.state {
         return Err(WireError::ChecksumMismatch {
             blob: "state.jsonl",
@@ -444,6 +547,16 @@ pub fn verify_store_checksums(
             actual: actual.deps,
         });
     }
+    if let Some(expected_notes) = expected.notes {
+        let actual_notes = actual.notes.expect("notes checksum missing");
+        if actual_notes != expected_notes {
+            return Err(WireError::ChecksumMismatch {
+                blob: "notes.jsonl",
+                expected: expected_notes,
+                actual: actual_notes,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -463,18 +576,49 @@ fn wire_to_stamp(wire: WireStamp) -> WriteStamp {
     WriteStamp::new(wire.0, wire.1)
 }
 
-fn dep_kind_to_str(kind: DepKind) -> String {
-    kind.as_str().to_string()
+fn stamp_to_field(stamp: &Stamp) -> WireFieldStamp {
+    (stamp_to_wire(&stamp.at), stamp.by.as_str().to_string())
 }
 
-fn str_to_dep_kind(s: &str) -> Result<DepKind, WireError> {
-    match s {
-        "blocks" => Ok(DepKind::Blocks),
-        "parent" => Ok(DepKind::Parent),
-        "related" => Ok(DepKind::Related),
-        "discovered_from" => Ok(DepKind::DiscoveredFrom),
-        _ => Err(WireError::InvalidValue(format!("unknown dep kind: {}", s))),
+fn wire_field_to_stamp(field: WireFieldStamp) -> Result<Stamp, WireError> {
+    let (at, by) = field;
+    Ok(Stamp::new(
+        wire_to_stamp(at),
+        ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
+    ))
+}
+
+fn label_state_to_wire(state: Option<&LabelState>) -> WireLabelState {
+    let mut entries: BTreeMap<Label, BTreeSet<Dot>> = BTreeMap::new();
+    let cc = state.map(|state| state.cc().clone()).unwrap_or_default();
+
+    if let Some(state) = state {
+        for label in state.values() {
+            if let Some(dots) = state.dots_for(label) {
+                entries.insert(label.clone(), dots.clone());
+            }
+        }
     }
+
+    WireLabelState { entries, cc }
+}
+
+fn wire_dep_store_to_state(wire: WireDepStore) -> Result<DepStore, WireError> {
+    let mut entries: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
+    for entry in wire.entries {
+        let mut dots = BTreeSet::new();
+        for dot in entry.dots {
+            dots.insert(dot);
+        }
+        entries.insert(entry.key, dots);
+    }
+
+    let stamp = match wire.stamp {
+        Some(stamp) => Some(wire_field_to_stamp(stamp)?),
+        None => None,
+    };
+    let set = OrSet::from_parts(entries, wire.cc);
+    Ok(DepStore::from_parts(set, stamp))
 }
 
 fn str_to_bead_type(s: &str) -> Result<BeadType, WireError> {
@@ -488,10 +632,11 @@ fn str_to_bead_type(s: &str) -> Result<BeadType, WireError> {
     }
 }
 
-/// Convert Bead to wire format with sparse _v.
-fn bead_to_wire(bead: &Bead) -> WireBead {
+/// Convert Bead view to wire format with sparse _v.
+fn bead_to_wire(view: &BeadView, label_state: Option<&LabelState>) -> WireBead {
+    let bead = &view.bead;
     // Find bead-level stamp (max of all field stamps)
-    let bead_stamp = bead.updated_stamp();
+    let bead_stamp = view.updated_stamp().clone();
 
     // Build sparse _v: only include fields with different stamps
     let mut v_map: BTreeMap<String, (WireStamp, String)> = BTreeMap::new();
@@ -516,7 +661,17 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
     check_field!(bead.fields.acceptance_criteria, "acceptance_criteria");
     check_field!(bead.fields.priority, "priority");
     check_field!(bead.fields.bead_type, "type");
-    check_field!(bead.fields.labels, "labels");
+    if let Some(label_stamp) = view.label_stamp.as_ref()
+        && label_stamp != &bead_stamp
+    {
+        v_map.insert(
+            "labels".to_string(),
+            (
+                stamp_to_wire(&label_stamp.at),
+                label_stamp.by.as_str().to_string(),
+            ),
+        );
+    }
     check_field!(bead.fields.external_ref, "external_ref");
     check_field!(bead.fields.source_repo, "source_repo");
     check_field!(bead.fields.estimated_minutes, "estimated_minutes");
@@ -549,18 +704,7 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
             (None, None, None)
         };
 
-    // Convert notes
-    let notes: Vec<WireNote> = bead
-        .notes
-        .sorted()
-        .iter()
-        .map(|n| WireNote {
-            id: n.id.as_str().to_string(),
-            content: n.content.clone(),
-            author: n.author.as_str().to_string(),
-            at: (n.at.wall_ms, n.at.counter),
-        })
-        .collect();
+    let labels = label_state_to_wire(label_state);
 
     WireBead {
         id: bead.core.id.as_str().to_string(),
@@ -573,13 +717,7 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
         acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
         priority: bead.fields.priority.value.value(),
         bead_type: bead.fields.bead_type.value.as_str().to_string(),
-        labels: bead
-            .fields
-            .labels
-            .value
-            .iter()
-            .map(|l| l.as_str().to_string())
-            .collect(),
+        labels,
         external_ref: bead.fields.external_ref.value.clone(),
         source_repo: bead.fields.source_repo.value.clone(),
         estimated_minutes: bead.fields.estimated_minutes.value,
@@ -591,15 +729,13 @@ fn bead_to_wire(bead: &Bead) -> WireBead {
         assignee,
         assignee_at,
         assignee_expires,
-        notes,
         at: stamp_to_wire(&bead_stamp.at),
         by: bead_stamp.by.as_str().to_string(),
         v: if v_map.is_empty() { None } else { Some(v_map) },
     }
 }
 
-/// Convert wire format to Bead, handling sparse _v.
-fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
+fn wire_to_parts(wire: WireBead) -> Result<ParsedWireBead, WireError> {
     // Default stamp is bead-level
     let default_stamp = Stamp::new(
         wire_to_stamp(wire.at),
@@ -618,6 +754,8 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
         }
         Ok(default_stamp.clone())
     };
+
+    let label_stamp = get_stamp("labels")?;
 
     // Parse core
     let core = BeadCore::new(
@@ -651,6 +789,11 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
         }
     };
 
+    let label_state = {
+        let set = OrSet::from_parts(wire.labels.entries, wire.labels.cc);
+        LabelState::from_parts(set, Some(label_stamp.clone()))
+    };
+
     // Build fields
     let fields = BeadFields {
         title: Lww::new(wire.title, get_stamp("title")?),
@@ -662,14 +805,6 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
             get_stamp("priority")?,
         ),
         bead_type: Lww::new(str_to_bead_type(&wire.bead_type)?, get_stamp("type")?),
-        labels: Lww::new(
-            wire.labels
-                .into_iter()
-                .map(Label::parse)
-                .collect::<std::result::Result<Labels, _>>()
-                .map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            get_stamp("labels")?,
-        ),
         external_ref: Lww::new(wire.external_ref, get_stamp("external_ref")?),
         source_repo: Lww::new(wire.source_repo, get_stamp("source_repo")?),
         estimated_minutes: Lww::new(wire.estimated_minutes, get_stamp("estimated_minutes")?),
@@ -677,28 +812,17 @@ fn wire_to_bead(wire: WireBead) -> Result<Bead, WireError> {
         claim: Lww::new(claim_value, get_stamp("claim")?),
     };
 
-    let mut bead = Bead::new(core, fields);
+    let bead = Bead::new(core, fields);
 
-    // Parse notes
-    for wire_note in wire.notes {
-        use crate::core::Note;
-        let note = Note::new(
-            crate::core::NoteId::new(wire_note.id)
-                .map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            wire_note.content,
-            ActorId::new(wire_note.author).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            wire_to_stamp(wire_note.at),
-        );
-        bead.notes.insert(note);
-    }
-
-    Ok(bead)
+    Ok(ParsedWireBead { bead, label_state })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{DepKind, ReplicaId};
     use proptest::prelude::*;
+    use uuid::Uuid;
 
     fn actor_id(actor: &str) -> ActorId {
         ActorId::new(actor).unwrap_or_else(|e| panic!("invalid actor id {actor}: {e}"))
@@ -717,7 +841,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -725,6 +848,13 @@ mod tests {
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         Bead::new(core, fields)
+    }
+
+    fn dot(replica_byte: u8, counter: u64) -> Dot {
+        Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([replica_byte; 16])),
+            counter,
+        }
     }
 
     fn base58_id_strategy() -> impl Strategy<Value = String> {
@@ -745,31 +875,29 @@ mod tests {
             .prop_map(|(id, stamp)| Tombstone::new(bead_id(&id), stamp, None))
     }
 
-    fn dep_strategy() -> impl Strategy<Value = (DepKey, DepEdge)> {
+    fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
         let kind = prop_oneof![
             Just(DepKind::Blocks),
             Just(DepKind::Parent),
             Just(DepKind::Related),
             Just(DepKind::DiscoveredFrom),
         ];
+        let dot_strategy =
+            (0u8..=255, 0u64..10_000).prop_map(|(replica, counter)| dot(replica, counter));
         (
             base58_id_strategy(),
             base58_id_strategy(),
             kind,
+            dot_strategy,
             stamp_strategy(),
-            prop::option::of(stamp_strategy()),
         )
             .prop_filter("deps cannot be self-referential", |(from, to, _, _, _)| {
                 from != to
             })
-            .prop_map(|(from, to, kind, created, deleted)| {
+            .prop_map(|(from, to, kind, dot, stamp)| {
                 let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
                     .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
-                let mut edge = DepEdge::new(created.clone());
-                if let Some(deleted) = deleted {
-                    edge.delete(deleted);
-                }
-                (key, edge)
+                (key, dot, stamp)
             })
     }
 
@@ -779,10 +907,12 @@ mod tests {
         let bytes = serialize_state(&state).unwrap();
         let beads = parse_state(&bytes).unwrap();
         assert!(beads.is_empty());
+        let notes = serialize_notes(&state).unwrap();
+        assert!(notes.is_empty());
     }
 
     #[test]
-    fn parse_legacy_state_roundtrip() {
+    fn parse_state_roundtrip() {
         let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
         let mut state = CanonicalState::new();
         let bead = make_bead(&bead_id("bd-legacy"), &stamp);
@@ -798,16 +928,297 @@ mod tests {
             DepKind::Blocks,
         )
         .unwrap();
-        state.insert_dep(dep_key, DepEdge::new(stamp.clone()));
+        state.apply_dep_add(
+            dep_key,
+            dot(2, 1),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+
+        let note_id = NoteId::new("note-legacy").unwrap();
+        let note = Note::new(
+            note_id,
+            "legacy note".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(2, 0),
+        );
+        state.insert_note(bead_id("bd-legacy"), note);
 
         let state_bytes = serialize_state(&state).unwrap();
         let tomb_bytes = serialize_tombstones(&state).unwrap();
         let deps_bytes = serialize_deps(&state).unwrap();
+        let notes_bytes = serialize_notes(&state).unwrap();
 
-        let parsed = parse_legacy_state(&state_bytes, &tomb_bytes, &deps_bytes).unwrap();
+        let parsed =
+            parse_legacy_state(&state_bytes, &tomb_bytes, &deps_bytes, &notes_bytes).unwrap();
         assert_eq!(serialize_state(&parsed).unwrap(), state_bytes);
         assert_eq!(serialize_tombstones(&parsed).unwrap(), tomb_bytes);
         assert_eq!(serialize_deps(&parsed).unwrap(), deps_bytes);
+        assert_eq!(serialize_notes(&parsed).unwrap(), notes_bytes);
+    }
+
+    #[test]
+    fn roundtrip_orset_metadata_and_notes() {
+        let stamp = Stamp::new(WriteStamp::new(5, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-orset");
+        state.insert(make_bead(&id, &stamp)).unwrap();
+
+        let label = Label::parse("urgent").unwrap();
+        let dot = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        state.apply_label_add(
+            id.clone(),
+            label.clone(),
+            dot,
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let ctx = state.label_dvv(&id, &label);
+        state.apply_label_remove(id.clone(), &label, &ctx, stamp.clone());
+
+        let dep_key = DepKey::new(id.clone(), bead_id("bd-target"), DepKind::Blocks).unwrap();
+        let dep_dot = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([2u8; 16])),
+            counter: 2,
+        };
+        state.apply_dep_add(
+            dep_key.clone(),
+            dep_dot,
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let dep_ctx = state.dep_dvv(&dep_key);
+        state.apply_dep_remove(&dep_key, &dep_ctx, stamp.clone());
+
+        let note_id = NoteId::new("note-orset").unwrap();
+        let note = Note::new(
+            note_id,
+            "orset note".to_string(),
+            actor_id("bob"),
+            WriteStamp::new(6, 0),
+        );
+        state.insert_note(id.clone(), note);
+
+        let state_bytes = serialize_state(&state).unwrap();
+        let tomb_bytes = serialize_tombstones(&state).unwrap();
+        let deps_bytes = serialize_deps(&state).unwrap();
+        let notes_bytes = serialize_notes(&state).unwrap();
+
+        let parsed =
+            parse_legacy_state(&state_bytes, &tomb_bytes, &deps_bytes, &notes_bytes).unwrap();
+        assert_eq!(serialize_state(&parsed).unwrap(), state_bytes);
+        assert_eq!(serialize_deps(&parsed).unwrap(), deps_bytes);
+        assert_eq!(serialize_notes(&parsed).unwrap(), notes_bytes);
+    }
+
+    #[test]
+    fn roundtrip_orset_metadata_preserves_dots_and_context() {
+        let stamp = Stamp::new(WriteStamp::new(10, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-orset-meta");
+        state.insert(make_bead(&id, &stamp)).unwrap();
+
+        let label_a = Label::parse("urgent").unwrap();
+        let label_b = Label::parse("backend").unwrap();
+        state.apply_label_add(
+            id.clone(),
+            label_a.clone(),
+            dot(1, 1),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state.apply_label_add(
+            id.clone(),
+            label_b.clone(),
+            dot(2, 2),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let label_ctx = state.label_dvv(&id, &label_a);
+        state.apply_label_remove(id.clone(), &label_a, &label_ctx, stamp.clone());
+
+        let dep_key_a = DepKey::new(id.clone(), bead_id("bd-target-a"), DepKind::Blocks).unwrap();
+        let dep_key_b = DepKey::new(id.clone(), bead_id("bd-target-b"), DepKind::Related).unwrap();
+        state.apply_dep_add(
+            dep_key_a.clone(),
+            dot(3, 3),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state.apply_dep_add(
+            dep_key_b.clone(),
+            dot(4, 4),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let dep_ctx = state.dep_dvv(&dep_key_b);
+        state.apply_dep_remove(&dep_key_b, &dep_ctx, stamp.clone());
+
+        let note_id = NoteId::new("note-meta").unwrap();
+        let note = Note::new(
+            note_id,
+            "metadata note".to_string(),
+            actor_id("bob"),
+            WriteStamp::new(11, 0),
+        );
+        state.insert_note(id.clone(), note);
+
+        let state_bytes = serialize_state(&state).unwrap();
+        let tomb_bytes = serialize_tombstones(&state).unwrap();
+        let deps_bytes = serialize_deps(&state).unwrap();
+        let notes_bytes = serialize_notes(&state).unwrap();
+
+        let parsed =
+            parse_legacy_state(&state_bytes, &tomb_bytes, &deps_bytes, &notes_bytes).unwrap();
+
+        let original_labels = state.label_store().state(&id).expect("label state missing");
+        let parsed_labels = parsed
+            .label_store()
+            .state(&id)
+            .expect("label state missing");
+        assert_eq!(original_labels.cc(), parsed_labels.cc());
+        assert_eq!(
+            original_labels.dots_for(&label_a),
+            parsed_labels.dots_for(&label_a)
+        );
+        assert_eq!(
+            original_labels.dots_for(&label_b),
+            parsed_labels.dots_for(&label_b)
+        );
+        assert_eq!(original_labels.stamp(), parsed_labels.stamp());
+
+        let original_deps = state.dep_store();
+        let parsed_deps = parsed.dep_store();
+        assert_eq!(original_deps.cc(), parsed_deps.cc());
+        assert_eq!(
+            original_deps.dots_for(&dep_key_a),
+            parsed_deps.dots_for(&dep_key_a)
+        );
+        assert_eq!(
+            original_deps.dots_for(&dep_key_b),
+            parsed_deps.dots_for(&dep_key_b)
+        );
+        assert_eq!(original_deps.stamp(), parsed_deps.stamp());
+
+        let original_notes = state.notes_for(&id);
+        let parsed_notes = parsed.notes_for(&id);
+        assert_eq!(original_notes, parsed_notes);
+    }
+
+    #[test]
+    fn serialize_orset_is_deterministic_across_insertion_order() {
+        let stamp = Stamp::new(WriteStamp::new(12, 0), actor_id("alice"));
+        let id = bead_id("bd-orset-order");
+
+        let mut state_a = CanonicalState::new();
+        state_a.insert(make_bead(&id, &stamp)).unwrap();
+        let label_a = Label::parse("alpha").unwrap();
+        let label_b = Label::parse("beta").unwrap();
+        state_a.apply_label_add(
+            id.clone(),
+            label_a.clone(),
+            dot(5, 1),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_a.apply_label_add(
+            id.clone(),
+            label_b.clone(),
+            dot(6, 2),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
+        let dep_key_b = DepKey::new(id.clone(), bead_id("bd-order-b"), DepKind::Related).unwrap();
+        state_a.apply_dep_add(
+            dep_key_a.clone(),
+            dot(7, 3),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_a.apply_dep_add(
+            dep_key_b.clone(),
+            dot(8, 4),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        let note_a = Note::new(
+            NoteId::new("note-a").unwrap(),
+            "first".to_string(),
+            actor_id("bob"),
+            WriteStamp::new(13, 0),
+        );
+        let note_b = Note::new(
+            NoteId::new("note-b").unwrap(),
+            "second".to_string(),
+            actor_id("carol"),
+            WriteStamp::new(14, 0),
+        );
+        state_a.insert_note(id.clone(), note_a);
+        state_a.insert_note(id.clone(), note_b);
+
+        let mut state_b = CanonicalState::new();
+        state_b.insert(make_bead(&id, &stamp)).unwrap();
+        state_b.apply_label_add(
+            id.clone(),
+            label_b,
+            dot(6, 2),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_b.apply_label_add(
+            id.clone(),
+            label_a,
+            dot(5, 1),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_b.apply_dep_add(
+            dep_key_b,
+            dot(8, 4),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_b.apply_dep_add(
+            dep_key_a,
+            dot(7, 3),
+            crate::core::Sha256([0; 32]),
+            stamp.clone(),
+        );
+        state_b.insert_note(
+            id.clone(),
+            Note::new(
+                NoteId::new("note-b").unwrap(),
+                "second".to_string(),
+                actor_id("carol"),
+                WriteStamp::new(14, 0),
+            ),
+        );
+        state_b.insert_note(
+            id.clone(),
+            Note::new(
+                NoteId::new("note-a").unwrap(),
+                "first".to_string(),
+                actor_id("bob"),
+                WriteStamp::new(13, 0),
+            ),
+        );
+
+        assert_eq!(
+            serialize_state(&state_a).unwrap(),
+            serialize_state(&state_b).unwrap()
+        );
+        assert_eq!(
+            serialize_deps(&state_a).unwrap(),
+            serialize_deps(&state_b).unwrap()
+        );
+        assert_eq!(
+            serialize_notes(&state_a).unwrap(),
+            serialize_notes(&state_b).unwrap()
+        );
     }
 
     proptest! {
@@ -855,15 +1266,13 @@ mod tests {
         #[test]
         fn roundtrip_deps(deps in prop::collection::vec(dep_strategy(), 0..12)) {
             let mut state = CanonicalState::new();
-            for (key, dep) in deps {
-                state.insert_dep(key, dep);
+            for (key, dot, stamp) in deps {
+                state.apply_dep_add(key, dot, crate::core::Sha256([0; 32]), stamp);
             }
             let bytes = serialize_deps(&state).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
             let parsed = parse_deps(&bytes).unwrap_or_else(|e| panic!("parse_deps failed: {e}"));
             let mut rebuilt = CanonicalState::new();
-            for (key, dep) in parsed {
-                rebuilt.insert_dep(key, dep);
-            }
+            rebuilt.set_dep_store(parsed);
             let bytes2 = serialize_deps(&rebuilt).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
             prop_assert_eq!(bytes, bytes2);
         }
@@ -871,7 +1280,7 @@ mod tests {
         #[test]
         fn roundtrip_meta(root in proptest::option::of(base58_id_strategy()), stamp in proptest::option::of((0u64..10_000, 0u32..5))) {
             let write_stamp = stamp.map(|(wall_ms, counter)| WriteStamp::new(wall_ms, counter));
-            let checksums = StoreChecksums::from_bytes(&[], &[], &[]);
+            let checksums = StoreChecksums::from_bytes(&[], &[], &[], Some(&[]));
             let bytes = serialize_meta(root.as_deref(), write_stamp.as_ref(), &checksums)
                 .unwrap_or_else(|e| panic!("serialize_meta failed: {e}"));
             let parsed = parse_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
@@ -883,10 +1292,11 @@ mod tests {
 
     #[test]
     fn verify_store_checksums_detects_mismatch() {
-        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps");
-        verify_store_checksums(&checksums, b"state", b"tombs", b"deps").unwrap();
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        verify_store_checksums(&checksums, b"state", b"tombs", b"deps", b"notes").unwrap();
 
-        let err = verify_store_checksums(&checksums, b"state-x", b"tombs", b"deps").unwrap_err();
+        let err = verify_store_checksums(&checksums, b"state-x", b"tombs", b"deps", b"notes")
+            .unwrap_err();
         match err {
             WireError::ChecksumMismatch { blob, .. } => {
                 assert_eq!(blob, "state.jsonl");
