@@ -106,6 +106,70 @@ mod wal_state {
         }
     }
 
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use uuid::Uuid;
+
+        fn dep_key(from: &str, to: &str) -> DepKey {
+            DepKey::new(
+                BeadId::parse(from).unwrap(),
+                BeadId::parse(to).unwrap(),
+                crate::core::DepKind::Blocks,
+            )
+            .unwrap()
+        }
+
+        fn dot(seed: u8) -> Dot {
+            Dot {
+                replica: crate::core::ReplicaId::new(Uuid::from_bytes([seed; 16])),
+                counter: 1,
+            }
+        }
+
+        #[test]
+        fn wal_dep_store_empty_dots_pruned() {
+            let key = dep_key("bd-a", "bd-b");
+            let store = WalDepStore {
+                cc: Dvv::default(),
+                entries: vec![WalDepEntry {
+                    key: key.clone(),
+                    dots: Vec::new(),
+                }],
+                stamp: None,
+            };
+
+            let dep_store = store.into_dep_store();
+            assert!(!dep_store.contains(&key));
+            assert!(dep_store.is_empty());
+        }
+
+        #[test]
+        fn wal_dep_store_mixed_dots_preserves_non_empty() {
+            let empty_key = dep_key("bd-a", "bd-b");
+            let filled_key = dep_key("bd-a", "bd-c");
+            let store = WalDepStore {
+                cc: Dvv::default(),
+                entries: vec![
+                    WalDepEntry {
+                        key: empty_key.clone(),
+                        dots: Vec::new(),
+                    },
+                    WalDepEntry {
+                        key: filled_key.clone(),
+                        dots: vec![dot(1)],
+                    },
+                ],
+                stamp: None,
+            };
+
+            let dep_store = store.into_dep_store();
+            assert!(!dep_store.contains(&empty_key));
+            assert!(dep_store.contains(&filled_key));
+            assert_eq!(dep_store.len(), 1);
+        }
+    }
+
     #[derive(Deserialize)]
     struct LegacyWalStateVec {
         live: Vec<Bead>,
