@@ -437,6 +437,9 @@ We must persist OR-Set metadata (dots + cc) and NoteStore globally.
 {"from":"bd-a","to":"bd-b","kind":"blocks","dots":[[replica,counter],...]}
 ```
 
+Ordering: dep entries are sorted by DepKey (from, to, kind), with DepKind ordered
+lexicographically by `DepKind::as_str` (`blocks` < `discovered_from` < `parent` < `related`).
+
 `notes.jsonl` note record:
 
 ```
