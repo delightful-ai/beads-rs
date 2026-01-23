@@ -36,6 +36,8 @@ pub fn sample_bead_patch(seed: u8) -> WireBeadPatch {
     patch.external_ref = WirePatch::Set(format!("ref-{seed:02x}"));
     patch.estimated_minutes = WirePatch::Set(45);
     patch.status = Some(WorkflowStatus::Open);
+    patch.closed_reason = WirePatch::Clear;
+    patch.closed_on_branch = WirePatch::Clear;
     patch.assignee = WirePatch::Set(actor_id(seed.wrapping_add(1)));
     patch.assignee_expires = WirePatch::Set(WallClock(20_000 + seed as u64));
     patch
