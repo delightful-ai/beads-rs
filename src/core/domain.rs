@@ -5,6 +5,7 @@
 //! Priority: 0-4 (0 = critical)
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 use super::error::{CoreError, InvalidDepKind, RangeError};
 
@@ -40,7 +41,7 @@ impl BeadType {
 }
 
 /// Dependency relationship kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DepKind {
     Blocks,
@@ -79,6 +80,18 @@ impl DepKind {
     /// - `Related` and `DiscoveredFrom` are informational links and can be cyclic.
     pub fn requires_dag(&self) -> bool {
         matches!(self, Self::Blocks | Self::Parent)
+    }
+}
+
+impl Ord for DepKind {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl PartialOrd for DepKind {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -168,6 +181,26 @@ mod tests {
     fn dep_kind_parse_rejects_unknown() {
         let err = DepKind::parse("unknown").unwrap_err();
         assert!(err.to_string().contains("dependency kind"));
+    }
+
+    #[test]
+    fn dep_kind_ordering_is_lexical() {
+        let mut kinds = vec![
+            DepKind::Related,
+            DepKind::Blocks,
+            DepKind::Parent,
+            DepKind::DiscoveredFrom,
+        ];
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec![
+                DepKind::Blocks,
+                DepKind::DiscoveredFrom,
+                DepKind::Parent,
+                DepKind::Related
+            ]
+        );
     }
 
     #[test]
