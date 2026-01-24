@@ -1369,9 +1369,21 @@ mod tests {
         let wire_out: WireDepStore =
             serde_json::from_slice(&serialized).expect("deps.jsonl should deserialize");
         let keys: Vec<DepKey> = wire_out.entries.iter().map(|entry| entry.key.clone()).collect();
-        assert_eq!(keys, vec![key_blocks.clone(), key_parent.clone()]);
-        assert_eq!(wire_out.entries[0].dots, vec![dot(8, 3)]);
-        assert_eq!(wire_out.entries[1].dots, vec![dot(9, 1), dot(9, 2)]);
+        let mut expected_keys = vec![key_parent.clone(), key_blocks.clone()];
+        expected_keys.sort();
+        assert_eq!(keys, expected_keys);
+        let blocks_entry = wire_out
+            .entries
+            .iter()
+            .find(|entry| entry.key == key_blocks)
+            .expect("blocks entry present");
+        let parent_entry = wire_out
+            .entries
+            .iter()
+            .find(|entry| entry.key == key_parent)
+            .expect("parent entry present");
+        assert_eq!(blocks_entry.dots, vec![dot(8, 3)]);
+        assert_eq!(parent_entry.dots, vec![dot(9, 1), dot(9, 2)]);
     }
 
     proptest! {
