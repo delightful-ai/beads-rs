@@ -4,8 +4,9 @@ use beads_rs::core::NoteAppendV1;
 use beads_rs::{
     ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, ReplicaId,
     TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
-    apply_event, sha256_bytes,
+    WireLabelAddV1, apply_event, sha256_bytes,
 };
+use beads_rs::core::Label;
 
 use crate::fixtures::apply_harness::{
     ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
@@ -120,6 +121,121 @@ fn lww_merge_ordering_is_deterministic() {
         .to_string();
     assert_eq!(title_a, title_b);
     assert_eq!(title_a, "title-b");
+}
+
+#[test]
+fn label_dot_collision_is_deterministic() {
+    let bead = bead_id(1);
+    let mut state_a = CanonicalState::new();
+    apply_event(&mut state_a, &sample_event_body(1)).expect("apply base");
+
+    let mut state_b = CanonicalState::new();
+    apply_event(&mut state_b, &sample_event_body(1)).expect("apply base");
+
+    let label_low = Label::parse("alpha").expect("label");
+    let label_high = Label::parse("beta").expect("label");
+    let dot = WireDotV1 {
+        replica: ReplicaId::new(Uuid::from_bytes([4u8; 16])),
+        counter: 1,
+    };
+
+    let mut delta_low = TxnDeltaV1::new();
+    delta_low
+        .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+            bead_id: bead.clone(),
+            label: label_low.clone(),
+            dot,
+        }))
+        .expect("unique label add");
+    let event_low = event_body_with_delta(10, delta_low);
+
+    let mut delta_high = TxnDeltaV1::new();
+    delta_high
+        .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+            bead_id: bead.clone(),
+            label: label_high.clone(),
+            dot,
+        }))
+        .expect("unique label add");
+    let event_high = event_body_with_delta(11, delta_high);
+
+    apply_event(&mut state_a, &event_low).expect("apply low");
+    apply_event(&mut state_a, &event_high).expect("apply high");
+
+    apply_event(&mut state_b, &event_high).expect("apply high");
+    apply_event(&mut state_b, &event_low).expect("apply low");
+
+    let labels_a = state_a.labels_for(&bead);
+    let labels_b = state_b.labels_for(&bead);
+    assert_eq!(labels_a, labels_b);
+    assert_eq!(labels_a.len(), 1);
+    assert!(labels_a.contains(label_high.as_str()));
+    assert_eq!(state_a.label_stamp(&bead), state_b.label_stamp(&bead));
+}
+
+#[test]
+fn dep_dot_collision_is_deterministic() {
+    let from = bead_id(1);
+    let to_low = bead_id(2);
+    let to_high = bead_id(3);
+
+    let mut state_a = CanonicalState::new();
+    apply_event(&mut state_a, &sample_event_body(1)).expect("apply base from");
+    apply_event(&mut state_a, &sample_event_body(2)).expect("apply base to");
+    apply_event(&mut state_a, &sample_event_body(3)).expect("apply base to");
+
+    let mut state_b = CanonicalState::new();
+    apply_event(&mut state_b, &sample_event_body(1)).expect("apply base from");
+    apply_event(&mut state_b, &sample_event_body(2)).expect("apply base to");
+    apply_event(&mut state_b, &sample_event_body(3)).expect("apply base to");
+
+    let key_low = DepKey::new(from.clone(), to_low.clone(), DepKind::Blocks).expect("dep key");
+    let key_high = DepKey::new(from.clone(), to_high.clone(), DepKind::Related).expect("dep key");
+    let dot = WireDotV1 {
+        replica: ReplicaId::new(Uuid::from_bytes([9u8; 16])),
+        counter: 1,
+    };
+
+    let mut delta_low = TxnDeltaV1::new();
+    delta_low
+        .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+            from: from.clone(),
+            to: to_low.clone(),
+            kind: DepKind::Blocks,
+            dot,
+        }))
+        .expect("unique dep add");
+    let event_low = event_body_with_delta(12, delta_low);
+
+    let mut delta_high = TxnDeltaV1::new();
+    delta_high
+        .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+            from: from.clone(),
+            to: to_high.clone(),
+            kind: DepKind::Related,
+            dot,
+        }))
+        .expect("unique dep add");
+    let event_high = event_body_with_delta(13, delta_high);
+
+    apply_event(&mut state_a, &event_low).expect("apply low");
+    apply_event(&mut state_a, &event_high).expect("apply high");
+
+    apply_event(&mut state_b, &event_high).expect("apply high");
+    apply_event(&mut state_b, &event_low).expect("apply low");
+
+    let deps_a = state_a.deps_from(&from);
+    let deps_b = state_b.deps_from(&from);
+    assert_eq!(deps_a, deps_b);
+    assert_eq!(deps_a.len(), 1);
+    let expected = if key_low > key_high {
+        key_low.clone()
+    } else {
+        key_high.clone()
+    };
+    assert_eq!(deps_a[0], expected);
+    assert_eq!(state_a.deps_to(&to_low).is_empty(), expected == key_high);
+    assert_eq!(state_a.deps_to(&to_high).is_empty(), expected == key_low);
 }
 
 #[test]
