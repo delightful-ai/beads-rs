@@ -70,12 +70,19 @@ impl Dvv {
     }
 
     pub fn merge(&mut self, other: &Self) {
+        self.merge_with_change(other);
+    }
+
+    pub fn merge_with_change(&mut self, other: &Self) -> bool {
+        let mut changed = false;
         for (replica, counter) in &other.max {
             let entry = self.max.entry(*replica).or_insert(0);
             if *counter > *entry {
                 *entry = *counter;
+                changed = true;
             }
         }
+        changed
     }
 }
 
@@ -83,6 +90,7 @@ impl Dvv {
 pub struct OrSetChange<V: Ord + Clone> {
     pub added: BTreeSet<V>,
     pub removed: BTreeSet<V>,
+    changed: bool,
 }
 
 impl<V: Ord + Clone> Default for OrSetChange<V> {
@@ -90,6 +98,7 @@ impl<V: Ord + Clone> Default for OrSetChange<V> {
         Self {
             added: BTreeSet::new(),
             removed: BTreeSet::new(),
+            changed: false,
         }
     }
 }
@@ -99,10 +108,27 @@ impl<V: Ord + Clone> OrSetChange<V> {
         self.added.is_empty() && self.removed.is_empty()
     }
 
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
     fn from_diff(before: BTreeSet<V>, after: BTreeSet<V>) -> Self {
+        Self::from_diff_with_change(before, after, false)
+    }
+
+    fn from_diff_with_change(
+        before: BTreeSet<V>,
+        after: BTreeSet<V>,
+        internal_changed: bool,
+    ) -> Self {
         let added = after.difference(&before).cloned().collect();
         let removed = before.difference(&after).cloned().collect();
-        Self { added, removed }
+        let changed = internal_changed || !added.is_empty() || !removed.is_empty();
+        Self {
+            added,
+            removed,
+            changed,
+        }
     }
 }
 
@@ -156,28 +182,49 @@ impl<V: OrSetValue> OrSet<V> {
             return OrSetChange::default();
         }
 
+        let existing_owner = self.owner_of_dot(dot);
+        let internal_changed = match existing_owner.as_ref() {
+            None => true,
+            Some(owner) => {
+                if *owner == value {
+                    false
+                } else if collision_cmp(dot, owner, &value) == Ordering::Less {
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+
         self.insert_dot(dot, value);
         self.prune_dominated();
 
         let after = self.membership_set();
-        OrSetChange::from_diff(before, after)
+        OrSetChange::from_diff_with_change(before, after, internal_changed)
     }
 
     pub fn apply_remove(&mut self, value: &V, ctx: &Dvv) -> OrSetChange<V> {
         let before = self.membership_set();
+        let mut internal_changed = false;
 
         if let Some(dots) = self.entries.get_mut(value) {
+            let before_len = dots.len();
             dots.retain(|dot| !ctx.dominates(dot));
+            if dots.len() != before_len {
+                internal_changed = true;
+            }
             if dots.is_empty() {
                 self.entries.remove(value);
             }
         }
 
-        self.cc.merge(ctx);
+        if self.cc.merge_with_change(ctx) {
+            internal_changed = true;
+        }
         self.prune_dominated();
 
         let after = self.membership_set();
-        OrSetChange::from_diff(before, after)
+        OrSetChange::from_diff_with_change(before, after, internal_changed)
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
@@ -201,13 +248,22 @@ impl<V: OrSetValue> OrSet<V> {
 
     pub fn merge(&mut self, other: &Self) -> OrSetChange<V> {
         let before = self.membership_set();
+        let before_cc = self.cc.clone();
+        let before_entries = self.entries.clone();
         *self = Self::join(self, other);
         let after = self.membership_set();
-        OrSetChange::from_diff(before, after)
+        let internal_changed = self.cc != before_cc || self.entries != before_entries;
+        OrSetChange::from_diff_with_change(before, after, internal_changed)
     }
 
     fn membership_set(&self) -> BTreeSet<V> {
         self.entries.keys().cloned().collect()
+    }
+
+    fn owner_of_dot(&self, dot: Dot) -> Option<V> {
+        self.entries
+            .iter()
+            .find_map(|(value, dots)| dots.contains(&dot).then(|| value.clone()))
     }
 
     fn insert_dot(&mut self, dot: Dot, value: V) {
