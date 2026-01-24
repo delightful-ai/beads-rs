@@ -1258,7 +1258,7 @@ mod tests {
     use super::*;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, ContentHash, DepKey,
-        DepKind, Dot, Lww, Priority, ReplicaId, Sha256, Stamp, Tombstone, Workflow,
+        DepKind, Dot, Lww, Priority, ReplicaId, Stamp, Tombstone, Workflow,
     };
     use crate::git::WireError;
     #[cfg(feature = "slow-tests")]
@@ -1420,7 +1420,7 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        after.apply_dep_add(dep_key, dep_dot, Sha256([0; 32]), stamp);
+        after.apply_dep_add(dep_key, dep_dot, stamp);
 
         let diff = compute_diff(&before, &after);
         assert_eq!(diff.created, 0);

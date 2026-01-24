@@ -457,7 +457,7 @@ mod tests {
     use crate::core::orset::Dot;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Label, Lww,
-        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Sha256, Stamp, Workflow,
+        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow,
         WriteStamp,
     };
     use uuid::Uuid;
@@ -514,7 +514,6 @@ mod tests {
             id.clone(),
             label,
             dot(1, 1),
-            Sha256([0; 32]),
             label_stamp.clone(),
         );
 

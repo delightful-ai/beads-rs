@@ -13,7 +13,7 @@ use beads_rs::git::checkpoint::{
 };
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
-    Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Sha256, Stamp, StoreEpoch,
+    Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreEpoch,
     StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
 };
 
@@ -159,7 +159,7 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
         replica: origin,
         counter: 1,
     };
-    state.apply_dep_add(dep_key, dot, Sha256([0; 32]), stamp.clone());
+    state.apply_dep_add(dep_key, dot, stamp.clone());
 
     let mut store_state = StoreState::new();
     *store_state.ensure_namespace(core.clone()) = state.clone();

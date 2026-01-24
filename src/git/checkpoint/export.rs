@@ -439,7 +439,7 @@ mod tests {
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, Dot, ReplicaEntry, ReplicaRole, Seq0, Sha256};
+    use crate::core::{ActorId, CanonicalState, Dot, ReplicaEntry, ReplicaRole, Seq0};
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -583,7 +583,7 @@ mod tests {
         let mut core_state = CanonicalState::new();
         core_state.insert(bead.clone()).unwrap();
         core_state.insert_tombstone(tombstone.clone());
-        core_state.apply_dep_add(dep_key.clone(), dep_dot, Sha256([0; 32]), stamp.clone());
+        core_state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
         let mut state = StoreState::new();
         state.set_namespace_state(namespace.clone(), core_state.clone());
 

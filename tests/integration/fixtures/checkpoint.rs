@@ -10,7 +10,7 @@ use beads_rs::git::checkpoint::{
 };
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, Durable,
-    HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Sha256, Stamp, StoreState, Tombstone,
+    HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreState, Tombstone,
     Watermarks, Workflow, WriteStamp, sha256_bytes,
 };
 
@@ -269,7 +269,7 @@ fn build_state(
         state.insert_tombstone(tombstone);
     }
     for (key, dot, stamp) in deps {
-        state.apply_dep_add(key, dot, Sha256([0; 32]), stamp);
+        state.apply_dep_add(key, dot, stamp);
     }
     state
 }

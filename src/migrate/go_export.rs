@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepKey,
-    DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId, Sha256, Stamp,
+    DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId, Stamp,
     Tombstone, Workflow, WriteStamp,
 };
 use crate::daemon::IpcError;
@@ -267,7 +267,6 @@ pub fn import_go_export(
                     id.clone(),
                     label.clone(),
                     dot,
-                    Sha256([0; 32]),
                     updated_stamp.clone(),
                 );
             }
@@ -332,7 +331,7 @@ pub fn import_go_export(
     }
 
     for (key, dot, stamp) in deps_to_insert {
-        state.apply_dep_add(key, dot, Sha256([0; 32]), stamp);
+        state.apply_dep_add(key, dot, stamp);
         report.deps += 1;
     }
 

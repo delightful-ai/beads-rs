@@ -932,7 +932,6 @@ mod tests {
         state.apply_dep_add(
             dep_key,
             dot(2, 1),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
 
@@ -974,7 +973,6 @@ mod tests {
             id.clone(),
             label.clone(),
             dot,
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         let ctx = state.label_dvv(&id, &label);
@@ -988,7 +986,6 @@ mod tests {
         state.apply_dep_add(
             dep_key.clone(),
             dep_dot,
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         let dep_ctx = state.dep_dvv(&dep_key);
@@ -1028,14 +1025,12 @@ mod tests {
             id.clone(),
             label_a.clone(),
             dot(1, 1),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(2, 2),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         let label_ctx = state.label_dvv(&id, &label_a);
@@ -1046,13 +1041,11 @@ mod tests {
         state.apply_dep_add(
             dep_key_a.clone(),
             dot(3, 3),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_dep_add(
             dep_key_b.clone(),
             dot(4, 4),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         let dep_ctx = state.dep_dvv(&dep_key_b);
@@ -1126,14 +1119,12 @@ mod tests {
             id.clone(),
             label_a.clone(),
             dot(5, 1),
-            crate::core::Sha256([0; 32]),
             label_stamp_a.clone(),
         );
         state_a.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(6, 2),
-            crate::core::Sha256([0; 32]),
             label_stamp_b.clone(),
         );
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
@@ -1141,13 +1132,11 @@ mod tests {
         state_a.apply_dep_add(
             dep_key_a.clone(),
             dot(7, 3),
-            crate::core::Sha256([0; 32]),
             dep_stamp_a.clone(),
         );
         state_a.apply_dep_add(
             dep_key_b.clone(),
             dot(8, 4),
-            crate::core::Sha256([0; 32]),
             dep_stamp_b.clone(),
         );
         let note_a = Note::new(
@@ -1171,26 +1160,22 @@ mod tests {
             id.clone(),
             label_b,
             dot(6, 2),
-            crate::core::Sha256([0; 32]),
             label_stamp_b,
         );
         state_b.apply_label_add(
             id.clone(),
             label_a,
             dot(5, 1),
-            crate::core::Sha256([0; 32]),
             label_stamp_a,
         );
         state_b.apply_dep_add(
             dep_key_b,
             dot(8, 4),
-            crate::core::Sha256([0; 32]),
             dep_stamp_b,
         );
         state_b.apply_dep_add(
             dep_key_a,
             dot(7, 3),
-            crate::core::Sha256([0; 32]),
             dep_stamp_a,
         );
         state_b.insert_note(
@@ -1241,14 +1226,12 @@ mod tests {
             id.clone(),
             label_a.clone(),
             dot(1, 1),
-            crate::core::Sha256([0; 32]),
             stamp_a.clone(),
         );
         state_a.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(2, 1),
-            crate::core::Sha256([0; 32]),
             stamp_b.clone(),
         );
 
@@ -1258,14 +1241,12 @@ mod tests {
             id.clone(),
             label_b,
             dot(2, 1),
-            crate::core::Sha256([0; 32]),
             stamp_b,
         );
         state_b.apply_label_add(
             id.clone(),
             label_a,
             dot(1, 1),
-            crate::core::Sha256([0; 32]),
             stamp_a,
         );
 
@@ -1288,13 +1269,11 @@ mod tests {
         state_a.apply_dep_add(
             key_a.clone(),
             dot(3, 1),
-            crate::core::Sha256([0; 32]),
             stamp_a.clone(),
         );
         state_a.apply_dep_add(
             key_b.clone(),
             dot(4, 1),
-            crate::core::Sha256([0; 32]),
             stamp_b.clone(),
         );
 
@@ -1302,13 +1281,11 @@ mod tests {
         state_b.apply_dep_add(
             key_b,
             dot(4, 1),
-            crate::core::Sha256([0; 32]),
             stamp_b,
         );
         state_b.apply_dep_add(
             key_a,
             dot(3, 1),
-            crate::core::Sha256([0; 32]),
             stamp_a,
         );
 
@@ -1337,25 +1314,21 @@ mod tests {
         state.apply_dep_add(
             key_related,
             dot(1, 4),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_dep_add(
             key_parent,
             dot(1, 3),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_dep_add(
             key_discovered,
             dot(1, 2),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_dep_add(
             key_blocks,
             dot(1, 1),
-            crate::core::Sha256([0; 32]),
             stamp.clone(),
         );
 
@@ -1526,7 +1499,7 @@ mod tests {
         fn roundtrip_deps(deps in prop::collection::vec(dep_strategy(), 0..12)) {
             let mut state = CanonicalState::new();
             for (key, dot, stamp) in deps {
-                state.apply_dep_add(key, dot, crate::core::Sha256([0; 32]), stamp);
+                state.apply_dep_add(key, dot, stamp);
             }
             let bytes = serialize_deps(&state).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
             let parsed = parse_deps(&bytes).unwrap_or_else(|e| panic!("parse_deps failed: {e}"));

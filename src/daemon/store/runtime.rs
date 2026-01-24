@@ -973,7 +973,7 @@ mod tests {
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, DepKey, Dot, ReplicaId, Sha256, StoreState};
+    use crate::core::{ActorId, CanonicalState, DepKey, Dot, ReplicaId, StoreState};
     use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
     use crate::paths;
@@ -1269,7 +1269,7 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        core_state.apply_dep_add(dep_key.clone(), dep_dot, Sha256([0; 32]), stamp.clone());
+        core_state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
         let mut store_state = StoreState::new();
         store_state.set_namespace_state(namespace.clone(), core_state);
         runtime.state = store_state;

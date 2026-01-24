@@ -1187,7 +1187,7 @@ mod tests {
     use super::{dep_cycles_from_state, sort_ready_issues};
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey,
-        DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Sha256, Stamp, Workflow, WriteStamp,
+        DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Stamp, Workflow, WriteStamp,
     };
     use uuid::Uuid;
 
@@ -1318,8 +1318,8 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
             counter: 1,
         };
-        state.apply_dep_add(ab, dep_dot, Sha256([0; 32]), stamp.clone());
-        state.apply_dep_add(ba, dep_dot_2, Sha256([0; 32]), stamp);
+        state.apply_dep_add(ab, dep_dot, stamp.clone());
+        state.apply_dep_add(ba, dep_dot_2, stamp);
 
         let cycles = dep_cycles_from_state(&state);
         assert_eq!(

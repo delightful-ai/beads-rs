@@ -575,7 +575,7 @@ mod tests {
     use super::*;
     use crate::core::{
         ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Limits, Lww,
-        Priority, ReplicaId, Sha256, Stamp, Workflow, WriteStamp,
+        Priority, ReplicaId, Stamp, Workflow, WriteStamp,
     };
     use serde::Serialize;
     use std::collections::BTreeMap;
@@ -668,7 +668,7 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        state.apply_dep_add(dep_key, dep_dot, Sha256([0; 32]), stamp.clone());
+        state.apply_dep_add(dep_key, dep_dot, stamp.clone());
 
         let entry = WalEntry::new(state, None, 7, 42);
         wal.write(&remote, &entry).unwrap();
