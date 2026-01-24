@@ -134,7 +134,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for WirePatch<T> {
 }
 
 /// Wire Dot for OR-Set ops.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct WireDotV1 {
     pub replica: ReplicaId,
     pub counter: u64,
