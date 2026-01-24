@@ -1364,6 +1364,7 @@ mod tests {
         let serialized = serialize_deps(&state).expect("serialize deps");
         let serialized_again = serialize_deps(&state).expect("serialize deps");
         assert_eq!(serialized, serialized_again);
+        assert!(serialized.ends_with(b"\n"), "deps.jsonl should end with newline");
 
         let wire_out: WireDepStore =
             serde_json::from_slice(&serialized).expect("deps.jsonl should deserialize");
