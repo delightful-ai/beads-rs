@@ -21,24 +21,24 @@ fn apply_bead(state: &mut CanonicalState, seed: u8) {
 
 fn dep_keys_from_serialize(state: &CanonicalState) -> BTreeSet<DepKey> {
     let bytes = serialize_deps(state).expect("serialize deps");
+    let value: Value = serde_json::from_slice(&bytes).expect("dep store json");
+    let entries = value
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .expect("dep entries");
+
     let mut keys = BTreeSet::new();
-    for line in bytes.split(|b| *b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_slice(line).expect("dep json line");
-        if value.get("type").and_then(|v| v.as_str()) == Some("cc") {
-            continue;
-        }
-        let from = value
+    for entry in entries {
+        let key_value = entry.get("key").expect("dep key");
+        let from = key_value
             .get("from")
             .and_then(|v| v.as_str())
             .expect("dep from");
-        let to = value
+        let to = key_value
             .get("to")
             .and_then(|v| v.as_str())
             .expect("dep to");
-        let kind = value
+        let kind = key_value
             .get("kind")
             .and_then(|v| v.as_str())
             .expect("dep kind");
@@ -192,17 +192,17 @@ fn dep_kind_ordering_in_serialize_is_canonical() {
     apply_event(&mut state, &event).expect("apply deps");
 
     let bytes = serialize_deps(&state).expect("serialize deps");
+    let value: Value = serde_json::from_slice(&bytes).expect("dep store json");
+    let entries = value
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .expect("dep entries");
+
     let mut kinds = Vec::new();
-    for line in bytes.split(|b| *b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_slice(line).expect("dep json line");
-        if value.get("type").and_then(|v| v.as_str()) == Some("cc") {
-            continue;
-        }
+    for entry in entries {
+        let key_value = entry.get("key").expect("dep key");
         kinds.push(
-            value
+            key_value
                 .get("kind")
                 .and_then(|v| v.as_str())
                 .expect("dep kind")
