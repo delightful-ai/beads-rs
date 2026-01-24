@@ -117,6 +117,16 @@ impl ReplRig {
         let mut nodes = Vec::with_capacity(node_count);
         for idx in 0..node_count {
             let seed = build_node(&root_path, idx, &remote_dir);
+            // Write user config before init, since init autostarts the daemon.
+            write_replication_user_config(
+                &seed.config_dir,
+                &seed.listen_addr,
+                &[],
+                options.dead_ms,
+                options.keepalive_ms,
+                options.wal_segment_max_bytes,
+            )
+            .expect("write initial user replication config");
             let (store_id, replica_id) = bootstrap_replica(&seed, store_id_override);
             if let Some(existing) = resolved_store_id {
                 assert_eq!(
