@@ -4,7 +4,7 @@ use beads_rs::core::NoteAppendV1;
 use beads_rs::{
     ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, ReplicaId,
     TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
-    WireLabelAddV1, apply_event, sha256_bytes,
+    WireLabelAddV1, WireLabelRemoveV1, apply_event, sha256_bytes,
 };
 use beads_rs::core::Label;
 
@@ -12,7 +12,8 @@ use crate::fixtures::apply_harness::{
     ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
 };
 use crate::fixtures::event_body::{
-    actor_id, bead_id, event_body_with_delta, note_id, sample_event_body, sample_note,
+    actor_id, bead_id, event_body_with_delta, note_id, sample_bead_patch, sample_event_body,
+    sample_note,
 };
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -35,6 +36,14 @@ fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -
         logical: 42,
     };
     event
+}
+
+fn bead_create_event(seed: u8) -> EventBody {
+    let mut delta = TxnDeltaV1::new();
+    delta
+        .insert(TxnOpV1::BeadUpsert(Box::new(sample_bead_patch(seed))))
+        .expect("unique bead upsert");
+    event_body_with_delta(seed, delta)
 }
 
 #[test]
@@ -121,6 +130,108 @@ fn lww_merge_ordering_is_deterministic() {
         .to_string();
     assert_eq!(title_a, title_b);
     assert_eq!(title_a, "title-b");
+}
+
+#[test]
+fn orphan_label_and_note_ops_become_visible_after_create() {
+    let mut state = CanonicalState::new();
+    let bead = bead_id(40);
+
+    let keep_label = Label::parse("alpha").expect("label");
+    let remove_label = Label::parse("beta").expect("label");
+    let replica = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
+
+    let note = sample_note(3, 1);
+    let note_id = note.id.clone();
+
+    let mut delta = TxnDeltaV1::new();
+    delta
+        .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+            bead_id: bead.clone(),
+            label: keep_label.clone(),
+            dot: WireDotV1 {
+                replica: replica.clone(),
+                counter: 1,
+            },
+        }))
+        .expect("unique label add");
+    delta
+        .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+            bead_id: bead.clone(),
+            label: remove_label.clone(),
+            ctx: WireDvvV1 {
+                max: BTreeMap::from([(replica.clone(), 1)]),
+            },
+        }))
+        .expect("unique label remove");
+    delta
+        .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
+            bead_id: bead.clone(),
+            note,
+        }))
+        .expect("unique note append");
+
+    let orphan_event = event_body_with_delta(10, delta);
+    apply_event(&mut state, &orphan_event).expect("apply orphan ops");
+
+    assert!(state.labels_for(&bead).is_empty());
+    assert!(state.notes_for(&bead).is_empty());
+
+    let create_event = bead_create_event(40);
+    apply_event(&mut state, &create_event).expect("apply bead create");
+
+    let labels = state.labels_for(&bead);
+    assert!(labels.contains(keep_label.as_str()));
+    assert!(!labels.contains(remove_label.as_str()));
+    let notes = state.notes_for(&bead);
+    assert!(notes.iter().any(|note| note.id == note_id));
+}
+
+#[test]
+fn orphan_dep_ops_become_visible_after_create() {
+    let mut state = CanonicalState::new();
+    let from = bead_id(41);
+    let to = bead_id(42);
+    let to_removed = bead_id(43);
+    let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+
+    let mut delta = TxnDeltaV1::new();
+    delta
+        .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+            from: from.clone(),
+            to: to.clone(),
+            kind: DepKind::Blocks,
+            dot: WireDotV1 {
+                replica: replica.clone(),
+                counter: 1,
+            },
+        }))
+        .expect("unique dep add");
+    delta
+        .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
+            from: from.clone(),
+            to: to_removed.clone(),
+            kind: DepKind::Related,
+            ctx: WireDvvV1 {
+                max: BTreeMap::from([(replica.clone(), 5)]),
+            },
+        }))
+        .expect("unique dep remove");
+
+    let orphan_event = event_body_with_delta(12, delta);
+    apply_event(&mut state, &orphan_event).expect("apply orphan deps");
+
+    assert!(state.deps_from(&from).is_empty());
+    assert!(state.deps_to(&to).is_empty());
+
+    apply_event(&mut state, &bead_create_event(41)).expect("apply from");
+    apply_event(&mut state, &bead_create_event(42)).expect("apply to");
+    apply_event(&mut state, &bead_create_event(43)).expect("apply to removed");
+
+    let expected = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).expect("dep key");
+    assert_eq!(state.deps_from(&from), vec![expected.clone()]);
+    assert!(state.deps_to(&to).contains(&expected));
+    assert!(state.deps_to(&to_removed).is_empty());
 }
 
 #[test]
