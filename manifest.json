@@ -1,1 +1,1 @@
-{"checkpoint_group":"core","files":{"namespaces/core/state/66.jsonl":{"bytes":262,"sha256":"cecb0443537d5d7f11700ab95c334b24f608d6c9f53dd0dd4f12f932de6f95aa"}},"namespaces":["core"],"store_epoch":0,"store_id":"2c74f6f7-28e8-5945-b7ca-dd4fe5304538"}
+{"checkpoint_group":"core","files":{"namespaces/core/state/66.jsonl":{"bytes":1296,"sha256":"4740dd4e9571f74ddee72967357a977da4b20bde2b75e6deb1ac8fa31970b953"}},"namespaces":["core"],"store_epoch":0,"store_id":"2c74f6f7-28e8-5945-b7ca-dd4fe5304538"}
