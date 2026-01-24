@@ -1087,6 +1087,7 @@ mod tests {
     use crate::core::orset::Dot;
     use crate::core::time::{Stamp, WriteStamp};
     use proptest::prelude::*;
+    use std::collections::BTreeSet;
     use uuid::Uuid;
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
@@ -1163,34 +1164,39 @@ mod tests {
             );
         }
 
-        for key in state.dep_store.values() {
-            let from = key.from();
-            let to = key.to();
-            let kind = key.kind();
-            let out_has = state
-                .dep_indexes
-                .out_edges(from)
-                .iter()
-                .any(|(t, k)| t == to && *k == kind);
-            let in_has = state
-                .dep_indexes
-                .in_edges(to)
-                .iter()
-                .any(|(f, k)| f == from && *k == kind);
-
-            assert!(out_has, "missing out-edge for {from}->{to:?}");
-            assert!(in_has, "missing in-edge for {from:?}->{to}");
-        }
-
+        let store_keys: BTreeSet<DepKey> = state.dep_store.values().cloned().collect();
+        let mut out_keys = BTreeSet::new();
+        let mut out_count = 0usize;
         for (from, edges) in state.dep_indexes.out_edges.iter() {
+            out_count += edges.len();
             for (to, kind) in edges {
                 let key = DepKey::new(from.clone(), to.clone(), *kind).expect("invalid dep key");
-                assert!(
-                    state.dep_store.contains(&key),
-                    "index missing dep store entry"
-                );
+                out_keys.insert(key);
             }
         }
+        let mut in_keys = BTreeSet::new();
+        let mut in_count = 0usize;
+        for (to, edges) in state.dep_indexes.in_edges.iter() {
+            in_count += edges.len();
+            for (from, kind) in edges {
+                let key = DepKey::new(from.clone(), to.clone(), *kind).expect("invalid dep key");
+                in_keys.insert(key);
+            }
+        }
+
+        assert_eq!(out_keys, store_keys, "dep out-edges mismatch dep store");
+        assert_eq!(in_keys, store_keys, "dep in-edges mismatch dep store");
+        assert_eq!(out_keys, in_keys, "dep in/out edges mismatch");
+        assert_eq!(
+            out_keys.len(),
+            out_count,
+            "dep out-edges contain duplicates"
+        );
+        assert_eq!(
+            in_keys.len(),
+            in_count,
+            "dep in-edges contain duplicates"
+        );
     }
 
     fn state_fingerprint(state: &CanonicalState) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
