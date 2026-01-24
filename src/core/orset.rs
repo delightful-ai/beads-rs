@@ -121,8 +121,8 @@ impl<V: Ord + Clone> OrSetChange<V> {
         after: BTreeSet<V>,
         internal_changed: bool,
     ) -> Self {
-        let added = after.difference(&before).cloned().collect();
-        let removed = before.difference(&after).cloned().collect();
+        let added: BTreeSet<V> = after.difference(&before).cloned().collect();
+        let removed: BTreeSet<V> = before.difference(&after).cloned().collect();
         let changed = internal_changed || !added.is_empty() || !removed.is_empty();
         Self {
             added,
