@@ -819,6 +819,7 @@ mod tests {
                 label: label.clone(),
                 ctx: WireDvvV1 {
                     max: BTreeMap::new(),
+                    dots: Vec::new(),
                 },
             }))
             .unwrap();
@@ -911,6 +912,7 @@ mod tests {
                 kind: DepKind::Blocks,
                 ctx: WireDvvV1 {
                     max: std::collections::BTreeMap::from([(replica_id, 10)]),
+                    dots: Vec::new(),
                 },
             }))
             .unwrap();

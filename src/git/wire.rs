@@ -1396,6 +1396,7 @@ mod tests {
         let wire = WireDepStore {
             cc: Dvv {
                 max: BTreeMap::from([(replica_a, 2), (replica_b, 5)]),
+                dots: BTreeSet::new(),
             },
             entries: vec![
                 WireDepEntry {

@@ -92,6 +92,7 @@ fn dep_add_remove_is_idempotent() {
             kind: DepKind::Blocks,
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(replica.clone(), 1)]),
+                dots: Vec::new(),
             },
         }))
         .expect("unique dep remove");
@@ -260,6 +261,7 @@ fn dep_delete_then_readd_across_kinds() {
             kind: DepKind::Blocks,
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(blocks_replica.clone(), 1)]),
+                dots: Vec::new(),
             },
         }))
         .expect("unique dep remove");
@@ -270,6 +272,7 @@ fn dep_delete_then_readd_across_kinds() {
             kind: DepKind::Related,
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(related_replica.clone(), 1)]),
+                dots: Vec::new(),
             },
         }))
         .expect("unique dep remove");

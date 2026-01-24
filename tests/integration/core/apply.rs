@@ -162,6 +162,7 @@ fn orphan_label_and_note_ops_become_visible_after_create() {
             label: remove_label.clone(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(remove_replica.clone(), 1)]),
+                dots: Vec::new(),
             },
         }))
         .expect("unique label remove");
@@ -216,6 +217,7 @@ fn orphan_dep_ops_become_visible_after_create() {
             kind: DepKind::Related,
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(remove_replica.clone(), 5)]),
+                dots: Vec::new(),
             },
         }))
         .expect("unique dep remove");
@@ -400,6 +402,7 @@ fn dep_delete_then_readd_restores_indexes() {
             kind,
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(replica, 1)]),
+                dots: Vec::new(),
             },
         }))
         .expect("unique dep remove");

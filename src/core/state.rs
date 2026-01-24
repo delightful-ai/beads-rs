@@ -747,13 +747,11 @@ impl CanonicalState {
     }
 
     fn dvv_from_dots(dots: Option<&BTreeSet<Dot>>) -> Dvv {
-        let mut ctx = Dvv::default();
         if let Some(dots) = dots {
-            for dot in dots {
-                ctx.observe(*dot);
-            }
+            Dvv::from_dots(dots.iter().copied())
+        } else {
+            Dvv::default()
         }
-        ctx
     }
 
     // =========================================================================

@@ -180,33 +180,51 @@ impl From<&WireDotV1> for Dot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireDvvV1 {
     pub max: BTreeMap<ReplicaId, u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dots: Vec<WireDotV1>,
 }
 
 impl From<&Dvv> for WireDvvV1 {
     fn from(dvv: &Dvv) -> Self {
         Self {
             max: dvv.max.clone(),
+            dots: dvv
+                .dots
+                .iter()
+                .copied()
+                .map(WireDotV1::from)
+                .collect(),
         }
     }
 }
 
 impl From<Dvv> for WireDvvV1 {
     fn from(dvv: Dvv) -> Self {
-        Self { max: dvv.max }
+        Self {
+            max: dvv.max,
+            dots: dvv.dots.into_iter().map(WireDotV1::from).collect(),
+        }
     }
 }
 
 impl From<WireDvvV1> for Dvv {
     fn from(dvv: WireDvvV1) -> Self {
-        Self { max: dvv.max }
+        let dots = dvv.dots.into_iter().map(Dot::from).collect::<BTreeSet<_>>();
+        let mut dvv = Self { max: dvv.max, dots };
+        dvv.normalize();
+        dvv
     }
 }
 
 impl From<&WireDvvV1> for Dvv {
     fn from(dvv: &WireDvvV1) -> Self {
-        Self {
+        let dots = dvv.dots.iter().map(Dot::from).collect::<BTreeSet<_>>();
+        let mut dvv = Self {
             max: dvv.max.clone(),
-        }
+            dots,
+        };
+        dvv.normalize();
+        dvv
     }
 }
 
@@ -1042,6 +1060,7 @@ mod tests {
             kind: DepKind::Related,
             ctx: WireDvvV1 {
                 max: BTreeMap::new(),
+                dots: Vec::new(),
             },
         };
         let label_add = WireLabelAddV1 {
@@ -1057,6 +1076,7 @@ mod tests {
             label: Label::parse("triage".to_string()).unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])), 2)]),
+                dots: Vec::new(),
             },
         };
         let append = NoteAppendV1 {
@@ -1129,6 +1149,7 @@ mod tests {
                         (ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])), 5),
                         (ReplicaId::from(uuid::Uuid::from_bytes([3u8; 16])), 2),
                     ]),
+                    dots: Vec::new(),
                 },
             }))
             .unwrap();
@@ -1148,6 +1169,7 @@ mod tests {
                 label: Label::parse("triage".to_string()).unwrap(),
                 ctx: WireDvvV1 {
                     max: BTreeMap::from([(ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])), 9)]),
+                    dots: Vec::new(),
                 },
             }))
             .unwrap();

@@ -47,6 +47,8 @@ pub struct Dot {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dvv {
     pub max: BTreeMap<ReplicaId, u64>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub dots: BTreeSet<Dot>,
 }
 
 impl Dvv {
@@ -54,13 +56,20 @@ impl Dvv {
         self.max
             .get(&dot.replica)
             .is_some_and(|seen| *seen >= dot.counter)
+            || self.dots.contains(dot)
     }
 
     pub fn observe(&mut self, dot: Dot) {
         let entry = self.max.entry(dot.replica).or_insert(0);
-        if dot.counter > *entry {
-            *entry = dot.counter;
+        if dot.counter <= *entry {
+            return;
         }
+        if dot.counter == *entry + 1 {
+            *entry = dot.counter;
+            self.normalize_replica(dot.replica);
+            return;
+        }
+        self.dots.insert(dot);
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
@@ -74,15 +83,65 @@ impl Dvv {
     }
 
     pub fn merge_with_change(&mut self, other: &Self) -> bool {
-        let mut changed = false;
+        let before = self.clone();
         for (replica, counter) in &other.max {
             let entry = self.max.entry(*replica).or_insert(0);
             if *counter > *entry {
                 *entry = *counter;
-                changed = true;
             }
         }
-        changed
+        self.dots.extend(other.dots.iter().copied());
+        self.normalize();
+        *self != before
+    }
+
+    pub fn from_dots(dots: impl IntoIterator<Item = Dot>) -> Self {
+        let mut dvv = Self::default();
+        for dot in dots {
+            dvv.observe(dot);
+        }
+        dvv
+    }
+
+    pub(crate) fn normalize(&mut self) {
+        let mut replicas = BTreeSet::new();
+        replicas.extend(self.max.keys().copied());
+        replicas.extend(self.dots.iter().map(|dot| dot.replica));
+        for replica in replicas {
+            self.normalize_replica(replica);
+        }
+    }
+
+    fn normalize_replica(&mut self, replica: ReplicaId) {
+        let entry = self.max.entry(replica).or_insert(0);
+
+        let start = Dot {
+            replica,
+            counter: 0,
+        };
+        let end = Dot {
+            replica,
+            counter: *entry,
+        };
+        let mut to_remove = Vec::new();
+        for dot in self.dots.range(start..=end) {
+            to_remove.push(*dot);
+        }
+        for dot in to_remove {
+            self.dots.remove(&dot);
+        }
+
+        loop {
+            let next = Dot {
+                replica,
+                counter: *entry + 1,
+            };
+            if self.dots.remove(&next) {
+                *entry += 1;
+                continue;
+            }
+            break;
+        }
     }
 }
 
@@ -385,18 +444,21 @@ mod tests {
     #[test]
     fn dvv_dominates_and_join() {
         let mut dvv = Dvv::default();
+        dvv.observe(dot(1, 1));
         dvv.observe(dot(1, 3));
-        assert!(dvv.dominates(&dot(1, 2)));
-        assert!(!dvv.dominates(&dot(1, 4)));
+        assert!(dvv.dominates(&dot(1, 1)));
+        assert!(!dvv.dominates(&dot(1, 2)));
+        assert!(dvv.dominates(&dot(1, 3)));
 
         let mut other = Dvv::default();
-        other.observe(dot(1, 5));
+        other.observe(dot(1, 2));
         other.observe(dot(2, 1));
 
         let merged = Dvv::join(&dvv, &other);
-        assert!(merged.dominates(&dot(1, 5)));
-        assert!(merged.dominates(&dot(2, 1)));
+        assert!(merged.dominates(&dot(1, 1)));
         assert!(merged.dominates(&dot(1, 2)));
+        assert!(merged.dominates(&dot(1, 3)));
+        assert!(merged.dominates(&dot(2, 1)));
     }
 
     #[test]
@@ -486,6 +548,46 @@ mod tests {
         set.apply_remove(&value, &ctx);
 
         assert!(set.contains(&value));
+    }
+
+    #[test]
+    fn orset_remove_does_not_remove_unrelated_value() {
+        let mut set = OrSet::new();
+        let value_a = "a".to_string();
+        let value_b = "b".to_string();
+        let dot_a = dot(1, 1);
+        let dot_b = dot(1, 2);
+
+        set.apply_add(dot_a, value_a.clone(), Sha256([1u8; 32]));
+        set.apply_add(dot_b, value_b.clone(), Sha256([2u8; 32]));
+
+        let mut ctx = Dvv::default();
+        ctx.observe(dot_b);
+        set.apply_remove(&value_b, &ctx);
+
+        assert!(set.contains(&value_a));
+        assert!(!set.contains(&value_b));
+    }
+
+    #[test]
+    fn orset_join_preserves_unrelated_value_from_remove_ctx() {
+        let value_a = "a".to_string();
+        let value_b = "b".to_string();
+        let dot_a = dot(1, 1);
+        let dot_b = dot(1, 2);
+
+        let mut a = OrSet::new();
+        a.apply_add(dot_a, value_a.clone(), Sha256([3u8; 32]));
+
+        let mut b = OrSet::new();
+        b.apply_add(dot_b, value_b.clone(), Sha256([4u8; 32]));
+        let mut ctx = Dvv::default();
+        ctx.observe(dot_b);
+        b.apply_remove(&value_b, &ctx);
+
+        let joined = OrSet::join(&a, &b);
+        assert!(joined.contains(&value_a));
+        assert!(!joined.contains(&value_b));
     }
 
     #[test]
