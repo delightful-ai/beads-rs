@@ -61,7 +61,7 @@ mod wal_state {
         dots: Vec<Dot>,
     }
 
-    #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+    #[derive(Clone, Debug, Default, Serialize)]
     struct WalDepStore {
         cc: Dvv,
         entries: Vec<WalDepEntry>,
@@ -101,6 +101,36 @@ mod wal_state {
             }
             let set = OrSet::from_parts(map, self.cc);
             DepStore::from_parts(set, self.stamp)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for WalDepStore {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum WalDepStoreRepr {
+                V2 {
+                    #[serde(default)]
+                    cc: Dvv,
+                    #[serde(default)]
+                    entries: Vec<WalDepEntry>,
+                    #[serde(default)]
+                    stamp: Option<Stamp>,
+                },
+                LegacyEntries(Vec<WalDepEntry>),
+            }
+
+            match WalDepStoreRepr::deserialize(deserializer)? {
+                WalDepStoreRepr::V2 { cc, entries, stamp } => Ok(WalDepStore { cc, entries, stamp }),
+                WalDepStoreRepr::LegacyEntries(entries) => Ok(WalDepStore {
+                    cc: Dvv::default(),
+                    entries,
+                    stamp: None,
+                }),
+            }
         }
     }
 
@@ -721,6 +751,73 @@ mod tests {
         assert_eq!(loaded.state.live_count(), 1);
         assert_eq!(loaded.state.tombstone_count(), 0);
         assert_eq!(loaded.state.dep_count(), 0);
+    }
+
+    #[test]
+    fn read_legacy_dep_store_entries_format() {
+        #[derive(Serialize)]
+        struct LegacyWalDepEntry {
+            key: DepKey,
+            dots: Vec<Dot>,
+        }
+
+        #[derive(Serialize)]
+        struct LegacyWalState {
+            live: Vec<Bead>,
+            tombstones: Vec<Tombstone>,
+            deps: Vec<LegacyWalDepEntry>,
+            #[serde(default)]
+            labels: LabelStore,
+            #[serde(default)]
+            notes: NoteStore,
+        }
+
+        #[derive(Serialize)]
+        struct LegacyWalEntry {
+            version: u32,
+            written_at_ms: u64,
+            state: LegacyWalState,
+            root_slug: Option<String>,
+            sequence: u64,
+        }
+
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor);
+        let bead = make_bead("bd-abc", &stamp);
+
+        let dep_key = DepKey::new(
+            BeadId::parse("bd-abc").unwrap(),
+            BeadId::parse("bd-def").unwrap(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let dep_dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
+            counter: 7,
+        };
+
+        let legacy = LegacyWalEntry {
+            version: WAL_VERSION,
+            written_at_ms: 1,
+            state: LegacyWalState {
+                live: vec![bead],
+                tombstones: Vec::new(),
+                deps: vec![LegacyWalDepEntry {
+                    key: dep_key.clone(),
+                    dots: vec![dep_dot],
+                }],
+                labels: LabelStore::default(),
+                notes: NoteStore::default(),
+            },
+            root_slug: None,
+            sequence: 1,
+        };
+
+        let data = serde_json::to_vec(&legacy).unwrap();
+        let loaded: WalEntry = serde_json::from_slice(&data).unwrap();
+        assert_eq!(loaded.state.live_count(), 1);
+        assert_eq!(loaded.state.dep_count(), 1);
+        assert!(loaded.state.dep_contains(&dep_key));
     }
 
     #[test]
