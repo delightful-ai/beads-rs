@@ -33,6 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --features slow-tests
+        timeout-minutes: 10
       - run: cargo check
         working-directory: beads_stateright_models
 
