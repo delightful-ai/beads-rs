@@ -539,8 +539,8 @@ impl CanonicalState {
     ) -> OrSetChange<Label> {
         let state = self.labels.state_mut(&id);
         let change = state.set.apply_add(dot, label, op_hash);
-        if !change.is_empty() {
-            state.stamp = Some(stamp);
+        if change.changed() {
+            state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
         }
         change
     }
@@ -554,8 +554,8 @@ impl CanonicalState {
     ) -> OrSetChange<Label> {
         let state = self.labels.state_mut(&id);
         let change = state.set.apply_remove(label, ctx);
-        if !change.is_empty() {
-            state.stamp = Some(stamp);
+        if change.changed() {
+            state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
         }
         change
     }
@@ -568,8 +568,10 @@ impl CanonicalState {
         stamp: Stamp,
     ) -> OrSetChange<DepKey> {
         let change = self.dep_store.set.apply_add(dot, key.clone(), op_hash);
+        if change.changed() {
+            self.dep_store.stamp = max_stamp(self.dep_store.stamp.as_ref(), Some(&stamp));
+        }
         if !change.is_empty() {
-            self.dep_store.stamp = Some(stamp.clone());
             for added in &change.added {
                 self.dep_indexes.add(added.from(), added.to(), added.kind());
             }
@@ -588,8 +590,10 @@ impl CanonicalState {
         stamp: Stamp,
     ) -> OrSetChange<DepKey> {
         let change = self.dep_store.set.apply_remove(key, ctx);
+        if change.changed() {
+            self.dep_store.stamp = max_stamp(self.dep_store.stamp.as_ref(), Some(&stamp));
+        }
         if !change.is_empty() {
-            self.dep_store.stamp = Some(stamp.clone());
             for removed in &change.removed {
                 self.dep_indexes
                     .remove(removed.from(), removed.to(), removed.kind());
@@ -1635,6 +1639,149 @@ mod tests {
         let updated = state.updated_stamp_for(&id).expect("updated stamp");
         assert_eq!(updated.at.wall_ms, 3000);
         assert_eq!(updated.by, note_author);
+    }
+
+    #[test]
+    fn label_stamp_is_monotonic_for_out_of_order_ops() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let id = bead_id("bd-label-stamp");
+        state.insert(make_bead(&id, &base)).unwrap();
+
+        let label = Label::parse("urgent").unwrap();
+        let stamp_new = make_stamp(3000, 0, "carol");
+        let stamp_old = make_stamp(2000, 0, "bob");
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([2u8; 16])),
+            counter: 2,
+        };
+
+        state.apply_label_add(
+            id.clone(),
+            label.clone(),
+            dot_a,
+            Sha256([0; 32]),
+            stamp_new.clone(),
+        );
+        state.apply_label_add(
+            id.clone(),
+            label.clone(),
+            dot_b,
+            Sha256([0; 32]),
+            stamp_old,
+        );
+
+        let stamp = state.label_stamp(&id).expect("label stamp");
+        assert_eq!(stamp, &stamp_new);
+    }
+
+    #[test]
+    fn label_stamp_updates_on_new_dot_without_membership_change() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let id = bead_id("bd-label-dot");
+        state.insert(make_bead(&id, &base)).unwrap();
+
+        let label = Label::parse("inbox").unwrap();
+        let stamp_a = make_stamp(2000, 0, "bob");
+        let stamp_b = make_stamp(3000, 0, "carol");
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([3u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([4u8; 16])),
+            counter: 2,
+        };
+
+        state.apply_label_add(
+            id.clone(),
+            label.clone(),
+            dot_a,
+            Sha256([0; 32]),
+            stamp_a,
+        );
+        state.apply_label_add(
+            id.clone(),
+            label,
+            dot_b,
+            Sha256([0; 32]),
+            stamp_b.clone(),
+        );
+
+        assert_eq!(state.labels_for(&id).len(), 1);
+        let stamp = state.label_stamp(&id).expect("label stamp");
+        assert_eq!(stamp, &stamp_b);
+    }
+
+    #[test]
+    fn dep_stamp_is_monotonic_for_out_of_order_ops() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let from = bead_id("bd-dep-from");
+        let to = bead_id("bd-dep-to");
+        state.insert(make_bead(&from, &base)).unwrap();
+
+        let key = DepKey::new(from.clone(), to, DepKind::Blocks).unwrap();
+        let stamp_new = make_stamp(3000, 0, "carol");
+        let stamp_old = make_stamp(2000, 0, "bob");
+
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([5u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([6u8; 16])),
+            counter: 2,
+        };
+
+        state.apply_dep_add(
+            key.clone(),
+            dot_a,
+            Sha256([0; 32]),
+            stamp_new.clone(),
+        );
+        state.apply_dep_add(key, dot_b, Sha256([0; 32]), stamp_old);
+
+        let stamp = state.dep_store().stamp().expect("dep stamp");
+        assert_eq!(stamp, &stamp_new);
+    }
+
+    #[test]
+    fn dep_stamp_updates_on_new_dot_without_membership_change() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let from = bead_id("bd-dep-dot-from");
+        let to = bead_id("bd-dep-dot-to");
+        state.insert(make_bead(&from, &base)).unwrap();
+
+        let key = DepKey::new(from.clone(), to, DepKind::Blocks).unwrap();
+        let stamp_a = make_stamp(2000, 0, "bob");
+        let stamp_b = make_stamp(3000, 0, "carol");
+
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([7u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([8u8; 16])),
+            counter: 2,
+        };
+
+        state.apply_dep_add(
+            key.clone(),
+            dot_a,
+            Sha256([0; 32]),
+            stamp_a,
+        );
+        state.apply_dep_add(key, dot_b, Sha256([0; 32]), stamp_b.clone());
+
+        let stamp = state.dep_store().stamp().expect("dep stamp");
+        assert_eq!(stamp, &stamp_b);
     }
 
     #[test]
