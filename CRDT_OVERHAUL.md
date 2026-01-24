@@ -111,10 +111,10 @@ Dot {
 **DVV**:
 
 ```
-Dvv { max: BTreeMap<ReplicaId, u64> }
+Dvv { max: BTreeMap<ReplicaId, u64>, dots: BTreeSet<Dot> }
 ```
 
-Dot `(r,c)` is dominated if `dvv.max[r] >= c`.
+Dot `(r,c)` is dominated if `dvv.max[r] >= c` or dot is in `dvv.dots`.
 
 ### 3) Dot allocation (explicit, persisted)
 
@@ -305,8 +305,8 @@ Code refs (current):
 ### Added (v1)
 
 ```
-WireDotV1 { replica_id: ReplicaId, counter: u64 }
-WireDvvV1(Vec<(ReplicaId, u64)>) // sorted by replica
+WireDotV1 { replica: ReplicaId, counter: u64 }
+WireDvvV1 { max: BTreeMap<ReplicaId, u64>, dots: Vec<WireDotV1> } // dots omitted when empty
 
 WireLabelAddV1 { bead_id, label, dot: WireDotV1 }
 WireLabelRemoveV1 { bead_id, label, ctx: WireDvvV1 }
@@ -314,6 +314,10 @@ WireLabelRemoveV1 { bead_id, label, ctx: WireDvvV1 }
 WireDepAddV1 { from, to, kind, dot: WireDotV1 }
 WireDepRemoveV1 { from, to, kind, ctx: WireDvvV1 }
 ```
+
+WireDvvV1 encodes as a map with keys `max` and `dots` in CBOR/JSON. `max` is a map
+from ReplicaId to u64, and `dots` is an array of `{ replica, counter }` objects
+omitted when empty.
 
 **TxnOpV1 variants become:**
 
@@ -423,9 +427,9 @@ We must persist OR-Set metadata (dots + cc) and NoteStore globally.
   "id":"bd-123",
   "core":{...},
   "fields":{...},
-  "labels":{
-    "cc":[[replica_id,counter],...],
-    "entries":[["label-a", [[replica,counter],...]], ...]
+  "labels": {
+    "cc": { "max": { "<replica-id>": counter, ... }, "dots": [ { "replica": "<replica-id>", "counter": n }, ... ] },
+    "entries": { "label-a": [ { "replica": "<replica-id>", "counter": n }, ... ], ... }
   }
 }
 ```
@@ -433,8 +437,13 @@ We must persist OR-Set metadata (dots + cc) and NoteStore globally.
 `deps.jsonl` OR-Set:
 
 ```
-{"type":"cc","cc":[[replica,counter],...]}
-{"from":"bd-a","to":"bd-b","kind":"blocks","dots":[[replica,counter],...]}
+{
+  "cc": { "max": { "<replica-id>": counter, ... }, "dots": [ { "replica": "<replica-id>", "counter": n }, ... ] },
+  "entries": [
+    { "key": { "from":"bd-a", "to":"bd-b", "kind":"blocks" }, "dots": [ { "replica": "<replica-id>", "counter": n }, ... ] }
+  ]
+  // "stamp": [ [wall_ms, counter], "actor" ] // optional
+}
 ```
 
 Ordering: dep entries are sorted by DepKey (from, to, kind), with DepKind ordered
