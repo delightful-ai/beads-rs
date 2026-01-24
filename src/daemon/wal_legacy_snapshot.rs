@@ -42,6 +42,7 @@ mod wal_state {
     use serde::de::Error as DeError;
     use serde::{Deserializer, Serializer};
     use std::collections::{BTreeMap, BTreeSet};
+    use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1, WireFieldStamp, WireStamp};
 
     #[derive(Serialize, Deserialize)]
     struct WalStateV2 {
@@ -55,18 +56,18 @@ mod wal_state {
         notes: NoteStore,
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    struct WalDepEntry {
-        key: DepKey,
-        dots: Vec<Dot>,
-    }
+    #[derive(Clone, Debug, Serialize)]
+    #[serde(transparent)]
+    struct WalDepStore(WireDepStoreV1);
 
-    #[derive(Clone, Debug, Default, Serialize)]
-    struct WalDepStore {
-        cc: Dvv,
-        entries: Vec<WalDepEntry>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stamp: Option<Stamp>,
+    impl Default for WalDepStore {
+        fn default() -> Self {
+            Self(WireDepStoreV1 {
+                cc: Dvv::default(),
+                entries: Vec::new(),
+                stamp: None,
+            })
+        }
     }
 
     impl WalDepStore {
@@ -78,30 +79,40 @@ mod wal_state {
                     .map(|dots| dots.iter().copied().collect())
                     .unwrap_or_default();
                 dots.sort();
-                entries.push(WalDepEntry {
+                entries.push(WireDepEntryV1 {
                     key: key.clone(),
                     dots,
                 });
             }
             entries.sort_by(|a, b| a.key.cmp(&b.key));
-            Self {
+            Self(WireDepStoreV1 {
                 cc: store.cc().clone(),
                 entries,
-                stamp: store.stamp().cloned(),
-            }
+                stamp: store.stamp().map(wire_field_stamp_from_stamp),
+            })
         }
 
         fn into_dep_store(self) -> DepStore {
             let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
-            for entry in self.entries {
+            for entry in self.0.entries {
                 let dots: BTreeSet<Dot> = entry.dots.into_iter().collect();
                 if !dots.is_empty() {
                     map.insert(entry.key, dots);
                 }
             }
-            let set = OrSet::from_parts(map, self.cc);
-            DepStore::from_parts(set, self.stamp)
+            let set = OrSet::from_parts(map, self.0.cc);
+            let stamp = self.0.stamp.map(stamp_from_wire_field_stamp);
+            DepStore::from_parts(set, stamp)
         }
+    }
+
+    fn wire_field_stamp_from_stamp(stamp: &Stamp) -> WireFieldStamp {
+        (WireStamp::from(&stamp.at), stamp.by.clone())
+    }
+
+    fn stamp_from_wire_field_stamp(stamp: WireFieldStamp) -> Stamp {
+        let (wire, actor) = stamp;
+        Stamp::new(crate::core::WriteStamp::from(wire), actor)
     }
 
     impl<'de> Deserialize<'de> for WalDepStore {
@@ -116,20 +127,24 @@ mod wal_state {
                     #[serde(default)]
                     cc: Dvv,
                     #[serde(default)]
-                    entries: Vec<WalDepEntry>,
+                    entries: Vec<WireDepEntryV1>,
                     #[serde(default)]
-                    stamp: Option<Stamp>,
+                    stamp: Option<WireFieldStamp>,
                 },
-                LegacyEntries(Vec<WalDepEntry>),
+                LegacyEntries(Vec<WireDepEntryV1>),
             }
 
             match WalDepStoreRepr::deserialize(deserializer)? {
-                WalDepStoreRepr::V2 { cc, entries, stamp } => Ok(WalDepStore { cc, entries, stamp }),
-                WalDepStoreRepr::LegacyEntries(entries) => Ok(WalDepStore {
+                WalDepStoreRepr::V2 { cc, entries, stamp } => Ok(WalDepStore(WireDepStoreV1 {
+                    cc,
+                    entries,
+                    stamp,
+                })),
+                WalDepStoreRepr::LegacyEntries(entries) => Ok(WalDepStore(WireDepStoreV1 {
                     cc: Dvv::default(),
                     entries,
                     stamp: None,
-                }),
+                })),
             }
         }
     }
@@ -158,14 +173,14 @@ mod wal_state {
         #[test]
         fn wal_dep_store_empty_dots_pruned() {
             let key = dep_key("bd-a", "bd-b");
-            let store = WalDepStore {
+            let store = WalDepStore(WireDepStoreV1 {
                 cc: Dvv::default(),
-                entries: vec![WalDepEntry {
+                entries: vec![WireDepEntryV1 {
                     key: key.clone(),
                     dots: Vec::new(),
                 }],
                 stamp: None,
-            };
+            });
 
             let dep_store = store.into_dep_store();
             assert!(!dep_store.contains(&key));
@@ -176,20 +191,20 @@ mod wal_state {
         fn wal_dep_store_mixed_dots_preserves_non_empty() {
             let empty_key = dep_key("bd-a", "bd-b");
             let filled_key = dep_key("bd-a", "bd-c");
-            let store = WalDepStore {
+            let store = WalDepStore(WireDepStoreV1 {
                 cc: Dvv::default(),
                 entries: vec![
-                    WalDepEntry {
+                    WireDepEntryV1 {
                         key: empty_key.clone(),
                         dots: Vec::new(),
                     },
-                    WalDepEntry {
+                    WireDepEntryV1 {
                         key: filled_key.clone(),
                         dots: vec![dot(1)],
                     },
                 ],
                 stamp: None,
-            };
+            });
 
             let dep_store = store.into_dep_store();
             assert!(!dep_store.contains(&empty_key));
