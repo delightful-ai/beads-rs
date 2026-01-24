@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::query_model::{
     AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
-    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadLimitsOutput,
     AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminRotateReplicaIdOutput,
     AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup,
     DepCycles, DepEdge, EpicStatus, Issue, IssueSummary, Note, ReadyResult, StatusOutput,
@@ -514,6 +514,9 @@ pub enum QueryResult {
 
     /// Admin reload replication report.
     AdminReloadReplication(AdminReloadReplicationOutput),
+
+    /// Admin reload limits report.
+    AdminReloadLimits(AdminReloadLimitsOutput),
 
     /// Admin rotate replica id report.
     AdminRotateReplicaId(AdminRotateReplicaIdOutput),

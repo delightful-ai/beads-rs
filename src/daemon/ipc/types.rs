@@ -401,6 +401,9 @@ pub enum Request {
     /// Admin reload namespace policies.
     AdminReloadPolicies { repo: PathBuf },
 
+    /// Admin reload limits.
+    AdminReloadLimits { repo: PathBuf },
+
     /// Admin reload replication runtime.
     AdminReloadReplication { repo: PathBuf },
 

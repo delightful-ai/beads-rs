@@ -126,6 +126,7 @@ impl RequestContext {
                 Self::from_read("admin_fingerprint", repo, read)
             }
             Request::AdminReloadPolicies { repo } => Self::from_repo("admin_reload_policies", repo),
+            Request::AdminReloadLimits { repo } => Self::from_repo("admin_reload_limits", repo),
             Request::AdminReloadReplication { repo } => {
                 Self::from_repo("admin_reload_replication", repo)
             }

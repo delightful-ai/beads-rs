@@ -326,6 +326,9 @@ impl From<internal_query::QueryResult> for QueryResult {
             internal_query::QueryResult::AdminReloadReplication(output) => {
                 QueryResult::AdminReloadReplication(output)
             }
+            internal_query::QueryResult::AdminReloadLimits(output) => {
+                QueryResult::AdminReloadLimits(output)
+            }
             internal_query::QueryResult::AdminRotateReplicaId(output) => {
                 QueryResult::AdminRotateReplicaId(output)
             }

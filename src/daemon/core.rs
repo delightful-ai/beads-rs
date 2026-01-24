@@ -381,6 +381,26 @@ impl Daemon {
         }
     }
 
+    pub(crate) fn apply_limits(&mut self, limits: Limits) -> Result<bool, OpError> {
+        let old_limits = self.limits.clone();
+        self.limits = limits.clone();
+        self.clock
+            .set_max_forward_drift(limits.hlc_max_forward_drift_ms);
+        self.checkpoint_scheduler
+            .set_max_queue_per_store(limits.max_checkpoint_job_queue);
+
+        for store in self.stores.values_mut() {
+            store.reload_limits(&limits);
+        }
+
+        let store_ids: Vec<StoreId> = self.stores.keys().copied().collect();
+        for store_id in store_ids {
+            self.reload_replication_runtime(store_id)?;
+        }
+
+        Ok(old_limits.max_background_io_bytes_per_sec != limits.max_background_io_bytes_per_sec)
+    }
+
     pub fn is_shutting_down(&self) -> bool {
         self.shutting_down
     }

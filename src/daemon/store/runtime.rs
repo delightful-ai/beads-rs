@@ -224,6 +224,17 @@ impl StoreRuntime {
         )
     }
 
+    pub fn reload_limits(&mut self, limits: &Limits) {
+        self.admission = AdmissionController::new(limits);
+        if let Err(err) = self
+            .broadcaster
+            .update_limits(BroadcasterLimits::from_limits(limits))
+        {
+            tracing::warn!("failed to update broadcaster limits: {err}");
+        }
+        self.event_wal.update_limits(limits);
+    }
+
     pub fn durable_head_sha(
         &self,
         namespace: &NamespaceId,

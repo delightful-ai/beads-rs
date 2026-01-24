@@ -96,6 +96,13 @@ impl MemoryEventWal {
         self.writers.get(namespace).map(|writer| writer.snapshot())
     }
 
+    pub fn update_config(&mut self, config: SegmentConfig) {
+        self.config = config;
+        for writer in self.writers.values_mut() {
+            writer.update_config(config);
+        }
+    }
+
     fn writer_mut(
         &mut self,
         namespace: &NamespaceId,
@@ -168,6 +175,10 @@ impl MemorySegmentWriter {
             created_at_ms: self.header.created_at_ms,
             path: self.path.clone(),
         }
+    }
+
+    fn update_config(&mut self, config: SegmentConfig) {
+        self.config = config;
     }
 
     fn append(&mut self, record: &VerifiedRecord, now_ms: u64) -> EventWalResult<AppendOutcome> {

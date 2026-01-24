@@ -12,7 +12,8 @@ use crate::api::{
     AdminFlushSegment, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
     AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
     AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
-    AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminReplicaLiveness,
+    AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
+    AdminReplicaLiveness,
     AdminReplicationNamespace, AdminReplicationPeer, AdminRotateReplicaIdOutput, AdminScrubOutput,
     AdminStatusOutput, AdminWalGrowth, AdminWalNamespace, AdminWalSegment, AdminWalWarning,
     AdminWalWarningKind,
@@ -429,6 +430,37 @@ impl Daemon {
             requires_restart: reload.requires_restart,
         };
         Response::ok(ResponsePayload::query(QueryResult::AdminReloadPolicies(
+            output,
+        )))
+    }
+
+    pub fn admin_reload_limits(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => return Response::err(err),
+        };
+        let store_id = proof.store_id();
+
+        let config = match crate::config::load_for_repo(Some(repo)) {
+            Ok(config) => config,
+            Err(err) => {
+                return Response::err(OpError::ValidationFailed {
+                    field: "limits".into(),
+                    reason: format!("failed to reload config: {err}"),
+                });
+            }
+        };
+
+        let new_limits = config.limits.clone();
+        let requires_restart = match self.apply_limits(new_limits) {
+            Ok(requires_restart) => requires_restart,
+            Err(err) => return Response::err(err),
+        };
+        let output = AdminReloadLimitsOutput {
+            store_id,
+            requires_restart,
+        };
+        Response::ok(ResponsePayload::query(QueryResult::AdminReloadLimits(
             output,
         )))
     }

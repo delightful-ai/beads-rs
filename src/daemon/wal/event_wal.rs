@@ -68,6 +68,17 @@ impl EventWal {
         }
     }
 
+    pub fn update_limits(&mut self, limits: &Limits) {
+        self.update_config(SegmentConfig::from_limits(limits));
+    }
+
+    pub fn update_config(&mut self, config: SegmentConfig) {
+        match &mut self.backend {
+            EventWalBackend::Disk(wal) => wal.update_config(config),
+            EventWalBackend::Memory(wal) => wal.update_config(config),
+        }
+    }
+
     pub fn flush(&mut self, namespace: &NamespaceId) -> EventWalResult<Option<SegmentSnapshot>> {
         match &mut self.backend {
             EventWalBackend::Disk(wal) => wal.flush(namespace),
@@ -109,6 +120,13 @@ impl DiskEventWal {
             created_at_ms: writer.current_created_at_ms(),
             path: writer.current_path().to_path_buf(),
         })
+    }
+
+    fn update_config(&mut self, config: SegmentConfig) {
+        self.config = config;
+        for writer in self.writers.values_mut() {
+            writer.update_config(config);
+        }
     }
 
     fn flush(&mut self, namespace: &NamespaceId) -> EventWalResult<Option<SegmentSnapshot>> {

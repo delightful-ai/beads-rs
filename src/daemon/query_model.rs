@@ -445,6 +445,7 @@ pub type AdminFlushOutput = crate::api::AdminFlushOutput;
 pub type AdminMaintenanceModeOutput = crate::api::AdminMaintenanceModeOutput;
 pub type AdminMetricsOutput = crate::api::AdminMetricsOutput;
 pub type AdminRebuildIndexOutput = crate::api::AdminRebuildIndexOutput;
+pub type AdminReloadLimitsOutput = crate::api::AdminReloadLimitsOutput;
 pub type AdminReloadPoliciesOutput = crate::api::AdminReloadPoliciesOutput;
 pub type AdminRotateReplicaIdOutput = crate::api::AdminRotateReplicaIdOutput;
 pub type AdminReloadReplicationOutput = crate::api::AdminReloadReplicationOutput;
