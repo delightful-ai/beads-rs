@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
+use crate::core::event::ValidatedBeadPatch;
 use super::ops::{BeadPatch, MapLiveError, OpError, Patch};
 use super::remote::RemoteUrl;
 use crate::core::{
@@ -885,6 +886,9 @@ impl MutationEngine {
             patch.assignee_expires = WirePatch::Set(expires);
         }
 
+        let patch = validate_wire_patch(patch)?;
+        let patch = validate_wire_patch(patch)?;
+        let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1065,6 +1069,8 @@ impl MutationEngine {
             patch.closed_on_branch = WirePatch::Set(branch);
         }
 
+        let patch = validate_wire_patch(patch)?;
+        let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1094,6 +1100,7 @@ impl MutationEngine {
         patch.closed_reason = WirePatch::Clear;
         patch.closed_on_branch = WirePatch::Clear;
 
+        let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1667,6 +1674,15 @@ fn canonical_deps(deps: &[DepSpec]) -> Vec<String> {
         .collect()
 }
 
+fn validate_wire_patch(patch: WireBeadPatch) -> Result<WireBeadPatch, OpError> {
+    ValidatedBeadPatch::try_from(patch)
+        .map(ValidatedBeadPatch::into_inner)
+        .map_err(|err| OpError::ValidationFailed {
+            field: "bead_patch".into(),
+            reason: err.to_string(),
+        })
+}
+
 fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
     if state.get_live(parent).is_none() {
         return Err(OpError::NotFound(parent.clone()));
@@ -1790,6 +1806,7 @@ fn normalize_patch(
         status: patch.status.clone(),
     };
 
+    let wire = validate_wire_patch(wire)?;
     Ok((wire, canonical))
 }
 

@@ -743,6 +743,37 @@ mod tests {
     }
 
     #[test]
+    fn apply_claim_patch_set_with_clear_expiry_is_total() {
+        let mut state = CanonicalState::new();
+        let bead_id = BeadId::parse("bd-claim").unwrap();
+        let create = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(10, 1),
+            actor_id("alice"),
+            "title",
+            10,
+        );
+        apply_event(&mut state, &create).unwrap();
+
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        patch.assignee = WirePatch::Set(actor_id("bob"));
+        patch.assignee_expires = WirePatch::Clear;
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        let event = event_with_delta(delta, 20);
+        apply_event(&mut state, &event).unwrap();
+
+        let bead = state.get_live(&bead_id).expect("bead");
+        match &bead.fields.claim.value {
+            Claim::Claimed { assignee, expires } => {
+                assert_eq!(assignee, &actor_id("bob"));
+                assert_eq!(*expires, None);
+            }
+            Claim::Unclaimed => panic!("expected claimed"),
+        }
+    }
+
+    #[test]
     fn note_append_before_bead_exists_is_stored() {
         let mut state = CanonicalState::new();
         let bead_id = BeadId::parse("bd-orphan-note").unwrap();
