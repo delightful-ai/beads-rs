@@ -148,6 +148,7 @@ fn run_trace_harness(mode: TailnetTraceMode, trace_dir: &Path) {
     });
 
     let rig = ReplRig::new(2, options);
+    rig.assert_replication_ready(Duration::from_secs(30));
 
     let ids = [
         rig.create_issue(0, "trace-0"),
@@ -191,13 +192,13 @@ fn repl_daemon_to_daemon_tailnet_roundtrip() {
     options.seed = 19;
 
     let rig = ReplRig::new(2, options);
+    rig.assert_replication_ready(Duration::from_secs(30));
 
     let ids = [
         rig.create_issue(0, "tailnet-0"),
         rig.create_issue(1, "tailnet-1"),
     ];
 
-    rig.assert_peers_seen(Duration::from_secs(30));
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
     wait_for_sample(&rig, &ids, Duration::from_secs(20));
 }
@@ -230,6 +231,7 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
     options.fault_profile_by_link = Some(by_link);
 
     let rig = ReplRig::new(2, options);
+    rig.assert_replication_ready(Duration::from_secs(60));
 
     let ids = [
         rig.create_issue(0, "pathology-0"),
@@ -339,6 +341,7 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     options.fault_profile = Some(FaultProfile::tailnet());
 
     let rig = ReplRig::new(2, options);
+    rig.assert_replication_ready(Duration::from_secs(30));
 
     let initial = [
         rig.create_issue(0, "tailnet-crash-pre-0"),
