@@ -753,9 +753,7 @@ impl Daemon {
                 self.admin_reload_policies(&repo, git_tx).into()
             }
 
-            Request::AdminReloadLimits { repo } => {
-                self.admin_reload_limits(&repo, git_tx).into()
-            }
+            Request::AdminReloadLimits { repo } => self.admin_reload_limits(&repo, git_tx).into(),
 
             Request::AdminReloadReplication { repo } => {
                 self.admin_reload_replication(&repo, git_tx).into()

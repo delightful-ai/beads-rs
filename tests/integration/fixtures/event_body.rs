@@ -58,6 +58,7 @@ pub fn sample_delta(seed: u8) -> TxnDeltaV1 {
     let append = NoteAppendV1 {
         bead_id: bead.id.clone(),
         note,
+        lineage: None,
     };
 
     let mut delta = TxnDeltaV1::new();

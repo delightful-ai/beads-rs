@@ -3859,6 +3859,7 @@ mod tests {
             .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
                 bead_id: BeadId::parse("bd-missing").unwrap(),
                 note,
+                lineage: None,
             }))
             .unwrap();
 

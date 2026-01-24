@@ -262,10 +262,13 @@ pub fn import_checkpoint(
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
                     let label_state = label_state_from_wire(wire.labels.clone(), label_stamp);
-                    label_stores
-                        .entry(ns.clone())
-                        .or_default()
-                        .insert_state(bead_id.clone(), label_state);
+                    let lineage =
+                        Stamp::new(WriteStamp::from(wire.created_at), wire.created_by.clone());
+                    label_stores.entry(ns.clone()).or_default().insert_state(
+                        bead_id.clone(),
+                        lineage.clone(),
+                        label_state,
+                    );
 
                     let notes = wire.notes.clone();
                     let bead = crate::core::Bead::from(wire);
@@ -274,7 +277,7 @@ pub fn import_checkpoint(
 
                     for note in notes {
                         let note = crate::core::Note::from(note);
-                        state.insert_note(bead_id.clone(), note);
+                        state.insert_note(bead_id.clone(), Some(lineage.clone()), note);
                     }
 
                     Ok(())

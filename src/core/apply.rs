@@ -78,7 +78,13 @@ pub fn apply_event(
                 apply_dep_remove(state, dep, &stamp, &mut outcome)?;
             }
             TxnOpV1::NoteAppend(append) => {
-                apply_note_append(state, append.bead_id.clone(), &append.note, &mut outcome)?;
+                apply_note_append(
+                    state,
+                    append.bead_id.clone(),
+                    &append.note,
+                    append.lineage_stamp(),
+                    &mut outcome,
+                )?;
             }
         }
     }
@@ -240,13 +246,15 @@ fn apply_label_add(
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let dot = op.dot.into();
+    let lineage = op.lineage_stamp();
     let change = state.apply_label_add(
         op.bead_id.clone(),
         op.label.clone(),
         dot,
         event_stamp.clone(),
+        lineage.clone(),
     );
-    if change.changed() && state.get_live(&op.bead_id).is_some() {
+    if change.changed() && matches_live_lineage(state, &op.bead_id, lineage.as_ref()) {
         outcome.changed_beads.insert(op.bead_id.clone());
     }
     Ok(())
@@ -259,8 +267,15 @@ fn apply_label_remove(
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let ctx = (&op.ctx).into();
-    let change = state.apply_label_remove(op.bead_id.clone(), &op.label, &ctx, event_stamp.clone());
-    if change.changed() && state.get_live(&op.bead_id).is_some() {
+    let lineage = op.lineage_stamp();
+    let change = state.apply_label_remove(
+        op.bead_id.clone(),
+        &op.label,
+        &ctx,
+        event_stamp.clone(),
+        lineage.clone(),
+    );
+    if change.changed() && matches_live_lineage(state, &op.bead_id, lineage.as_ref()) {
         outcome.changed_beads.insert(op.bead_id.clone());
     }
     Ok(())
@@ -526,10 +541,13 @@ fn apply_note_append(
     state: &mut CanonicalState,
     bead_id: BeadId,
     note: &WireNoteV1,
+    lineage: Option<Stamp>,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let note = note_to_core(note);
-    if apply_note(state, bead_id.clone(), note, outcome)? && state.get_live(&bead_id).is_some() {
+    if apply_note(state, bead_id.clone(), lineage.clone(), note, outcome)?
+        && matches_live_lineage(state, &bead_id, lineage.as_ref())
+    {
         outcome.changed_beads.insert(bead_id);
     }
     Ok(())
@@ -538,15 +556,16 @@ fn apply_note_append(
 fn apply_note(
     state: &mut CanonicalState,
     bead_id: BeadId,
+    lineage: Option<Stamp>,
     note: Note,
     outcome: &mut ApplyOutcome,
 ) -> Result<bool, ApplyError> {
-    if let Some(existing) = state.insert_note(bead_id.clone(), note.clone()) {
+    if let Some(existing) = state.insert_note(bead_id.clone(), lineage.clone(), note.clone()) {
         if existing == note {
             return Ok(false);
         }
         if note_collision_cmp(&existing, &note) == Ordering::Less {
-            state.replace_note(bead_id.clone(), note.clone());
+            state.replace_note(bead_id.clone(), lineage.clone(), note.clone());
             outcome.changed_notes.insert(NoteKey {
                 bead_id,
                 note_id: note.id.clone(),
@@ -570,6 +589,16 @@ fn note_to_core(note: &WireNoteV1) -> Note {
         note.author.clone(),
         WriteStamp::new(note.at.0, note.at.1),
     )
+}
+
+fn matches_live_lineage(state: &CanonicalState, bead_id: &BeadId, lineage: Option<&Stamp>) -> bool {
+    let Some(bead) = state.get_live(bead_id) else {
+        return false;
+    };
+    match lineage {
+        Some(lineage) => bead.core.created() == lineage,
+        None => !state.has_collision_tombstone(bead_id),
+    }
 }
 
 fn update_lww<T: Clone + PartialEq>(field: &mut Lww<T>, value: T, stamp: &Stamp) -> bool {
@@ -617,7 +646,7 @@ mod tests {
         ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
     };
     use crate::core::namespace::NamespaceId;
-    use crate::core::wire_bead::{WireDotV1, WireDvvV1, WireStamp};
+    use crate::core::wire_bead::{WireDotV1, WireDvvV1, WireLineageStamp, WireStamp};
     use crate::core::{Seq1, TxnDeltaV1};
     use std::collections::BTreeMap;
     use uuid::Uuid;
@@ -648,12 +677,17 @@ mod tests {
             at: WireStamp(11, 1),
         };
 
+        let lineage = WireLineageStamp {
+            at: patch.created_at.expect("created_at"),
+            by: patch.created_by.clone().expect("created_by"),
+        };
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         delta
             .insert(TxnOpV1::NoteAppend(super::super::wire_bead::NoteAppendV1 {
                 bead_id: BeadId::parse("bd-apply1").unwrap(),
                 note,
+                lineage: Some(lineage),
             }))
             .unwrap();
 
@@ -732,9 +766,15 @@ mod tests {
 
         let bead_id = BeadId::parse("bd-apply1").unwrap();
         let note_id = NoteId::new("note-apply").unwrap();
+        let lineage = state
+            .get_live(&bead_id)
+            .expect("bead should be live")
+            .core
+            .created()
+            .clone();
         let stored = state
             .note_store()
-            .get(&bead_id, &note_id)
+            .get(&bead_id, &lineage, &note_id)
             .expect("note should be stored");
         let hash_a = sha256_bytes("note-a".as_bytes());
         let hash_b = sha256_bytes("note-b".as_bytes());
@@ -790,6 +830,7 @@ mod tests {
             .insert(TxnOpV1::NoteAppend(super::super::wire_bead::NoteAppendV1 {
                 bead_id: bead_id.clone(),
                 note,
+                lineage: None,
             }))
             .unwrap();
         let outcome = apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
@@ -819,6 +860,7 @@ mod tests {
                     max: BTreeMap::new(),
                     dots: Vec::new(),
                 },
+                lineage: None,
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
@@ -832,11 +874,12 @@ mod tests {
                     replica: replica_id,
                     counter: 1,
                 },
+                lineage: None,
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
 
-        let labels = state.labels_for_any(&bead_id);
+        let labels = state.legacy_labels_for(&bead_id);
         assert!(labels.contains(label.as_str()));
     }
 
@@ -1014,6 +1057,7 @@ mod tests {
                     replica: replica_a,
                     counter: 1,
                 },
+                lineage: None,
             }))
             .unwrap();
         let outcome1 = apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
@@ -1029,6 +1073,7 @@ mod tests {
                     replica: replica_b,
                     counter: 1,
                 },
+                lineage: None,
             }))
             .unwrap();
         let outcome2 = apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();

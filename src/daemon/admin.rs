@@ -13,10 +13,9 @@ use crate::api::{
     AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
     AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
     AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
-    AdminReplicaLiveness,
-    AdminReplicationNamespace, AdminReplicationPeer, AdminRotateReplicaIdOutput, AdminScrubOutput,
-    AdminStatusOutput, AdminWalGrowth, AdminWalNamespace, AdminWalSegment, AdminWalWarning,
-    AdminWalWarningKind,
+    AdminReplicaLiveness, AdminReplicationNamespace, AdminReplicationPeer,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalGrowth,
+    AdminWalNamespace, AdminWalSegment, AdminWalWarning, AdminWalWarningKind,
 };
 use crate::core::{
     Limits, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, WallClock, Watermarks,

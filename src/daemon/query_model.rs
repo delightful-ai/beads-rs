@@ -510,7 +510,13 @@ mod tests {
 
         let label = Label::parse("urgent").expect("label");
         let label_stamp = Stamp::new(WriteStamp::new(2_000, 0), actor_id("bob"));
-        state.apply_label_add(id.clone(), label, dot(1, 1), label_stamp.clone());
+        state.apply_label_add(
+            id.clone(),
+            label,
+            dot(1, 1),
+            label_stamp.clone(),
+            Some(base_stamp.clone()),
+        );
 
         let view = state.bead_view(&id).expect("bead view");
         let summary = IssueSummary::from_view(&NamespaceId::core(), &view);
@@ -534,7 +540,7 @@ mod tests {
             note_author.clone(),
             WriteStamp::new(3_000, 0),
         );
-        state.insert_note(id.clone(), note);
+        state.insert_note(id.clone(), Some(base_stamp.clone()), note);
 
         let view = state.bead_view(&id).expect("bead view");
         let issue = Issue::from_view(&NamespaceId::core(), &view);

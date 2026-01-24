@@ -252,7 +252,7 @@ pub fn import_go_export(
             claim: Lww::new(claim_value, updated_stamp.clone()),
         };
 
-        let core = BeadCore::new(id.clone(), created_stamp, None);
+        let core = BeadCore::new(id.clone(), created_stamp.clone(), None);
         let bead = Bead::new(core, fields);
 
         state.insert_live(bead);
@@ -263,7 +263,13 @@ pub fn import_go_export(
         } else {
             for label in labels.iter() {
                 let dot = legacy_dot_from_bytes(label.as_str().as_bytes(), &updated_stamp);
-                state.apply_label_add(id.clone(), label.clone(), dot, updated_stamp.clone());
+                state.apply_label_add(
+                    id.clone(),
+                    label.clone(),
+                    dot,
+                    updated_stamp.clone(),
+                    Some(created_stamp.clone()),
+                );
             }
         }
 
@@ -271,7 +277,7 @@ pub fn import_go_export(
         if let Some(notes) = issue.notes.clone().filter(|s| !s.trim().is_empty()) {
             let note_id = NoteId::new("legacy-notes".to_string())?;
             let note = Note::new(note_id, notes, actor.clone(), updated_stamp.at.clone());
-            state.insert_note(id.clone(), note);
+            state.insert_note(id.clone(), Some(created_stamp.clone()), note);
             report.notes += 1;
         }
 
@@ -302,7 +308,7 @@ pub fn import_go_export(
                 // Include issue ID to ensure global uniqueness across all imported comments
                 let note_id = NoteId::new(format!("go-comment-{}-{}", id.as_str(), c.id))?;
                 let note = Note::new(note_id, c.text.clone(), author, at);
-                state.insert_note(id.clone(), note);
+                state.insert_note(id.clone(), Some(created_stamp.clone()), note);
                 report.notes += 1;
             }
         }

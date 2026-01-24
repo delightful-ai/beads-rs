@@ -1498,6 +1498,7 @@ mod tests {
             .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
                 bead_id: expected_bead_id.clone(),
                 note,
+                lineage: None,
             }))
             .unwrap();
 

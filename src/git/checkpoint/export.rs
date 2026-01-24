@@ -334,7 +334,7 @@ fn build_namespace_shards(
         let Some(view) = state.bead_view(id) else {
             continue;
         };
-        let label_state = state.label_store().state(id);
+        let label_state = state.label_store().state(id, view.bead.core.created());
         let wire = WireBeadFull::from_view(&view, label_state);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
@@ -625,7 +625,9 @@ mod tests {
         );
         let state_payload = snapshot.shards.get(&state_path).expect("state shard");
         let view = core_state.bead_view(&bead_id).expect("bead view");
-        let label_state = core_state.label_store().state(&bead_id);
+        let label_state = core_state
+            .label_store()
+            .state(&bead_id, view.bead.core.created());
         let mut expected =
             to_canon_json_bytes(&WireBeadFull::from_view(&view, label_state)).unwrap();
         expected.push(b'\n');
@@ -865,7 +867,9 @@ mod tests {
         let view_state = state.get(&namespace).expect("state");
         for id in ids {
             let view = view_state.bead_view(&id).expect("bead view");
-            let label_state = view_state.label_store().state(&id);
+            let label_state = view_state
+                .label_store()
+                .state(&id, view.bead.core.created());
             let mut line =
                 to_canon_json_bytes(&WireBeadFull::from_view(&view, label_state)).unwrap();
             line.push(b'\n');

@@ -702,16 +702,26 @@ fn encode_txn_delta(
         enc.str("note_appends")?;
         enc.array(note_appends.len() as u64)?;
         for append in note_appends {
-            enc.map(2)?;
+            let mut len = 2;
+            if append.lineage.is_some() {
+                len += 2;
+            }
+            enc.map(len as u64)?;
             enc.str("bead_id")?;
             enc.str(append.bead_id.as_str())?;
             enc.str("note")?;
             encode_wire_note(enc, &append.note)?;
+            if let Some(lineage) = append.lineage.as_ref() {
+                enc.str("lineage_created_at")?;
+                encode_wire_stamp(enc, &lineage.at)?;
+                enc.str("lineage_created_by")?;
+                enc.str(lineage.by.as_str())?;
+            }
         }
     }
 
     enc.str("v")?;
-    enc.u32(1)?;
+    enc.u32(2)?;
 
     Ok(())
 }
@@ -823,14 +833,16 @@ fn decode_txn_delta(
                 }
                 for _ in 0..arr_len {
                     let entry_len = decode_map_len(dec, limits, depth + 2)?;
-                    if entry_len != 2 {
+                    if !(2..=4).contains(&entry_len) {
                         return Err(DecodeError::InvalidField {
                             field: "note_appends",
-                            reason: "entry must have exactly two fields".into(),
+                            reason: "entry must have 2-4 fields".into(),
                         });
                     }
                     let mut bead_id = None;
                     let mut note = None;
+                    let mut lineage_created_at = None;
+                    let mut lineage_created_by = None;
                     let mut entry_seen = BTreeSet::new();
                     for _ in 0..entry_len {
                         let entry_key = decode_text(dec, limits)?;
@@ -843,6 +855,15 @@ fn decode_txn_delta(
                             "note" => {
                                 note = Some(decode_wire_note(dec, limits, depth + 3)?);
                             }
+                            "lineage_created_at" => {
+                                lineage_created_at =
+                                    Some(decode_wire_stamp(dec, limits, depth + 3)?);
+                            }
+                            "lineage_created_by" => {
+                                let raw = decode_text(dec, limits)?;
+                                lineage_created_by =
+                                    Some(parse_actor_id(raw, "lineage_created_by")?);
+                            }
                             other => {
                                 return Err(DecodeError::InvalidField {
                                     field: "note_appends",
@@ -851,9 +872,22 @@ fn decode_txn_delta(
                             }
                         }
                     }
+                    let lineage = match (lineage_created_at, lineage_created_by) {
+                        (None, None) => None,
+                        (Some(at), Some(by)) => Some(WireLineageStamp { at, by }),
+                        _ => {
+                            return Err(DecodeError::InvalidField {
+                                field: "note_appends",
+                                reason:
+                                    "lineage_created_at and lineage_created_by must be set together"
+                                        .into(),
+                            });
+                        }
+                    };
                     note_appends.push(NoteAppendV1 {
                         bead_id: bead_id.ok_or(DecodeError::MissingField("bead_id"))?,
                         note: note.ok_or(DecodeError::MissingField("note"))?,
+                        lineage,
                     });
                 }
             }
@@ -870,7 +904,7 @@ fn decode_txn_delta(
     }
 
     let version = version.ok_or(DecodeError::MissingField("v"))?;
-    if version != 1 {
+    if version != 1 && version != 2 {
         return Err(DecodeError::UnsupportedDeltaVersion(version));
     }
 
@@ -1449,13 +1483,23 @@ fn encode_wire_label_add(
     enc: &mut Encoder<&mut Vec<u8>>,
     op: &WireLabelAddV1,
 ) -> Result<(), EncodeError> {
-    enc.map(3)?;
+    let mut len = 3;
+    if op.lineage.is_some() {
+        len += 2;
+    }
+    enc.map(len as u64)?;
     enc.str("bead_id")?;
     enc.str(op.bead_id.as_str())?;
     enc.str("label")?;
     enc.str(op.label.as_str())?;
     enc.str("dot")?;
     encode_wire_dot(enc, &op.dot)?;
+    if let Some(lineage) = op.lineage.as_ref() {
+        enc.str("lineage_created_at")?;
+        encode_wire_stamp(enc, &lineage.at)?;
+        enc.str("lineage_created_by")?;
+        enc.str(lineage.by.as_str())?;
+    }
     Ok(())
 }
 
@@ -1469,6 +1513,8 @@ fn decode_wire_label_add(
     let mut bead_id = None;
     let mut label = None;
     let mut dot = None;
+    let mut lineage_created_at = None;
+    let mut lineage_created_by = None;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
@@ -1492,6 +1538,13 @@ fn decode_wire_label_add(
             "dot" => {
                 dot = Some(decode_wire_dot(dec, limits, depth + 1)?);
             }
+            "lineage_created_at" => {
+                lineage_created_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
+            }
+            "lineage_created_by" => {
+                let raw = decode_text(dec, limits)?;
+                lineage_created_by = Some(parse_actor_id(raw, "lineage_created_by")?);
+            }
             other => {
                 return Err(DecodeError::InvalidField {
                     field: "label_add",
@@ -1501,10 +1554,22 @@ fn decode_wire_label_add(
         }
     }
 
+    let lineage = match (lineage_created_at, lineage_created_by) {
+        (None, None) => None,
+        (Some(at), Some(by)) => Some(WireLineageStamp { at, by }),
+        _ => {
+            return Err(DecodeError::InvalidField {
+                field: "label_add",
+                reason: "lineage_created_at and lineage_created_by must be set together".into(),
+            });
+        }
+    };
+
     Ok(WireLabelAddV1 {
         bead_id: bead_id.ok_or(DecodeError::MissingField("bead_id"))?,
         label: label.ok_or(DecodeError::MissingField("label"))?,
         dot: dot.ok_or(DecodeError::MissingField("dot"))?,
+        lineage,
     })
 }
 
@@ -1512,13 +1577,23 @@ fn encode_wire_label_remove(
     enc: &mut Encoder<&mut Vec<u8>>,
     op: &WireLabelRemoveV1,
 ) -> Result<(), EncodeError> {
-    enc.map(3)?;
+    let mut len = 3;
+    if op.lineage.is_some() {
+        len += 2;
+    }
+    enc.map(len as u64)?;
     enc.str("bead_id")?;
     enc.str(op.bead_id.as_str())?;
     enc.str("label")?;
     enc.str(op.label.as_str())?;
     enc.str("ctx")?;
     encode_wire_dvv(enc, &op.ctx)?;
+    if let Some(lineage) = op.lineage.as_ref() {
+        enc.str("lineage_created_at")?;
+        encode_wire_stamp(enc, &lineage.at)?;
+        enc.str("lineage_created_by")?;
+        enc.str(lineage.by.as_str())?;
+    }
     Ok(())
 }
 
@@ -1532,6 +1607,8 @@ fn decode_wire_label_remove(
     let mut bead_id = None;
     let mut label = None;
     let mut ctx = None;
+    let mut lineage_created_at = None;
+    let mut lineage_created_by = None;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
@@ -1555,6 +1632,13 @@ fn decode_wire_label_remove(
             "ctx" => {
                 ctx = Some(decode_wire_dvv(dec, limits, depth + 1)?);
             }
+            "lineage_created_at" => {
+                lineage_created_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
+            }
+            "lineage_created_by" => {
+                let raw = decode_text(dec, limits)?;
+                lineage_created_by = Some(parse_actor_id(raw, "lineage_created_by")?);
+            }
             other => {
                 return Err(DecodeError::InvalidField {
                     field: "label_remove",
@@ -1564,10 +1648,22 @@ fn decode_wire_label_remove(
         }
     }
 
+    let lineage = match (lineage_created_at, lineage_created_by) {
+        (None, None) => None,
+        (Some(at), Some(by)) => Some(WireLineageStamp { at, by }),
+        _ => {
+            return Err(DecodeError::InvalidField {
+                field: "label_remove",
+                reason: "lineage_created_at and lineage_created_by must be set together".into(),
+            });
+        }
+    };
+
     Ok(WireLabelRemoveV1 {
         bead_id: bead_id.ok_or(DecodeError::MissingField("bead_id"))?,
         label: label.ok_or(DecodeError::MissingField("label"))?,
         ctx: ctx.ok_or(DecodeError::MissingField("ctx"))?,
+        lineage,
     })
 }
 
@@ -2582,6 +2678,7 @@ mod tests {
                     replica: dep_replica,
                     counter: 2,
                 },
+                lineage: None,
             }))
             .unwrap();
         txn.delta
@@ -2592,6 +2689,7 @@ mod tests {
                     max: BTreeMap::from([(dep_replica, 2)]),
                     dots: Vec::new(),
                 },
+                lineage: None,
             }))
             .unwrap();
         txn.delta
@@ -2603,6 +2701,7 @@ mod tests {
                     author: actor_id("alice"),
                     at: WireStamp(13, 2),
                 },
+                lineage: None,
             }))
             .unwrap();
         body
@@ -2989,6 +3088,7 @@ mod tests {
                     replica,
                     counter: 1,
                 },
+                lineage: None,
             }))
             .unwrap();
         txn_ref
@@ -3000,6 +3100,7 @@ mod tests {
                     replica,
                     counter: 2,
                 },
+                lineage: None,
             }))
             .unwrap();
         txn_ref
@@ -3011,6 +3112,7 @@ mod tests {
                     max: BTreeMap::from([(replica, 2)]),
                     dots: Vec::new(),
                 },
+                lineage: None,
             }))
             .unwrap();
 

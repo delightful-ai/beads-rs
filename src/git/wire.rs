@@ -102,6 +102,10 @@ struct WireNote {
 struct WireNoteEntry {
     bead_id: String,
     note: WireNote,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lineage_created_at: Option<WireStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lineage_created_by: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -196,8 +200,18 @@ pub fn serialize_state(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
         let Some(view) = state.bead_view(&id) else {
             continue;
         };
-        let label_state = state.label_store().state(&id);
-        let wire = bead_to_wire(&view, label_state);
+        let lineage_state = state.label_store().state(&id, view.bead.core.created());
+        let label_state = if state.has_collision_tombstone(&id) {
+            lineage_state.cloned()
+        } else {
+            match (lineage_state, state.label_store().legacy_state(&id)) {
+                (Some(lineage), Some(legacy)) => Some(LabelState::join(lineage, legacy)),
+                (Some(lineage), None) => Some(lineage.clone()),
+                (None, Some(legacy)) => Some(legacy.clone()),
+                (None, None) => None,
+            }
+        };
+        let wire = bead_to_wire(&view, label_state.as_ref());
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
@@ -276,22 +290,41 @@ pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
 
 /// Serialize notes to notes.jsonl bytes.
 pub fn serialize_notes(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
-    let mut entries = Vec::new();
+    let mut entries: Vec<(BeadId, Option<Stamp>, Note)> = Vec::new();
 
-    for (bead_id, notes) in state.note_store().iter() {
+    for (bead_id, lineage, notes) in state.note_store().iter_lineages() {
         for note in notes.values() {
-            entries.push((bead_id.clone(), note.clone()));
+            entries.push((bead_id.clone(), Some(lineage.clone()), note.clone()));
         }
     }
 
-    entries.sort_by(|(a_id, a_note), (b_id, b_note)| {
+    for (bead_id, notes) in state.note_store().iter_legacy() {
+        if state.has_collision_tombstone(bead_id) {
+            continue;
+        }
+        for note in notes.values() {
+            entries.push((bead_id.clone(), None, note.clone()));
+        }
+    }
+
+    entries.sort_by(|(a_id, a_lineage, a_note), (b_id, b_lineage, b_note)| {
         a_id.cmp(b_id)
+            .then_with(|| a_lineage.cmp(b_lineage))
             .then_with(|| a_note.at.cmp(&b_note.at))
             .then_with(|| a_note.id.cmp(&b_note.id))
     });
 
     let mut lines = Vec::new();
-    for (bead_id, note) in entries {
+    for (bead_id, lineage, note) in entries {
+        let (lineage_created_at, lineage_created_by) = lineage
+            .as_ref()
+            .map(|stamp| {
+                (
+                    Some(stamp_to_wire(&stamp.at)),
+                    Some(stamp.by.as_str().to_string()),
+                )
+            })
+            .unwrap_or((None, None));
         let wire = WireNoteEntry {
             bead_id: bead_id.as_str().to_string(),
             note: WireNote {
@@ -300,6 +333,8 @@ pub fn serialize_notes(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
                 author: note.author.as_str().to_string(),
                 at: (note.at.wall_ms, note.at.counter),
             },
+            lineage_created_at,
+            lineage_created_by,
         };
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
@@ -418,7 +453,7 @@ fn parse_deps(bytes: &[u8]) -> Result<DepStore, WireError> {
 }
 
 /// Parse notes.jsonl bytes.
-pub fn parse_notes(bytes: &[u8]) -> Result<Vec<(BeadId, Note)>, WireError> {
+pub fn parse_notes(bytes: &[u8]) -> Result<Vec<(BeadId, Option<Stamp>, Note)>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut notes = Vec::new();
 
@@ -439,7 +474,19 @@ pub fn parse_notes(bytes: &[u8]) -> Result<Vec<(BeadId, Note)>, WireError> {
             author,
             wire_to_stamp(wire.note.at),
         );
-        notes.push((bead_id, note));
+        let lineage = match (wire.lineage_created_at, wire.lineage_created_by) {
+            (None, None) => None,
+            (Some(at), Some(by)) => Some(Stamp::new(
+                wire_to_stamp(at),
+                ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
+            )),
+            _ => {
+                return Err(WireError::InvalidValue(
+                    "lineage_created_at and lineage_created_by must be set together".into(),
+                ));
+            }
+        };
+        notes.push((bead_id, lineage, note));
     }
 
     Ok(notes)
@@ -461,12 +508,14 @@ pub fn parse_legacy_state(
     let mut label_store = LabelStore::new();
     let mut note_store = NoteStore::new();
     for parsed in beads {
-        let bead_id = parsed.bead.core.id.clone();
-        state.insert_live(parsed.bead);
-        label_store.insert_state(bead_id.clone(), parsed.label_state);
+        let bead = parsed.bead;
+        let bead_id = bead.core.id.clone();
+        let lineage = bead.core.created().clone();
+        state.insert_live(bead);
+        label_store.insert_state(bead_id.clone(), lineage, parsed.label_state);
     }
-    for (bead_id, note) in notes {
-        note_store.insert(bead_id, note);
+    for (bead_id, lineage, note) in notes {
+        note_store.insert(bead_id, lineage, note);
     }
     state.set_label_store(label_store);
     state.set_note_store(note_store);
@@ -938,7 +987,7 @@ mod tests {
             actor_id("alice"),
             WriteStamp::new(2, 0),
         );
-        state.insert_note(bead_id("bd-legacy"), note);
+        state.insert_note(bead_id("bd-legacy"), Some(stamp.clone()), note);
 
         let state_bytes = serialize_state(&state).unwrap();
         let tomb_bytes = serialize_tombstones(&state).unwrap();
@@ -965,9 +1014,15 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        state.apply_label_add(id.clone(), label.clone(), dot, stamp.clone());
-        let ctx = state.label_dvv(&id, &label);
-        state.apply_label_remove(id.clone(), &label, &ctx, stamp.clone());
+        state.apply_label_add(
+            id.clone(),
+            label.clone(),
+            dot,
+            stamp.clone(),
+            Some(stamp.clone()),
+        );
+        let ctx = state.label_dvv(&id, &label, Some(&stamp));
+        state.apply_label_remove(id.clone(), &label, &ctx, stamp.clone(), Some(stamp.clone()));
 
         let dep_key = DepKey::new(id.clone(), bead_id("bd-target"), DepKind::Blocks).unwrap();
         let dep_dot = Dot {
@@ -985,7 +1040,7 @@ mod tests {
             actor_id("bob"),
             WriteStamp::new(6, 0),
         );
-        state.insert_note(id.clone(), note);
+        state.insert_note(id.clone(), Some(stamp.clone()), note);
 
         let state_bytes = serialize_state(&state).unwrap();
         let tomb_bytes = serialize_tombstones(&state).unwrap();
@@ -1008,10 +1063,28 @@ mod tests {
 
         let label_a = Label::parse("urgent").unwrap();
         let label_b = Label::parse("backend").unwrap();
-        state.apply_label_add(id.clone(), label_a.clone(), dot(1, 1), stamp.clone());
-        state.apply_label_add(id.clone(), label_b.clone(), dot(2, 2), stamp.clone());
-        let label_ctx = state.label_dvv(&id, &label_a);
-        state.apply_label_remove(id.clone(), &label_a, &label_ctx, stamp.clone());
+        state.apply_label_add(
+            id.clone(),
+            label_a.clone(),
+            dot(1, 1),
+            stamp.clone(),
+            Some(stamp.clone()),
+        );
+        state.apply_label_add(
+            id.clone(),
+            label_b.clone(),
+            dot(2, 2),
+            stamp.clone(),
+            Some(stamp.clone()),
+        );
+        let label_ctx = state.label_dvv(&id, &label_a, Some(&stamp));
+        state.apply_label_remove(
+            id.clone(),
+            &label_a,
+            &label_ctx,
+            stamp.clone(),
+            Some(stamp.clone()),
+        );
 
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-target-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-target-b"), DepKind::Related).unwrap();
@@ -1027,7 +1100,7 @@ mod tests {
             actor_id("bob"),
             WriteStamp::new(11, 0),
         );
-        state.insert_note(id.clone(), note);
+        state.insert_note(id.clone(), Some(stamp.clone()), note);
 
         let state_bytes = serialize_state(&state).unwrap();
         let tomb_bytes = serialize_tombstones(&state).unwrap();
@@ -1037,10 +1110,13 @@ mod tests {
         let parsed =
             parse_legacy_state(&state_bytes, &tomb_bytes, &deps_bytes, &notes_bytes).unwrap();
 
-        let original_labels = state.label_store().state(&id).expect("label state missing");
+        let original_labels = state
+            .label_store()
+            .state(&id, &stamp)
+            .expect("label state missing");
         let parsed_labels = parsed
             .label_store()
-            .state(&id)
+            .state(&id, &stamp)
             .expect("label state missing");
         assert_eq!(original_labels.cc(), parsed_labels.cc());
         assert_eq!(
@@ -1089,12 +1165,14 @@ mod tests {
             label_a.clone(),
             dot(5, 1),
             label_stamp_a.clone(),
+            Some(stamp.clone()),
         );
         state_a.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(6, 2),
             label_stamp_b.clone(),
+            Some(stamp.clone()),
         );
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-order-b"), DepKind::Related).unwrap();
@@ -1112,17 +1190,30 @@ mod tests {
             actor_id("carol"),
             WriteStamp::new(11, 0),
         );
-        state_a.insert_note(id.clone(), note_a);
-        state_a.insert_note(id.clone(), note_b);
+        state_a.insert_note(id.clone(), Some(stamp.clone()), note_a);
+        state_a.insert_note(id.clone(), Some(stamp.clone()), note_b);
 
         let mut state_b = CanonicalState::new();
         state_b.insert(make_bead(&id, &stamp)).unwrap();
-        state_b.apply_label_add(id.clone(), label_b, dot(6, 2), label_stamp_b);
-        state_b.apply_label_add(id.clone(), label_a, dot(5, 1), label_stamp_a);
+        state_b.apply_label_add(
+            id.clone(),
+            label_b,
+            dot(6, 2),
+            label_stamp_b,
+            Some(stamp.clone()),
+        );
+        state_b.apply_label_add(
+            id.clone(),
+            label_a,
+            dot(5, 1),
+            label_stamp_a,
+            Some(stamp.clone()),
+        );
         state_b.apply_dep_add(dep_key_b, dot(8, 4), dep_stamp_b);
         state_b.apply_dep_add(dep_key_a, dot(7, 3), dep_stamp_a);
         state_b.insert_note(
             id.clone(),
+            Some(stamp.clone()),
             Note::new(
                 NoteId::new("note-b").unwrap(),
                 "second".to_string(),
@@ -1132,6 +1223,7 @@ mod tests {
         );
         state_b.insert_note(
             id.clone(),
+            Some(stamp.clone()),
             Note::new(
                 NoteId::new("note-a").unwrap(),
                 "first".to_string(),
@@ -1165,13 +1257,25 @@ mod tests {
 
         let mut state_a = CanonicalState::new();
         state_a.insert(make_bead(&id, &base)).unwrap();
-        state_a.apply_label_add(id.clone(), label_a.clone(), dot(1, 1), stamp_a.clone());
-        state_a.apply_label_add(id.clone(), label_b.clone(), dot(2, 1), stamp_b.clone());
+        state_a.apply_label_add(
+            id.clone(),
+            label_a.clone(),
+            dot(1, 1),
+            stamp_a.clone(),
+            Some(base.clone()),
+        );
+        state_a.apply_label_add(
+            id.clone(),
+            label_b.clone(),
+            dot(2, 1),
+            stamp_b.clone(),
+            Some(base.clone()),
+        );
 
         let mut state_b = CanonicalState::new();
         state_b.insert(make_bead(&id, &base)).unwrap();
-        state_b.apply_label_add(id.clone(), label_b, dot(2, 1), stamp_b);
-        state_b.apply_label_add(id.clone(), label_a, dot(1, 1), stamp_a);
+        state_b.apply_label_add(id.clone(), label_b, dot(2, 1), stamp_b, Some(base.clone()));
+        state_b.apply_label_add(id.clone(), label_a, dot(1, 1), stamp_a, Some(base.clone()));
 
         assert_eq!(
             serialize_state(&state_a).unwrap(),

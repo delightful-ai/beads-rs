@@ -79,6 +79,7 @@ fn note_collision_is_deterministic() {
         .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
             bead_id: bead_id.clone(),
             note,
+            lineage: None,
         }))
         .expect("unique note append");
 
@@ -199,6 +200,7 @@ fn orphan_label_and_note_ops_become_visible_after_create() {
                 replica: replica.clone(),
                 counter: 1,
             },
+            lineage: None,
         }))
         .expect("unique label add");
     delta
@@ -209,12 +211,14 @@ fn orphan_label_and_note_ops_become_visible_after_create() {
                 max: BTreeMap::from([(remove_replica.clone(), 1)]),
                 dots: Vec::new(),
             },
+            lineage: None,
         }))
         .expect("unique label remove");
     delta
         .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
             bead_id: bead.clone(),
             note,
+            lineage: None,
         }))
         .expect("unique note append");
 
@@ -305,6 +309,7 @@ fn label_dot_collision_is_deterministic() {
             bead_id: bead.clone(),
             label: label_low.clone(),
             dot,
+            lineage: None,
         }))
         .expect("unique label add");
     let event_low = event_body_with_delta(10, delta_low);
@@ -315,6 +320,7 @@ fn label_dot_collision_is_deterministic() {
             bead_id: bead.clone(),
             label: label_high.clone(),
             dot,
+            lineage: None,
         }))
         .expect("unique label add");
     let event_high = event_body_with_delta(11, delta_high);

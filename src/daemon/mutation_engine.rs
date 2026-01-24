@@ -901,6 +901,7 @@ impl MutationEngine {
                     bead_id: id.clone(),
                     label: label.clone(),
                     dot: WireDotV1::from(dot),
+                    lineage: Some(stamp.clone().into()),
                 }))
                 .map_err(delta_error_to_op)?;
         }
@@ -989,7 +990,8 @@ impl MutationEngine {
         labels: Labels,
         dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedDelta, OpError> {
-        state.require_live(&id).map_live_err(&id)?;
+        let bead = state.require_live(&id).map_live_err(&id)?;
+        let lineage = bead.core.created().clone();
         let mut merged = state.labels_for(&id);
         for label in labels.iter() {
             merged.insert(label.clone());
@@ -1004,6 +1006,7 @@ impl MutationEngine {
                     bead_id: id.clone(),
                     label: label.clone(),
                     dot: WireDotV1::from(dot),
+                    lineage: Some(lineage.clone().into()),
                 }))
                 .map_err(delta_error_to_op)?;
         }
@@ -1022,15 +1025,17 @@ impl MutationEngine {
         id: BeadId,
         labels: Labels,
     ) -> Result<PlannedDelta, OpError> {
-        state.require_live(&id).map_live_err(&id)?;
+        let bead = state.require_live(&id).map_live_err(&id)?;
+        let lineage = bead.core.created().clone();
         let mut delta = TxnDeltaV1::new();
         for label in labels.iter() {
-            let ctx = state.label_dvv(&id, label);
+            let ctx = state.label_dvv(&id, label, Some(&lineage));
             delta
                 .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
                     bead_id: id.clone(),
                     label: label.clone(),
                     ctx: WireDvvV1::from(&ctx),
+                    lineage: Some(lineage.clone().into()),
                 }))
                 .map_err(delta_error_to_op)?;
         }
@@ -1301,7 +1306,8 @@ impl MutationEngine {
         content: String,
     ) -> Result<PlannedDelta, OpError> {
         enforce_note_limit(&content, &self.limits)?;
-        state.require_live(&id).map_live_err(&id)?;
+        let bead = state.require_live(&id).map_live_err(&id)?;
+        let lineage = bead.core.created().clone();
         let note_id = generate_unique_note_id(state, &id, NoteId::generate);
 
         let note = WireNoteV1 {
@@ -1314,6 +1320,7 @@ impl MutationEngine {
         let append = NoteAppendV1 {
             bead_id: id.clone(),
             note,
+            lineage: Some(lineage.into()),
         };
 
         let mut delta = TxnDeltaV1::new();

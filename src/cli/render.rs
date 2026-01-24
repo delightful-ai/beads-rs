@@ -951,7 +951,11 @@ fn render_admin_reload_limits(out: &AdminReloadLimitsOutput) -> String {
     out_str.push_str(&format!("store_id: {}\n", out.store_id));
     out_str.push_str(&format!(
         "requires_restart: {}\n",
-        if out.requires_restart { "true" } else { "false" }
+        if out.requires_restart {
+            "true"
+        } else {
+            "false"
+        }
     ));
     out_str.trim_end().into()
 }

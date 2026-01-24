@@ -902,8 +902,8 @@ fn detect_changed_fields(
     if old.fields.claim.stamp != new.fields.claim.stamp {
         changed.push("claim");
     }
-    let before_labels = before.labels_for_any(id);
-    let after_labels = after.labels_for_any(id);
+    let before_labels = before.labels_for(id);
+    let after_labels = after.labels_for(id);
     if before_labels != after_labels || before.label_stamp(id) != after.label_stamp(id) {
         changed.push("labels");
     }

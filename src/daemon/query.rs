@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use super::query_model::{
     AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
-    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput, AdminReloadLimitsOutput,
-    AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminRotateReplicaIdOutput,
-    AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup,
-    DepCycles, DepEdge, EpicStatus, Issue, IssueSummary, Note, ReadyResult, StatusOutput,
-    Tombstone,
+    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult,
+    DaemonInfo, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue, IssueSummary, Note,
+    ReadyResult, StatusOutput, Tombstone,
 };
 use crate::core::{ActorId, BeadId, BeadType, BeadView, Claim, Priority};
 

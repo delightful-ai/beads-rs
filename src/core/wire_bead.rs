@@ -655,6 +655,14 @@ pub struct WireLabelAddV1 {
     pub bead_id: BeadId,
     pub label: Label,
     pub dot: WireDotV1,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<WireLineageStamp>,
+}
+
+impl WireLabelAddV1 {
+    pub fn lineage_stamp(&self) -> Option<Stamp> {
+        self.lineage.as_ref().map(WireLineageStamp::stamp)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,6 +670,14 @@ pub struct WireLabelRemoveV1 {
     pub bead_id: BeadId,
     pub label: Label,
     pub ctx: WireDvvV1,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<WireLineageStamp>,
+}
+
+impl WireLabelRemoveV1 {
+    pub fn lineage_stamp(&self) -> Option<Stamp> {
+        self.lineage.as_ref().map(WireLineageStamp::stamp)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -684,6 +700,14 @@ pub struct WireDepRemoveV1 {
 pub struct NoteAppendV1 {
     pub bead_id: BeadId,
     pub note: WireNoteV1,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<WireLineageStamp>,
+}
+
+impl NoteAppendV1 {
+    pub fn lineage_stamp(&self) -> Option<Stamp> {
+        self.lineage.as_ref().map(WireLineageStamp::stamp)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -712,10 +736,12 @@ impl TxnOpV1 {
                 bead_id: op.bead_id.clone(),
                 label: op.label.clone(),
                 dot: op.dot.into(),
+                lineage: op.lineage_stamp(),
             },
             TxnOpV1::LabelRemove(op) => TxnOpKey::LabelRemove {
                 bead_id: op.bead_id.clone(),
                 label: op.label.clone(),
+                lineage: op.lineage_stamp(),
             },
             TxnOpV1::DepAdd(dep) => TxnOpKey::DepAdd {
                 from: dep.from.clone(),
@@ -731,6 +757,7 @@ impl TxnOpV1 {
             TxnOpV1::NoteAppend(append) => TxnOpKey::NoteAppend {
                 bead_id: append.bead_id.clone(),
                 note_id: append.note.id.clone(),
+                lineage: append.lineage_stamp(),
             },
         }
     }
@@ -749,10 +776,12 @@ pub enum TxnOpKey {
         bead_id: BeadId,
         label: Label,
         dot: Dot,
+        lineage: Option<Stamp>,
     },
     LabelRemove {
         bead_id: BeadId,
         label: Label,
+        lineage: Option<Stamp>,
     },
     DepAdd {
         from: BeadId,
@@ -768,6 +797,7 @@ pub enum TxnOpKey {
     NoteAppend {
         bead_id: BeadId,
         note_id: NoteId,
+        lineage: Option<Stamp>,
     },
 }
 
@@ -801,15 +831,26 @@ impl TxnOpKey {
                 bead_id,
                 label,
                 dot,
+                lineage,
             } => format!(
-                "label_add:{}:{}:{}:{}",
+                "label_add:{}:{}:{}:{}{}",
                 bead_id.as_str(),
                 label.as_str(),
                 dot.replica,
-                dot.counter
+                dot.counter,
+                lineage_suffix(lineage.as_ref())
             ),
-            TxnOpKey::LabelRemove { bead_id, label } => {
-                format!("label_remove:{}:{}", bead_id.as_str(), label.as_str())
+            TxnOpKey::LabelRemove {
+                bead_id,
+                label,
+                lineage,
+            } => {
+                format!(
+                    "label_remove:{}:{}{}",
+                    bead_id.as_str(),
+                    label.as_str(),
+                    lineage_suffix(lineage.as_ref())
+                )
             }
             TxnOpKey::DepAdd {
                 from,
@@ -830,10 +871,31 @@ impl TxnOpKey {
                 to.as_str(),
                 kind.as_str()
             ),
-            TxnOpKey::NoteAppend { bead_id, note_id } => {
-                format!("note_append:{}:{}", bead_id.as_str(), note_id.as_str())
+            TxnOpKey::NoteAppend {
+                bead_id,
+                note_id,
+                lineage,
+            } => {
+                format!(
+                    "note_append:{}:{}{}",
+                    bead_id.as_str(),
+                    note_id.as_str(),
+                    lineage_suffix(lineage.as_ref())
+                )
             }
         }
+    }
+}
+
+fn lineage_suffix(lineage: Option<&Stamp>) -> String {
+    match lineage {
+        Some(stamp) => format!(
+            ":{}:{}:{}",
+            stamp.at.wall_ms,
+            stamp.at.counter,
+            stamp.by.as_str()
+        ),
+        None => ":legacy".to_string(),
     }
 }
 
@@ -1092,6 +1154,7 @@ mod tests {
                 replica: ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])),
                 counter: 2,
             },
+            lineage: None,
         };
         let label_remove = WireLabelRemoveV1 {
             bead_id: bead_id("bd-order"),
@@ -1100,6 +1163,7 @@ mod tests {
                 max: BTreeMap::from([(ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])), 2)]),
                 dots: Vec::new(),
             },
+            lineage: None,
         };
         let append = NoteAppendV1 {
             bead_id: bead_id("bd-order"),
@@ -1109,6 +1173,7 @@ mod tests {
                 author: actor_id("alice"),
                 at: WireStamp(1, 1),
             },
+            lineage: None,
         };
         delta.insert(TxnOpV1::NoteAppend(append)).unwrap();
         delta.insert(TxnOpV1::DepRemove(dep_remove)).unwrap();
@@ -1182,6 +1247,7 @@ mod tests {
                     replica: ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])),
                     counter: 9,
                 },
+                lineage: None,
             }))
             .unwrap();
         delta
@@ -1192,6 +1258,7 @@ mod tests {
                     max: BTreeMap::from([(ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])), 9)]),
                     dots: Vec::new(),
                 },
+                lineage: None,
             }))
             .unwrap();
         delta
@@ -1203,6 +1270,7 @@ mod tests {
                     author: actor_id("bob"),
                     at: WireStamp(2, 2),
                 },
+                lineage: None,
             }))
             .unwrap();
 

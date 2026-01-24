@@ -307,12 +307,14 @@ Code refs (current):
 ```
 WireDotV1 { replica: ReplicaId, counter: u64 }
 WireDvvV1 { max: BTreeMap<ReplicaId, u64>, dots: Vec<WireDotV1> } // dots omitted when empty
+WireLineageStamp { lineage_created_at, lineage_created_by }
 
-WireLabelAddV1 { bead_id, label, dot: WireDotV1 }
-WireLabelRemoveV1 { bead_id, label, ctx: WireDvvV1 }
+WireLabelAddV1 { bead_id, label, dot: WireDotV1, lineage?: WireLineageStamp }
+WireLabelRemoveV1 { bead_id, label, ctx: WireDvvV1, lineage?: WireLineageStamp }
 
 WireDepAddV1 { from, to, kind, dot: WireDotV1 }
 WireDepRemoveV1 { from, to, kind, ctx: WireDvvV1 }
+NoteAppendV1 { bead_id, note, lineage?: WireLineageStamp }
 ```
 
 WireDvvV1 encodes as a map with keys `max` and `dots` in CBOR/JSON. `max` is a map
@@ -334,8 +336,9 @@ NoteAppend(NoteAppendV1)
 **TxnOpKey** must include dot for add ops to avoid dedup losing distinct dots:
 
 ```
-LabelAdd { bead_id, label, dot }
+LabelAdd { bead_id, label, dot, lineage? }
 DepAdd { from, to, kind, dot }
+NoteAppend { bead_id, note_id, lineage? }
 ```
 
 Remove keys can remain `{bead_id,label}` / `{from,to,kind}`.
