@@ -488,6 +488,7 @@ fn repl_daemon_replicated_fsync_receipt() {
     options.seed = 31;
 
     let rig = ReplRig::new(3, options);
+    rig.assert_peers_seen(Duration::from_secs(30));
 
     let (issue_id, receipt) =
         create_issue_with_durability(&rig, 0, "durability-ok", NonZeroU32::new(2).unwrap());
