@@ -352,8 +352,14 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
         if let Some(branch) = closure.on_branch.as_ref() {
             h.update(branch.as_bytes());
         }
+        h.update([0]);
+    } else {
+        // Not closed - emit 4 null separators for compatibility
+        h.update([0]); // closed_at
+        h.update([0]); // closed_by
+        h.update([0]); // closed_reason
+        h.update([0]); // closed_on_branch
     }
-    h.update([0]);
 
     // external_ref
     if let Some(ext) = bead.fields.external_ref.value.as_ref() {
