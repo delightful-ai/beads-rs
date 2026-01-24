@@ -10,21 +10,557 @@
 //!
 //! Resurrection rule: modification strictly newer than deletion can resurrect.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::bead::Bead;
-use super::dep::{DepEdge, DepKey, DepLife};
+use super::bead::{Bead, BeadView};
+use super::collections::{Label, Labels};
+use super::composite::Note;
+use super::dep::DepKey;
 use super::domain::DepKind;
 use super::error::CoreError;
-use super::identity::BeadId;
+use super::event::sha256_bytes;
+use super::identity::{BeadId, ContentHash, NoteId};
+use super::orset::{Dot, Dvv, OrSet, OrSetChange};
 use super::time::{Stamp, WallClock};
 use super::tombstone::{Tombstone, TombstoneKey};
+use super::wire_bead::WireLineageStamp;
+
+/// Label membership for a single bead.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LabelState {
+    set: OrSet<Label>,
+    stamp: Option<Stamp>,
+}
+
+impl LabelState {
+    pub fn new() -> Self {
+        Self {
+            set: OrSet::new(),
+            stamp: None,
+        }
+    }
+
+    pub(crate) fn from_parts(set: OrSet<Label>, stamp: Option<Stamp>) -> Self {
+        Self { set, stamp }
+    }
+
+    pub fn stamp(&self) -> Option<&Stamp> {
+        self.stamp.as_ref()
+    }
+
+    pub(crate) fn labels(&self) -> Labels {
+        self.set.values().cloned().collect()
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &Label> {
+        self.set.values()
+    }
+
+    pub(crate) fn dots_for(&self, label: &Label) -> Option<&BTreeSet<Dot>> {
+        self.set.dots_for(label)
+    }
+
+    pub(crate) fn cc(&self) -> &Dvv {
+        self.set.cc()
+    }
+
+    pub(crate) fn join(a: &Self, b: &Self) -> Self {
+        Self {
+            set: OrSet::join(&a.set, &b.set),
+            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
+        }
+    }
+}
+
+impl Default for LabelState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Canonical label store keyed by bead id + lineage stamp.
+#[derive(Clone, Debug, Default)]
+pub struct LabelStore {
+    by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>>,
+    legacy_by_bead: BTreeMap<BeadId, LabelState>,
+}
+
+impl LabelStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn state(&self, id: &BeadId, lineage: &Stamp) -> Option<&LabelState> {
+        self.by_bead.get(id).and_then(|states| states.get(lineage))
+    }
+
+    pub(crate) fn state_mut(&mut self, id: &BeadId, lineage: &Stamp) -> &mut LabelState {
+        self.by_bead
+            .entry(id.clone())
+            .or_default()
+            .entry(lineage.clone())
+            .or_default()
+    }
+
+    pub(crate) fn legacy_state(&self, id: &BeadId) -> Option<&LabelState> {
+        self.legacy_by_bead.get(id)
+    }
+
+    pub(crate) fn legacy_state_mut(&mut self, id: &BeadId) -> &mut LabelState {
+        self.legacy_by_bead.entry(id.clone()).or_default()
+    }
+
+    pub(crate) fn insert_state(&mut self, id: BeadId, lineage: Stamp, state: LabelState) {
+        self.by_bead.entry(id).or_default().insert(lineage, state);
+    }
+
+    pub fn join(a: &Self, b: &Self) -> Self {
+        let mut merged = LabelStore::new();
+        let ids: BTreeSet<_> = a
+            .by_bead
+            .keys()
+            .chain(b.by_bead.keys())
+            .chain(a.legacy_by_bead.keys())
+            .chain(b.legacy_by_bead.keys())
+            .cloned()
+            .collect();
+        for id in ids {
+            let mut merged_lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
+            if let Some(states) = a.by_bead.get(&id) {
+                for (lineage, state) in states {
+                    merged_lineages.insert(lineage.clone(), state.clone());
+                }
+            }
+            if let Some(states) = b.by_bead.get(&id) {
+                for (lineage, state) in states {
+                    match merged_lineages.get(lineage) {
+                        Some(existing) => {
+                            merged_lineages
+                                .insert(lineage.clone(), LabelState::join(existing, state));
+                        }
+                        None => {
+                            merged_lineages.insert(lineage.clone(), state.clone());
+                        }
+                    }
+                }
+            }
+            if !merged_lineages.is_empty() {
+                merged.by_bead.insert(id.clone(), merged_lineages);
+            }
+
+            let merged_legacy = match (a.legacy_by_bead.get(&id), b.legacy_by_bead.get(&id)) {
+                (Some(left), Some(right)) => Some(LabelState::join(left, right)),
+                (Some(left), None) => Some(left.clone()),
+                (None, Some(right)) => Some(right.clone()),
+                (None, None) => None,
+            };
+            if let Some(state) = merged_legacy {
+                merged.legacy_by_bead.insert(id, state);
+            }
+        }
+        merged
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct LineageLabelState {
+    lineage: WireLineageStamp,
+    state: LabelState,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LabelStoreWire {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    by_bead: BTreeMap<BeadId, Vec<LineageLabelState>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    legacy: BTreeMap<BeadId, LabelState>,
+}
+
+impl Serialize for LabelStore {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut by_bead = BTreeMap::new();
+        for (id, lineages) in &self.by_bead {
+            let entries = lineages
+                .iter()
+                .map(|(lineage, state)| LineageLabelState {
+                    lineage: WireLineageStamp::from(lineage.clone()),
+                    state: state.clone(),
+                })
+                .collect::<Vec<_>>();
+            if !entries.is_empty() {
+                by_bead.insert(id.clone(), entries);
+            }
+        }
+        let wire = LabelStoreWire {
+            by_bead,
+            legacy: self.legacy_by_bead.clone(),
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LabelStore {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum LabelStoreRepr {
+            Legacy(BTreeMap<BeadId, LabelState>),
+            Wire(LabelStoreWire),
+        }
+
+        match LabelStoreRepr::deserialize(deserializer)? {
+            LabelStoreRepr::Legacy(map) => Ok(LabelStore {
+                by_bead: BTreeMap::new(),
+                legacy_by_bead: map,
+            }),
+            LabelStoreRepr::Wire(wire) => {
+                let mut by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>> = BTreeMap::new();
+                for (id, entries) in wire.by_bead {
+                    let mut lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
+                    for entry in entries {
+                        let lineage = entry.lineage.stamp();
+                        match lineages.get(&lineage) {
+                            Some(existing) => {
+                                lineages.insert(lineage, LabelState::join(existing, &entry.state));
+                            }
+                            None => {
+                                lineages.insert(lineage, entry.state);
+                            }
+                        }
+                    }
+                    if !lineages.is_empty() {
+                        by_bead.insert(id, lineages);
+                    }
+                }
+                Ok(LabelStore {
+                    by_bead,
+                    legacy_by_bead: wire.legacy,
+                })
+            }
+        }
+    }
+}
+
+/// Canonical dependency store (OR-Set membership only).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DepStore {
+    set: OrSet<DepKey>,
+    stamp: Option<Stamp>,
+}
+
+impl DepStore {
+    pub fn new() -> Self {
+        Self {
+            set: OrSet::new(),
+            stamp: None,
+        }
+    }
+
+    pub(crate) fn from_parts(set: OrSet<DepKey>, stamp: Option<Stamp>) -> Self {
+        Self { set, stamp }
+    }
+    pub fn stamp(&self) -> Option<&Stamp> {
+        self.stamp.as_ref()
+    }
+
+    pub(crate) fn cc(&self) -> &Dvv {
+        self.set.cc()
+    }
+
+    pub fn contains(&self, key: &DepKey) -> bool {
+        self.set.contains(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.set.values().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &DepKey> {
+        self.set.values()
+    }
+
+    pub fn dots_for(&self, key: &DepKey) -> Option<&BTreeSet<Dot>> {
+        self.set.dots_for(key)
+    }
+
+    pub fn join(a: &Self, b: &Self) -> Self {
+        Self {
+            set: OrSet::join(&a.set, &b.set),
+            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
+        }
+    }
+}
+
+impl Default for DepStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Canonical note store keyed by bead id + lineage stamp.
+#[derive(Clone, Debug, Default)]
+pub struct NoteStore {
+    by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>>,
+    legacy_by_bead: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
+}
+
+impl NoteStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, id: BeadId, lineage: Option<Stamp>, note: Note) -> Option<Note> {
+        let entry = match lineage {
+            Some(lineage) => self
+                .by_bead
+                .entry(id)
+                .or_default()
+                .entry(lineage)
+                .or_default(),
+            None => self.legacy_by_bead.entry(id).or_default(),
+        };
+        if let Some(existing) = entry.get(&note.id) {
+            return Some(existing.clone());
+        }
+        entry.insert(note.id.clone(), note);
+        None
+    }
+
+    pub fn replace(&mut self, id: BeadId, lineage: Option<Stamp>, note: Note) -> Option<Note> {
+        let entry = match lineage {
+            Some(lineage) => self
+                .by_bead
+                .entry(id)
+                .or_default()
+                .entry(lineage)
+                .or_default(),
+            None => self.legacy_by_bead.entry(id).or_default(),
+        };
+        entry.insert(note.id.clone(), note)
+    }
+
+    pub fn get(&self, id: &BeadId, lineage: &Stamp, note_id: &NoteId) -> Option<&Note> {
+        self.by_bead
+            .get(id)
+            .and_then(|notes| notes.get(lineage))
+            .and_then(|notes| notes.get(note_id))
+    }
+
+    pub fn note_id_exists(&self, id: &BeadId, note_id: &NoteId) -> bool {
+        if let Some(lineages) = self.by_bead.get(id) {
+            for notes in lineages.values() {
+                if notes.contains_key(note_id) {
+                    return true;
+                }
+            }
+        }
+        self.legacy_by_bead
+            .get(id)
+            .is_some_and(|notes| notes.contains_key(note_id))
+    }
+
+    pub fn notes_for(&self, id: &BeadId, lineage: &Stamp) -> Vec<&Note> {
+        let Some(notes) = self.by_bead.get(id).and_then(|notes| notes.get(lineage)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<&Note> = notes.values().collect();
+        out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+        out
+    }
+
+    pub(crate) fn legacy_notes_for(&self, id: &BeadId) -> Vec<&Note> {
+        let Some(notes) = self.legacy_by_bead.get(id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<&Note> = notes.values().collect();
+        out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+        out
+    }
+
+    pub(crate) fn iter_lineages(
+        &self,
+    ) -> impl Iterator<Item = (&BeadId, &Stamp, &BTreeMap<NoteId, Note>)> {
+        self.by_bead.iter().flat_map(|(id, lineages)| {
+            lineages
+                .iter()
+                .map(move |(lineage, notes)| (id, lineage, notes))
+        })
+    }
+
+    pub(crate) fn iter_legacy(&self) -> impl Iterator<Item = (&BeadId, &BTreeMap<NoteId, Note>)> {
+        self.legacy_by_bead.iter()
+    }
+
+    pub fn join(a: &Self, b: &Self) -> Self {
+        let mut merged = NoteStore::new();
+        for (id, lineages) in a.by_bead.iter().chain(b.by_bead.iter()) {
+            let entry = merged.by_bead.entry(id.clone()).or_default();
+            for (lineage, notes) in lineages {
+                let lineage_entry = entry.entry(lineage.clone()).or_default();
+                for (note_id, note) in notes {
+                    match lineage_entry.get(note_id) {
+                        None => {
+                            lineage_entry.insert(note_id.clone(), note.clone());
+                        }
+                        Some(existing) => {
+                            if note_collision_cmp(existing, note) == Ordering::Less {
+                                lineage_entry.insert(note_id.clone(), note.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (id, notes) in a.legacy_by_bead.iter().chain(b.legacy_by_bead.iter()) {
+            let entry = merged.legacy_by_bead.entry(id.clone()).or_default();
+            for (note_id, note) in notes {
+                match entry.get(note_id) {
+                    None => {
+                        entry.insert(note_id.clone(), note.clone());
+                    }
+                    Some(existing) => {
+                        if note_collision_cmp(existing, note) == Ordering::Less {
+                            entry.insert(note_id.clone(), note.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        merged
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct LineageNotes {
+    lineage: WireLineageStamp,
+    notes: BTreeMap<NoteId, Note>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NoteStoreWire {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    by_bead: BTreeMap<BeadId, Vec<LineageNotes>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    legacy: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
+}
+
+impl Serialize for NoteStore {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut by_bead = BTreeMap::new();
+        for (id, lineages) in &self.by_bead {
+            let entries = lineages
+                .iter()
+                .map(|(lineage, notes)| LineageNotes {
+                    lineage: WireLineageStamp::from(lineage.clone()),
+                    notes: notes.clone(),
+                })
+                .collect::<Vec<_>>();
+            if !entries.is_empty() {
+                by_bead.insert(id.clone(), entries);
+            }
+        }
+        let wire = NoteStoreWire {
+            by_bead,
+            legacy: self.legacy_by_bead.clone(),
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for NoteStore {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum NoteStoreRepr {
+            Legacy(BTreeMap<BeadId, BTreeMap<NoteId, Note>>),
+            Wire(NoteStoreWire),
+        }
+
+        match NoteStoreRepr::deserialize(deserializer)? {
+            NoteStoreRepr::Legacy(map) => Ok(NoteStore {
+                by_bead: BTreeMap::new(),
+                legacy_by_bead: map,
+            }),
+            NoteStoreRepr::Wire(wire) => {
+                let mut by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>> =
+                    BTreeMap::new();
+                for (id, entries) in wire.by_bead {
+                    let mut lineages: BTreeMap<Stamp, BTreeMap<NoteId, Note>> = BTreeMap::new();
+                    for entry in entries {
+                        let lineage = entry.lineage.stamp();
+                        match lineages.get(&lineage) {
+                            Some(existing) => {
+                                let mut merged = existing.clone();
+                                for (note_id, note) in entry.notes {
+                                    match merged.get(&note_id) {
+                                        None => {
+                                            merged.insert(note_id, note);
+                                        }
+                                        Some(existing_note) => {
+                                            if note_collision_cmp(existing_note, &note)
+                                                == Ordering::Less
+                                            {
+                                                merged.insert(note_id, note);
+                                            }
+                                        }
+                                    }
+                                }
+                                lineages.insert(lineage, merged);
+                            }
+                            None => {
+                                lineages.insert(lineage, entry.notes);
+                            }
+                        }
+                    }
+                    if !lineages.is_empty() {
+                        by_bead.insert(id, lineages);
+                    }
+                }
+                Ok(NoteStore {
+                    by_bead,
+                    legacy_by_bead: wire.legacy,
+                })
+            }
+        }
+    }
+}
+
+fn max_stamp(a: Option<&Stamp>, b: Option<&Stamp>) -> Option<Stamp> {
+    match (a, b) {
+        (Some(left), Some(right)) => Some(if left >= right {
+            left.clone()
+        } else {
+            right.clone()
+        }),
+        (Some(stamp), None) | (None, Some(stamp)) => Some(stamp.clone()),
+        (None, None) => None,
+    }
+}
 
 /// Derived indexes for efficient dependency lookups.
 ///
-/// These are rebuilt from `deps` on load and updated incrementally.
+/// These are rebuilt from `dep_store` on load and updated incrementally.
 /// Not serialized - derived state only.
 #[derive(Default, Debug, Clone)]
 pub struct DepIndexes {
@@ -98,7 +634,12 @@ pub enum BeadEntry {
 pub struct CanonicalState {
     beads: BTreeMap<BeadId, BeadEntry>,
     collision_tombstones: BTreeMap<TombstoneKey, Tombstone>,
-    deps: BTreeMap<DepKey, DepEdge>,
+    #[serde(default)]
+    labels: LabelStore,
+    #[serde(default)]
+    dep_store: DepStore,
+    #[serde(default)]
+    notes: NoteStore,
     /// Derived indexes for O(1) dependency lookups.
     /// Not serialized - rebuilt on load and updated incrementally.
     #[serde(skip, default)]
@@ -144,6 +685,10 @@ impl CanonicalState {
             .contains_key(&TombstoneKey::lineage(id.clone(), lineage.clone()))
     }
 
+    pub(crate) fn has_collision_tombstone(&self, id: &BeadId) -> bool {
+        self.collision_tombstones.keys().any(|k| &k.id == id)
+    }
+
     pub fn contains(&self, id: &BeadId) -> bool {
         self.beads.contains_key(id) || self.has_any_tombstone(id)
     }
@@ -165,7 +710,11 @@ impl CanonicalState {
     }
 
     pub fn dep_count(&self) -> usize {
-        self.deps.len()
+        self.dep_store.len()
+    }
+
+    pub fn dep_contains(&self, key: &DepKey) -> bool {
+        self.dep_store.contains(key)
     }
 
     pub fn iter_live(&self) -> impl Iterator<Item = (&BeadId, &Bead)> {
@@ -187,12 +736,342 @@ impl CanonicalState {
         globals.chain(collisions)
     }
 
-    pub fn iter_deps(&self) -> impl Iterator<Item = (&DepKey, &DepEdge)> {
-        self.deps.iter()
+    pub fn labels_for(&self, id: &BeadId) -> Labels {
+        let Some(bead) = self.get_live(id) else {
+            return Labels::new();
+        };
+        let lineage = bead.core.created();
+        let mut labels = self
+            .labels
+            .state(id, lineage)
+            .map(LabelState::labels)
+            .unwrap_or_default();
+        if !self.has_collision_tombstone(id)
+            && let Some(legacy) = self.labels.legacy_state(id)
+        {
+            for label in legacy.labels().iter() {
+                labels.insert(label.clone());
+            }
+        }
+        labels
     }
 
-    pub fn get_dep(&self, key: &DepKey) -> Option<&DepEdge> {
-        self.deps.get(key)
+    pub(crate) fn labels_for_lineage(&self, id: &BeadId, lineage: &Stamp) -> Labels {
+        self.labels
+            .state(id, lineage)
+            .map(LabelState::labels)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn legacy_labels_for(&self, id: &BeadId) -> Labels {
+        self.labels
+            .legacy_state(id)
+            .map(LabelState::labels)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn label_dvv(&self, id: &BeadId, label: &Label, lineage: Option<&Stamp>) -> Dvv {
+        let mut dots = BTreeSet::new();
+        let include_legacy = !self.has_collision_tombstone(id);
+        let mut collect = |state: Option<&LabelState>| {
+            if let Some(state) = state
+                && let Some(entries) = state.dots_for(label)
+            {
+                dots.extend(entries.iter().copied());
+            }
+        };
+
+        match lineage {
+            Some(lineage) => {
+                collect(self.labels.state(id, lineage));
+                if include_legacy {
+                    collect(self.labels.legacy_state(id));
+                }
+            }
+            None => {
+                collect(self.labels.legacy_state(id));
+                if include_legacy && let Some(bead) = self.get_live(id) {
+                    collect(self.labels.state(id, bead.core.created()));
+                }
+            }
+        }
+
+        Dvv::from_dots(dots.iter().copied())
+    }
+
+    pub(crate) fn dep_dvv(&self, key: &DepKey) -> Dvv {
+        let dots = self.dep_store.dots_for(key);
+        Self::dvv_from_dots(dots)
+    }
+
+    pub fn label_stamp(&self, id: &BeadId) -> Option<Stamp> {
+        let bead = self.get_live(id)?;
+        let lineage = bead.core.created();
+        let lineage_stamp = self
+            .labels
+            .state(id, lineage)
+            .and_then(|state| state.stamp())
+            .cloned();
+        if self.has_collision_tombstone(id) {
+            return lineage_stamp;
+        }
+        let legacy_stamp = self
+            .labels
+            .legacy_state(id)
+            .and_then(|state| state.stamp())
+            .cloned();
+        max_stamp(lineage_stamp.as_ref(), legacy_stamp.as_ref())
+    }
+
+    pub fn notes_for(&self, id: &BeadId) -> Vec<&Note> {
+        let Some(bead) = self.get_live(id) else {
+            return Vec::new();
+        };
+        let lineage = bead.core.created();
+        let mut notes = self.notes.notes_for(id, lineage);
+        if !self.has_collision_tombstone(id) {
+            let legacy = self.notes.legacy_notes_for(id);
+            if !legacy.is_empty() {
+                notes.extend(legacy);
+                notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+            }
+        }
+        notes
+    }
+
+    pub fn note_id_exists(&self, id: &BeadId, note_id: &NoteId) -> bool {
+        self.notes.note_id_exists(id, note_id)
+    }
+
+    pub(crate) fn label_store(&self) -> &LabelStore {
+        &self.labels
+    }
+
+    pub(crate) fn note_store(&self) -> &NoteStore {
+        &self.notes
+    }
+
+    pub(crate) fn dep_store(&self) -> &DepStore {
+        &self.dep_store
+    }
+
+    pub(crate) fn set_label_store(&mut self, labels: LabelStore) {
+        self.labels = labels;
+    }
+
+    pub(crate) fn set_note_store(&mut self, notes: NoteStore) {
+        self.notes = notes;
+    }
+
+    pub(crate) fn set_dep_store(&mut self, dep_store: DepStore) {
+        self.dep_store = dep_store;
+        self.rebuild_dep_indexes();
+    }
+
+    pub fn bead_view(&self, id: &BeadId) -> Option<BeadView> {
+        let bead = self.get(id)?.clone();
+        let labels = self.labels_for(id);
+        let mut notes = self
+            .notes
+            .notes_for(id, bead.core.created())
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !self.has_collision_tombstone(id) {
+            let legacy = self.notes.legacy_notes_for(id);
+            if !legacy.is_empty() {
+                notes.extend(legacy.into_iter().cloned());
+                notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+            }
+        }
+        let label_stamp = self.label_stamp(id);
+        Some(BeadView::new(bead, labels, notes, label_stamp))
+    }
+
+    pub fn updated_stamp_for(&self, id: &BeadId) -> Option<Stamp> {
+        self.bead_view(id).map(|view| view.updated_stamp().clone())
+    }
+
+    pub fn content_hash_for(&self, id: &BeadId) -> Option<super::identity::ContentHash> {
+        self.bead_view(id).map(|view| *view.content_hash())
+    }
+
+    fn updated_stamp_for_merge(&self, id: &BeadId, bead: &Bead) -> Stamp {
+        let lineage = bead.core.created();
+        let mut labels = self.labels_for_lineage(id, lineage);
+        let mut notes = self
+            .notes
+            .notes_for(id, lineage)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut label_stamp = self
+            .labels
+            .state(id, lineage)
+            .and_then(|state| state.stamp())
+            .cloned();
+        if !self.has_collision_tombstone(id) {
+            let legacy_labels = self.legacy_labels_for(id);
+            for label in legacy_labels.iter() {
+                labels.insert(label.clone());
+            }
+            let legacy_notes = self.notes.legacy_notes_for(id);
+            if !legacy_notes.is_empty() {
+                notes.extend(legacy_notes.into_iter().cloned());
+                notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+            }
+            let legacy_stamp = self
+                .labels
+                .legacy_state(id)
+                .and_then(|state| state.stamp())
+                .cloned();
+            label_stamp = max_stamp(label_stamp.as_ref(), legacy_stamp.as_ref());
+        }
+        BeadView::new(bead.clone(), labels, notes, label_stamp)
+            .updated_stamp()
+            .clone()
+    }
+
+    pub fn apply_label_add(
+        &mut self,
+        id: BeadId,
+        label: Label,
+        dot: Dot,
+        stamp: Stamp,
+        lineage: Option<Stamp>,
+    ) -> OrSetChange<Label> {
+        let state = match lineage {
+            Some(lineage) => self.labels.state_mut(&id, &lineage),
+            None => self.labels.legacy_state_mut(&id),
+        };
+        let change = state.set.apply_add(dot, label);
+        if change.changed() {
+            state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
+        }
+        change
+    }
+
+    pub fn apply_label_remove(
+        &mut self,
+        id: BeadId,
+        label: &Label,
+        ctx: &Dvv,
+        stamp: Stamp,
+        lineage: Option<Stamp>,
+    ) -> OrSetChange<Label> {
+        match lineage {
+            Some(lineage) => {
+                let include_legacy = !self.has_collision_tombstone(&id);
+                let mut change = {
+                    let state = self.labels.state_mut(&id, &lineage);
+                    let change = state.set.apply_remove(label, ctx);
+                    if change.changed() {
+                        state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
+                    }
+                    change
+                };
+
+                if include_legacy && self.labels.legacy_state(&id).is_some() {
+                    let legacy_change = {
+                        let state = self.labels.legacy_state_mut(&id);
+                        let change = state.set.apply_remove(label, ctx);
+                        if change.changed() {
+                            state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
+                        }
+                        change
+                    };
+                    if legacy_change.changed() {
+                        if change.changed() {
+                            change.added.extend(legacy_change.added);
+                            change.removed.extend(legacy_change.removed);
+                        } else {
+                            change = legacy_change;
+                        }
+                    }
+                }
+
+                change
+            }
+            None => {
+                let include_lineage = !self.has_collision_tombstone(&id);
+                let live_lineage = if include_lineage {
+                    self.get_live(&id).map(|bead| bead.core.created().clone())
+                } else {
+                    None
+                };
+                let mut change = {
+                    let state = self.labels.legacy_state_mut(&id);
+                    let change = state.set.apply_remove(label, ctx);
+                    if change.changed() {
+                        state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
+                    }
+                    change
+                };
+                if let Some(lineage) = live_lineage {
+                    let lineage_change = {
+                        let state = self.labels.state_mut(&id, &lineage);
+                        let change = state.set.apply_remove(label, ctx);
+                        if change.changed() {
+                            state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
+                        }
+                        change
+                    };
+                    if lineage_change.changed() {
+                        if change.changed() {
+                            change.added.extend(lineage_change.added);
+                            change.removed.extend(lineage_change.removed);
+                        } else {
+                            change = lineage_change;
+                        }
+                    }
+                }
+                change
+            }
+        }
+    }
+
+    pub fn apply_dep_add(&mut self, key: DepKey, dot: Dot, stamp: Stamp) -> OrSetChange<DepKey> {
+        let change = self.dep_store.set.apply_add(dot, key.clone());
+        if change.changed() {
+            self.dep_store.stamp = max_stamp(self.dep_store.stamp.as_ref(), Some(&stamp));
+        }
+        if !change.is_empty() {
+            for added in &change.added {
+                self.dep_indexes.add(added.from(), added.to(), added.kind());
+            }
+            for removed in &change.removed {
+                self.dep_indexes
+                    .remove(removed.from(), removed.to(), removed.kind());
+            }
+        }
+        change
+    }
+
+    pub fn apply_dep_remove(
+        &mut self,
+        key: &DepKey,
+        ctx: &Dvv,
+        stamp: Stamp,
+    ) -> OrSetChange<DepKey> {
+        let change = self.dep_store.set.apply_remove(key, ctx);
+        if change.changed() {
+            self.dep_store.stamp = max_stamp(self.dep_store.stamp.as_ref(), Some(&stamp));
+        }
+        if !change.is_empty() {
+            for removed in &change.removed {
+                self.dep_indexes
+                    .remove(removed.from(), removed.to(), removed.kind());
+            }
+        }
+        change
+    }
+
+    pub fn insert_note(&mut self, id: BeadId, lineage: Option<Stamp>, note: Note) -> Option<Note> {
+        self.notes.insert(id, lineage, note)
+    }
+
+    pub fn replace_note(&mut self, id: BeadId, lineage: Option<Stamp>, note: Note) -> Option<Note> {
+        self.notes.replace(id, lineage, note)
     }
 
     /// Get a live bead by ID (alias for get).
@@ -239,9 +1118,9 @@ impl CanonicalState {
     /// Used for clock synchronization after sync.
     pub fn max_write_stamp(&self) -> Option<super::time::WriteStamp> {
         self.beads
-            .values()
-            .filter_map(|entry| match entry {
-                BeadEntry::Live(bead) => Some(bead.updated_stamp().at.clone()),
+            .iter()
+            .filter_map(|(id, entry)| match entry {
+                BeadEntry::Live(_) => self.updated_stamp_for(id).map(|s| s.at.clone()),
                 _ => None,
             })
             .max()
@@ -295,44 +1174,6 @@ impl CanonicalState {
         }
     }
 
-    /// Insert or update a dependency edge.
-    ///
-    /// Maintains the dep indexes incrementally.
-    pub fn insert_dep(&mut self, key: DepKey, edge: DepEdge) {
-        let from = key.from().clone();
-        let to = key.to().clone();
-        let kind = key.kind();
-
-        if let Some(existing) = self.deps.get(&key) {
-            let was_active = existing.is_active();
-            let merged = DepEdge::join(existing, &edge);
-            let is_active = merged.is_active();
-
-            // Update index if activity state changed
-            match (was_active, is_active) {
-                (true, false) => {
-                    // Active -> Deleted: remove from index
-                    self.dep_indexes.remove(&from, &to, kind);
-                }
-                (false, true) => {
-                    // Deleted -> Active: add to index
-                    self.dep_indexes.add(&from, &to, kind);
-                }
-                _ => {
-                    // No change in activity state
-                }
-            }
-
-            self.deps.insert(key, merged);
-        } else {
-            // New edge
-            if edge.is_active() {
-                self.dep_indexes.add(&from, &to, kind);
-            }
-            self.deps.insert(key, edge);
-        }
-    }
-
     /// Remove a live bead by ID, returning it if present.
     pub fn remove_live(&mut self, id: &BeadId) -> Option<Bead> {
         match self.beads.get(id) {
@@ -353,11 +1194,6 @@ impl CanonicalState {
             .insert(bead.core.id.clone(), BeadEntry::Live(Box::new(bead)));
     }
 
-    /// Remove a dependency edge.
-    pub fn remove_dep(&mut self, key: &DepKey) -> Option<DepEdge> {
-        self.deps.remove(key)
-    }
-
     /// Insert a tombstone directly.
     ///
     /// Used for collision resolution. Does not remove live beads.
@@ -374,6 +1210,14 @@ impl CanonicalState {
             .or_insert(tombstone);
     }
 
+    fn dvv_from_dots(dots: Option<&BTreeSet<Dot>>) -> Dvv {
+        if let Some(dots) = dots {
+            Dvv::from_dots(dots.iter().copied())
+        } else {
+            Dvv::default()
+        }
+    }
+
     // =========================================================================
     // CRDT Merge
     // =========================================================================
@@ -386,7 +1230,7 @@ impl CanonicalState {
     /// Returns errors for ID collisions (collected, doesn't abort early).
     pub fn join(a: &Self, b: &Self) -> Result<Self, Vec<CoreError>> {
         let mut result = Self::default();
-        let mut errors = Vec::new();
+        let errors = Vec::new();
 
         // Merge collision tombstones by key.
         for (key, tomb) in a
@@ -400,6 +1244,10 @@ impl CanonicalState {
                 .and_modify(|t| *t = Tombstone::join(t, tomb))
                 .or_insert_with(|| tomb.clone());
         }
+
+        result.labels = LabelStore::join(&a.labels, &b.labels);
+        result.dep_store = DepStore::join(&a.dep_store, &b.dep_store);
+        result.notes = NoteStore::join(&a.notes, &b.notes);
 
         // Collect all bead IDs from both sides (including collision tombstones).
         let all_ids: BTreeSet<_> = a
@@ -423,16 +1271,32 @@ impl CanonicalState {
                 None => (None, None),
             };
 
-            // Merge beads if both exist (may error on collision)
+            // Merge beads if both exist (resolve collisions deterministically)
             let merged_bead = match (a_bead, b_bead) {
-                (Some(ab), Some(bb)) => match Bead::join(ab, bb) {
-                    Ok(merged) => Some(merged),
-                    Err(e) => {
-                        errors.push(e);
-                        // On collision, keep one arbitrarily (a's version)
-                        Some(ab.clone())
+                (Some(ab), Some(bb)) => {
+                    if ab.core.created() == bb.core.created() {
+                        Some(
+                            Bead::join(ab, bb)
+                                .expect("bead join should succeed for identical lineage"),
+                        )
+                    } else {
+                        let ordering = bead_collision_cmp(&result, ab, bb);
+                        let (winner, loser_stamp) = if ordering == Ordering::Less {
+                            (bb.clone(), ab.core.created().clone())
+                        } else {
+                            (ab.clone(), bb.core.created().clone())
+                        };
+                        let deleted =
+                            std::cmp::max(ab.core.created().clone(), bb.core.created().clone());
+                        result.insert_tombstone(Tombstone::new_collision(
+                            id.clone(),
+                            deleted,
+                            loser_stamp,
+                            None,
+                        ));
+                        Some(winner)
                     }
-                },
+                }
                 (Some(b), None) | (None, Some(b)) => Some(b.clone()),
                 (None, None) => None,
             };
@@ -458,7 +1322,8 @@ impl CanonicalState {
 
             if let (Some(bead), Some(tomb)) = (final_bead.as_ref(), final_tomb.as_ref()) {
                 // RESURRECTION RULE: bead wins if strictly newer than deletion
-                if bead.updated_stamp() > tomb.deleted {
+                let updated = result.updated_stamp_for_merge(&id, bead);
+                if updated > tomb.deleted {
                     final_tomb = None;
                 } else {
                     final_bead = None;
@@ -474,16 +1339,7 @@ impl CanonicalState {
             }
         }
 
-        // Merge deps: union by key, join if both exist
-        for (key, edge) in a.deps.iter().chain(b.deps.iter()) {
-            result
-                .deps
-                .entry(key.clone())
-                .and_modify(|e| *e = DepEdge::join(e, edge))
-                .or_insert_with(|| edge.clone());
-        }
-
-        // Rebuild derived indexes from merged deps
+        // Rebuild derived indexes from merged dep store
         result.rebuild_dep_indexes();
 
         if errors.is_empty() {
@@ -511,43 +1367,35 @@ impl CanonicalState {
         before - self.tombstone_count()
     }
 
-    /// Remove soft-deleted deps (where deleted is Some).
-    ///
-    /// Returns number of deps removed.
-    /// Note: Does not rebuild indexes since deleted deps aren't in indexes anyway.
-    pub fn gc_deleted_deps(&mut self) -> usize {
-        let before = self.deps.len();
-        self.deps.retain(|_, e| e.is_active());
-        before - self.deps.len()
-    }
-
     /// Get all active deps for a bead (outgoing).
     ///
-    /// Returns the dep key alongside the edge since the key is not stored in the edge.
+    /// Returns dep keys only; membership is tracked in the OR-Set.
     /// Uses the derived index for O(neighbors) lookup instead of O(all deps).
-    pub fn deps_from(&self, id: &BeadId) -> Vec<(DepKey, &DepEdge)> {
+    pub fn deps_from(&self, id: &BeadId) -> Vec<DepKey> {
+        if self.get_live(id).is_none() {
+            return Vec::new();
+        }
         self.dep_indexes
             .out_edges(id)
             .iter()
-            .filter_map(|(to, kind)| {
-                let key = DepKey::new(id.clone(), to.clone(), *kind).ok()?;
-                self.deps.get(&key).map(|edge| (key, edge))
-            })
+            .filter(|(to, _)| self.get_live(to).is_some())
+            .filter_map(|(to, kind)| DepKey::new(id.clone(), to.clone(), *kind).ok())
             .collect()
     }
 
     /// Get all active deps to a bead (incoming).
     ///
-    /// Returns the dep key alongside the edge since the key is not stored in the edge.
+    /// Returns dep keys only; membership is tracked in the OR-Set.
     /// Uses the derived index for O(neighbors) lookup instead of O(all deps).
-    pub fn deps_to(&self, id: &BeadId) -> Vec<(DepKey, &DepEdge)> {
+    pub fn deps_to(&self, id: &BeadId) -> Vec<DepKey> {
+        if self.get_live(id).is_none() {
+            return Vec::new();
+        }
         self.dep_indexes
             .in_edges(id)
             .iter()
-            .filter_map(|(from, kind)| {
-                let key = DepKey::new(from.clone(), id.clone(), *kind).ok()?;
-                self.deps.get(&key).map(|edge| (key, edge))
-            })
+            .filter(|(from, _)| self.get_live(from).is_some())
+            .filter_map(|(from, kind)| DepKey::new(from.clone(), id.clone(), *kind).ok())
             .collect()
     }
 
@@ -556,10 +1404,8 @@ impl CanonicalState {
     /// Call this after deserializing state or after `join()`.
     pub fn rebuild_dep_indexes(&mut self) {
         self.dep_indexes = DepIndexes::new();
-        for (key, edge) in &self.deps {
-            if edge.is_active() {
-                self.dep_indexes.add(key.from(), key.to(), key.kind());
-            }
+        for key in self.dep_store.values() {
+            self.dep_indexes.add(key.from(), key.to(), key.kind());
         }
     }
 
@@ -583,8 +1429,8 @@ impl CanonicalState {
 
         let mut adjacency: BTreeMap<BeadId, Vec<BeadId>> = BTreeMap::new();
         let mut nodes: BTreeSet<BeadId> = BTreeSet::new();
-        for (key, edge) in self.iter_deps() {
-            if edge.life.value != DepLife::Active {
+        for key in self.dep_store.values() {
+            if self.get_live(key.from()).is_none() || self.get_live(key.to()).is_none() {
                 continue;
             }
             nodes.insert(key.from().clone());
@@ -710,13 +1556,61 @@ impl CanonicalState {
     }
 }
 
+fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
+    let lineage = bead.core.created();
+    let labels = state.labels_for_lineage(bead.id(), lineage);
+    let notes = state
+        .note_store()
+        .notes_for(bead.id(), lineage)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let label_stamp = state
+        .label_store()
+        .state(bead.id(), lineage)
+        .and_then(|state| state.stamp())
+        .cloned();
+    *BeadView::new(bead.clone(), labels, notes, label_stamp).content_hash()
+}
+
+pub(crate) fn bead_collision_cmp(
+    state: &CanonicalState,
+    existing: &Bead,
+    incoming: &Bead,
+) -> Ordering {
+    existing
+        .core
+        .created()
+        .cmp(incoming.core.created())
+        .then_with(|| {
+            bead_content_hash_for_collision(state, existing)
+                .as_bytes()
+                .cmp(bead_content_hash_for_collision(state, incoming).as_bytes())
+        })
+}
+
+pub(crate) fn note_collision_cmp(existing: &Note, incoming: &Note) -> Ordering {
+    existing
+        .at
+        .cmp(&incoming.at)
+        .then_with(|| existing.author.cmp(&incoming.author))
+        .then_with(|| {
+            sha256_bytes(existing.content.as_bytes())
+                .cmp(&sha256_bytes(incoming.content.as_bytes()))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::dep::DepLife;
-    use crate::core::identity::ActorId;
+    use crate::core::collections::Label;
+    use crate::core::composite::Note;
+    use crate::core::identity::{ActorId, NoteId, ReplicaId};
+    use crate::core::orset::Dot;
     use crate::core::time::{Stamp, WriteStamp};
     use proptest::prelude::*;
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -735,7 +1629,6 @@ mod tests {
 
     fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -748,7 +1641,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -756,6 +1648,19 @@ mod tests {
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         Bead::new(core, fields)
+    }
+
+    fn add_dep(state: &mut CanonicalState, key: DepKey, stamp: &Stamp, counter: u64) {
+        let dot = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([9u8; 16])),
+            counter,
+        };
+        state.apply_dep_add(key, dot, stamp.clone());
+    }
+
+    fn remove_dep(state: &mut CanonicalState, key: &DepKey, stamp: &Stamp) {
+        let ctx = state.dep_dvv(key);
+        state.apply_dep_remove(key, &ctx, stamp.clone());
     }
 
     #[derive(Clone, Debug)]
@@ -781,29 +1686,35 @@ mod tests {
             );
         }
 
-        for (key, edge) in state.deps.iter() {
-            let from = key.from();
-            let to = key.to();
-            let kind = key.kind();
-            let out_has = state
-                .dep_indexes
-                .out_edges(from)
-                .iter()
-                .any(|(t, k)| t == to && *k == kind);
-            let in_has = state
-                .dep_indexes
-                .in_edges(to)
-                .iter()
-                .any(|(f, k)| f == from && *k == kind);
-
-            if edge.is_active() {
-                assert!(out_has, "missing out-edge for {from}->{to:?}");
-                assert!(in_has, "missing in-edge for {from:?}->{to}");
-            } else {
-                assert!(!out_has, "deleted edge still in out-index");
-                assert!(!in_has, "deleted edge still in in-index");
+        let store_keys: BTreeSet<DepKey> = state.dep_store.values().cloned().collect();
+        let mut out_keys = BTreeSet::new();
+        let mut out_count = 0usize;
+        for (from, edges) in state.dep_indexes.out_edges.iter() {
+            out_count += edges.len();
+            for (to, kind) in edges {
+                let key = DepKey::new(from.clone(), to.clone(), *kind).expect("invalid dep key");
+                out_keys.insert(key);
             }
         }
+        let mut in_keys = BTreeSet::new();
+        let mut in_count = 0usize;
+        for (to, edges) in state.dep_indexes.in_edges.iter() {
+            in_count += edges.len();
+            for (from, kind) in edges {
+                let key = DepKey::new(from.clone(), to.clone(), *kind).expect("invalid dep key");
+                in_keys.insert(key);
+            }
+        }
+
+        assert_eq!(out_keys, store_keys, "dep out-edges mismatch dep store");
+        assert_eq!(in_keys, store_keys, "dep in-edges mismatch dep store");
+        assert_eq!(out_keys, in_keys, "dep in/out edges mismatch");
+        assert_eq!(
+            out_keys.len(),
+            out_count,
+            "dep out-edges contain duplicates"
+        );
+        assert_eq!(in_keys.len(), in_count, "dep in-edges contain duplicates");
     }
 
     fn state_fingerprint(state: &CanonicalState) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -839,31 +1750,29 @@ mod tests {
         })
     }
 
-    fn dep_strategy() -> impl Strategy<Value = (DepKey, DepEdge)> {
+    fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
         let kind = prop_oneof![
             Just(DepKind::Blocks),
             Just(DepKind::Parent),
             Just(DepKind::Related),
             Just(DepKind::DiscoveredFrom),
         ];
+        let replica = any::<u128>().prop_map(|raw| ReplicaId::new(Uuid::from_u128(raw)));
+        let dot = (replica, 0u64..10_000).prop_map(|(replica, counter)| Dot { replica, counter });
         (
             base58_id_strategy(),
             base58_id_strategy(),
             kind,
+            dot,
             stamp_strategy(),
-            prop::option::of(stamp_strategy()),
         )
             .prop_filter("deps cannot be self-referential", |(from, to, _, _, _)| {
                 from != to
             })
-            .prop_map(|(from, to, kind, created, deleted)| {
+            .prop_map(|(from, to, kind, dot, stamp)| {
                 let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
                     .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
-                let mut edge = DepEdge::new(created.clone());
-                if let Some(deleted) = deleted {
-                    edge.delete(deleted);
-                }
-                (key, edge)
+                (key, dot, stamp)
             })
     }
 
@@ -887,8 +1796,8 @@ mod tests {
                         }
                     }
                 }
-                for (key, dep) in deps {
-                    state.insert_dep(key, dep);
+                for (key, dot, stamp) in deps {
+                    state.apply_dep_add(key, dot, stamp);
                 }
                 state
             })
@@ -902,6 +1811,27 @@ mod tests {
             let ab = CanonicalState::join(&a, &b)
                 .unwrap_or_else(|e| panic!("join failed: {e:?}"));
             let ba = CanonicalState::join(&b, &a)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            assert_invariants(&ab);
+            assert_invariants(&ba);
+            prop_assert_eq!(state_fingerprint(&ab), state_fingerprint(&ba));
+        }
+
+        #[test]
+        fn join_commutative_with_collision(
+            stamp_a in stamp_strategy(),
+            stamp_b in stamp_strategy(),
+        ) {
+            prop_assume!(stamp_a != stamp_b);
+            let id = bead_id("bd-collision");
+            let mut state_a = CanonicalState::new();
+            state_a.insert_live(make_bead(&id, &stamp_a));
+            let mut state_b = CanonicalState::new();
+            state_b.insert_live(make_bead(&id, &stamp_b));
+
+            let ab = CanonicalState::join(&state_a, &state_b)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let ba = CanonicalState::join(&state_b, &state_a)
                 .unwrap_or_else(|e| panic!("join failed: {e:?}"));
             assert_invariants(&ab);
             assert_invariants(&ba);
@@ -983,7 +1913,6 @@ mod tests {
     #[test]
     fn invariant_insert_removes_tombstone() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1007,7 +1936,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1023,9 +1951,97 @@ mod tests {
     }
 
     #[test]
+    fn collision_hides_other_lineage_labels_and_notes() {
+        let id = bead_id("bd-collision");
+        let stamp_a = make_stamp(1000, 0, "alice");
+        let stamp_b = make_stamp(2000, 0, "bob");
+
+        let mut state_a = CanonicalState::new();
+        state_a.insert_live(make_bead(&id, &stamp_a));
+        let mut state_b = CanonicalState::new();
+        state_b.insert_live(make_bead(&id, &stamp_b));
+
+        let label_a = Label::parse("alpha").expect("label");
+        let label_b = Label::parse("beta").expect("label");
+        let legacy_label = Label::parse("legacy").expect("label");
+
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([2u8; 16])),
+            counter: 1,
+        };
+        let dot_legacy = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([3u8; 16])),
+            counter: 1,
+        };
+
+        state_a.apply_label_add(
+            id.clone(),
+            label_a.clone(),
+            dot_a,
+            stamp_a.clone(),
+            Some(stamp_a.clone()),
+        );
+        state_b.apply_label_add(
+            id.clone(),
+            label_b.clone(),
+            dot_b,
+            stamp_b.clone(),
+            Some(stamp_b.clone()),
+        );
+        state_a.apply_label_add(
+            id.clone(),
+            legacy_label.clone(),
+            dot_legacy,
+            stamp_a.clone(),
+            None,
+        );
+
+        let note_a = Note::new(
+            NoteId::new("note-a").unwrap(),
+            "note-a".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(10, 0),
+        );
+        let note_b = Note::new(
+            NoteId::new("note-b").unwrap(),
+            "note-b".to_string(),
+            actor_id("bob"),
+            WriteStamp::new(20, 0),
+        );
+        let legacy_note = Note::new(
+            NoteId::new("note-legacy").unwrap(),
+            "note-legacy".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(30, 0),
+        );
+
+        state_a.insert_note(id.clone(), Some(stamp_a.clone()), note_a);
+        state_b.insert_note(id.clone(), Some(stamp_b.clone()), note_b);
+        state_a.insert_note(id.clone(), None, legacy_note);
+
+        let merged = CanonicalState::join(&state_a, &state_b)
+            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+
+        assert!(merged.has_lineage_tombstone(&id, &stamp_a));
+
+        let labels = merged.labels_for(&id);
+        assert!(labels.contains(label_b.as_str()));
+        assert!(!labels.contains(label_a.as_str()));
+        assert!(!labels.contains(legacy_label.as_str()));
+
+        let notes = merged.notes_for(&id);
+        assert!(notes.iter().any(|note| note.content == "note-b"));
+        assert!(!notes.iter().any(|note| note.content == "note-a"));
+        assert!(!notes.iter().any(|note| note.content == "note-legacy"));
+    }
+
+    #[test]
     fn invariant_delete_removes_live() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1043,7 +2059,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1066,7 +2081,6 @@ mod tests {
     #[test]
     fn resurrection_newer_bead_wins() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1089,7 +2103,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, new_stamp.clone()),
             priority: Lww::new(Priority::default(), new_stamp.clone()),
             bead_type: Lww::new(BeadType::Task, new_stamp.clone()),
-            labels: Lww::new(Labels::new(), new_stamp.clone()),
             external_ref: Lww::new(None, new_stamp.clone()),
             source_repo: Lww::new(None, new_stamp.clone()),
             estimated_minutes: Lww::new(None, new_stamp.clone()),
@@ -1110,7 +2123,6 @@ mod tests {
     #[test]
     fn deletion_wins_when_newer() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1129,7 +2141,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, old_stamp.clone()),
             priority: Lww::new(Priority::default(), old_stamp.clone()),
             bead_type: Lww::new(BeadType::Task, old_stamp.clone()),
-            labels: Lww::new(Labels::new(), old_stamp.clone()),
             external_ref: Lww::new(None, old_stamp.clone()),
             source_repo: Lww::new(None, old_stamp.clone()),
             estimated_minutes: Lww::new(None, old_stamp.clone()),
@@ -1152,9 +2163,45 @@ mod tests {
     }
 
     #[test]
+    fn note_store_join_resolves_collisions_deterministically() {
+        let bead = bead_id("bd-note-join");
+        let note_id = NoteId::new("note-join").unwrap();
+        let lineage = make_stamp(1000, 0, "alice");
+        let note_a = Note::new(
+            note_id.clone(),
+            "alpha".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(10, 0),
+        );
+        let note_b = Note::new(
+            note_id.clone(),
+            "beta".to_string(),
+            actor_id("bob"),
+            WriteStamp::new(20, 0),
+        );
+
+        let mut store_a = NoteStore::new();
+        store_a.insert(bead.clone(), Some(lineage.clone()), note_a);
+        let mut store_b = NoteStore::new();
+        store_b.insert(bead.clone(), Some(lineage.clone()), note_b.clone());
+
+        let joined_ab = NoteStore::join(&store_a, &store_b);
+        let joined_ba = NoteStore::join(&store_b, &store_a);
+
+        let stored_ab = joined_ab
+            .get(&bead, &lineage, &note_id)
+            .expect("note stored");
+        let stored_ba = joined_ba
+            .get(&bead, &lineage, &note_id)
+            .expect("note stored");
+
+        assert_eq!(stored_ab, stored_ba);
+        assert_eq!(stored_ab.content, "beta");
+    }
+
+    #[test]
     fn require_live_returns_bead_when_exists() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1171,7 +2218,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1192,6 +2238,9 @@ mod tests {
         let a = bead_id("bd-aaa");
         let b = bead_id("bd-bbb");
         let c = bead_id("bd-ccc");
+        for id in [&a, &b, &c] {
+            state.insert(make_bead(id, &stamp)).unwrap();
+        }
 
         let ab = DepKey::new(a.clone(), b.clone(), DepKind::Blocks)
             .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
@@ -1200,13 +2249,203 @@ mod tests {
         let ca = DepKey::new(c.clone(), a.clone(), DepKind::Blocks)
             .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
 
-        state.insert_dep(ab, DepEdge::new(stamp.clone()));
-        state.insert_dep(bc, DepEdge::new(stamp.clone()));
-        state.insert_dep(ca, DepEdge::new(stamp));
+        let replica = ReplicaId::from(Uuid::from_bytes([2u8; 16]));
+        state.apply_dep_add(
+            ab,
+            Dot {
+                replica,
+                counter: 1,
+            },
+            stamp.clone(),
+        );
+        state.apply_dep_add(
+            bc,
+            Dot {
+                replica,
+                counter: 2,
+            },
+            stamp.clone(),
+        );
+        state.apply_dep_add(
+            ca,
+            Dot {
+                replica,
+                counter: 3,
+            },
+            stamp,
+        );
 
         let cycles = state.dependency_cycles();
         assert_eq!(cycles.len(), 1);
         assert_eq!(cycles[0], vec![a.clone(), b.clone(), c.clone(), a.clone()]);
+    }
+
+    #[test]
+    fn updated_stamp_includes_labels_and_notes() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let id = bead_id("bd-aaa");
+        state.insert(make_bead(&id, &base)).unwrap();
+
+        let label = Label::parse("urgent").unwrap();
+        let label_stamp = make_stamp(2000, 0, "bob");
+        let dot = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        state.apply_label_add(
+            id.clone(),
+            label,
+            dot,
+            label_stamp.clone(),
+            Some(base.clone()),
+        );
+
+        let updated = state.updated_stamp_for(&id).expect("updated stamp");
+        assert_eq!(updated.at.wall_ms, label_stamp.at.wall_ms);
+
+        let note_id = NoteId::new("note-1").unwrap();
+        let note_author = ActorId::new("carol").unwrap();
+        let note_stamp = WriteStamp::new(3000, 0);
+        let note = Note::new(note_id, "hi".to_string(), note_author.clone(), note_stamp);
+        state.insert_note(id.clone(), Some(base.clone()), note);
+
+        let updated = state.updated_stamp_for(&id).expect("updated stamp");
+        assert_eq!(updated.at.wall_ms, 3000);
+        assert_eq!(updated.by, note_author);
+    }
+
+    #[test]
+    fn label_stamp_is_monotonic_for_out_of_order_ops() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let id = bead_id("bd-label-stamp");
+        state.insert(make_bead(&id, &base)).unwrap();
+
+        let label = Label::parse("urgent").unwrap();
+        let stamp_new = make_stamp(3000, 0, "carol");
+        let stamp_old = make_stamp(2000, 0, "bob");
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([2u8; 16])),
+            counter: 2,
+        };
+
+        state.apply_label_add(
+            id.clone(),
+            label.clone(),
+            dot_a,
+            stamp_new.clone(),
+            Some(base.clone()),
+        );
+        state.apply_label_add(
+            id.clone(),
+            label.clone(),
+            dot_b,
+            stamp_old,
+            Some(base.clone()),
+        );
+
+        let stamp = state.label_stamp(&id).expect("label stamp");
+        assert_eq!(stamp, stamp_new);
+    }
+
+    #[test]
+    fn label_stamp_updates_on_new_dot_without_membership_change() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let id = bead_id("bd-label-dot");
+        state.insert(make_bead(&id, &base)).unwrap();
+
+        let label = Label::parse("inbox").unwrap();
+        let stamp_a = make_stamp(2000, 0, "bob");
+        let stamp_b = make_stamp(3000, 0, "carol");
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([3u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([4u8; 16])),
+            counter: 2,
+        };
+
+        state.apply_label_add(
+            id.clone(),
+            label.clone(),
+            dot_a,
+            stamp_a,
+            Some(base.clone()),
+        );
+        state.apply_label_add(
+            id.clone(),
+            label,
+            dot_b,
+            stamp_b.clone(),
+            Some(base.clone()),
+        );
+
+        assert_eq!(state.labels_for(&id).len(), 1);
+        let stamp = state.label_stamp(&id).expect("label stamp");
+        assert_eq!(stamp, stamp_b);
+    }
+
+    #[test]
+    fn dep_stamp_is_monotonic_for_out_of_order_ops() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let from = bead_id("bd-dep-from");
+        let to = bead_id("bd-dep-to");
+        state.insert(make_bead(&from, &base)).unwrap();
+
+        let key = DepKey::new(from.clone(), to, DepKind::Blocks).unwrap();
+        let stamp_new = make_stamp(3000, 0, "carol");
+        let stamp_old = make_stamp(2000, 0, "bob");
+
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([5u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([6u8; 16])),
+            counter: 2,
+        };
+
+        state.apply_dep_add(key.clone(), dot_a, stamp_new.clone());
+        state.apply_dep_add(key, dot_b, stamp_old);
+
+        let stamp = state.dep_store().stamp().expect("dep stamp");
+        assert_eq!(stamp, &stamp_new);
+    }
+
+    #[test]
+    fn dep_stamp_updates_on_new_dot_without_membership_change() {
+        let mut state = CanonicalState::new();
+        let base = make_stamp(1000, 0, "alice");
+        let from = bead_id("bd-dep-dot-from");
+        let to = bead_id("bd-dep-dot-to");
+        state.insert(make_bead(&from, &base)).unwrap();
+
+        let key = DepKey::new(from.clone(), to, DepKind::Blocks).unwrap();
+        let stamp_a = make_stamp(2000, 0, "bob");
+        let stamp_b = make_stamp(3000, 0, "carol");
+
+        let dot_a = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([7u8; 16])),
+            counter: 1,
+        };
+        let dot_b = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([8u8; 16])),
+            counter: 2,
+        };
+
+        state.apply_dep_add(key.clone(), dot_a, stamp_a);
+        state.apply_dep_add(key, dot_b, stamp_b.clone());
+
+        let stamp = state.dep_store().stamp().expect("dep stamp");
+        assert_eq!(stamp, &stamp_b);
     }
 
     #[test]
@@ -1222,8 +2461,23 @@ mod tests {
         let bc = DepKey::new(b, c, DepKind::Blocks)
             .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
 
-        state.insert_dep(ab, DepEdge::new(stamp.clone()));
-        state.insert_dep(bc, DepEdge::new(stamp));
+        let replica = ReplicaId::from(Uuid::from_bytes([3u8; 16]));
+        state.apply_dep_add(
+            ab,
+            Dot {
+                replica,
+                counter: 1,
+            },
+            stamp.clone(),
+        );
+        state.apply_dep_add(
+            bc,
+            Dot {
+                replica,
+                counter: 2,
+            },
+            stamp,
+        );
 
         let cycles = state.dependency_cycles();
         assert!(cycles.is_empty());
@@ -1253,7 +2507,6 @@ mod tests {
     #[test]
     fn require_live_mut_returns_mutable_bead() {
         use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -1270,7 +2523,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1300,9 +2552,7 @@ mod tests {
         let to = BeadId::parse("bd-bbb").unwrap();
 
         let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
-        let edge = DepEdge::new(stamp);
-
-        state.insert_dep(key, edge);
+        add_dep(&mut state, key, &stamp, 1);
 
         // Should be in out_edges for "from"
         let out = state.dep_indexes().out_edges(&from);
@@ -1323,10 +2573,8 @@ mod tests {
         let to = BeadId::parse("bd-bbb").unwrap();
 
         let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
-        let life = crate::core::crdt::Lww::new(DepLife::Deleted, stamp.clone());
-        let edge = DepEdge::with_life(stamp, life);
-
-        state.insert_dep(key, edge);
+        add_dep(&mut state, key.clone(), &stamp, 1);
+        remove_dep(&mut state, &key, &stamp);
 
         // Deleted edge should NOT be in indexes
         assert!(state.dep_indexes().out_edges(&from).is_empty());
@@ -1343,16 +2591,13 @@ mod tests {
 
         // Insert active edge
         let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
-        let edge = DepEdge::new(stamp1);
-        state.insert_dep(key.clone(), edge);
+        add_dep(&mut state, key.clone(), &stamp1, 1);
 
         // Should be in indexes
         assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
 
         // Now delete it
-        let life = crate::core::crdt::Lww::new(DepLife::Deleted, stamp2.clone());
-        let deleted_edge = DepEdge::with_life(stamp2, life);
-        state.insert_dep(key, deleted_edge);
+        remove_dep(&mut state, &key, &stamp2);
 
         // Should be removed from indexes
         assert!(state.dep_indexes().out_edges(&from).is_empty());
@@ -1367,18 +2612,16 @@ mod tests {
         let from = BeadId::parse("bd-aaa").unwrap();
         let to = BeadId::parse("bd-bbb").unwrap();
 
-        // Insert deleted edge first
+        // Insert then remove edge
         let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
-        let life = crate::core::crdt::Lww::new(DepLife::Deleted, stamp1.clone());
-        let edge = DepEdge::with_life(stamp1, life);
-        state.insert_dep(key.clone(), edge);
+        add_dep(&mut state, key.clone(), &stamp1, 1);
+        remove_dep(&mut state, &key, &stamp1);
 
         // Should NOT be in indexes
         assert!(state.dep_indexes().out_edges(&from).is_empty());
 
         // Now restore it (active edge with newer stamp)
-        let restored_edge = DepEdge::new(stamp2);
-        state.insert_dep(key, restored_edge);
+        add_dep(&mut state, key, &stamp2, 2);
 
         // Should be in indexes now
         assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
@@ -1392,19 +2635,22 @@ mod tests {
         let from = BeadId::parse("bd-aaa").unwrap();
         let to1 = BeadId::parse("bd-bbb").unwrap();
         let to2 = BeadId::parse("bd-ccc").unwrap();
+        for id in [&from, &to1, &to2] {
+            state.insert(make_bead(id, &stamp)).unwrap();
+        }
 
         // Add two deps from the same source
         let key1 = DepKey::new(from.clone(), to1.clone(), DepKind::Blocks).unwrap();
         let key2 = DepKey::new(from.clone(), to2.clone(), DepKind::Parent).unwrap();
-        state.insert_dep(key1.clone(), DepEdge::new(stamp.clone()));
-        state.insert_dep(key2.clone(), DepEdge::new(stamp));
+        add_dep(&mut state, key1.clone(), &stamp, 1);
+        add_dep(&mut state, key2.clone(), &stamp, 2);
 
         let deps = state.deps_from(&from);
         assert_eq!(deps.len(), 2);
 
         // Verify the edges are correct
         let to_ids: std::collections::HashSet<_> =
-            deps.iter().map(|(key, _)| key.to().clone()).collect();
+            deps.iter().map(|key| key.to().clone()).collect();
         assert!(to_ids.contains(&to1));
         assert!(to_ids.contains(&to2));
     }
@@ -1416,19 +2662,22 @@ mod tests {
         let from1 = BeadId::parse("bd-aaa").unwrap();
         let from2 = BeadId::parse("bd-bbb").unwrap();
         let to = BeadId::parse("bd-ccc").unwrap();
+        for id in [&from1, &from2, &to] {
+            state.insert(make_bead(id, &stamp)).unwrap();
+        }
 
         // Add two deps to the same target
         let key1 = DepKey::new(from1.clone(), to.clone(), DepKind::Blocks).unwrap();
         let key2 = DepKey::new(from2.clone(), to.clone(), DepKind::Blocks).unwrap();
-        state.insert_dep(key1.clone(), DepEdge::new(stamp.clone()));
-        state.insert_dep(key2.clone(), DepEdge::new(stamp));
+        add_dep(&mut state, key1.clone(), &stamp, 1);
+        add_dep(&mut state, key2.clone(), &stamp, 2);
 
         let deps = state.deps_to(&to);
         assert_eq!(deps.len(), 2);
 
         // Verify the edges are correct
         let from_ids: std::collections::HashSet<_> =
-            deps.iter().map(|(key, _)| key.from().clone()).collect();
+            deps.iter().map(|key| key.from().clone()).collect();
         assert!(from_ids.contains(&from1));
         assert!(from_ids.contains(&from2));
     }
@@ -1440,10 +2689,14 @@ mod tests {
         let from = BeadId::parse("bd-aaa").unwrap();
         let to = BeadId::parse("bd-bbb").unwrap();
 
-        // Manually insert into deps map (simulating deserialization)
+        // Manually insert into dep store (simulating deserialization)
         let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
-        let edge = DepEdge::new(stamp);
-        state.deps.insert(key.clone(), edge);
+        let dot = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([7u8; 16])),
+            counter: 1,
+        };
+        state.dep_store.set.apply_add(dot, key.clone());
+        state.dep_store.stamp = Some(stamp);
 
         // Index should be empty (not maintained)
         assert!(state.dep_indexes().out_edges(&from).is_empty());
@@ -1465,7 +2718,7 @@ mod tests {
         // State A: has one dep
         let mut state_a = CanonicalState::new();
         let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
-        state_a.insert_dep(key, DepEdge::new(stamp));
+        add_dep(&mut state_a, key, &stamp, 1);
 
         // State B: empty
         let state_b = CanonicalState::new();
@@ -1488,8 +2741,8 @@ mod tests {
         // Add multiple deps of different kinds between same beads
         let key1 = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
         let key2 = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
-        state.insert_dep(key1.clone(), DepEdge::new(stamp.clone()));
-        state.insert_dep(key2.clone(), DepEdge::new(stamp));
+        add_dep(&mut state, key1.clone(), &stamp, 1);
+        add_dep(&mut state, key2.clone(), &stamp, 2);
 
         // Should have two edges in indexes
         let out = state.dep_indexes().out_edges(&from);

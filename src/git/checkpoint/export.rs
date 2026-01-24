@@ -10,16 +10,16 @@ use super::CHECKPOINT_FORMAT_VERSION;
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{
     CheckpointFileKind, CheckpointShardPath, shard_for_bead, shard_for_dep, shard_for_tombstone,
-    shard_path,
+    shard_name, shard_path,
 };
 use super::manifest::{CheckpointManifest, ManifestFile};
 use super::meta::{CheckpointMeta, IncludedHeads, IncludedWatermarks};
 use super::types::{CheckpointShardPayload, CheckpointSnapshot};
-use crate::core::dep::DepKey;
 use crate::core::tombstone::TombstoneKey;
+use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1};
 use crate::core::{
-    ContentHash, DepEdge, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId,
-    ReplicaRoster, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireDepV1,
+    ContentHash, Dot, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRoster,
+    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireLineageStamp,
     WireStamp, WireTombstoneV1, sha256_bytes,
 };
 
@@ -328,10 +328,14 @@ fn build_namespace_shards(
     };
     let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
-    for (id, bead) in state.iter_live() {
+    for (id, _) in state.iter_live() {
         let shard = shard_for_bead(id);
         let path = shard_path(namespace, CheckpointFileKind::State, &shard);
-        let wire = WireBeadFull::from(bead);
+        let Some(view) = state.bead_view(id) else {
+            continue;
+        };
+        let label_state = state.label_store().state(id, view.bead.core.created());
+        let wire = WireBeadFull::from_view(&view, label_state);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
@@ -343,10 +347,38 @@ fn build_namespace_shards(
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
-    for (key, edge) in state.iter_deps() {
+    let dep_store = state.dep_store();
+    let mut dep_entries_by_shard: BTreeMap<String, Vec<WireDepEntryV1>> = BTreeMap::new();
+    for key in dep_store.values() {
+        let mut dots: Vec<Dot> = dep_store
+            .dots_for(key)
+            .map(|dots| dots.iter().copied().collect())
+            .unwrap_or_default();
+        dots.sort();
+        let entry = WireDepEntryV1 {
+            key: key.clone(),
+            dots,
+        };
         let shard = shard_for_dep(key.from(), key.to(), key.kind());
+        dep_entries_by_shard.entry(shard).or_default().push(entry);
+    }
+
+    if dep_entries_by_shard.is_empty()
+        && (!dep_store.cc().max.is_empty() || dep_store.stamp().is_some())
+    {
+        dep_entries_by_shard.insert(shard_name(0), Vec::new());
+    }
+
+    for (shard, mut entries) in dep_entries_by_shard {
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        let wire = WireDepStoreV1 {
+            cc: dep_store.cc().clone(),
+            entries,
+            stamp: dep_store
+                .stamp()
+                .map(|stamp| (WireStamp::from(&stamp.at), stamp.by.clone())),
+        };
         let path = shard_path(namespace, CheckpointFileKind::Deps, &shard);
-        let wire = wire_dep(key, edge);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
@@ -380,32 +412,14 @@ fn push_jsonl_line<T: Serialize>(
 
 fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
     let deleted = &tombstone.deleted;
-    let (lineage_created_at, lineage_created_by) = tombstone
-        .lineage
-        .as_ref()
-        .map(|stamp| (Some(WireStamp::from(&stamp.at)), Some(stamp.by.clone())))
-        .unwrap_or((None, None));
+    let lineage = tombstone.lineage.as_ref().map(WireLineageStamp::from);
 
     WireTombstoneV1 {
         id: tombstone.id.clone(),
         deleted_at: WireStamp::from(&deleted.at),
         deleted_by: deleted.by.clone(),
         reason: tombstone.reason.clone(),
-        lineage_created_at,
-        lineage_created_by,
-    }
-}
-
-fn wire_dep(key: &DepKey, edge: &DepEdge) -> WireDepV1 {
-    let deleted = edge.deleted_stamp();
-    WireDepV1 {
-        from: key.from().clone(),
-        to: key.to().clone(),
-        kind: key.kind(),
-        created_at: WireStamp::from(&edge.created.at),
-        created_by: edge.created.by.clone(),
-        deleted_at: deleted.map(|stamp| WireStamp::from(&stamp.at)),
-        deleted_by: deleted.map(|stamp| stamp.by.clone()),
+        lineage,
     }
 }
 
@@ -416,13 +430,13 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::bead::{BeadCore, BeadFields};
-    use crate::core::collections::Labels;
     use crate::core::composite::{Claim, Workflow};
     use crate::core::crdt::Lww;
+    use crate::core::dep::DepKey;
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, ReplicaEntry, ReplicaRole, Seq0};
+    use crate::core::{ActorId, CanonicalState, Dot, ReplicaEntry, ReplicaRole, Seq0};
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -440,7 +454,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -559,14 +572,17 @@ mod tests {
             Some("bye".into()),
         );
         let dep_key = DepKey::new(bead_id.clone(), dep_to.clone(), DepKind::Blocks).unwrap();
-        let dep_edge = DepEdge::new(stamp.clone());
+        let dep_dot = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes([5u8; 16])),
+            counter: 1,
+        };
 
         let mut core_state = CanonicalState::new();
         core_state.insert(bead.clone()).unwrap();
         core_state.insert_tombstone(tombstone.clone());
-        core_state.insert_dep(dep_key.clone(), dep_edge.clone());
+        core_state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state);
+        state.set_namespace_state(namespace.clone(), core_state.clone());
 
         let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
         let mut watermarks = Watermarks::<Durable>::new();
@@ -608,7 +624,12 @@ mod tests {
             &shard_for_bead(&bead_id),
         );
         let state_payload = snapshot.shards.get(&state_path).expect("state shard");
-        let mut expected = to_canon_json_bytes(&WireBeadFull::from(&bead)).unwrap();
+        let view = core_state.bead_view(&bead_id).expect("bead view");
+        let label_state = core_state
+            .label_store()
+            .state(&bead_id, view.bead.core.created());
+        let mut expected =
+            to_canon_json_bytes(&WireBeadFull::from_view(&view, label_state)).unwrap();
         expected.push(b'\n');
         assert_eq!(state_payload.bytes.as_ref(), expected);
 
@@ -628,7 +649,18 @@ mod tests {
             &shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind()),
         );
         let dep_payload = snapshot.shards.get(&dep_path).expect("dep shard");
-        let mut expected = to_canon_json_bytes(&wire_dep(&dep_key, &dep_edge)).unwrap();
+        let mut expected = to_canon_json_bytes(&WireDepStoreV1 {
+            cc: core_state.dep_store().cc().clone(),
+            entries: vec![WireDepEntryV1 {
+                key: dep_key.clone(),
+                dots: vec![dep_dot],
+            }],
+            stamp: core_state
+                .dep_store()
+                .stamp()
+                .map(|stamp| (WireStamp::from(&stamp.at), stamp.by.clone())),
+        })
+        .unwrap();
         expected.push(b'\n');
         assert_eq!(dep_payload.bytes.as_ref(), expected);
 
@@ -832,9 +864,14 @@ mod tests {
         let mut ids = vec![id_a.clone(), id_b.clone()];
         ids.sort();
         let mut expected = Vec::new();
+        let view_state = state.get(&namespace).expect("state");
         for id in ids {
-            let bead = if id == id_a { &bead_a } else { &bead_b };
-            let mut line = to_canon_json_bytes(&WireBeadFull::from(bead)).unwrap();
+            let view = view_state.bead_view(&id).expect("bead view");
+            let label_state = view_state
+                .label_store()
+                .state(&id, view.bead.core.created());
+            let mut line =
+                to_canon_json_bytes(&WireBeadFull::from_view(&view, label_state)).unwrap();
             line.push(b'\n');
             expected.extend_from_slice(&line);
         }

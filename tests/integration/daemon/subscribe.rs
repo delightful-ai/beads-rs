@@ -13,7 +13,7 @@ use beads_rs::{
 
 use crate::fixtures::admin_status::StatusCollector;
 use crate::fixtures::ipc_stream::{StreamClientError, StreamingClient};
-use crate::fixtures::load_gen::{LoadGenerator, LoadReport};
+use crate::fixtures::load_gen::{Autostart, LoadGenerator, LoadReport};
 use crate::fixtures::realtime::RealtimeFixture;
 
 #[test]
@@ -180,7 +180,7 @@ fn run_load(
     config.workers = 1;
     config.total_requests = total;
     config.namespace = Some(namespace.as_str().to_string());
-    config.autostart = false;
+    config.autostart = Autostart::Disabled;
     generator.run()
 }
 

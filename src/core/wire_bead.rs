@@ -3,21 +3,24 @@
 //! Notes rule: bead_upsert deltas should omit notes; if notes are present they
 //! mean set-union only (never truncation).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::Bead;
 use super::bead::{BeadCore, BeadFields};
-use super::collections::Labels;
+use super::collections::Label;
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
+use super::dep::DepKey;
 use super::domain::{BeadType, DepKind, Priority};
-use super::identity::{ActorId, BeadId, NoteId};
+use super::identity::{ActorId, BeadId, NoteId, ReplicaId};
+use super::orset::{Dot, Dvv};
+use super::state::LabelState;
 use super::time::{Stamp, WallClock, WriteStamp};
+use super::{Bead, BeadView};
 
 /// Wire stamp encoded as [wall_ms, counter].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +50,7 @@ impl From<&WireStamp> for WriteStamp {
     }
 }
 
-/// Note wire representation (used in note_append and optional bead_upsert notes).
+/// Note wire representation (used in note_append).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireNoteV1 {
     pub id: NoteId,
@@ -86,20 +89,6 @@ impl From<WireNoteV1> for Note {
             note.author,
             WriteStamp::from(note.at),
         )
-    }
-}
-
-/// Notes patch semantics: omitted vs at-least.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub enum NotesPatch {
-    #[default]
-    Omitted,
-    AtLeast(Vec<WireNoteV1>),
-}
-
-impl NotesPatch {
-    pub fn is_omitted(&self) -> bool {
-        matches!(self, NotesPatch::Omitted)
     }
 }
 
@@ -144,28 +133,93 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for WirePatch<T> {
     }
 }
 
-impl Serialize for NotesPatch {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            NotesPatch::Omitted => Option::<Vec<WireNoteV1>>::None.serialize(serializer),
-            NotesPatch::AtLeast(notes) => Some(notes).serialize(serializer),
+/// Wire Dot for OR-Set ops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct WireDotV1 {
+    pub replica: ReplicaId,
+    pub counter: u64,
+}
+
+impl From<Dot> for WireDotV1 {
+    fn from(dot: Dot) -> Self {
+        Self {
+            replica: dot.replica,
+            counter: dot.counter,
         }
     }
 }
 
-impl<'de> Deserialize<'de> for NotesPatch {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let notes = Option::<Vec<WireNoteV1>>::deserialize(deserializer)?;
-        Ok(match notes {
-            Some(notes) => NotesPatch::AtLeast(notes),
-            None => NotesPatch::Omitted,
-        })
+impl From<&Dot> for WireDotV1 {
+    fn from(dot: &Dot) -> Self {
+        Self {
+            replica: dot.replica,
+            counter: dot.counter,
+        }
+    }
+}
+
+impl From<WireDotV1> for Dot {
+    fn from(dot: WireDotV1) -> Self {
+        Self {
+            replica: dot.replica,
+            counter: dot.counter,
+        }
+    }
+}
+
+impl From<&WireDotV1> for Dot {
+    fn from(dot: &WireDotV1) -> Self {
+        Self {
+            replica: dot.replica,
+            counter: dot.counter,
+        }
+    }
+}
+
+/// Wire DVV for OR-Set ops.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDvvV1 {
+    pub max: BTreeMap<ReplicaId, u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dots: Vec<WireDotV1>,
+}
+
+impl From<&Dvv> for WireDvvV1 {
+    fn from(dvv: &Dvv) -> Self {
+        Self {
+            max: dvv.max.clone(),
+            dots: dvv.dots.iter().copied().map(WireDotV1::from).collect(),
+        }
+    }
+}
+
+impl From<Dvv> for WireDvvV1 {
+    fn from(dvv: Dvv) -> Self {
+        Self {
+            max: dvv.max,
+            dots: dvv.dots.into_iter().map(WireDotV1::from).collect(),
+        }
+    }
+}
+
+impl From<WireDvvV1> for Dvv {
+    fn from(dvv: WireDvvV1) -> Self {
+        let dots = dvv.dots.into_iter().map(Dot::from).collect::<BTreeSet<_>>();
+        let mut dvv = Self { max: dvv.max, dots };
+        dvv.normalize();
+        dvv
+    }
+}
+
+impl From<&WireDvvV1> for Dvv {
+    fn from(dvv: &WireDvvV1) -> Self {
+        let dots = dvv.dots.iter().map(Dot::from).collect::<BTreeSet<_>>();
+        let mut dvv = Self {
+            max: dvv.max.clone(),
+            dots,
+        };
+        dvv.normalize();
+        dvv
     }
 }
 
@@ -221,6 +275,29 @@ impl WorkflowStatus {
 /// Field-level stamp map entry: (at, by).
 pub type WireFieldStamp = (WireStamp, ActorId);
 
+/// OR-Set label state snapshot for checkpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireLabelStateV1 {
+    pub entries: BTreeMap<Label, BTreeSet<Dot>>,
+    pub cc: Dvv,
+}
+
+/// OR-Set dep entry snapshot for checkpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepEntryV1 {
+    pub key: DepKey,
+    pub dots: Vec<Dot>,
+}
+
+/// OR-Set dep store snapshot for checkpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepStoreV1 {
+    pub cc: Dvv,
+    pub entries: Vec<WireDepEntryV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<WireFieldStamp>,
+}
+
 /// Full bead wire representation (checkpoint snapshots).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireBeadFull {
@@ -241,7 +318,7 @@ pub struct WireBeadFull {
     pub priority: Priority,
     #[serde(rename = "type")]
     pub bead_type: BeadType,
-    pub labels: Labels,
+    pub labels: WireLabelStateV1,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,9 +358,25 @@ pub struct WireBeadFull {
     pub v: Option<BTreeMap<String, WireFieldStamp>>,
 }
 
-impl From<&Bead> for WireBeadFull {
-    fn from(bead: &Bead) -> Self {
-        let bead_stamp = bead.updated_stamp();
+fn label_state_to_wire(state: Option<&LabelState>) -> WireLabelStateV1 {
+    let mut entries: BTreeMap<Label, BTreeSet<Dot>> = BTreeMap::new();
+    let cc = state.map(|state| state.cc().clone()).unwrap_or_default();
+
+    if let Some(state) = state {
+        for label in state.values() {
+            if let Some(dots) = state.dots_for(label) {
+                entries.insert(label.clone(), dots.clone());
+            }
+        }
+    }
+
+    WireLabelStateV1 { entries, cc }
+}
+
+impl WireBeadFull {
+    pub fn from_view(view: &BeadView, label_state: Option<&LabelState>) -> Self {
+        let bead = &view.bead;
+        let bead_stamp = view.updated_stamp().clone();
 
         let mut v_map: BTreeMap<String, WireFieldStamp> = BTreeMap::new();
         macro_rules! check_field {
@@ -303,7 +396,14 @@ impl From<&Bead> for WireBeadFull {
         check_field!(bead.fields.acceptance_criteria, "acceptance_criteria");
         check_field!(bead.fields.priority, "priority");
         check_field!(bead.fields.bead_type, "type");
-        check_field!(bead.fields.labels, "labels");
+        if let Some(label_stamp) = view.label_stamp.as_ref()
+            && label_stamp != &bead_stamp
+        {
+            v_map.insert(
+                "labels".to_string(),
+                (WireStamp::from(&label_stamp.at), label_stamp.by.clone()),
+            );
+        }
         check_field!(bead.fields.external_ref, "external_ref");
         check_field!(bead.fields.source_repo, "source_repo");
         check_field!(bead.fields.estimated_minutes, "estimated_minutes");
@@ -333,12 +433,11 @@ impl From<&Bead> for WireBeadFull {
                 (None, None, None)
             };
 
-        let notes = bead
-            .notes
-            .sorted()
-            .into_iter()
-            .map(WireNoteV1::from)
-            .collect();
+        let mut notes = view.notes.clone();
+        notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+        let notes = notes.into_iter().map(WireNoteV1::from).collect();
+
+        let labels = label_state_to_wire(label_state);
 
         WireBeadFull {
             id: bead.core.id.clone(),
@@ -351,7 +450,7 @@ impl From<&Bead> for WireBeadFull {
             acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
             priority: bead.fields.priority.value,
             bead_type: bead.fields.bead_type.value,
-            labels: bead.fields.labels.value.clone(),
+            labels,
             external_ref: bead.fields.external_ref.value.clone(),
             source_repo: bead.fields.source_repo.value.clone(),
             estimated_minutes: bead.fields.estimated_minutes.value,
@@ -368,6 +467,18 @@ impl From<&Bead> for WireBeadFull {
             by: bead_stamp.by.clone(),
             v: if v_map.is_empty() { None } else { Some(v_map) },
         }
+    }
+}
+
+impl WireBeadFull {
+    pub fn label_stamp(&self) -> Stamp {
+        let bead_stamp = Stamp::new(WriteStamp::from(self.at), self.by.clone());
+        if let Some(v_map) = &self.v
+            && let Some((at, by)) = v_map.get("labels")
+        {
+            return Stamp::new(WriteStamp::from(at), by.clone());
+        }
+        bead_stamp
     }
 }
 
@@ -408,19 +519,13 @@ impl From<WireBeadFull> for Bead {
             ),
             priority: Lww::new(wire.priority, field_stamp("priority")),
             bead_type: Lww::new(wire.bead_type, field_stamp("type")),
-            labels: Lww::new(wire.labels, field_stamp("labels")),
             external_ref: Lww::new(wire.external_ref, field_stamp("external_ref")),
             source_repo: Lww::new(wire.source_repo, field_stamp("source_repo")),
             estimated_minutes: Lww::new(wire.estimated_minutes, field_stamp("estimated_minutes")),
             workflow: Lww::new(workflow_value, field_stamp("workflow")),
             claim: Lww::new(claim_value, field_stamp("claim")),
         };
-
-        let mut bead = Bead::new(core, fields);
-        for note in wire.notes {
-            bead.notes.insert(Note::from(note));
-        }
-        bead
+        Bead::new(core, fields)
     }
 }
 
@@ -447,8 +552,6 @@ pub struct WireBeadPatch {
     pub priority: Option<Priority>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub bead_type: Option<BeadType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub labels: Option<Labels>,
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
     pub external_ref: WirePatch<String>,
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
@@ -467,9 +570,6 @@ pub struct WireBeadPatch {
     pub assignee: WirePatch<ActorId>,
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
     pub assignee_expires: WirePatch<WallClock>,
-
-    #[serde(default, skip_serializing_if = "NotesPatch::is_omitted")]
-    pub notes: NotesPatch,
 }
 
 impl WireBeadPatch {
@@ -485,7 +585,6 @@ impl WireBeadPatch {
             acceptance_criteria: WirePatch::Keep,
             priority: None,
             bead_type: None,
-            labels: None,
             external_ref: WirePatch::Keep,
             source_repo: WirePatch::Keep,
             estimated_minutes: WirePatch::Keep,
@@ -494,7 +593,38 @@ impl WireBeadPatch {
             closed_on_branch: WirePatch::Keep,
             assignee: WirePatch::Keep,
             assignee_expires: WirePatch::Keep,
-            notes: NotesPatch::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireLineageStamp {
+    #[serde(rename = "lineage_created_at")]
+    pub at: WireStamp,
+    #[serde(rename = "lineage_created_by")]
+    pub by: ActorId,
+}
+
+impl WireLineageStamp {
+    pub fn stamp(&self) -> Stamp {
+        Stamp::new(WriteStamp::from(self.at), self.by.clone())
+    }
+}
+
+impl From<&Stamp> for WireLineageStamp {
+    fn from(stamp: &Stamp) -> Self {
+        Self {
+            at: WireStamp::from(&stamp.at),
+            by: stamp.by.clone(),
+        }
+    }
+}
+
+impl From<Stamp> for WireLineageStamp {
+    fn from(stamp: Stamp) -> Self {
+        Self {
+            at: WireStamp::from(stamp.at),
+            by: stamp.by,
         }
     }
 }
@@ -506,10 +636,8 @@ pub struct WireTombstoneV1 {
     pub deleted_by: ActorId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_created_at: Option<WireStamp>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_created_by: Option<ActorId>,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<WireLineageStamp>,
 }
 
 impl WireTombstoneV1 {
@@ -518,38 +646,68 @@ impl WireTombstoneV1 {
     }
 
     pub fn lineage_stamp(&self) -> Option<Stamp> {
-        let at = self.lineage_created_at?;
-        let by = self.lineage_created_by.clone()?;
-        Some(Stamp::new(WriteStamp::from(at), by))
+        self.lineage.as_ref().map(WireLineageStamp::stamp)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireDepV1 {
-    pub from: BeadId,
-    pub to: BeadId,
-    pub kind: DepKind,
-    pub created_at: WireStamp,
-    pub created_by: ActorId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_at: Option<WireStamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_by: Option<ActorId>,
+pub struct WireLabelAddV1 {
+    pub bead_id: BeadId,
+    pub label: Label,
+    pub dot: WireDotV1,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<WireLineageStamp>,
+}
+
+impl WireLabelAddV1 {
+    pub fn lineage_stamp(&self) -> Option<Stamp> {
+        self.lineage.as_ref().map(WireLineageStamp::stamp)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireDepDeleteV1 {
+pub struct WireLabelRemoveV1 {
+    pub bead_id: BeadId,
+    pub label: Label,
+    pub ctx: WireDvvV1,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<WireLineageStamp>,
+}
+
+impl WireLabelRemoveV1 {
+    pub fn lineage_stamp(&self) -> Option<Stamp> {
+        self.lineage.as_ref().map(WireLineageStamp::stamp)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepAddV1 {
     pub from: BeadId,
     pub to: BeadId,
     pub kind: DepKind,
-    pub deleted_at: WireStamp,
-    pub deleted_by: ActorId,
+    pub dot: WireDotV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireDepRemoveV1 {
+    pub from: BeadId,
+    pub to: BeadId,
+    pub kind: DepKind,
+    pub ctx: WireDvvV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteAppendV1 {
     pub bead_id: BeadId,
     pub note: WireNoteV1,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<WireLineageStamp>,
+}
+
+impl NoteAppendV1 {
+    pub fn lineage_stamp(&self) -> Option<Stamp> {
+        self.lineage.as_ref().map(WireLineageStamp::stamp)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,8 +715,10 @@ pub struct NoteAppendV1 {
 pub enum TxnOpV1 {
     BeadUpsert(Box<WireBeadPatch>),
     BeadDelete(WireTombstoneV1),
-    DepUpsert(WireDepV1),
-    DepDelete(WireDepDeleteV1),
+    LabelAdd(WireLabelAddV1),
+    LabelRemove(WireLabelRemoveV1),
+    DepAdd(WireDepAddV1),
+    DepRemove(WireDepRemoveV1),
     NoteAppend(NoteAppendV1),
 }
 
@@ -572,12 +732,24 @@ impl TxnOpV1 {
                 id: delete.id.clone(),
                 lineage: delete.lineage_stamp(),
             },
-            TxnOpV1::DepUpsert(dep) => TxnOpKey::DepUpsert {
+            TxnOpV1::LabelAdd(op) => TxnOpKey::LabelAdd {
+                bead_id: op.bead_id.clone(),
+                label: op.label.clone(),
+                dot: op.dot.into(),
+                lineage: op.lineage_stamp(),
+            },
+            TxnOpV1::LabelRemove(op) => TxnOpKey::LabelRemove {
+                bead_id: op.bead_id.clone(),
+                label: op.label.clone(),
+                lineage: op.lineage_stamp(),
+            },
+            TxnOpV1::DepAdd(dep) => TxnOpKey::DepAdd {
                 from: dep.from.clone(),
                 to: dep.to.clone(),
                 kind: dep.kind,
+                dot: dep.dot.into(),
             },
-            TxnOpV1::DepDelete(dep) => TxnOpKey::DepDelete {
+            TxnOpV1::DepRemove(dep) => TxnOpKey::DepRemove {
                 from: dep.from.clone(),
                 to: dep.to.clone(),
                 kind: dep.kind,
@@ -585,6 +757,7 @@ impl TxnOpV1 {
             TxnOpV1::NoteAppend(append) => TxnOpKey::NoteAppend {
                 bead_id: append.bead_id.clone(),
                 note_id: append.note.id.clone(),
+                lineage: append.lineage_stamp(),
             },
         }
     }
@@ -599,12 +772,24 @@ pub enum TxnOpKey {
         id: BeadId,
         lineage: Option<Stamp>,
     },
-    DepUpsert {
+    LabelAdd {
+        bead_id: BeadId,
+        label: Label,
+        dot: Dot,
+        lineage: Option<Stamp>,
+    },
+    LabelRemove {
+        bead_id: BeadId,
+        label: Label,
+        lineage: Option<Stamp>,
+    },
+    DepAdd {
         from: BeadId,
         to: BeadId,
         kind: DepKind,
+        dot: Dot,
     },
-    DepDelete {
+    DepRemove {
         from: BeadId,
         to: BeadId,
         kind: DepKind,
@@ -612,6 +797,7 @@ pub enum TxnOpKey {
     NoteAppend {
         bead_id: BeadId,
         note_id: NoteId,
+        lineage: Option<Stamp>,
     },
 }
 
@@ -620,8 +806,10 @@ impl TxnOpKey {
         match self {
             TxnOpKey::BeadUpsert { .. } => "bead_upsert",
             TxnOpKey::BeadDelete { .. } => "bead_delete",
-            TxnOpKey::DepUpsert { .. } => "dep_upsert",
-            TxnOpKey::DepDelete { .. } => "dep_delete",
+            TxnOpKey::LabelAdd { .. } => "label_add",
+            TxnOpKey::LabelRemove { .. } => "label_remove",
+            TxnOpKey::DepAdd { .. } => "dep_add",
+            TxnOpKey::DepRemove { .. } => "dep_remove",
             TxnOpKey::NoteAppend { .. } => "note_append",
         }
     }
@@ -639,22 +827,75 @@ impl TxnOpKey {
                 ),
                 None => format!("bead_delete:{}", id.as_str()),
             },
-            TxnOpKey::DepUpsert { from, to, kind } => format!(
-                "dep_upsert:{}:{}:{}",
+            TxnOpKey::LabelAdd {
+                bead_id,
+                label,
+                dot,
+                lineage,
+            } => format!(
+                "label_add:{}:{}:{}:{}{}",
+                bead_id.as_str(),
+                label.as_str(),
+                dot.replica,
+                dot.counter,
+                lineage_suffix(lineage.as_ref())
+            ),
+            TxnOpKey::LabelRemove {
+                bead_id,
+                label,
+                lineage,
+            } => {
+                format!(
+                    "label_remove:{}:{}{}",
+                    bead_id.as_str(),
+                    label.as_str(),
+                    lineage_suffix(lineage.as_ref())
+                )
+            }
+            TxnOpKey::DepAdd {
+                from,
+                to,
+                kind,
+                dot,
+            } => format!(
+                "dep_add:{}:{}:{}:{}:{}",
+                from.as_str(),
+                to.as_str(),
+                kind.as_str(),
+                dot.replica,
+                dot.counter
+            ),
+            TxnOpKey::DepRemove { from, to, kind } => format!(
+                "dep_remove:{}:{}:{}",
                 from.as_str(),
                 to.as_str(),
                 kind.as_str()
             ),
-            TxnOpKey::DepDelete { from, to, kind } => format!(
-                "dep_delete:{}:{}:{}",
-                from.as_str(),
-                to.as_str(),
-                kind.as_str()
-            ),
-            TxnOpKey::NoteAppend { bead_id, note_id } => {
-                format!("note_append:{}:{}", bead_id.as_str(), note_id.as_str())
+            TxnOpKey::NoteAppend {
+                bead_id,
+                note_id,
+                lineage,
+            } => {
+                format!(
+                    "note_append:{}:{}{}",
+                    bead_id.as_str(),
+                    note_id.as_str(),
+                    lineage_suffix(lineage.as_ref())
+                )
             }
         }
+    }
+}
+
+fn lineage_suffix(lineage: Option<&Stamp>) -> String {
+    match lineage {
+        Some(stamp) => format!(
+            ":{}:{}:{}",
+            stamp.at.wall_ms,
+            stamp.at.counter,
+            stamp.by.as_str()
+        ),
+        None => ":legacy".to_string(),
     }
 }
 
@@ -695,8 +936,10 @@ impl TxnDeltaV1 {
     pub fn from_parts(
         bead_upserts: Vec<WireBeadPatch>,
         bead_deletes: Vec<WireTombstoneV1>,
-        dep_upserts: Vec<WireDepV1>,
-        dep_deletes: Vec<WireDepDeleteV1>,
+        label_adds: Vec<WireLabelAddV1>,
+        label_removes: Vec<WireLabelRemoveV1>,
+        dep_adds: Vec<WireDepAddV1>,
+        dep_removes: Vec<WireDepRemoveV1>,
         note_appends: Vec<NoteAppendV1>,
     ) -> Result<Self, TxnDeltaError> {
         let mut delta = TxnDeltaV1::new();
@@ -706,11 +949,17 @@ impl TxnDeltaV1 {
         for delete in bead_deletes {
             delta.insert(TxnOpV1::BeadDelete(delete))?;
         }
-        for dep in dep_upserts {
-            delta.insert(TxnOpV1::DepUpsert(dep))?;
+        for op in label_adds {
+            delta.insert(TxnOpV1::LabelAdd(op))?;
         }
-        for dep in dep_deletes {
-            delta.insert(TxnOpV1::DepDelete(dep))?;
+        for op in label_removes {
+            delta.insert(TxnOpV1::LabelRemove(op))?;
+        }
+        for dep in dep_adds {
+            delta.insert(TxnOpV1::DepAdd(dep))?;
+        }
+        for dep in dep_removes {
+            delta.insert(TxnOpV1::DepRemove(dep))?;
         }
         for na in note_appends {
             delta.insert(TxnOpV1::NoteAppend(na))?;
@@ -754,9 +1003,10 @@ impl<'de> Deserialize<'de> for TxnDeltaV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::BeadView;
     use crate::core::collections::Labels;
     use crate::core::composite::Note;
-    use crate::core::identity::ActorId;
+    use crate::core::identity::{ActorId, ReplicaId};
     use crate::core::time::Stamp;
 
     fn actor_id(actor: &str) -> ActorId {
@@ -810,23 +1060,24 @@ mod tests {
             acceptance_criteria: Lww::new(None, base.clone()),
             priority: Lww::new(Priority::default(), base.clone()),
             bead_type: Lww::new(BeadType::Task, base.clone()),
-            labels: Lww::new(Labels::new(), base.clone()),
             external_ref: Lww::new(None, base.clone()),
             source_repo: Lww::new(None, base.clone()),
             estimated_minutes: Lww::new(None, base.clone()),
             workflow: Lww::new(Workflow::Open, base.clone()),
             claim: Lww::new(Claim::Unclaimed, base.clone()),
         };
-        let mut bead = Bead::new(core, fields);
-        bead.notes.insert(Note::new(
+        let bead = Bead::new(core, fields);
+        let labels = Labels::new();
+        let notes = vec![Note::new(
             note_id("note-3"),
             "n".to_string(),
             actor_id("carol"),
             WriteStamp::new(5, 1),
-        ));
+        )];
 
-        let wire = WireBeadFull::from(&bead);
-        let rebuilt = Bead::from(wire);
+        let view = BeadView::new(bead.clone(), labels, notes.clone(), Some(base.clone()));
+        let wire = WireBeadFull::from_view(&view, None);
+        let rebuilt = Bead::from(wire.clone());
 
         assert_eq!(bead.core.id, rebuilt.core.id);
         assert_eq!(bead.core.created(), rebuilt.core.created());
@@ -835,7 +1086,11 @@ mod tests {
             bead.fields.description.stamp,
             rebuilt.fields.description.stamp
         );
-        assert_eq!(bead.notes, rebuilt.notes);
+        assert_eq!(wire.label_stamp(), base);
+        assert_eq!(
+            wire.notes,
+            notes.iter().map(WireNoteV1::from).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -845,26 +1100,10 @@ mod tests {
         patch.created_by = Some(actor_id("alice"));
         patch.title = Some("title".to_string());
         patch.design = WirePatch::Clear;
-        patch.labels = Some(Labels::new());
-        patch.notes = NotesPatch::AtLeast(vec![WireNoteV1 {
-            id: note_id("note-4"),
-            content: "note".to_string(),
-            author: actor_id("alice"),
-            at: WireStamp(11, 2),
-        }]);
 
         let json = serde_json::to_string(&patch).unwrap();
         let back: WireBeadPatch = serde_json::from_str(&json).unwrap();
         assert_eq!(patch, back);
-    }
-
-    #[test]
-    fn wire_bead_patch_omits_notes_when_omitted() {
-        let patch = WireBeadPatch::new(bead_id("bd-omit"));
-        let json = serde_json::to_string(&patch).unwrap();
-        assert!(!json.contains("\"notes\""));
-        let back: WireBeadPatch = serde_json::from_str(&json).unwrap();
-        assert!(back.notes.is_omitted());
     }
 
     #[test]
@@ -888,24 +1127,43 @@ mod tests {
             deleted_at: WireStamp(5, 1),
             deleted_by: actor_id("alice"),
             reason: None,
-            lineage_created_at: None,
-            lineage_created_by: None,
+            lineage: None,
         };
-        let dep_upsert = WireDepV1 {
+        let dep_add = WireDepAddV1 {
             from: bead_id("bd-order"),
             to: bead_id("bd-up"),
             kind: DepKind::Blocks,
-            created_at: WireStamp(3, 1),
-            created_by: actor_id("bob"),
-            deleted_at: None,
-            deleted_by: None,
+            dot: WireDotV1 {
+                replica: ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])),
+                counter: 1,
+            },
         };
-        let dep_delete = WireDepDeleteV1 {
+        let dep_remove = WireDepRemoveV1 {
             from: bead_id("bd-order"),
             to: bead_id("bd-down"),
             kind: DepKind::Related,
-            deleted_at: WireStamp(4, 2),
-            deleted_by: actor_id("carol"),
+            ctx: WireDvvV1 {
+                max: BTreeMap::new(),
+                dots: Vec::new(),
+            },
+        };
+        let label_add = WireLabelAddV1 {
+            bead_id: bead_id("bd-order"),
+            label: Label::parse("triage".to_string()).unwrap(),
+            dot: WireDotV1 {
+                replica: ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])),
+                counter: 2,
+            },
+            lineage: None,
+        };
+        let label_remove = WireLabelRemoveV1 {
+            bead_id: bead_id("bd-order"),
+            label: Label::parse("triage".to_string()).unwrap(),
+            ctx: WireDvvV1 {
+                max: BTreeMap::from([(ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])), 2)]),
+                dots: Vec::new(),
+            },
+            lineage: None,
         };
         let append = NoteAppendV1 {
             bead_id: bead_id("bd-order"),
@@ -915,11 +1173,14 @@ mod tests {
                 author: actor_id("alice"),
                 at: WireStamp(1, 1),
             },
+            lineage: None,
         };
         delta.insert(TxnOpV1::NoteAppend(append)).unwrap();
-        delta.insert(TxnOpV1::DepDelete(dep_delete)).unwrap();
+        delta.insert(TxnOpV1::DepRemove(dep_remove)).unwrap();
         delta.insert(TxnOpV1::BeadDelete(delete)).unwrap();
-        delta.insert(TxnOpV1::DepUpsert(dep_upsert)).unwrap();
+        delta.insert(TxnOpV1::LabelRemove(label_remove)).unwrap();
+        delta.insert(TxnOpV1::DepAdd(dep_add)).unwrap();
+        delta.insert(TxnOpV1::LabelAdd(label_add)).unwrap();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(WireBeadPatch::new(bead_id(
                 "bd-order",
@@ -929,8 +1190,10 @@ mod tests {
         let mut iter = delta.iter();
         assert!(matches!(iter.next(), Some(TxnOpV1::BeadUpsert(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::BeadDelete(_))));
-        assert!(matches!(iter.next(), Some(TxnOpV1::DepUpsert(_))));
-        assert!(matches!(iter.next(), Some(TxnOpV1::DepDelete(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::LabelAdd(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::LabelRemove(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::DepAdd(_))));
+        assert!(matches!(iter.next(), Some(TxnOpV1::DepRemove(_))));
         assert!(matches!(iter.next(), Some(TxnOpV1::NoteAppend(_))));
     }
 
@@ -948,28 +1211,54 @@ mod tests {
                 deleted_at: WireStamp(3, 0),
                 deleted_by: actor_id("alice"),
                 reason: Some("cleanup".to_string()),
-                lineage_created_at: None,
-                lineage_created_by: None,
+                lineage: None,
             }))
             .unwrap();
         delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: bead_id("bd-rt"),
                 to: bead_id("bd-rt-dep"),
                 kind: DepKind::Blocks,
-                created_at: WireStamp(4, 0),
-                created_by: actor_id("alice"),
-                deleted_at: None,
-                deleted_by: None,
+                dot: WireDotV1 {
+                    replica: ReplicaId::from(uuid::Uuid::from_bytes([2u8; 16])),
+                    counter: 7,
+                },
             }))
             .unwrap();
         delta
-            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
                 from: bead_id("bd-rt"),
                 to: bead_id("bd-rt-dep2"),
                 kind: DepKind::Related,
-                deleted_at: WireStamp(5, 1),
-                deleted_by: actor_id("bob"),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([
+                        (ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])), 5),
+                        (ReplicaId::from(uuid::Uuid::from_bytes([3u8; 16])), 2),
+                    ]),
+                    dots: Vec::new(),
+                },
+            }))
+            .unwrap();
+        delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id("bd-rt"),
+                label: Label::parse("triage".to_string()).unwrap(),
+                dot: WireDotV1 {
+                    replica: ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])),
+                    counter: 9,
+                },
+                lineage: None,
+            }))
+            .unwrap();
+        delta
+            .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+                bead_id: bead_id("bd-rt"),
+                label: Label::parse("triage".to_string()).unwrap(),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([(ReplicaId::from(uuid::Uuid::from_bytes([4u8; 16])), 9)]),
+                    dots: Vec::new(),
+                },
+                lineage: None,
             }))
             .unwrap();
         delta
@@ -981,6 +1270,7 @@ mod tests {
                     author: actor_id("bob"),
                     at: WireStamp(2, 2),
                 },
+                lineage: None,
             }))
             .unwrap();
 

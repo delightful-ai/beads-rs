@@ -381,6 +381,26 @@ impl Daemon {
         }
     }
 
+    pub(crate) fn apply_limits(&mut self, limits: Limits) -> Result<bool, OpError> {
+        let old_limits = self.limits.clone();
+        self.limits = limits.clone();
+        self.clock
+            .set_max_forward_drift(limits.hlc_max_forward_drift_ms);
+        self.checkpoint_scheduler
+            .set_max_queue_per_store(limits.max_checkpoint_job_queue);
+
+        for store in self.stores.values_mut() {
+            store.reload_limits(&limits);
+        }
+
+        let store_ids: Vec<StoreId> = self.stores.keys().copied().collect();
+        for store_id in store_ids {
+            self.reload_replication_runtime(store_id)?;
+        }
+
+        Ok(old_limits.max_background_io_bytes_per_sec != limits.max_background_io_bytes_per_sec)
+    }
+
     pub fn is_shutting_down(&self) -> bool {
         self.shutting_down
     }
@@ -2680,12 +2700,12 @@ mod tests {
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Labels,
-        Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority,
-        ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
-        TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp,
-        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww,
+        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry,
+        ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
+        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
+        VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
+        WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -3049,7 +3069,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -3696,7 +3715,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_sync_resolves_collisions_for_dirty_state() {
+    fn complete_sync_preserves_local_state_on_collision() {
         let _tmp = test_store_dir();
         let remote = test_remote();
         let mut daemon = Daemon::new(test_actor());
@@ -3704,6 +3723,7 @@ mod tests {
 
         let winner = make_bead("bd-abc", 1000, "alice");
         let loser = make_bead("bd-abc", 2000, "bob");
+        let loser_created = loser.core.created().clone();
 
         let mut synced_state = CanonicalState::new();
         synced_state.insert_live(winner.clone());
@@ -3738,11 +3758,15 @@ mod tests {
             .state
             .get(&NamespaceId::core())
             .expect("core state");
-        assert_eq!(core_state.live_count(), 2);
+        assert_eq!(core_state.live_count(), 1);
 
         let id = BeadId::parse("bd-abc").unwrap();
         let merged = core_state.get_live(&id).unwrap();
-        assert_eq!(merged.core.created(), winner.core.created());
+        assert_eq!(merged.core.created(), &loser_created);
+
+        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
+        assert!(repo_state.dirty);
+        assert!(!repo_state.sync_in_progress);
     }
 
     #[test]
@@ -3815,7 +3839,7 @@ mod tests {
     }
 
     #[test]
-    fn ingest_reports_apply_failure_after_append() {
+    fn ingest_accepts_orphan_note_after_append() {
         let tmp = TempStoreDir::new();
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
@@ -3826,7 +3850,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         let note_id = NoteId::new("note-1").unwrap();
         let note = WireNoteV1 {
-            id: note_id,
+            id: note_id.clone(),
             content: "hi".to_string(),
             author: ActorId::new("alice").unwrap(),
             at: WireStamp(now_ms, 0),
@@ -3835,6 +3859,7 @@ mod tests {
             .insert(TxnOpV1::NoteAppend(NoteAppendV1 {
                 bead_id: BeadId::parse("bd-missing").unwrap(),
                 note,
+                lineage: None,
             }))
             .unwrap();
 
@@ -3846,16 +3871,9 @@ mod tests {
         std::fs::create_dir_all(&repo_path).unwrap();
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
 
-        let err = daemon
+        let _outcome = daemon
             .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event], now_ms)
-            .expect_err("apply failure should reject batch");
-        assert_eq!(err.code, ProtocolErrorCode::Corruption.into());
-        let details = err
-            .to_payload()
-            .details_as::<error_details::CorruptionDetails>()
-            .unwrap()
-            .expect("corruption details");
-        assert!(details.reason.contains("apply_event rejected for core/"));
+            .expect("ingest should accept orphan note");
 
         let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
         let segments = store_runtime
@@ -3864,6 +3882,14 @@ mod tests {
             .list_segments(&namespace)
             .expect("segments");
         assert_eq!(segments.len(), 1);
+        let state = store_runtime
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(
+            state.note_id_exists(&BeadId::parse("bd-missing").unwrap(), &note_id),
+            "orphan note stored"
+        );
     }
 
     #[test]

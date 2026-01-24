@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-use beads_rs::core::{Label, NoteAppendV1, NotesPatch};
+use beads_rs::core::NoteAppendV1;
 use beads_rs::{
-    ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, Labels,
-    NamespaceId, NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TraceId,
-    TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,
+    ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId,
+    NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnDeltaV1,
+    TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,
     WorkflowStatus,
 };
 use uuid::Uuid;
@@ -21,15 +21,6 @@ pub fn note_id(seed: u8) -> NoteId {
     NoteId::new(format!("note-{seed:02x}")).expect("valid note id fixture")
 }
 
-pub fn sample_labels(seed: u8) -> Labels {
-    let mut labels = Labels::new();
-    let primary = Label::parse(format!("label-{seed:02x}")).expect("valid label fixture");
-    let secondary = Label::parse(format!("label-{seed:02x}-b")).expect("valid label fixture");
-    labels.insert(primary);
-    labels.insert(secondary);
-    labels
-}
-
 pub fn sample_bead_patch(seed: u8) -> WireBeadPatch {
     let id = bead_id(seed);
     let mut patch = WireBeadPatch::new(id);
@@ -42,13 +33,13 @@ pub fn sample_bead_patch(seed: u8) -> WireBeadPatch {
     patch.acceptance_criteria = WirePatch::Clear;
     patch.priority = Some(Priority::HIGH);
     patch.bead_type = Some(BeadType::Task);
-    patch.labels = Some(sample_labels(seed));
     patch.external_ref = WirePatch::Set(format!("ref-{seed:02x}"));
     patch.estimated_minutes = WirePatch::Set(45);
     patch.status = Some(WorkflowStatus::Open);
+    patch.closed_reason = WirePatch::Clear;
+    patch.closed_on_branch = WirePatch::Clear;
     patch.assignee = WirePatch::Set(actor_id(seed.wrapping_add(1)));
     patch.assignee_expires = WirePatch::Set(WallClock(20_000 + seed as u64));
-    patch.notes = NotesPatch::Omitted;
     patch
 }
 
@@ -67,6 +58,7 @@ pub fn sample_delta(seed: u8) -> TxnDeltaV1 {
     let append = NoteAppendV1 {
         bead_id: bead.id.clone(),
         note,
+        lineage: None,
     };
 
     let mut delta = TxnDeltaV1::new();

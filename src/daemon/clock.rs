@@ -79,6 +79,10 @@ impl Clock {
         }
     }
 
+    pub fn set_max_forward_drift(&mut self, max_forward_drift_ms: u64) {
+        self.max_forward_drift_ms = max_forward_drift_ms;
+    }
+
     pub fn state(&self) -> WriteStamp {
         WriteStamp::new(self.wall_ms, self.counter)
     }

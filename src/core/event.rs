@@ -1,6 +1,6 @@
 //! Event body encoding + hashing for realtime WAL and replication.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
 use bytes::Bytes;
@@ -11,14 +11,16 @@ use thiserror::Error;
 
 use super::domain::DepKind;
 use super::identity::{
-    ActorId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TraceId, TxnId,
+    ActorId, BeadId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TraceId, TxnId,
 };
 use super::limits::Limits;
 use super::namespace::NamespaceId;
+use super::time::WallClock;
 use super::watermark::Seq1;
 use super::wire_bead::{
-    NoteAppendV1, NotesPatch, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepDeleteV1, WireDepV1,
-    WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
+    NoteAppendV1, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1,
+    WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WirePatch,
+    WireStamp, WireTombstoneV1, WorkflowStatus,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,6 +230,16 @@ pub enum EventValidationError {
     TooManyLabels { count: usize, max: usize },
     #[error("note_appends count {count} exceeds max {max}")]
     TooManyNoteAppends { count: usize, max: usize },
+    #[error("invalid workflow patch for {id}: {reason}")]
+    InvalidWorkflowPatch { id: BeadId, reason: String },
+    #[error("invalid claim patch for {id}: {reason}")]
+    InvalidClaimPatch { id: BeadId, reason: String },
+    #[error("invalid tombstone lineage for {id}: {reason}")]
+    InvalidTombstoneLineage { id: BeadId, reason: String },
+    #[error("invalid bead patch for {id}: {reason}")]
+    InvalidBeadPatch { id: BeadId, reason: String },
+    #[error("invalid dependency: {reason}")]
+    InvalidDependency { reason: String },
 }
 
 #[derive(Debug, Error)]
@@ -593,16 +605,20 @@ fn encode_txn_delta(
 ) -> Result<(), EncodeError> {
     let mut bead_upserts: Vec<&WireBeadPatch> = Vec::new();
     let mut bead_deletes: Vec<&WireTombstoneV1> = Vec::new();
-    let mut dep_upserts: Vec<&WireDepV1> = Vec::new();
-    let mut dep_deletes: Vec<&WireDepDeleteV1> = Vec::new();
+    let mut label_adds: Vec<&WireLabelAddV1> = Vec::new();
+    let mut label_removes: Vec<&WireLabelRemoveV1> = Vec::new();
+    let mut dep_adds: Vec<&WireDepAddV1> = Vec::new();
+    let mut dep_removes: Vec<&WireDepRemoveV1> = Vec::new();
     let mut note_appends: Vec<&NoteAppendV1> = Vec::new();
 
     for op in delta.iter() {
         match op {
             TxnOpV1::BeadUpsert(up) => bead_upserts.push(up),
             TxnOpV1::BeadDelete(delete) => bead_deletes.push(delete),
-            TxnOpV1::DepUpsert(dep) => dep_upserts.push(dep),
-            TxnOpV1::DepDelete(dep) => dep_deletes.push(dep),
+            TxnOpV1::LabelAdd(op) => label_adds.push(op),
+            TxnOpV1::LabelRemove(op) => label_removes.push(op),
+            TxnOpV1::DepAdd(dep) => dep_adds.push(dep),
+            TxnOpV1::DepRemove(dep) => dep_removes.push(dep),
             TxnOpV1::NoteAppend(append) => note_appends.push(append),
         }
     }
@@ -614,10 +630,16 @@ fn encode_txn_delta(
     if !bead_deletes.is_empty() {
         len += 1;
     }
-    if !dep_upserts.is_empty() {
+    if !label_adds.is_empty() {
         len += 1;
     }
-    if !dep_deletes.is_empty() {
+    if !label_removes.is_empty() {
+        len += 1;
+    }
+    if !dep_adds.is_empty() {
+        len += 1;
+    }
+    if !dep_removes.is_empty() {
         len += 1;
     }
     if !note_appends.is_empty() {
@@ -644,19 +666,35 @@ fn encode_txn_delta(
         }
     }
 
-    if !dep_upserts.is_empty() {
-        enc.str("dep_upserts")?;
-        enc.array(dep_upserts.len() as u64)?;
-        for dep in dep_upserts {
-            encode_wire_dep(enc, dep)?;
+    if !label_adds.is_empty() {
+        enc.str("label_adds")?;
+        enc.array(label_adds.len() as u64)?;
+        for op in label_adds {
+            encode_wire_label_add(enc, op)?;
         }
     }
 
-    if !dep_deletes.is_empty() {
-        enc.str("dep_deletes")?;
-        enc.array(dep_deletes.len() as u64)?;
-        for dep in dep_deletes {
-            encode_wire_dep_delete(enc, dep)?;
+    if !label_removes.is_empty() {
+        enc.str("label_removes")?;
+        enc.array(label_removes.len() as u64)?;
+        for op in label_removes {
+            encode_wire_label_remove(enc, op)?;
+        }
+    }
+
+    if !dep_adds.is_empty() {
+        enc.str("dep_adds")?;
+        enc.array(dep_adds.len() as u64)?;
+        for dep in dep_adds {
+            encode_wire_dep_add(enc, dep)?;
+        }
+    }
+
+    if !dep_removes.is_empty() {
+        enc.str("dep_removes")?;
+        enc.array(dep_removes.len() as u64)?;
+        for dep in dep_removes {
+            encode_wire_dep_remove(enc, dep)?;
         }
     }
 
@@ -664,16 +702,26 @@ fn encode_txn_delta(
         enc.str("note_appends")?;
         enc.array(note_appends.len() as u64)?;
         for append in note_appends {
-            enc.map(2)?;
+            let mut len = 2;
+            if append.lineage.is_some() {
+                len += 2;
+            }
+            enc.map(len as u64)?;
             enc.str("bead_id")?;
             enc.str(append.bead_id.as_str())?;
             enc.str("note")?;
             encode_wire_note(enc, &append.note)?;
+            if let Some(lineage) = append.lineage.as_ref() {
+                enc.str("lineage_created_at")?;
+                encode_wire_stamp(enc, &lineage.at)?;
+                enc.str("lineage_created_by")?;
+                enc.str(lineage.by.as_str())?;
+            }
         }
     }
 
     enc.str("v")?;
-    enc.u32(1)?;
+    enc.u32(2)?;
 
     Ok(())
 }
@@ -689,8 +737,10 @@ fn decode_txn_delta(
     let mut version = None;
     let mut bead_upserts: Vec<WireBeadPatch> = Vec::new();
     let mut bead_deletes: Vec<WireTombstoneV1> = Vec::new();
-    let mut dep_upserts: Vec<WireDepV1> = Vec::new();
-    let mut dep_deletes: Vec<WireDepDeleteV1> = Vec::new();
+    let mut label_adds: Vec<WireLabelAddV1> = Vec::new();
+    let mut label_removes: Vec<WireLabelRemoveV1> = Vec::new();
+    let mut dep_adds: Vec<WireDepAddV1> = Vec::new();
+    let mut dep_removes: Vec<WireDepRemoveV1> = Vec::new();
     let mut note_appends: Vec<NoteAppendV1> = Vec::new();
     let mut ops_total: usize = 0;
 
@@ -732,24 +782,44 @@ fn decode_txn_delta(
                     bead_deletes.push(decode_wire_tombstone(dec, limits, depth + 2)?);
                 }
             }
-            "dep_upserts" => {
+            "label_adds" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
                 ops_total = ops_total.saturating_add(arr_len);
                 if ops_total > limits.max_ops_per_txn {
                     return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
                 }
                 for _ in 0..arr_len {
-                    dep_upserts.push(decode_wire_dep(dec, limits, depth + 2)?);
+                    label_adds.push(decode_wire_label_add(dec, limits, depth + 2)?);
                 }
             }
-            "dep_deletes" => {
+            "label_removes" => {
                 let arr_len = decode_array_len(dec, limits, depth + 1)?;
                 ops_total = ops_total.saturating_add(arr_len);
                 if ops_total > limits.max_ops_per_txn {
                     return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
                 }
                 for _ in 0..arr_len {
-                    dep_deletes.push(decode_wire_dep_delete(dec, limits, depth + 2)?);
+                    label_removes.push(decode_wire_label_remove(dec, limits, depth + 2)?);
+                }
+            }
+            "dep_adds" => {
+                let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
+                for _ in 0..arr_len {
+                    dep_adds.push(decode_wire_dep_add(dec, limits, depth + 2)?);
+                }
+            }
+            "dep_removes" => {
+                let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
+                for _ in 0..arr_len {
+                    dep_removes.push(decode_wire_dep_remove(dec, limits, depth + 2)?);
                 }
             }
             "note_appends" => {
@@ -763,14 +833,16 @@ fn decode_txn_delta(
                 }
                 for _ in 0..arr_len {
                     let entry_len = decode_map_len(dec, limits, depth + 2)?;
-                    if entry_len != 2 {
+                    if !(2..=4).contains(&entry_len) {
                         return Err(DecodeError::InvalidField {
                             field: "note_appends",
-                            reason: "entry must have exactly two fields".into(),
+                            reason: "entry must have 2-4 fields".into(),
                         });
                     }
                     let mut bead_id = None;
                     let mut note = None;
+                    let mut lineage_created_at = None;
+                    let mut lineage_created_by = None;
                     let mut entry_seen = BTreeSet::new();
                     for _ in 0..entry_len {
                         let entry_key = decode_text(dec, limits)?;
@@ -783,6 +855,15 @@ fn decode_txn_delta(
                             "note" => {
                                 note = Some(decode_wire_note(dec, limits, depth + 3)?);
                             }
+                            "lineage_created_at" => {
+                                lineage_created_at =
+                                    Some(decode_wire_stamp(dec, limits, depth + 3)?);
+                            }
+                            "lineage_created_by" => {
+                                let raw = decode_text(dec, limits)?;
+                                lineage_created_by =
+                                    Some(parse_actor_id(raw, "lineage_created_by")?);
+                            }
                             other => {
                                 return Err(DecodeError::InvalidField {
                                     field: "note_appends",
@@ -791,9 +872,22 @@ fn decode_txn_delta(
                             }
                         }
                     }
+                    let lineage = match (lineage_created_at, lineage_created_by) {
+                        (None, None) => None,
+                        (Some(at), Some(by)) => Some(WireLineageStamp { at, by }),
+                        _ => {
+                            return Err(DecodeError::InvalidField {
+                                field: "note_appends",
+                                reason:
+                                    "lineage_created_at and lineage_created_by must be set together"
+                                        .into(),
+                            });
+                        }
+                    };
                     note_appends.push(NoteAppendV1 {
                         bead_id: bead_id.ok_or(DecodeError::MissingField("bead_id"))?,
                         note: note.ok_or(DecodeError::MissingField("note"))?,
+                        lineage,
                     });
                 }
             }
@@ -810,7 +904,7 @@ fn decode_txn_delta(
     }
 
     let version = version.ok_or(DecodeError::MissingField("v"))?;
-    if version != 1 {
+    if version != 1 && version != 2 {
         return Err(DecodeError::UnsupportedDeltaVersion(version));
     }
 
@@ -825,14 +919,24 @@ fn decode_txn_delta(
             .insert(TxnOpV1::BeadDelete(delete))
             .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
     }
-    for dep in dep_upserts {
+    for op in label_adds {
         delta
-            .insert(TxnOpV1::DepUpsert(dep))
+            .insert(TxnOpV1::LabelAdd(op))
             .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
     }
-    for dep in dep_deletes {
+    for op in label_removes {
         delta
-            .insert(TxnOpV1::DepDelete(dep))
+            .insert(TxnOpV1::LabelRemove(op))
+            .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
+    }
+    for dep in dep_adds {
+        delta
+            .insert(TxnOpV1::DepAdd(dep))
+            .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
+    }
+    for dep in dep_removes {
+        delta
+            .insert(TxnOpV1::DepRemove(dep))
             .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
     }
     for na in note_appends {
@@ -875,9 +979,6 @@ fn encode_wire_bead_patch(
     if patch.bead_type.is_some() {
         len += 1;
     }
-    if patch.labels.is_some() {
-        len += 1;
-    }
     if !patch.external_ref.is_keep() {
         len += 1;
     }
@@ -900,9 +1001,6 @@ fn encode_wire_bead_patch(
         len += 1;
     }
     if !patch.assignee_expires.is_keep() {
-        len += 1;
-    }
-    if !patch.notes.is_omitted() {
         len += 1;
     }
 
@@ -958,27 +1056,6 @@ fn encode_wire_bead_patch(
     }
     enc.str("id")?;
     enc.str(patch.id.as_str())?;
-    if let Some(labels) = &patch.labels {
-        enc.str("labels")?;
-        enc.array(labels.len() as u64)?;
-        for label in labels.iter() {
-            enc.str(label.as_str())?;
-        }
-    }
-    if !patch.notes.is_omitted() {
-        enc.str("notes")?;
-        match &patch.notes {
-            NotesPatch::Omitted => {
-                enc.array(0)?;
-            }
-            NotesPatch::AtLeast(notes) => {
-                enc.array(notes.len() as u64)?;
-                for note in notes {
-                    encode_wire_note(enc, note)?;
-                }
-            }
-        }
-    }
     if let Some(priority) = patch.priority {
         enc.str("priority")?;
         enc.u32(priority.value().into())?;
@@ -1058,29 +1135,6 @@ fn decode_wire_bead_patch(
                 let raw = decode_text(dec, limits)?;
                 patch.id = parse_bead_id(raw)?;
                 id_set = true;
-            }
-            "labels" => {
-                let arr_len = decode_array_len(dec, limits, depth + 1)?;
-                let mut labels = super::collections::Labels::new();
-                for _ in 0..arr_len {
-                    let raw = decode_text(dec, limits)?;
-                    let label = super::collections::Label::parse(raw.to_string()).map_err(|e| {
-                        DecodeError::InvalidField {
-                            field: "labels",
-                            reason: e.to_string(),
-                        }
-                    })?;
-                    labels.insert(label);
-                }
-                patch.labels = Some(labels);
-            }
-            "notes" => {
-                let arr_len = decode_array_len(dec, limits, depth + 1)?;
-                let mut notes = Vec::with_capacity(arr_len);
-                for _ in 0..arr_len {
-                    notes.push(decode_wire_note(dec, limits, depth + 2)?);
-                }
-                patch.notes = NotesPatch::AtLeast(notes);
             }
             "priority" => {
                 let val = decode_u32(dec, "priority")?;
@@ -1209,9 +1263,7 @@ fn encode_wire_tombstone(
     if tombstone.reason.is_some() {
         len += 1;
     }
-    let has_lineage =
-        tombstone.lineage_created_at.is_some() || tombstone.lineage_created_by.is_some();
-    if has_lineage {
+    if tombstone.lineage.is_some() {
         len += 2;
     }
 
@@ -1228,19 +1280,11 @@ fn encode_wire_tombstone(
         enc.str(reason)?;
     }
 
-    if let (Some(at), Some(by)) = (
-        tombstone.lineage_created_at,
-        tombstone.lineage_created_by.as_ref(),
-    ) {
+    if let Some(lineage) = tombstone.lineage.as_ref() {
         enc.str("lineage_created_at")?;
-        encode_wire_stamp(enc, &at)?;
+        encode_wire_stamp(enc, &lineage.at)?;
         enc.str("lineage_created_by")?;
-        enc.str(by.as_str())?;
-    } else {
-        debug_assert!(
-            tombstone.lineage_created_at.is_none() && tombstone.lineage_created_by.is_none(),
-            "lineage fields must be set together"
-        );
+        enc.str(lineage.by.as_str())?;
     }
 
     Ok(())
@@ -1294,159 +1338,362 @@ fn decode_wire_tombstone(
         }
     }
 
-    if lineage_created_at.is_some() ^ lineage_created_by.is_some() {
-        return Err(DecodeError::InvalidField {
-            field: "bead_delete",
-            reason: "lineage_created_at and lineage_created_by must be set together".into(),
-        });
-    }
+    let lineage = match (lineage_created_at, lineage_created_by) {
+        (None, None) => None,
+        (Some(at), Some(by)) => Some(WireLineageStamp { at, by }),
+        _ => {
+            return Err(DecodeError::InvalidField {
+                field: "bead_delete",
+                reason: "lineage_created_at and lineage_created_by must be set together".into(),
+            });
+        }
+    };
 
     Ok(WireTombstoneV1 {
         id: id.ok_or(DecodeError::MissingField("id"))?,
         deleted_at: deleted_at.ok_or(DecodeError::MissingField("deleted_at"))?,
         deleted_by: deleted_by.ok_or(DecodeError::MissingField("deleted_by"))?,
         reason,
-        lineage_created_at,
-        lineage_created_by,
+        lineage,
     })
 }
 
-fn encode_wire_dep(enc: &mut Encoder<&mut Vec<u8>>, dep: &WireDepV1) -> Result<(), EncodeError> {
-    let mut len = 5;
-    let has_deleted = dep.deleted_at.is_some() || dep.deleted_by.is_some();
-    if has_deleted {
+fn encode_wire_dot(enc: &mut Encoder<&mut Vec<u8>>, dot: &WireDotV1) -> Result<(), EncodeError> {
+    enc.map(2)?;
+    enc.str("replica")?;
+    let replica = dot.replica.to_string();
+    enc.str(replica.as_str())?;
+    enc.str("counter")?;
+    enc.u64(dot.counter)?;
+    Ok(())
+}
+
+fn decode_wire_dot(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireDotV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
+    let mut replica = None;
+    let mut counter = None;
+
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
+        match key {
+            "replica" => {
+                let raw = decode_text(dec, limits)?;
+                replica = Some(parse_uuid_field::<ReplicaId>("replica", raw)?);
+            }
+            "counter" => {
+                counter = Some(decode_u64(dec, "counter")?);
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "dot",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    Ok(WireDotV1 {
+        replica: replica.ok_or(DecodeError::MissingField("replica"))?,
+        counter: counter.ok_or(DecodeError::MissingField("counter"))?,
+    })
+}
+
+fn encode_wire_dvv(enc: &mut Encoder<&mut Vec<u8>>, dvv: &WireDvvV1) -> Result<(), EncodeError> {
+    let include_dots = !dvv.dots.is_empty();
+    enc.map(if include_dots { 2 } else { 1 })?;
+    if include_dots {
+        enc.str("dots")?;
+        enc.array(dvv.dots.len() as u64)?;
+        for dot in &dvv.dots {
+            encode_wire_dot(enc, dot)?;
+        }
+    }
+    enc.str("max")?;
+    enc.map(dvv.max.len() as u64)?;
+    for (replica, counter) in &dvv.max {
+        let replica = replica.to_string();
+        enc.str(replica.as_str())?;
+        enc.u64(*counter)?;
+    }
+    Ok(())
+}
+
+fn decode_wire_dvv(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireDvvV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut max = BTreeMap::new();
+    let mut dots = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for _ in 0..map_len {
+        let raw = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen, raw)?;
+        match raw {
+            "max" => {
+                let max_len = decode_map_len(dec, limits, depth + 1)?;
+                let mut max_seen = BTreeSet::new();
+                for _ in 0..max_len {
+                    let raw = decode_text(dec, limits)?;
+                    ensure_unique_key(&mut max_seen, raw)?;
+                    let replica = parse_uuid_field::<ReplicaId>("replica", raw)?;
+                    let counter = decode_u64(dec, "counter")?;
+                    max.insert(replica, counter);
+                }
+            }
+            "dots" => {
+                let dots_len = decode_array_len(dec, limits, depth + 1)?;
+                let mut dot_seen = BTreeSet::new();
+                for _ in 0..dots_len {
+                    let dot = decode_wire_dot(dec, limits, depth + 2)?;
+                    if !dot_seen.insert(dot) {
+                        return Err(DecodeError::InvalidField {
+                            field: "dots",
+                            reason: "duplicate dot".to_string(),
+                        });
+                    }
+                    dots.push(dot);
+                }
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "dvv",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    if !seen.contains("max") {
+        return Err(DecodeError::MissingField("max"));
+    }
+
+    Ok(WireDvvV1 { max, dots })
+}
+
+fn encode_wire_label_add(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    op: &WireLabelAddV1,
+) -> Result<(), EncodeError> {
+    let mut len = 3;
+    if op.lineage.is_some() {
         len += 2;
     }
-
     enc.map(len as u64)?;
-    enc.str("from")?;
-    enc.str(dep.from.as_str())?;
-    enc.str("to")?;
-    enc.str(dep.to.as_str())?;
-    enc.str("kind")?;
-    enc.str(dep.kind.as_str())?;
-    enc.str("created_at")?;
-    encode_wire_stamp(enc, &dep.created_at)?;
-    enc.str("created_by")?;
-    enc.str(dep.created_by.as_str())?;
-
-    if let (Some(at), Some(by)) = (dep.deleted_at, dep.deleted_by.as_ref()) {
-        enc.str("deleted_at")?;
-        encode_wire_stamp(enc, &at)?;
-        enc.str("deleted_by")?;
-        enc.str(by.as_str())?;
-    } else {
-        debug_assert!(
-            dep.deleted_at.is_none() && dep.deleted_by.is_none(),
-            "deleted fields must be set together"
-        );
+    enc.str("bead_id")?;
+    enc.str(op.bead_id.as_str())?;
+    enc.str("label")?;
+    enc.str(op.label.as_str())?;
+    enc.str("dot")?;
+    encode_wire_dot(enc, &op.dot)?;
+    if let Some(lineage) = op.lineage.as_ref() {
+        enc.str("lineage_created_at")?;
+        encode_wire_stamp(enc, &lineage.at)?;
+        enc.str("lineage_created_by")?;
+        enc.str(lineage.by.as_str())?;
     }
-
     Ok(())
 }
 
-fn decode_wire_dep(
+fn decode_wire_label_add(
     dec: &mut Decoder,
     limits: &Limits,
     depth: usize,
-) -> Result<WireDepV1, DecodeError> {
+) -> Result<WireLabelAddV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut seen_keys = BTreeSet::new();
-    let mut from = None;
-    let mut to = None;
-    let mut kind = None;
-    let mut created_at = None;
-    let mut created_by = None;
-    let mut deleted_at = None;
-    let mut deleted_by = None;
+    let mut bead_id = None;
+    let mut label = None;
+    let mut dot = None;
+    let mut lineage_created_at = None;
+    let mut lineage_created_by = None;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
         ensure_unique_key(&mut seen_keys, key)?;
         match key {
-            "from" => {
+            "bead_id" => {
                 let raw = decode_text(dec, limits)?;
-                from = Some(parse_bead_id(raw)?);
+                bead_id = Some(parse_bead_id(raw)?);
             }
-            "to" => {
+            "label" => {
                 let raw = decode_text(dec, limits)?;
-                to = Some(parse_bead_id(raw)?);
+                label = Some(
+                    super::collections::Label::parse(raw.to_string()).map_err(|e| {
+                        DecodeError::InvalidField {
+                            field: "label",
+                            reason: e.to_string(),
+                        }
+                    })?,
+                );
             }
-            "kind" => {
+            "dot" => {
+                dot = Some(decode_wire_dot(dec, limits, depth + 1)?);
+            }
+            "lineage_created_at" => {
+                lineage_created_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
+            }
+            "lineage_created_by" => {
                 let raw = decode_text(dec, limits)?;
-                kind = Some(parse_dep_kind(raw)?);
-            }
-            "created_at" => {
-                created_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
-            }
-            "created_by" => {
-                let raw = decode_text(dec, limits)?;
-                created_by = Some(parse_actor_id(raw, "created_by")?);
-            }
-            "deleted_at" => {
-                deleted_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
-            }
-            "deleted_by" => {
-                let raw = decode_text(dec, limits)?;
-                deleted_by = Some(parse_actor_id(raw, "deleted_by")?);
+                lineage_created_by = Some(parse_actor_id(raw, "lineage_created_by")?);
             }
             other => {
                 return Err(DecodeError::InvalidField {
-                    field: "dep_upsert",
+                    field: "label_add",
                     reason: format!("unknown key {other}"),
                 });
             }
         }
     }
 
-    if deleted_at.is_some() ^ deleted_by.is_some() {
-        return Err(DecodeError::InvalidField {
-            field: "dep_upsert",
-            reason: "deleted_at and deleted_by must be set together".into(),
-        });
-    }
+    let lineage = match (lineage_created_at, lineage_created_by) {
+        (None, None) => None,
+        (Some(at), Some(by)) => Some(WireLineageStamp { at, by }),
+        _ => {
+            return Err(DecodeError::InvalidField {
+                field: "label_add",
+                reason: "lineage_created_at and lineage_created_by must be set together".into(),
+            });
+        }
+    };
 
-    Ok(WireDepV1 {
-        from: from.ok_or(DecodeError::MissingField("from"))?,
-        to: to.ok_or(DecodeError::MissingField("to"))?,
-        kind: kind.ok_or(DecodeError::MissingField("kind"))?,
-        created_at: created_at.ok_or(DecodeError::MissingField("created_at"))?,
-        created_by: created_by.ok_or(DecodeError::MissingField("created_by"))?,
-        deleted_at,
-        deleted_by,
+    Ok(WireLabelAddV1 {
+        bead_id: bead_id.ok_or(DecodeError::MissingField("bead_id"))?,
+        label: label.ok_or(DecodeError::MissingField("label"))?,
+        dot: dot.ok_or(DecodeError::MissingField("dot"))?,
+        lineage,
     })
 }
 
-fn encode_wire_dep_delete(
+fn encode_wire_label_remove(
     enc: &mut Encoder<&mut Vec<u8>>,
-    dep: &WireDepDeleteV1,
+    op: &WireLabelRemoveV1,
 ) -> Result<(), EncodeError> {
-    enc.map(5)?;
+    let mut len = 3;
+    if op.lineage.is_some() {
+        len += 2;
+    }
+    enc.map(len as u64)?;
+    enc.str("bead_id")?;
+    enc.str(op.bead_id.as_str())?;
+    enc.str("label")?;
+    enc.str(op.label.as_str())?;
+    enc.str("ctx")?;
+    encode_wire_dvv(enc, &op.ctx)?;
+    if let Some(lineage) = op.lineage.as_ref() {
+        enc.str("lineage_created_at")?;
+        encode_wire_stamp(enc, &lineage.at)?;
+        enc.str("lineage_created_by")?;
+        enc.str(lineage.by.as_str())?;
+    }
+    Ok(())
+}
+
+fn decode_wire_label_remove(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireLabelRemoveV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
+    let mut bead_id = None;
+    let mut label = None;
+    let mut ctx = None;
+    let mut lineage_created_at = None;
+    let mut lineage_created_by = None;
+
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
+        match key {
+            "bead_id" => {
+                let raw = decode_text(dec, limits)?;
+                bead_id = Some(parse_bead_id(raw)?);
+            }
+            "label" => {
+                let raw = decode_text(dec, limits)?;
+                label = Some(
+                    super::collections::Label::parse(raw.to_string()).map_err(|e| {
+                        DecodeError::InvalidField {
+                            field: "label",
+                            reason: e.to_string(),
+                        }
+                    })?,
+                );
+            }
+            "ctx" => {
+                ctx = Some(decode_wire_dvv(dec, limits, depth + 1)?);
+            }
+            "lineage_created_at" => {
+                lineage_created_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
+            }
+            "lineage_created_by" => {
+                let raw = decode_text(dec, limits)?;
+                lineage_created_by = Some(parse_actor_id(raw, "lineage_created_by")?);
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "label_remove",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    let lineage = match (lineage_created_at, lineage_created_by) {
+        (None, None) => None,
+        (Some(at), Some(by)) => Some(WireLineageStamp { at, by }),
+        _ => {
+            return Err(DecodeError::InvalidField {
+                field: "label_remove",
+                reason: "lineage_created_at and lineage_created_by must be set together".into(),
+            });
+        }
+    };
+
+    Ok(WireLabelRemoveV1 {
+        bead_id: bead_id.ok_or(DecodeError::MissingField("bead_id"))?,
+        label: label.ok_or(DecodeError::MissingField("label"))?,
+        ctx: ctx.ok_or(DecodeError::MissingField("ctx"))?,
+        lineage,
+    })
+}
+
+fn encode_wire_dep_add(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    dep: &WireDepAddV1,
+) -> Result<(), EncodeError> {
+    enc.map(4)?;
     enc.str("from")?;
     enc.str(dep.from.as_str())?;
     enc.str("to")?;
     enc.str(dep.to.as_str())?;
     enc.str("kind")?;
     enc.str(dep.kind.as_str())?;
-    enc.str("deleted_at")?;
-    encode_wire_stamp(enc, &dep.deleted_at)?;
-    enc.str("deleted_by")?;
-    enc.str(dep.deleted_by.as_str())?;
+    enc.str("dot")?;
+    encode_wire_dot(enc, &dep.dot)?;
     Ok(())
 }
 
-fn decode_wire_dep_delete(
+fn decode_wire_dep_add(
     dec: &mut Decoder,
     limits: &Limits,
     depth: usize,
-) -> Result<WireDepDeleteV1, DecodeError> {
+) -> Result<WireDepAddV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut seen_keys = BTreeSet::new();
     let mut from = None;
     let mut to = None;
     let mut kind = None;
-    let mut deleted_at = None;
-    let mut deleted_by = None;
+    let mut dot = None;
 
     for _ in 0..map_len {
         let key = decode_text(dec, limits)?;
@@ -1464,28 +1711,87 @@ fn decode_wire_dep_delete(
                 let raw = decode_text(dec, limits)?;
                 kind = Some(parse_dep_kind(raw)?);
             }
-            "deleted_at" => {
-                deleted_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
-            }
-            "deleted_by" => {
-                let raw = decode_text(dec, limits)?;
-                deleted_by = Some(parse_actor_id(raw, "deleted_by")?);
+            "dot" => {
+                dot = Some(decode_wire_dot(dec, limits, depth + 1)?);
             }
             other => {
                 return Err(DecodeError::InvalidField {
-                    field: "dep_delete",
+                    field: "dep_add",
                     reason: format!("unknown key {other}"),
                 });
             }
         }
     }
 
-    Ok(WireDepDeleteV1 {
+    Ok(WireDepAddV1 {
         from: from.ok_or(DecodeError::MissingField("from"))?,
         to: to.ok_or(DecodeError::MissingField("to"))?,
         kind: kind.ok_or(DecodeError::MissingField("kind"))?,
-        deleted_at: deleted_at.ok_or(DecodeError::MissingField("deleted_at"))?,
-        deleted_by: deleted_by.ok_or(DecodeError::MissingField("deleted_by"))?,
+        dot: dot.ok_or(DecodeError::MissingField("dot"))?,
+    })
+}
+
+fn encode_wire_dep_remove(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    dep: &WireDepRemoveV1,
+) -> Result<(), EncodeError> {
+    enc.map(4)?;
+    enc.str("from")?;
+    enc.str(dep.from.as_str())?;
+    enc.str("to")?;
+    enc.str(dep.to.as_str())?;
+    enc.str("kind")?;
+    enc.str(dep.kind.as_str())?;
+    enc.str("ctx")?;
+    encode_wire_dvv(enc, &dep.ctx)?;
+    Ok(())
+}
+
+fn decode_wire_dep_remove(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireDepRemoveV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
+    let mut from = None;
+    let mut to = None;
+    let mut kind = None;
+    let mut ctx = None;
+
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
+        match key {
+            "from" => {
+                let raw = decode_text(dec, limits)?;
+                from = Some(parse_bead_id(raw)?);
+            }
+            "to" => {
+                let raw = decode_text(dec, limits)?;
+                to = Some(parse_bead_id(raw)?);
+            }
+            "kind" => {
+                let raw = decode_text(dec, limits)?;
+                kind = Some(parse_dep_kind(raw)?);
+            }
+            "ctx" => {
+                ctx = Some(decode_wire_dvv(dec, limits, depth + 1)?);
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "dep_remove",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    Ok(WireDepRemoveV1 {
+        from: from.ok_or(DecodeError::MissingField("from"))?,
+        to: to.ok_or(DecodeError::MissingField("to"))?,
+        kind: kind.ok_or(DecodeError::MissingField("kind"))?,
+        ctx: ctx.ok_or(DecodeError::MissingField("ctx"))?,
     })
 }
 
@@ -2015,30 +2321,12 @@ pub fn validate_event_body_limits(
     let mut note_appends = 0usize;
     for op in delta.iter() {
         match op {
-            TxnOpV1::BeadUpsert(patch) => {
-                if let Some(labels) = &patch.labels
-                    && labels.len() > limits.max_labels_per_bead
-                {
-                    return Err(EventValidationError::TooManyLabels {
-                        count: labels.len(),
-                        max: limits.max_labels_per_bead,
-                    });
-                }
-                if let NotesPatch::AtLeast(notes) = &patch.notes {
-                    for note in notes {
-                        let bytes = note.content.len();
-                        if bytes > limits.max_note_bytes {
-                            return Err(EventValidationError::NoteTooLarge {
-                                bytes,
-                                max: limits.max_note_bytes,
-                            });
-                        }
-                    }
-                }
-            }
+            TxnOpV1::BeadUpsert(_) => {}
             TxnOpV1::BeadDelete(_) => {}
-            TxnOpV1::DepUpsert(_) => {}
-            TxnOpV1::DepDelete(_) => {}
+            TxnOpV1::LabelAdd(_) => {}
+            TxnOpV1::LabelRemove(_) => {}
+            TxnOpV1::DepAdd(_) => {}
+            TxnOpV1::DepRemove(_) => {}
             TxnOpV1::NoteAppend(append) => {
                 note_appends += 1;
                 let bytes = append.note.content.len();
@@ -2056,6 +2344,153 @@ pub fn validate_event_body_limits(
         return Err(EventValidationError::TooManyNoteAppends {
             count: note_appends,
             max: limits.max_note_appends_per_txn,
+        });
+    }
+
+    Ok(())
+}
+
+pub fn validate_event_body_semantics(body: &EventBody) -> Result<(), EventValidationError> {
+    let delta = match &body.kind {
+        EventKindV1::TxnV1(txn) => &txn.delta,
+    };
+
+    for op in delta.iter() {
+        if let TxnOpV1::BeadUpsert(patch) = op {
+            validate_bead_patch_semantics(patch)?;
+        }
+        if let TxnOpV1::BeadDelete(delete) = op
+            && let Some(lineage) = delete.lineage.as_ref()
+            && lineage.by.as_str().is_empty()
+        {
+            return Err(EventValidationError::InvalidTombstoneLineage {
+                id: delete.id.clone(),
+                reason: "lineage_created_by must be set".to_string(),
+            });
+        }
+        // Reject self-dependencies
+        if let TxnOpV1::DepAdd(dep) = op
+            && dep.from == dep.to
+        {
+            return Err(EventValidationError::InvalidDependency {
+                reason: format!("self-dependency on {}", dep.from),
+            });
+        }
+        if let TxnOpV1::DepRemove(dep) = op
+            && dep.from == dep.to
+        {
+            return Err(EventValidationError::InvalidDependency {
+                reason: format!("self-dependency on {}", dep.from),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_event_body(body: &EventBody, limits: &Limits) -> Result<(), EventValidationError> {
+    validate_event_body_limits(body, limits)?;
+    validate_event_body_semantics(body)?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkflowPatch {
+    NoChange,
+    SetStatus {
+        status: WorkflowStatus,
+        closed_reason: WirePatch<String>,
+        closed_on_branch: WirePatch<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClaimPatch {
+    NoChange,
+    Clear,
+    Set {
+        assignee: ActorId,
+        expires: Option<WallClock>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ValidatedBeadPatch {
+    inner: WireBeadPatch,
+}
+
+impl ValidatedBeadPatch {
+    pub fn into_inner(self) -> WireBeadPatch {
+        self.inner
+    }
+}
+
+impl TryFrom<WireBeadPatch> for ValidatedBeadPatch {
+    type Error = EventValidationError;
+
+    fn try_from(patch: WireBeadPatch) -> Result<Self, Self::Error> {
+        workflow_patch_from_wire(&patch)?;
+        claim_patch_from_wire(&patch)?;
+        Ok(Self { inner: patch })
+    }
+}
+
+fn workflow_patch_from_wire(patch: &WireBeadPatch) -> Result<WorkflowPatch, EventValidationError> {
+    match patch.status {
+        None => Ok(WorkflowPatch::NoChange),
+        Some(status) => {
+            if patch.closed_reason.is_keep() || patch.closed_on_branch.is_keep() {
+                return Err(EventValidationError::InvalidWorkflowPatch {
+                    id: patch.id.clone(),
+                    reason:
+                        "status updates must include explicit closed_reason and closed_on_branch"
+                            .to_string(),
+                });
+            }
+            Ok(WorkflowPatch::SetStatus {
+                status,
+                closed_reason: patch.closed_reason.clone(),
+                closed_on_branch: patch.closed_on_branch.clone(),
+            })
+        }
+    }
+}
+
+fn claim_patch_from_wire(patch: &WireBeadPatch) -> Result<ClaimPatch, EventValidationError> {
+    match (&patch.assignee, &patch.assignee_expires) {
+        (WirePatch::Keep, WirePatch::Keep) => Ok(ClaimPatch::NoChange),
+        (WirePatch::Clear, WirePatch::Clear) => Ok(ClaimPatch::Clear),
+        (WirePatch::Set(assignee), WirePatch::Set(expires)) => Ok(ClaimPatch::Set {
+            assignee: assignee.clone(),
+            expires: Some(*expires),
+        }),
+        (WirePatch::Set(assignee), WirePatch::Clear) => Ok(ClaimPatch::Set {
+            assignee: assignee.clone(),
+            expires: None,
+        }),
+        (WirePatch::Clear, WirePatch::Set(_)) => Err(EventValidationError::InvalidClaimPatch {
+            id: patch.id.clone(),
+            reason: "assignee cleared but assignee_expires set".to_string(),
+        }),
+        (WirePatch::Keep, _) | (_, WirePatch::Keep) => {
+            Err(EventValidationError::InvalidClaimPatch {
+                id: patch.id.clone(),
+                reason: "claim updates must include explicit assignee and assignee_expires"
+                    .to_string(),
+            })
+        }
+    }
+}
+
+fn validate_bead_patch_semantics(patch: &WireBeadPatch) -> Result<(), EventValidationError> {
+    workflow_patch_from_wire(patch)?;
+    claim_patch_from_wire(patch)?;
+
+    // created_at and created_by must both be set or both omitted
+    if patch.created_at.is_some() ^ patch.created_by.is_some() {
+        return Err(EventValidationError::InvalidBeadPatch {
+            id: patch.id.clone(),
+            reason: "created_at and created_by must both be set or both omitted".into(),
         });
     }
 
@@ -2090,7 +2525,7 @@ pub fn verify_event_frame(
         return Err(EventFrameError::HashMismatch);
     }
 
-    validate_event_body_limits(&body, limits)?;
+    validate_event_body(&body, limits)?;
 
     match lookup.lookup_event_sha(&frame.eid)? {
         None => {}
@@ -2138,7 +2573,10 @@ pub fn verify_event_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::collections::Label;
     use crate::core::identity::{BeadId, NoteId, StoreEpoch};
+    use crate::core::time::WallClock;
+    use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
 
     fn actor_id(actor: &str) -> ActorId {
@@ -2203,28 +2641,55 @@ mod tests {
                 deleted_at: WireStamp(20, 1),
                 deleted_by: actor_id("alice"),
                 reason: Some("cleanup".to_string()),
-                lineage_created_at: Some(WireStamp(1, 0)),
-                lineage_created_by: Some(actor_id("bob")),
+                lineage: Some(WireLineageStamp {
+                    at: WireStamp(1, 0),
+                    by: actor_id("bob"),
+                }),
             }))
             .unwrap();
+        let dep_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         txn.delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: BeadId::parse("bd-test1").unwrap(),
                 to: BeadId::parse("bd-dep").unwrap(),
                 kind: DepKind::Blocks,
-                created_at: WireStamp(15, 0),
-                created_by: actor_id("alice"),
-                deleted_at: Some(WireStamp(18, 2)),
-                deleted_by: Some(actor_id("carol")),
+                dot: WireDotV1 {
+                    replica: dep_replica,
+                    counter: 1,
+                },
             }))
             .unwrap();
         txn.delta
-            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
                 from: BeadId::parse("bd-test1").unwrap(),
                 to: BeadId::parse("bd-dep2").unwrap(),
                 kind: DepKind::Related,
-                deleted_at: WireStamp(22, 0),
-                deleted_by: actor_id("alice"),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([(dep_replica, 2)]),
+                    dots: Vec::new(),
+                },
+            }))
+            .unwrap();
+        txn.delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: BeadId::parse("bd-test1").unwrap(),
+                label: Label::parse("triage".to_string()).unwrap(),
+                dot: WireDotV1 {
+                    replica: dep_replica,
+                    counter: 2,
+                },
+                lineage: None,
+            }))
+            .unwrap();
+        txn.delta
+            .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+                bead_id: BeadId::parse("bd-test1").unwrap(),
+                label: Label::parse("triage".to_string()).unwrap(),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([(dep_replica, 2)]),
+                    dots: Vec::new(),
+                },
+                lineage: None,
             }))
             .unwrap();
         txn.delta
@@ -2236,6 +2701,7 @@ mod tests {
                     author: actor_id("alice"),
                     at: WireStamp(13, 2),
                 },
+                lineage: None,
             }))
             .unwrap();
         body
@@ -2545,21 +3011,360 @@ mod tests {
     }
 
     #[test]
-    fn canonical_event_body_keys_are_sorted() {
-        let body = sample_body();
+    fn encode_tombstone_without_lineage_uses_base_len() {
+        let tombstone = WireTombstoneV1 {
+            id: BeadId::parse("bd-tombstone").unwrap(),
+            deleted_at: WireStamp(1, 0),
+            deleted_by: actor_id("alice"),
+            reason: None,
+            lineage: None,
+        };
+
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        encode_wire_tombstone(&mut enc, &tombstone).unwrap();
+
+        let mut dec = Decoder::new(buf.as_slice());
+        let map_len = decode_map_len(&mut dec, &Limits::default(), 0).unwrap();
+        assert_eq!(map_len, 3);
+    }
+
+    #[test]
+    fn decode_rejects_partial_tombstone_lineage() {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.map(4).unwrap();
+        enc.str("id").unwrap();
+        enc.str("bd-tombstone").unwrap();
+        enc.str("deleted_at").unwrap();
+        encode_wire_stamp(&mut enc, &WireStamp(1, 0)).unwrap();
+        enc.str("deleted_by").unwrap();
+        enc.str("alice").unwrap();
+        enc.str("lineage_created_at").unwrap();
+        encode_wire_stamp(&mut enc, &WireStamp(2, 0)).unwrap();
+
+        let mut dec = Decoder::new(buf.as_slice());
+        let err = decode_wire_tombstone(&mut dec, &Limits::default(), 0).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidField { field, .. } if field == "bead_delete"));
+    }
+
+    #[test]
+    fn tombstone_roundtrip_with_lineage() {
+        let tombstone = WireTombstoneV1 {
+            id: BeadId::parse("bd-tombstone").unwrap(),
+            deleted_at: WireStamp(3, 1),
+            deleted_by: actor_id("alice"),
+            reason: Some("cleanup".to_string()),
+            lineage: Some(WireLineageStamp {
+                at: WireStamp(2, 0),
+                by: actor_id("bob"),
+            }),
+        };
+
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        encode_wire_tombstone(&mut enc, &tombstone).unwrap();
+
+        let mut dec = Decoder::new(buf.as_slice());
+        let decoded = decode_wire_tombstone(&mut dec, &Limits::default(), 0).unwrap();
+        assert_eq!(decoded, tombstone);
+    }
+
+    #[test]
+    fn cbor_roundtrip_label_ops_preserves_dots() {
+        let mut body = sample_body();
+        let txn_ref = txn_mut(&mut body);
+
+        let replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let bead_id = BeadId::parse("bd-test1").unwrap();
+        let label = Label::parse("triage".to_string()).unwrap();
+
+        txn_ref
+            .delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id.clone(),
+                label: label.clone(),
+                dot: WireDotV1 {
+                    replica,
+                    counter: 1,
+                },
+                lineage: None,
+            }))
+            .unwrap();
+        txn_ref
+            .delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id.clone(),
+                label: label.clone(),
+                dot: WireDotV1 {
+                    replica,
+                    counter: 2,
+                },
+                lineage: None,
+            }))
+            .unwrap();
+        txn_ref
+            .delta
+            .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+                bead_id,
+                label,
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([(replica, 2)]),
+                    dots: Vec::new(),
+                },
+                lineage: None,
+            }))
+            .unwrap();
+
         let encoded = encode_event_body_canonical(&body).unwrap();
-        let limits = Limits::default();
-        let mut dec = Decoder::new(encoded.as_ref());
-        let map_len = decode_map_len(&mut dec, &limits, 0).unwrap();
-        let mut keys = Vec::with_capacity(map_len);
-        for _ in 0..map_len {
-            let key = decode_text(&mut dec, &limits).unwrap();
-            keys.push(key.to_string());
-            skip_value(&mut dec, &limits, 1).unwrap();
-        }
-        let mut sorted = keys.clone();
-        sorted.sort();
-        assert_eq!(keys, sorted);
+        let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
+        let reencoded = encode_event_body_canonical(&decoded).unwrap();
+
+        assert_eq!(encoded.as_ref(), reencoded.as_ref());
+        assert_eq!(body, decoded);
+        let label_adds = txn(&decoded)
+            .delta
+            .iter()
+            .filter(|op| matches!(op, TxnOpV1::LabelAdd(_)))
+            .count();
+        assert_eq!(label_adds, 2);
+        let dots: BTreeSet<(ReplicaId, u64)> = txn(&decoded)
+            .delta
+            .iter()
+            .filter_map(|op| match op {
+                TxnOpV1::LabelAdd(add) => Some((add.dot.replica, add.dot.counter)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dots, BTreeSet::from([(replica, 1), (replica, 2)]));
+    }
+
+    #[test]
+    fn cbor_roundtrip_dep_ops() {
+        let mut body = sample_body();
+        let txn_ref = txn_mut(&mut body);
+
+        let replica = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
+        txn_ref
+            .delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                from: BeadId::parse("bd-test1").unwrap(),
+                to: BeadId::parse("bd-dep").unwrap(),
+                kind: DepKind::Blocks,
+                dot: WireDotV1 {
+                    replica,
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+        txn_ref
+            .delta
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
+                from: BeadId::parse("bd-test1").unwrap(),
+                to: BeadId::parse("bd-dep").unwrap(),
+                kind: DepKind::Blocks,
+                ctx: WireDvvV1 {
+                    max: BTreeMap::from([(replica, 1)]),
+                    dots: vec![WireDotV1 {
+                        replica,
+                        counter: 3,
+                    }],
+                },
+            }))
+            .unwrap();
+
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
+        let reencoded = encode_event_body_canonical(&decoded).unwrap();
+
+        assert_eq!(encoded.as_ref(), reencoded.as_ref());
+        assert_eq!(body, decoded);
+    }
+
+    #[test]
+    fn validate_rejects_keep_workflow_patch_fields() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.status = Some(WorkflowStatus::Closed);
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidWorkflowPatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_keep_claim_patch_fields() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.assignee = WirePatch::Keep;
+        patch.assignee_expires = WirePatch::Set(WallClock(123));
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidClaimPatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_clear_claim_with_expires_set() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.assignee = WirePatch::Clear;
+        patch.assignee_expires = WirePatch::Set(WallClock(123));
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidClaimPatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_claim_clear() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.assignee = WirePatch::Clear;
+        patch.assignee_expires = WirePatch::Clear;
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        validate_event_body_semantics(&body).expect("clear claim should be valid");
+    }
+
+    #[test]
+    fn validate_accepts_claim_set_with_clear_expiry() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.assignee = WirePatch::Set(actor_id("alice"));
+        patch.assignee_expires = WirePatch::Clear;
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        validate_event_body_semantics(&body).expect("set claim should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_partial_tombstone_lineage() {
+        let mut body = sample_body();
+        let tombstone = WireTombstoneV1 {
+            id: BeadId::parse("bd-delete").unwrap(),
+            deleted_at: WireStamp(10, 0),
+            deleted_by: actor_id("alice"),
+            reason: None,
+            lineage: Some(WireLineageStamp {
+                at: WireStamp(1, 0),
+                by: ActorId::new_unchecked("".to_string()),
+            }),
+        };
+
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadDelete(tombstone)).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidTombstoneLineage { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_partial_creation_stamp_at_only() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-partial").unwrap());
+        patch.created_at = Some(WireStamp(10, 0));
+        patch.created_by = None; // Missing created_by
+        patch.title = Some("title".to_string());
+
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(err, EventValidationError::InvalidBeadPatch { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_partial_creation_stamp_by_only() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-partial").unwrap());
+        patch.created_at = None; // Missing created_at
+        patch.created_by = Some(actor_id("alice"));
+        patch.title = Some("title".to_string());
+
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(err, EventValidationError::InvalidBeadPatch { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_self_dep_add() {
+        let mut body = sample_body();
+        let bead_id = BeadId::parse("bd-selfdep").unwrap();
+        let replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                from: bead_id.clone(),
+                to: bead_id.clone(), // Self-dependency
+                kind: DepKind::Blocks,
+                dot: WireDotV1 {
+                    replica,
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidDependency { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_self_dep_remove() {
+        let mut body = sample_body();
+        let bead_id = BeadId::parse("bd-selfdep").unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
+                from: bead_id.clone(),
+                to: bead_id.clone(), // Self-dependency
+                kind: DepKind::Blocks,
+                ctx: WireDvvV1 {
+                    max: BTreeMap::new(),
+                    dots: Vec::new(),
+                },
+            }))
+            .unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let err = validate_event_body_semantics(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidDependency { .. }
+        ));
     }
 
     #[test]
@@ -2653,6 +3458,41 @@ mod tests {
         );
         let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
         assert!(matches!(err, DecodeError::DuplicateKey(key) if key == "id"));
+    }
+
+    #[test]
+    fn decode_rejects_legacy_labels_patch() {
+        let body = sample_body();
+        let txn = txn(&body);
+        let bytes = encode_body_with_custom_delta_and_hlc(
+            &body,
+            |enc| {
+                enc.map(2).unwrap();
+                enc.str("bead_upserts").unwrap();
+                enc.array(1).unwrap();
+                enc.map(1).unwrap();
+                enc.str("bead").unwrap();
+                enc.map(2).unwrap();
+                enc.str("id").unwrap();
+                enc.str("bd-test1").unwrap();
+                enc.str("labels").unwrap();
+                enc.array(1).unwrap();
+                enc.str("triage").unwrap();
+                enc.str("v").unwrap();
+                enc.u32(1).unwrap();
+            },
+            |enc| {
+                encode_hlc_max(enc, &txn.hlc_max).unwrap();
+            },
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::InvalidField {
+                field: "bead_patch",
+                ..
+            }
+        ));
     }
 
     #[test]

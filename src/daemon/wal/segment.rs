@@ -333,6 +333,10 @@ impl SegmentWriter {
         self.header.created_at_ms
     }
 
+    pub fn update_config(&mut self, config: SegmentConfig) {
+        self.config = config;
+    }
+
     pub fn append(
         &mut self,
         record: &VerifiedRecord,

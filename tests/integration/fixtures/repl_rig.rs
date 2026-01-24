@@ -117,6 +117,16 @@ impl ReplRig {
         let mut nodes = Vec::with_capacity(node_count);
         for idx in 0..node_count {
             let seed = build_node(&root_path, idx, &remote_dir);
+            // Write user config before init, since init autostarts the daemon.
+            write_replication_user_config(
+                &seed.config_dir,
+                &seed.listen_addr,
+                &[],
+                options.dead_ms,
+                options.keepalive_ms,
+                options.wal_segment_max_bytes,
+            )
+            .expect("write initial user replication config");
             let (store_id, replica_id) = bootstrap_replica(&seed, store_id_override);
             if let Some(existing) = resolved_store_id {
                 assert_eq!(
@@ -327,6 +337,31 @@ impl ReplRig {
         panic!("replication peers not observed: {statuses:?}");
     }
 
+    pub fn assert_replication_ready(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
+        {
+            Ok(statuses) => statuses,
+            Err(err) => panic!("admin status error: {err:?}"),
+        };
+        loop {
+            if self.replication_ready_with_statuses(&statuses) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline) {
+                Ok(statuses) => statuses,
+                Err(err) => panic!("admin status error: {err:?}"),
+            };
+        }
+        if self.replication_ready_with_statuses(&statuses) {
+            return;
+        }
+        panic!("replication not ready: {statuses:?}");
+    }
+
     fn admin_statuses_with_read(
         &self,
         mut read: ReadConsistency,
@@ -396,6 +431,31 @@ impl ReplRig {
                     continue;
                 }
                 if !seen.contains(peer) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn replication_ready_with_statuses(&self, statuses: &[AdminStatusOutput]) -> bool {
+        if self.nodes.len() < 2 {
+            return true;
+        }
+        let expected: BTreeSet<ReplicaId> = self.nodes.iter().map(|node| node.replica_id).collect();
+        for status in statuses {
+            for peer in &expected {
+                if *peer == status.replica_id {
+                    continue;
+                }
+                let Some(row) = status
+                    .replica_liveness
+                    .iter()
+                    .find(|row| row.replica_id == *peer)
+                else {
+                    return false;
+                };
+                if row.last_handshake_ms == 0 {
                     return false;
                 }
             }

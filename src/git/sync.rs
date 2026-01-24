@@ -17,10 +17,9 @@ use std::time::Instant;
 
 use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 
-use super::collision::{Collision, detect_collisions, resolve_collisions};
 use super::error::SyncError;
 use super::wire;
-use crate::core::{BeadId, CanonicalState, Stamp, WallClock, WriteStamp};
+use crate::core::{BeadId, CanonicalState, WallClock, WriteStamp};
 
 // =============================================================================
 // Phase markers (zero-sized types for typestate)
@@ -59,8 +58,6 @@ pub struct Fetched {
 pub struct Merged {
     /// Merged state (local + remote).
     pub state: CanonicalState,
-    /// Collisions that were resolved.
-    pub collisions: Vec<Collision>,
     /// Parent oid for commit (local ref, not remote).
     pub parent_oid: Oid,
     /// Diff summary for commit message.
@@ -265,7 +262,7 @@ impl SyncConfig {
 /// ```ignore
 /// let synced = SyncProcess::new(repo_path)
 ///     .fetch(&repo)?
-///     .merge(&local_state, stamp)?
+///     .merge(&local_state)?
 ///     .commit(&repo)?
 ///     .push(&repo)?;
 /// ```
@@ -447,14 +444,9 @@ impl SyncProcess<Fetched> {
     /// Merge local state with remote, transition to Merged phase.
     ///
     /// Handles:
-    /// - ID collisions (detects and resolves)
     /// - CRDT pairwise merge (no base needed)
     /// - Resurrection rule (bead beats tombstone if newer)
-    pub fn merge(
-        self,
-        local_state: &CanonicalState,
-        resolution_stamp: Stamp,
-    ) -> Result<SyncProcess<Merged>, SyncError> {
+    pub fn merge(self, local_state: &CanonicalState) -> Result<SyncProcess<Merged>, SyncError> {
         let SyncProcess {
             repo_path,
             config,
@@ -483,7 +475,6 @@ impl SyncProcess<Fetched> {
                 config,
                 phase: Merged {
                     state: local_state.clone(),
-                    collisions: Vec::new(),
                     parent_oid,
                     diff,
                     root_slug,
@@ -492,23 +483,11 @@ impl SyncProcess<Fetched> {
             });
         }
 
-        // Detect ID collisions
-        let collisions = detect_collisions(local_state, &remote_state);
-
-        // Resolve collisions if any
-        let (local_resolved, remote_resolved) = if collisions.is_empty() {
-            (local_state.clone(), remote_state)
-        } else {
-            resolve_collisions(local_state, &remote_state, &collisions, resolution_stamp)
-                .map_err(SyncError::CollisionResolution)?
-        };
-
         // Pairwise CRDT merge
-        let mut merged = CanonicalState::join(&local_resolved, &remote_resolved)
+        let mut merged = CanonicalState::join(local_state, &remote_state)
             .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
 
-        // Garbage collect soft-deleted deps. Tombstones are GC'd only if configured.
-        merged.gc_deleted_deps();
+        // Garbage collect tombstones if configured.
         if let Some(ttl_ms) = config.tombstone_ttl_ms {
             let removed = merged.gc_tombstones(ttl_ms, WallClock::now());
             if removed > 0 {
@@ -517,14 +496,13 @@ impl SyncProcess<Fetched> {
         }
 
         // Compute diff for commit message
-        let diff = compute_diff(&remote_resolved, &merged);
+        let diff = compute_diff(&remote_state, &merged);
 
         Ok(SyncProcess {
             repo_path,
             config,
             phase: Merged {
                 state: merged,
-                collisions,
                 parent_oid,
                 diff,
                 root_slug,
@@ -559,6 +537,7 @@ impl SyncProcess<Merged> {
         let state_bytes = wire::serialize_state(&state)?;
         let tombs_bytes = wire::serialize_tombstones(&state)?;
         let deps_bytes = wire::serialize_deps(&state)?;
+        let notes_bytes = wire::serialize_notes(&state)?;
         let mut meta_last_stamp = state.max_write_stamp();
         if let Some(parent_stamp) = parent_meta_stamp {
             meta_last_stamp = match meta_last_stamp {
@@ -566,7 +545,12 @@ impl SyncProcess<Merged> {
                 None => Some(parent_stamp),
             };
         }
-        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let checksums = wire::StoreChecksums::from_bytes(
+            &state_bytes,
+            &tombs_bytes,
+            &deps_bytes,
+            Some(&notes_bytes),
+        );
         let meta_bytes =
             wire::serialize_meta(root_slug.as_deref(), meta_last_stamp.as_ref(), &checksums)?;
 
@@ -574,6 +558,7 @@ impl SyncProcess<Merged> {
         let state_oid = repo.blob(&state_bytes)?;
         let tombs_oid = repo.blob(&tombs_bytes)?;
         let deps_oid = repo.blob(&deps_bytes)?;
+        let notes_oid = repo.blob(&notes_bytes)?;
         let meta_oid = repo.blob(&meta_bytes)?;
 
         // Build tree
@@ -581,6 +566,7 @@ impl SyncProcess<Merged> {
         builder.insert("state.jsonl", state_oid, 0o100644)?;
         builder.insert("tombstones.jsonl", tombs_oid, 0o100644)?;
         builder.insert("deps.jsonl", deps_oid, 0o100644)?;
+        builder.insert("notes.jsonl", notes_oid, 0o100644)?;
         builder.insert("meta.json", meta_oid, 0o100644)?;
         let tree_oid = builder.write()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -749,15 +735,25 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         .find_object(deps_entry.id(), Some(ObjectType::Blob))?
         .peel_to_blob()?;
 
+    // Read notes.jsonl (optional in legacy format)
+    let notes_bytes = if let Some(notes_entry) = tree.get_name("notes.jsonl") {
+        let notes_blob = repo
+            .find_object(notes_entry.id(), Some(ObjectType::Blob))?
+            .peel_to_blob()?;
+        notes_blob.content().to_vec()
+    } else {
+        Vec::new()
+    };
+
     // Read meta.json for root_slug + last_write_stamp + checksums
     let mut root_slug = None;
     let mut last_write_stamp = None;
     let mut checksums = None;
-    if let Some(meta_entry) = tree.get_name("meta.json")
-        && let Ok(meta_obj) = repo.find_object(meta_entry.id(), Some(ObjectType::Blob))
-        && let Ok(meta_blob) = meta_obj.peel_to_blob()
-        && let Ok(meta) = wire::parse_meta(meta_blob.content())
-    {
+    if let Some(meta_entry) = tree.get_name("meta.json") {
+        let meta_blob = repo
+            .find_object(meta_entry.id(), Some(ObjectType::Blob))?
+            .peel_to_blob()?;
+        let meta = wire::parse_meta(meta_blob.content())?;
         root_slug = meta.root_slug;
         last_write_stamp = meta.last_write_stamp;
         checksums = meta.checksums;
@@ -769,6 +765,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
             state_blob.content(),
             tombs_blob.content(),
             deps_blob.content(),
+            &notes_bytes,
         )?;
     }
 
@@ -776,6 +773,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         state_blob.content(),
         tombs_blob.content(),
         deps_blob.content(),
+        &notes_bytes,
     )?;
 
     Ok(LoadedStore {
@@ -804,11 +802,11 @@ fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
                 });
             }
             Some(old_bead) => {
-                let field_changed = bead.updated_stamp() != old_bead.updated_stamp();
+                let field_changed = before.updated_stamp_for(id) != after.updated_stamp_for(id);
                 if field_changed || dep_changed {
                     diff.updated += 1;
                     let mut changed_fields = if field_changed {
-                        detect_changed_fields(old_bead, bead)
+                        detect_changed_fields(before, after, id, old_bead, bead)
                     } else {
                         Vec::new()
                     };
@@ -843,16 +841,8 @@ fn compute_diff(before: &CanonicalState, after: &CanonicalState) -> SyncDiff {
 }
 
 fn dep_change_ids(before: &CanonicalState, after: &CanonicalState) -> BTreeSet<BeadId> {
-    let before_active: BTreeSet<_> = before
-        .iter_deps()
-        .filter(|(_, edge)| edge.is_active())
-        .map(|(key, _)| key.clone())
-        .collect();
-    let after_active: BTreeSet<_> = after
-        .iter_deps()
-        .filter(|(_, edge)| edge.is_active())
-        .map(|(key, _)| key.clone())
-        .collect();
+    let before_active: BTreeSet<_> = before.dep_store().values().cloned().collect();
+    let after_active: BTreeSet<_> = after.dep_store().values().cloned().collect();
 
     before_active
         .symmetric_difference(&after_active)
@@ -870,7 +860,13 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
 }
 
 /// Detect which fields changed between two beads by comparing LWW stamps.
-fn detect_changed_fields(old: &crate::core::Bead, new: &crate::core::Bead) -> Vec<&'static str> {
+fn detect_changed_fields(
+    before: &CanonicalState,
+    after: &CanonicalState,
+    id: &BeadId,
+    old: &crate::core::Bead,
+    new: &crate::core::Bead,
+) -> Vec<&'static str> {
     let mut changed = Vec::new();
 
     if old.fields.title.stamp != new.fields.title.stamp {
@@ -891,9 +887,6 @@ fn detect_changed_fields(old: &crate::core::Bead, new: &crate::core::Bead) -> Ve
     if old.fields.bead_type.stamp != new.fields.bead_type.stamp {
         changed.push("type");
     }
-    if old.fields.labels.stamp != new.fields.labels.stamp {
-        changed.push("labels");
-    }
     if old.fields.external_ref.stamp != new.fields.external_ref.stamp {
         changed.push("external_ref");
     }
@@ -909,8 +902,14 @@ fn detect_changed_fields(old: &crate::core::Bead, new: &crate::core::Bead) -> Ve
     if old.fields.claim.stamp != new.fields.claim.stamp {
         changed.push("claim");
     }
+    let before_labels = before.labels_for(id);
+    let after_labels = after.labels_for(id);
+    if before_labels != after_labels || before.label_stamp(id) != after.label_stamp(id) {
+        changed.push("labels");
+    }
+
     // Check notes (compare note counts as a simple heuristic)
-    if old.notes.len() != new.notes.len() {
+    if before.notes_for(id).len() != after.notes_for(id).len() {
         changed.push("notes");
     }
 
@@ -924,7 +923,6 @@ pub fn sync_with_retry(
     repo: &Repository,
     repo_path: &Path,
     local_state: &CanonicalState,
-    resolution_stamp: Stamp,
     max_retries: usize,
 ) -> Result<SyncOutcome, SyncError> {
     let mut retries = 0;
@@ -940,10 +938,7 @@ pub fn sync_with_retry(
             force_push = fetched.phase.force_push.clone();
         }
         let parent_meta_stamp = fetched.phase.parent_meta_stamp.clone();
-        let result = fetched
-            .merge(local_state, resolution_stamp.clone())?
-            .commit(repo)?
-            .push(repo);
+        let result = fetched.merge(local_state)?.commit(repo)?.push(repo);
 
         match result {
             Ok(state) => {
@@ -1154,13 +1149,20 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
         let state_bytes = wire::serialize_state(&state)?;
         let tombs_bytes = wire::serialize_tombstones(&state)?;
         let deps_bytes = wire::serialize_deps(&state)?;
-        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let notes_bytes = wire::serialize_notes(&state)?;
+        let checksums = wire::StoreChecksums::from_bytes(
+            &state_bytes,
+            &tombs_bytes,
+            &deps_bytes,
+            Some(&notes_bytes),
+        );
         let meta_bytes = wire::serialize_meta(Some(&root_slug), None, &checksums)?;
 
         // Write blobs
         let state_oid = repo.blob(&state_bytes)?;
         let tombs_oid = repo.blob(&tombs_bytes)?;
         let deps_oid = repo.blob(&deps_bytes)?;
+        let notes_oid = repo.blob(&notes_bytes)?;
         let meta_oid = repo.blob(&meta_bytes)?;
 
         // Build tree
@@ -1168,6 +1170,7 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
         builder.insert("state.jsonl", state_oid, 0o100644)?;
         builder.insert("tombstones.jsonl", tombs_oid, 0o100644)?;
         builder.insert("deps.jsonl", deps_oid, 0o100644)?;
+        builder.insert("notes.jsonl", notes_oid, 0o100644)?;
         builder.insert("meta.json", meta_oid, 0o100644)?;
         let tree_oid = builder.write()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -1254,12 +1257,14 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepEdge, DepKey, DepKind,
-        Lww, Priority, Tombstone, Workflow,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, ContentHash, DepKey, DepKind,
+        Dot, Lww, Priority, ReplicaId, Stamp, Tombstone, Workflow,
     };
+    use crate::git::WireError;
     #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
         Stamp::new(WriteStamp::new(wall_ms, 0), ActorId::new(actor).unwrap())
@@ -1274,7 +1279,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::new(2).unwrap(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Default::default(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1282,6 +1286,15 @@ mod tests {
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         Bead::new(core, fields)
+    }
+
+    fn store_bytes() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+        let state = CanonicalState::new();
+        let state_bytes = wire::serialize_state(&state).unwrap();
+        let tombs_bytes = wire::serialize_tombstones(&state).unwrap();
+        let deps_bytes = wire::serialize_deps(&state).unwrap();
+        let notes_bytes = wire::serialize_notes(&state).unwrap();
+        (state_bytes, tombs_bytes, deps_bytes, notes_bytes)
     }
 
     fn write_store_commit(repo: &Repository, parent: Option<Oid>, message: &str) -> Oid {
@@ -1294,18 +1307,30 @@ mod tests {
         message: &str,
         last_stamp: Option<WriteStamp>,
     ) -> Oid {
-        let state = CanonicalState::new();
-        let state_bytes = wire::serialize_state(&state).unwrap();
-        let tombs_bytes = wire::serialize_tombstones(&state).unwrap();
-        let deps_bytes = wire::serialize_deps(&state).unwrap();
-        let checksums = wire::StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes);
+        let (state_bytes, tombs_bytes, deps_bytes, notes_bytes) = store_bytes();
+        let checksums = wire::StoreChecksums::from_bytes(
+            &state_bytes,
+            &tombs_bytes,
+            &deps_bytes,
+            Some(&notes_bytes),
+        );
         let meta_bytes =
             wire::serialize_meta(Some("test"), last_stamp.as_ref(), &checksums).unwrap();
+        write_store_commit_with_meta_bytes(repo, parent, message, Some(meta_bytes))
+    }
+
+    fn write_store_commit_with_meta_bytes(
+        repo: &Repository,
+        parent: Option<Oid>,
+        message: &str,
+        meta_bytes: Option<Vec<u8>>,
+    ) -> Oid {
+        let (state_bytes, tombs_bytes, deps_bytes, notes_bytes) = store_bytes();
 
         let state_oid = repo.blob(&state_bytes).unwrap();
         let tombs_oid = repo.blob(&tombs_bytes).unwrap();
         let deps_oid = repo.blob(&deps_bytes).unwrap();
-        let meta_oid = repo.blob(&meta_bytes).unwrap();
+        let notes_oid = repo.blob(&notes_bytes).unwrap();
 
         let mut builder = repo.treebuilder(None).unwrap();
         builder.insert("state.jsonl", state_oid, 0o100644).unwrap();
@@ -1313,7 +1338,11 @@ mod tests {
             .insert("tombstones.jsonl", tombs_oid, 0o100644)
             .unwrap();
         builder.insert("deps.jsonl", deps_oid, 0o100644).unwrap();
-        builder.insert("meta.json", meta_oid, 0o100644).unwrap();
+        builder.insert("notes.jsonl", notes_oid, 0o100644).unwrap();
+        if let Some(meta_bytes) = meta_bytes {
+            let meta_oid = repo.blob(&meta_bytes).unwrap();
+            builder.insert("meta.json", meta_oid, 0o100644).unwrap();
+        }
         let tree_oid = builder.write().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
 
@@ -1334,6 +1363,14 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("update ref failed: {e}"));
         commit_oid
+    }
+
+    fn write_store_commit_without_meta(
+        repo: &Repository,
+        parent: Option<Oid>,
+        message: &str,
+    ) -> Oid {
+        write_store_commit_with_meta_bytes(repo, parent, message, None)
     }
 
     #[test]
@@ -1379,7 +1416,11 @@ mod tests {
             DepKind::Blocks,
         )
         .unwrap();
-        after.insert_dep(dep_key, DepEdge::new(stamp));
+        let dep_dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        after.apply_dep_add(dep_key, dep_dot, stamp);
 
         let diff = compute_diff(&before, &after);
         assert_eq!(diff.created, 0);
@@ -1412,9 +1453,7 @@ mod tests {
             },
         };
 
-        let merged = fetched
-            .merge(&local_state, make_stamp(2, "bob"))
-            .expect("merge");
+        let merged = fetched.merge(&local_state).expect("merge");
         assert!(merged.phase.state.get_tombstone(&id).is_some());
     }
 
@@ -1472,6 +1511,62 @@ mod tests {
 
         let loaded = read_state_at_oid(&repo, oid).unwrap();
         assert_eq!(loaded.last_write_stamp, Some(stamp));
+    }
+
+    #[test]
+    fn read_state_at_oid_errors_on_invalid_meta() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let oid = write_store_commit_with_meta_bytes(
+            &repo,
+            None,
+            "bad-meta",
+            Some(b"{not json".to_vec()),
+        );
+
+        let err = read_state_at_oid(&repo, oid)
+            .err()
+            .expect("expected invalid meta error");
+        assert!(matches!(err, SyncError::Wire(_)));
+    }
+
+    #[test]
+    fn read_state_at_oid_errors_on_checksum_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+
+        let (state_bytes, tombs_bytes, deps_bytes, notes_bytes) = store_bytes();
+        let mut checksums = wire::StoreChecksums::from_bytes(
+            &state_bytes,
+            &tombs_bytes,
+            &deps_bytes,
+            Some(&notes_bytes),
+        );
+        checksums.state = ContentHash::from_bytes([0xAB; 32]);
+        let meta_bytes = wire::serialize_meta(Some("test"), None, &checksums).unwrap();
+        let oid =
+            write_store_commit_with_meta_bytes(&repo, None, "bad-checksums", Some(meta_bytes));
+
+        let err = read_state_at_oid(&repo, oid)
+            .err()
+            .expect("expected checksum mismatch error");
+        assert!(matches!(
+            err,
+            SyncError::Wire(WireError::ChecksumMismatch {
+                blob: "state.jsonl",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn read_state_at_oid_allows_missing_meta() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let oid = write_store_commit_without_meta(&repo, None, "no-meta");
+
+        let loaded = read_state_at_oid(&repo, oid).unwrap();
+        assert_eq!(loaded.last_write_stamp, None);
     }
 
     #[test]
@@ -1623,21 +1718,7 @@ mod tests {
         let _remote_oid = write_store_commit(&remote_repo, None, "remote");
         let _local_oid = write_store_commit(&local_repo, None, "local");
 
-        let actor =
-            crate::core::ActorId::new("tester").unwrap_or_else(|e| panic!("invalid actor id: {e}"));
-        let resolution_stamp = Stamp {
-            at: WriteStamp::new(10, 0),
-            by: actor,
-        };
-
-        let outcome = sync_with_retry(
-            &local_repo,
-            &local_dir,
-            &CanonicalState::new(),
-            resolution_stamp,
-            1,
-        )
-        .unwrap();
+        let outcome = sync_with_retry(&local_repo, &local_dir, &CanonicalState::new(), 1).unwrap();
 
         assert!(outcome.divergence.is_some());
     }
@@ -1674,14 +1755,7 @@ mod tests {
         }
         fs::write(&lock_path, b"lock").unwrap();
 
-        let resolution_stamp = make_stamp(10, "tester");
-        let result = sync_with_retry(
-            &local_repo,
-            &local_dir,
-            &CanonicalState::new(),
-            resolution_stamp,
-            0,
-        );
+        let result = sync_with_retry(&local_repo, &local_dir, &CanonicalState::new(), 0);
 
         match result {
             Err(SyncError::TooManyRetries(retries)) => assert_eq!(retries, 1),
@@ -2168,20 +2242,10 @@ mod tests {
                 Err(e) => return Err(TestCaseError::fail(format!("remote tracking: {e}"))),
             };
 
-            let actor = match crate::core::ActorId::new("tester") {
-                Ok(actor) => actor,
-                Err(e) => return Err(TestCaseError::fail(format!("actor: {e}"))),
-            };
-            let resolution_stamp = Stamp {
-                at: WriteStamp::new(10, 0),
-                by: actor,
-            };
-
             let outcome = match sync_with_retry(
                 &local_repo,
                 &local_dir,
                 &CanonicalState::new(),
-                resolution_stamp,
                 1,
             ) {
                 Ok(outcome) => outcome,

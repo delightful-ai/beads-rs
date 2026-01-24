@@ -204,6 +204,21 @@ impl EventBroadcaster {
         Ok(state.subscribers.len())
     }
 
+    pub fn update_limits(&self, limits: BroadcasterLimits) -> Result<(), BroadcastError> {
+        let mut state = self.lock_state()?;
+        state.limits = limits;
+        while state.hot_cache.len() > state.limits.hot_cache_max_events
+            || state.hot_cache_bytes > state.limits.hot_cache_max_bytes
+        {
+            if let Some(evicted) = state.hot_cache.pop_front() {
+                state.hot_cache_bytes = state.hot_cache_bytes.saturating_sub(evicted.byte_len());
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, BroadcasterState>, BroadcastError> {
         self.inner.lock().map_err(|_| BroadcastError::LockPoisoned)
     }

@@ -1,22 +1,17 @@
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use bytes::Bytes;
-
-use beads_rs::core::ContentHash;
-use beads_rs::git::checkpoint::json_canon::to_canon_json_bytes;
+use beads_rs::core::{ContentHash, Dot};
 use beads_rs::git::checkpoint::{
     CheckpointExport, CheckpointExportInput, CheckpointFileKind, CheckpointManifest,
-    CheckpointMeta, CheckpointShardPayload, CheckpointSnapshot, IncludedHeads, IncludedWatermarks,
-    SHARD_COUNT, export_checkpoint, shard_for_bead, shard_for_dep, shard_for_tombstone, shard_name,
-    shard_path,
+    CheckpointMeta, CheckpointShardPayload, CheckpointSnapshot, CheckpointSnapshotInput,
+    SHARD_COUNT, export_checkpoint, shard_name, shard_path,
 };
 use beads_rs::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepEdge, DepKey,
-    Durable, HeadStatus, Labels, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, Tombstone,
-    Watermarks, WireBeadFull, WireDepV1, WireStamp, WireTombstoneV1, Workflow, WriteStamp,
-    sha256_bytes,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, Durable,
+    HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreState, Tombstone,
+    Watermarks, Workflow, WriteStamp, sha256_bytes,
 };
 
 use super::identity;
@@ -60,7 +55,7 @@ pub fn fixture_small_state() -> CheckpointFixture {
     let origin = identity::replica_id(1);
     observe_watermark(&mut watermarks, &namespace, &origin, 3, [3u8; 32]);
 
-    CheckpointFixture::from_snapshot(build_snapshot(
+    CheckpointFixture::from_snapshot(build_fixture_snapshot(
         "core",
         vec![namespace],
         &states,
@@ -85,7 +80,7 @@ pub fn fixture_tombstones() -> CheckpointFixture {
     let origin = identity::replica_id(2);
     observe_watermark(&mut watermarks, &namespace, &origin, 7, [7u8; 32]);
 
-    CheckpointFixture::from_snapshot(build_snapshot(
+    CheckpointFixture::from_snapshot(build_fixture_snapshot(
         "core",
         vec![namespace],
         &states,
@@ -132,7 +127,7 @@ pub fn fixture_multi_namespace() -> CheckpointFixture {
         [2u8; 32],
     );
 
-    CheckpointFixture::from_snapshot(build_snapshot(
+    CheckpointFixture::from_snapshot(build_fixture_snapshot(
         "core",
         vec![core, sys],
         &states,
@@ -252,7 +247,6 @@ fn make_bead(id: &BeadId, stamp: &Stamp, title: &str) -> Bead {
         acceptance_criteria: Lww::new(None, stamp.clone()),
         priority: Lww::new(Priority::default(), stamp.clone()),
         bead_type: Lww::new(BeadType::Task, stamp.clone()),
-        labels: Lww::new(Labels::new(), stamp.clone()),
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
@@ -265,7 +259,7 @@ fn make_bead(id: &BeadId, stamp: &Stamp, title: &str) -> Bead {
 fn build_state(
     beads: Vec<Bead>,
     tombstones: Vec<Tombstone>,
-    deps: Vec<(DepKey, DepEdge)>,
+    deps: Vec<(DepKey, Dot, Stamp)>,
 ) -> CanonicalState {
     let mut state = CanonicalState::new();
     for bead in beads {
@@ -274,42 +268,37 @@ fn build_state(
     for tombstone in tombstones {
         state.insert_tombstone(tombstone);
     }
-    for (key, edge) in deps {
-        state.insert_dep(key, edge);
+    for (key, dot, stamp) in deps {
+        state.apply_dep_add(key, dot, stamp);
     }
     state
 }
 
-fn build_snapshot(
+fn build_fixture_snapshot(
     checkpoint_group: &str,
     namespaces: Vec<NamespaceId>,
     states: &BTreeMap<NamespaceId, CanonicalState>,
     watermarks: &Watermarks<Durable>,
 ) -> CheckpointSnapshot {
-    let mut shards: BTreeMap<String, CheckpointShardPayload> = BTreeMap::new();
-    for namespace in &namespaces {
-        if let Some(state) = states.get(namespace) {
-            shards.extend(build_shards_for_state(namespace, state));
-        }
+    let mut store_state = StoreState::new();
+    for (namespace, state) in states {
+        store_state.set_namespace_state(namespace.clone(), state.clone());
     }
-    let included = included_watermarks(watermarks, &namespaces);
-    let included_heads = included_heads(watermarks, &namespaces);
-    let dirty_shards: BTreeSet<String> = shards.keys().cloned().collect();
 
-    CheckpointSnapshot {
+    beads_rs::git::checkpoint::build_snapshot(CheckpointSnapshotInput {
         checkpoint_group: checkpoint_group.to_string(),
+        namespaces,
         store_id: identity::store_id(1),
         store_epoch: beads_rs::StoreEpoch::new(0),
-        namespaces,
         created_at_ms: 1_700_000_000_000,
         created_by_replica_id: identity::replica_id(9),
         policy_hash: ContentHash::from_bytes([9u8; 32]),
         roster_hash: None,
-        included,
-        included_heads,
-        shards,
-        dirty_shards,
-    }
+        dirty_shards: None,
+        state: &store_state,
+        watermarks_durable: watermarks,
+    })
+    .expect("snapshot")
 }
 
 fn observe_watermark(
@@ -322,121 +311,6 @@ fn observe_watermark(
     watermarks
         .observe_at_least(namespace, origin, Seq0::new(seq), HeadStatus::Known(head))
         .expect("watermark");
-}
-
-fn included_watermarks(
-    watermarks: &Watermarks<Durable>,
-    namespaces: &[NamespaceId],
-) -> IncludedWatermarks {
-    let mut included = IncludedWatermarks::new();
-    for namespace in namespaces {
-        let mut origins = BTreeMap::new();
-        for (origin, watermark) in watermarks.origins(namespace) {
-            origins.insert(*origin, watermark.seq().get());
-        }
-        included.insert(namespace.clone(), origins);
-    }
-    included
-}
-
-fn included_heads(
-    watermarks: &Watermarks<Durable>,
-    namespaces: &[NamespaceId],
-) -> Option<IncludedHeads> {
-    let mut heads = IncludedHeads::new();
-    for namespace in namespaces {
-        let mut origins = BTreeMap::new();
-        for (origin, watermark) in watermarks.origins(namespace) {
-            if let HeadStatus::Known(head) = watermark.head() {
-                origins.insert(*origin, ContentHash::from_bytes(head));
-            }
-        }
-        if !origins.is_empty() {
-            heads.insert(namespace.clone(), origins);
-        }
-    }
-    if heads.is_empty() { None } else { Some(heads) }
-}
-
-fn build_shards_for_state(
-    namespace: &NamespaceId,
-    state: &CanonicalState,
-) -> BTreeMap<String, CheckpointShardPayload> {
-    let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-
-    for (id, bead) in state.iter_live() {
-        let shard = shard_for_bead(id);
-        let path = shard_path(namespace, CheckpointFileKind::State, &shard);
-        push_jsonl_line(&mut payloads, path, &WireBeadFull::from(bead)).expect("bead jsonl");
-    }
-
-    for (key, tombstone) in state.iter_tombstones() {
-        let shard = shard_for_tombstone(&key.id);
-        let path = shard_path(namespace, CheckpointFileKind::Tombstones, &shard);
-        push_jsonl_line(&mut payloads, path, &wire_tombstone(tombstone)).expect("tombstone jsonl");
-    }
-
-    for (key, edge) in state.iter_deps() {
-        let shard = shard_for_dep(key.from(), key.to(), key.kind());
-        let path = shard_path(namespace, CheckpointFileKind::Deps, &shard);
-        push_jsonl_line(&mut payloads, path, &wire_dep(key, edge)).expect("dep jsonl");
-    }
-
-    payloads
-        .into_iter()
-        .map(|(path, bytes)| {
-            (
-                path.clone(),
-                CheckpointShardPayload {
-                    path,
-                    bytes: Bytes::from(bytes),
-                },
-            )
-        })
-        .collect()
-}
-
-fn push_jsonl_line<T: serde::Serialize>(
-    payloads: &mut BTreeMap<String, Vec<u8>>,
-    path: String,
-    value: &T,
-) -> Result<(), beads_rs::CanonJsonError> {
-    let mut line = to_canon_json_bytes(value)?;
-    line.push(b'\n');
-    let entry = payloads.entry(path).or_default();
-    entry.extend_from_slice(&line);
-    Ok(())
-}
-
-fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
-    let deleted = &tombstone.deleted;
-    let (lineage_created_at, lineage_created_by) = tombstone
-        .lineage
-        .as_ref()
-        .map(|stamp| (Some(WireStamp::from(&stamp.at)), Some(stamp.by.clone())))
-        .unwrap_or((None, None));
-
-    WireTombstoneV1 {
-        id: tombstone.id.clone(),
-        deleted_at: WireStamp::from(&deleted.at),
-        deleted_by: deleted.by.clone(),
-        reason: tombstone.reason.clone(),
-        lineage_created_at,
-        lineage_created_by,
-    }
-}
-
-fn wire_dep(key: &DepKey, edge: &DepEdge) -> WireDepV1 {
-    let deleted = edge.deleted_stamp();
-    WireDepV1 {
-        from: key.from().clone(),
-        to: key.to().clone(),
-        kind: key.kind(),
-        created_at: WireStamp::from(&edge.created.at),
-        created_by: edge.created.by.clone(),
-        deleted_at: deleted.map(|stamp| WireStamp::from(&stamp.at)),
-        deleted_by: deleted.map(|stamp| stamp.by.clone()),
-    }
 }
 
 #[cfg(test)]

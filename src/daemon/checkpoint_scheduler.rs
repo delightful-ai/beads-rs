@@ -92,6 +92,10 @@ impl CheckpointScheduler {
         }
     }
 
+    pub fn set_max_queue_per_store(&mut self, max_queue_per_store: usize) {
+        self.max_queue_per_store = max_queue_per_store;
+    }
+
     pub fn register_group(&mut self, config: CheckpointGroupConfig) -> CheckpointGroupKey {
         let key = CheckpointGroupKey {
             store_id: config.store_id,

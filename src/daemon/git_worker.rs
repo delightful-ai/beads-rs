@@ -11,7 +11,7 @@ use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
 use super::remote::RemoteUrl;
-use crate::core::{ActorId, CanonicalState, Stamp, StoreId, WriteStamp};
+use crate::core::{ActorId, CanonicalState, StoreId, WriteStamp};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::git::checkpoint::{
@@ -246,19 +246,10 @@ impl GitWorker {
     }
 
     /// Sync local state to remote.
-    pub fn sync(&mut self, path: &Path, state: &CanonicalState, actor: &ActorId) -> SyncResult {
+    pub fn sync(&mut self, path: &Path, state: &CanonicalState) -> SyncResult {
         let repo = self.open(path)?;
 
-        // Create resolution stamp for collision handling
-        use crate::daemon::Clock;
-        let mut clock = Clock::new();
-        let write_stamp = clock.tick();
-        let resolution_stamp = Stamp {
-            at: write_stamp,
-            by: actor.clone(),
-        };
-
-        sync_with_retry(repo, path, state, resolution_stamp, 5)
+        sync_with_retry(repo, path, state, 5)
     }
 
     pub fn publish_checkpoint(
@@ -384,7 +375,7 @@ impl GitWorker {
                 );
                 let _guard = span.enter();
                 let started = Instant::now();
-                let result = self.sync(&repo, &state, &actor);
+                let result = self.sync(&repo, &state);
                 let elapsed_ms = started.elapsed().as_millis();
                 match &result {
                     Ok(_) => tracing::info!(elapsed_ms, "sync completed"),

@@ -451,7 +451,8 @@ Modules impacted:
 
 What must be true to proceed safely:
 - Decide what "idempotent no-op" means. Spec: events with origin_seq <= seen_map
-  must be no-op. Note id collision with different content is corruption, not LWW.
+  must be no-op. Note id collision with different content resolves deterministically
+  (D4) and should be logged/metric'd as corruption, not treated as LWW.
 
 ### 0.9 WAL segment naming and lifecycle
 

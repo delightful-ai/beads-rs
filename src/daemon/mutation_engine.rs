@@ -4,16 +4,17 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
-use super::clock::Clock;
 use super::ops::{BeadPatch, MapLiveError, OpError, Patch};
 use super::remote::RemoteUrl;
+use crate::core::event::ValidatedBeadPatch;
 use crate::core::{
     ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, CoreError, DepKey,
-    DepKind, DepSpec, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
-    NamespaceId, NoteAppendV1, NoteId, NoteLog, Priority, ReplicaId, Seq1, Stamp, StoreIdentity,
-    TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch,
-    WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
-    encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
+    DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
+    NamespaceId, NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId,
+    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepAddV1,
+    WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
+    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
+    sha256_bytes, to_canon_json_bytes, validate_event_body,
 };
 use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
 
@@ -23,6 +24,10 @@ pub struct MutationContext {
     pub actor_id: ActorId,
     pub client_request_id: Option<ClientRequestId>,
     pub trace_id: TraceId,
+}
+
+pub trait DotAllocator {
+    fn next_dot(&mut self) -> Result<Dot, OpError>;
 }
 
 #[derive(Clone, Debug)]
@@ -131,7 +136,6 @@ pub struct ParsedBeadPatch {
     pub acceptance_criteria: Patch<String>,
     pub priority: Patch<Priority>,
     pub bead_type: Patch<BeadType>,
-    pub labels: Patch<Labels>,
     pub external_ref: Patch<String>,
     pub source_repo: Patch<String>,
     pub estimated_minutes: Patch<u32>,
@@ -147,7 +151,6 @@ impl ParsedBeadPatch {
             acceptance_criteria,
             priority,
             bead_type,
-            labels,
             external_ref,
             source_repo,
             estimated_minutes,
@@ -167,12 +170,6 @@ impl ParsedBeadPatch {
             });
         }
 
-        let labels = match labels {
-            Patch::Set(values) => Patch::Set(parse_labels(values)?),
-            Patch::Clear => Patch::Clear,
-            Patch::Keep => Patch::Keep,
-        };
-
         Ok(Self {
             title,
             description,
@@ -180,7 +177,6 @@ impl ParsedBeadPatch {
             acceptance_criteria,
             priority,
             bead_type,
-            labels,
             external_ref,
             source_repo,
             estimated_minutes,
@@ -417,15 +413,15 @@ impl MutationEngine {
     pub fn plan(
         &self,
         state: &CanonicalState,
-        clock: &mut Clock,
+        now_ms: u64,
+        stamp: Stamp,
         store: StoreIdentity,
         id_ctx: Option<&IdContext>,
         ctx: MutationContext,
         req: ParsedMutationRequest,
+        dot_alloc: &mut dyn DotAllocator,
     ) -> Result<EventDraft, OpError> {
-        let now_ms = clock.wall_ms();
-        let write_stamp = clock.tick();
-        let stamp = Stamp::new(write_stamp.clone(), ctx.actor_id.clone());
+        let write_stamp = stamp.at.clone();
 
         let planned = match req {
             ParsedMutationRequest::Create {
@@ -445,6 +441,7 @@ impl MutationEngine {
             } => self.plan_create(
                 state,
                 &stamp,
+                dot_alloc,
                 id_ctx,
                 id,
                 parent,
@@ -464,13 +461,13 @@ impl MutationEngine {
                 self.plan_update(state, id, patch, cas)?
             }
             ParsedMutationRequest::AddLabels { id, labels } => {
-                self.plan_add_labels(state, id, labels)?
+                self.plan_add_labels(state, id, labels, dot_alloc)?
             }
             ParsedMutationRequest::RemoveLabels { id, labels } => {
                 self.plan_remove_labels(state, id, labels)?
             }
             ParsedMutationRequest::SetParent { id, parent } => {
-                self.plan_set_parent(state, id, parent, &stamp)?
+                self.plan_set_parent(state, id, parent, &stamp, dot_alloc)?
             }
             ParsedMutationRequest::Close {
                 id,
@@ -482,10 +479,10 @@ impl MutationEngine {
                 self.plan_delete(state, &stamp, id, reason)?
             }
             ParsedMutationRequest::AddDep { from, to, kind } => {
-                self.plan_add_dep(state, &stamp, from, to, kind)?
+                self.plan_add_dep(state, &stamp, from, to, kind, dot_alloc)?
             }
             ParsedMutationRequest::RemoveDep { from, to, kind } => {
-                self.plan_remove_dep(&stamp, from, to, kind)?
+                self.plan_remove_dep(state, &stamp, from, to, kind)?
             }
             ParsedMutationRequest::AddNote { id, content } => {
                 self.plan_add_note(state, &stamp, id, content)?
@@ -547,6 +544,13 @@ impl MutationEngine {
                 hlc_max: draft.hlc_max,
             }),
         };
+
+        validate_event_body(&event_body, &self.limits).map_err(|err| {
+            OpError::ValidationFailed {
+                field: "event".into(),
+                reason: err.to_string(),
+            }
+        })?;
 
         let event_bytes = encode_event_body_canonical(&event_body)
             .map_err(|_| OpError::Internal("event_body encode failed"))?;
@@ -700,19 +704,12 @@ impl MutationEngine {
         let mut note_appends = 0usize;
         for op in delta.iter() {
             match op {
-                TxnOpV1::BeadUpsert(patch) => {
-                    if let Some(labels) = &patch.labels {
-                        enforce_label_limit(labels, &self.limits, Some(patch.id.clone()))?;
-                    }
-                    if let crate::core::NotesPatch::AtLeast(notes) = &patch.notes {
-                        for note in notes {
-                            enforce_note_limit(&note.content, &self.limits)?;
-                        }
-                    }
-                }
+                TxnOpV1::BeadUpsert(_) => {}
                 TxnOpV1::BeadDelete(_) => {}
-                TxnOpV1::DepUpsert(_) => {}
-                TxnOpV1::DepDelete(_) => {}
+                TxnOpV1::LabelAdd(_) => {}
+                TxnOpV1::LabelRemove(_) => {}
+                TxnOpV1::DepAdd(_) => {}
+                TxnOpV1::DepRemove(_) => {}
                 TxnOpV1::NoteAppend(append) => {
                     note_appends += 1;
                     enforce_note_limit(&append.note.content, &self.limits)?;
@@ -765,6 +762,7 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         stamp: &Stamp,
+        dot_alloc: &mut dyn DotAllocator,
         id_ctx: Option<&IdContext>,
         id: Option<BeadId>,
         parent: Option<BeadId>,
@@ -873,9 +871,6 @@ impl MutationEngine {
         }
         patch.priority = Some(priority);
         patch.bead_type = Some(bead_type);
-        if !labels.is_empty() {
-            patch.labels = Some(labels.clone());
-        }
         if let Some(external_ref) = external_ref.clone() {
             patch.external_ref = WirePatch::Set(external_ref);
         }
@@ -891,35 +886,44 @@ impl MutationEngine {
             patch.assignee_expires = WirePatch::Set(expires);
         }
 
+        let patch = validate_wire_patch(patch)?;
+        let patch = validate_wire_patch(patch)?;
+        let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
             .map_err(delta_error_to_op)?;
 
+        for label in labels.iter() {
+            let dot = dot_alloc.next_dot()?;
+            delta
+                .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                    bead_id: id.clone(),
+                    label: label.clone(),
+                    dot: WireDotV1::from(dot),
+                    lineage: Some(stamp.clone().into()),
+                }))
+                .map_err(delta_error_to_op)?;
+        }
+
         if let Some(parent_id) = parent_id {
             delta
-                .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                     from: id.clone(),
                     to: parent_id,
                     kind: DepKind::Parent,
-                    created_at: WireStamp::from(&stamp.at),
-                    created_by: stamp.by.clone(),
-                    deleted_at: None,
-                    deleted_by: None,
+                    dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
         }
 
         for spec in parsed_deps {
             delta
-                .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                     from: id.clone(),
                     to: spec.id().clone(),
                     kind: spec.kind(),
-                    created_at: WireStamp::from(&stamp.at),
-                    created_by: stamp.by.clone(),
-                    deleted_at: None,
-                    deleted_by: None,
+                    dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
         }
@@ -950,10 +954,11 @@ impl MutationEngine {
         patch: ParsedBeadPatch,
         cas: Option<String>,
     ) -> Result<PlannedDelta, OpError> {
-        let bead = state.require_live(&id).map_live_err(&id)?;
+        state.require_live(&id).map_live_err(&id)?;
 
         if let Some(expected) = cas.as_ref() {
-            let actual = bead.content_hash().to_hex();
+            let view = state.bead_view(&id).expect("live bead should have view");
+            let actual = view.content_hash().to_hex();
             if expected != &actual {
                 return Err(OpError::CasMismatch {
                     expected: expected.clone(),
@@ -983,21 +988,28 @@ impl MutationEngine {
         state: &CanonicalState,
         id: BeadId,
         labels: Labels,
+        dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
-        let mut merged = bead.fields.labels.value.clone();
+        let lineage = bead.core.created().clone();
+        let mut merged = state.labels_for(&id);
         for label in labels.iter() {
             merged.insert(label.clone());
         }
         enforce_label_limit(&merged, &self.limits, Some(id.clone()))?;
 
-        let mut patch = WireBeadPatch::new(id.clone());
-        patch.labels = Some(merged.clone());
-
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .map_err(delta_error_to_op)?;
+        for label in labels.iter() {
+            let dot = dot_alloc.next_dot()?;
+            delta
+                .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                    bead_id: id.clone(),
+                    label: label.clone(),
+                    dot: WireDotV1::from(dot),
+                    lineage: Some(lineage.clone().into()),
+                }))
+                .map_err(delta_error_to_op)?;
+        }
 
         let canonical = CanonicalMutationOp::AddLabels {
             id,
@@ -1014,18 +1026,19 @@ impl MutationEngine {
         labels: Labels,
     ) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
-        let mut merged = bead.fields.labels.value.clone();
-        for label in labels.iter() {
-            merged.remove(label.as_str());
-        }
-
-        let mut patch = WireBeadPatch::new(id.clone());
-        patch.labels = Some(merged);
-
+        let lineage = bead.core.created().clone();
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .map_err(delta_error_to_op)?;
+        for label in labels.iter() {
+            let ctx = state.label_dvv(&id, label, Some(&lineage));
+            delta
+                .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+                    bead_id: id.clone(),
+                    label: label.clone(),
+                    ctx: WireDvvV1::from(&ctx),
+                    lineage: Some(lineage.clone().into()),
+                }))
+                .map_err(delta_error_to_op)?;
+        }
 
         let canonical = CanonicalMutationOp::RemoveLabels {
             id,
@@ -1052,6 +1065,8 @@ impl MutationEngine {
 
         let mut patch = WireBeadPatch::new(id.clone());
         patch.status = Some(WorkflowStatus::Closed);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
         if let Some(reason) = reason.clone() {
             patch.closed_reason = WirePatch::Set(reason);
         }
@@ -1059,6 +1074,8 @@ impl MutationEngine {
             patch.closed_on_branch = WirePatch::Set(branch);
         }
 
+        let patch = validate_wire_patch(patch)?;
+        let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1085,7 +1102,10 @@ impl MutationEngine {
 
         let mut patch = WireBeadPatch::new(id.clone());
         patch.status = Some(WorkflowStatus::Open);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
 
+        let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1111,8 +1131,7 @@ impl MutationEngine {
             deleted_at: WireStamp::from(&stamp.at),
             deleted_by: stamp.by.clone(),
             reason: reason.clone(),
-            lineage_created_at: None,
-            lineage_created_by: None,
+            lineage: None,
         };
 
         let mut delta = TxnDeltaV1::new();
@@ -1128,10 +1147,11 @@ impl MutationEngine {
     fn plan_add_dep(
         &self,
         state: &CanonicalState,
-        stamp: &Stamp,
+        _stamp: &Stamp,
         from: BeadId,
         to: BeadId,
         kind: DepKind,
+        dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedDelta, OpError> {
         DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
             field: "dependency".into(),
@@ -1156,14 +1176,11 @@ impl MutationEngine {
 
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: from.clone(),
                 to: to.clone(),
                 kind,
-                created_at: WireStamp::from(&stamp.at),
-                created_by: stamp.by.clone(),
-                deleted_at: None,
-                deleted_by: None,
+                dot: WireDotV1::from(dot_alloc.next_dot()?),
             }))
             .map_err(delta_error_to_op)?;
 
@@ -1174,24 +1191,25 @@ impl MutationEngine {
 
     fn plan_remove_dep(
         &self,
-        stamp: &Stamp,
+        state: &CanonicalState,
+        _stamp: &Stamp,
         from: BeadId,
         to: BeadId,
         kind: DepKind,
     ) -> Result<PlannedDelta, OpError> {
-        DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
-            field: "dependency".into(),
-            reason: e.reason,
-        })?;
+        let key =
+            DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: e.reason,
+            })?;
 
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
                 from: from.clone(),
                 to: to.clone(),
                 kind,
-                deleted_at: WireStamp::from(&stamp.at),
-                deleted_by: stamp.by.clone(),
+                ctx: WireDvvV1::from(&state.dep_dvv(&key)),
             }))
             .map_err(delta_error_to_op)?;
 
@@ -1205,7 +1223,8 @@ impl MutationEngine {
         state: &CanonicalState,
         id: BeadId,
         parent: Option<BeadId>,
-        stamp: &Stamp,
+        _stamp: &Stamp,
+        dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedDelta, OpError> {
         state.require_live(&id).map_live_err(&id)?;
 
@@ -1237,33 +1256,36 @@ impl MutationEngine {
         let existing_parents: Vec<BeadId> = state
             .deps_from(&id)
             .into_iter()
-            .filter(|(key, _)| key.kind() == DepKind::Parent)
-            .map(|(key, _)| key.to().clone())
+            .filter(|key| key.kind() == DepKind::Parent)
+            .map(|key| key.to().clone())
             .collect();
 
         let mut delta = TxnDeltaV1::new();
         for existing_parent in existing_parents {
+            let key =
+                DepKey::new(id.clone(), existing_parent.clone(), DepKind::Parent).map_err(|e| {
+                    OpError::ValidationFailed {
+                        field: "parent".into(),
+                        reason: e.reason,
+                    }
+                })?;
             delta
-                .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+                .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
                     from: id.clone(),
                     to: existing_parent,
                     kind: DepKind::Parent,
-                    deleted_at: WireStamp::from(&stamp.at),
-                    deleted_by: stamp.by.clone(),
+                    ctx: WireDvvV1::from(&state.dep_dvv(&key)),
                 }))
                 .map_err(delta_error_to_op)?;
         }
 
         if let Some(parent_id) = parent_id.clone() {
             delta
-                .insert(TxnOpV1::DepUpsert(WireDepV1 {
+                .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                     from: id.clone(),
                     to: parent_id,
                     kind: DepKind::Parent,
-                    created_at: WireStamp::from(&stamp.at),
-                    created_by: stamp.by.clone(),
-                    deleted_at: None,
-                    deleted_by: None,
+                    dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
         }
@@ -1285,7 +1307,8 @@ impl MutationEngine {
     ) -> Result<PlannedDelta, OpError> {
         enforce_note_limit(&content, &self.limits)?;
         let bead = state.require_live(&id).map_live_err(&id)?;
-        let note_id = generate_unique_note_id(&bead.notes, NoteId::generate);
+        let lineage = bead.core.created().clone();
+        let note_id = generate_unique_note_id(state, &id, NoteId::generate);
 
         let note = WireNoteV1 {
             id: note_id.clone(),
@@ -1297,6 +1320,7 @@ impl MutationEngine {
         let append = NoteAppendV1 {
             bead_id: id.clone(),
             note,
+            lineage: Some(lineage.into()),
         };
 
         let mut delta = TxnDeltaV1::new();
@@ -1344,6 +1368,8 @@ impl MutationEngine {
         patch.assignee = WirePatch::Set(stamp.by.clone());
         patch.assignee_expires = WirePatch::Set(expires);
         patch.status = Some(WorkflowStatus::InProgress);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1373,7 +1399,10 @@ impl MutationEngine {
 
         let mut patch = WireBeadPatch::new(id.clone());
         patch.assignee = WirePatch::Clear;
+        patch.assignee_expires = WirePatch::Clear;
         patch.status = Some(WorkflowStatus::Open);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1394,13 +1423,17 @@ impl MutationEngine {
     ) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
 
-        if let crate::core::Claim::Claimed { assignee, .. } = &bead.fields.claim.value {
-            if assignee != &stamp.by {
+        let assignee = match &bead.fields.claim.value {
+            crate::core::Claim::Claimed { assignee, .. } => {
+                if assignee != &stamp.by {
+                    return Err(OpError::NotClaimedByYou);
+                }
+                assignee.clone()
+            }
+            crate::core::Claim::Unclaimed => {
                 return Err(OpError::NotClaimedByYou);
             }
-        } else {
-            return Err(OpError::NotClaimedByYou);
-        }
+        };
 
         let expires = WallClock(
             stamp
@@ -1410,7 +1443,7 @@ impl MutationEngine {
         );
 
         let mut patch = WireBeadPatch::new(id.clone());
-        patch.assignee = WirePatch::Keep;
+        patch.assignee = WirePatch::Set(assignee);
         patch.assignee_expires = WirePatch::Set(expires);
 
         let mut delta = TxnDeltaV1::new();
@@ -1540,8 +1573,6 @@ struct CanonicalBeadPatch {
     #[serde(skip_serializing_if = "Patch::is_keep")]
     bead_type: Patch<BeadType>,
     #[serde(skip_serializing_if = "Patch::is_keep")]
-    labels: Patch<Vec<String>>,
-    #[serde(skip_serializing_if = "Patch::is_keep")]
     external_ref: Patch<String>,
     #[serde(skip_serializing_if = "Patch::is_keep")]
     source_repo: Patch<String>,
@@ -1650,6 +1681,15 @@ fn canonical_deps(deps: &[DepSpec]) -> Vec<String> {
         .collect()
 }
 
+fn validate_wire_patch(patch: WireBeadPatch) -> Result<WireBeadPatch, OpError> {
+    ValidatedBeadPatch::try_from(patch)
+        .map(ValidatedBeadPatch::into_inner)
+        .map_err(|err| OpError::ValidationFailed {
+            field: "bead_patch".into(),
+            reason: err.to_string(),
+        })
+}
+
 fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
     if state.get_live(parent).is_none() {
         return Err(OpError::NotFound(parent.clone()));
@@ -1719,7 +1759,7 @@ fn would_create_cycle(state: &CanonicalState, from: &BeadId, to: &BeadId, kind: 
         if !visited.insert(current.clone()) {
             continue;
         }
-        for (key, _) in state.deps_from(&current) {
+        for key in state.deps_from(&current) {
             if key.kind().requires_dag() && !visited.contains(key.to()) {
                 queue.push(key.to().clone());
             }
@@ -1750,21 +1790,14 @@ fn normalize_patch(
         wire.bead_type = Some(*bead_type);
     }
 
-    let canon_labels = match &patch.labels {
-        Patch::Set(labels) => {
-            wire.labels = Some(labels.clone());
-            Patch::Set(canonical_labels(labels))
-        }
-        Patch::Clear => Patch::Clear,
-        Patch::Keep => Patch::Keep,
-    };
-
     wire.external_ref = patch_to_wire(&patch.external_ref);
     wire.source_repo = patch_to_wire(&patch.source_repo);
     wire.estimated_minutes = patch_to_wire_u32(&patch.estimated_minutes);
 
     if let Patch::Set(status) = &patch.status {
         wire.status = Some(*status);
+        wire.closed_reason = WirePatch::Clear;
+        wire.closed_on_branch = WirePatch::Clear;
     }
 
     let canonical = CanonicalBeadPatch {
@@ -1774,13 +1807,13 @@ fn normalize_patch(
         acceptance_criteria: patch.acceptance_criteria.clone(),
         priority: patch.priority.clone(),
         bead_type: patch.bead_type.clone(),
-        labels: canon_labels,
         external_ref: patch.external_ref.clone(),
         source_repo: patch.source_repo.clone(),
         estimated_minutes: patch.estimated_minutes.clone(),
         status: patch.status.clone(),
     };
 
+    let wire = validate_wire_patch(wire)?;
     Ok((wire, canonical))
 }
 
@@ -1989,12 +2022,12 @@ fn encode_base36(bytes: &[u8], len: usize) -> String {
     s
 }
 
-fn generate_unique_note_id<F>(notes: &NoteLog, mut next_id: F) -> NoteId
+fn generate_unique_note_id<F>(state: &CanonicalState, bead_id: &BeadId, mut next_id: F) -> NoteId
 where
     F: FnMut() -> NoteId,
 {
     let mut note_id = next_id();
-    while notes.contains(&note_id) {
+    while state.note_id_exists(bead_id, &note_id) {
         note_id = next_id();
     }
     note_id
@@ -2004,10 +2037,9 @@ where
 mod tests {
     use super::*;
     use crate::core::{
-        Bead, BeadCore, BeadFields, Claim, Lww, Stamp, StoreId, Workflow, WriteStamp,
+        Bead, BeadCore, BeadFields, Claim, Dot, Lww, ReplicaId, Stamp, StoreId, Workflow,
+        WriteStamp,
     };
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn actor_id(actor: &str) -> ActorId {
         ActorId::new(actor).unwrap()
@@ -2023,7 +2055,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -2036,21 +2067,32 @@ mod tests {
         state
     }
 
-    struct FixedTimeSource {
-        now: Arc<AtomicU64>,
+    fn make_stamp(now_ms: u64, actor: &ActorId) -> Stamp {
+        Stamp::new(WriteStamp::new(now_ms, 0), actor.clone())
     }
 
-    impl crate::daemon::clock::TimeSource for FixedTimeSource {
-        fn now_ms(&self) -> u64 {
-            self.now.load(Ordering::SeqCst)
+    struct TestDotAllocator {
+        replica_id: ReplicaId,
+        counter: u64,
+    }
+
+    impl TestDotAllocator {
+        fn new(replica_id: ReplicaId) -> Self {
+            Self {
+                replica_id,
+                counter: 0,
+            }
         }
     }
 
-    fn fixed_clock(now: u64) -> Clock {
-        let source = Box::new(FixedTimeSource {
-            now: Arc::new(AtomicU64::new(now)),
-        });
-        Clock::with_time_source(source)
+    impl DotAllocator for TestDotAllocator {
+        fn next_dot(&mut self) -> Result<Dot, OpError> {
+            self.counter += 1;
+            Ok(Dot {
+                replica: self.replica_id,
+                counter: self.counter,
+            })
+        }
     }
 
     #[test]
@@ -2083,14 +2125,36 @@ mod tests {
         )
         .unwrap();
 
-        let mut clock_a = fixed_clock(1_000);
-        let mut clock_b = fixed_clock(1_000);
+        let now_ms = 1_000;
+        let stamp_a = make_stamp(now_ms, &actor);
+        let stamp_b = make_stamp(now_ms, &actor);
+        let replica_id = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        let mut dots_a = TestDotAllocator::new(replica_id);
+        let mut dots_b = TestDotAllocator::new(replica_id);
 
         let draft_a = engine
-            .plan(&state, &mut clock_a, store, None, ctx.clone(), req_a)
+            .plan(
+                &state,
+                now_ms,
+                stamp_a,
+                store,
+                None,
+                ctx.clone(),
+                req_a,
+                &mut dots_a,
+            )
             .unwrap();
         let draft_b = engine
-            .plan(&state, &mut clock_b, store, None, ctx, req_b)
+            .plan(
+                &state,
+                now_ms,
+                stamp_b,
+                store,
+                None,
+                ctx,
+                req_b,
+                &mut dots_b,
+            )
             .unwrap();
 
         assert_eq!(draft_a.request_sha256, draft_b.request_sha256);
@@ -2123,9 +2187,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut clock = fixed_clock(1_000);
+        let now_ms = 1_000;
+        let stamp = make_stamp(now_ms, &actor);
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([2u8; 16])));
         let err = engine
-            .plan(&state, &mut clock, store, None, ctx, req)
+            .plan(&state, now_ms, stamp, store, None, ctx, req, &mut dots)
             .unwrap_err();
 
         assert!(matches!(err, OpError::NoteTooLarge { .. }));
@@ -2157,9 +2223,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut clock = fixed_clock(1_000);
+        let now_ms = 1_000;
+        let stamp = make_stamp(now_ms, &actor);
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
         let err = engine
-            .plan(&state, &mut clock, store, None, ctx, req)
+            .plan(&state, now_ms, stamp, store, None, ctx, req, &mut dots)
             .unwrap_err();
 
         assert!(matches!(err, OpError::OpsTooMany { .. }));
@@ -2188,9 +2256,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut clock = fixed_clock(1_000);
+        let now_ms = 1_000;
+        let stamp = make_stamp(now_ms, &actor);
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([4u8; 16])));
         let _ = engine
-            .plan(&state, &mut clock, store, None, ctx, req)
+            .plan(&state, now_ms, stamp, store, None, ctx, req, &mut dots)
             .unwrap();
 
         let after = serde_json::to_string(&state).unwrap();

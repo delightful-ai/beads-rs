@@ -20,9 +20,8 @@ use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
     ActorId, BeadId, CanonicalState, CliErrorCode, ClientRequestId, CoreError, DurabilityClass,
-    ErrorCode, NamespaceId, ProtocolErrorCode, Stamp, TraceId, WallClock,
+    ErrorCode, NamespaceId, ProtocolErrorCode, TraceId, WallClock,
 };
-use crate::git::collision::{detect_collisions, resolve_collisions};
 use crate::git::{SyncError, SyncOutcome};
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
@@ -267,13 +266,6 @@ impl Daemon {
                 if let Some(max_stamp) = outcome.last_seen_stamp.as_ref() {
                     self.clock_mut().receive(max_stamp);
                 }
-                let resolution_stamp = {
-                    let write_stamp = self.clock_mut().tick();
-                    Stamp {
-                        at: write_stamp,
-                        by: self.actor().clone(),
-                    }
-                };
                 let wall_ms = self.clock().wall_ms();
 
                 let Some((store, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
@@ -307,30 +299,7 @@ impl Daemon {
                 // If mutations happened during sync, merge them
                 if repo_state.dirty {
                     let local_state = store.state.get_or_default(&NamespaceId::core());
-                    let merged = match CanonicalState::join(&synced_state, &local_state) {
-                        Ok(merged) => Ok(merged),
-                        Err(mut errs) => {
-                            let collisions = detect_collisions(&local_state, &synced_state);
-                            if collisions.is_empty() {
-                                Err(errs)
-                            } else {
-                                match resolve_collisions(
-                                    &local_state,
-                                    &synced_state,
-                                    &collisions,
-                                    resolution_stamp,
-                                ) {
-                                    Ok((local_resolved, remote_resolved)) => {
-                                        CanonicalState::join(&remote_resolved, &local_resolved)
-                                    }
-                                    Err(err) => {
-                                        errs.push(err);
-                                        Err(errs)
-                                    }
-                                }
-                            }
-                        }
-                    };
+                    let merged = CanonicalState::join(&synced_state, &local_state);
 
                     match merged {
                         Ok(merged) => {
@@ -783,6 +752,8 @@ impl Daemon {
             Request::AdminReloadPolicies { repo } => {
                 self.admin_reload_policies(&repo, git_tx).into()
             }
+
+            Request::AdminReloadLimits { repo } => self.admin_reload_limits(&repo, git_tx).into(),
 
             Request::AdminReloadReplication { repo } => {
                 self.admin_reload_replication(&repo, git_tx).into()

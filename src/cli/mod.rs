@@ -814,6 +814,9 @@ pub enum AdminCmd {
     /// Reload namespace policies from namespaces.toml.
     #[command(name = "reload-policies")]
     ReloadPolicies,
+    /// Reload limits from config.toml.
+    #[command(name = "reload-limits")]
+    ReloadLimits,
     /// Rotate the local replica id.
     #[command(name = "rotate-replica-id")]
     RotateReplicaId,
@@ -1118,6 +1121,7 @@ fn admin_cmd_name(cmd: &AdminCmd) -> &'static str {
         AdminCmd::Flush(_) => "flush",
         AdminCmd::Fingerprint(_) => "fingerprint",
         AdminCmd::ReloadPolicies => "reload-policies",
+        AdminCmd::ReloadLimits => "reload-limits",
         AdminCmd::RotateReplicaId => "rotate-replica-id",
         AdminCmd::Maintenance { .. } => "maintenance",
         AdminCmd::RebuildIndex => "rebuild-index",

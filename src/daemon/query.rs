@@ -12,12 +12,12 @@ use serde::{Deserialize, Serialize};
 use super::query_model::{
     AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
     AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
-    AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminRotateReplicaIdOutput,
-    AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup,
-    DepCycles, DepEdge, EpicStatus, Issue, IssueSummary, Note, ReadyResult, StatusOutput,
-    Tombstone,
+    AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, BlockedIssue, CountResult,
+    DaemonInfo, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue, IssueSummary, Note,
+    ReadyResult, StatusOutput, Tombstone,
 };
-use crate::core::{ActorId, Bead, BeadId, BeadType, Claim, Priority};
+use crate::core::{ActorId, BeadId, BeadType, BeadView, Claim, Priority};
 
 // =============================================================================
 // Filters - Filtering criteria
@@ -141,7 +141,8 @@ pub enum SortField {
 
 impl Filters {
     /// Check if a bead matches these filters.
-    pub fn matches(&self, bead: &Bead) -> bool {
+    pub fn matches(&self, view: &BeadView) -> bool {
+        let bead = &view.bead;
         // Status filter
         if let Some(ref status) = self.status {
             // NOTE: "blocked" is derived and handled by higher-level queries when needed.
@@ -192,8 +193,7 @@ impl Filters {
 
         // Labels filter (AND)
         if let Some(ref labels) = self.labels {
-            let bead_labels = &bead.fields.labels.value;
-            let has_all = labels.iter().all(|l| bead_labels.contains(l));
+            let has_all = labels.iter().all(|l| view.labels.contains(l));
             if !has_all {
                 return false;
             }
@@ -201,14 +201,13 @@ impl Filters {
 
         // LabelsAny filter (OR)
         if let Some(ref labels_any) = self.labels_any {
-            let bead_labels = &bead.fields.labels.value;
-            let has_any = labels_any.iter().any(|l| bead_labels.contains(l));
+            let has_any = labels_any.iter().any(|l| view.labels.contains(l));
             if !has_any {
                 return false;
             }
         }
 
-        if self.no_labels && !bead.fields.labels.value.is_empty() {
+        if self.no_labels && !view.labels.is_empty() {
             return false;
         }
 
@@ -272,10 +271,10 @@ impl Filters {
         }
         if let Some(ref needle) = self.notes_contains {
             let n = needle.to_lowercase();
-            let any = bead
+            let any = view
                 .notes
                 .iter()
-                .any(|(_, note)| note.content.to_lowercase().contains(&n));
+                .any(|note| note.content.to_lowercase().contains(&n));
             if !any {
                 return false;
             }
@@ -294,7 +293,7 @@ impl Filters {
             return false;
         }
 
-        let updated_ms = bead.updated_stamp().at.wall_ms;
+        let updated_ms = view.updated_stamp().at.wall_ms;
         if let Some(after) = self.updated_after
             && updated_ms < after
         {
@@ -515,6 +514,9 @@ pub enum QueryResult {
 
     /// Admin reload replication report.
     AdminReloadReplication(AdminReloadReplicationOutput),
+
+    /// Admin reload limits report.
+    AdminReloadLimits(AdminReloadLimitsOutput),
 
     /// Admin rotate replica id report.
     AdminRotateReplicaId(AdminRotateReplicaIdOutput),

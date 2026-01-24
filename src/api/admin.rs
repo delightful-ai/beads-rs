@@ -373,6 +373,12 @@ pub struct AdminReloadReplicationOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminReloadLimitsOutput {
+    pub store_id: StoreId,
+    pub requires_restart: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminMaintenanceModeOutput {
     pub enabled: bool,
 }

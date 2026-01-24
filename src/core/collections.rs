@@ -2,17 +2,14 @@
 //!
 //! Label: validated label string (non-empty, no newlines)
 //! Labels: sorted set of Label values
-//! NoteLog: notes keyed by id, sorted output by (stamp, id)
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::composite::Note;
 use super::error::{CoreError, InvalidLabel};
-use super::identity::NoteId;
+use super::orset::OrSetValue;
 
 /// Validated label - non-empty, no newlines.
 ///
@@ -72,6 +69,12 @@ impl From<Label> for String {
     }
 }
 
+impl OrSetValue for Label {
+    fn collision_bytes(&self) -> Vec<u8> {
+        self.as_str().as_bytes().to_vec()
+    }
+}
+
 /// Labels as sorted set - principal form by construction.
 ///
 /// BTreeSet ensures sorted, deduplicated output.
@@ -90,8 +93,9 @@ impl Labels {
 
     pub fn remove(&mut self, label: &str) -> bool {
         // Find and remove by string value
+        let before = self.0.len();
         self.0.retain(|l| l.as_str() != label);
-        true // BTreeSet doesn't tell us if it changed, but retain always succeeds
+        self.0.len() != before
     }
 
     pub fn contains(&self, label: &str) -> bool {
@@ -114,62 +118,6 @@ impl Labels {
 impl FromIterator<Label> for Labels {
     fn from_iter<T: IntoIterator<Item = Label>>(iter: T) -> Self {
         Self(iter.into_iter().collect())
-    }
-}
-
-/// Notes keyed by ID - enforces uniqueness, sorted output.
-///
-/// Merge semantics: union by ID (notes are immutable).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NoteLog(BTreeMap<NoteId, Note>);
-
-impl NoteLog {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&mut self, note: Note) {
-        self.0.insert(note.id.clone(), note);
-    }
-
-    pub fn get(&self, id: &NoteId) -> Option<&Note> {
-        self.0.get(id)
-    }
-
-    pub fn contains(&self, id: &NoteId) -> bool {
-        self.0.contains_key(id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Merge = union by ID.
-    ///
-    /// Notes are immutable, so if same ID exists in both, they should be identical.
-    /// We keep left's version in case of mismatch (shouldn't happen in practice).
-    pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = a.0.clone();
-        for (id, note) in &b.0 {
-            merged.entry(id.clone()).or_insert_with(|| note.clone());
-        }
-        Self(merged)
-    }
-
-    /// Principal form: sorted by (at, id) for stable output.
-    pub fn sorted(&self) -> Vec<&Note> {
-        let mut v: Vec<_> = self.0.values().collect();
-        v.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
-        v
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&NoteId, &Note)> {
-        self.0.iter()
     }
 }
 
@@ -212,5 +160,15 @@ mod tests {
 
         assert!(parsed.contains("bug"));
         assert!(parsed.contains("feature"));
+    }
+
+    #[test]
+    fn labels_remove_reports_change() {
+        let mut labels = Labels::new();
+        labels.insert(Label::parse("bug").unwrap());
+
+        assert!(labels.remove("bug"));
+        assert!(!labels.contains("bug"));
+        assert!(!labels.remove("missing"));
     }
 }

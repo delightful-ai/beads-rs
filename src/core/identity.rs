@@ -36,6 +36,11 @@ impl ActorId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[cfg(test)]
+    pub fn new_unchecked(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
 }
 
 impl fmt::Debug for ActorId {

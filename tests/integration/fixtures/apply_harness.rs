@@ -35,8 +35,8 @@ pub fn assert_bead_present<'a>(state: &'a CanonicalState, id: &BeadId) -> &'a Be
 }
 
 pub fn assert_note_present(state: &CanonicalState, bead_id: &BeadId, note_id: &NoteId) {
-    let bead = assert_bead_present(state, bead_id);
-    assert!(bead.notes.contains(note_id), "note present");
+    let _ = assert_bead_present(state, bead_id);
+    assert!(state.note_id_exists(bead_id, note_id), "note present");
 }
 
 pub fn note_key(bead_id: &BeadId, note_id: &NoteId) -> NoteKey {

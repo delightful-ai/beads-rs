@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use crate::fixtures::load_gen::LoadGenerator;
 use crate::fixtures::receipt;
-use crate::fixtures::repl_rig::{FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig};
+use crate::fixtures::repl_rig::{
+    DurabilityEligibility, FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig,
+};
 use crate::fixtures::tailnet_proxy::TailnetTraceMode;
 use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
@@ -146,6 +148,7 @@ fn run_trace_harness(mode: TailnetTraceMode, trace_dir: &Path) {
     });
 
     let rig = ReplRig::new(2, options);
+    rig.assert_replication_ready(Duration::from_secs(30));
 
     let ids = [
         rig.create_issue(0, "trace-0"),
@@ -189,13 +192,13 @@ fn repl_daemon_to_daemon_tailnet_roundtrip() {
     options.seed = 19;
 
     let rig = ReplRig::new(2, options);
+    rig.assert_replication_ready(Duration::from_secs(30));
 
     let ids = [
         rig.create_issue(0, "tailnet-0"),
         rig.create_issue(1, "tailnet-1"),
     ];
 
-    rig.assert_peers_seen(Duration::from_secs(30));
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
     wait_for_sample(&rig, &ids, Duration::from_secs(20));
 }
@@ -228,6 +231,7 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
     options.fault_profile_by_link = Some(by_link);
 
     let rig = ReplRig::new(2, options);
+    rig.assert_replication_ready(Duration::from_secs(60));
 
     let ids = [
         rig.create_issue(0, "pathology-0"),
@@ -270,7 +274,7 @@ fn repl_checkpoint_bootstrap_under_churn() {
     let mut options = ReplRigOptions::default();
     options.seed = 73;
     options.wal_segment_max_bytes = Some(64 * 1024);
-    options.checkpoints_enabled = true;
+    // Note: checkpoints are now always enabled by default
 
     let rig = ReplRig::new(2, options);
 
@@ -337,6 +341,7 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     options.fault_profile = Some(FaultProfile::tailnet());
 
     let rig = ReplRig::new(2, options);
+    rig.assert_replication_ready(Duration::from_secs(30));
 
     let initial = [
         rig.create_issue(0, "tailnet-crash-pre-0"),
@@ -382,7 +387,12 @@ fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
     }
 
     let replica = rig.node(1).replica_id();
-    rig.wait_for_durability_eligible(0, replica, false, Duration::from_secs(30));
+    rig.wait_for_durability_eligible(
+        0,
+        replica,
+        DurabilityEligibility::Ineligible,
+        Duration::from_secs(30),
+    );
 
     let post_roster = [
         rig.create_issue(0, "roster-post-0"),
@@ -481,6 +491,7 @@ fn repl_daemon_replicated_fsync_receipt() {
     options.seed = 31;
 
     let rig = ReplRig::new(3, options);
+    rig.assert_peers_seen(Duration::from_secs(30));
 
     let (issue_id, receipt) =
         create_issue_with_durability(&rig, 0, "durability-ok", NonZeroU32::new(2).unwrap());

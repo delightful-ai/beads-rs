@@ -26,8 +26,6 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
             ),
         })),
         MigrateCmd::FromGo(args) => {
-            use std::time::{SystemTime, UNIX_EPOCH};
-
             use crate::git::SyncProcess;
 
             let actor = ctx.actor_id()?;
@@ -64,16 +62,9 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 }));
             }
 
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let resolution_stamp =
-                crate::core::Stamp::new(crate::core::WriteStamp::new(now_ms, 0), actor.clone());
-
             let committed = SyncProcess::new(ctx.repo.clone())
                 .fetch(&repo)?
-                .merge(&imported, resolution_stamp)?
+                .merge(&imported)?
                 .commit(&repo)?;
             let commit_oid = committed.commit_oid().to_string();
             let pushed = if !args.no_push {

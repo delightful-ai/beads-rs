@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::admin::{
     AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
     AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
-    AdminReloadPoliciesOutput, AdminReloadReplicationOutput, AdminRotateReplicaIdOutput,
-    AdminScrubOutput, AdminStatusOutput, DaemonInfo,
+    AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, DaemonInfo,
 };
 use crate::api::deps::{DepCycles, DepEdge};
 use crate::api::issues::{
@@ -100,6 +100,9 @@ pub enum QueryResult {
 
     /// Admin reload replication runtime.
     AdminReloadReplication(AdminReloadReplicationOutput),
+
+    /// Admin reload limits report.
+    AdminReloadLimits(AdminReloadLimitsOutput),
 
     /// Maintenance mode toggle.
     AdminMaintenanceMode(AdminMaintenanceModeOutput),

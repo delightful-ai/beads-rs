@@ -79,6 +79,13 @@ pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
+        AdminCmd::ReloadLimits => {
+            let req = Request::AdminReloadLimits {
+                repo: ctx.repo.clone(),
+            };
+            let ok = send(&req)?;
+            print_ok(&ok, ctx.json)
+        }
         AdminCmd::RotateReplicaId => {
             let req = Request::AdminRotateReplicaId {
                 repo: ctx.repo.clone(),

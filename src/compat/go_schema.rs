@@ -5,9 +5,10 @@
 
 use serde::Serialize;
 
-use crate::core::bead::Bead;
+use crate::core::BeadView;
+use crate::core::Stamp;
 use crate::core::composite::{Claim, Note, Workflow};
-use crate::core::dep::{DepEdge, DepKey};
+use crate::core::dep::DepKey;
 use crate::core::domain::DepKind;
 use crate::core::state::CanonicalState;
 use crate::core::tombstone::Tombstone;
@@ -99,7 +100,13 @@ impl GoIssue {
     /// Convert a Rust Bead to a Go-compatible issue.
     ///
     /// `is_blocked` should be true if the bead has unfinished blocking dependencies.
-    pub fn from_bead(bead: &Bead, deps: &[(DepKey, &DepEdge)], is_blocked: bool) -> Self {
+    pub fn from_view(
+        view: &BeadView,
+        deps: &[DepKey],
+        is_blocked: bool,
+        dep_stamp: Option<&Stamp>,
+    ) -> Self {
+        let bead = &view.bead;
         let status = derive_status(&bead.fields.workflow.value, is_blocked);
 
         let (closed_at, close_reason) = match bead.fields.workflow.value.closure() {
@@ -115,32 +122,25 @@ impl GoIssue {
             Claim::Unclaimed => None,
         };
 
-        let labels: Vec<String> = bead
-            .fields
-            .labels
-            .value
-            .iter()
-            .map(|l| l.as_str().to_string())
-            .collect();
+        let labels: Vec<String> = view.labels.iter().map(|l| l.as_str().to_string()).collect();
 
+        // Go export requires per-dependency stamps; OR-Set deps only track a global stamp.
+        let dep_stamp = dep_stamp.unwrap_or_else(|| view.updated_stamp());
         let dependencies: Vec<GoDependency> = deps
             .iter()
-            .filter(|(_, edge)| edge.is_active())
-            .map(|(key, edge)| GoDependency::from_edge(key, edge, bead.core.id.as_str()))
+            .map(|key| GoDependency::from_key(key, bead.core.id.as_str(), dep_stamp))
             .collect();
 
-        let comments: Vec<GoComment> = bead
+        let comments: Vec<GoComment> = view
             .notes
-            .sorted()
             .iter()
             .enumerate()
             .map(|(i, note)| GoComment::from_note(note, bead.core.id.as_str(), i as i64 + 1))
             .collect();
 
         // Concatenate notes text for the legacy "notes" field (optional)
-        let notes_text: String = bead
+        let notes_text: String = view
             .notes
-            .sorted()
             .iter()
             .map(|n| n.content.as_str())
             .collect::<Vec<_>>()
@@ -163,7 +163,7 @@ impl GoIssue {
             assignee,
             estimated_minutes: bead.fields.estimated_minutes.value,
             created_at: stamp_to_rfc3339(bead.core.created()),
-            updated_at: stamp_to_rfc3339(&bead.updated_stamp()),
+            updated_at: stamp_to_rfc3339(view.updated_stamp()),
             closed_at,
             close_reason,
             external_ref: bead.fields.external_ref.value.clone(),
@@ -206,13 +206,13 @@ impl GoIssue {
 }
 
 impl GoDependency {
-    fn from_edge(key: &DepKey, edge: &DepEdge, issue_id: &str) -> Self {
+    fn from_key(key: &DepKey, issue_id: &str, stamp: &Stamp) -> Self {
         GoDependency {
             issue_id: issue_id.to_string(),
             depends_on_id: key.to().as_str().to_string(),
             dep_type: dep_kind_to_go_type(key.kind()),
-            created_at: stamp_to_rfc3339(&edge.created),
-            created_by: edge.created.by.as_str().to_string(),
+            created_at: stamp_to_rfc3339(stamp),
+            created_by: stamp.by.as_str().to_string(),
         }
     }
 }
@@ -275,11 +275,7 @@ fn write_stamp_to_rfc3339(ws: &crate::core::time::WriteStamp) -> String {
 /// Check if a bead is blocked by unfinished dependencies.
 pub fn is_bead_blocked(bead_id: &crate::core::identity::BeadId, state: &CanonicalState) -> bool {
     // Get all dependencies where this bead depends on something
-    for (key, edge) in state.deps_from(bead_id) {
-        if !edge.is_active() {
-            continue;
-        }
-
+    for key in state.deps_from(bead_id) {
         // Only Blocks kind actually blocks
         if key.kind() != DepKind::Blocks {
             continue;

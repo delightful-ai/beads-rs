@@ -224,6 +224,17 @@ impl StoreRuntime {
         )
     }
 
+    pub fn reload_limits(&mut self, limits: &Limits) {
+        self.admission = AdmissionController::new(limits);
+        if let Err(err) = self
+            .broadcaster
+            .update_limits(BroadcasterLimits::from_limits(limits))
+        {
+            tracing::warn!("failed to update broadcaster limits: {err}");
+        }
+        self.event_wal.update_limits(limits);
+    }
+
     pub fn durable_head_sha(
         &self,
         namespace: &NamespaceId,
@@ -478,6 +489,18 @@ impl StoreRuntime {
         let path = paths::store_meta_path(self.meta.store_id());
         write_store_meta(&path, &self.meta)?;
         Ok((old, new))
+    }
+
+    pub fn next_orset_counter(&mut self) -> Result<u64, StoreRuntimeError> {
+        let next = self
+            .meta
+            .orset_counter
+            .checked_add(1)
+            .expect("orset counter overflow");
+        self.meta.orset_counter = next;
+        let path = paths::store_meta_path(self.meta.store_id());
+        write_store_meta(&path, &self.meta)?;
+        Ok(next)
     }
 }
 
@@ -956,18 +979,18 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::core::bead::{BeadCore, BeadFields};
-    use crate::core::collections::Labels;
     use crate::core::composite::{Claim, Workflow};
     use crate::core::crdt::Lww;
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, DepEdge, DepKey, StoreState};
+    use crate::core::{ActorId, CanonicalState, DepKey, Dot, ReplicaId, StoreState};
     use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
     use crate::paths;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use uuid::Uuid;
 
     fn write_meta_for(store_id: StoreId, replica_id: ReplicaId, now_ms: u64) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
@@ -1113,6 +1136,38 @@ mod tests {
     }
 
     #[test]
+    fn store_runtime_persists_orset_counter() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([32u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let mut runtime = StoreRuntime::open(
+            store_id,
+            RemoteUrl("example.com/test/repo".to_string()),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        let first = runtime.next_orset_counter().expect("increment");
+        let second = runtime.next_orset_counter().expect("increment");
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+
+        let meta_path = paths::store_meta_path(store_id);
+        let meta = read_store_meta_optional(&meta_path)
+            .expect("read meta")
+            .expect("meta exists");
+        assert_eq!(meta.orset_counter, 2);
+    }
+
+    #[test]
     fn store_config_defaults_to_cache_and_persists() {
         let temp = TempDir::new().expect("temp dir");
         let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
@@ -1211,7 +1266,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::default(), stamp.clone()),
             bead_type: Lww::new(BeadType::Task, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -1220,11 +1274,13 @@ mod tests {
         };
         let bead = crate::core::Bead::new(core, fields);
         let dep_key = DepKey::new(bead_id.clone(), dep_to, DepKind::Blocks).expect("dep key");
-        let dep_edge = DepEdge::new(stamp.clone());
-
         let mut core_state = CanonicalState::new();
         core_state.insert(bead).expect("insert bead");
-        core_state.insert_dep(dep_key.clone(), dep_edge);
+        let dep_dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        core_state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
         let mut store_state = StoreState::new();
         store_state.set_namespace_state(namespace.clone(), core_state);
         runtime.state = store_state;

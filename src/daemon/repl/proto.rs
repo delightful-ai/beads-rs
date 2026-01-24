@@ -1531,6 +1531,7 @@ mod tests {
             .insert(crate::core::TxnOpV1::NoteAppend(NoteAppendV1 {
                 bead_id: BeadId::parse("bd-test1").unwrap(),
                 note,
+                lineage: None,
             }))
             .unwrap();
 

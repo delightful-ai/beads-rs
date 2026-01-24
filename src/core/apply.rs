@@ -1,24 +1,27 @@
 //! Deterministic EventBody application into CanonicalState.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use thiserror::Error;
 
-use super::bead::{BeadCore, BeadFields};
-use super::collections::Labels;
+use super::bead::{Bead, BeadCore, BeadFields};
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
-use super::dep::{DepEdge, DepKey, DepLife};
+use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
 use super::event::{EventBody, EventKindV1, TxnV1};
 use super::identity::{ActorId, BeadId, NoteId};
-use super::state::CanonicalState;
+use super::state::{CanonicalState, bead_collision_cmp, note_collision_cmp};
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
 use super::wire_bead::{
-    NotesPatch, TxnOpV1, WireBeadPatch, WireDepDeleteV1, WireDepV1, WireNoteV1, WirePatch,
-    WireTombstoneV1,
+    TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireLabelAddV1, WireLabelRemoveV1,
+    WireNoteV1, WirePatch, WireTombstoneV1,
 };
+
+#[cfg(test)]
+use super::event::sha256_bytes;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NoteKey {
@@ -39,12 +42,6 @@ pub enum ApplyError {
     UnsupportedKind(String),
     #[error("bead {id} missing creation stamp")]
     MissingCreationStamp { id: BeadId },
-    #[error("bead {id} creation collision")]
-    BeadCollision { id: BeadId },
-    #[error("note collision for {bead_id}:{note_id}")]
-    NoteCollision { bead_id: BeadId, note_id: NoteId },
-    #[error("note append missing bead {id}")]
-    MissingBead { id: BeadId },
     #[error("invalid claim patch for {id}: {reason}")]
     InvalidClaimPatch { id: BeadId, reason: String },
     #[error("invalid dependency: {reason}")]
@@ -68,14 +65,26 @@ pub fn apply_event(
             TxnOpV1::BeadDelete(delete) => {
                 apply_bead_delete(state, delete, &mut outcome)?;
             }
-            TxnOpV1::DepUpsert(dep) => {
-                apply_dep_upsert(state, dep, &mut outcome)?;
+            TxnOpV1::LabelAdd(op) => {
+                apply_label_add(state, op, &stamp, &mut outcome)?;
             }
-            TxnOpV1::DepDelete(dep) => {
-                apply_dep_delete(state, dep, &mut outcome)?;
+            TxnOpV1::LabelRemove(op) => {
+                apply_label_remove(state, op, &stamp, &mut outcome)?;
+            }
+            TxnOpV1::DepAdd(dep) => {
+                apply_dep_add(state, dep, &stamp, &mut outcome)?;
+            }
+            TxnOpV1::DepRemove(dep) => {
+                apply_dep_remove(state, dep, &stamp, &mut outcome)?;
             }
             TxnOpV1::NoteAppend(append) => {
-                apply_note_append(state, append.bead_id.clone(), &append.note, &mut outcome)?;
+                apply_note_append(
+                    state,
+                    append.bead_id.clone(),
+                    &append.note,
+                    append.lineage_stamp(),
+                    &mut outcome,
+                )?;
             }
         }
     }
@@ -112,15 +121,51 @@ fn apply_bead_upsert(
         return Err(ApplyError::MissingCreationStamp { id: id.clone() });
     }
 
-    if let Some(bead) = state.get_live_mut(&id) {
+    if let Some(existing) = state.get_live(&id).cloned() {
         if let (Some(at), Some(by)) = (patch.created_at, patch.created_by.as_ref()) {
-            let incoming = Stamp::new(WriteStamp::new(at.0, at.1), by.clone());
-            if bead.core.created() != &incoming {
-                return Err(ApplyError::BeadCollision { id: id.clone() });
+            let incoming_created = Stamp::new(WriteStamp::new(at.0, at.1), by.clone());
+            if state.has_lineage_tombstone(&id, &incoming_created) {
+                return Ok(());
+            }
+            if existing.core.created() != &incoming_created {
+                let core = BeadCore::new(
+                    id.clone(),
+                    incoming_created.clone(),
+                    patch.created_on_branch.clone(),
+                );
+                let incoming = Bead::new(core, fields_from_patch(patch, event_stamp)?);
+                // Compute deleted stamp before move for deterministic tombstone regardless of apply order
+                let deleted = std::cmp::max(
+                    existing.core.created().clone(),
+                    incoming.core.created().clone(),
+                );
+                let ordering = bead_collision_cmp(state, &existing, &incoming);
+                let (winner, loser_stamp, incoming_won) = if ordering == Ordering::Less {
+                    (incoming, existing.core.created().clone(), true)
+                } else {
+                    (existing, incoming.core.created().clone(), false)
+                };
+
+                state.insert_tombstone(Tombstone::new_collision(
+                    id.clone(),
+                    deleted,
+                    loser_stamp,
+                    None,
+                ));
+                if incoming_won {
+                    state.insert_live(winner);
+                }
+                outcome.changed_beads.insert(id);
+                return Ok(());
             }
         }
-        let changed = apply_patch_to_bead(bead, patch, event_stamp, outcome)?;
-        if changed {
+
+        let field_changed = {
+            let bead = state.get_live_mut(&id).expect("live bead checked above");
+            apply_patch_to_bead(bead, patch, event_stamp, outcome)?
+        };
+
+        if field_changed {
             outcome.changed_beads.insert(id);
         }
         return Ok(());
@@ -139,16 +184,11 @@ fn apply_bead_upsert(
     }
 
     let core = BeadCore::new(id.clone(), created, patch.created_on_branch.clone());
-    let mut bead = super::Bead::new(core, fields_from_patch(patch, event_stamp)?);
-    if let NotesPatch::AtLeast(notes) = &patch.notes {
-        for note in notes {
-            let note = note_to_core(note);
-            apply_note(&mut bead, note, outcome)?;
-        }
-    }
+    let bead = super::Bead::new(core, fields_from_patch(patch, event_stamp)?);
     state
         .insert(bead)
-        .map_err(|_| ApplyError::BeadCollision { id: id.clone() })?;
+        .expect("bead collision should be handled before insert");
+
     outcome.changed_beads.insert(id);
     Ok(())
 }
@@ -182,8 +222,8 @@ fn apply_bead_delete(
         return Ok(());
     }
 
-    if let Some(bead) = state.get_live(&id)
-        && bead.updated_stamp() > tombstone.deleted
+    if let Some(updated) = state.updated_stamp_for(&id)
+        && updated > tombstone.deleted
     {
         return Ok(());
     }
@@ -199,45 +239,77 @@ fn apply_bead_delete(
     Ok(())
 }
 
-fn apply_dep_upsert(
+fn apply_label_add(
     state: &mut CanonicalState,
-    dep: &WireDepV1,
+    op: &WireLabelAddV1,
+    event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
-        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
-    let created = Stamp::new(WriteStamp::from(dep.created_at), dep.created_by.clone());
-    let edge = match (dep.deleted_at, dep.deleted_by.as_ref()) {
-        (Some(at), Some(by)) => {
-            let deleted = Stamp::new(WriteStamp::from(at), by.clone());
-            let life = Lww::new(DepLife::Deleted, deleted);
-            DepEdge::with_life(created, life)
-        }
-        (None, None) => DepEdge::new(created),
-        _ => {
-            return Err(ApplyError::InvalidDependency {
-                reason: "deleted_at and deleted_by must be set together".into(),
-            });
-        }
-    };
-
-    state.insert_dep(key.clone(), edge);
-    outcome.changed_deps.insert(key);
+    let dot = op.dot.into();
+    let lineage = op.lineage_stamp();
+    let change = state.apply_label_add(
+        op.bead_id.clone(),
+        op.label.clone(),
+        dot,
+        event_stamp.clone(),
+        lineage.clone(),
+    );
+    if change.changed() && matches_live_lineage(state, &op.bead_id, lineage.as_ref()) {
+        outcome.changed_beads.insert(op.bead_id.clone());
+    }
     Ok(())
 }
 
-fn apply_dep_delete(
+fn apply_label_remove(
     state: &mut CanonicalState,
-    dep: &WireDepDeleteV1,
+    op: &WireLabelRemoveV1,
+    event_stamp: &Stamp,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let ctx = (&op.ctx).into();
+    let lineage = op.lineage_stamp();
+    let change = state.apply_label_remove(
+        op.bead_id.clone(),
+        &op.label,
+        &ctx,
+        event_stamp.clone(),
+        lineage.clone(),
+    );
+    if change.changed() && matches_live_lineage(state, &op.bead_id, lineage.as_ref()) {
+        outcome.changed_beads.insert(op.bead_id.clone());
+    }
+    Ok(())
+}
+
+fn apply_dep_add(
+    state: &mut CanonicalState,
+    dep: &WireDepAddV1,
+    event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
         .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
-    let deleted = Stamp::new(WriteStamp::from(dep.deleted_at), dep.deleted_by.clone());
-    let life = Lww::new(DepLife::Deleted, deleted.clone());
-    let edge = DepEdge::with_life(deleted, life);
-    state.insert_dep(key.clone(), edge);
-    outcome.changed_deps.insert(key);
+    let dot = dep.dot.into();
+    let change = state.apply_dep_add(key.clone(), dot, event_stamp.clone());
+    for changed in change.added.iter().chain(change.removed.iter()) {
+        outcome.changed_deps.insert(changed.clone());
+    }
+    Ok(())
+}
+
+fn apply_dep_remove(
+    state: &mut CanonicalState,
+    dep: &WireDepRemoveV1,
+    event_stamp: &Stamp,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
+        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
+    let ctx = (&dep.ctx).into();
+    let change = state.apply_dep_remove(&key, &ctx, event_stamp.clone());
+    for changed in change.added.iter().chain(change.removed.iter()) {
+        outcome.changed_deps.insert(changed.clone());
+    }
     Ok(())
 }
 
@@ -269,9 +341,6 @@ fn fields_from_patch(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<BeadF
     }
     if let Some(bead_type) = patch.bead_type {
         fields.bead_type = Lww::new(bead_type, event_stamp.clone());
-    }
-    if let Some(labels) = &patch.labels {
-        fields.labels = Lww::new(labels.clone(), event_stamp.clone());
     }
     if !patch.external_ref.is_keep() {
         let existing = fields.external_ref.value.clone();
@@ -322,7 +391,7 @@ fn apply_patch_to_bead(
     bead: &mut super::Bead,
     patch: &WireBeadPatch,
     event_stamp: &Stamp,
-    outcome: &mut ApplyOutcome,
+    _outcome: &mut ApplyOutcome,
 ) -> Result<bool, ApplyError> {
     let mut changed = false;
 
@@ -357,9 +426,6 @@ fn apply_patch_to_bead(
     }
     if let Some(bead_type) = patch.bead_type {
         changed |= update_lww(&mut bead.fields.bead_type, bead_type, event_stamp);
-    }
-    if let Some(labels) = &patch.labels {
-        changed |= update_lww(&mut bead.fields.labels, labels.clone(), event_stamp);
     }
     if !patch.external_ref.is_keep() {
         let existing = bead.fields.external_ref.value.clone();
@@ -404,15 +470,6 @@ fn apply_patch_to_bead(
             &patch.assignee_expires,
         )?;
         changed |= update_lww(&mut bead.fields.claim, claim_value, event_stamp);
-    }
-
-    if let NotesPatch::AtLeast(notes) = &patch.notes {
-        for note in notes {
-            let note = note_to_core(note);
-            if apply_note(bead, note, outcome)? {
-                changed = true;
-            }
-        }
     }
 
     Ok(changed)
@@ -484,36 +541,42 @@ fn apply_note_append(
     state: &mut CanonicalState,
     bead_id: BeadId,
     note: &WireNoteV1,
+    lineage: Option<Stamp>,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let Some(bead) = state.get_live_mut(&bead_id) else {
-        return Err(ApplyError::MissingBead { id: bead_id });
-    };
     let note = note_to_core(note);
-    if apply_note(bead, note, outcome)? {
+    if apply_note(state, bead_id.clone(), lineage.clone(), note, outcome)?
+        && matches_live_lineage(state, &bead_id, lineage.as_ref())
+    {
         outcome.changed_beads.insert(bead_id);
     }
     Ok(())
 }
 
 fn apply_note(
-    bead: &mut super::Bead,
+    state: &mut CanonicalState,
+    bead_id: BeadId,
+    lineage: Option<Stamp>,
     note: Note,
     outcome: &mut ApplyOutcome,
 ) -> Result<bool, ApplyError> {
-    if let Some(existing) = bead.notes.get(&note.id) {
-        if existing == &note {
+    if let Some(existing) = state.insert_note(bead_id.clone(), lineage.clone(), note.clone()) {
+        if existing == note {
             return Ok(false);
         }
-        return Err(ApplyError::NoteCollision {
-            bead_id: bead.id().clone(),
-            note_id: note.id.clone(),
-        });
+        if note_collision_cmp(&existing, &note) == Ordering::Less {
+            state.replace_note(bead_id.clone(), lineage.clone(), note.clone());
+            outcome.changed_notes.insert(NoteKey {
+                bead_id,
+                note_id: note.id.clone(),
+            });
+            return Ok(true);
+        }
+        return Ok(false);
     }
 
-    bead.notes.insert(note.clone());
     outcome.changed_notes.insert(NoteKey {
-        bead_id: bead.id().clone(),
+        bead_id,
         note_id: note.id,
     });
     Ok(true)
@@ -526,6 +589,16 @@ fn note_to_core(note: &WireNoteV1) -> Note {
         note.author.clone(),
         WriteStamp::new(note.at.0, note.at.1),
     )
+}
+
+fn matches_live_lineage(state: &CanonicalState, bead_id: &BeadId, lineage: Option<&Stamp>) -> bool {
+    let Some(bead) = state.get_live(bead_id) else {
+        return false;
+    };
+    match lineage {
+        Some(lineage) => bead.core.created() == lineage,
+        None => !state.has_collision_tombstone(bead_id),
+    }
 }
 
 fn update_lww<T: Clone + PartialEq>(field: &mut Lww<T>, value: T, stamp: &Stamp) -> bool {
@@ -555,7 +628,6 @@ fn default_fields(stamp: Stamp) -> BeadFields {
         acceptance_criteria: Lww::new(None, stamp.clone()),
         priority: Lww::new(Priority::default(), stamp.clone()),
         bead_type: Lww::new(BeadType::Task, stamp.clone()),
-        labels: Lww::new(Labels::new(), stamp.clone()),
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
@@ -567,14 +639,16 @@ fn default_fields(stamp: Stamp) -> BeadFields {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::collections::Label;
     use crate::core::domain::DepKind;
     use crate::core::event::{EventKindV1, HlcMax};
     use crate::core::identity::{
         ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
     };
     use crate::core::namespace::NamespaceId;
-    use crate::core::wire_bead::WireStamp;
+    use crate::core::wire_bead::{WireDotV1, WireDvvV1, WireLineageStamp, WireStamp};
     use crate::core::{Seq1, TxnDeltaV1};
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     fn actor_id(actor: &str) -> ActorId {
@@ -603,12 +677,17 @@ mod tests {
             at: WireStamp(11, 1),
         };
 
+        let lineage = WireLineageStamp {
+            at: patch.created_at.expect("created_at"),
+            by: patch.created_by.clone().expect("created_by"),
+        };
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         delta
             .insert(TxnOpV1::NoteAppend(super::super::wire_bead::NoteAppendV1 {
                 bead_id: BeadId::parse("bd-apply1").unwrap(),
                 note,
+                lineage: Some(lineage),
             }))
             .unwrap();
 
@@ -643,6 +722,23 @@ mod tests {
         event
     }
 
+    fn bead_upsert_event(
+        bead_id: BeadId,
+        created_at: WireStamp,
+        created_by: ActorId,
+        title: &str,
+        wall_ms: u64,
+    ) -> EventBody {
+        let mut patch = WireBeadPatch::new(bead_id);
+        patch.created_at = Some(created_at);
+        patch.created_by = Some(created_by);
+        patch.title = Some(title.to_string());
+
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        event_with_delta(delta, wall_ms)
+    }
+
     #[test]
     fn apply_event_is_idempotent() {
         let mut state = CanonicalState::new();
@@ -660,14 +756,172 @@ mod tests {
     }
 
     #[test]
-    fn note_collision_is_detected() {
+    fn note_collision_is_deterministic() {
         let mut state = CanonicalState::new();
         let event = sample_event("note-a");
         apply_event(&mut state, &event).unwrap();
 
         let event_b = sample_event("note-b");
-        let err = apply_event(&mut state, &event_b).unwrap_err();
-        assert!(matches!(err, ApplyError::NoteCollision { .. }));
+        apply_event(&mut state, &event_b).unwrap();
+
+        let bead_id = BeadId::parse("bd-apply1").unwrap();
+        let note_id = NoteId::new("note-apply").unwrap();
+        let lineage = state
+            .get_live(&bead_id)
+            .expect("bead should be live")
+            .core
+            .created()
+            .clone();
+        let stored = state
+            .note_store()
+            .get(&bead_id, &lineage, &note_id)
+            .expect("note should be stored");
+        let hash_a = sha256_bytes("note-a".as_bytes());
+        let hash_b = sha256_bytes("note-b".as_bytes());
+        let expected = if hash_a >= hash_b { "note-a" } else { "note-b" };
+        assert_eq!(stored.content, expected);
+    }
+
+    #[test]
+    fn apply_claim_patch_set_with_clear_expiry_is_total() {
+        let mut state = CanonicalState::new();
+        let bead_id = BeadId::parse("bd-claim").unwrap();
+        let create = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(10, 1),
+            actor_id("alice"),
+            "title",
+            10,
+        );
+        apply_event(&mut state, &create).unwrap();
+
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        patch.assignee = WirePatch::Set(actor_id("bob"));
+        patch.assignee_expires = WirePatch::Clear;
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        let event = event_with_delta(delta, 20);
+        apply_event(&mut state, &event).unwrap();
+
+        let bead = state.get_live(&bead_id).expect("bead");
+        match &bead.fields.claim.value {
+            Claim::Claimed { assignee, expires } => {
+                assert_eq!(assignee, &actor_id("bob"));
+                assert_eq!(*expires, None);
+            }
+            Claim::Unclaimed => panic!("expected claimed"),
+        }
+    }
+
+    #[test]
+    fn note_append_before_bead_exists_is_stored() {
+        let mut state = CanonicalState::new();
+        let bead_id = BeadId::parse("bd-orphan-note").unwrap();
+        let note_id = NoteId::new("note-orphan").unwrap();
+        let note = WireNoteV1 {
+            id: note_id.clone(),
+            content: "orphan".to_string(),
+            author: actor_id("alice"),
+            at: WireStamp(10, 1),
+        };
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::NoteAppend(super::super::wire_bead::NoteAppendV1 {
+                bead_id: bead_id.clone(),
+                note,
+                lineage: None,
+            }))
+            .unwrap();
+        let outcome = apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
+
+        assert!(state.get_live(&bead_id).is_none());
+        assert!(state.note_id_exists(&bead_id, &note_id));
+        assert!(outcome.changed_notes.contains(&NoteKey {
+            bead_id: bead_id.clone(),
+            note_id: note_id.clone(),
+        }));
+        assert!(!outcome.changed_beads.contains(&bead_id));
+    }
+
+    #[test]
+    fn label_ops_on_missing_bead_are_total() {
+        let mut state = CanonicalState::new();
+        let bead_id = BeadId::parse("bd-orphan-label").unwrap();
+        let label = Label::parse("orphan").unwrap();
+        let replica_id = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+                bead_id: bead_id.clone(),
+                label: label.clone(),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::new(),
+                    dots: Vec::new(),
+                },
+                lineage: None,
+            }))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id.clone(),
+                label: label.clone(),
+                dot: WireDotV1 {
+                    replica: replica_id,
+                    counter: 1,
+                },
+                lineage: None,
+            }))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
+
+        let labels = state.legacy_labels_for(&bead_id);
+        assert!(labels.contains(label.as_str()));
+    }
+
+    #[test]
+    fn bead_creation_collision_is_deterministic() {
+        let bead_id = BeadId::parse("bd-collision").unwrap();
+        let low_stamp = Stamp::new(WriteStamp::new(10, 1), actor_id("alice"));
+        let high_stamp = Stamp::new(WriteStamp::new(20, 1), actor_id("bob"));
+
+        let event_low = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(10, 1),
+            actor_id("alice"),
+            "low",
+            10,
+        );
+        let event_high = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(20, 1),
+            actor_id("bob"),
+            "high",
+            11,
+        );
+
+        let mut state_a = CanonicalState::new();
+        apply_event(&mut state_a, &event_low).unwrap();
+        apply_event(&mut state_a, &event_high).unwrap();
+
+        let mut state_b = CanonicalState::new();
+        apply_event(&mut state_b, &event_high).unwrap();
+        apply_event(&mut state_b, &event_low).unwrap();
+
+        assert_eq!(
+            state_a.get_live(&bead_id).unwrap().core.created(),
+            &high_stamp
+        );
+        assert_eq!(
+            state_b.get_live(&bead_id).unwrap().core.created(),
+            &high_stamp
+        );
+        assert!(state_a.has_lineage_tombstone(&bead_id, &low_stamp));
+        assert!(state_b.has_lineage_tombstone(&bead_id, &low_stamp));
     }
 
     #[test]
@@ -689,55 +943,55 @@ mod tests {
         let from = BeadId::parse("bd-from").unwrap();
         let to = BeadId::parse("bd-to").unwrap();
         let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let replica_id = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
 
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::DepDelete(WireDepDeleteV1 {
+            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
                 from: from.clone(),
                 to: to.clone(),
                 kind: DepKind::Blocks,
-                deleted_at: WireStamp(10, 0),
-                deleted_by: actor_id("alice"),
+                ctx: WireDvvV1 {
+                    max: std::collections::BTreeMap::from([(replica_id, 10)]),
+                    dots: Vec::new(),
+                },
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
 
-        let edge = state.get_dep(&key).unwrap();
-        assert!(edge.is_deleted());
+        assert!(!state.dep_contains(&key));
 
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: from.clone(),
                 to: to.clone(),
                 kind: DepKind::Blocks,
-                created_at: WireStamp(5, 0),
-                created_by: actor_id("bob"),
-                deleted_at: None,
-                deleted_by: None,
+                dot: WireDotV1 {
+                    replica: replica_id,
+                    counter: 5,
+                },
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
 
-        let edge = state.get_dep(&key).unwrap();
-        assert!(edge.is_deleted());
+        assert!(!state.dep_contains(&key));
 
         let mut delta = TxnDeltaV1::new();
         delta
-            .insert(TxnOpV1::DepUpsert(WireDepV1 {
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 from: from.clone(),
                 to: to.clone(),
                 kind: DepKind::Blocks,
-                created_at: WireStamp(20, 0),
-                created_by: actor_id("carol"),
-                deleted_at: None,
-                deleted_by: None,
+                dot: WireDotV1 {
+                    replica: replica_id,
+                    counter: 20,
+                },
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();
 
-        let edge = state.get_dep(&key).unwrap();
-        assert!(edge.is_active());
+        assert!(state.dep_contains(&key));
     }
 
     #[test]
@@ -759,8 +1013,7 @@ mod tests {
                 deleted_at: WireStamp(10, 0),
                 deleted_by: actor_id("alice"),
                 reason: None,
-                lineage_created_at: None,
-                lineage_created_by: None,
+                lineage: None,
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 21)).unwrap();
@@ -775,5 +1028,107 @@ mod tests {
                 .get_tombstone(&BeadId::parse("bd-delete").unwrap())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn label_add_same_value_different_dot_tracks_change() {
+        let mut state = CanonicalState::new();
+        let bead_id = BeadId::parse("bd-label-change").unwrap();
+        let label = Label::parse("status").unwrap();
+        let replica_a = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let replica_b = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
+
+        // Create the bead first
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        patch.created_at = Some(WireStamp(10, 0));
+        patch.created_by = Some(actor_id("alice"));
+        patch.title = Some("title".to_string());
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
+
+        // First label add
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id.clone(),
+                label: label.clone(),
+                dot: WireDotV1 {
+                    replica: replica_a,
+                    counter: 1,
+                },
+                lineage: None,
+            }))
+            .unwrap();
+        let outcome1 = apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
+        assert!(outcome1.changed_beads.contains(&bead_id));
+
+        // Second label add with different dot but same label value
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id.clone(),
+                label: label.clone(),
+                dot: WireDotV1 {
+                    replica: replica_b,
+                    counter: 1,
+                },
+                lineage: None,
+            }))
+            .unwrap();
+        let outcome2 = apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();
+        // Changed should be tracked even though label value didn't change (new dot added)
+        assert!(outcome2.changed_beads.contains(&bead_id));
+    }
+
+    #[test]
+    fn collision_tombstone_is_order_independent() {
+        let bead_id = BeadId::parse("bd-coll-tomb").unwrap();
+        let low_stamp = Stamp::new(WriteStamp::new(10, 1), actor_id("alice"));
+
+        let event_low = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(10, 1),
+            actor_id("alice"),
+            "low",
+            10,
+        );
+        let event_high = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(20, 1),
+            actor_id("bob"),
+            "high",
+            11,
+        );
+
+        // Apply in order: low then high
+        let mut state_a = CanonicalState::new();
+        apply_event(&mut state_a, &event_low).unwrap();
+        apply_event(&mut state_a, &event_high).unwrap();
+
+        // Apply in order: high then low
+        let mut state_b = CanonicalState::new();
+        apply_event(&mut state_b, &event_high).unwrap();
+        apply_event(&mut state_b, &event_low).unwrap();
+
+        // Both should have collision tombstone for the loser (low_stamp)
+        assert!(state_a.has_lineage_tombstone(&bead_id, &low_stamp));
+        assert!(state_b.has_lineage_tombstone(&bead_id, &low_stamp));
+
+        // Get the collision tombstones via iter_tombstones iterator
+        let tomb_a = state_a
+            .iter_tombstones()
+            .find(|(_, t)| t.lineage.as_ref() == Some(&low_stamp))
+            .map(|(_, t)| t.clone())
+            .expect("collision tombstone exists");
+        let tomb_b = state_b
+            .iter_tombstones()
+            .find(|(_, t)| t.lineage.as_ref() == Some(&low_stamp))
+            .map(|(_, t)| t.clone())
+            .expect("collision tombstone exists");
+
+        // Tombstones must be identical (deleted stamp, lineage stamp)
+        assert_eq!(tomb_a.deleted, tomb_b.deleted);
+        assert_eq!(tomb_a.lineage, tomb_b.lineage);
     }
 }

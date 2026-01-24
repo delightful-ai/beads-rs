@@ -112,10 +112,14 @@ pub fn export_jsonl(
     // but aren't exported to Go-compat format since:
     // 1. beads-go doesn't export them (deleted = removed from export)
     // 2. beads_viewer (bv) doesn't recognize status="tombstone"
-    for (id, bead) in state.iter_live() {
+    for (id, _) in state.iter_live() {
+        let Some(view) = state.bead_view(id) else {
+            continue;
+        };
         let deps: Vec<_> = state.deps_from(id);
         let is_blocked = is_bead_blocked(id, state);
-        issues.push(GoIssue::from_bead(bead, &deps, is_blocked));
+        let dep_stamp = state.dep_store().stamp();
+        issues.push(GoIssue::from_view(&view, &deps, is_blocked, dep_stamp));
     }
 
     // Sort by ID for stable diffs
@@ -289,7 +293,6 @@ mod tests {
     #[test]
     fn test_export_with_beads() {
         use crate::core::bead::{Bead, BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -313,7 +316,6 @@ mod tests {
             acceptance_criteria: Lww::new(None, stamp.clone()),
             priority: Lww::new(Priority::HIGH, stamp.clone()),
             bead_type: Lww::new(BeadType::Bug, stamp.clone()),
-            labels: Lww::new(Labels::new(), stamp.clone()),
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
@@ -535,7 +537,6 @@ mod tests {
     #[test]
     fn test_export_sorted_by_id() {
         use crate::core::bead::{Bead, BeadCore, BeadFields};
-        use crate::core::collections::Labels;
         use crate::core::composite::{Claim, Workflow};
         use crate::core::crdt::Lww;
         use crate::core::domain::{BeadType, Priority};
@@ -561,7 +562,6 @@ mod tests {
                 acceptance_criteria: Lww::new(None, stamp.clone()),
                 priority: Lww::new(Priority::MEDIUM, stamp.clone()),
                 bead_type: Lww::new(BeadType::Task, stamp.clone()),
-                labels: Lww::new(Labels::new(), stamp.clone()),
                 external_ref: Lww::new(None, stamp.clone()),
                 source_repo: Lww::new(None, stamp.clone()),
                 estimated_minutes: Lww::new(None, stamp.clone()),
