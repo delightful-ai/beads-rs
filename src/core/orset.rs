@@ -184,10 +184,8 @@ impl<V: OrSetValue> OrSet<V> {
             Some(owner) => {
                 if *owner == value {
                     false
-                } else if collision_cmp(dot, owner, &value) == Ordering::Less {
-                    true
                 } else {
-                    false
+                    collision_cmp(dot, owner, &value) == Ordering::Less
                 }
             }
         };
