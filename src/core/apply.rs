@@ -42,10 +42,6 @@ pub enum ApplyError {
     UnsupportedKind(String),
     #[error("bead {id} missing creation stamp")]
     MissingCreationStamp { id: BeadId },
-    #[error("bead {id} creation collision")]
-    BeadCollision { id: BeadId },
-    #[error("note collision for {bead_id}:{note_id}")]
-    NoteCollision { bead_id: BeadId, note_id: NoteId },
     #[error("invalid claim patch for {id}: {reason}")]
     InvalidClaimPatch { id: BeadId, reason: String },
     #[error("invalid dependency: {reason}")]
@@ -180,7 +176,7 @@ fn apply_bead_upsert(
     let bead = super::Bead::new(core, fields_from_patch(patch, event_stamp)?);
     state
         .insert(bead)
-        .map_err(|_| ApplyError::BeadCollision { id: id.clone() })?;
+        .expect("bead collision should be handled before insert");
 
     outcome.changed_beads.insert(id);
     Ok(())
