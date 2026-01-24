@@ -19,8 +19,8 @@ use crate::core::tombstone::TombstoneKey;
 use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1};
 use crate::core::{
     ContentHash, Dot, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRoster,
-    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireStamp,
-    WireTombstoneV1, sha256_bytes,
+    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireLineageStamp,
+    WireStamp, WireTombstoneV1, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -412,19 +412,17 @@ fn push_jsonl_line<T: Serialize>(
 
 fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
     let deleted = &tombstone.deleted;
-    let (lineage_created_at, lineage_created_by) = tombstone
+    let lineage = tombstone
         .lineage
         .as_ref()
-        .map(|stamp| (Some(WireStamp::from(&stamp.at)), Some(stamp.by.clone())))
-        .unwrap_or((None, None));
+        .map(WireLineageStamp::from);
 
     WireTombstoneV1 {
         id: tombstone.id.clone(),
         deleted_at: WireStamp::from(&deleted.at),
         deleted_by: deleted.by.clone(),
         reason: tombstone.reason.clone(),
-        lineage_created_at,
-        lineage_created_by,
+        lineage,
     }
 }
 

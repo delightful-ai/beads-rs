@@ -1119,8 +1119,7 @@ impl MutationEngine {
             deleted_at: WireStamp::from(&stamp.at),
             deleted_by: stamp.by.clone(),
             reason: reason.clone(),
-            lineage_created_at: None,
-            lineage_created_by: None,
+            lineage: None,
         };
 
         let mut delta = TxnDeltaV1::new();

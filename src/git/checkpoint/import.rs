@@ -556,20 +556,14 @@ fn read_file_bytes(path: &Path) -> Result<Vec<u8>, CheckpointImportError> {
 
 fn tombstone_from_wire(
     wire: &WireTombstoneV1,
-    path: &Path,
-    line: JsonlLineContext,
+    _path: &Path,
+    _line: JsonlLineContext,
 ) -> Result<Tombstone, CheckpointImportError> {
     let deleted = StampFromWire::stamp(wire.deleted_at, &wire.deleted_by);
-    let lineage = match (wire.lineage_created_at, wire.lineage_created_by.clone()) {
-        (None, None) => None,
-        (Some(at), Some(by)) => Some(StampFromWire::stamp(at, &by)),
-        _ => {
-            return Err(CheckpointImportError::InvalidLineage {
-                path: path.to_path_buf(),
-                line: line.line_no,
-            });
-        }
-    };
+    let lineage = wire
+        .lineage
+        .as_ref()
+        .map(|lineage| StampFromWire::stamp(lineage.at, &lineage.by));
 
     Ok(match lineage {
         Some(stamp) => {

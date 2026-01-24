@@ -972,8 +972,7 @@ mod tests {
                 deleted_at: WireStamp(10, 0),
                 deleted_by: actor_id("alice"),
                 reason: None,
-                lineage_created_at: None,
-                lineage_created_by: None,
+                lineage: None,
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 21)).unwrap();

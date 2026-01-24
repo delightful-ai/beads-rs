@@ -603,16 +603,46 @@ impl WireBeadPatch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireLineageStamp {
+    #[serde(rename = "lineage_created_at")]
+    pub at: WireStamp,
+    #[serde(rename = "lineage_created_by")]
+    pub by: ActorId,
+}
+
+impl WireLineageStamp {
+    pub fn stamp(&self) -> Stamp {
+        Stamp::new(WriteStamp::from(self.at), self.by.clone())
+    }
+}
+
+impl From<&Stamp> for WireLineageStamp {
+    fn from(stamp: &Stamp) -> Self {
+        Self {
+            at: WireStamp::from(&stamp.at),
+            by: stamp.by.clone(),
+        }
+    }
+}
+
+impl From<Stamp> for WireLineageStamp {
+    fn from(stamp: Stamp) -> Self {
+        Self {
+            at: WireStamp::from(stamp.at),
+            by: stamp.by,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireTombstoneV1 {
     pub id: BeadId,
     pub deleted_at: WireStamp,
     pub deleted_by: ActorId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_created_at: Option<WireStamp>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_created_by: Option<ActorId>,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<WireLineageStamp>,
 }
 
 impl WireTombstoneV1 {
@@ -621,9 +651,7 @@ impl WireTombstoneV1 {
     }
 
     pub fn lineage_stamp(&self) -> Option<Stamp> {
-        let at = self.lineage_created_at?;
-        let by = self.lineage_created_by.clone()?;
-        Some(Stamp::new(WriteStamp::from(at), by))
+        self.lineage.as_ref().map(WireLineageStamp::stamp)
     }
 }
 
@@ -1042,8 +1070,7 @@ mod tests {
             deleted_at: WireStamp(5, 1),
             deleted_by: actor_id("alice"),
             reason: None,
-            lineage_created_at: None,
-            lineage_created_by: None,
+            lineage: None,
         };
         let dep_add = WireDepAddV1 {
             from: bead_id("bd-order"),
@@ -1124,8 +1151,7 @@ mod tests {
                 deleted_at: WireStamp(3, 0),
                 deleted_by: actor_id("alice"),
                 reason: Some("cleanup".to_string()),
-                lineage_created_at: None,
-                lineage_created_by: None,
+                lineage: None,
             }))
             .unwrap();
         delta
