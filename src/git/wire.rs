@@ -822,6 +822,7 @@ mod tests {
     use super::*;
     use crate::core::{DepKind, ReplicaId};
     use proptest::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
 
     fn actor_id(actor: &str) -> ActorId {
@@ -1282,6 +1283,94 @@ mod tests {
                 DepKind::Related
             ]
         );
+    }
+
+    #[test]
+    fn legacy_deps_jsonl_parses_expected_entries() {
+        let stamp = Stamp::new(WriteStamp::new(42, 7), actor_id("alice"));
+        let replica_a = ReplicaId::from(Uuid::from_bytes([4u8; 16]));
+        let replica_b = ReplicaId::from(Uuid::from_bytes([7u8; 16]));
+        let key_blocks =
+            DepKey::new(bead_id("bd-legacy-from"), bead_id("bd-legacy-to"), DepKind::Blocks)
+                .unwrap();
+        let key_related = DepKey::new(
+            bead_id("bd-legacy-from"),
+            bead_id("bd-legacy-other"),
+            DepKind::Related,
+        )
+        .unwrap();
+
+        let wire = WireDepStore {
+            cc: Dvv {
+                max: BTreeMap::from([(replica_a, 2), (replica_b, 5)]),
+            },
+            entries: vec![
+                WireDepEntry {
+                    key: key_related.clone(),
+                    dots: vec![dot(7, 5), dot(7, 3)],
+                },
+                WireDepEntry {
+                    key: key_blocks.clone(),
+                    dots: vec![dot(4, 2)],
+                },
+            ],
+            stamp: Some(stamp_to_field(&stamp)),
+        };
+
+        let mut bytes = serde_json::to_vec(&wire).expect("serialize wire deps");
+        bytes.push(b'\n');
+        let parsed = parse_deps(&bytes).expect("parse_deps");
+
+        assert!(parsed.contains(&key_blocks));
+        assert!(parsed.contains(&key_related));
+        assert_eq!(parsed.stamp(), Some(&stamp));
+        assert_eq!(parsed.cc().max.get(&replica_a), Some(&2));
+        assert_eq!(parsed.cc().max.get(&replica_b), Some(&5));
+        let related_dots = parsed.dots_for(&key_related).expect("related dots");
+        assert_eq!(
+            related_dots,
+            &BTreeSet::from([dot(7, 5), dot(7, 3)])
+        );
+    }
+
+    #[test]
+    fn legacy_deps_parse_then_serialize_is_deterministic() {
+        let key_parent =
+            DepKey::new(bead_id("bd-legacy-a"), bead_id("bd-legacy-b"), DepKind::Parent).unwrap();
+        let key_blocks =
+            DepKey::new(bead_id("bd-legacy-a"), bead_id("bd-legacy-c"), DepKind::Blocks).unwrap();
+
+        let wire = WireDepStore {
+            cc: Dvv::default(),
+            entries: vec![
+                WireDepEntry {
+                    key: key_parent.clone(),
+                    dots: vec![dot(9, 2), dot(9, 1)],
+                },
+                WireDepEntry {
+                    key: key_blocks.clone(),
+                    dots: vec![dot(8, 3)],
+                },
+            ],
+            stamp: None,
+        };
+        let mut bytes = serde_json::to_vec(&wire).expect("serialize wire deps");
+        bytes.push(b'\n');
+
+        let parsed = parse_deps(&bytes).expect("parse legacy deps");
+        let mut state = CanonicalState::new();
+        state.set_dep_store(parsed);
+
+        let serialized = serialize_deps(&state).expect("serialize deps");
+        let serialized_again = serialize_deps(&state).expect("serialize deps");
+        assert_eq!(serialized, serialized_again);
+
+        let wire_out: WireDepStore =
+            serde_json::from_slice(&serialized).expect("deps.jsonl should deserialize");
+        let keys: Vec<DepKey> = wire_out.entries.iter().map(|entry| entry.key.clone()).collect();
+        assert_eq!(keys, vec![key_blocks.clone(), key_parent.clone()]);
+        assert_eq!(wire_out.entries[0].dots, vec![dot(8, 3)]);
+        assert_eq!(wire_out.entries[1].dots, vec![dot(9, 1), dot(9, 2)]);
     }
 
     proptest! {
