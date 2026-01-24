@@ -1257,8 +1257,8 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, ContentHash, DepKey,
-        DepKind, Dot, Lww, Priority, ReplicaId, Stamp, Tombstone, Workflow,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, ContentHash, DepKey, DepKind,
+        Dot, Lww, Priority, ReplicaId, Stamp, Tombstone, Workflow,
     };
     use crate::git::WireError;
     #[cfg(feature = "slow-tests")]
@@ -1544,14 +1544,18 @@ mod tests {
         );
         checksums.state = ContentHash::from_bytes([0xAB; 32]);
         let meta_bytes = wire::serialize_meta(Some("test"), None, &checksums).unwrap();
-        let oid = write_store_commit_with_meta_bytes(&repo, None, "bad-checksums", Some(meta_bytes));
+        let oid =
+            write_store_commit_with_meta_bytes(&repo, None, "bad-checksums", Some(meta_bytes));
 
         let err = read_state_at_oid(&repo, oid)
             .err()
             .expect("expected checksum mismatch error");
         assert!(matches!(
             err,
-            SyncError::Wire(WireError::ChecksumMismatch { blob: "state.jsonl", .. })
+            SyncError::Wire(WireError::ChecksumMismatch {
+                blob: "state.jsonl",
+                ..
+            })
         ));
     }
 

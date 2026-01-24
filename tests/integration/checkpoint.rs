@@ -13,8 +13,8 @@ use beads_rs::git::checkpoint::{
 };
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
-    Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreEpoch,
-    StoreId, StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
+    Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreEpoch, StoreId,
+    StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
 };
 
 use crate::fixtures::checkpoint::{

@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
-use crate::core::event::ValidatedBeadPatch;
 use super::ops::{BeadPatch, MapLiveError, OpError, Patch};
 use super::remote::RemoteUrl;
+use crate::core::event::ValidatedBeadPatch;
 use crate::core::{
     ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, CoreError, DepKey,
     DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,

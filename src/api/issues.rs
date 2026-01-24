@@ -410,8 +410,7 @@ mod tests {
     use crate::core::orset::Dot;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Label, Lww,
-        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow,
-        WriteStamp,
+        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow, WriteStamp,
     };
     use uuid::Uuid;
 
@@ -463,12 +462,7 @@ mod tests {
 
         let label = Label::parse("urgent").expect("label");
         let label_stamp = Stamp::new(WriteStamp::new(2_000, 0), actor_id("bob"));
-        state.apply_label_add(
-            id.clone(),
-            label,
-            dot(1, 1),
-            label_stamp.clone(),
-        );
+        state.apply_label_add(id.clone(), label, dot(1, 1), label_stamp.clone());
 
         let view = state.bead_view(&id).expect("bead view");
         let summary = IssueSummary::from_view(&NamespaceId::core(), &view);

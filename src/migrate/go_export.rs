@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepKey,
-    DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId, Stamp,
-    Tombstone, Workflow, WriteStamp,
+    DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId, Stamp, Tombstone,
+    Workflow, WriteStamp,
 };
 use crate::daemon::IpcError;
 use crate::daemon::OpError;
@@ -263,12 +263,7 @@ pub fn import_go_export(
         } else {
             for label in labels.iter() {
                 let dot = legacy_dot_from_bytes(label.as_str().as_bytes(), &updated_stamp);
-                state.apply_label_add(
-                    id.clone(),
-                    label.clone(),
-                    dot,
-                    updated_stamp.clone(),
-                );
+                state.apply_label_add(id.clone(), label.clone(), dot, updated_stamp.clone());
             }
         }
 

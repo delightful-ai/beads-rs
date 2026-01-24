@@ -412,10 +412,7 @@ fn push_jsonl_line<T: Serialize>(
 
 fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
     let deleted = &tombstone.deleted;
-    let lineage = tombstone
-        .lineage
-        .as_ref()
-        .map(WireLineageStamp::from);
+    let lineage = tombstone.lineage.as_ref().map(WireLineageStamp::from);
 
     WireTombstoneV1 {
         id: tombstone.id.clone(),

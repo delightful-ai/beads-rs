@@ -188,12 +188,7 @@ impl From<&Dvv> for WireDvvV1 {
     fn from(dvv: &Dvv) -> Self {
         Self {
             max: dvv.max.clone(),
-            dots: dvv
-                .dots
-                .iter()
-                .copied()
-                .map(WireDotV1::from)
-                .collect(),
+            dots: dvv.dots.iter().copied().map(WireDotV1::from).collect(),
         }
     }
 }

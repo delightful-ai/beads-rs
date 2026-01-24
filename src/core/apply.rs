@@ -12,7 +12,7 @@ use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
 use super::event::{EventBody, EventKindV1, TxnV1};
 use super::identity::{ActorId, BeadId, NoteId};
-use super::state::{bead_collision_cmp, note_collision_cmp, CanonicalState};
+use super::state::{CanonicalState, bead_collision_cmp, note_collision_cmp};
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
 use super::wire_bead::{
@@ -128,6 +128,11 @@ fn apply_bead_upsert(
                     patch.created_on_branch.clone(),
                 );
                 let incoming = Bead::new(core, fields_from_patch(patch, event_stamp)?);
+                // Compute deleted stamp before move for deterministic tombstone regardless of apply order
+                let deleted = std::cmp::max(
+                    existing.core.created().clone(),
+                    incoming.core.created().clone(),
+                );
                 let ordering = bead_collision_cmp(state, &existing, &incoming);
                 let (winner, loser_stamp, incoming_won) = if ordering == Ordering::Less {
                     (incoming, existing.core.created().clone(), true)
@@ -137,7 +142,7 @@ fn apply_bead_upsert(
 
                 state.insert_tombstone(Tombstone::new_collision(
                     id.clone(),
-                    event_stamp.clone(),
+                    deleted,
                     loser_stamp,
                     None,
                 ));
@@ -241,7 +246,7 @@ fn apply_label_add(
         dot,
         event_stamp.clone(),
     );
-    if !change.is_empty() {
+    if change.changed() && state.get_live(&op.bead_id).is_some() {
         outcome.changed_beads.insert(op.bead_id.clone());
     }
     Ok(())
@@ -255,7 +260,7 @@ fn apply_label_remove(
 ) -> Result<(), ApplyError> {
     let ctx = (&op.ctx).into();
     let change = state.apply_label_remove(op.bead_id.clone(), &op.label, &ctx, event_stamp.clone());
-    if !change.is_empty() {
+    if change.changed() && state.get_live(&op.bead_id).is_some() {
         outcome.changed_beads.insert(op.bead_id.clone());
     }
     Ok(())
@@ -980,5 +985,105 @@ mod tests {
                 .get_tombstone(&BeadId::parse("bd-delete").unwrap())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn label_add_same_value_different_dot_tracks_change() {
+        let mut state = CanonicalState::new();
+        let bead_id = BeadId::parse("bd-label-change").unwrap();
+        let label = Label::parse("status").unwrap();
+        let replica_a = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let replica_b = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
+
+        // Create the bead first
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        patch.created_at = Some(WireStamp(10, 0));
+        patch.created_by = Some(actor_id("alice"));
+        patch.title = Some("title".to_string());
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
+
+        // First label add
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id.clone(),
+                label: label.clone(),
+                dot: WireDotV1 {
+                    replica: replica_a,
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+        let outcome1 = apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
+        assert!(outcome1.changed_beads.contains(&bead_id));
+
+        // Second label add with different dot but same label value
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: bead_id.clone(),
+                label: label.clone(),
+                dot: WireDotV1 {
+                    replica: replica_b,
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+        let outcome2 = apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();
+        // Changed should be tracked even though label value didn't change (new dot added)
+        assert!(outcome2.changed_beads.contains(&bead_id));
+    }
+
+    #[test]
+    fn collision_tombstone_is_order_independent() {
+        let bead_id = BeadId::parse("bd-coll-tomb").unwrap();
+        let low_stamp = Stamp::new(WriteStamp::new(10, 1), actor_id("alice"));
+
+        let event_low = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(10, 1),
+            actor_id("alice"),
+            "low",
+            10,
+        );
+        let event_high = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(20, 1),
+            actor_id("bob"),
+            "high",
+            11,
+        );
+
+        // Apply in order: low then high
+        let mut state_a = CanonicalState::new();
+        apply_event(&mut state_a, &event_low).unwrap();
+        apply_event(&mut state_a, &event_high).unwrap();
+
+        // Apply in order: high then low
+        let mut state_b = CanonicalState::new();
+        apply_event(&mut state_b, &event_high).unwrap();
+        apply_event(&mut state_b, &event_low).unwrap();
+
+        // Both should have collision tombstone for the loser (low_stamp)
+        assert!(state_a.has_lineage_tombstone(&bead_id, &low_stamp));
+        assert!(state_b.has_lineage_tombstone(&bead_id, &low_stamp));
+
+        // Get the collision tombstones via iter_tombstones iterator
+        let tomb_a = state_a
+            .iter_tombstones()
+            .find(|(_, t)| t.lineage.as_ref() == Some(&low_stamp))
+            .map(|(_, t)| t.clone())
+            .expect("collision tombstone exists");
+        let tomb_b = state_b
+            .iter_tombstones()
+            .find(|(_, t)| t.lineage.as_ref() == Some(&low_stamp))
+            .map(|(_, t)| t.clone())
+            .expect("collision tombstone exists");
+
+        // Tombstones must be identical (deleted stamp, lineage stamp)
+        assert_eq!(tomb_a.deleted, tomb_b.deleted);
+        assert_eq!(tomb_a.lineage, tomb_b.lineage);
     }
 }

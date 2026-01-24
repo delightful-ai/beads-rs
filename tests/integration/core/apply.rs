@@ -1,12 +1,12 @@
 //! Core apply semantics + LWW determinism.
 
+use beads_rs::core::Label;
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
     ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, ReplicaId, Stamp,
     TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
     WireLabelAddV1, WireLabelRemoveV1, WireStamp, WriteStamp, apply_event, sha256_bytes,
 };
-use beads_rs::core::Label;
 
 use crate::fixtures::apply_harness::{
     ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
@@ -428,16 +428,20 @@ fn dep_delete_then_readd_restores_indexes() {
 
     assert!(state.deps_from(&from).contains(&key));
     assert!(state.deps_to(&to).contains(&key));
-    assert!(state
-        .dep_indexes()
-        .out_edges(&from)
-        .iter()
-        .any(|(t, k)| t == &to && *k == kind));
-    assert!(state
-        .dep_indexes()
-        .in_edges(&to)
-        .iter()
-        .any(|(f, k)| f == &from && *k == kind));
+    assert!(
+        state
+            .dep_indexes()
+            .out_edges(&from)
+            .iter()
+            .any(|(t, k)| t == &to && *k == kind)
+    );
+    assert!(
+        state
+            .dep_indexes()
+            .in_edges(&to)
+            .iter()
+            .any(|(f, k)| f == &from && *k == kind)
+    );
 
     let mut remove_delta = TxnDeltaV1::new();
     remove_delta
@@ -478,14 +482,18 @@ fn dep_delete_then_readd_restores_indexes() {
     assert_eq!(state.deps_to(&to), vec![key.clone()]);
     assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
     assert_eq!(state.dep_indexes().in_edges(&to).len(), 1);
-    assert!(state
-        .dep_indexes()
-        .out_edges(&from)
-        .iter()
-        .any(|(t, k)| t == &to && *k == kind));
-    assert!(state
-        .dep_indexes()
-        .in_edges(&to)
-        .iter()
-        .any(|(f, k)| f == &from && *k == kind));
+    assert!(
+        state
+            .dep_indexes()
+            .out_edges(&from)
+            .iter()
+            .any(|(t, k)| t == &to && *k == kind)
+    );
+    assert!(
+        state
+            .dep_indexes()
+            .in_edges(&to)
+            .iter()
+            .any(|(f, k)| f == &from && *k == kind)
+    );
 }

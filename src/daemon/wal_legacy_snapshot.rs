@@ -39,10 +39,10 @@ pub struct WalEntry {
 
 mod wal_state {
     use super::*;
+    use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1, WireFieldStamp, WireStamp};
     use serde::de::Error as DeError;
     use serde::{Deserializer, Serializer};
     use std::collections::{BTreeMap, BTreeSet};
-    use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1, WireFieldStamp, WireStamp};
 
     #[derive(Serialize, Deserialize)]
     struct WalStateV2 {
@@ -135,11 +135,9 @@ mod wal_state {
             }
 
             match WalDepStoreRepr::deserialize(deserializer)? {
-                WalDepStoreRepr::V2 { cc, entries, stamp } => Ok(WalDepStore(WireDepStoreV1 {
-                    cc,
-                    entries,
-                    stamp,
-                })),
+                WalDepStoreRepr::V2 { cc, entries, stamp } => {
+                    Ok(WalDepStore(WireDepStoreV1 { cc, entries, stamp }))
+                }
                 WalDepStoreRepr::LegacyEntries(entries) => Ok(WalDepStore(WireDepStoreV1 {
                     cc: Dvv::default(),
                     entries,
@@ -210,6 +208,25 @@ mod wal_state {
             assert!(!dep_store.contains(&empty_key));
             assert!(dep_store.contains(&filled_key));
             assert_eq!(dep_store.len(), 1);
+        }
+
+        #[test]
+        fn wal_dep_store_serializes_transparently() {
+            let key = dep_key("bd-a", "bd-b");
+            let store = WalDepStore(WireDepStoreV1 {
+                cc: Dvv::default(),
+                entries: vec![WireDepEntryV1 {
+                    key,
+                    dots: vec![dot(1)],
+                }],
+                stamp: None,
+            });
+
+            let value = serde_json::to_value(&store).unwrap();
+            let obj = value.as_object().expect("deps should serialize as object");
+            assert!(obj.contains_key("cc"));
+            assert!(obj.contains_key("entries"));
+            assert!(!obj.contains_key("stamp"));
         }
     }
 

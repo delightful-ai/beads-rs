@@ -929,11 +929,7 @@ mod tests {
             DepKind::Blocks,
         )
         .unwrap();
-        state.apply_dep_add(
-            dep_key,
-            dot(2, 1),
-            stamp.clone(),
-        );
+        state.apply_dep_add(dep_key, dot(2, 1), stamp.clone());
 
         let note_id = NoteId::new("note-legacy").unwrap();
         let note = Note::new(
@@ -969,12 +965,7 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        state.apply_label_add(
-            id.clone(),
-            label.clone(),
-            dot,
-            stamp.clone(),
-        );
+        state.apply_label_add(id.clone(), label.clone(), dot, stamp.clone());
         let ctx = state.label_dvv(&id, &label);
         state.apply_label_remove(id.clone(), &label, &ctx, stamp.clone());
 
@@ -983,11 +974,7 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([2u8; 16])),
             counter: 2,
         };
-        state.apply_dep_add(
-            dep_key.clone(),
-            dep_dot,
-            stamp.clone(),
-        );
+        state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
         let dep_ctx = state.dep_dvv(&dep_key);
         state.apply_dep_remove(&dep_key, &dep_ctx, stamp.clone());
 
@@ -1021,33 +1008,15 @@ mod tests {
 
         let label_a = Label::parse("urgent").unwrap();
         let label_b = Label::parse("backend").unwrap();
-        state.apply_label_add(
-            id.clone(),
-            label_a.clone(),
-            dot(1, 1),
-            stamp.clone(),
-        );
-        state.apply_label_add(
-            id.clone(),
-            label_b.clone(),
-            dot(2, 2),
-            stamp.clone(),
-        );
+        state.apply_label_add(id.clone(), label_a.clone(), dot(1, 1), stamp.clone());
+        state.apply_label_add(id.clone(), label_b.clone(), dot(2, 2), stamp.clone());
         let label_ctx = state.label_dvv(&id, &label_a);
         state.apply_label_remove(id.clone(), &label_a, &label_ctx, stamp.clone());
 
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-target-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-target-b"), DepKind::Related).unwrap();
-        state.apply_dep_add(
-            dep_key_a.clone(),
-            dot(3, 3),
-            stamp.clone(),
-        );
-        state.apply_dep_add(
-            dep_key_b.clone(),
-            dot(4, 4),
-            stamp.clone(),
-        );
+        state.apply_dep_add(dep_key_a.clone(), dot(3, 3), stamp.clone());
+        state.apply_dep_add(dep_key_b.clone(), dot(4, 4), stamp.clone());
         let dep_ctx = state.dep_dvv(&dep_key_b);
         state.apply_dep_remove(&dep_key_b, &dep_ctx, stamp.clone());
 
@@ -1129,16 +1098,8 @@ mod tests {
         );
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-order-b"), DepKind::Related).unwrap();
-        state_a.apply_dep_add(
-            dep_key_a.clone(),
-            dot(7, 3),
-            dep_stamp_a.clone(),
-        );
-        state_a.apply_dep_add(
-            dep_key_b.clone(),
-            dot(8, 4),
-            dep_stamp_b.clone(),
-        );
+        state_a.apply_dep_add(dep_key_a.clone(), dot(7, 3), dep_stamp_a.clone());
+        state_a.apply_dep_add(dep_key_b.clone(), dot(8, 4), dep_stamp_b.clone());
         let note_a = Note::new(
             NoteId::new("note-a").unwrap(),
             "first".to_string(),
@@ -1156,28 +1117,10 @@ mod tests {
 
         let mut state_b = CanonicalState::new();
         state_b.insert(make_bead(&id, &stamp)).unwrap();
-        state_b.apply_label_add(
-            id.clone(),
-            label_b,
-            dot(6, 2),
-            label_stamp_b,
-        );
-        state_b.apply_label_add(
-            id.clone(),
-            label_a,
-            dot(5, 1),
-            label_stamp_a,
-        );
-        state_b.apply_dep_add(
-            dep_key_b,
-            dot(8, 4),
-            dep_stamp_b,
-        );
-        state_b.apply_dep_add(
-            dep_key_a,
-            dot(7, 3),
-            dep_stamp_a,
-        );
+        state_b.apply_label_add(id.clone(), label_b, dot(6, 2), label_stamp_b);
+        state_b.apply_label_add(id.clone(), label_a, dot(5, 1), label_stamp_a);
+        state_b.apply_dep_add(dep_key_b, dot(8, 4), dep_stamp_b);
+        state_b.apply_dep_add(dep_key_a, dot(7, 3), dep_stamp_a);
         state_b.insert_note(
             id.clone(),
             Note::new(
@@ -1222,33 +1165,13 @@ mod tests {
 
         let mut state_a = CanonicalState::new();
         state_a.insert(make_bead(&id, &base)).unwrap();
-        state_a.apply_label_add(
-            id.clone(),
-            label_a.clone(),
-            dot(1, 1),
-            stamp_a.clone(),
-        );
-        state_a.apply_label_add(
-            id.clone(),
-            label_b.clone(),
-            dot(2, 1),
-            stamp_b.clone(),
-        );
+        state_a.apply_label_add(id.clone(), label_a.clone(), dot(1, 1), stamp_a.clone());
+        state_a.apply_label_add(id.clone(), label_b.clone(), dot(2, 1), stamp_b.clone());
 
         let mut state_b = CanonicalState::new();
         state_b.insert(make_bead(&id, &base)).unwrap();
-        state_b.apply_label_add(
-            id.clone(),
-            label_b,
-            dot(2, 1),
-            stamp_b,
-        );
-        state_b.apply_label_add(
-            id.clone(),
-            label_a,
-            dot(1, 1),
-            stamp_a,
-        );
+        state_b.apply_label_add(id.clone(), label_b, dot(2, 1), stamp_b);
+        state_b.apply_label_add(id.clone(), label_a, dot(1, 1), stamp_a);
 
         assert_eq!(
             serialize_state(&state_a).unwrap(),
@@ -1266,28 +1189,12 @@ mod tests {
             DepKey::new(bead_id("bd-dep-a"), bead_id("bd-dep-c"), DepKind::Related).unwrap();
 
         let mut state_a = CanonicalState::new();
-        state_a.apply_dep_add(
-            key_a.clone(),
-            dot(3, 1),
-            stamp_a.clone(),
-        );
-        state_a.apply_dep_add(
-            key_b.clone(),
-            dot(4, 1),
-            stamp_b.clone(),
-        );
+        state_a.apply_dep_add(key_a.clone(), dot(3, 1), stamp_a.clone());
+        state_a.apply_dep_add(key_b.clone(), dot(4, 1), stamp_b.clone());
 
         let mut state_b = CanonicalState::new();
-        state_b.apply_dep_add(
-            key_b,
-            dot(4, 1),
-            stamp_b,
-        );
-        state_b.apply_dep_add(
-            key_a,
-            dot(3, 1),
-            stamp_a,
-        );
+        state_b.apply_dep_add(key_b, dot(4, 1), stamp_b);
+        state_b.apply_dep_add(key_a, dot(3, 1), stamp_a);
 
         assert_eq!(
             serialize_deps(&state_a).unwrap(),
@@ -1311,35 +1218,15 @@ mod tests {
         let key_parent = DepKey::new(from.clone(), to.clone(), DepKind::Parent).unwrap();
         let key_related = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
 
-        state.apply_dep_add(
-            key_related,
-            dot(1, 4),
-            stamp.clone(),
-        );
-        state.apply_dep_add(
-            key_parent,
-            dot(1, 3),
-            stamp.clone(),
-        );
-        state.apply_dep_add(
-            key_discovered,
-            dot(1, 2),
-            stamp.clone(),
-        );
-        state.apply_dep_add(
-            key_blocks,
-            dot(1, 1),
-            stamp.clone(),
-        );
+        state.apply_dep_add(key_related, dot(1, 4), stamp.clone());
+        state.apply_dep_add(key_parent, dot(1, 3), stamp.clone());
+        state.apply_dep_add(key_discovered, dot(1, 2), stamp.clone());
+        state.apply_dep_add(key_blocks, dot(1, 1), stamp.clone());
 
         let bytes = serialize_deps(&state).unwrap();
         let wire: WireDepStore =
             serde_json::from_slice(&bytes).expect("deps.jsonl should deserialize");
-        let kinds: Vec<DepKind> = wire
-            .entries
-            .iter()
-            .map(|entry| entry.key.kind())
-            .collect();
+        let kinds: Vec<DepKind> = wire.entries.iter().map(|entry| entry.key.kind()).collect();
         assert_eq!(
             kinds,
             vec![
@@ -1356,9 +1243,12 @@ mod tests {
         let stamp = Stamp::new(WriteStamp::new(42, 7), actor_id("alice"));
         let replica_a = ReplicaId::from(Uuid::from_bytes([4u8; 16]));
         let replica_b = ReplicaId::from(Uuid::from_bytes([7u8; 16]));
-        let key_blocks =
-            DepKey::new(bead_id("bd-legacy-from"), bead_id("bd-legacy-to"), DepKind::Blocks)
-                .unwrap();
+        let key_blocks = DepKey::new(
+            bead_id("bd-legacy-from"),
+            bead_id("bd-legacy-to"),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let key_related = DepKey::new(
             bead_id("bd-legacy-from"),
             bead_id("bd-legacy-other"),
@@ -1394,18 +1284,23 @@ mod tests {
         assert_eq!(parsed.cc().max.get(&replica_a), Some(&2));
         assert_eq!(parsed.cc().max.get(&replica_b), Some(&5));
         let related_dots = parsed.dots_for(&key_related).expect("related dots");
-        assert_eq!(
-            related_dots,
-            &BTreeSet::from([dot(7, 5), dot(7, 3)])
-        );
+        assert_eq!(related_dots, &BTreeSet::from([dot(7, 5), dot(7, 3)]));
     }
 
     #[test]
     fn legacy_deps_parse_then_serialize_is_deterministic() {
-        let key_parent =
-            DepKey::new(bead_id("bd-legacy-a"), bead_id("bd-legacy-b"), DepKind::Parent).unwrap();
-        let key_blocks =
-            DepKey::new(bead_id("bd-legacy-a"), bead_id("bd-legacy-c"), DepKind::Blocks).unwrap();
+        let key_parent = DepKey::new(
+            bead_id("bd-legacy-a"),
+            bead_id("bd-legacy-b"),
+            DepKind::Parent,
+        )
+        .unwrap();
+        let key_blocks = DepKey::new(
+            bead_id("bd-legacy-a"),
+            bead_id("bd-legacy-c"),
+            DepKind::Blocks,
+        )
+        .unwrap();
 
         let wire = WireDepStore {
             cc: Dvv::default(),
@@ -1431,11 +1326,18 @@ mod tests {
         let serialized = serialize_deps(&state).expect("serialize deps");
         let serialized_again = serialize_deps(&state).expect("serialize deps");
         assert_eq!(serialized, serialized_again);
-        assert!(serialized.ends_with(b"\n"), "deps.jsonl should end with newline");
+        assert!(
+            serialized.ends_with(b"\n"),
+            "deps.jsonl should end with newline"
+        );
 
         let wire_out: WireDepStore =
             serde_json::from_slice(&serialized).expect("deps.jsonl should deserialize");
-        let keys: Vec<DepKey> = wire_out.entries.iter().map(|entry| entry.key.clone()).collect();
+        let keys: Vec<DepKey> = wire_out
+            .entries
+            .iter()
+            .map(|entry| entry.key.clone())
+            .collect();
         let mut expected_keys = vec![key_parent.clone(), key_blocks.clone()];
         expected_keys.sort();
         assert_eq!(keys, expected_keys);

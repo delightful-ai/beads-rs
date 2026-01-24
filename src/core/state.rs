@@ -569,12 +569,7 @@ impl CanonicalState {
         change
     }
 
-    pub fn apply_dep_add(
-        &mut self,
-        key: DepKey,
-        dot: Dot,
-        stamp: Stamp,
-    ) -> OrSetChange<DepKey> {
+    pub fn apply_dep_add(&mut self, key: DepKey, dot: Dot, stamp: Stamp) -> OrSetChange<DepKey> {
         let change = self.dep_store.set.apply_add(dot, key.clone());
         if change.changed() {
             self.dep_store.stamp = max_stamp(self.dep_store.stamp.as_ref(), Some(&stamp));
@@ -830,10 +825,8 @@ impl CanonicalState {
                         } else {
                             (ab.clone(), bb.core.created().clone())
                         };
-                        let deleted = std::cmp::max(
-                            ab.core.created().clone(),
-                            bb.core.created().clone(),
-                        );
+                        let deleted =
+                            std::cmp::max(ab.core.created().clone(), bb.core.created().clone());
                         result.insert_tombstone(Tombstone::new_collision(
                             id.clone(),
                             deleted,
@@ -1255,11 +1248,7 @@ mod tests {
             out_count,
             "dep out-edges contain duplicates"
         );
-        assert_eq!(
-            in_keys.len(),
-            in_count,
-            "dep in-edges contain duplicates"
-        );
+        assert_eq!(in_keys.len(), in_count, "dep in-edges contain duplicates");
     }
 
     fn state_fingerprint(state: &CanonicalState) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -1779,18 +1768,8 @@ mod tests {
             counter: 2,
         };
 
-        state.apply_label_add(
-            id.clone(),
-            label.clone(),
-            dot_a,
-            stamp_new.clone(),
-        );
-        state.apply_label_add(
-            id.clone(),
-            label.clone(),
-            dot_b,
-            stamp_old,
-        );
+        state.apply_label_add(id.clone(), label.clone(), dot_a, stamp_new.clone());
+        state.apply_label_add(id.clone(), label.clone(), dot_b, stamp_old);
 
         let stamp = state.label_stamp(&id).expect("label stamp");
         assert_eq!(stamp, &stamp_new);
@@ -1815,18 +1794,8 @@ mod tests {
             counter: 2,
         };
 
-        state.apply_label_add(
-            id.clone(),
-            label.clone(),
-            dot_a,
-            stamp_a,
-        );
-        state.apply_label_add(
-            id.clone(),
-            label,
-            dot_b,
-            stamp_b.clone(),
-        );
+        state.apply_label_add(id.clone(), label.clone(), dot_a, stamp_a);
+        state.apply_label_add(id.clone(), label, dot_b, stamp_b.clone());
 
         assert_eq!(state.labels_for(&id).len(), 1);
         let stamp = state.label_stamp(&id).expect("label stamp");
@@ -1854,11 +1823,7 @@ mod tests {
             counter: 2,
         };
 
-        state.apply_dep_add(
-            key.clone(),
-            dot_a,
-            stamp_new.clone(),
-        );
+        state.apply_dep_add(key.clone(), dot_a, stamp_new.clone());
         state.apply_dep_add(key, dot_b, stamp_old);
 
         let stamp = state.dep_store().stamp().expect("dep stamp");
@@ -1886,11 +1851,7 @@ mod tests {
             counter: 2,
         };
 
-        state.apply_dep_add(
-            key.clone(),
-            dot_a,
-            stamp_a,
-        );
+        state.apply_dep_add(key.clone(), dot_a, stamp_a);
         state.apply_dep_add(key, dot_b, stamp_b.clone());
 
         let stamp = state.dep_store().stamp().expect("dep stamp");
@@ -2144,10 +2105,7 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([7u8; 16])),
             counter: 1,
         };
-        state
-            .dep_store
-            .set
-            .apply_add(dot, key.clone());
+        state.dep_store.set.apply_add(dot, key.clone());
         state.dep_store.stamp = Some(stamp);
 
         // Index should be empty (not maintained)

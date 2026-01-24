@@ -310,9 +310,6 @@ fn dep_delete_then_readd_across_kinds() {
         DepKey::new(from.clone(), to.clone(), DepKind::Blocks).expect("dep key"),
         DepKey::new(from.clone(), to.clone(), DepKind::Related).expect("dep key"),
     ]);
-    let actual = state
-        .deps_from(&from)
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let actual = state.deps_from(&from).into_iter().collect::<BTreeSet<_>>();
     assert_eq!(actual, expected);
 }
