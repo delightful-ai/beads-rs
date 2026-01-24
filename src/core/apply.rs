@@ -5,20 +5,23 @@ use std::collections::BTreeSet;
 
 use thiserror::Error;
 
-use super::bead::{Bead, BeadCore, BeadFields, BeadView};
+use super::bead::{Bead, BeadCore, BeadFields};
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
-use super::event::{EventBody, EventKindV1, Sha256, TxnV1, sha256_bytes};
-use super::identity::{ActorId, BeadId, ContentHash, NoteId};
-use super::state::CanonicalState;
+use super::event::{EventBody, EventKindV1, Sha256, TxnV1};
+use super::identity::{ActorId, BeadId, NoteId};
+use super::state::{bead_collision_cmp, note_collision_cmp, CanonicalState};
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
 use super::wire_bead::{
     TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireLabelAddV1, WireLabelRemoveV1,
     WireNoteV1, WirePatch, WireTombstoneV1,
 };
+
+#[cfg(test)]
+use super::event::sha256_bytes;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NoteKey {
@@ -103,31 +106,6 @@ fn creation_stamp(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<Stamp, A
             id: patch.id.clone(),
         }),
     }
-}
-
-fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
-    let id = bead.id();
-    let labels = state.labels_for_any(id);
-    let notes = state
-        .note_store()
-        .notes_for(id)
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let label_stamp = state.label_stamp(id).cloned();
-    *BeadView::new(bead.clone(), labels, notes, label_stamp).content_hash()
-}
-
-fn bead_collision_cmp(state: &CanonicalState, existing: &Bead, incoming: &Bead) -> Ordering {
-    existing
-        .core
-        .created()
-        .cmp(incoming.core.created())
-        .then_with(|| {
-            bead_content_hash_for_collision(state, existing)
-                .as_bytes()
-                .cmp(bead_content_hash_for_collision(state, incoming).as_bytes())
-        })
 }
 
 fn apply_bead_upsert(
@@ -555,17 +533,6 @@ fn apply_note_append(
         outcome.changed_beads.insert(bead_id);
     }
     Ok(())
-}
-
-fn note_collision_cmp(existing: &Note, incoming: &Note) -> Ordering {
-    existing
-        .at
-        .cmp(&incoming.at)
-        .then_with(|| existing.author.cmp(&incoming.author))
-        .then_with(|| {
-            sha256_bytes(existing.content.as_bytes())
-                .cmp(&sha256_bytes(incoming.content.as_bytes()))
-        })
 }
 
 fn apply_note(

@@ -2,9 +2,9 @@
 
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
-    ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, ReplicaId,
+    ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, ReplicaId, Stamp,
     TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
-    WireLabelAddV1, WireLabelRemoveV1, apply_event, sha256_bytes,
+    WireLabelAddV1, WireLabelRemoveV1, WireStamp, WriteStamp, apply_event, sha256_bytes,
 };
 use beads_rs::core::Label;
 
@@ -98,6 +98,51 @@ fn note_collision_is_deterministic() {
         "different-content"
     };
     assert_eq!(stored.content, expected);
+}
+
+#[test]
+fn join_bead_collision_is_deterministic_and_inserts_lineage_tombstone() {
+    let bead = bead_id(50);
+
+    let mut patch_a = sample_bead_patch(50);
+    patch_a.id = bead.clone();
+    patch_a.created_at = Some(WireStamp(1000, 0));
+    patch_a.created_by = Some(actor_id(1));
+    patch_a.title = Some("title-a".to_string());
+
+    let mut patch_b = sample_bead_patch(51);
+    patch_b.id = bead.clone();
+    patch_b.created_at = Some(WireStamp(2000, 0));
+    patch_b.created_by = Some(actor_id(2));
+    patch_b.title = Some("title-b".to_string());
+
+    let mut state_a = CanonicalState::new();
+    let mut delta_a = TxnDeltaV1::new();
+    delta_a
+        .insert(TxnOpV1::BeadUpsert(Box::new(patch_a)))
+        .expect("unique bead upsert");
+    let event_a = event_body_with_delta(50, delta_a);
+    apply_event(&mut state_a, &event_a).expect("apply a");
+
+    let mut state_b = CanonicalState::new();
+    let mut delta_b = TxnDeltaV1::new();
+    delta_b
+        .insert(TxnOpV1::BeadUpsert(Box::new(patch_b)))
+        .expect("unique bead upsert");
+    let event_b = event_body_with_delta(51, delta_b);
+    apply_event(&mut state_b, &event_b).expect("apply b");
+
+    let merged_ab = CanonicalState::join(&state_a, &state_b).expect("merge ab");
+    let merged_ba = CanonicalState::join(&state_b, &state_a).expect("merge ba");
+
+    let winner_ab = merged_ab.get_live(&bead).expect("winner");
+    let winner_ba = merged_ba.get_live(&bead).expect("winner");
+    assert_eq!(winner_ab.title(), "title-b");
+    assert_eq!(winner_ba.title(), "title-b");
+
+    let loser_stamp = Stamp::new(WriteStamp::new(1000, 0), actor_id(1));
+    assert!(merged_ab.has_lineage_tombstone(&bead, &loser_stamp));
+    assert!(merged_ba.has_lineage_tombstone(&bead, &loser_stamp));
 }
 
 #[test]

@@ -10,6 +10,7 @@
 //!
 //! Resurrection rule: modification strictly newer than deletion can resurrect.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -20,8 +21,8 @@ use super::composite::Note;
 use super::dep::DepKey;
 use super::domain::DepKind;
 use super::error::CoreError;
-use super::event::Sha256;
-use super::identity::{BeadId, NoteId};
+use super::event::{sha256_bytes, Sha256};
+use super::identity::{BeadId, ContentHash, NoteId};
 use super::orset::{Dot, Dvv, OrSet, OrSetChange};
 use super::time::{Stamp, WallClock};
 use super::tombstone::{Tombstone, TombstoneKey};
@@ -231,7 +232,16 @@ impl NoteStore {
         for (id, notes) in a.by_bead.iter().chain(b.by_bead.iter()) {
             let entry = merged.by_bead.entry(id.clone()).or_default();
             for (note_id, note) in notes {
-                entry.entry(note_id.clone()).or_insert_with(|| note.clone());
+                match entry.get(note_id) {
+                    None => {
+                        entry.insert(note_id.clone(), note.clone());
+                    }
+                    Some(existing) => {
+                        if note_collision_cmp(existing, note) == Ordering::Less {
+                            entry.insert(note_id.clone(), note.clone());
+                        }
+                    }
+                }
             }
         }
         merged
@@ -807,16 +817,34 @@ impl CanonicalState {
                 None => (None, None),
             };
 
-            // Merge beads if both exist (may error on collision)
+            // Merge beads if both exist (resolve collisions deterministically)
             let merged_bead = match (a_bead, b_bead) {
-                (Some(ab), Some(bb)) => match Bead::join(ab, bb) {
-                    Ok(merged) => Some(merged),
-                    Err(e) => {
-                        errors.push(e);
-                        // On collision, keep one arbitrarily (a's version)
-                        Some(ab.clone())
+                (Some(ab), Some(bb)) => {
+                    if ab.core.created() == bb.core.created() {
+                        Some(
+                            Bead::join(ab, bb)
+                                .expect("bead join should succeed for identical lineage"),
+                        )
+                    } else {
+                        let ordering = bead_collision_cmp(&result, ab, bb);
+                        let (winner, loser_stamp) = if ordering == Ordering::Less {
+                            (bb.clone(), ab.core.created().clone())
+                        } else {
+                            (ab.clone(), bb.core.created().clone())
+                        };
+                        let deleted = std::cmp::max(
+                            ab.core.created().clone(),
+                            bb.core.created().clone(),
+                        );
+                        result.insert_tombstone(Tombstone::new_collision(
+                            id.clone(),
+                            deleted,
+                            loser_stamp,
+                            None,
+                        ));
+                        Some(winner)
                     }
-                },
+                }
                 (Some(b), None) | (None, Some(b)) => Some(b.clone()),
                 (None, None) => None,
             };
@@ -1076,6 +1104,45 @@ impl CanonicalState {
     }
 }
 
+fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
+    let labels = state.labels_for_any(bead.id());
+    let notes = state
+        .note_store()
+        .notes_for(bead.id())
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let label_stamp = state.label_stamp(bead.id()).cloned();
+    *BeadView::new(bead.clone(), labels, notes, label_stamp).content_hash()
+}
+
+pub(crate) fn bead_collision_cmp(
+    state: &CanonicalState,
+    existing: &Bead,
+    incoming: &Bead,
+) -> Ordering {
+    existing
+        .core
+        .created()
+        .cmp(incoming.core.created())
+        .then_with(|| {
+            bead_content_hash_for_collision(state, existing)
+                .as_bytes()
+                .cmp(bead_content_hash_for_collision(state, incoming).as_bytes())
+        })
+}
+
+pub(crate) fn note_collision_cmp(existing: &Note, incoming: &Note) -> Ordering {
+    existing
+        .at
+        .cmp(&incoming.at)
+        .then_with(|| existing.author.cmp(&incoming.author))
+        .then_with(|| {
+            sha256_bytes(existing.content.as_bytes())
+                .cmp(&sha256_bytes(incoming.content.as_bytes()))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,6 +1358,27 @@ mod tests {
             let ab = CanonicalState::join(&a, &b)
                 .unwrap_or_else(|e| panic!("join failed: {e:?}"));
             let ba = CanonicalState::join(&b, &a)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            assert_invariants(&ab);
+            assert_invariants(&ba);
+            prop_assert_eq!(state_fingerprint(&ab), state_fingerprint(&ba));
+        }
+
+        #[test]
+        fn join_commutative_with_collision(
+            stamp_a in stamp_strategy(),
+            stamp_b in stamp_strategy(),
+        ) {
+            prop_assume!(stamp_a != stamp_b);
+            let id = bead_id("bd-collision");
+            let mut state_a = CanonicalState::new();
+            state_a.insert_live(make_bead(&id, &stamp_a));
+            let mut state_b = CanonicalState::new();
+            state_b.insert_live(make_bead(&id, &stamp_b));
+
+            let ab = CanonicalState::join(&state_a, &state_b)
+                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let ba = CanonicalState::join(&state_b, &state_a)
                 .unwrap_or_else(|e| panic!("join failed: {e:?}"));
             assert_invariants(&ab);
             assert_invariants(&ba);
@@ -1530,6 +1618,38 @@ mod tests {
             merged.get_tombstone(&id).is_some(),
             "tombstone should exist"
         );
+    }
+
+    #[test]
+    fn note_store_join_resolves_collisions_deterministically() {
+        let bead = bead_id("bd-note-join");
+        let note_id = NoteId::new("note-join").unwrap();
+        let note_a = Note::new(
+            note_id.clone(),
+            "alpha".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(10, 0),
+        );
+        let note_b = Note::new(
+            note_id.clone(),
+            "beta".to_string(),
+            actor_id("bob"),
+            WriteStamp::new(20, 0),
+        );
+
+        let mut store_a = NoteStore::new();
+        store_a.insert(bead.clone(), note_a);
+        let mut store_b = NoteStore::new();
+        store_b.insert(bead.clone(), note_b.clone());
+
+        let joined_ab = NoteStore::join(&store_a, &store_b);
+        let joined_ba = NoteStore::join(&store_b, &store_a);
+
+        let stored_ab = joined_ab.get(&bead, &note_id).expect("note stored");
+        let stored_ba = joined_ba.get(&bead, &note_id).expect("note stored");
+
+        assert_eq!(stored_ab, stored_ba);
+        assert_eq!(stored_ab.content, "beta");
     }
 
     #[test]
