@@ -776,7 +776,7 @@ impl CanonicalState {
     /// Returns errors for ID collisions (collected, doesn't abort early).
     pub fn join(a: &Self, b: &Self) -> Result<Self, Vec<CoreError>> {
         let mut result = Self::default();
-        let mut errors = Vec::new();
+        let errors = Vec::new();
 
         // Merge collision tombstones by key.
         for (key, tomb) in a
