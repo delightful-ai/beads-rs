@@ -21,7 +21,7 @@ use super::composite::Note;
 use super::dep::DepKey;
 use super::domain::DepKind;
 use super::error::CoreError;
-use super::event::{sha256_bytes, Sha256};
+use super::event::sha256_bytes;
 use super::identity::{BeadId, ContentHash, NoteId};
 use super::orset::{Dot, Dvv, OrSet, OrSetChange};
 use super::time::{Stamp, WallClock};
@@ -544,11 +544,10 @@ impl CanonicalState {
         id: BeadId,
         label: Label,
         dot: Dot,
-        op_hash: Sha256,
         stamp: Stamp,
     ) -> OrSetChange<Label> {
         let state = self.labels.state_mut(&id);
-        let change = state.set.apply_add(dot, label, op_hash);
+        let change = state.set.apply_add(dot, label);
         if change.changed() {
             state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
         }
@@ -574,10 +573,9 @@ impl CanonicalState {
         &mut self,
         key: DepKey,
         dot: Dot,
-        op_hash: Sha256,
         stamp: Stamp,
     ) -> OrSetChange<DepKey> {
-        let change = self.dep_store.set.apply_add(dot, key.clone(), op_hash);
+        let change = self.dep_store.set.apply_add(dot, key.clone());
         if change.changed() {
             self.dep_store.stamp = max_stamp(self.dep_store.stamp.as_ref(), Some(&stamp));
         }
@@ -1198,7 +1196,7 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([9u8; 16])),
             counter,
         };
-        state.apply_dep_add(key, dot, Sha256([0; 32]), stamp.clone());
+        state.apply_dep_add(key, dot, stamp.clone());
     }
 
     fn remove_dep(state: &mut CanonicalState, key: &DepKey, stamp: &Stamp) {
@@ -1344,7 +1342,7 @@ mod tests {
                     }
                 }
                 for (key, dot, stamp) in deps {
-                    state.apply_dep_add(key, dot, Sha256([0; 32]), stamp);
+                    state.apply_dep_add(key, dot, stamp);
                 }
                 state
             })
@@ -1709,7 +1707,6 @@ mod tests {
                 replica,
                 counter: 1,
             },
-            Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_dep_add(
@@ -1718,7 +1715,6 @@ mod tests {
                 replica,
                 counter: 2,
             },
-            Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_dep_add(
@@ -1727,7 +1723,6 @@ mod tests {
                 replica,
                 counter: 3,
             },
-            Sha256([0; 32]),
             stamp,
         );
 
@@ -1749,7 +1744,7 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        state.apply_label_add(id.clone(), label, dot, Sha256([0; 32]), label_stamp.clone());
+        state.apply_label_add(id.clone(), label, dot, label_stamp.clone());
 
         let updated = state.updated_stamp_for(&id).expect("updated stamp");
         assert_eq!(updated.at.wall_ms, label_stamp.at.wall_ms);
@@ -1788,14 +1783,12 @@ mod tests {
             id.clone(),
             label.clone(),
             dot_a,
-            Sha256([0; 32]),
             stamp_new.clone(),
         );
         state.apply_label_add(
             id.clone(),
             label.clone(),
             dot_b,
-            Sha256([0; 32]),
             stamp_old,
         );
 
@@ -1826,14 +1819,12 @@ mod tests {
             id.clone(),
             label.clone(),
             dot_a,
-            Sha256([0; 32]),
             stamp_a,
         );
         state.apply_label_add(
             id.clone(),
             label,
             dot_b,
-            Sha256([0; 32]),
             stamp_b.clone(),
         );
 
@@ -1866,10 +1857,9 @@ mod tests {
         state.apply_dep_add(
             key.clone(),
             dot_a,
-            Sha256([0; 32]),
             stamp_new.clone(),
         );
-        state.apply_dep_add(key, dot_b, Sha256([0; 32]), stamp_old);
+        state.apply_dep_add(key, dot_b, stamp_old);
 
         let stamp = state.dep_store().stamp().expect("dep stamp");
         assert_eq!(stamp, &stamp_new);
@@ -1899,10 +1889,9 @@ mod tests {
         state.apply_dep_add(
             key.clone(),
             dot_a,
-            Sha256([0; 32]),
             stamp_a,
         );
-        state.apply_dep_add(key, dot_b, Sha256([0; 32]), stamp_b.clone());
+        state.apply_dep_add(key, dot_b, stamp_b.clone());
 
         let stamp = state.dep_store().stamp().expect("dep stamp");
         assert_eq!(stamp, &stamp_b);
@@ -1928,7 +1917,6 @@ mod tests {
                 replica,
                 counter: 1,
             },
-            Sha256([0; 32]),
             stamp.clone(),
         );
         state.apply_dep_add(
@@ -1937,7 +1925,6 @@ mod tests {
                 replica,
                 counter: 2,
             },
-            Sha256([0; 32]),
             stamp,
         );
 
@@ -2160,7 +2147,7 @@ mod tests {
         state
             .dep_store
             .set
-            .apply_add(dot, key.clone(), Sha256([0; 32]));
+            .apply_add(dot, key.clone());
         state.dep_store.stamp = Some(stamp);
 
         // Index should be empty (not maintained)

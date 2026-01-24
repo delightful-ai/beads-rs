@@ -10,7 +10,7 @@ use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
-use super::event::{EventBody, EventKindV1, Sha256, TxnV1};
+use super::event::{EventBody, EventKindV1, TxnV1};
 use super::identity::{ActorId, BeadId, NoteId};
 use super::state::{bead_collision_cmp, note_collision_cmp, CanonicalState};
 use super::time::{Stamp, WriteStamp};
@@ -243,7 +243,6 @@ fn apply_label_add(
         op.bead_id.clone(),
         op.label.clone(),
         dot,
-        Sha256([0; 32]),
         event_stamp.clone(),
     );
     if !change.is_empty() {
@@ -275,7 +274,7 @@ fn apply_dep_add(
     let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
         .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
     let dot = dep.dot.into();
-    let change = state.apply_dep_add(key.clone(), dot, Sha256([0; 32]), event_stamp.clone());
+    let change = state.apply_dep_add(key.clone(), dot, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
         outcome.changed_deps.insert(changed.clone());
     }

@@ -7,7 +7,7 @@
 //! - cc: Dvv (dots observed/removed)
 //!
 //! Operations:
-//! - apply_add(dot, value, op_hash): insert dot unless already dominated by cc
+//! - apply_add(dot, value): insert dot unless already dominated by cc
 //! - apply_remove(value, ctx): remove dots for value dominated by ctx, merge ctx into cc
 //! - join(a, b): merge entries + cc, drop dots dominated by cc, resolve dot collisions
 //!
@@ -21,7 +21,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha256Hasher};
 
-use super::event::Sha256;
 use super::identity::ReplicaId;
 
 /// Values stored in an OR-Set must provide a deterministic byte encoding for
@@ -230,7 +229,7 @@ impl<V: OrSetValue> OrSet<V> {
         &self.cc
     }
 
-    pub fn apply_add(&mut self, dot: Dot, value: V, _op_hash: Sha256) -> OrSetChange<V> {
+    pub fn apply_add(&mut self, dot: Dot, value: V) -> OrSetChange<V> {
         let before = self.membership_set();
 
         if self.cc.dominates(&dot) {
@@ -473,7 +472,7 @@ mod tests {
     #[test]
     fn orset_add_remove_basic() {
         let mut set = OrSet::new();
-        let added = set.apply_add(dot(1, 1), "alpha".to_string(), Sha256([0u8; 32]));
+        let added = set.apply_add(dot(1, 1), "alpha".to_string());
         assert!(added.added.contains(&"alpha".to_string()));
         assert!(set.contains(&"alpha".to_string()));
 
@@ -487,9 +486,9 @@ mod tests {
     #[test]
     fn orset_join_commutative_and_idempotent() {
         let mut a = OrSet::new();
-        a.apply_add(dot(1, 1), "a".to_string(), Sha256([1u8; 32]));
+        a.apply_add(dot(1, 1), "a".to_string());
         let mut b = OrSet::new();
-        b.apply_add(dot(2, 1), "b".to_string(), Sha256([2u8; 32]));
+        b.apply_add(dot(2, 1), "b".to_string());
 
         let ab = OrSet::join(&a, &b);
         let ba = OrSet::join(&b, &a);
@@ -501,8 +500,8 @@ mod tests {
     fn orset_collision_picks_higher_value() {
         let mut set = OrSet::new();
         let shared = dot(1, 1);
-        set.apply_add(shared, "alpha".to_string(), Sha256([1u8; 32]));
-        set.apply_add(shared, "beta".to_string(), Sha256([2u8; 32]));
+        set.apply_add(shared, "alpha".to_string());
+        set.apply_add(shared, "beta".to_string());
 
         assert!(!set.contains(&"alpha".to_string()));
         assert!(set.contains(&"beta".to_string()));
@@ -512,7 +511,7 @@ mod tests {
     fn orset_join_drops_dominated_dots() {
         let mut a = OrSet::new();
         let dot_a = dot(1, 1);
-        a.apply_add(dot_a, "a".to_string(), Sha256([1u8; 32]));
+        a.apply_add(dot_a, "a".to_string());
 
         let mut ctx = Dvv::default();
         ctx.observe(dot_a);
@@ -530,7 +529,7 @@ mod tests {
         ctx.observe(dot(1, 1));
         set.cc = ctx;
 
-        set.apply_add(dot(1, 1), "a".to_string(), Sha256([3u8; 32]));
+        set.apply_add(dot(1, 1), "a".to_string());
         assert!(set.is_empty());
     }
 
@@ -540,8 +539,8 @@ mod tests {
         let value = "x".to_string();
         let dot_a = dot(1, 1);
         let dot_b = dot(2, 1);
-        set.apply_add(dot_a, value.clone(), Sha256([1u8; 32]));
-        set.apply_add(dot_b, value.clone(), Sha256([2u8; 32]));
+        set.apply_add(dot_a, value.clone());
+        set.apply_add(dot_b, value.clone());
 
         let mut ctx = Dvv::default();
         ctx.observe(dot_a);
@@ -558,8 +557,8 @@ mod tests {
         let dot_a = dot(1, 1);
         let dot_b = dot(1, 2);
 
-        set.apply_add(dot_a, value_a.clone(), Sha256([1u8; 32]));
-        set.apply_add(dot_b, value_b.clone(), Sha256([2u8; 32]));
+        set.apply_add(dot_a, value_a.clone());
+        set.apply_add(dot_b, value_b.clone());
 
         let mut ctx = Dvv::default();
         ctx.observe(dot_b);
@@ -577,10 +576,10 @@ mod tests {
         let dot_b = dot(1, 2);
 
         let mut a = OrSet::new();
-        a.apply_add(dot_a, value_a.clone(), Sha256([3u8; 32]));
+        a.apply_add(dot_a, value_a.clone());
 
         let mut b = OrSet::new();
-        b.apply_add(dot_b, value_b.clone(), Sha256([4u8; 32]));
+        b.apply_add(dot_b, value_b.clone());
         let mut ctx = Dvv::default();
         ctx.observe(dot_b);
         b.apply_remove(&value_b, &ctx);
@@ -596,8 +595,8 @@ mod tests {
         let value = "y".to_string();
         let dot_a = dot(1, 1);
         let dot_b = dot(2, 1);
-        set.apply_add(dot_a, value.clone(), Sha256([4u8; 32]));
-        set.apply_add(dot_b, value.clone(), Sha256([5u8; 32]));
+        set.apply_add(dot_a, value.clone());
+        set.apply_add(dot_b, value.clone());
 
         let mut ctx = Dvv::default();
         ctx.observe(dot_a);
@@ -614,10 +613,10 @@ mod tests {
         let dot_b = dot(2, 1);
 
         let mut a = OrSet::new();
-        a.apply_add(dot_a, value.clone(), Sha256([6u8; 32]));
+        a.apply_add(dot_a, value.clone());
 
         let mut b = OrSet::new();
-        b.apply_add(dot_b, value.clone(), Sha256([7u8; 32]));
+        b.apply_add(dot_b, value.clone());
         let mut ctx = Dvv::default();
         ctx.observe(dot_a);
         b.apply_remove(&value, &ctx);
