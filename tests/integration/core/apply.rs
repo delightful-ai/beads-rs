@@ -140,6 +140,7 @@ fn orphan_label_and_note_ops_become_visible_after_create() {
     let keep_label = Label::parse("alpha").expect("label");
     let remove_label = Label::parse("beta").expect("label");
     let replica = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
+    let remove_replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
 
     let note = sample_note(3, 1);
     let note_id = note.id.clone();
@@ -160,7 +161,7 @@ fn orphan_label_and_note_ops_become_visible_after_create() {
             bead_id: bead.clone(),
             label: remove_label.clone(),
             ctx: WireDvvV1 {
-                max: BTreeMap::from([(replica.clone(), 1)]),
+                max: BTreeMap::from([(remove_replica.clone(), 1)]),
             },
         }))
         .expect("unique label remove");
@@ -194,6 +195,7 @@ fn orphan_dep_ops_become_visible_after_create() {
     let to = bead_id(42);
     let to_removed = bead_id(43);
     let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+    let remove_replica = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
 
     let mut delta = TxnDeltaV1::new();
     delta
@@ -213,7 +215,7 @@ fn orphan_dep_ops_become_visible_after_create() {
             to: to_removed.clone(),
             kind: DepKind::Related,
             ctx: WireDvvV1 {
-                max: BTreeMap::from([(replica.clone(), 5)]),
+                max: BTreeMap::from([(remove_replica.clone(), 5)]),
             },
         }))
         .expect("unique dep remove");
