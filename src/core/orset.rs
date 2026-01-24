@@ -112,10 +112,6 @@ impl<V: Ord + Clone> OrSetChange<V> {
         self.changed
     }
 
-    fn from_diff(before: BTreeSet<V>, after: BTreeSet<V>) -> Self {
-        Self::from_diff_with_change(before, after, false)
-    }
-
     fn from_diff_with_change(
         before: BTreeSet<V>,
         after: BTreeSet<V>,
