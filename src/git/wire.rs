@@ -1227,6 +1227,99 @@ mod tests {
     }
 
     #[test]
+    fn label_ops_with_distinct_stamps_are_deterministic() {
+        let base = Stamp::new(WriteStamp::new(5, 0), actor_id("alice"));
+        let stamp_a = Stamp::new(WriteStamp::new(10, 0), actor_id("bob"));
+        let stamp_b = Stamp::new(WriteStamp::new(11, 0), actor_id("carol"));
+        let id = bead_id("bd-label-order");
+        let label_a = Label::parse("alpha").unwrap();
+        let label_b = Label::parse("beta").unwrap();
+
+        let mut state_a = CanonicalState::new();
+        state_a.insert(make_bead(&id, &base)).unwrap();
+        state_a.apply_label_add(
+            id.clone(),
+            label_a.clone(),
+            dot(1, 1),
+            crate::core::Sha256([0; 32]),
+            stamp_a.clone(),
+        );
+        state_a.apply_label_add(
+            id.clone(),
+            label_b.clone(),
+            dot(2, 1),
+            crate::core::Sha256([0; 32]),
+            stamp_b.clone(),
+        );
+
+        let mut state_b = CanonicalState::new();
+        state_b.insert(make_bead(&id, &base)).unwrap();
+        state_b.apply_label_add(
+            id.clone(),
+            label_b,
+            dot(2, 1),
+            crate::core::Sha256([0; 32]),
+            stamp_b,
+        );
+        state_b.apply_label_add(
+            id.clone(),
+            label_a,
+            dot(1, 1),
+            crate::core::Sha256([0; 32]),
+            stamp_a,
+        );
+
+        assert_eq!(
+            serialize_state(&state_a).unwrap(),
+            serialize_state(&state_b).unwrap()
+        );
+        assert_eq!(state_a.label_stamp(&id), state_b.label_stamp(&id));
+    }
+
+    #[test]
+    fn dep_ops_with_distinct_stamps_are_deterministic() {
+        let stamp_a = Stamp::new(WriteStamp::new(15, 0), actor_id("dan"));
+        let stamp_b = Stamp::new(WriteStamp::new(16, 0), actor_id("erin"));
+        let key_a = DepKey::new(bead_id("bd-dep-a"), bead_id("bd-dep-b"), DepKind::Blocks).unwrap();
+        let key_b =
+            DepKey::new(bead_id("bd-dep-a"), bead_id("bd-dep-c"), DepKind::Related).unwrap();
+
+        let mut state_a = CanonicalState::new();
+        state_a.apply_dep_add(
+            key_a.clone(),
+            dot(3, 1),
+            crate::core::Sha256([0; 32]),
+            stamp_a.clone(),
+        );
+        state_a.apply_dep_add(
+            key_b.clone(),
+            dot(4, 1),
+            crate::core::Sha256([0; 32]),
+            stamp_b.clone(),
+        );
+
+        let mut state_b = CanonicalState::new();
+        state_b.apply_dep_add(
+            key_b,
+            dot(4, 1),
+            crate::core::Sha256([0; 32]),
+            stamp_b,
+        );
+        state_b.apply_dep_add(
+            key_a,
+            dot(3, 1),
+            crate::core::Sha256([0; 32]),
+            stamp_a,
+        );
+
+        assert_eq!(
+            serialize_deps(&state_a).unwrap(),
+            serialize_deps(&state_b).unwrap()
+        );
+        assert_eq!(state_a.dep_store().stamp(), state_b.dep_store().stamp());
+    }
+
+    #[test]
     fn serialize_deps_sorts_by_dep_kind_canonical() {
         let stamp = Stamp::new(WriteStamp::new(12, 0), actor_id("alice"));
         let from = bead_id("bd-kind-from");
