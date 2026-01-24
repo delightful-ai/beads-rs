@@ -2,7 +2,8 @@
 
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
-    ActorId, CanonicalState, EventBody, EventKindV1, HlcMax, TxnDeltaV1, TxnOpV1, WireBeadPatch,
+    ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, ReplicaId,
+    TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
     apply_event, sha256_bytes,
 };
 
@@ -12,6 +13,8 @@ use crate::fixtures::apply_harness::{
 use crate::fixtures::event_body::{
     actor_id, bead_id, event_body_with_delta, note_id, sample_event_body, sample_note,
 };
+use std::collections::BTreeMap;
+use uuid::Uuid;
 
 fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -> EventBody {
     let mut patch = WireBeadPatch::new(bead_id.clone());
@@ -117,4 +120,95 @@ fn lww_merge_ordering_is_deterministic() {
         .to_string();
     assert_eq!(title_a, title_b);
     assert_eq!(title_a, "title-b");
+}
+
+#[test]
+fn dep_delete_then_readd_restores_indexes() {
+    let mut state = CanonicalState::new();
+    let from = bead_id(1);
+    let to = bead_id(2);
+    let kind = DepKind::Blocks;
+    let key = DepKey::new(from.clone(), to.clone(), kind).expect("valid dep key");
+
+    apply_event(&mut state, &sample_event_body(1)).expect("apply base 1");
+    apply_event(&mut state, &sample_event_body(2)).expect("apply base 2");
+
+    let replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+
+    let mut add_delta = TxnDeltaV1::new();
+    add_delta
+        .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+            from: from.clone(),
+            to: to.clone(),
+            kind,
+            dot: WireDotV1 {
+                replica,
+                counter: 1,
+            },
+        }))
+        .expect("unique dep add");
+    let add_event = event_body_with_delta(3, add_delta);
+    apply_event(&mut state, &add_event).expect("apply dep add");
+
+    assert!(state.deps_from(&from).contains(&key));
+    assert!(state.deps_to(&to).contains(&key));
+    assert!(state
+        .dep_indexes()
+        .out_edges(&from)
+        .iter()
+        .any(|(t, k)| t == &to && *k == kind));
+    assert!(state
+        .dep_indexes()
+        .in_edges(&to)
+        .iter()
+        .any(|(f, k)| f == &from && *k == kind));
+
+    let mut remove_delta = TxnDeltaV1::new();
+    remove_delta
+        .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
+            from: from.clone(),
+            to: to.clone(),
+            kind,
+            ctx: WireDvvV1 {
+                max: BTreeMap::from([(replica, 1)]),
+            },
+        }))
+        .expect("unique dep remove");
+    let remove_event = event_body_with_delta(4, remove_delta);
+    apply_event(&mut state, &remove_event).expect("apply dep remove");
+
+    assert!(state.deps_from(&from).is_empty());
+    assert!(state.deps_to(&to).is_empty());
+    assert!(state.dep_indexes().out_edges(&from).is_empty());
+    assert!(state.dep_indexes().in_edges(&to).is_empty());
+
+    let mut readd_delta = TxnDeltaV1::new();
+    readd_delta
+        .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+            from: from.clone(),
+            to: to.clone(),
+            kind,
+            dot: WireDotV1 {
+                replica,
+                counter: 2,
+            },
+        }))
+        .expect("unique dep add");
+    let readd_event = event_body_with_delta(5, readd_delta);
+    apply_event(&mut state, &readd_event).expect("apply dep re-add");
+
+    assert_eq!(state.deps_from(&from), vec![key.clone()]);
+    assert_eq!(state.deps_to(&to), vec![key.clone()]);
+    assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
+    assert_eq!(state.dep_indexes().in_edges(&to).len(), 1);
+    assert!(state
+        .dep_indexes()
+        .out_edges(&from)
+        .iter()
+        .any(|(t, k)| t == &to && *k == kind));
+    assert!(state
+        .dep_indexes()
+        .in_edges(&to)
+        .iter()
+        .any(|(f, k)| f == &from && *k == kind));
 }
