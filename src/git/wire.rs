@@ -1111,6 +1111,10 @@ mod tests {
     #[test]
     fn serialize_orset_is_deterministic_across_insertion_order() {
         let stamp = Stamp::new(WriteStamp::new(12, 0), actor_id("alice"));
+        let label_stamp_a = Stamp::new(WriteStamp::new(20, 0), actor_id("bob"));
+        let label_stamp_b = Stamp::new(WriteStamp::new(21, 0), actor_id("carol"));
+        let dep_stamp_a = Stamp::new(WriteStamp::new(22, 0), actor_id("dave"));
+        let dep_stamp_b = Stamp::new(WriteStamp::new(23, 0), actor_id("erin"));
         let id = bead_id("bd-orset-order");
 
         let mut state_a = CanonicalState::new();
@@ -1122,14 +1126,14 @@ mod tests {
             label_a.clone(),
             dot(5, 1),
             crate::core::Sha256([0; 32]),
-            stamp.clone(),
+            label_stamp_a.clone(),
         );
         state_a.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(6, 2),
             crate::core::Sha256([0; 32]),
-            stamp.clone(),
+            label_stamp_b.clone(),
         );
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-order-b"), DepKind::Related).unwrap();
@@ -1137,25 +1141,25 @@ mod tests {
             dep_key_a.clone(),
             dot(7, 3),
             crate::core::Sha256([0; 32]),
-            stamp.clone(),
+            dep_stamp_a.clone(),
         );
         state_a.apply_dep_add(
             dep_key_b.clone(),
             dot(8, 4),
             crate::core::Sha256([0; 32]),
-            stamp.clone(),
+            dep_stamp_b.clone(),
         );
         let note_a = Note::new(
             NoteId::new("note-a").unwrap(),
             "first".to_string(),
             actor_id("bob"),
-            WriteStamp::new(13, 0),
+            WriteStamp::new(10, 0),
         );
         let note_b = Note::new(
             NoteId::new("note-b").unwrap(),
             "second".to_string(),
             actor_id("carol"),
-            WriteStamp::new(14, 0),
+            WriteStamp::new(11, 0),
         );
         state_a.insert_note(id.clone(), note_a);
         state_a.insert_note(id.clone(), note_b);
@@ -1167,26 +1171,26 @@ mod tests {
             label_b,
             dot(6, 2),
             crate::core::Sha256([0; 32]),
-            stamp.clone(),
+            label_stamp_b,
         );
         state_b.apply_label_add(
             id.clone(),
             label_a,
             dot(5, 1),
             crate::core::Sha256([0; 32]),
-            stamp.clone(),
+            label_stamp_a,
         );
         state_b.apply_dep_add(
             dep_key_b,
             dot(8, 4),
             crate::core::Sha256([0; 32]),
-            stamp.clone(),
+            dep_stamp_b,
         );
         state_b.apply_dep_add(
             dep_key_a,
             dot(7, 3),
             crate::core::Sha256([0; 32]),
-            stamp.clone(),
+            dep_stamp_a,
         );
         state_b.insert_note(
             id.clone(),
