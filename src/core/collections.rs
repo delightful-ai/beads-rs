@@ -93,8 +93,9 @@ impl Labels {
 
     pub fn remove(&mut self, label: &str) -> bool {
         // Find and remove by string value
+        let before = self.0.len();
         self.0.retain(|l| l.as_str() != label);
-        true // BTreeSet doesn't tell us if it changed, but retain always succeeds
+        self.0.len() != before
     }
 
     pub fn contains(&self, label: &str) -> bool {
@@ -159,5 +160,15 @@ mod tests {
 
         assert!(parsed.contains("bug"));
         assert!(parsed.contains("feature"));
+    }
+
+    #[test]
+    fn labels_remove_reports_change() {
+        let mut labels = Labels::new();
+        labels.insert(Label::parse("bug").unwrap());
+
+        assert!(labels.remove("bug"));
+        assert!(!labels.contains("bug"));
+        assert!(!labels.remove("missing"));
     }
 }
