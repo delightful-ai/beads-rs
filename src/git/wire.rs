@@ -1198,7 +1198,7 @@ mod tests {
                 NoteId::new("note-b").unwrap(),
                 "second".to_string(),
                 actor_id("carol"),
-                WriteStamp::new(14, 0),
+                WriteStamp::new(11, 0),
             ),
         );
         state_b.insert_note(
@@ -1207,7 +1207,7 @@ mod tests {
                 NoteId::new("note-a").unwrap(),
                 "first".to_string(),
                 actor_id("bob"),
-                WriteStamp::new(13, 0),
+                WriteStamp::new(10, 0),
             ),
         );
 
