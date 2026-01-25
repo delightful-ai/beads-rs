@@ -1,5 +1,6 @@
 //! `bd upgrade` - install latest binary and restart daemon.
 
+use clap::Args;
 use serde::Serialize;
 
 use super::super::print_json;
@@ -14,6 +15,13 @@ struct UpgradeJson<'a> {
     to_version: Option<&'a str>,
     install_path: &'a str,
     method: &'a str,
+}
+
+#[derive(Args, Debug)]
+pub struct UpgradeArgs {
+    /// Run upgrade in the background (internal).
+    #[arg(long, hide = true, default_value_t = false)]
+    pub background: bool,
 }
 
 pub(crate) fn handle(json: bool, background: bool) -> Result<()> {

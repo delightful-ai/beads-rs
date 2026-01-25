@@ -1,6 +1,51 @@
-use super::super::{Ctx, DepCmd, normalize_bead_id, parse_dep_edge, print_ok, send};
+use clap::{Args, Subcommand};
+
+use super::super::{Ctx, normalize_bead_id, parse_dep_edge, parse_dep_kind, print_ok, send};
+use crate::core::DepKind;
 use crate::daemon::ipc::Request;
 use crate::{Error, Result};
+
+#[derive(Subcommand, Debug)]
+pub enum DepCmd {
+    /// Add a dependency.
+    Add(DepAddArgs),
+
+    /// Remove a dependency.
+    #[command(alias = "remove")]
+    Rm(DepRmArgs),
+
+    /// Show dependency tree.
+    Tree { id: String },
+
+    /// Find cycles.
+    Cycles,
+}
+
+#[derive(Args, Debug)]
+pub struct DepAddArgs {
+    /// Dep kind (blocks, blocked_by, related, parent, etc).
+    #[arg(long, value_parser = parse_dep_kind)]
+    pub kind: Option<DepKind>,
+
+    /// Source issue ID.
+    pub from: String,
+
+    /// Target issue ID.
+    pub to: String,
+}
+
+#[derive(Args, Debug)]
+pub struct DepRmArgs {
+    /// Dep kind (blocks, blocked_by, related, parent, etc).
+    #[arg(long, value_parser = parse_dep_kind)]
+    pub kind: Option<DepKind>,
+
+    /// Source issue ID.
+    pub from: String,
+
+    /// Target issue ID.
+    pub to: String,
+}
 
 pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
     match cmd {

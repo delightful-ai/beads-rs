@@ -1,5 +1,7 @@
+use clap::Args;
+
 use super::super::render;
-use super::super::{Ctx, ShowArgs, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use crate::Result;
 use crate::api::IssueSummary;
 use crate::api::QueryResult;
@@ -7,6 +9,15 @@ use crate::core::BeadId;
 use crate::daemon::Filters;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use std::collections::{BTreeSet, HashMap};
+
+#[derive(Args, Debug)]
+pub struct ShowArgs {
+    pub id: String,
+
+    /// No-op for compatibility (children are always shown).
+    #[arg(long, hide = true)]
+    pub children: bool,
+}
 
 pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;

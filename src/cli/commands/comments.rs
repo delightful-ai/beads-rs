@@ -1,10 +1,37 @@
+use clap::{Args, Subcommand};
+
 use super::super::render;
-use super::super::{
-    CommentAddArgs, CommentsArgs, CommentsCmd, Ctx, normalize_bead_id, print_ok, send,
-};
+use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::{Error, Result};
+
+#[derive(Args, Debug)]
+pub struct CommentsArgs {
+    /// Optional subcommand.
+    #[command(subcommand)]
+    pub cmd: Option<CommentsCmd>,
+
+    /// Issue ID (lists comments when provided without a subcommand).
+    #[arg(value_name = "ID", required = false)]
+    pub id: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CommentsCmd {
+    /// Add a comment to an issue.
+    Add(CommentAddArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct CommentAddArgs {
+    /// Issue ID.
+    pub id: String,
+
+    /// Comment text. If omitted, read from stdin.
+    #[arg(value_name = "TEXT", num_args = 0..)]
+    pub content: Vec<String>,
+}
 
 pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
     match args.cmd {

@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::api::QueryResult;
@@ -13,7 +14,38 @@ use crate::daemon::wal::fsck::{FsckOptions, FsckReport, FsckStatus, fsck_store};
 use crate::paths;
 use crate::{Error, Result};
 
-use super::super::{StoreCmd, StoreFsckArgs, StoreUnlockArgs, print_json};
+use super::super::print_json;
+
+#[derive(Args, Debug)]
+pub struct StoreUnlockArgs {
+    /// Store id (UUID).
+    #[arg(long = "store-id")]
+    pub store_id: String,
+
+    /// Force unlock if lock appears valid.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct StoreFsckArgs {
+    /// Store id (UUID).
+    #[arg(long = "store-id")]
+    pub store_id: String,
+
+    /// Repair (truncate) corrupted WAL entries.
+    #[arg(long)]
+    pub repair: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StoreCmd {
+    /// Unlock store (advanced).
+    Unlock(StoreUnlockArgs),
+
+    /// Verify store integrity.
+    Fsck(StoreFsckArgs),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

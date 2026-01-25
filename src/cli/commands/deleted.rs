@@ -1,8 +1,25 @@
+use clap::Args;
+
 use super::super::render;
-use super::super::{Ctx, DeletedArgs, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::{Error, Result};
+
+#[derive(Args, Debug)]
+pub struct DeletedArgs {
+    /// Optional issue id to show details.
+    #[arg(value_name = "ISSUE_ID", required = false)]
+    pub id: Option<String>,
+
+    /// Show deletions within this time range (e.g., 7d, 30d, 2w).
+    #[arg(long, default_value = "7d")]
+    pub since: String,
+
+    /// Show all tracked deletions.
+    #[arg(long)]
+    pub all: bool,
+}
 
 pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
     let since_ms = if args.all {

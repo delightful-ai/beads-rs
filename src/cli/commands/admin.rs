@@ -1,7 +1,93 @@
-use super::super::{AdminCmd, AdminMaintenanceCmd, Ctx, print_ok, send};
+use clap::{Args, Subcommand};
+
+use super::super::{Ctx, print_ok, send};
 use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
 use crate::daemon::ipc::Request;
 use crate::{Result, WallClock};
+
+#[derive(Args, Debug)]
+pub struct AdminDoctorArgs {
+    /// Max records to sample per namespace.
+    #[arg(long = "max-records", default_value_t = 200)]
+    pub max_records: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminScrubArgs {
+    /// Max records to sample per namespace.
+    #[arg(long = "max-records", default_value_t = 200)]
+    pub max_records: u64,
+    /// Verify checkpoint cache entries.
+    #[arg(long)]
+    pub verify_checkpoint_cache: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminFlushArgs {
+    /// Trigger checkpoint immediately for matching groups.
+    #[arg(long = "checkpoint-now")]
+    pub checkpoint_now: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminFingerprintArgs {
+    /// Sample N shard indices per namespace.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=256))]
+    pub sample: Option<u16>,
+    /// Sampling nonce (auto-generated if omitted).
+    #[arg(long, requires = "sample")]
+    pub nonce: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminMaintenanceCmd {
+    /// Enable maintenance mode (disables writes).
+    On,
+
+    /// Disable maintenance mode.
+    Off,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminCmd {
+    /// Show admin status.
+    Status,
+
+    /// Show admin metrics.
+    Metrics,
+
+    /// Validate store data.
+    Doctor(AdminDoctorArgs),
+
+    /// Scrub store data.
+    Scrub(AdminScrubArgs),
+
+    /// Flush WAL to store.
+    Flush(AdminFlushArgs),
+
+    /// Create or update store fingerprint.
+    Fingerprint(AdminFingerprintArgs),
+
+    /// Reload policy config.
+    ReloadPolicies,
+
+    /// Reload limit config.
+    ReloadLimits,
+
+    /// Rotate replica id.
+    #[command(name = "rotate-replica-id")]
+    RotateReplicaId,
+
+    /// Enter or exit maintenance mode.
+    Maintenance {
+        #[command(subcommand)]
+        cmd: AdminMaintenanceCmd,
+    },
+
+    /// Rebuild search index.
+    #[command(name = "rebuild-index")]
+    RebuildIndex,
+}
 
 pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
     match cmd {

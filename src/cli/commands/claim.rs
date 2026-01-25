@@ -1,6 +1,17 @@
-use super::super::{ClaimArgs, Ctx, normalize_bead_id, print_ok, send};
+use clap::Args;
+
+use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use crate::Result;
 use crate::daemon::ipc::Request;
+
+#[derive(Args, Debug)]
+pub struct ClaimArgs {
+    pub id: String,
+
+    /// Lease duration in seconds.
+    #[arg(long, default_value_t = 3600)]
+    pub lease_secs: u64,
+}
 
 pub(crate) fn handle(ctx: &Ctx, args: ClaimArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;

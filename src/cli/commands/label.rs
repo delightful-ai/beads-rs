@@ -1,14 +1,36 @@
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use super::super::render;
-use super::super::{
-    Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, print_json, send,
-};
+use super::super::{Ctx, fetch_issue, normalize_bead_id, print_json, send};
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::query::Filters;
 use crate::{Error, Result};
+
+#[derive(Args, Debug)]
+pub struct LabelBatchArgs {
+    /// Issue ids followed by a label (e.g. `bd-1 bd-2 bug`).
+    #[arg(required = true, num_args = 2..)]
+    pub args: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LabelCmd {
+    /// Add a label to one or more issues.
+    Add(LabelBatchArgs),
+
+    /// Remove a label from one or more issues.
+    #[command(alias = "rm")]
+    Remove(LabelBatchArgs),
+
+    /// List labels on an issue.
+    List { id: String },
+
+    /// List all labels.
+    ListAll,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct LabelChange {
