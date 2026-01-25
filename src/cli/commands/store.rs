@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::api::QueryResult;
@@ -13,7 +14,52 @@ use crate::daemon::wal::fsck::{FsckOptions, FsckReport, FsckStatus, fsck_store};
 use crate::paths;
 use crate::{Error, Result};
 
-use super::super::{StoreCmd, StoreFsckArgs, StoreUnlockArgs, print_json};
+use super::super::print_json;
+
+#[derive(Subcommand, Debug)]
+pub enum StoreCmd {
+    /// Unlock store (for recovery).
+    Unlock(StoreUnlockArgs),
+    /// Run fsck on store.
+    Fsck(StoreFsckArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct StoreUnlockArgs {
+    /// Store id.
+    #[arg(value_name = "STORE_ID")]
+    pub store_id: String,
+
+    /// Force unlocking even if daemon seems alive.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct StoreFsckArgs {
+    /// Store id.
+    #[arg(value_name = "STORE_ID")]
+    pub store_id: String,
+
+    /// Repair the store (best effort).
+    #[arg(long)]
+    pub repair: bool,
+
+    /// Automatically discard corrupt segments.
+    #[arg(long)]
+    pub auto_discard: bool,
+
+    /// Skip index rebuild (faster, less thorough).
+    #[arg(long)]
+    pub skip_index: bool,
+}
+
+pub(super) fn cmd_name(cmd: &StoreCmd) -> &'static str {
+    match cmd {
+        StoreCmd::Unlock(_) => "unlock",
+        StoreCmd::Fsck(_) => "fsck",
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

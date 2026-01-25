@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use super::super::{Ctx, DeleteArgs, normalize_bead_ids, print_json, send};
+use clap::Args;
+
+use super::super::{Ctx, normalize_bead_ids, print_json, send};
 use crate::Result;
 use crate::daemon::ipc::Request;
 
@@ -8,6 +10,16 @@ use crate::daemon::ipc::Request;
 struct DeleteResult {
     status: &'static str,
     issue_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct DeleteArgs {
+    /// One or more issue IDs to delete.
+    #[arg(required = true, num_args = 1..)]
+    pub ids: Vec<String>,
+
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {

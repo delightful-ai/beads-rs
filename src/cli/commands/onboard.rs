@@ -7,9 +7,18 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use clap::Args;
+
 use crate::Result;
 use crate::daemon::ipc::{Request, Response, send_request};
 use crate::repo;
+
+#[derive(Args, Debug)]
+pub struct OnboardArgs {
+    /// Write output to file instead of stdout.
+    #[arg(short = 'o', long, value_name = "PATH")]
+    pub output: Option<std::path::PathBuf>,
+}
 
 /// The core philosophical content for AGENTS.md.
 const AGENTS_CONTENT: &str = r#"## Issue Tracking

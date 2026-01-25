@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 
+use clap::Args;
+
 use super::super::print_json;
 use crate::Result;
 use crate::config::load_or_init;
@@ -14,6 +16,13 @@ struct UpgradeJson<'a> {
     to_version: Option<&'a str>,
     install_path: &'a str,
     method: &'a str,
+}
+
+#[derive(Args, Debug)]
+pub struct UpgradeArgs {
+    /// Run upgrade in the background (internal).
+    #[arg(long, hide = true, default_value_t = false)]
+    pub background: bool,
 }
 
 pub(crate) fn handle(json: bool, background: bool) -> Result<()> {

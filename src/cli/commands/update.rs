@@ -1,13 +1,88 @@
+use clap::Args;
+
 use super::super::render;
 use super::super::{
-    Ctx, UpdateArgs, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs,
-    print_ok, resolve_description, send,
+    Ctx, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs,
+    parse_bead_type, parse_priority, print_ok, resolve_description, send,
 };
 use crate::api::QueryResult;
-use crate::core::{DepKind, WorkflowStatus};
+use crate::core::{BeadType, DepKind, Priority, WorkflowStatus};
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::daemon::ops::{BeadPatch, Patch};
 use crate::{Error, Result};
+
+#[derive(Args, Debug)]
+pub struct UpdateArgs {
+    pub id: String,
+
+    /// Reparent the bead (adds/removes `parent` dependency).
+    #[arg(long)]
+    pub parent: Option<String>,
+
+    /// Remove any existing parent relationship.
+    #[arg(long = "no-parent", conflicts_with = "parent")]
+    pub no_parent: bool,
+
+    #[arg(long)]
+    pub title: Option<String>,
+
+    #[arg(short = 'd', long, allow_hyphen_values = true)]
+    pub description: Option<String>,
+
+    /// Alias for --description (GitHub CLI convention).
+    #[arg(long = "body", hide = true, allow_hyphen_values = true)]
+    pub body: Option<String>,
+
+    #[arg(long, allow_hyphen_values = true)]
+    pub design: Option<String>,
+
+    #[arg(
+        long = "acceptance",
+        alias = "acceptance-criteria",
+        allow_hyphen_values = true
+    )]
+    pub acceptance: Option<String>,
+
+    /// External reference (e.g., "gh-9", "jira-ABC").
+    #[arg(long = "external-ref")]
+    pub external_ref: Option<String>,
+
+    /// Time estimate in minutes.
+    #[arg(short = 'e', long)]
+    pub estimate: Option<u32>,
+
+    #[arg(short = 's', long, value_parser = parse_status)]
+    pub status: Option<String>,
+
+    /// Close reason (only valid with --status=closed).
+    #[arg(long, allow_hyphen_values = true)]
+    pub reason: Option<String>,
+
+    #[arg(short = 'p', long, value_parser = parse_priority)]
+    pub priority: Option<Priority>,
+
+    /// Change the issue type (bug, feature, task, epic, chore).
+    #[arg(short = 't', long = "type", alias = "issue-type", value_parser = parse_bead_type)]
+    pub bead_type: Option<BeadType>,
+
+    /// Compat: assignee/claim.
+    #[arg(short = 'a', long)]
+    pub assignee: Option<String>,
+
+    #[arg(long = "add-label", alias = "add_label", value_delimiter = ',', num_args = 0..)]
+    pub add_label: Vec<String>,
+
+    #[arg(long = "remove-label", alias = "remove_label", value_delimiter = ',', num_args = 0..)]
+    pub remove_label: Vec<String>,
+
+    /// Add a note.
+    #[arg(long = "notes", alias = "note", allow_hyphen_values = true)]
+    pub notes: Option<String>,
+
+    /// Dependencies to add (repeat or comma-separated): "type:id" or "id" (defaults to blocks).
+    #[arg(long = "deps", value_delimiter = ',', num_args = 0..)]
+    pub deps: Vec<String>,
+}
 
 pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;

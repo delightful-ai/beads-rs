@@ -1,7 +1,108 @@
-use super::super::{AdminCmd, AdminMaintenanceCmd, Ctx, print_ok, send};
+use clap::{Args, Subcommand};
+
+use super::super::{Ctx, print_ok, send};
 use crate::api::{AdminFingerprintMode, AdminFingerprintSample};
 use crate::daemon::ipc::Request;
 use crate::{Result, WallClock};
+
+#[derive(Subcommand, Debug)]
+pub enum AdminCmd {
+    /// Show admin status snapshot.
+    Status,
+    /// Show admin metrics snapshot.
+    Metrics,
+    /// Run admin doctor checks.
+    Doctor(AdminDoctorArgs),
+    /// Run admin scrub now checks.
+    #[command(name = "scrub")]
+    Scrub(AdminScrubArgs),
+    /// Flush WAL for a namespace.
+    Flush(AdminFlushArgs),
+    /// Show admin fingerprint for divergence detection.
+    Fingerprint(AdminFingerprintArgs),
+    /// Reload namespace policies from namespaces.toml.
+    #[command(name = "reload-policies")]
+    ReloadPolicies,
+    /// Reload limits from config.toml.
+    #[command(name = "reload-limits")]
+    ReloadLimits,
+    /// Rotate the local replica id.
+    #[command(name = "rotate-replica-id")]
+    RotateReplicaId,
+    /// Toggle maintenance mode.
+    Maintenance {
+        #[command(subcommand)]
+        cmd: AdminMaintenanceCmd,
+    },
+    /// Rebuild WAL index from segments.
+    #[command(name = "rebuild-index")]
+    RebuildIndex,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminMaintenanceCmd {
+    /// Enable maintenance mode.
+    On,
+    /// Disable maintenance mode.
+    Off,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminDoctorArgs {
+    /// Max records to sample per namespace.
+    #[arg(long = "max-records", default_value_t = 200)]
+    pub max_records: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminScrubArgs {
+    /// Max records to sample per namespace.
+    #[arg(long = "max-records", default_value_t = 200)]
+    pub max_records: u64,
+    /// Verify checkpoint cache entries.
+    #[arg(long)]
+    pub verify_checkpoint_cache: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminFlushArgs {
+    /// Trigger checkpoint immediately for matching groups.
+    #[arg(long = "checkpoint-now")]
+    pub checkpoint_now: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AdminFingerprintArgs {
+    /// Sample N shard indices per namespace.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=256))]
+    pub sample: Option<u16>,
+    /// Sampling nonce (auto-generated if omitted).
+    #[arg(long, requires = "sample")]
+    pub nonce: Option<String>,
+}
+
+pub(super) fn cmd_name(cmd: &AdminCmd) -> &'static str {
+    match cmd {
+        AdminCmd::Status => "status",
+        AdminCmd::Metrics => "metrics",
+        AdminCmd::Doctor(_) => "doctor",
+        AdminCmd::Scrub(_) => "scrub",
+        AdminCmd::Flush(_) => "flush",
+        AdminCmd::Fingerprint(_) => "fingerprint",
+        AdminCmd::ReloadPolicies => "reload-policies",
+        AdminCmd::ReloadLimits => "reload-limits",
+        AdminCmd::RotateReplicaId => "rotate-replica-id",
+        AdminCmd::Maintenance { .. } => "maintenance",
+        AdminCmd::RebuildIndex => "rebuild-index",
+    }
+}
+
+pub(super) fn maintenance_cmd_name(cmd: &AdminMaintenanceCmd) -> &'static str {
+    match cmd {
+        AdminMaintenanceCmd::On => "on",
+        AdminMaintenanceCmd::Off => "off",
+    }
+}
 
 pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
     match cmd {

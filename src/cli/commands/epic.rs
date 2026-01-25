@@ -1,7 +1,9 @@
 use serde::Serialize;
 
+use clap::{Args, Subcommand};
+
 use super::super::render;
-use super::super::{Ctx, EpicCmd, print_json, print_ok, send};
+use super::super::{Ctx, print_json, print_ok, send};
 use crate::Result;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
@@ -10,6 +12,36 @@ use crate::daemon::ipc::{Request, ResponsePayload};
 struct EpicCloseResult {
     closed: Vec<String>,
     count: usize,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum EpicCmd {
+    /// Show epic status.
+    Status(EpicStatusArgs),
+    /// Close all eligible epics.
+    #[command(name = "close-eligible")]
+    CloseEligible(EpicCloseEligibleArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct EpicStatusArgs {
+    /// Show only epics eligible for closure.
+    #[arg(long)]
+    pub eligible_only: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct EpicCloseEligibleArgs {
+    /// Preview without closing epics.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+pub(super) fn cmd_name(cmd: &EpicCmd) -> &'static str {
+    match cmd {
+        EpicCmd::Status(_) => "status",
+        EpicCmd::CloseEligible(_) => "close-eligible",
+    }
 }
 
 pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {

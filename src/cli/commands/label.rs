@@ -1,9 +1,9 @@
 use serde::Serialize;
 
+use clap::{Args, Subcommand};
+
 use super::super::render;
-use super::super::{
-    Ctx, LabelBatchArgs, LabelCmd, fetch_issue, normalize_bead_id, print_json, send,
-};
+use super::super::{Ctx, fetch_issue, normalize_bead_id, print_json, send};
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::ipc::{Request, ResponsePayload};
@@ -21,6 +21,35 @@ struct LabelChange {
 struct LabelCount {
     label: String,
     count: usize,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LabelCmd {
+    /// Add a label to one or more issues.
+    Add(LabelBatchArgs),
+    /// Remove a label from one or more issues.
+    Remove(LabelBatchArgs),
+    /// List labels for a specific issue.
+    List { id: String },
+    /// List all labels in the repo.
+    #[command(name = "list-all")]
+    ListAll,
+}
+
+#[derive(Args, Debug)]
+pub struct LabelBatchArgs {
+    /// Issue IDs and label (expects: <issue-id...> <label>).
+    #[arg(value_name = "ARGS", num_args = 2..)]
+    pub args: Vec<String>,
+}
+
+pub(super) fn cmd_name(cmd: &LabelCmd) -> &'static str {
+    match cmd {
+        LabelCmd::Add(_) => "add",
+        LabelCmd::Remove(_) => "remove",
+        LabelCmd::List { .. } => "list",
+        LabelCmd::ListAll => "list-all",
+    }
 }
 
 pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {

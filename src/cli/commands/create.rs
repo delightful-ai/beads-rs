@@ -1,15 +1,96 @@
 use std::io::{BufRead, Write};
 
+use clap::Args;
+
 use super::super::render;
 use super::super::{
-    CreateArgs, Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_json, print_ok,
-    resolve_description, send, send_raw,
+    Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, parse_bead_type, parse_priority,
+    print_json, print_ok, resolve_description, send, send_raw,
 };
 use crate::api::QueryResult;
 use crate::core::BeadType;
 use crate::daemon::ipc::{Request, Response, ResponsePayload};
 use crate::daemon::ops::OpResult;
 use crate::{Error, Result};
+
+#[derive(Args, Debug)]
+pub struct CreateArgs {
+    /// Title (positional).
+    #[arg(value_name = "TITLE", required = false)]
+    pub title: Option<String>,
+
+    /// Title (compat: `--title`).
+    #[arg(long = "title", alias = "title-flag", value_name = "TITLE")]
+    pub title_flag: Option<String>,
+
+    /// Create multiple issues from a markdown file.
+    #[arg(short = 'f', long = "file", value_name = "PATH")]
+    pub file: Option<std::path::PathBuf>,
+
+    /// Issue type.
+    #[arg(short = 't', long = "type", alias = "issue-type", value_parser = parse_bead_type)]
+    pub bead_type: Option<BeadType>,
+
+    /// Priority 0-4 or words like "high".
+    #[arg(short = 'p', long, value_parser = parse_priority)]
+    pub priority: Option<crate::core::Priority>,
+
+    /// Description.
+    #[arg(short = 'd', long, allow_hyphen_values = true)]
+    pub description: Option<String>,
+
+    /// Alias for --description (GitHub CLI convention).
+    #[arg(long = "body", hide = true, allow_hyphen_values = true)]
+    pub body: Option<String>,
+
+    /// Assignee (compat; only supports current actor).
+    #[arg(short = 'a', long)]
+    pub assignee: Option<String>,
+
+    /// Labels (comma-separated or repeat).
+    #[arg(short = 'l', long = "labels", value_delimiter = ',', num_args = 0..)]
+    pub labels: Vec<String>,
+
+    /// Alias for --labels.
+    #[arg(long = "label", hide = true, value_delimiter = ',', num_args = 0..)]
+    pub label: Vec<String>,
+
+    /// Design text.
+    #[arg(long, allow_hyphen_values = true)]
+    pub design: Option<String>,
+
+    /// Acceptance criteria text.
+    #[arg(
+        long = "acceptance",
+        alias = "acceptance-criteria",
+        allow_hyphen_values = true
+    )]
+    pub acceptance: Option<String>,
+
+    /// External reference (e.g., "gh-9", "jira-ABC").
+    #[arg(long = "external-ref")]
+    pub external_ref: Option<String>,
+
+    /// Explicit issue ID (partitioning).
+    #[arg(long)]
+    pub id: Option<String>,
+
+    /// Parent bead id (adds `parent` dep).
+    #[arg(long)]
+    pub parent: Option<String>,
+
+    /// Dependencies (repeat or comma-separated): "type:id" or "id" (defaults to blocks).
+    #[arg(long = "deps", value_delimiter = ',', num_args = 0..)]
+    pub deps: Vec<String>,
+
+    /// Time estimate in minutes.
+    #[arg(short = 'e', long)]
+    pub estimate: Option<u32>,
+
+    /// No-op (compat). beads-rs doesn't require forcing.
+    #[arg(long)]
+    pub force: bool,
+}
 
 pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     if let Some(path) = args.file.take() {
