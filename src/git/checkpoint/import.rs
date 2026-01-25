@@ -10,6 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
 
+use super::export::CheckpointExport;
 use super::json_canon::CanonJsonError;
 use super::layout::{CheckpointFileKind, MANIFEST_FILE, META_FILE, parse_shard_path};
 use super::{CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks};
@@ -328,6 +329,199 @@ pub fn import_checkpoint(
     })
 }
 
+/// Import a checkpoint from an in-memory export (as produced by `export_checkpoint` or read from git).
+///
+/// This is the same verification + parsing as `import_checkpoint(dir, limits)`, but without filesystem I/O.
+pub fn import_checkpoint_export(
+    export: &CheckpointExport,
+    limits: &Limits,
+) -> Result<CheckpointImport, CheckpointImportError> {
+    let meta = &export.meta;
+    let manifest = &export.manifest;
+
+    if meta.store_id != manifest.store_id {
+        return Err(CheckpointImportError::StoreIdMismatch {
+            meta: meta.store_id,
+            manifest: manifest.store_id,
+        });
+    }
+    if meta.store_epoch != manifest.store_epoch {
+        return Err(CheckpointImportError::StoreEpochMismatch {
+            meta: meta.store_epoch,
+            manifest: manifest.store_epoch,
+        });
+    }
+    if meta.checkpoint_group != manifest.checkpoint_group {
+        return Err(CheckpointImportError::GroupMismatch {
+            meta: meta.checkpoint_group.clone(),
+            manifest: manifest.checkpoint_group.clone(),
+        });
+    }
+
+    let mut meta_namespaces = meta.namespaces.clone();
+    meta_namespaces.sort();
+    meta_namespaces.dedup();
+    let mut manifest_namespaces = manifest.namespaces.clone();
+    manifest_namespaces.sort();
+    manifest_namespaces.dedup();
+    if meta_namespaces != manifest_namespaces {
+        return Err(CheckpointImportError::NamespacesMismatch {
+            meta: meta_namespaces,
+            manifest: manifest_namespaces,
+        });
+    }
+
+    // Verify manifest hash and meta content hash using canonical encoding.
+    let manifest_hash = manifest.manifest_hash()?;
+    if manifest_hash != meta.manifest_hash {
+        return Err(CheckpointImportError::ManifestHashMismatch {
+            expected: meta.manifest_hash,
+            got: manifest_hash,
+        });
+    }
+    let content_hash = meta.compute_content_hash()?;
+    if content_hash != meta.content_hash {
+        return Err(CheckpointImportError::ContentHashMismatch {
+            expected: meta.content_hash,
+            got: content_hash,
+        });
+    }
+
+    let mut state = StoreState::new();
+    let mut label_stores: BTreeMap<NamespaceId, LabelStore> = BTreeMap::new();
+    let mut dep_stores: BTreeMap<NamespaceId, DepStore> = BTreeMap::new();
+    let allowed_namespaces: BTreeSet<NamespaceId> = manifest_namespaces.iter().cloned().collect();
+
+    for (rel_path, entry) in &manifest.files {
+        validate_rel_path(rel_path)?;
+        if rel_path == META_FILE || rel_path == MANIFEST_FILE {
+            return Err(CheckpointImportError::UnexpectedFile {
+                path: rel_path.clone(),
+            });
+        }
+
+        let shard =
+            parse_shard_path(rel_path).ok_or_else(|| CheckpointImportError::UnexpectedFile {
+                path: rel_path.clone(),
+            })?;
+        if !allowed_namespaces.contains(&shard.namespace) {
+            return Err(CheckpointImportError::UnexpectedFile {
+                path: rel_path.clone(),
+            });
+        }
+
+        let payload =
+            export
+                .files
+                .get(rel_path)
+                .ok_or_else(|| CheckpointImportError::MissingFile {
+                    path: PathBuf::from(rel_path),
+                })?;
+        let bytes = payload.bytes.as_ref();
+
+        let got_bytes = bytes.len() as u64;
+        if got_bytes != entry.bytes {
+            return Err(CheckpointImportError::FileSizeMismatch {
+                path: PathBuf::from(rel_path),
+                expected: entry.bytes,
+                got: got_bytes,
+            });
+        }
+        let got_hash = ContentHash::from_bytes(sha256_bytes(bytes).0);
+        if got_hash != entry.sha256 {
+            return Err(CheckpointImportError::FileHashMismatch {
+                path: PathBuf::from(rel_path),
+                expected: entry.sha256,
+                got: got_hash,
+            });
+        }
+
+        if entry.bytes > limits.max_jsonl_shard_bytes as u64 {
+            return Err(CheckpointImportError::ShardTooLarge {
+                path: PathBuf::from(rel_path),
+                max_bytes: limits.max_jsonl_shard_bytes as u64,
+                got_bytes: entry.bytes,
+            });
+        }
+
+        let path = PathBuf::from(rel_path);
+        match shard.kind {
+            CheckpointFileKind::State => parse_jsonl_bytes::<WireBeadFull, _>(
+                bytes,
+                &path,
+                &shard.namespace,
+                limits,
+                |line, wire| {
+                    let ns = line.namespace.clone();
+                    let bead_id = wire.id.clone();
+                    let label_stamp = wire.label_stamp();
+                    let label_state = label_state_from_wire(wire.labels.clone(), label_stamp);
+                    let lineage =
+                        Stamp::new(WriteStamp::from(wire.created_at), wire.created_by.clone());
+                    label_stores.entry(ns.clone()).or_default().insert_state(
+                        bead_id.clone(),
+                        lineage.clone(),
+                        label_state,
+                    );
+
+                    let notes = wire.notes.clone();
+                    let bead = crate::core::Bead::from(wire);
+                    let state = state.ensure_namespace(ns);
+                    state.insert_live(bead);
+
+                    for note in notes {
+                        let note = crate::core::Note::from(note);
+                        state.insert_note(bead_id.clone(), Some(lineage.clone()), note);
+                    }
+
+                    Ok(())
+                },
+            )?,
+            CheckpointFileKind::Tombstones => parse_jsonl_bytes::<WireTombstoneV1, _>(
+                bytes,
+                &path,
+                &shard.namespace,
+                limits,
+                |line, wire| {
+                    let ns = line.namespace.clone();
+                    let tomb = tombstone_from_wire(&wire, &path, line)?;
+                    state.ensure_namespace(ns).insert_tombstone(tomb);
+                    Ok(())
+                },
+            )?,
+            CheckpointFileKind::Deps => parse_jsonl_bytes::<WireDepStoreV1, _>(
+                bytes,
+                &path,
+                &shard.namespace,
+                limits,
+                |line, wire| {
+                    let ns = line.namespace.clone();
+                    let dep_store = dep_store_from_wire(&wire, &path, line)?;
+                    let entry = dep_stores.entry(ns.clone()).or_default();
+                    *entry = DepStore::join(entry, &dep_store);
+                    Ok(())
+                },
+            )?,
+        };
+    }
+
+    for (ns, labels) in label_stores {
+        state.ensure_namespace(ns).set_label_store(labels);
+    }
+    for (ns, deps) in dep_stores {
+        state.ensure_namespace(ns).set_dep_store(deps);
+    }
+
+    Ok(CheckpointImport {
+        checkpoint_group: meta.checkpoint_group.clone(),
+        policy_hash: meta.policy_hash,
+        roster_hash: meta.roster_hash,
+        state,
+        included: meta.included.clone(),
+        included_heads: meta.included_heads.clone(),
+    })
+}
+
 pub fn merge_store_states(
     a: &StoreState,
     b: &StoreState,
@@ -378,6 +572,66 @@ struct JsonlStats {
 struct JsonlLineContext {
     line_no: u64,
     namespace: NamespaceId,
+}
+
+fn parse_jsonl_bytes<T, F>(
+    bytes: &[u8],
+    path: &Path,
+    namespace: &NamespaceId,
+    limits: &Limits,
+    mut on_item: F,
+) -> Result<(), CheckpointImportError>
+where
+    T: DeserializeOwned,
+    F: FnMut(JsonlLineContext, T) -> Result<(), CheckpointImportError>,
+{
+    let total_bytes = bytes.len() as u64;
+    if total_bytes > limits.max_jsonl_shard_bytes as u64 {
+        return Err(CheckpointImportError::ShardTooLarge {
+            path: path.to_path_buf(),
+            max_bytes: limits.max_jsonl_shard_bytes as u64,
+            got_bytes: total_bytes,
+        });
+    }
+
+    let mut line_no = 0u64;
+    let mut entries = 0usize;
+
+    for chunk in bytes.split_inclusive(|b| *b == b'\n') {
+        if chunk.len() > limits.max_jsonl_line_bytes {
+            return Err(CheckpointImportError::LineTooLong {
+                path: path.to_path_buf(),
+                line: line_no + 1,
+                max_bytes: limits.max_jsonl_line_bytes as u64,
+                got_bytes: chunk.len() as u64,
+            });
+        }
+
+        let line = if chunk.ends_with(b"\n") {
+            &chunk[..chunk.len() - 1]
+        } else {
+            chunk
+        };
+
+        line_no += 1;
+        let value = parse_json_line::<T>(line, limits, path, line_no)?;
+        entries += 1;
+        if entries > limits.max_snapshot_entries {
+            return Err(CheckpointImportError::ShardEntryLimit {
+                path: path.to_path_buf(),
+                max_entries: limits.max_snapshot_entries,
+                got_entries: entries,
+            });
+        }
+
+        let ctx = JsonlLineContext {
+            line_no,
+            namespace: namespace.clone(),
+        };
+        on_item(ctx, value)?;
+    }
+
+    Ok(())
 }
 
 fn parse_jsonl_file<T, F>(

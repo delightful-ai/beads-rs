@@ -101,6 +101,72 @@ pub struct CheckpointSnapshotInput<'a> {
     pub watermarks_durable: &'a Watermarks<Durable>,
 }
 
+/// Snapshot builder for already-materialized state (used by checkpoint publish retry/merge).
+///
+/// Equivalent to `build_snapshot`, but caller provides `included` watermarks and heads directly.
+pub struct CheckpointSnapshotFromStateInput<'a> {
+    pub checkpoint_group: String,
+    pub namespaces: Vec<NamespaceId>,
+    pub store_id: StoreId,
+    pub store_epoch: StoreEpoch,
+    pub created_at_ms: u64,
+    pub created_by_replica_id: ReplicaId,
+    pub policy_hash: ContentHash,
+    pub roster_hash: Option<ContentHash>,
+    pub included: IncludedWatermarks,
+    pub included_heads: Option<IncludedHeads>,
+    pub dirty_shards: Option<BTreeSet<CheckpointShardPath>>,
+    pub state: &'a StoreState,
+}
+
+pub fn build_snapshot_from_state(
+    input: CheckpointSnapshotFromStateInput<'_>,
+) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
+    let CheckpointSnapshotFromStateInput {
+        checkpoint_group,
+        mut namespaces,
+        store_id,
+        store_epoch,
+        created_at_ms,
+        created_by_replica_id,
+        policy_hash,
+        roster_hash,
+        included,
+        included_heads,
+        dirty_shards,
+        state,
+    } = input;
+
+    namespaces.sort();
+    namespaces.dedup();
+
+    let mut shards: BTreeMap<String, CheckpointShardPayload> = BTreeMap::new();
+    for namespace in &namespaces {
+        let ns_shards = build_namespace_shards(namespace, state)?;
+        shards.extend(ns_shards);
+    }
+
+    let dirty_shards = match dirty_shards {
+        Some(paths) => paths.into_iter().map(|path| path.to_path()).collect(),
+        None => shards.keys().cloned().collect(),
+    };
+
+    Ok(CheckpointSnapshot {
+        checkpoint_group,
+        store_id,
+        store_epoch,
+        namespaces,
+        created_at_ms,
+        created_by_replica_id,
+        policy_hash,
+        roster_hash,
+        included,
+        included_heads,
+        shards,
+        dirty_shards,
+    })
+}
+
 pub fn build_snapshot(
     input: CheckpointSnapshotInput<'_>,
 ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
