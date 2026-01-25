@@ -201,6 +201,12 @@ pub enum WatermarkError {
     MissingHead { seq: Seq0 },
     #[error("head hash must be absent at genesis (seq {seq})")]
     UnexpectedHead { seq: Seq0 },
+    #[error("head mismatch for seq {seq}: {left:?} vs {right:?}")]
+    HeadMismatch {
+        seq: Seq0,
+        left: HeadStatus,
+        right: HeadStatus,
+    },
 }
 
 fn validate_head(seq: Seq0, head: HeadStatus) -> Result<(), WatermarkError> {
@@ -214,6 +220,22 @@ fn validate_head(seq: Seq0, head: HeadStatus) -> Result<(), WatermarkError> {
     match head {
         HeadStatus::Known(_) => Ok(()),
         _ => Err(WatermarkError::MissingHead { seq }),
+    }
+}
+
+fn head_key(head: HeadStatus) -> (u8, [u8; 32]) {
+    match head {
+        HeadStatus::Genesis => (0, [0u8; 32]),
+        HeadStatus::Known(bytes) => (1, bytes),
+        HeadStatus::Unknown => (2, [0u8; 32]),
+    }
+}
+
+fn canonicalize_heads(a: HeadStatus, b: HeadStatus) -> (HeadStatus, HeadStatus) {
+    if head_key(a) <= head_key(b) {
+        (a, b)
+    } else {
+        (b, a)
     }
 }
 
@@ -290,6 +312,11 @@ impl<K> Watermarks<K> {
         }
 
         if seq == current.seq() {
+            validate_head(seq, head)?;
+            if head != current.head() {
+                let (left, right) = canonicalize_heads(current.head(), head);
+                return Err(WatermarkError::HeadMismatch { seq, left, right });
+            }
             return Ok(());
         }
 
@@ -416,5 +443,64 @@ mod tests {
         let watermark = watermarks.get(&ns, &origin).expect("watermark");
         assert_eq!(watermark.seq().get(), next.get());
         assert!(matches!(watermark.head(), HeadStatus::Known(_)));
+    }
+
+    #[test]
+    fn observe_at_least_rejects_head_mismatch_same_seq() {
+        let mut watermarks = Watermarks::<Applied>::new();
+        let ns = NamespaceId::parse("core").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
+        let seq = Seq0::new(2);
+        let head_a = HeadStatus::Known([1u8; 32]);
+        let head_b = HeadStatus::Known([2u8; 32]);
+
+        watermarks
+            .observe_at_least(&ns, &origin, seq, head_a)
+            .unwrap();
+        let err = watermarks
+            .observe_at_least(&ns, &origin, seq, head_b)
+            .unwrap_err();
+
+        let (left, right) = canonicalize_heads(head_a, head_b);
+        assert_eq!(err, WatermarkError::HeadMismatch { seq, left, right });
+    }
+
+    #[test]
+    fn merge_at_least_head_mismatch_is_order_independent() {
+        let ns = NamespaceId::parse("core").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
+        let seq = Seq0::new(4);
+
+        let mut a = Watermarks::<Applied>::new();
+        a.observe_at_least(&ns, &origin, seq, HeadStatus::Known([3u8; 32]))
+            .unwrap();
+
+        let mut b = Watermarks::<Applied>::new();
+        b.observe_at_least(&ns, &origin, seq, HeadStatus::Known([9u8; 32]))
+            .unwrap();
+
+        let mut ab = a.clone();
+        let err_ab = ab.merge_at_least(&b).unwrap_err();
+        let mut ba = b.clone();
+        let err_ba = ba.merge_at_least(&a).unwrap_err();
+
+        assert_eq!(err_ab, err_ba);
+    }
+
+    #[test]
+    fn observe_at_least_validates_head_on_equal_seq() {
+        let mut watermarks = Watermarks::<Applied>::new();
+        let ns = NamespaceId::parse("core").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([13u8; 16]));
+        let seq = Seq0::ZERO;
+
+        watermarks
+            .observe_at_least(&ns, &origin, seq, HeadStatus::Genesis)
+            .unwrap();
+
+        let err = watermarks
+            .observe_at_least(&ns, &origin, seq, HeadStatus::Known([7u8; 32]))
+            .unwrap_err();
+        assert_eq!(err, WatermarkError::UnexpectedHead { seq });
     }
 }

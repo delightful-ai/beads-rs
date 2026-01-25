@@ -2166,7 +2166,7 @@ fn apply_checkpoint_watermarks(
                             kind: "applied",
                             namespace: namespace.clone(),
                             origin: *origin,
-                            source,
+                            source: Box::new(source),
                         })?;
                 store
                     .watermarks_applied
@@ -2175,7 +2175,7 @@ fn apply_checkpoint_watermarks(
                         kind: "applied",
                         namespace: namespace.clone(),
                         origin: *origin,
-                        source,
+                        source: Box::new(source),
                     })?;
                 store
                     .watermarks_durable
@@ -2184,7 +2184,7 @@ fn apply_checkpoint_watermarks(
                         kind: "durable",
                         namespace: namespace.clone(),
                         origin: *origin,
-                        source,
+                        source: Box::new(source),
                     })?;
                 origins
                     .entry(namespace.clone())

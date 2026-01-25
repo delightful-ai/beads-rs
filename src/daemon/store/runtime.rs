@@ -599,7 +599,7 @@ pub enum StoreRuntimeError {
         namespace: NamespaceId,
         origin: ReplicaId,
         #[source]
-        source: WatermarkError,
+        source: Box<WatermarkError>,
     },
 }
 
@@ -787,7 +787,7 @@ fn load_watermarks(
                     kind: "applied",
                     namespace: namespace.clone(),
                     origin,
-                    source,
+                    source: Box::new(source),
                 }
             })?;
         applied
@@ -801,7 +801,7 @@ fn load_watermarks(
                 kind: "applied",
                 namespace: namespace.clone(),
                 origin,
-                source,
+                source: Box::new(source),
             })?;
 
         let durable_head =
@@ -810,7 +810,7 @@ fn load_watermarks(
                     kind: "durable",
                     namespace: namespace.clone(),
                     origin,
-                    source,
+                    source: Box::new(source),
                 }
             })?;
         durable
@@ -824,7 +824,7 @@ fn load_watermarks(
                 kind: "durable",
                 namespace: namespace.clone(),
                 origin,
-                source,
+                source: Box::new(source),
             })?;
     }
 

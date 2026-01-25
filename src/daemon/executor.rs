@@ -421,7 +421,7 @@ impl Daemon {
                         kind: "applied",
                         namespace: namespace.clone(),
                         origin: origin_replica_id,
-                        source: err,
+                        source: Box::new(err),
                     })
                 })?;
             store_runtime
@@ -432,7 +432,7 @@ impl Daemon {
                         kind: "durable",
                         namespace: namespace.clone(),
                         origin: origin_replica_id,
-                        source: err,
+                        source: Box::new(err),
                     })
                 })?;
 
@@ -826,10 +826,10 @@ fn plan_local_append(
             kind: "durable",
             namespace: namespace.clone(),
             origin: origin_replica_id,
-            source: WatermarkError::NonContiguous {
+            source: Box::new(WatermarkError::NonContiguous {
                 expected: expected_next,
                 got: origin_seq,
-            },
+            }),
         }));
     }
     let prev_sha = match durable_watermark.head() {
