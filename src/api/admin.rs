@@ -376,6 +376,9 @@ pub struct AdminReloadReplicationOutput {
 pub struct AdminReloadLimitsOutput {
     pub store_id: StoreId,
     pub requires_restart: bool,
+    /// Number of checkpoint groups reloaded, or None if reload failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_groups_reloaded: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

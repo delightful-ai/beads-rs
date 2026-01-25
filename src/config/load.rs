@@ -24,25 +24,37 @@ pub fn discover_repo_root() -> Option<PathBuf> {
 pub fn load_user_config() -> Result<Option<ConfigLayer>> {
     let path = config_path();
     if !path.exists() {
+        tracing::debug!(path = %path.display(), "user config file not found, using defaults");
         return Ok(None);
     }
     let contents = fs::read_to_string(&path)
         .map_err(|e| config_error(format!("failed to read {}: {e}", path.display())))?;
-    toml::from_str(&contents)
-        .map(Some)
-        .map_err(|e| config_error(format!("failed to parse {}: {e}", path.display())))
+    let layer: ConfigLayer = toml::from_str(&contents)
+        .map_err(|e| config_error(format!("failed to parse {}: {e}", path.display())))?;
+    tracing::debug!(
+        path = %path.display(),
+        has_checkpoint_groups = layer.checkpoint_groups.is_some(),
+        "loaded user config"
+    );
+    Ok(Some(layer))
 }
 
 pub fn load_repo_config(repo_root: &Path) -> Result<Option<ConfigLayer>> {
     let path = repo_config_path(repo_root);
     if !path.exists() {
+        tracing::debug!(path = %path.display(), "repo config file not found");
         return Ok(None);
     }
     let contents = fs::read_to_string(&path)
         .map_err(|e| config_error(format!("failed to read {}: {e}", path.display())))?;
-    toml::from_str(&contents)
-        .map(Some)
-        .map_err(|e| config_error(format!("failed to parse {}: {e}", path.display())))
+    let layer: ConfigLayer = toml::from_str(&contents)
+        .map_err(|e| config_error(format!("failed to parse {}: {e}", path.display())))?;
+    tracing::debug!(
+        path = %path.display(),
+        has_checkpoint_groups = layer.checkpoint_groups.is_some(),
+        "loaded repo config"
+    );
+    Ok(Some(layer))
 }
 
 pub fn load() -> Result<Config> {
@@ -57,6 +69,12 @@ pub fn load_for_repo(repo_root: Option<&Path>) -> Result<Config> {
     };
     let mut config = merge_layers(user, repo);
     apply_env_overrides(&mut config);
+
+    tracing::debug!(
+        checkpoint_groups = ?config.checkpoint_groups.keys().collect::<Vec<_>>(),
+        "config loaded with checkpoint groups"
+    );
+
     Ok(config)
 }
 

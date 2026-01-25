@@ -957,6 +957,10 @@ fn render_admin_reload_limits(out: &AdminReloadLimitsOutput) -> String {
             "false"
         }
     ));
+    match out.checkpoint_groups_reloaded {
+        Some(count) => out_str.push_str(&format!("checkpoint_groups_reloaded: {}\n", count)),
+        None => out_str.push_str("checkpoint_groups_reloaded: failed\n"),
+    }
     out_str.trim_end().into()
 }
 

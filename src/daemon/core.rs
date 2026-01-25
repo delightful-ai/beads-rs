@@ -1448,6 +1448,41 @@ impl Daemon {
         Ok(())
     }
 
+    /// Reload checkpoint groups from config and re-register with scheduler.
+    pub(crate) fn reload_checkpoint_groups(&mut self, repo_path: &Path) -> Result<usize, OpError> {
+        let config = crate::config::load_for_repo(Some(repo_path)).map_err(|e| {
+            OpError::ValidationFailed {
+                field: "checkpoint_groups".into(),
+                reason: format!("failed to reload config: {e}"),
+            }
+        })?;
+
+        let old_count = self.checkpoint_groups.len();
+        self.checkpoint_groups = config.checkpoint_groups;
+        let new_count = self.checkpoint_groups.len();
+
+        tracing::info!(
+            old_count = old_count,
+            new_count = new_count,
+            groups = ?self.checkpoint_groups.keys().collect::<Vec<_>>(),
+            "reloaded checkpoint groups from config"
+        );
+
+        // Re-register checkpoint groups for all loaded stores
+        let store_ids: Vec<StoreId> = self.stores.keys().copied().collect();
+        for store_id in store_ids {
+            if let Err(e) = self.register_default_checkpoint_groups(store_id) {
+                tracing::warn!(
+                    store_id = %store_id,
+                    error = ?e,
+                    "failed to re-register checkpoint groups for store"
+                );
+            }
+        }
+
+        Ok(new_count)
+    }
+
     fn ingest_remote_batch(
         &mut self,
         store_id: StoreId,

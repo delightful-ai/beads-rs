@@ -455,9 +455,20 @@ impl Daemon {
             Ok(requires_restart) => requires_restart,
             Err(err) => return Response::err(err),
         };
+
+        // Also reload checkpoint groups
+        let checkpoint_groups_reloaded = match self.reload_checkpoint_groups(repo) {
+            Ok(count) => Some(count),
+            Err(err) => {
+                tracing::warn!(error = ?err, "failed to reload checkpoint groups");
+                None
+            }
+        };
+
         let output = AdminReloadLimitsOutput {
             store_id,
             requires_restart,
+            checkpoint_groups_reloaded,
         };
         Response::ok(ResponsePayload::query(QueryResult::AdminReloadLimits(
             output,
