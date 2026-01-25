@@ -1,11 +1,19 @@
 //! `bd upgrade` - install latest binary and restart daemon.
 
+use clap::Args;
 use serde::Serialize;
 
 use super::super::print_json;
 use crate::Result;
 use crate::config::load_or_init;
 use crate::upgrade::{UpgradeMethod, UpgradeOutcome, run_upgrade};
+
+#[derive(Args, Debug)]
+pub struct UpgradeArgs {
+    /// Run upgrade in the background (internal).
+    #[arg(long, hide = true, default_value_t = false)]
+    pub background: bool,
+}
 
 #[derive(Serialize)]
 struct UpgradeJson<'a> {

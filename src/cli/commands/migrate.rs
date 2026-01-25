@@ -1,7 +1,65 @@
-use super::super::{Ctx, MigrateCmd, normalize_bead_slug_for, print_json};
+use clap::{Args, Subcommand};
+
+use super::super::{Ctx, normalize_bead_slug_for, print_json};
 use crate::core::FormatVersion;
 use crate::daemon::ipc::{Request, send_request};
 use crate::{Error, Result};
+use std::path::PathBuf;
+
+#[derive(Subcommand, Debug)]
+pub enum MigrateCmd {
+    /// Show current store format and whether migration is needed.
+    Detect,
+
+    /// Migrate canonical store to a target format version.
+    To(MigrateToArgs),
+
+    /// Import/migrate from beads-go export.
+    FromGo(MigrateFromGoArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct MigrateToArgs {
+    /// Target format version.
+    pub to: u32,
+
+    /// Preview changes without writing commits.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip safety checks.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Do not push to remote.
+    #[arg(long)]
+    pub no_push: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct MigrateFromGoArgs {
+    /// Path to beads-go issues.jsonl (or export bundle).
+    #[arg(long, value_name = "PATH")]
+    pub input: PathBuf,
+
+    /// Override the bead ID root slug during import (e.g. `myrepo` for `myrepo-abc123`).
+    ///
+    /// When omitted, the importer preserves whatever slug is present in the export IDs.
+    #[arg(long, value_name = "SLUG")]
+    pub root_slug: Option<String>,
+
+    /// Preview without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip safety checks.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Do not push to remote.
+    #[arg(long)]
+    pub no_push: bool,
+}
 
 pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
     match cmd {

@@ -5,7 +5,9 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use clap::Args;
 
 use crate::Result;
 use crate::daemon::ipc::{Request, Response, send_request};
@@ -26,6 +28,13 @@ bd close <id>         # Done
 ```
 
 Run `bd prime` for full workflow."#;
+
+#[derive(Args, Debug)]
+pub struct OnboardArgs {
+    /// Generate BD_GUIDE.md at the specified path instead of printing instructions.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+}
 
 /// Handle `bd onboard` command.
 pub(crate) fn handle(output: Option<&Path>) -> Result<()> {

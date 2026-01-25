@@ -12,7 +12,7 @@ fn main() {
 
     let is_daemon = matches!(
         cli.command,
-        cli::Commands::Daemon {
+        cli::Command::Daemon {
             cmd: cli::DaemonCmd::Run
         }
     );

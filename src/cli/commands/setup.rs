@@ -9,10 +9,59 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use clap::{Args, Subcommand};
+
 use serde_json::{Map, Value, json};
 
 use crate::daemon::OpError;
 use crate::{Error, Result};
+
+#[derive(Subcommand, Debug)]
+pub enum SetupCmd {
+    /// Setup Claude Code integration (hooks for SessionStart/PreCompact).
+    Claude(SetupClaudeArgs),
+    /// Setup Cursor IDE integration (rules file).
+    Cursor(SetupCursorArgs),
+    /// Setup Aider integration (config + instructions).
+    Aider(SetupAiderArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SetupClaudeArgs {
+    /// Install for this project only (not globally).
+    #[arg(long)]
+    pub project: bool,
+
+    /// Check if Claude integration is installed.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Remove bd hooks from Claude settings.
+    #[arg(long)]
+    pub remove: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct SetupCursorArgs {
+    /// Check if Cursor integration is installed.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Remove bd rules from Cursor.
+    #[arg(long)]
+    pub remove: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct SetupAiderArgs {
+    /// Check if Aider integration is installed.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Remove bd config from Aider.
+    #[arg(long)]
+    pub remove: bool,
+}
 
 // =============================================================================
 // Claude Code integration

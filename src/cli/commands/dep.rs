@@ -1,6 +1,40 @@
-use super::super::{Ctx, DepCmd, normalize_bead_id, parse_dep_edge, print_ok, send};
+use clap::{Args, Subcommand};
+
+use super::super::{Ctx, normalize_bead_id, print_ok, send};
+use crate::cli::parse::{parse_dep_edge, parse_dep_kind};
+use crate::core::DepKind;
 use crate::daemon::ipc::Request;
 use crate::{Error, Result};
+
+#[derive(Subcommand, Debug)]
+pub enum DepCmd {
+    /// Add a dependency: FROM depends on TO (FROM waits for TO to complete).
+    Add(DepAddArgs),
+    /// Remove a dependency between two issues.
+    Rm(DepRmArgs),
+    /// Show dependency tree for an issue.
+    Tree { id: String },
+    /// List dependency cycles.
+    Cycles,
+}
+
+#[derive(Args, Debug)]
+pub struct DepAddArgs {
+    /// Issue that depends on another (waits for TO to complete).
+    pub from: String,
+    /// Issue that must complete first (blocks FROM).
+    pub to: String,
+    #[arg(long, alias = "type", value_parser = parse_dep_kind)]
+    pub kind: Option<DepKind>,
+}
+
+#[derive(Args, Debug)]
+pub struct DepRmArgs {
+    pub from: String,
+    pub to: String,
+    #[arg(long, alias = "type", value_parser = parse_dep_kind)]
+    pub kind: Option<DepKind>,
+}
 
 pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
     match cmd {

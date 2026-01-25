@@ -1,7 +1,12 @@
-use super::super::{Ctx, SubscribeArgs, print_ok};
+use clap::Args;
+
+use super::super::{Ctx, print_ok};
 use crate::Result;
 use crate::core::ErrorPayload;
 use crate::daemon::ipc::{Request, Response, subscribe_stream};
+
+#[derive(Args, Debug, Default)]
+pub struct SubscribeArgs {}
 
 pub(crate) fn handle(ctx: &Ctx, _args: SubscribeArgs) -> Result<()> {
     let read = ctx.read_consistency();

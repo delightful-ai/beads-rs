@@ -1,8 +1,17 @@
+use clap::Args;
+
 use super::super::render;
-use super::super::{Ctx, ReadyArgs, print_ok, send};
+use super::super::{Ctx, print_ok, send};
 use crate::Result;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
+
+#[derive(Args, Debug)]
+pub struct ReadyArgs {
+    /// Limit results.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+}
 
 pub(crate) fn handle(ctx: &Ctx, args: ReadyArgs) -> Result<()> {
     let req = Request::Ready {

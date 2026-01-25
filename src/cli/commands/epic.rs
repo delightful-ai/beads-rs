@@ -1,10 +1,34 @@
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use super::super::render;
-use super::super::{Ctx, EpicCmd, print_json, print_ok, send};
+use super::super::{Ctx, print_json, print_ok, send};
 use crate::Result;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
+
+#[derive(Subcommand, Debug)]
+pub enum EpicCmd {
+    /// Show epic completion status.
+    Status(EpicStatusArgs),
+    /// Close epics where all children are complete.
+    #[command(name = "close-eligible")]
+    CloseEligible(EpicCloseEligibleArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct EpicStatusArgs {
+    /// Show only epics eligible for closure.
+    #[arg(long)]
+    pub eligible_only: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct EpicCloseEligibleArgs {
+    /// Preview what would be closed without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
 
 #[derive(Debug, Serialize)]
 struct EpicCloseResult {
