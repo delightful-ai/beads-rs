@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"
 thiserror = "1"
-beads-rs = { path = "..", default-features = false, features = ["model-testing"] }
+beads-rs = { path = "../beads-rs", default-features = false, features = ["model-testing"] }
 
 # CLI helpers (same as upstream Stateright examples)
 env_logger = "0.10"
@@ -23,6 +23,3 @@ pico-args = "0.5"
 
 [features]
 model_testing = []
-
-[profile.release]
-debug = true

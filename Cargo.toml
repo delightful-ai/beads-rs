@@ -1,76 +1,35 @@
-[package]
-name = "beads-rs"
-version = "0.1.26"
-edition = "2024"
-rust-version = "1.91"
-license = "MIT"
-description = "A distributed work-item database for agent swarms, using git as the sync layer"
-repository = "https://github.com/delightful-ai/beads-rs"
-homepage = "https://github.com/delightful-ai/beads-rs"
-authors = ["Darin <darinkishore@protonmail.com>"]
-keywords = ["cli", "git", "crdt", "issue-tracker", "agents"]
-categories = ["command-line-utilities", "development-tools"]
-readme = "README.md"
-exclude = [".beads/"]
+[workspace]
+resolver = "2"
+members = [
+    "crates/beads-rs",
+    "crates/beads_stateright_models",
+    "crates/fuzz",
+]
 
-# Dual CLI + library crate
-
-[dependencies]
-clap = { version = "4", features = ["derive"], optional = true }
+# Shared dependencies for workspace inheritance
+[workspace.dependencies]
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
 tracing = "0.1"
-tracing-tree = "0.3"
-tracing-subscriber = { version = "0.3", features = ["ansi", "env-filter", "json"] }
-tracing-appender = "0.2"
-rand = "0.9"
 sha2 = "0.10"
 hex = "0.4"
-crc32c = "0.6"
-git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
-crossbeam = "0.8"
-signal-hook = "0.3"
-whoami = "1.4"
-libc = "0.2"
-nix = { version = "0.29", features = ["signal", "user"] }
-time = { version = "0.3", features = ["parsing", "formatting"] }
-dirs = "6.0.0"
-chrono = "0.4"
-flate2 = "1"
-tar = "0.4"
-toml = "0.8"
-ureq = { version = "2", default-features = true }
-tempfile = "3"
 bytes = "1"
-minicbor = { version = "0.24", features = ["std"] }
-rusqlite = "0.31"
 
-[features]
-default = ["cli"]
-cli = ["clap"]
-slow-tests = []
-test-harness = []
-e2e-tests = ["test-harness"]
-model-testing = []
+[workspace.package]
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+repository = "https://github.com/delightful-ai/beads-rs"
 
-[[bin]]
-name = "bd"
-path = "src/bin/main.rs"
-required-features = ["cli"]
-
-[dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
-proptest = "1"
-
-# Build profiles
+# Build profiles (workspace-level)
 [profile.dev]
 incremental = true
 
 [profile.release]
-incremental = false  # Default; prioritize binary quality over rebuild speed
+incremental = false
+debug = true
 
 # Optimize dependencies in dev builds for faster test/runtime execution
 [profile.dev.package."*"]
