@@ -1,6 +1,16 @@
-use super::super::{CloseArgs, Ctx, normalize_bead_id, print_ok, send};
+use clap::Args;
+
+use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use crate::Result;
 use crate::daemon::ipc::Request;
+
+#[derive(Args, Debug)]
+pub struct CloseArgs {
+    pub id: String,
+
+    #[arg(long)]
+    pub reason: Option<String>,
+}
 
 pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
     let reason_str = args.reason.clone().unwrap_or_else(|| "Closed".to_string());
