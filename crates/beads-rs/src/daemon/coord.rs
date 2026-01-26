@@ -12,7 +12,8 @@ use super::core::{
 };
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
-    ErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+    ErrorPayload, IntoErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response,
+    ResponseExt, ResponsePayload,
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
@@ -599,7 +600,7 @@ impl Daemon {
             Request::Show { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
+                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
                 };
                 self.query_show(&repo, &id, read, git_tx).into()
             }
@@ -621,7 +622,7 @@ impl Daemon {
             Request::DepTree { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
+                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
                 };
                 self.query_dep_tree(&repo, &id, read, git_tx).into()
             }
@@ -631,7 +632,7 @@ impl Daemon {
             Request::Deps { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
+                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
                 };
                 self.query_deps(&repo, &id, read, git_tx).into()
             }
@@ -639,7 +640,7 @@ impl Daemon {
             Request::Notes { repo, id, read } => {
                 let id = match BeadId::parse(&id) {
                     Ok(id) => id,
-                    Err(e) => return Response::err(invalid_id_payload(e)).into(),
+                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
                 };
                 self.query_notes(&repo, &id, read, git_tx).into()
             }
@@ -675,7 +676,7 @@ impl Daemon {
                     Some(s) => Some(match BeadId::parse(&s) {
                         Ok(id) => id,
                         Err(e) => {
-                            return Response::err(invalid_id_payload(e)).into();
+                            return Response::err_from(invalid_id_payload(e)).into();
                         }
                     }),
                     None => None,
@@ -771,7 +772,7 @@ impl Daemon {
 
             Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx).into(),
 
-            Request::Subscribe { .. } => Response::err(error_payload(
+            Request::Subscribe { .. } => Response::err_from(error_payload(
                 ProtocolErrorCode::InvalidRequest.into(),
                 "subscribe must be handled by the streaming IPC path",
                 false,
@@ -784,7 +785,7 @@ impl Daemon {
                 // Used after external changes like migration.
                 match self.force_reload(&repo, git_tx) {
                     Ok(_) => Response::ok(ResponsePayload::refreshed()),
-                    Err(e) => Response::err(e),
+                    Err(e) => Response::err_from(e),
                 }
                 .into()
             }
@@ -793,7 +794,7 @@ impl Daemon {
                 // Force immediate sync (used for graceful shutdown)
                 match self.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
                     Ok(_) => Response::ok(ResponsePayload::synced()),
-                    Err(e) => Response::err(e),
+                    Err(e) => Response::err_from(e),
                 }
                 .into()
             }
@@ -811,7 +812,7 @@ impl Daemon {
                     })
                     .is_err()
                 {
-                    return Response::err(error_payload(
+                    return Response::err_from(error_payload(
                         CliErrorCode::Internal.into(),
                         "git thread not responding",
                         false,
@@ -822,14 +823,14 @@ impl Daemon {
                 match respond_rx.recv() {
                     Ok(Ok(())) => match self.ensure_repo_loaded(&repo, git_tx) {
                         Ok(_) => Response::ok(ResponsePayload::initialized()),
-                        Err(e) => Response::err(e),
+                        Err(e) => Response::err_from(e),
                     },
-                    Ok(Err(e)) => Response::err(error_payload(
+                    Ok(Err(e)) => Response::err_from(error_payload(
                         CliErrorCode::InitFailed.into(),
                         &e.to_string(),
                         false,
                     )),
-                    Err(_) => Response::err(error_payload(
+                    Err(_) => Response::err_from(error_payload(
                         CliErrorCode::Internal.into(),
                         "git thread died",
                         false,
@@ -861,7 +862,7 @@ fn error_payload(code: ErrorCode, message: &str, retryable: bool) -> ErrorPayloa
 
 fn invalid_id_payload(err: CoreError) -> ErrorPayload {
     match err {
-        CoreError::InvalidId(id) => IpcError::from(id).into(),
+        CoreError::InvalidId(id) => IpcError::from(id).into_error_payload(),
         other => ErrorPayload::new(
             ProtocolErrorCode::InternalError.into(),
             other.to_string(),

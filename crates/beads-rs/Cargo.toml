@@ -1,11 +1,11 @@
 [package]
 name = "beads-rs"
-version = "0.1.26"
-edition = "2024"
-rust-version = "1.91"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "A distributed work-item database for agent swarms, using git as the sync layer"
-repository = "https://github.com/delightful-ai/beads-rs"
 homepage = "https://github.com/delightful-ai/beads-rs"
 authors = ["Darin <darinkishore@protonmail.com>"]
 keywords = ["cli", "git", "crdt", "issue-tracker", "agents"]
@@ -16,6 +16,10 @@ exclude = [".beads/"]
 # Dual CLI + library crate
 
 [dependencies]
+beads-core = { path = "../beads-core" }
+beads-api = { path = "../beads-api" }
+beads-surface = { path = "../beads-surface" }
+beads-macros = { path = "../beads-macros" }
 clap = { version = "4", features = ["derive"], optional = true }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }

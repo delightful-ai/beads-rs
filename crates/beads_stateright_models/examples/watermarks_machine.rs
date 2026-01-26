@@ -9,7 +9,7 @@
 //! - append -> fsync (durable) -> apply
 //! - append -> apply -> fsync (still safe so long as we don't ACK before fsync)
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::time::Duration;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]

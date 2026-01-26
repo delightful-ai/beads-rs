@@ -6,7 +6,7 @@
 //! Priority order: IPC mutations > replication ingest > WANT servicing > checkpoint/scrub.
 //! On overload, replication is shed first when available.
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::time::Duration;
 
 const MAX_QUEUE: u8 = 4;

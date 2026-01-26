@@ -21,6 +21,8 @@ pub fn init_from_config(config: &PathsConfig) {
     let lock = PATHS_CONFIG.get_or_init(|| Mutex::new(config.clone()));
     let mut guard = lock.lock().expect("paths config lock poisoned");
     *guard = config.clone();
+
+    beads_surface::ipc::set_runtime_dir_override(config.runtime_dir.clone());
 }
 
 /// Get the config-based data_dir override, if set.

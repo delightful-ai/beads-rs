@@ -1,0 +1,21 @@
+[package]
+name = "beads-surface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IPC and CLI surface types for beads-rs"
+
+[dependencies]
+beads-core = { path = "../beads-core" }
+beads-api = { path = "../beads-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+nix = { version = "0.29", features = ["signal", "user"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Optional; available for future tests.
+tempfile = "3"

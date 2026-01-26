@@ -7,7 +7,7 @@
 //! - if seq  > durable+1 => buffer (bounded) and emit WANT(durable)
 //! - if seq <= durable => duplicate noop
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::collections::BTreeSet;
 use std::time::Duration;
 

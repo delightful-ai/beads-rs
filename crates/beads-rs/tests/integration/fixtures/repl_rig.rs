@@ -670,7 +670,7 @@ impl Node {
         };
         let response = self
             .send_admin_request(&request)
-            .map_err(ErrorPayload::from)?;
+            .map_err(|e| beads_rs::daemon::ipc::IntoErrorPayload::into_error_payload(e))?;
         match response {
             Response::Ok { ok } => match ok {
                 ResponsePayload::Query(QueryResult::AdminStatus(status)) => Ok(status),

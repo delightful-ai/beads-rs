@@ -19,12 +19,12 @@ use super::broadcast::BroadcastEvent;
 use super::core::{Daemon, HandleOutcome, ParsedMutationMeta, detect_clock_skew};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
-use super::ipc::{MutationMeta, OpResponse, Response, ResponsePayload};
+use super::ipc::{MutationMeta, OpResponse, Response, ResponseExt, ResponsePayload};
 use super::mutation_engine::{
     DotAllocator, EventDraft, IdContext, MutationContext, MutationEngine, MutationRequest,
     ParsedMutationRequest, SequencedEvent,
 };
-use super::ops::{BeadPatch, OpError, OpResult};
+use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
@@ -41,6 +41,7 @@ use crate::core::{
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
 use crate::paths;
+use beads_surface::ops::{BeadPatch, OpResult};
 
 #[derive(Debug)]
 pub(crate) struct DurabilityWait {
@@ -86,7 +87,7 @@ impl Daemon {
     ) -> HandleOutcome {
         match self.apply_mutation_request_inner(repo, meta, request, git_tx) {
             Ok(outcome) => outcome.into_handle(),
-            Err(err) => HandleOutcome::Response(Response::err(err)),
+            Err(err) => HandleOutcome::Response(Response::err_from(err)),
         }
     }
 

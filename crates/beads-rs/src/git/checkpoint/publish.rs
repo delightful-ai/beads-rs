@@ -134,9 +134,17 @@ pub fn publish_checkpoint_with_retry(
             }
             Err(CheckpointPublishError::NonFastForward) => {
                 retries += 1;
-                tracing::debug!(retries, checkpoint_ref, "checkpoint publish retry: non-fast-forward");
+                tracing::debug!(
+                    retries,
+                    checkpoint_ref,
+                    "checkpoint publish retry: non-fast-forward"
+                );
                 if retries > max_retries {
-                    tracing::warn!(retries, checkpoint_ref, "checkpoint publish retry limit exceeded");
+                    tracing::warn!(
+                        retries,
+                        checkpoint_ref,
+                        "checkpoint publish retry limit exceeded"
+                    );
                     return Err(CheckpointPublishError::TooManyRetries { retries });
                 }
 
@@ -484,9 +492,17 @@ fn publish_store_meta_with_retry(
             Ok(()) => return Ok(commit_oid),
             Err(CheckpointPublishError::NonFastForward) => {
                 retries += 1;
-                tracing::debug!(retries, ref_name = STORE_META_REF, "store meta publish retry: non-fast-forward");
+                tracing::debug!(
+                    retries,
+                    ref_name = STORE_META_REF,
+                    "store meta publish retry: non-fast-forward"
+                );
                 if retries > max_retries {
-                    tracing::warn!(retries, ref_name = STORE_META_REF, "store meta publish retry limit exceeded");
+                    tracing::warn!(
+                        retries,
+                        ref_name = STORE_META_REF,
+                        "store meta publish retry limit exceeded"
+                    );
                     return Err(CheckpointPublishError::TooManyRetries { retries });
                 }
 

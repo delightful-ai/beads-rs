@@ -129,10 +129,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "beads-api"
+version = "0.2.0-alpha"
+dependencies = [
+ "beads-core",
+ "serde",
+ "uuid",
+]
+
+[[package]]
+name = "beads-core"
+version = "0.2.0-alpha"
+dependencies = [
+ "beads-macros",
+ "bytes",
+ "minicbor",
+ "proptest",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "toml",
+ "uuid",
+]
+
+[[package]]
+name = "beads-macros"
+version = "0.2.0-alpha"
+
+[[package]]
 name = "beads-rs"
-version = "0.1.26"
+version = "0.2.0-alpha"
 dependencies = [
  "assert_cmd",
+ "beads-api",
+ "beads-core",
+ "beads-macros",
+ "beads-surface",
  "bytes",
  "chrono",
  "clap",
@@ -170,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "beads-rs-fuzz"
-version = "0.0.0"
+version = "0.2.0-alpha"
 dependencies = [
  "beads-rs",
  "libfuzzer-sys",
@@ -178,8 +212,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "beads-surface"
+version = "0.2.0-alpha"
+dependencies = [
+ "beads-api",
+ "beads-core",
+ "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "beads_stateright_models"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "beads-rs",
  "bytes",

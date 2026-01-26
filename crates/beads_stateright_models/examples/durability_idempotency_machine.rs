@@ -11,16 +11,16 @@ use std::time::Duration;
 
 use beads_rs::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
 use beads_rs::daemon::wal::WalIndex;
-use beads_rs::model::{durability, MemoryWalIndex, MemoryWalIndexSnapshot, PeerAckTable};
+use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot, PeerAckTable, durability};
 use beads_rs::{
     Applied, ClientRequestId, DurabilityClass, DurabilityOutcome, DurabilityReceipt, EventId,
     NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
     Watermarks,
 };
 use stateright::actor::{
-    model_timeout, Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out,
+    Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out, model_timeout,
 };
-use stateright::{report::WriteReporter, Checker, Expectation, Model};
+use stateright::{Checker, Expectation, Model, report::WriteReporter};
 use uuid::Uuid;
 
 const SERVER_ID: usize = 0;

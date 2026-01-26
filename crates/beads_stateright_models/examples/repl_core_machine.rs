@@ -12,9 +12,9 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use beads_rs::model::{
-    event_factory, repl_ingest, BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOrigin,
-    GapBufferByNsOriginSnapshot, GapBufferSnapshot, HeadSnapshot, OriginStreamSnapshot,
-    WatermarkSnapshot,
+    BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOrigin, GapBufferByNsOriginSnapshot,
+    GapBufferSnapshot, HeadSnapshot, OriginStreamSnapshot, WatermarkSnapshot, event_factory,
+    repl_ingest,
 };
 use beads_rs::{
     ActorId, Applied, Durable, EventFrameError, EventFrameV1, EventId, EventShaLookup, HeadStatus,
@@ -22,11 +22,11 @@ use beads_rs::{
     TxnDeltaV1, TxnId, Watermark,
 };
 use stateright::actor::{
-    model_peers, model_timeout, ordered_reliable_link::ActorWrapper,
-    ordered_reliable_link::MsgWrapper, Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out,
+    Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out, model_peers, model_timeout,
+    ordered_reliable_link::ActorWrapper, ordered_reliable_link::MsgWrapper,
 };
 use stateright::{
-    report::WriteReporter, Checker, Expectation, Model, Representative, Rewrite, RewritePlan,
+    Checker, Expectation, Model, Representative, Rewrite, RewritePlan, report::WriteReporter,
 };
 use uuid::Uuid;
 
@@ -1568,7 +1568,7 @@ fn parse_network(args: &mut pico_args::Arguments) -> Result<NetConfig, pico_args
         other => {
             return Err(pico_args::Error::ArgumentParsingFailed {
                 cause: format!("unsupported --network {other}"),
-            })
+            });
         }
     };
 
@@ -1584,7 +1584,7 @@ fn parse_network(args: &mut pico_args::Arguments) -> Result<NetConfig, pico_args
             other => {
                 return Err(pico_args::Error::ArgumentParsingFailed {
                     cause: format!("unsupported --lossy {other}"),
-                })
+                });
             }
         },
     };

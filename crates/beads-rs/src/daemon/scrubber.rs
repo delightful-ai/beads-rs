@@ -1147,14 +1147,3 @@ impl ScrubReportBuilder {
         }
     }
 }
-
-impl From<AdminHealthSeverity> for AdminHealthRisk {
-    fn from(value: AdminHealthSeverity) -> Self {
-        match value {
-            AdminHealthSeverity::Low => AdminHealthRisk::Low,
-            AdminHealthSeverity::Medium => AdminHealthRisk::Medium,
-            AdminHealthSeverity::High => AdminHealthRisk::High,
-            AdminHealthSeverity::Critical => AdminHealthRisk::Critical,
-        }
-    }
-}

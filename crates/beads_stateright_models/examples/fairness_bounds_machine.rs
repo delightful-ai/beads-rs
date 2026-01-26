@@ -8,7 +8,7 @@
 //! It enforces per-namespace buffer caps and in-flight limits, and checks
 //! that core cannot be starved under sustained wf churn.
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::time::Duration;
 
 const MAX_BUFFER: u8 = 3;

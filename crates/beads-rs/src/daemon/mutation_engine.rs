@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
-use super::ops::{BeadPatch, MapLiveError, OpError, Patch};
+use super::ops::{MapLiveError, OpError};
 use super::remote::RemoteUrl;
 use crate::core::event::ValidatedBeadPatch;
 use crate::core::{
@@ -17,6 +17,7 @@ use crate::core::{
     sha256_bytes, to_canon_json_bytes, validate_event_body,
 };
 use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
+use beads_surface::ops::{BeadPatch, Patch};
 
 #[derive(Clone, Debug)]
 pub struct MutationContext {
@@ -887,8 +888,6 @@ impl MutationEngine {
         }
 
         let patch = validate_wire_patch(patch)?;
-        let patch = validate_wire_patch(patch)?;
-        let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1074,7 +1073,6 @@ impl MutationEngine {
             patch.closed_on_branch = WirePatch::Set(branch);
         }
 
-        let patch = validate_wire_patch(patch)?;
         let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta

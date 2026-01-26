@@ -1,8 +1,11 @@
 [package]
 name = "beads-rs-fuzz"
-version = "0.0.0"
+version.workspace = true
 publish = false
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
