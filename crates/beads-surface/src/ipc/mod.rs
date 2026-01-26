@@ -6,10 +6,8 @@ use beads_api::DaemonInfo;
 use beads_core::{CliErrorCode, Effect, ErrorCode, InvalidId, ProtocolErrorCode, Transience};
 use thiserror::Error;
 
-pub use client::IpcClient;
-pub use codec::{
-    decode_request, decode_request_with_limits, encode_response, read_requests, send_response,
-};
+pub use client::*;
+pub use codec::*;
 pub use types::*;
 
 #[derive(Debug, Error)]
