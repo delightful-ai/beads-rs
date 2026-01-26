@@ -888,8 +888,6 @@ impl MutationEngine {
         }
 
         let patch = validate_wire_patch(patch)?;
-        let patch = validate_wire_patch(patch)?;
-        let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1075,7 +1073,6 @@ impl MutationEngine {
             patch.closed_on_branch = WirePatch::Set(branch);
         }
 
-        let patch = validate_wire_patch(patch)?;
         let patch = validate_wire_patch(patch)?;
         let mut delta = TxnDeltaV1::new();
         delta

@@ -22,9 +22,7 @@ pub fn init_from_config(config: &PathsConfig) {
     let mut guard = lock.lock().expect("paths config lock poisoned");
     *guard = config.clone();
 
-    if let Some(dir) = config.runtime_dir.clone() {
-        beads_surface::ipc::set_runtime_dir_override(dir);
-    }
+    beads_surface::ipc::set_runtime_dir_override(config.runtime_dir.clone());
 }
 
 /// Get the config-based data_dir override, if set.

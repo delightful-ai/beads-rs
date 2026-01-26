@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use beads_api::QueryResult;
@@ -18,14 +18,17 @@ use crate::ipc::{IPC_PROTOCOL_VERSION, Request, Response, ResponsePayload};
 // Socket path
 // =============================================================================
 
-static RUNTIME_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+static RUNTIME_DIR_OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
-pub fn set_runtime_dir_override(dir: PathBuf) {
-    let _ = RUNTIME_DIR_OVERRIDE.set(dir);
+/// Set or clear the runtime directory override. Can be called multiple times; latest value wins.
+pub fn set_runtime_dir_override(dir: Option<PathBuf>) {
+    let lock = RUNTIME_DIR_OVERRIDE.get_or_init(|| Mutex::new(None));
+    *lock.lock().expect("runtime dir lock poisoned") = dir;
 }
 
-fn runtime_dir_override() -> Option<&'static PathBuf> {
-    RUNTIME_DIR_OVERRIDE.get()
+fn runtime_dir_override() -> Option<PathBuf> {
+    let lock = RUNTIME_DIR_OVERRIDE.get()?;
+    lock.lock().expect("runtime dir lock poisoned").clone()
 }
 
 /// Get the directory that will contain the daemon socket.
@@ -1034,7 +1037,7 @@ mod tests {
     fn socket_dir_candidates_prefers_runtime_override() {
         let temp = TempDir::new().expect("temp dir");
         if runtime_dir_override().is_none() {
-            set_runtime_dir_override(temp.path().to_path_buf());
+            set_runtime_dir_override(Some(temp.path().to_path_buf()));
         }
 
         let runtime_dir = runtime_dir_override().expect("runtime override");
