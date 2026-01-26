@@ -1460,13 +1460,13 @@ impl CanonicalState {
             let n = base.len();
             let mut best = 0;
             for i in 1..n {
-                let a = base[i].as_str();
+                let candidate_id_str = base[i].as_str();
                 let b = base[best].as_str();
-                if a < b {
+                if candidate_id_str < b {
                     best = i;
                     continue;
                 }
-                if a == b {
+                if candidate_id_str == b {
                     for offset in 1..n {
                         let lhs = base[(i + offset) % n].as_str();
                         let rhs = base[(best + offset) % n].as_str();
