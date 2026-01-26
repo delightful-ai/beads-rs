@@ -134,9 +134,17 @@ pub fn publish_checkpoint_with_retry(
             }
             Err(CheckpointPublishError::NonFastForward) => {
                 retries += 1;
-                tracing::debug!(retries, checkpoint_ref, "checkpoint publish retry: non-fast-forward");
+                tracing::debug!(
+                    retries,
+                    checkpoint_ref,
+                    "checkpoint publish retry: non-fast-forward"
+                );
                 if retries > max_retries {
-                    tracing::warn!(retries, checkpoint_ref, "checkpoint publish retry limit exceeded");
+                    tracing::warn!(
+                        retries,
+                        checkpoint_ref,
+                        "checkpoint publish retry limit exceeded"
+                    );
                     return Err(CheckpointPublishError::TooManyRetries { retries });
                 }
 
@@ -484,9 +492,17 @@ fn publish_store_meta_with_retry(
             Ok(()) => return Ok(commit_oid),
             Err(CheckpointPublishError::NonFastForward) => {
                 retries += 1;
-                tracing::debug!(retries, ref_name = STORE_META_REF, "store meta publish retry: non-fast-forward");
+                tracing::debug!(
+                    retries,
+                    ref_name = STORE_META_REF,
+                    "store meta publish retry: non-fast-forward"
+                );
                 if retries > max_retries {
-                    tracing::warn!(retries, ref_name = STORE_META_REF, "store meta publish retry limit exceeded");
+                    tracing::warn!(
+                        retries,
+                        ref_name = STORE_META_REF,
+                        "store meta publish retry limit exceeded"
+                    );
                     return Err(CheckpointPublishError::TooManyRetries { retries });
                 }
 
@@ -525,44 +541,44 @@ fn ensure_checkpoint_compatible(
     local: &CheckpointExport,
     remote: &CheckpointExport,
 ) -> Result<(), CheckpointPublishError> {
-    let l = &local.meta;
-    let r = &remote.meta;
+    let local_meta = &local.meta;
+    let remote_meta = &remote.meta;
 
-    if l.checkpoint_format_version != r.checkpoint_format_version {
+    if local_meta.checkpoint_format_version != remote_meta.checkpoint_format_version {
         return Err(CheckpointPublishError::IncompatibleRemote {
             reason: "checkpoint_format_version mismatch".to_string(),
         });
     }
-    if l.store_id != r.store_id {
+    if local_meta.store_id != remote_meta.store_id {
         return Err(CheckpointPublishError::IncompatibleRemote {
             reason: "store_id mismatch".to_string(),
         });
     }
-    if l.store_epoch != r.store_epoch {
+    if local_meta.store_epoch != remote_meta.store_epoch {
         return Err(CheckpointPublishError::IncompatibleRemote {
             reason: "store_epoch mismatch".to_string(),
         });
     }
-    if l.checkpoint_group != r.checkpoint_group {
+    if local_meta.checkpoint_group != remote_meta.checkpoint_group {
         return Err(CheckpointPublishError::IncompatibleRemote {
             reason: "checkpoint_group mismatch".to_string(),
         });
     }
-    if l.policy_hash != r.policy_hash {
+    if local_meta.policy_hash != remote_meta.policy_hash {
         return Err(CheckpointPublishError::IncompatibleRemote {
             reason: "policy_hash mismatch".to_string(),
         });
     }
-    if l.roster_hash != r.roster_hash {
+    if local_meta.roster_hash != remote_meta.roster_hash {
         return Err(CheckpointPublishError::IncompatibleRemote {
             reason: "roster_hash mismatch".to_string(),
         });
     }
 
-    let mut ln = l.namespaces.clone();
+    let mut ln = local_meta.namespaces.clone();
     ln.sort();
     ln.dedup();
-    let mut rn = r.namespaces.clone();
+    let mut rn = remote_meta.namespaces.clone();
     rn.sort();
     rn.dedup();
     if ln != rn {
