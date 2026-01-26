@@ -77,3 +77,5 @@ bench_results/
 
 # Local continuity ledger (per instructions)
 CONTINUITY.md
+.kit/
+.agent/
