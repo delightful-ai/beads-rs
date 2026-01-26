@@ -9,7 +9,7 @@
 //! per-event persistence (fsync) so "durable" is derived from contiguous
 //! persisted events, not just a counter.
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 

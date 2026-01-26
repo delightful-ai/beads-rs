@@ -1,7 +1,7 @@
 #![no_main]
 
-use beads_rs::daemon::wal::FrameReader;
 use beads_rs::Limits;
+use beads_rs::daemon::wal::FrameReader;
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 

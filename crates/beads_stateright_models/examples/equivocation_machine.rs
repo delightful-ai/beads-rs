@@ -7,7 +7,7 @@
 //! - observing both variants for the same seq *forces* the model into `errored`
 //! - observing the same variant repeatedly is safe (idempotent)
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::collections::BTreeMap;
 use std::time::Duration;
 

@@ -1,11 +1,11 @@
 [package]
 name = "beads-rs"
-version = "0.1.26"
-edition = "2024"
-rust-version = "1.91"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "A distributed work-item database for agent swarms, using git as the sync layer"
-repository = "https://github.com/delightful-ai/beads-rs"
 homepage = "https://github.com/delightful-ai/beads-rs"
 authors = ["Darin <darinkishore@protonmail.com>"]
 keywords = ["cli", "git", "crdt", "issue-tracker", "agents"]

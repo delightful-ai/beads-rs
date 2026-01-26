@@ -6,7 +6,7 @@
 //! Reads either return success once applied >= require_min_seen, or wait up to
 //! wait_timeout_ms and return a retryable error with the current watermark.
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::time::Duration;
 
 const MAX_APPLIED: u8 = 3;

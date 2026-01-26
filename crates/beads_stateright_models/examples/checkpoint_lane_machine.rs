@@ -8,7 +8,7 @@
 //! and focuses on truthful inclusion, import advancement, multi-writer retries,
 //! and no cross-epoch merges.
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::collections::BTreeMap;
 use std::time::Duration;
 

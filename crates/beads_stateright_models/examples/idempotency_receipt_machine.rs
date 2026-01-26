@@ -9,7 +9,7 @@
 //! mapping entry, and ensures retries never mint new txn_id/stamps once a
 //! durable record exists.
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]

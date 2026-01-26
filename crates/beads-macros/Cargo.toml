@@ -1,0 +1,13 @@
+[package]
+name = "beads-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Procedural macros for beads-rs"
+
+[lib]
+proc-macro = true
+
+[dependencies]

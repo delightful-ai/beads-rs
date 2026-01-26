@@ -8,7 +8,7 @@
 //! **Intentionally abstract**:
 //! - no hashing, no bytes, no namespaces. We model one (ns, origin) stream.
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::collections::BTreeSet;
 use std::time::Duration;
 

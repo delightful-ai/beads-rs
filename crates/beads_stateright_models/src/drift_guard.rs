@@ -7,10 +7,10 @@
 
 #[allow(unused_imports)]
 use beads_rs::model::{
-    digest, durability, event_factory, repl_ingest, BufferedEventSnapshot, BufferedPrevSnapshot,
-    GapBufferByNsOrigin, GapBufferByNsOriginSnapshot, GapBufferSnapshot, HeadSnapshot,
-    IngestDecision, MemoryWalIndex, OriginStreamSnapshot, OriginStreamState, PeerAckTable,
-    VerifiedEventAny, WatermarkSnapshot,
+    BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOrigin, GapBufferByNsOriginSnapshot,
+    GapBufferSnapshot, HeadSnapshot, IngestDecision, MemoryWalIndex, OriginStreamSnapshot,
+    OriginStreamState, PeerAckTable, VerifiedEventAny, WatermarkSnapshot, digest, durability,
+    event_factory, repl_ingest,
 };
 #[allow(unused_imports)]
 use beads_rs::{

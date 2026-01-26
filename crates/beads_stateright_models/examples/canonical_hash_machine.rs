@@ -10,7 +10,7 @@
 //! out-of-order events until gaps fill (prev is validated on drain once contiguity
 //! is restored).
 
-use stateright::{report::WriteReporter, Checker, Model, Property};
+use stateright::{Checker, Model, Property, report::WriteReporter};
 use std::collections::BTreeMap;
 use std::time::Duration;
 

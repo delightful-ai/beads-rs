@@ -15,9 +15,9 @@ use beads_rs::{
 use stateright::actor::register::RegisterMsg;
 use stateright::actor::{Actor, ActorModel, Id, LossyNetwork, Network, Out};
 use stateright::report::WriteReporter;
-use stateright::semantics::register::Register;
 use stateright::semantics::ConsistencyTester;
 use stateright::semantics::LinearizabilityTester;
+use stateright::semantics::register::Register;
 use stateright::{Checker, Expectation, Model};
 use uuid::Uuid;
 
