@@ -19,3 +19,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ReopenArgs) -> Result<()> {
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)
 }
+
+pub(crate) fn render_reopened(id: &str) -> String {
+    format!("↻ Reopened {id}")
+}

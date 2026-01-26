@@ -29,3 +29,7 @@ pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
     println!("✓ Closed {}: {}", id.as_str(), reason_str);
     Ok(())
 }
+
+pub(crate) fn render_closed(id: &str) -> String {
+    format!("✓ Closed {id}")
+}

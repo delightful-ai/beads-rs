@@ -19,3 +19,7 @@ pub(crate) fn handle(ctx: &Ctx, args: UnclaimArgs) -> Result<()> {
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)
 }
+
+pub(crate) fn render_unclaimed(id: &str) -> String {
+    format!("✓ Unclaimed {id}")
+}

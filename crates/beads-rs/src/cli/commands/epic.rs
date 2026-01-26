@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::render;
 use super::super::{Ctx, print_json, print_ok, send};
+use super::fmt_issue_ref;
 use crate::Result;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
@@ -50,7 +50,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
             }
             match ok {
                 ResponsePayload::Query(QueryResult::EpicStatus(statuses)) => {
-                    println!("{}", render::render_epic_statuses(&statuses));
+                    println!("{}", render_epic_statuses(&statuses));
                     Ok(())
                 }
                 other => print_ok(&other, false),
@@ -92,7 +92,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
                         true,
                     )?;
                 } else {
-                    println!("{}", render::render_epic_close_dry_run(&statuses));
+                    println!("{}", render_epic_close_dry_run(&statuses));
                 }
                 return Ok(());
             }
@@ -118,9 +118,60 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
                 };
                 print_json(&out)?;
             } else {
-                println!("{}", render::render_epic_close_result(&closed));
+                println!("{}", render_epic_close_result(&closed));
             }
             Ok(())
         }
     }
+}
+
+pub(crate) fn render_epic_statuses(statuses: &[crate::api::EpicStatus]) -> String {
+    if statuses.is_empty() {
+        return "No open epics found".into();
+    }
+
+    let mut out = String::new();
+    for s in statuses {
+        let pct = if s.total_children > 0 {
+            (s.closed_children * 100) / s.total_children
+        } else {
+            0
+        };
+        let icon = if s.eligible_for_close { "✓" } else { "○" };
+        out.push_str(&format!(
+            "{icon} {} {}\n",
+            fmt_issue_ref(&s.epic.namespace, &s.epic.id),
+            s.epic.title
+        ));
+        out.push_str(&format!(
+            "   Progress: {}/{} children closed ({}%)\n",
+            s.closed_children, s.total_children, pct
+        ));
+        if s.eligible_for_close {
+            out.push_str("   Eligible for closure\n");
+        }
+        out.push('\n');
+    }
+
+    out.trim_end().into()
+}
+
+pub(crate) fn render_epic_close_dry_run(statuses: &[crate::api::EpicStatus]) -> String {
+    let mut out = format!("Would close {} epic(s):\n", statuses.len());
+    for s in statuses {
+        out.push_str(&format!(
+            "  - {}: {}\n",
+            fmt_issue_ref(&s.epic.namespace, &s.epic.id),
+            s.epic.title
+        ));
+    }
+    out
+}
+
+pub(crate) fn render_epic_close_result(closed: &[String]) -> String {
+    let mut out = format!("✓ Closed {} epic(s)\n", closed.len());
+    for id in closed {
+        out.push_str(&format!("  - {id}\n"));
+    }
+    out.trim_end().into()
 }

@@ -1,4 +1,5 @@
 use clap::Subcommand;
+use std::sync::LazyLock;
 
 pub(super) mod admin;
 pub(super) mod blocked;
@@ -31,6 +32,69 @@ pub(super) mod sync;
 pub(super) mod unclaim;
 pub(super) mod update;
 pub(super) mod upgrade;
+
+pub(super) fn fmt_issue_ref(namespace: &crate::core::NamespaceId, id: &str) -> String {
+    format!("{}/{}", namespace.as_str(), id)
+}
+
+pub(super) fn fmt_labels(labels: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, l) in labels.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(l);
+    }
+    out.push(']');
+    out
+}
+
+pub(super) fn fmt_metric_labels(labels: &[crate::api::AdminMetricLabel]) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(" {");
+    for (i, label) in labels.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(label.key.as_str());
+        out.push('=');
+        out.push_str(label.value.as_str());
+    }
+    out.push('}');
+    out
+}
+
+static WALL_MS_FORMAT: LazyLock<Option<Vec<time::format_description::FormatItem<'static>>>> =
+    LazyLock::new(|| time::format_description::parse("[year]-[month]-[day] [hour]:[minute]").ok());
+
+pub(super) fn fmt_wall_ms(ms: u64) -> String {
+    use time::OffsetDateTime;
+
+    let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    match WALL_MS_FORMAT.as_deref() {
+        Some(fmt) => dt.format(fmt).unwrap_or_else(|_| ms.to_string()),
+        None => ms.to_string(),
+    }
+}
+
+pub(super) fn fmt_duration_ms(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let secs = ms as f64 / 1000.0;
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let mins = secs / 60.0;
+    if mins < 60.0 {
+        return format!("{mins:.1}m");
+    }
+    let hours = mins / 60.0;
+    format!("{hours:.1}h")
+}
 
 #[derive(Subcommand, Debug)]
 pub enum Command {

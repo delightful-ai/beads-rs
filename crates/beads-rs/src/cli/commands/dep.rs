@@ -94,3 +94,58 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
         }
     }
 }
+
+pub(crate) fn render_dep_tree(root: &str, edges: &[crate::api::DepEdge]) -> String {
+    if edges.is_empty() {
+        return format!("\n{root} has no dependencies\n");
+    }
+    let mut out = format!("\n🌲 Dependency tree for {root}:\n\n");
+    for e in edges {
+        out.push_str(&format!("{} → {} ({})\n", e.from, e.to, e.kind));
+    }
+    out.push('\n');
+    out
+}
+
+pub(crate) fn render_deps(
+    incoming: &[crate::api::DepEdge],
+    outgoing: &[crate::api::DepEdge],
+) -> String {
+    let mut out = String::new();
+    if !outgoing.is_empty() {
+        out.push_str(&format!("\nDepends on ({}):\n", outgoing.len()));
+        for e in outgoing {
+            out.push_str(&format!("  → {} ({})\n", e.to, e.kind));
+        }
+    }
+    if !incoming.is_empty() {
+        out.push_str(&format!("\nBlocks ({}):\n", incoming.len()));
+        for e in incoming {
+            out.push_str(&format!("  ← {} ({})\n", e.from, e.kind));
+        }
+    }
+    if out.is_empty() {
+        "no deps".into()
+    } else {
+        out.trim_end().into()
+    }
+}
+
+pub(crate) fn render_dep_cycles(out: &crate::api::DepCycles) -> String {
+    if out.cycles.is_empty() {
+        return "no dependency cycles found".into();
+    }
+    let mut lines = Vec::new();
+    for cycle in &out.cycles {
+        lines.push(format!("cycle: {}", cycle.join(" -> ")));
+    }
+    lines.join("\n")
+}
+
+pub(crate) fn render_dep_added(from: &str, to: &str) -> String {
+    format!("✓ Added dependency: {from} depends on {to}")
+}
+
+pub(crate) fn render_dep_removed(from: &str, to: &str) -> String {
+    format!("✓ Removed dependency: {from} no longer depends on {to}")
+}

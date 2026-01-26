@@ -1,7 +1,6 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::render;
 use super::super::{Ctx, fetch_issue, normalize_bead_id, print_json, send};
 use crate::api::QueryResult;
 use crate::core::BeadId;
@@ -111,7 +110,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 print_json(&issue.labels)?;
                 return Ok(());
             }
-            println!("{}", render::render_label_list(&issue.id, &issue.labels));
+            println!("{}", render_label_list(&issue.id, &issue.labels));
             Ok(())
         }
         LabelCmd::ListAll => {
@@ -141,10 +140,37 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 print_json(&out)?;
                 return Ok(());
             }
-            println!("{}", render::render_label_list_all(&counts));
+            println!("{}", render_label_list_all(&counts));
             Ok(())
         }
     }
+}
+
+pub(crate) fn render_label_list(issue_id: &str, labels: &[String]) -> String {
+    if labels.is_empty() {
+        return format!("\n{issue_id} has no labels\n");
+    }
+    let mut out = format!("\n🏷 Labels for {issue_id}:\n");
+    for l in labels {
+        out.push_str(&format!("  - {l}\n"));
+    }
+    out.push('\n');
+    out
+}
+
+pub(crate) fn render_label_list_all(counts: &std::collections::BTreeMap<String, usize>) -> String {
+    if counts.is_empty() {
+        return "\nNo labels found in database".into();
+    }
+
+    let max_len = counts.keys().map(|s| s.len()).max().unwrap_or(0);
+    let mut out = format!("\n🏷 All labels ({} unique):\n", counts.len());
+    for (label, count) in counts {
+        let padding = " ".repeat(max_len.saturating_sub(label.len()));
+        out.push_str(&format!("  {label}{padding}  ({count} issues)\n"));
+    }
+    out.push('\n');
+    out
 }
 
 fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {

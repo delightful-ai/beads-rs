@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 
-use super::super::render;
 use super::super::{Ctx, normalize_bead_id, print_ok, send};
+use super::fmt_wall_ms;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{Request, ResponsePayload};
 use crate::{Error, Result};
@@ -56,10 +56,7 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
             match ok {
                 ResponsePayload::Query(QueryResult::Notes(notes)) => {
                     // Render like beads-go: "Comments on <id>:" + entries.
-                    println!(
-                        "{}",
-                        render::render_comments_list(id_for_render.as_str(), &notes)
-                    );
+                    println!("{}", render_comments_list(id_for_render.as_str(), &notes));
                     Ok(())
                 }
                 other => print_ok(&other, false),
@@ -89,4 +86,42 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)
+}
+
+pub(crate) fn render_comments_list(issue_id: &str, notes: &[crate::api::Note]) -> String {
+    if notes.is_empty() {
+        return format!("No comments on {issue_id}");
+    }
+
+    let mut out = format!("\nComments on {issue_id}:\n\n");
+    for n in notes {
+        out.push_str(&format!(
+            "[{}] {} at {}\n\n",
+            n.author,
+            n.content,
+            fmt_wall_ms(n.at.wall_ms),
+        ));
+    }
+    out.trim_end().into()
+}
+
+pub(crate) fn render_notes(notes: &[crate::api::Note]) -> String {
+    if notes.is_empty() {
+        return "No comments".into();
+    }
+    let mut out = String::new();
+    out.push_str("\nComments:\n\n");
+    for n in notes {
+        out.push_str(&format!(
+            "[{}] {} at {}\n\n",
+            n.author,
+            n.content,
+            fmt_wall_ms(n.at.wall_ms)
+        ));
+    }
+    out.trim_end().into()
+}
+
+pub(crate) fn render_comment_added(issue_id: &str) -> String {
+    format!("Comment added to {issue_id}")
 }

@@ -181,6 +181,19 @@ pub(crate) fn handle(ctx: &Ctx, args: CountArgs) -> Result<()> {
     print_ok(&ok, ctx.json)
 }
 
+pub(crate) fn render_count(result: &crate::api::CountResult) -> String {
+    match result {
+        crate::api::CountResult::Simple { count } => format!("{count}"),
+        crate::api::CountResult::Grouped { total, groups } => {
+            let mut out = format!("Total: {total}\n\n");
+            for g in groups {
+                out.push_str(&format!("{}: {}\n", g.group, g.count));
+            }
+            out.trim_end().into()
+        }
+    }
+}
+
 fn resolve_group_by(args: &CountArgs) -> Result<Option<String>> {
     let mut group_by: Option<&'static str> = None;
 
