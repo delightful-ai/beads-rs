@@ -30,14 +30,14 @@ impl<R: Read> FrameReader<R> {
         let mut header = [0u8; FRAME_HEADER_LEN];
         let mut read = 0usize;
         while read < header.len() {
-            let n = self
+            let bytes_read = self
                 .reader
                 .read(&mut header[read..])
                 .map_err(|source| EventWalError::Io { path: None, source })?;
-            if n == 0 {
+            if bytes_read == 0 {
                 return Ok(None);
             }
-            read += n;
+            read += bytes_read;
         }
 
         let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
@@ -62,14 +62,14 @@ impl<R: Read> FrameReader<R> {
         let mut body = vec![0u8; length];
         let mut read_body = 0usize;
         while read_body < length {
-            let n = self
+            let bytes_read = self
                 .reader
                 .read(&mut body[read_body..])
                 .map_err(|source| EventWalError::Io { path: None, source })?;
-            if n == 0 {
+            if bytes_read == 0 {
                 return Ok(None);
             }
-            read_body += n;
+            read_body += bytes_read;
         }
 
         let actual_crc = crc32c(&body);
