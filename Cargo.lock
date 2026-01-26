@@ -213,6 +213,16 @@ dependencies = [
 [[package]]
 name = "beads-surface"
 version = "0.2.0-alpha"
+dependencies = [
+ "beads-api",
+ "beads-core",
+ "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
 
 [[package]]
 name = "beads_stateright_models"
