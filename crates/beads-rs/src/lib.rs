@@ -7,6 +7,8 @@ pub use beads_macros::enum_str;
 pub use beads_core as core;
 
 pub use beads_api as api;
+// Optional direct access to surface types.
+pub use beads_surface as surface;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod compat;
