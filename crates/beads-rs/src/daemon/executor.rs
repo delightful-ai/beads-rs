@@ -24,7 +24,7 @@ use super::mutation_engine::{
     DotAllocator, EventDraft, IdContext, MutationContext, MutationEngine, MutationRequest,
     ParsedMutationRequest, SequencedEvent,
 };
-use super::ops::{BeadPatch, OpError, OpResult};
+use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
@@ -41,6 +41,7 @@ use crate::core::{
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
 use crate::paths;
+use beads_surface::ops::{BeadPatch, OpResult};
 
 #[derive(Debug)]
 pub(crate) struct DurabilityWait {

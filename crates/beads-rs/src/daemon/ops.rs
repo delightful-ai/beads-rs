@@ -1,10 +1,8 @@
-//! Operations and patches for bead mutations.
+//! Daemon-only operation logic and errors.
 //!
 //! Provides:
-//! - `Patch<T>` - Three-way patch enum (Keep, Clear, Set)
-//! - `BeadPatch` - Partial update for bead fields
 //! - `OpError` - Operation errors
-//! - `OpResult` - Operation results
+//! - `BeadPatchDaemonExt` - Daemon-only patch validation and application
 
 use std::path::PathBuf;
 
@@ -638,13 +636,13 @@ impl<T> MapLiveError<T> for Result<T, crate::core::LiveLookupError> {
     }
 }
 
-pub trait BeadPatchExt {
-    fn validate(&self) -> Result<(), OpError>;
+pub trait BeadPatchDaemonExt {
+    fn validate_for_daemon(&self) -> Result<(), OpError>;
     fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError>;
 }
 
-impl BeadPatchExt for BeadPatch {
-    fn validate(&self) -> Result<(), OpError> {
+impl BeadPatchDaemonExt for BeadPatch {
+    fn validate_for_daemon(&self) -> Result<(), OpError> {
         if matches!(self.title, Patch::Clear) {
             return Err(OpError::ValidationFailed {
                 field: "title".into(),
@@ -712,29 +710,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn patch_default_is_keep() {
-        let patch: Patch<String> = Patch::default();
-        assert!(patch.is_keep());
-    }
-
-    #[test]
-    fn patch_apply() {
-        let current = Some("old".to_string());
-
-        assert_eq!(Patch::Keep.apply(current.clone()), Some("old".to_string()));
-        assert_eq!(Patch::<String>::Clear.apply(current.clone()), None);
-        assert_eq!(
-            Patch::Set("new".to_string()).apply(current),
-            Some("new".to_string())
-        );
-    }
-
-    #[test]
     fn bead_patch_validation() {
         let mut patch = BeadPatch::default();
-        assert!(patch.validate().is_ok());
+        assert!(patch.validate_for_daemon().is_ok());
 
         patch.title = Patch::Clear;
-        assert!(patch.validate().is_err());
+        assert!(patch.validate_for_daemon().is_err());
     }
 }

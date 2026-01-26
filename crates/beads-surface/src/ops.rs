@@ -168,3 +168,26 @@ pub enum OpResult {
     /// Claim was extended.
     ClaimExtended { id: BeadId, expires: WallClock },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patch_default_is_keep() {
+        let patch: Patch<String> = Patch::default();
+        assert!(patch.is_keep());
+    }
+
+    #[test]
+    fn patch_apply() {
+        let current = Some("old".to_string());
+
+        assert_eq!(Patch::Keep.apply(current.clone()), Some("old".to_string()));
+        assert_eq!(Patch::<String>::Clear.apply(current.clone()), None);
+        assert_eq!(
+            Patch::Set("new".to_string()).apply(current),
+            Some("new".to_string())
+        );
+    }
+}

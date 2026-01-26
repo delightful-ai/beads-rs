@@ -10,8 +10,9 @@ use crate::cli::parse::{parse_bead_type, parse_priority, parse_status as parse_s
 use crate::core::{BeadType, Priority};
 use crate::core::{DepKind, WorkflowStatus};
 use crate::daemon::ipc::{Request, ResponsePayload};
-use crate::daemon::ops::{BeadPatch, BeadPatchExt, Patch};
+use crate::daemon::ops::BeadPatchDaemonExt;
 use crate::{Error, Result};
+use beads_surface::ops::{BeadPatch, Patch};
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -163,7 +164,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     }
 
     if !patch.is_empty() {
-        patch.validate()?;
+        patch.validate_for_daemon()?;
         let req = Request::Update {
             repo: ctx.repo.clone(),
             id: id_str.clone(),
