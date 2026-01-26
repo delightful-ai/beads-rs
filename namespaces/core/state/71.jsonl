@@ -1,0 +1,1 @@
+{"_at":[1769398652632,0],"_by":"darin@book","created_at":[1769398652632,0],"created_by":"darin@book","description":"","id":"bd-1vt","labels":{"cc":{"max":{}},"entries":{}},"priority":1,"status":"open","title":"Crate boundary refactor: split beads-rs into workspace DAG","type":"epic"}
