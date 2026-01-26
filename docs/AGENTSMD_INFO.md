@@ -408,7 +408,7 @@ Think of these as “micro‑playbooks” for the really weird/dense areas.
 
 Code style has two homes:
 
-1. **Global style (root-level or `/style/AGENTS.md`)**
+1. **Global style (root-level)**
    - Language‑wide norms:
      - Rust: prefer enums + typestates; no `unwrap`; explicit errors.
      - Python: type hints required in `app/`; ruff config is canonical style.
