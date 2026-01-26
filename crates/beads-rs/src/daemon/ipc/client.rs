@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use super::codec::IpcError;
-use super::types::{IPC_PROTOCOL_VERSION, Request, Response, ResponsePayload};
+use super::{IPC_PROTOCOL_VERSION, Request, Response, ResponsePayload};
 use crate::api::QueryResult;
 
 // =============================================================================

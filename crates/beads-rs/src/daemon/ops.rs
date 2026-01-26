@@ -8,14 +8,13 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    ActorId, Applied, BeadFields, BeadId, BeadType, CliErrorCode, ClientRequestId, DurabilityClass,
-    DurabilityReceipt, ErrorCode, InvalidId, Lww, NamespaceId, Priority, ProtocolErrorCode,
-    ReplicaId, Stamp, WallClock, Watermarks, WorkflowStatus,
+    ActorId, Applied, BeadFields, BeadId, CliErrorCode, ClientRequestId, DurabilityClass,
+    DurabilityReceipt, ErrorCode, InvalidId, Lww, NamespaceId, ProtocolErrorCode, ReplicaId, Stamp,
+    WallClock, Watermarks,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_lock::StoreLockError;
@@ -24,197 +23,7 @@ use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
 
-// =============================================================================
-// Patch<T> - Three-way field update
-// =============================================================================
-
-/// Three-way patch for updating a field.
-///
-/// This is the clean solution to the "Option<Option<T>>" problem for nullable fields:
-/// - `Keep` - Don't change the field
-/// - `Clear` - Set the field to None
-/// - `Set(T)` - Set the field to Some(T)
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum Patch<T> {
-    /// Don't change the field.
-    #[default]
-    Keep,
-    /// Clear the field (set to None).
-    Clear,
-    /// Set the field to a new value.
-    Set(T),
-}
-
-impl<T> Patch<T> {
-    /// Check if this patch would change the value.
-    pub fn is_keep(&self) -> bool {
-        matches!(self, Patch::Keep)
-    }
-
-    /// Apply the patch to a current value.
-    pub fn apply(self, current: Option<T>) -> Option<T> {
-        match self {
-            Patch::Keep => current,
-            Patch::Clear => None,
-            Patch::Set(v) => Some(v),
-        }
-    }
-}
-
-// Custom serde for Patch: absent = Keep, null = Clear, value = Set
-impl<T: Serialize> Serialize for Patch<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Patch::Keep => serializer.serialize_none(), // Won't actually be serialized if skip_serializing_if
-            Patch::Clear => serializer.serialize_none(),
-            Patch::Set(v) => v.serialize(serializer),
-        }
-    }
-}
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // If present and null -> Clear
-        // If present and value -> Set
-        // If absent -> Keep (handled by #[serde(default)])
-        let opt: Option<T> = Option::deserialize(deserializer)?;
-        match opt {
-            None => Ok(Patch::Clear),
-            Some(v) => Ok(Patch::Set(v)),
-        }
-    }
-}
-
-// =============================================================================
-// BeadPatch - Partial update for bead fields
-// =============================================================================
-
-/// Partial update for bead fields.
-///
-/// All fields default to `Keep`, meaning no change.
-/// Use `Patch::Set(value)` to update a field.
-/// Use `Patch::Clear` to clear a nullable field.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BeadPatch {
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub title: Patch<String>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub description: Patch<String>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub design: Patch<String>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub acceptance_criteria: Patch<String>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub priority: Patch<Priority>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub bead_type: Patch<BeadType>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub external_ref: Patch<String>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub source_repo: Patch<String>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub estimated_minutes: Patch<u32>,
-
-    #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub status: Patch<WorkflowStatus>,
-}
-
-impl BeadPatch {
-    /// Validate the patch, returning error if invalid.
-    ///
-    /// Rules:
-    /// - Cannot clear required fields (title, description)
-    pub fn validate(&self) -> Result<(), OpError> {
-        if matches!(self.title, Patch::Clear) {
-            return Err(OpError::ValidationFailed {
-                field: "title".into(),
-                reason: "cannot clear required field".into(),
-            });
-        }
-        if matches!(self.description, Patch::Clear) {
-            return Err(OpError::ValidationFailed {
-                field: "description".into(),
-                reason: "cannot clear required field".into(),
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Check if this patch has any changes.
-    pub fn is_empty(&self) -> bool {
-        self.title.is_keep()
-            && self.description.is_keep()
-            && self.design.is_keep()
-            && self.acceptance_criteria.is_keep()
-            && self.priority.is_keep()
-            && self.bead_type.is_keep()
-            && self.external_ref.is_keep()
-            && self.source_repo.is_keep()
-            && self.estimated_minutes.is_keep()
-            && self.status.is_keep()
-    }
-
-    /// Apply this patch to bead fields.
-    pub fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError> {
-        if let Patch::Set(v) = &self.title {
-            fields.title = Lww::new(v.clone(), stamp.clone());
-        }
-        if let Patch::Set(v) = &self.description {
-            fields.description = Lww::new(v.clone(), stamp.clone());
-        }
-        match &self.design {
-            Patch::Set(v) => fields.design = Lww::new(Some(v.clone()), stamp.clone()),
-            Patch::Clear => fields.design = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        match &self.acceptance_criteria {
-            Patch::Set(v) => fields.acceptance_criteria = Lww::new(Some(v.clone()), stamp.clone()),
-            Patch::Clear => fields.acceptance_criteria = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        if let Patch::Set(v) = &self.priority {
-            fields.priority = Lww::new(*v, stamp.clone());
-        }
-        if let Patch::Set(v) = &self.bead_type {
-            fields.bead_type = Lww::new(*v, stamp.clone());
-        }
-        match &self.external_ref {
-            Patch::Set(v) => fields.external_ref = Lww::new(Some(v.clone()), stamp.clone()),
-            Patch::Clear => fields.external_ref = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        match &self.source_repo {
-            Patch::Set(v) => fields.source_repo = Lww::new(Some(v.clone()), stamp.clone()),
-            Patch::Clear => fields.source_repo = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        match &self.estimated_minutes {
-            Patch::Set(v) => fields.estimated_minutes = Lww::new(Some(*v), stamp.clone()),
-            Patch::Clear => fields.estimated_minutes = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        if let Patch::Set(status) = &self.status {
-            fields.workflow = Lww::new(status.into_workflow(None, None), stamp.clone());
-        }
-
-        Ok(())
-    }
-}
+pub use beads_surface::ops::{BeadPatch, OpResult, Patch};
 
 // =============================================================================
 // OpError - Operation errors
@@ -829,46 +638,73 @@ impl<T> MapLiveError<T> for Result<T, crate::core::LiveLookupError> {
     }
 }
 
-// =============================================================================
-// OpResult - Operation results
-// =============================================================================
+pub trait BeadPatchExt {
+    fn validate(&self) -> Result<(), OpError>;
+    fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError>;
+}
 
-/// Result of a successful operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
-pub enum OpResult {
-    /// Bead was created.
-    Created { id: BeadId },
+impl BeadPatchExt for BeadPatch {
+    fn validate(&self) -> Result<(), OpError> {
+        if matches!(self.title, Patch::Clear) {
+            return Err(OpError::ValidationFailed {
+                field: "title".into(),
+                reason: "cannot clear required field".into(),
+            });
+        }
+        if matches!(self.description, Patch::Clear) {
+            return Err(OpError::ValidationFailed {
+                field: "description".into(),
+                reason: "cannot clear required field".into(),
+            });
+        }
 
-    /// Bead was updated.
-    Updated { id: BeadId },
+        Ok(())
+    }
 
-    /// Bead was closed.
-    Closed { id: BeadId },
+    fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError> {
+        if let Patch::Set(v) = &self.title {
+            fields.title = Lww::new(v.clone(), stamp.clone());
+        }
+        if let Patch::Set(v) = &self.description {
+            fields.description = Lww::new(v.clone(), stamp.clone());
+        }
+        match &self.design {
+            Patch::Set(v) => fields.design = Lww::new(Some(v.clone()), stamp.clone()),
+            Patch::Clear => fields.design = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        match &self.acceptance_criteria {
+            Patch::Set(v) => fields.acceptance_criteria = Lww::new(Some(v.clone()), stamp.clone()),
+            Patch::Clear => fields.acceptance_criteria = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        if let Patch::Set(v) = &self.priority {
+            fields.priority = Lww::new(*v, stamp.clone());
+        }
+        if let Patch::Set(v) = &self.bead_type {
+            fields.bead_type = Lww::new(*v, stamp.clone());
+        }
+        match &self.external_ref {
+            Patch::Set(v) => fields.external_ref = Lww::new(Some(v.clone()), stamp.clone()),
+            Patch::Clear => fields.external_ref = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        match &self.source_repo {
+            Patch::Set(v) => fields.source_repo = Lww::new(Some(v.clone()), stamp.clone()),
+            Patch::Clear => fields.source_repo = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        match &self.estimated_minutes {
+            Patch::Set(v) => fields.estimated_minutes = Lww::new(Some(*v), stamp.clone()),
+            Patch::Clear => fields.estimated_minutes = Lww::new(None, stamp.clone()),
+            Patch::Keep => {}
+        }
+        if let Patch::Set(status) = &self.status {
+            fields.workflow = Lww::new(status.into_workflow(None, None), stamp.clone());
+        }
 
-    /// Bead was reopened.
-    Reopened { id: BeadId },
-
-    /// Bead was deleted.
-    Deleted { id: BeadId },
-
-    /// Dependency was added.
-    DepAdded { from: BeadId, to: BeadId },
-
-    /// Dependency was removed.
-    DepRemoved { from: BeadId, to: BeadId },
-
-    /// Note was added.
-    NoteAdded { bead_id: BeadId, note_id: String },
-
-    /// Bead was claimed.
-    Claimed { id: BeadId, expires: WallClock },
-
-    /// Claim was released.
-    Unclaimed { id: BeadId },
-
-    /// Claim was extended.
-    ClaimExtended { id: BeadId, expires: WallClock },
+        Ok(())
+    }
 }
 
 #[cfg(test)]

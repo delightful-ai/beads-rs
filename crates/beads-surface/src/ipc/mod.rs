@@ -5,7 +5,7 @@ pub mod types;
 use thiserror::Error;
 
 pub use client::IpcClient;
-pub use types::{Request, Response, ResponsePayload};
+pub use types::*;
 
 #[derive(Debug, Error)]
 pub enum IpcError {

@@ -34,21 +34,27 @@ pub fn prepare_subscription(
     read: ReadConsistency,
     git_tx: &Sender<GitOp>,
 ) -> Result<SubscribeReply, Box<ErrorPayload>> {
-    let loaded = daemon.ensure_repo_fresh(repo, git_tx).map_err(box_error)?;
+    let loaded = daemon
+        .ensure_repo_fresh(repo, git_tx)
+        .map_err(|err| box_error(err.into()))?;
     let read = daemon
         .normalize_read_consistency(&loaded, read)
-        .map_err(box_error)?;
-    daemon.check_read_gate(&loaded, &read).map_err(box_error)?;
+        .map_err(|err| box_error(err.into()))?;
+    daemon
+        .check_read_gate(&loaded, &read)
+        .map_err(|err| box_error(err.into()))?;
 
-    let store_runtime = daemon.store_runtime(&loaded).map_err(box_error)?;
+    let store_runtime = daemon
+        .store_runtime(&loaded)
+        .map_err(|err| box_error(err.into()))?;
     let subscription = store_runtime
         .broadcaster
         .subscribe(subscriber_limits(daemon.limits()))
-        .map_err(|err| box_error(broadcast_error_to_op(err)))?;
+        .map_err(|err| box_error(broadcast_error_to_op(err).into()))?;
     let hot_cache = store_runtime
         .broadcaster
         .hot_cache()
-        .map_err(|err| box_error(broadcast_error_to_op(err)))?;
+        .map_err(|err| box_error(broadcast_error_to_op(err).into()))?;
 
     let namespace = read.namespace().clone();
     let watermarks_applied = store_runtime.watermarks_applied.clone();
@@ -87,8 +93,8 @@ pub fn subscriber_limits(limits: &Limits) -> SubscriberLimits {
     SubscriberLimits::new(max_events, max_bytes).expect("subscriber limits")
 }
 
-fn box_error(err: impl Into<ErrorPayload>) -> Box<ErrorPayload> {
-    Box::new(err.into())
+fn box_error(err: ErrorPayload) -> Box<ErrorPayload> {
+    Box::new(err)
 }
 
 fn broadcast_error_to_op(err: BroadcastError) -> OpError {

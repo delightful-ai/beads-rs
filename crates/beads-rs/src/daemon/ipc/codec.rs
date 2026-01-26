@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use serde_json::Value;
 use thiserror::Error;
 
-use super::types::{Request, Response};
+use super::{Request, Response};
 use crate::core::error::details as error_details;
 use crate::core::{
     CliErrorCode, ErrorCode, ErrorPayload, InvalidId, Limits, ProtocolErrorCode, StoreId,

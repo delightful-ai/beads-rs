@@ -870,10 +870,10 @@ impl ReplicationRig {
                             pending_replica_ids: Some(pending),
                             receipt: Box::new(pending_receipt),
                         };
-                        return Response::err(err);
+                        return Response::err(err.into());
                     }
                 }
-                Err(err) => return Response::err(err),
+                Err(err) => return Response::err(err.into()),
             }
 
             if self.pump(1) == 0 {

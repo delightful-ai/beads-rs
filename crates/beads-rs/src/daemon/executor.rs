@@ -86,7 +86,7 @@ impl Daemon {
     ) -> HandleOutcome {
         match self.apply_mutation_request_inner(repo, meta, request, git_tx) {
             Ok(outcome) => outcome.into_handle(),
-            Err(err) => HandleOutcome::Response(Response::err(err)),
+            Err(err) => HandleOutcome::Response(Response::err(err.into())),
         }
     }
 

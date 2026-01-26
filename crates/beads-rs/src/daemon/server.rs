@@ -351,14 +351,14 @@ pub fn run_state_loop(
                             let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
                                 Ok(remote) => remote,
                                 Err(err) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                    let _ = respond.send(ServerReply::Response(Response::err(err.into())));
                                     continue;
                                 }
                             };
                             let read = match daemon.normalize_read_consistency(&loaded, read_gate.read) {
                                 Ok(read) => read,
                                 Err(err) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                    let _ = respond.send(ServerReply::Response(Response::err(err.into())));
                                     continue;
                                 }
                             };
@@ -375,7 +375,7 @@ pub fn run_state_loop(
                                                 required: Box::new(required),
                                                 current_applied: Box::new(current_applied),
                                             };
-                                            let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                            let _ = respond.send(ServerReply::Response(Response::err(err.into())));
                                             continue;
                                         }
 
@@ -395,7 +395,7 @@ pub fn run_state_loop(
                                         continue;
                                     }
                                     Err(err) => {
-                                        let _ = respond.send(ServerReply::Response(Response::err(err)));
+                                        let _ = respond.send(ServerReply::Response(Response::err(err.into())));
                                         continue;
                                     }
                                 }
@@ -600,7 +600,7 @@ fn process_request_message(
                 let repo_state = match daemon.git_lane_state(&loaded) {
                     Ok(repo_state) => repo_state,
                     Err(e) => {
-                        let _ = respond.send(ServerReply::Response(Response::err(e)));
+                        let _ = respond.send(ServerReply::Response(Response::err(e.into())));
                         return RequestOutcome::Continue;
                     }
                 };
@@ -618,7 +618,7 @@ fn process_request_message(
                 }
             }
             Err(e) => {
-                let _ = respond.send(ServerReply::Response(Response::err(e)));
+                let _ = respond.send(ServerReply::Response(Response::err(e.into())));
             }
         }
         return RequestOutcome::Continue;
@@ -628,14 +628,14 @@ fn process_request_message(
         let proof = match daemon.ensure_repo_loaded_strict(&repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(err)));
+                let _ = respond.send(ServerReply::Response(Response::err(err.into())));
                 return RequestOutcome::Continue;
             }
         };
         let namespace = match daemon.normalize_namespace(&proof, namespace) {
             Ok(namespace) => namespace,
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(err)));
+                let _ = respond.send(ServerReply::Response(Response::err(err.into())));
                 return RequestOutcome::Continue;
             }
         };
@@ -647,7 +647,8 @@ fn process_request_message(
                 OpError::InvalidRequest {
                     field: Some("checkpoint".into()),
                     reason: format!("no checkpoint groups scheduled for namespace {namespace}",),
-                },
+                }
+                .into(),
             )));
             return RequestOutcome::Continue;
         }
@@ -674,7 +675,7 @@ fn process_request_message(
                 });
             }
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(err)));
+                let _ = respond.send(ServerReply::Response(Response::err(err.into())));
             }
         }
 
@@ -831,7 +832,7 @@ fn flush_read_gate_waiters(
             Err(err) => {
                 let _ = waiter
                     .respond
-                    .send(ServerReply::Response(Response::err(err)));
+                    .send(ServerReply::Response(Response::err(err.into())));
                 continue;
             }
         };
@@ -862,7 +863,7 @@ fn flush_read_gate_waiters(
                     };
                     let _ = waiter
                         .respond
-                        .send(ServerReply::Response(Response::err(err)));
+                        .send(ServerReply::Response(Response::err(err.into())));
                     continue;
                 }
                 remaining.push(waiter);
@@ -870,7 +871,7 @@ fn flush_read_gate_waiters(
             Err(err) => {
                 let _ = waiter
                     .respond
-                    .send(ServerReply::Response(Response::err(err)));
+                    .send(ServerReply::Response(Response::err(err.into())));
             }
         }
     }
@@ -936,7 +937,7 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
                     };
                     let _ = waiter
                         .respond
-                        .send(ServerReply::Response(Response::err(err)));
+                        .send(ServerReply::Response(Response::err(err.into())));
                     continue;
                 }
                 remaining.push(waiter);
@@ -944,7 +945,7 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
             Err(err) => {
                 let _ = waiter
                     .respond
-                    .send(ServerReply::Response(Response::err(err)));
+                    .send(ServerReply::Response(Response::err(err.into())));
             }
         }
     }
@@ -1024,7 +1025,7 @@ fn flush_checkpoint_waiters(daemon: &Daemon, waiters: &mut Vec<CheckpointWaiter>
             Err(err) => {
                 let _ = waiter
                     .respond
-                    .send(ServerReply::Response(Response::err(err)));
+                    .send(ServerReply::Response(Response::err(err.into())));
             }
         }
     }
@@ -1110,7 +1111,7 @@ pub(super) fn handle_client(
         let request = match decode_request_with_limits(&line, &limits) {
             Ok(r) => r,
             Err(e) => {
-                let resp = Response::err(e);
+                let resp = Response::err(e.into());
                 let bytes = match encode_response(&resp) {
                     Ok(b) => b,
                     Err(e) => {

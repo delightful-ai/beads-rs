@@ -10,7 +10,7 @@ use crate::cli::parse::{parse_bead_type, parse_priority, parse_status as parse_s
 use crate::core::{BeadType, Priority};
 use crate::core::{DepKind, WorkflowStatus};
 use crate::daemon::ipc::{Request, ResponsePayload};
-use crate::daemon::ops::{BeadPatch, Patch};
+use crate::daemon::ops::{BeadPatch, BeadPatchExt, Patch};
 use crate::{Error, Result};
 
 #[derive(Args, Debug)]

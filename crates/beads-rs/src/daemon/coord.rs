@@ -784,7 +784,7 @@ impl Daemon {
                 // Used after external changes like migration.
                 match self.force_reload(&repo, git_tx) {
                     Ok(_) => Response::ok(ResponsePayload::refreshed()),
-                    Err(e) => Response::err(e),
+                    Err(e) => Response::err(e.into()),
                 }
                 .into()
             }
@@ -793,7 +793,7 @@ impl Daemon {
                 // Force immediate sync (used for graceful shutdown)
                 match self.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
                     Ok(_) => Response::ok(ResponsePayload::synced()),
-                    Err(e) => Response::err(e),
+                    Err(e) => Response::err(e.into()),
                 }
                 .into()
             }
@@ -822,7 +822,7 @@ impl Daemon {
                 match respond_rx.recv() {
                     Ok(Ok(())) => match self.ensure_repo_loaded(&repo, git_tx) {
                         Ok(_) => Response::ok(ResponsePayload::initialized()),
-                        Err(e) => Response::err(e),
+                        Err(e) => Response::err(e.into()),
                     },
                     Ok(Err(e)) => Response::err(error_payload(
                         CliErrorCode::InitFailed.into(),
