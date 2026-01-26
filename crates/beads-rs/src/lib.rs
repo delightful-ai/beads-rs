@@ -6,7 +6,7 @@ pub use beads_macros::enum_str;
 // Re-export beads-core as core module for backwards compatibility
 pub use beads_core as core;
 
-pub mod api;
+pub use beads_api as api;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod compat;

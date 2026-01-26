@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::DepKey as CoreDepKey;
+use beads_core::DepKey as CoreDepKey;
 
 // =============================================================================
 // Dependencies

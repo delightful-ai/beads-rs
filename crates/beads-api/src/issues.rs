@@ -1,28 +1,15 @@
-//! Internal query view types for daemon queries.
-//!
-//! These types mirror IPC/CLI shapes but live on the daemon side so query
-//! execution does not depend on the API module.
+//! Issue and status schemas.
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{
-    BeadView, Claim, DepKey as CoreDepKey, NamespaceId, SegmentId, Tombstone as CoreTombstone,
-    WallClock, Workflow, WriteStamp,
+use crate::deps::DepEdge;
+use beads_core::{
+    BeadView, Claim, NamespaceId, SegmentId, Tombstone as CoreTombstone, WallClock, Workflow,
+    WriteStamp,
 };
 
 // =============================================================================
-// Daemon info
-// =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DaemonInfo {
-    pub version: String,
-    pub protocol_version: u32,
-    pub pid: u32,
-}
-
-// =============================================================================
-// Status / stats
+// Status / Stats
 // =============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +81,7 @@ pub struct StatusOutput {
 }
 
 // =============================================================================
-// Blocked / Ready / Epic
+// Blocked / Stale
 // =============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,12 +93,21 @@ pub struct BlockedIssue {
     pub blocked_by: Vec<String>,
 }
 
+// =============================================================================
+// Ready
+// =============================================================================
+
+/// Ready result with summary counts for context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadyResult {
     pub issues: Vec<IssueSummary>,
     pub blocked_count: usize,
     pub closed_count: usize,
 }
+
+// =============================================================================
+// Epic
+// =============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpicStatus {
@@ -168,39 +164,13 @@ pub struct Note {
     pub at: WriteStamp,
 }
 
-impl From<&crate::core::Note> for Note {
-    fn from(n: &crate::core::Note) -> Self {
+impl From<&beads_core::Note> for Note {
+    fn from(n: &beads_core::Note) -> Self {
         Self {
             id: n.id.as_str().to_string(),
             content: n.content.clone(),
             author: n.author.as_str().to_string(),
             at: n.at.clone(),
-        }
-    }
-}
-
-// =============================================================================
-// Dependencies
-// =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DepEdge {
-    pub from: String,
-    pub to: String,
-    pub kind: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DepCycles {
-    pub cycles: Vec<Vec<String>>,
-}
-
-impl From<&CoreDepKey> for DepEdge {
-    fn from(key: &CoreDepKey) -> Self {
-        Self {
-            from: key.from().as_str().to_string(),
-            to: key.to().as_str().to_string(),
-            kind: key.kind().as_str().to_string(),
         }
     }
 }
@@ -434,29 +404,11 @@ impl IssueSummary {
     }
 }
 
-// =============================================================================
-// Admin outputs (daemon-only aliases for now)
-// =============================================================================
-
-pub type AdminDoctorOutput = crate::api::AdminDoctorOutput;
-pub type AdminCheckpointOutput = crate::api::AdminCheckpointOutput;
-pub type AdminFingerprintOutput = crate::api::AdminFingerprintOutput;
-pub type AdminFlushOutput = crate::api::AdminFlushOutput;
-pub type AdminMaintenanceModeOutput = crate::api::AdminMaintenanceModeOutput;
-pub type AdminMetricsOutput = crate::api::AdminMetricsOutput;
-pub type AdminRebuildIndexOutput = crate::api::AdminRebuildIndexOutput;
-pub type AdminReloadLimitsOutput = crate::api::AdminReloadLimitsOutput;
-pub type AdminReloadPoliciesOutput = crate::api::AdminReloadPoliciesOutput;
-pub type AdminRotateReplicaIdOutput = crate::api::AdminRotateReplicaIdOutput;
-pub type AdminReloadReplicationOutput = crate::api::AdminReloadReplicationOutput;
-pub type AdminScrubOutput = crate::api::AdminScrubOutput;
-pub type AdminStatusOutput = crate::api::AdminStatusOutput;
-
 #[cfg(test)]
 mod tests {
     use super::{Issue, IssueSummary};
-    use crate::core::orset::Dot;
-    use crate::core::{
+    use beads_core::orset::Dot;
+    use beads_core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Label, Lww,
         NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow, WriteStamp,
     };

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{
+use beads_core::{
     ActorId, Applied, ClientRequestId, EventBody as CoreEventBody, EventId, EventKindV1, HlcMax,
     NamespaceId, ReplicaId, Seq1, StoreIdentity, TraceId, TxnDeltaV1, TxnId, Watermarks,
 };

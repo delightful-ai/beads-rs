@@ -28,7 +28,6 @@ pub mod mutation_engine;
 pub mod ops;
 pub mod query;
 pub mod query_executor;
-pub mod query_model;
 pub mod remote;
 pub mod repl;
 pub mod run;

@@ -2715,10 +2715,10 @@ pub(crate) fn insert_store_for_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::QueryResult;
     use crate::daemon::ipc::{MutationMeta, ReadConsistency, Request, ResponsePayload};
     use crate::daemon::store::discovery::store_id_from_remote;
     use crate::git::sync::SyncOutcome;
+    use beads_api::QueryResult;
     use std::collections::BTreeMap;
     use std::io::Write;
     #[cfg(unix)]

@@ -2,18 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::admin::{
+use crate::admin::{
     AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
     AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
     AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
     AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, DaemonInfo,
 };
-use crate::api::deps::{DepCycles, DepEdge};
-use crate::api::issues::{
+use crate::deps::{DepCycles, DepEdge};
+use crate::issues::{
     BlockedIssue, CountResult, DeletedLookup, EpicStatus, Issue, IssueSummary, Note, ReadyResult,
     StatusOutput, Tombstone,
 };
-use crate::core::BeadId;
+use beads_core::BeadId;
 
 /// Result of a query.
 #[derive(Debug, Clone, Serialize, Deserialize)]

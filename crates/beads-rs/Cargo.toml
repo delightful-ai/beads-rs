@@ -17,6 +17,7 @@ exclude = [".beads/"]
 
 [dependencies]
 beads-core = { path = "../beads-core" }
+beads-api = { path = "../beads-api" }
 beads-macros = { path = "../beads-macros" }
 clap = { version = "4", features = ["derive"], optional = true }
 thiserror = "1"

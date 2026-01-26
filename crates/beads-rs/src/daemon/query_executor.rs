@@ -12,12 +12,12 @@ use super::git_worker::GitOp;
 use super::ipc::{ReadConsistency, Response, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
-use super::query_model::{
+use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
+use beads_api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
     IssueSummary, Note, ReadyResult, StatusOutput, StatusSummary, SyncStatus, SyncWarning,
     Tombstone,
 };
-use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
 
 impl Daemon {
     /// Get a single bead.

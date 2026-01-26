@@ -6,17 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crossbeam::channel::Sender;
 
-use crate::api::{
-    AdminCheckpointGroup, AdminClockAnomaly, AdminClockAnomalyKind, AdminDoctorOutput,
-    AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput,
-    AdminFlushSegment, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
-    AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
-    AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
-    AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
-    AdminReplicaLiveness, AdminReplicationNamespace, AdminReplicationPeer,
-    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalGrowth,
-    AdminWalNamespace, AdminWalSegment, AdminWalWarning, AdminWalWarningKind,
-};
 use crate::core::{
     Limits, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, WallClock, Watermarks,
 };
@@ -28,6 +17,17 @@ use crate::daemon::store_runtime::{StoreRuntimeError, load_replica_roster};
 use crate::daemon::wal::{ReplayStats, rebuild_index};
 use crate::git::checkpoint::layout::SHARD_COUNT;
 use crate::paths;
+use beads_api::{
+    AdminCheckpointGroup, AdminClockAnomaly, AdminClockAnomalyKind, AdminDoctorOutput,
+    AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput,
+    AdminFlushSegment, AdminMaintenanceModeOutput, AdminMetricHistogram, AdminMetricLabel,
+    AdminMetricSample, AdminMetricsOutput, AdminPolicyChange, AdminPolicyDiff,
+    AdminRebuildIndexOutput, AdminRebuildIndexStats, AdminRebuildIndexTruncation,
+    AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
+    AdminReplicaLiveness, AdminReplicationNamespace, AdminReplicationPeer,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalGrowth,
+    AdminWalNamespace, AdminWalSegment, AdminWalWarning, AdminWalWarningKind,
+};
 
 use super::core::Daemon;
 use super::ipc::ReadConsistency;
@@ -1159,8 +1159,8 @@ fn clock_anomaly_output(anomaly: Option<ClockAnomaly>) -> Option<AdminClockAnoma
 #[cfg(test)]
 mod tests {
     use super::{WalSegmentStats, build_wal_growth, wal_guardrail_warnings};
-    use crate::api::AdminWalWarningKind;
     use crate::core::{Limits, NamespaceId};
+    use beads_api::AdminWalWarningKind;
 
     #[test]
     fn wal_guardrails_warn_on_limits() {
