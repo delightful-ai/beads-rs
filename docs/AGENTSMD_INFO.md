@@ -1,4 +1,4 @@
-## What an AGENTS.md is (final synthesis)
+## What an AGENTS.md is
 
 An `AGENTS.md` file is **executable context that makes a limited-visibility contributor behave correctly**.
 
@@ -186,7 +186,7 @@ Root and domain levels will be heavier; leaf levels can be much lighter.
 
 Include:
 
--[<43;103;15M **Purpose (1–2 sentences)**
+- **Purpose (1–2 sentences)**
   - “This directory implements X and nothing else.”
   - Avoid vague crap; name the domain and responsibility.
 
@@ -231,7 +231,7 @@ High‑signal conventions that *actually matter* here:
   - “Prefer small, pure functions; avoid 200‑line methods.”
   - “Don’t use `unwrap`/`expect` in production code here.”
   - “Explicit enums over stringly‑typed variants.”
-[<43;104;15M
+
 - **Error handling patterns**
   - “All errors go through `Error` in `errors.rs` (use `thiserror`).”
   - “Bubble errors up as `Result<T, MyError>`, never `anyhow::Error` in this module.”
@@ -269,7 +269,7 @@ Basically: “When I (human you) need to touch this area, what do I actually do?
 
 ### 4.3 `## Verification`
 
-This is the Factory talk made concrete[<43;105;16M: how we validate work in this subtree.
+This is the Factory talk made concrete: how we validate work in this subtree.
 
 Include:
 
@@ -294,7 +294,7 @@ Include:
 Optional but nice:
 
 - **Non‑test validators**
-  - “If you change mig[<43;106;16Mrations, run `sqlx prepare --check`.”
+  - “If you change migrations, run `sqlx prepare --check`.”
   - “Run `cargo clippy -p core` for new public APIs.”
 
 The agent should be able to finish its edits, run the commands listed here, and know: “I am probably safe.”
@@ -366,7 +366,7 @@ Contains:
 
 - **Repo topology**
   - What the major top-level directories are for.
-  - Maybe a tiny map: `core/`, [<35;107;16M`server/`, `ui/`, `scripts/`, `tests/`.
+  - Maybe a tiny map: `core/`, `server/`, `ui/`, `scripts/`, `tests/`.
 
 - **Global axioms / bans**
   - E.g., “No `unwrap`/`expect` in production code anywhere.”
@@ -413,7 +413,7 @@ Code style has two homes:
      - Rust: prefer enums + typestates; no `unwrap`; explicit errors.
      - Python: type hints required in `app/`; ruff config is canonical style.
    - Formatting rules:
-     - “Always run `rustfmt` / `ruff format` / `prettier` on save.”[<35;108;16M
+     - “Always run `rustfmt` / `ruff format` / `prettier` on save.”
    - High‑level patterns:
      - “Keep functions short; long ones must be heavily structured.”
      - “Prefer composition over inheritance.”
@@ -436,7 +436,7 @@ Don’t duplicate linter manuals. Focus on how style + architecture + domain sem
 A few meta‑rules for authoring AGENTS.md files:
 
 - **Write for a smart stranger with local eyesight.**
-  - Assume they can read code and[<35;108;17M tests.
+  - Assume they can read code and tests.
   - Assume they can search the repo.
   - Don’t assume they know the history or tribal rules.
 
@@ -484,4 +484,3 @@ If a contributor (human or LLM) **actually follows** a well-written AGENTS.md th
 - Agents that behave like opinionated seniors, not autocomplete with a GPU.
 
 That’s the bar.
-
