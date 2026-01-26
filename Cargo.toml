@@ -23,6 +23,24 @@ rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/delightful-ai/beads-rs"
 
+# Dylint configuration
+[workspace.metadata.dylint]
+libraries = [
+    { git = "https://github.com/trailofbits/dylint", pattern = "examples/general" },
+    { path = "lints/beads_lints" },
+]
+
+# Workspace-wide lints
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(dylint_lib, values(any()))"]
+
+[workspace.lints.clippy]
+all = "warn"
+
 # Build profiles (workspace-level)
 [profile.dev]
 incremental = true

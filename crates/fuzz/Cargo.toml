@@ -29,3 +29,6 @@ name = "repl_message_decode"
 path = "fuzz_targets/repl_message_decode.rs"
 test = false
 doc = false
+
+[lints]
+workspace = true

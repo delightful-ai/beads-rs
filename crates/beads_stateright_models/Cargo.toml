@@ -23,3 +23,6 @@ pico-args = "0.5"
 
 [features]
 model_testing = []
+
+[lints]
+workspace = true
