@@ -901,10 +901,10 @@ fn negotiate_version(
     peer_max: u32,
     peer_min: u32,
 ) -> Result<u32, ProtocolIncompatible> {
-    let v = local.max.min(peer_max);
+    let negotiated_version = local.max.min(peer_max);
     let min_ok = local.min.max(peer_min);
-    if v >= min_ok {
-        Ok(v)
+    if negotiated_version >= min_ok {
+        Ok(negotiated_version)
     } else {
         Err(ProtocolIncompatible {
             local_min: local.min,
