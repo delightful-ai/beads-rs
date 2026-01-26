@@ -102,7 +102,7 @@ impl Dvv {
         dvv
     }
 
-    pub(crate) fn normalize(&mut self) {
+    pub fn normalize(&mut self) {
         let mut replicas = BTreeSet::new();
         replicas.extend(self.max.keys().copied());
         replicas.extend(self.dots.iter().map(|dot| dot.replica));
@@ -205,7 +205,7 @@ impl<V: OrSetValue> OrSet<V> {
         }
     }
 
-    pub(crate) fn from_parts(entries: BTreeMap<V, BTreeSet<Dot>>, cc: Dvv) -> Self {
+    pub fn from_parts(entries: BTreeMap<V, BTreeSet<Dot>>, cc: Dvv) -> Self {
         Self { entries, cc }
     }
 
@@ -473,13 +473,13 @@ mod tests {
     fn orset_add_remove_basic() {
         let mut set = OrSet::new();
         let added = set.apply_add(dot(1, 1), "alpha".to_string());
-        assert!(added.added.contains(&"alpha".to_string()));
+        assert!(added.added.contains("alpha"));
         assert!(set.contains(&"alpha".to_string()));
 
         let mut ctx = Dvv::default();
         ctx.observe(dot(1, 1));
         let removed = set.apply_remove(&"alpha".to_string(), &ctx);
-        assert!(removed.removed.contains(&"alpha".to_string()));
+        assert!(removed.removed.contains("alpha"));
         assert!(!set.contains(&"alpha".to_string()));
     }
 

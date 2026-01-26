@@ -639,15 +639,15 @@ fn default_fields(stamp: Stamp) -> BeadFields {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::collections::Label;
-    use crate::core::domain::DepKind;
-    use crate::core::event::{EventKindV1, HlcMax};
-    use crate::core::identity::{
+    use crate::collections::Label;
+    use crate::domain::DepKind;
+    use crate::event::{EventKindV1, HlcMax};
+    use crate::identity::{
         ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
     };
-    use crate::core::namespace::NamespaceId;
-    use crate::core::wire_bead::{WireDotV1, WireDvvV1, WireLineageStamp, WireStamp};
-    use crate::core::{Seq1, TxnDeltaV1};
+    use crate::namespace::NamespaceId;
+    use crate::wire_bead::{WireDotV1, WireDvvV1, WireLineageStamp, WireStamp};
+    use crate::{Seq1, TxnDeltaV1};
     use std::collections::BTreeMap;
     use uuid::Uuid;
 

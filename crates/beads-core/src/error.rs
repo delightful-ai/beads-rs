@@ -10,7 +10,7 @@ use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
 
-use crate::error::{Effect, Transience};
+use crate::effect::{Effect, Transience};
 
 /// Invalid ID or content identifier.
 #[derive(Debug, Error, Clone)]
@@ -485,7 +485,7 @@ pub mod details {
     use serde_json::Value;
     use uuid::Uuid;
 
-    use super::super::{
+    use crate::{
         ActorId, Applied, BeadId, ClientRequestId, DurabilityClass, NamespaceId, ReplicaId,
         SegmentId, StoreId, StoreMetaVersions, Watermarks,
     };

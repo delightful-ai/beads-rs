@@ -1003,11 +1003,11 @@ impl<'de> Deserialize<'de> for TxnDeltaV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::BeadView;
-    use crate::core::collections::Labels;
-    use crate::core::composite::Note;
-    use crate::core::identity::{ActorId, ReplicaId};
-    use crate::core::time::Stamp;
+    use crate::BeadView;
+    use crate::collections::Labels;
+    use crate::composite::Note;
+    use crate::identity::{ActorId, ReplicaId};
+    use crate::time::Stamp;
 
     fn actor_id(actor: &str) -> ActorId {
         ActorId::new(actor).unwrap_or_else(|e| panic!("invalid actor id {actor}: {e}"))

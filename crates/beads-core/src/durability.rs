@@ -312,7 +312,7 @@ fn durability_strength(class: DurabilityClass) -> (u8, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{HeadStatus, NamespaceId, Seq0, Seq1, StoreEpoch, StoreId};
+    use crate::{HeadStatus, NamespaceId, Seq0, Seq1, StoreEpoch, StoreId};
     use uuid::Uuid;
 
     #[test]

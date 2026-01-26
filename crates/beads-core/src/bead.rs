@@ -114,7 +114,7 @@ impl BeadFields {
     }
 
     /// Collect all stamps for computing updated_stamp.
-    pub(crate) fn all_stamps(&self) -> impl Iterator<Item = &Stamp> {
+    pub fn all_stamps(&self) -> impl Iterator<Item = &Stamp> {
         [
             &self.title.stamp,
             &self.description.stamp,

@@ -51,7 +51,7 @@ impl<S> EventBytes<S> {
 
 impl EventBytes<Canonical> {
     /// Construct canonical bytes without validation; only use with encoder output.
-    pub(crate) fn new_unchecked(bytes: Bytes) -> Self {
+    pub fn new_unchecked(bytes: Bytes) -> Self {
         Self {
             bytes,
             _state: PhantomData,
@@ -2415,7 +2415,7 @@ pub(crate) enum ClaimPatch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedBeadPatch {
+pub struct ValidatedBeadPatch {
     inner: WireBeadPatch,
 }
 
@@ -2573,9 +2573,9 @@ pub fn verify_event_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::collections::Label;
-    use crate::core::identity::{BeadId, NoteId, StoreEpoch};
-    use crate::core::time::WallClock;
+    use crate::collections::Label;
+    use crate::identity::{BeadId, NoteId, StoreEpoch};
+    use crate::time::WallClock;
     use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
 

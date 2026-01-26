@@ -987,6 +987,12 @@ fn invalid_id_details(err: &InvalidId) -> error_details::InvalidIdDetails {
             raw: raw.clone(),
             reason: reason.clone(),
         },
+        // Handle any future variants added to the non-exhaustive enum
+        _ => error_details::InvalidIdDetails {
+            kind: error_details::InvalidIdKind::Bead, // fallback
+            raw: format!("{:?}", err),
+            reason: "unknown variant".to_string(),
+        },
     }
 }
 

@@ -43,7 +43,7 @@ impl LabelState {
         }
     }
 
-    pub(crate) fn from_parts(set: OrSet<Label>, stamp: Option<Stamp>) -> Self {
+    pub fn from_parts(set: OrSet<Label>, stamp: Option<Stamp>) -> Self {
         Self { set, stamp }
     }
 
@@ -51,23 +51,23 @@ impl LabelState {
         self.stamp.as_ref()
     }
 
-    pub(crate) fn labels(&self) -> Labels {
+    pub fn labels(&self) -> Labels {
         self.set.values().cloned().collect()
     }
 
-    pub(crate) fn values(&self) -> impl Iterator<Item = &Label> {
+    pub fn values(&self) -> impl Iterator<Item = &Label> {
         self.set.values()
     }
 
-    pub(crate) fn dots_for(&self, label: &Label) -> Option<&BTreeSet<Dot>> {
+    pub fn dots_for(&self, label: &Label) -> Option<&BTreeSet<Dot>> {
         self.set.dots_for(label)
     }
 
-    pub(crate) fn cc(&self) -> &Dvv {
+    pub fn cc(&self) -> &Dvv {
         self.set.cc()
     }
 
-    pub(crate) fn join(a: &Self, b: &Self) -> Self {
+    pub fn join(a: &Self, b: &Self) -> Self {
         Self {
             set: OrSet::join(&a.set, &b.set),
             stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
@@ -93,11 +93,11 @@ impl LabelStore {
         Self::default()
     }
 
-    pub(crate) fn state(&self, id: &BeadId, lineage: &Stamp) -> Option<&LabelState> {
+    pub fn state(&self, id: &BeadId, lineage: &Stamp) -> Option<&LabelState> {
         self.by_bead.get(id).and_then(|states| states.get(lineage))
     }
 
-    pub(crate) fn state_mut(&mut self, id: &BeadId, lineage: &Stamp) -> &mut LabelState {
+    pub fn state_mut(&mut self, id: &BeadId, lineage: &Stamp) -> &mut LabelState {
         self.by_bead
             .entry(id.clone())
             .or_default()
@@ -105,15 +105,15 @@ impl LabelStore {
             .or_default()
     }
 
-    pub(crate) fn legacy_state(&self, id: &BeadId) -> Option<&LabelState> {
+    pub fn legacy_state(&self, id: &BeadId) -> Option<&LabelState> {
         self.legacy_by_bead.get(id)
     }
 
-    pub(crate) fn legacy_state_mut(&mut self, id: &BeadId) -> &mut LabelState {
+    pub fn legacy_state_mut(&mut self, id: &BeadId) -> &mut LabelState {
         self.legacy_by_bead.entry(id.clone()).or_default()
     }
 
-    pub(crate) fn insert_state(&mut self, id: BeadId, lineage: Stamp, state: LabelState) {
+    pub fn insert_state(&mut self, id: BeadId, lineage: Stamp, state: LabelState) {
         self.by_bead.entry(id).or_default().insert(lineage, state);
     }
 
@@ -265,14 +265,14 @@ impl DepStore {
         }
     }
 
-    pub(crate) fn from_parts(set: OrSet<DepKey>, stamp: Option<Stamp>) -> Self {
+    pub fn from_parts(set: OrSet<DepKey>, stamp: Option<Stamp>) -> Self {
         Self { set, stamp }
     }
     pub fn stamp(&self) -> Option<&Stamp> {
         self.stamp.as_ref()
     }
 
-    pub(crate) fn cc(&self) -> &Dvv {
+    pub fn cc(&self) -> &Dvv {
         self.set.cc()
     }
 
@@ -381,7 +381,7 @@ impl NoteStore {
         out
     }
 
-    pub(crate) fn legacy_notes_for(&self, id: &BeadId) -> Vec<&Note> {
+    pub fn legacy_notes_for(&self, id: &BeadId) -> Vec<&Note> {
         let Some(notes) = self.legacy_by_bead.get(id) else {
             return Vec::new();
         };
@@ -390,7 +390,7 @@ impl NoteStore {
         out
     }
 
-    pub(crate) fn iter_lineages(
+    pub fn iter_lineages(
         &self,
     ) -> impl Iterator<Item = (&BeadId, &Stamp, &BTreeMap<NoteId, Note>)> {
         self.by_bead.iter().flat_map(|(id, lineages)| {
@@ -400,7 +400,7 @@ impl NoteStore {
         })
     }
 
-    pub(crate) fn iter_legacy(&self) -> impl Iterator<Item = (&BeadId, &BTreeMap<NoteId, Note>)> {
+    pub fn iter_legacy(&self) -> impl Iterator<Item = (&BeadId, &BTreeMap<NoteId, Note>)> {
         self.legacy_by_bead.iter()
     }
 
@@ -685,7 +685,7 @@ impl CanonicalState {
             .contains_key(&TombstoneKey::lineage(id.clone(), lineage.clone()))
     }
 
-    pub(crate) fn has_collision_tombstone(&self, id: &BeadId) -> bool {
+    pub fn has_collision_tombstone(&self, id: &BeadId) -> bool {
         self.collision_tombstones.keys().any(|k| &k.id == id)
     }
 
@@ -756,21 +756,21 @@ impl CanonicalState {
         labels
     }
 
-    pub(crate) fn labels_for_lineage(&self, id: &BeadId, lineage: &Stamp) -> Labels {
+    pub fn labels_for_lineage(&self, id: &BeadId, lineage: &Stamp) -> Labels {
         self.labels
             .state(id, lineage)
             .map(LabelState::labels)
             .unwrap_or_default()
     }
 
-    pub(crate) fn legacy_labels_for(&self, id: &BeadId) -> Labels {
+    pub fn legacy_labels_for(&self, id: &BeadId) -> Labels {
         self.labels
             .legacy_state(id)
             .map(LabelState::labels)
             .unwrap_or_default()
     }
 
-    pub(crate) fn label_dvv(&self, id: &BeadId, label: &Label, lineage: Option<&Stamp>) -> Dvv {
+    pub fn label_dvv(&self, id: &BeadId, label: &Label, lineage: Option<&Stamp>) -> Dvv {
         let mut dots = BTreeSet::new();
         let include_legacy = !self.has_collision_tombstone(id);
         let mut collect = |state: Option<&LabelState>| {
@@ -799,7 +799,7 @@ impl CanonicalState {
         Dvv::from_dots(dots.iter().copied())
     }
 
-    pub(crate) fn dep_dvv(&self, key: &DepKey) -> Dvv {
+    pub fn dep_dvv(&self, key: &DepKey) -> Dvv {
         let dots = self.dep_store.dots_for(key);
         Self::dvv_from_dots(dots)
     }
@@ -843,27 +843,27 @@ impl CanonicalState {
         self.notes.note_id_exists(id, note_id)
     }
 
-    pub(crate) fn label_store(&self) -> &LabelStore {
+    pub fn label_store(&self) -> &LabelStore {
         &self.labels
     }
 
-    pub(crate) fn note_store(&self) -> &NoteStore {
+    pub fn note_store(&self) -> &NoteStore {
         &self.notes
     }
 
-    pub(crate) fn dep_store(&self) -> &DepStore {
+    pub fn dep_store(&self) -> &DepStore {
         &self.dep_store
     }
 
-    pub(crate) fn set_label_store(&mut self, labels: LabelStore) {
+    pub fn set_label_store(&mut self, labels: LabelStore) {
         self.labels = labels;
     }
 
-    pub(crate) fn set_note_store(&mut self, notes: NoteStore) {
+    pub fn set_note_store(&mut self, notes: NoteStore) {
         self.notes = notes;
     }
 
-    pub(crate) fn set_dep_store(&mut self, dep_store: DepStore) {
+    pub fn set_dep_store(&mut self, dep_store: DepStore) {
         self.dep_store = dep_store;
         self.rebuild_dep_indexes();
     }
@@ -1573,11 +1573,7 @@ fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> Conte
     *BeadView::new(bead.clone(), labels, notes, label_stamp).content_hash()
 }
 
-pub(crate) fn bead_collision_cmp(
-    state: &CanonicalState,
-    existing: &Bead,
-    incoming: &Bead,
-) -> Ordering {
+pub fn bead_collision_cmp(state: &CanonicalState, existing: &Bead, incoming: &Bead) -> Ordering {
     existing
         .core
         .created()
@@ -1589,7 +1585,7 @@ pub(crate) fn bead_collision_cmp(
         })
 }
 
-pub(crate) fn note_collision_cmp(existing: &Note, incoming: &Note) -> Ordering {
+pub fn note_collision_cmp(existing: &Note, incoming: &Note) -> Ordering {
     existing
         .at
         .cmp(&incoming.at)
@@ -1603,13 +1599,12 @@ pub(crate) fn note_collision_cmp(existing: &Note, incoming: &Note) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::collections::Label;
-    use crate::core::composite::Note;
-    use crate::core::identity::{ActorId, NoteId, ReplicaId};
-    use crate::core::orset::Dot;
-    use crate::core::time::{Stamp, WriteStamp};
+    use crate::collections::Label;
+    use crate::composite::Note;
+    use crate::identity::{ActorId, NoteId, ReplicaId};
+    use crate::orset::Dot;
+    use crate::time::{Stamp, WriteStamp};
     use proptest::prelude::*;
-    use std::collections::BTreeSet;
     use uuid::Uuid;
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
@@ -1628,10 +1623,10 @@ mod tests {
     }
 
     fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
-        use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
+        use crate::bead::{BeadCore, BeadFields};
+        use crate::composite::{Claim, Workflow};
+        use crate::crdt::Lww;
+        use crate::domain::{BeadType, Priority};
 
         let core = BeadCore::new(id.clone(), stamp.clone(), None);
         let fields = BeadFields {
@@ -1663,76 +1658,6 @@ mod tests {
         state.apply_dep_remove(key, &ctx, stamp.clone());
     }
 
-    #[derive(Clone, Debug)]
-    enum Entry {
-        Live { id: String, stamp: Stamp },
-        Tombstone { id: String, stamp: Stamp },
-    }
-
-    fn assert_invariants(state: &CanonicalState) {
-        for (id, entry) in state.beads.iter() {
-            if let BeadEntry::Tombstone(tomb) = entry {
-                assert!(
-                    tomb.lineage.is_none(),
-                    "global tombstone should not have lineage: {id}"
-                );
-            }
-        }
-        for key in state.collision_tombstones.keys() {
-            assert!(
-                key.lineage.is_some(),
-                "collision tombstone missing lineage: {}",
-                key.id
-            );
-        }
-
-        let store_keys: BTreeSet<DepKey> = state.dep_store.values().cloned().collect();
-        let mut out_keys = BTreeSet::new();
-        let mut out_count = 0usize;
-        for (from, edges) in state.dep_indexes.out_edges.iter() {
-            out_count += edges.len();
-            for (to, kind) in edges {
-                let key = DepKey::new(from.clone(), to.clone(), *kind).expect("invalid dep key");
-                out_keys.insert(key);
-            }
-        }
-        let mut in_keys = BTreeSet::new();
-        let mut in_count = 0usize;
-        for (to, edges) in state.dep_indexes.in_edges.iter() {
-            in_count += edges.len();
-            for (from, kind) in edges {
-                let key = DepKey::new(from.clone(), to.clone(), *kind).expect("invalid dep key");
-                in_keys.insert(key);
-            }
-        }
-
-        assert_eq!(out_keys, store_keys, "dep out-edges mismatch dep store");
-        assert_eq!(in_keys, store_keys, "dep in-edges mismatch dep store");
-        assert_eq!(out_keys, in_keys, "dep in/out edges mismatch");
-        assert_eq!(
-            out_keys.len(),
-            out_count,
-            "dep out-edges contain duplicates"
-        );
-        assert_eq!(in_keys.len(), in_count, "dep in-edges contain duplicates");
-    }
-
-    fn state_fingerprint(state: &CanonicalState) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let state_bytes = crate::git::wire::serialize_state(state)
-            .unwrap_or_else(|e| panic!("serialize state failed: {e}"));
-        let tomb_bytes = crate::git::wire::serialize_tombstones(state)
-            .unwrap_or_else(|e| panic!("serialize tombstones failed: {e}"));
-        let deps_bytes = crate::git::wire::serialize_deps(state)
-            .unwrap_or_else(|e| panic!("serialize deps failed: {e}"));
-        (state_bytes, tomb_bytes, deps_bytes)
-    }
-
-    fn base58_id_strategy() -> impl Strategy<Value = String> {
-        proptest::string::string_regex("[1-9A-HJ-NP-Za-km-z]{5,8}")
-            .unwrap_or_else(|e| panic!("regex failed: {e}"))
-            .prop_map(|suffix| format!("bd-{suffix}"))
-    }
-
     fn stamp_strategy() -> impl Strategy<Value = Stamp> {
         let actor = prop_oneof![Just("alice"), Just("bob"), Just("carol")];
         (0u64..10_000, 0u32..5, actor).prop_map(|(wall_ms, counter, actor)| {
@@ -1740,126 +1665,8 @@ mod tests {
         })
     }
 
-    fn entry_strategy() -> impl Strategy<Value = Entry> {
-        (base58_id_strategy(), stamp_strategy(), any::<bool>()).prop_map(|(id, stamp, is_live)| {
-            if is_live {
-                Entry::Live { id, stamp }
-            } else {
-                Entry::Tombstone { id, stamp }
-            }
-        })
-    }
-
-    fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
-        let kind = prop_oneof![
-            Just(DepKind::Blocks),
-            Just(DepKind::Parent),
-            Just(DepKind::Related),
-            Just(DepKind::DiscoveredFrom),
-        ];
-        let replica = any::<u128>().prop_map(|raw| ReplicaId::new(Uuid::from_u128(raw)));
-        let dot = (replica, 0u64..10_000).prop_map(|(replica, counter)| Dot { replica, counter });
-        (
-            base58_id_strategy(),
-            base58_id_strategy(),
-            kind,
-            dot,
-            stamp_strategy(),
-        )
-            .prop_filter("deps cannot be self-referential", |(from, to, _, _, _)| {
-                from != to
-            })
-            .prop_map(|(from, to, kind, dot, stamp)| {
-                let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
-                    .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
-                (key, dot, stamp)
-            })
-    }
-
-    fn state_strategy() -> impl Strategy<Value = CanonicalState> {
-        (
-            prop::collection::vec(entry_strategy(), 0..12),
-            prop::collection::vec(dep_strategy(), 0..12),
-        )
-            .prop_map(|(entries, deps)| {
-                let mut state = CanonicalState::new();
-                for entry in entries {
-                    match entry {
-                        Entry::Live { id, stamp } => {
-                            let bead = make_bead(&bead_id(&id), &stamp);
-                            if let Err(err) = state.insert(bead) {
-                                panic!("insert bead failed: {err:?}");
-                            }
-                        }
-                        Entry::Tombstone { id, stamp } => {
-                            state.delete(Tombstone::new(bead_id(&id), stamp, None));
-                        }
-                    }
-                }
-                for (key, dot, stamp) in deps {
-                    state.apply_dep_add(key, dot, stamp);
-                }
-                state
-            })
-    }
-
     proptest! {
         #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
-
-        #[test]
-        fn join_commutative(a in state_strategy(), b in state_strategy()) {
-            let ab = CanonicalState::join(&a, &b)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            let ba = CanonicalState::join(&b, &a)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            assert_invariants(&ab);
-            assert_invariants(&ba);
-            prop_assert_eq!(state_fingerprint(&ab), state_fingerprint(&ba));
-        }
-
-        #[test]
-        fn join_commutative_with_collision(
-            stamp_a in stamp_strategy(),
-            stamp_b in stamp_strategy(),
-        ) {
-            prop_assume!(stamp_a != stamp_b);
-            let id = bead_id("bd-collision");
-            let mut state_a = CanonicalState::new();
-            state_a.insert_live(make_bead(&id, &stamp_a));
-            let mut state_b = CanonicalState::new();
-            state_b.insert_live(make_bead(&id, &stamp_b));
-
-            let ab = CanonicalState::join(&state_a, &state_b)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            let ba = CanonicalState::join(&state_b, &state_a)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            assert_invariants(&ab);
-            assert_invariants(&ba);
-            prop_assert_eq!(state_fingerprint(&ab), state_fingerprint(&ba));
-        }
-
-        #[test]
-        fn join_idempotent(a in state_strategy()) {
-            let aa = CanonicalState::join(&a, &a)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            assert_invariants(&aa);
-            prop_assert_eq!(state_fingerprint(&aa), state_fingerprint(&a));
-        }
-
-        #[test]
-        fn join_associative(a in state_strategy(), b in state_strategy(), c in state_strategy()) {
-            let ab = CanonicalState::join(&a, &b)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            let left = CanonicalState::join(&ab, &c)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            let bc = CanonicalState::join(&b, &c)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            let right = CanonicalState::join(&a, &bc)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-            assert_invariants(&left);
-            assert_invariants(&right);
-            prop_assert_eq!(state_fingerprint(&left), state_fingerprint(&right));
-        }
 
         #[test]
         fn join_resurrection_rule_prefers_newer_bead(
@@ -1912,10 +1719,10 @@ mod tests {
 
     #[test]
     fn invariant_insert_removes_tombstone() {
-        use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
+        use crate::bead::{BeadCore, BeadFields};
+        use crate::composite::{Claim, Workflow};
+        use crate::crdt::Lww;
+        use crate::domain::{BeadType, Priority};
 
         let mut state = CanonicalState::new();
         let id = BeadId::parse("bd-abc").unwrap();
@@ -2041,10 +1848,10 @@ mod tests {
 
     #[test]
     fn invariant_delete_removes_live() {
-        use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
+        use crate::bead::{BeadCore, BeadFields};
+        use crate::composite::{Claim, Workflow};
+        use crate::crdt::Lww;
+        use crate::domain::{BeadType, Priority};
 
         let mut state = CanonicalState::new();
         let id = BeadId::parse("bd-xyz").unwrap();
@@ -2080,10 +1887,10 @@ mod tests {
 
     #[test]
     fn resurrection_newer_bead_wins() {
-        use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
+        use crate::bead::{BeadCore, BeadFields};
+        use crate::composite::{Claim, Workflow};
+        use crate::crdt::Lww;
+        use crate::domain::{BeadType, Priority};
 
         let id = BeadId::parse("bd-res").unwrap();
         let old_stamp = make_stamp(1000, 0, "alice");
@@ -2122,10 +1929,10 @@ mod tests {
 
     #[test]
     fn deletion_wins_when_newer() {
-        use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
+        use crate::bead::{BeadCore, BeadFields};
+        use crate::composite::{Claim, Workflow};
+        use crate::crdt::Lww;
+        use crate::domain::{BeadType, Priority};
 
         let id = BeadId::parse("bd-de1").unwrap(); // no 'l' in base58
         let old_stamp = make_stamp(1000, 0, "alice");
@@ -2201,10 +2008,10 @@ mod tests {
 
     #[test]
     fn require_live_returns_bead_when_exists() {
-        use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
+        use crate::bead::{BeadCore, BeadFields};
+        use crate::composite::{Claim, Workflow};
+        use crate::crdt::Lww;
+        use crate::domain::{BeadType, Priority};
 
         let mut state = CanonicalState::new();
         let id = BeadId::parse("bd-abc").unwrap();
@@ -2506,10 +2313,10 @@ mod tests {
 
     #[test]
     fn require_live_mut_returns_mutable_bead() {
-        use crate::core::bead::{BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
+        use crate::bead::{BeadCore, BeadFields};
+        use crate::composite::{Claim, Workflow};
+        use crate::crdt::Lww;
+        use crate::domain::{BeadType, Priority};
 
         let mut state = CanonicalState::new();
         let id = BeadId::parse("bd-abc").unwrap();

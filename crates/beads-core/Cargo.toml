@@ -7,4 +7,20 @@ license.workspace = true
 repository.workspace = true
 description = "Core domain types and CRDT primitives for beads-rs"
 
+[features]
+test-harness = []
+
 [dependencies]
+beads-macros = { path = "../beads-macros" }
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4", "v5"] }
+sha2 = "0.10"
+bytes = "1"
+minicbor = { version = "0.24", features = ["std"] }
+rand = "0.9"
+toml = "0.8"
+
+[dev-dependencies]
+proptest = "1"

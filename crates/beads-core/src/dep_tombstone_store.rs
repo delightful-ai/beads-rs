@@ -70,8 +70,8 @@ impl TombstoneStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::BeadId;
-    use crate::core::{ActorId, Stamp, WriteStamp};
+    use crate::BeadId;
+    use crate::{ActorId, Stamp, WriteStamp};
 
     fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
         Stamp::new(WriteStamp::new(wall_ms, 0), ActorId::new(actor).unwrap())

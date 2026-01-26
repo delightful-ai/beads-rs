@@ -541,7 +541,7 @@ impl BeadId {
     /// Generate a new bead ID with given suffix length.
     ///
     /// Only daemon should call this.
-    pub(crate) fn generate_with_slug(slug: &BeadSlug, len: usize) -> Self {
+    pub fn generate_with_slug(slug: &BeadSlug, len: usize) -> Self {
         use rand::Rng;
         assert!(len >= 3, "bead id suffix must be >=3 chars");
 
@@ -714,7 +714,7 @@ impl NoteId {
     }
 
     /// Generate a new note ID.
-    pub(crate) fn generate() -> Self {
+    pub fn generate() -> Self {
         use rand::Rng;
         let mut rng = rand::rng();
         let suffix: String = (0..8)
