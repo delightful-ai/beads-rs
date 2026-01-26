@@ -16,6 +16,7 @@ exclude = [".beads/"]
 # Dual CLI + library crate
 
 [dependencies]
+beads-macros = { path = "../beads-macros" }
 clap = { version = "4", features = ["derive"], optional = true }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }

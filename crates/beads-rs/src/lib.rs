@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+// Re-export enum_str! macro from beads-macros for internal use and downstream consumers
+pub use beads_macros::enum_str;
+
 pub mod api;
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -7,8 +10,6 @@ pub mod compat;
 pub mod config;
 pub mod core;
 pub mod daemon;
-#[macro_use]
-mod enum_str;
 pub mod error;
 pub mod git;
 pub mod migrate;

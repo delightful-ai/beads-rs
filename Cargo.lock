@@ -145,6 +145,7 @@ name = "beads-rs"
 version = "0.2.0-alpha"
 dependencies = [
  "assert_cmd",
+ "beads-macros",
  "bytes",
  "chrono",
  "clap",
