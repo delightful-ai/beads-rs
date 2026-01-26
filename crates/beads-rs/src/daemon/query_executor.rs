@@ -9,7 +9,7 @@ use crossbeam::channel::Sender;
 
 use super::core::Daemon;
 use super::git_worker::GitOp;
-use super::ipc::{ReadConsistency, Response, ResponsePayload};
+use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
@@ -30,18 +30,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -53,7 +53,7 @@ impl Daemon {
                 let issue = Issue::from_view(read.namespace(), &view);
                 Response::ok(ResponsePayload::query(QueryResult::Issue(issue)))
             }
-            Err(e) => Response::err(e.into()),
+            Err(e) => Response::err_from(e),
         }
     }
 
@@ -67,18 +67,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -108,18 +108,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -223,18 +223,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -298,18 +298,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -317,7 +317,7 @@ impl Daemon {
 
         // Check if bead exists
         if let Err(e) = state.require_live(id).map_live_err(id) {
-            return Response::err(e.into());
+            return Response::err_from(e);
         }
 
         // Collect all edges in the transitive closure
@@ -357,18 +357,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -376,7 +376,7 @@ impl Daemon {
 
         // Check if bead exists
         if let Err(e) = state.require_live(id).map_live_err(id) {
-            return Response::err(e.into());
+            return Response::err_from(e);
         }
 
         let mut incoming = Vec::new();
@@ -410,25 +410,25 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
 
         if state.get_live(id).is_none() {
-            return Response::err(OpError::NotFound(id.clone()).into());
+            return Response::err_from(OpError::NotFound(id.clone()));
         }
 
         let notes: Vec<Note> = state.notes_for(id).into_iter().map(Note::from).collect();
@@ -445,22 +445,22 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let repo_state = match self.git_lane_state(&remote) {
             Ok(repo_state) => repo_state,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -582,18 +582,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -645,18 +645,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let status = status.map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -665,13 +665,10 @@ impl Daemon {
             && s != "in_progress"
             && s != "blocked"
         {
-            return Response::err(
-                OpError::ValidationFailed {
-                    field: "status".into(),
-                    reason: "valid values: open, in_progress, blocked".into(),
-                }
-                .into(),
-            );
+            return Response::err_from(OpError::ValidationFailed {
+                field: "status".into(),
+                reason: "valid values: open, in_progress, blocked".into(),
+            });
         }
 
         let empty_state = CanonicalState::new();
@@ -742,18 +739,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -774,13 +771,10 @@ impl Daemon {
             match g {
                 "status" | "priority" | "type" | "assignee" | "label" => {}
                 _ => {
-                    return Response::err(
-                        OpError::ValidationFailed {
-                            field: "group_by".into(),
-                            reason: "valid values: status, priority, type, assignee, label".into(),
-                        }
-                        .into(),
-                    );
+                    return Response::err_from(OpError::ValidationFailed {
+                        field: "group_by".into(),
+                        reason: "valid values: status, priority, type, assignee, label".into(),
+                    });
                 }
             }
         }
@@ -810,13 +804,10 @@ impl Daemon {
                     }
                     "all" => {}
                     _ => {
-                        return Response::err(
-                            OpError::ValidationFailed {
-                                field: "status".into(),
-                                reason: "valid values: open, in_progress, blocked, closed".into(),
-                            }
-                            .into(),
-                        );
+                        return Response::err_from(OpError::ValidationFailed {
+                            field: "status".into(),
+                            reason: "valid values: open, in_progress, blocked, closed".into(),
+                        });
                     }
                 }
             }
@@ -902,18 +893,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -954,18 +945,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -984,18 +975,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();
@@ -1059,18 +1050,18 @@ impl Daemon {
     ) -> Response {
         let remote = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&remote, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&remote, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&remote) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let empty_state = CanonicalState::new();

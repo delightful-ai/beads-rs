@@ -9,6 +9,8 @@ impl IpcClient {
     }
 
     pub fn connect(_path: &std::path::Path) -> Result<Self, IpcError> {
-        Err(IpcError::NotImplemented)
+        Err(IpcError::DaemonUnavailable(
+            "ipc client not implemented".to_string(),
+        ))
     }
 }

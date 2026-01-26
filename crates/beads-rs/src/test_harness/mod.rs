@@ -22,7 +22,7 @@ use crate::daemon::admission::AdmissionController;
 use crate::daemon::core::{Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal};
 use crate::daemon::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use crate::daemon::executor::DurabilityWait;
-use crate::daemon::ipc::{MutationMeta, Request, Response, ResponsePayload};
+use crate::daemon::ipc::{MutationMeta, Request, Response, ResponseExt, ResponsePayload};
 use crate::daemon::ops::OpError;
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repl::frame::{FrameReader, encode_frame};
@@ -870,10 +870,10 @@ impl ReplicationRig {
                             pending_replica_ids: Some(pending),
                             receipt: Box::new(pending_receipt),
                         };
-                        return Response::err(err.into());
+                        return Response::err_from(err);
                     }
                 }
-                Err(err) => return Response::err(err.into()),
+                Err(err) => return Response::err_from(err),
             }
 
             if self.pump(1) == 0 {

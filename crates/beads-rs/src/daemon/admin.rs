@@ -30,7 +30,7 @@ use beads_api::{
 };
 
 use super::core::Daemon;
-use super::ipc::ReadConsistency;
+use super::ipc::{ReadConsistency, ResponseExt};
 use super::{GitOp, OpError, QueryResult, Response, ResponsePayload};
 
 impl Daemon {
@@ -42,25 +42,25 @@ impl Daemon {
     ) -> Response {
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&proof, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&proof) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let namespaces = collect_namespaces(store);
         let now_ms = WallClock::now().0;
         let wal_report = match build_wal_status(store, &namespaces, self.limits(), now_ms) {
             Ok(wal_report) => wal_report,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let replication = build_replication_status(store, &namespaces);
         let replica_liveness = build_replica_liveness(store);
@@ -92,24 +92,24 @@ impl Daemon {
     ) -> Response {
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&proof, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
 
         let store = match self.store_runtime(&proof) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let namespaces = collect_namespaces(store);
         let now_ms = WallClock::now().0;
         if let Err(err) = build_wal_status(store, &namespaces, self.limits(), now_ms) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let snapshot = crate::daemon::metrics::snapshot();
         let output = build_metrics_output(snapshot);
@@ -126,18 +126,18 @@ impl Daemon {
     ) -> Response {
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&proof, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&proof) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let mut options = ScrubOptions::default_for_doctor();
@@ -148,16 +148,13 @@ impl Daemon {
             });
             match value {
                 Ok(0) => {
-                    return Response::err(
-                        OpError::InvalidRequest {
-                            field: Some("max_records_per_namespace".into()),
-                            reason: "max_records_per_namespace must be >= 1".into(),
-                        }
-                        .into(),
-                    );
+                    return Response::err_from(OpError::InvalidRequest {
+                        field: Some("max_records_per_namespace".into()),
+                        reason: "max_records_per_namespace must be >= 1".into(),
+                    });
                 }
                 Ok(value) => options.max_records_per_namespace = value,
-                Err(err) => return Response::err(err.into()),
+                Err(err) => return Response::err_from(err),
             }
         }
         options.verify_checkpoint_cache = verify_checkpoint_cache;
@@ -191,18 +188,18 @@ impl Daemon {
     ) -> Response {
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&proof, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&proof) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let mut options = ScrubOptions::default_for_scrub();
@@ -213,16 +210,13 @@ impl Daemon {
             });
             match value {
                 Ok(0) => {
-                    return Response::err(
-                        OpError::InvalidRequest {
-                            field: Some("max_records_per_namespace".into()),
-                            reason: "max_records_per_namespace must be >= 1".into(),
-                        }
-                        .into(),
-                    );
+                    return Response::err_from(OpError::InvalidRequest {
+                        field: Some("max_records_per_namespace".into()),
+                        reason: "max_records_per_namespace must be >= 1".into(),
+                    });
                 }
                 Ok(value) => options.max_records_per_namespace = value,
-                Err(err) => return Response::err(err.into()),
+                Err(err) => return Response::err_from(err),
             }
         }
         options.verify_checkpoint_cache = verify_checkpoint_cache;
@@ -255,11 +249,11 @@ impl Daemon {
     ) -> Response {
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let namespace = match self.normalize_namespace(&proof, namespace) {
             Ok(namespace) => namespace,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let flushed_at_ms = WallClock::now().0;
         let (segment, store_id) = match self.store_runtime_mut(&proof) {
@@ -267,11 +261,11 @@ impl Daemon {
                 let store_id = store.meta.store_id();
                 let segment = match store.event_wal.flush(&namespace) {
                     Ok(segment) => segment,
-                    Err(err) => return Response::err(OpError::EventWal(Box::new(err)).into()),
+                    Err(err) => return Response::err_from(OpError::EventWal(Box::new(err))),
                 };
                 (segment, store_id)
             }
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
 
         let checkpoint_groups = if checkpoint_now {
@@ -306,30 +300,27 @@ impl Daemon {
     ) -> Response {
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         let read = match self.normalize_read_consistency(&proof, read) {
             Ok(read) => read,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
         if let Err(err) = self.check_read_gate(&proof, &read) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
         let store = match self.store_runtime(&proof) {
             Ok(store) => store,
-            Err(e) => return Response::err(e.into()),
+            Err(e) => return Response::err_from(e),
         };
 
         let fingerprint_mode = match mode {
             AdminFingerprintMode::Full => {
                 if sample.is_some() {
-                    return Response::err(
-                        OpError::InvalidRequest {
-                            field: Some("sample".into()),
-                            reason: "sample only valid with mode=sample".into(),
-                        }
-                        .into(),
-                    );
+                    return Response::err_from(OpError::InvalidRequest {
+                        field: Some("sample".into()),
+                        reason: "sample only valid with mode=sample".into(),
+                    });
                 }
                 FingerprintMode::Full
             }
@@ -337,42 +328,30 @@ impl Daemon {
                 let sample = match sample.as_ref() {
                     Some(sample) => sample,
                     None => {
-                        return Response::err(
-                            OpError::InvalidRequest {
-                                field: Some("sample".into()),
-                                reason: "sample required for mode=sample".into(),
-                            }
-                            .into(),
-                        );
+                        return Response::err_from(OpError::InvalidRequest {
+                            field: Some("sample".into()),
+                            reason: "sample required for mode=sample".into(),
+                        });
                     }
                 };
                 let shard_count = usize::from(sample.shard_count);
                 if shard_count == 0 {
-                    return Response::err(
-                        OpError::InvalidRequest {
-                            field: Some("sample.shard_count".into()),
-                            reason: "shard_count must be >= 1".into(),
-                        }
-                        .into(),
-                    );
+                    return Response::err_from(OpError::InvalidRequest {
+                        field: Some("sample.shard_count".into()),
+                        reason: "shard_count must be >= 1".into(),
+                    });
                 }
                 if shard_count > SHARD_COUNT {
-                    return Response::err(
-                        OpError::InvalidRequest {
-                            field: Some("sample.shard_count".into()),
-                            reason: format!("shard_count must be <= {SHARD_COUNT}"),
-                        }
-                        .into(),
-                    );
+                    return Response::err_from(OpError::InvalidRequest {
+                        field: Some("sample.shard_count".into()),
+                        reason: format!("shard_count must be <= {SHARD_COUNT}"),
+                    });
                 }
                 if sample.nonce.trim().is_empty() {
-                    return Response::err(
-                        OpError::InvalidRequest {
-                            field: Some("sample.nonce".into()),
-                            reason: "nonce must be non-empty".into(),
-                        }
-                        .into(),
-                    );
+                    return Response::err_from(OpError::InvalidRequest {
+                        field: Some("sample.nonce".into()),
+                        reason: "nonce must be non-empty".into(),
+                    });
                 }
                 FingerprintMode::Sample {
                     shard_count,
@@ -392,13 +371,10 @@ impl Daemon {
                     FingerprintError::InvalidShardPath { .. }
                     | FingerprintError::InvalidShardIndex { .. } => err.to_string(),
                 };
-                return Response::err(
-                    OpError::InvalidRequest {
-                        field: None,
-                        reason,
-                    }
-                    .into(),
-                );
+                return Response::err_from(OpError::InvalidRequest {
+                    field: None,
+                    reason,
+                });
             }
         };
 
@@ -417,37 +393,31 @@ impl Daemon {
     pub fn admin_reload_policies(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
         let store = match self.store_runtime_mut(&proof) {
             Ok(store) => store,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
 
         let path = crate::paths::namespaces_path(store_id);
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(err) => {
-                return Response::err(
-                    OpError::ValidationFailed {
-                        field: "namespaces".into(),
-                        reason: format!("failed to read {}: {err}", path.display()),
-                    }
-                    .into(),
-                );
+                return Response::err_from(OpError::ValidationFailed {
+                    field: "namespaces".into(),
+                    reason: format!("failed to read {}: {err}", path.display()),
+                });
             }
         };
         let policies = match NamespacePolicies::from_toml_str(&raw) {
             Ok(policies) => policies,
             Err(err) => {
-                return Response::err(
-                    OpError::ValidationFailed {
-                        field: "namespaces".into(),
-                        reason: format!("policy parse failed: {err}"),
-                    }
-                    .into(),
-                );
+                return Response::err_from(OpError::ValidationFailed {
+                    field: "namespaces".into(),
+                    reason: format!("policy parse failed: {err}"),
+                });
             }
         };
 
@@ -466,27 +436,24 @@ impl Daemon {
     pub fn admin_reload_limits(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
 
         let config = match crate::config::load_for_repo(Some(repo)) {
             Ok(config) => config,
             Err(err) => {
-                return Response::err(
-                    OpError::ValidationFailed {
-                        field: "limits".into(),
-                        reason: format!("failed to reload config: {err}"),
-                    }
-                    .into(),
-                );
+                return Response::err_from(OpError::ValidationFailed {
+                    field: "limits".into(),
+                    reason: format!("failed to reload config: {err}"),
+                });
             }
         };
 
         let new_limits = config.limits.clone();
         let requires_restart = match self.apply_limits(new_limits) {
             Ok(requires_restart) => requires_restart,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
 
         // Also reload checkpoint groups
@@ -511,22 +478,22 @@ impl Daemon {
     pub fn admin_reload_replication(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
 
         // Reload replication config from disk
         if let Err(err) = self.reload_replication_config(repo) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
 
         if let Err(err) = self.reload_replication_runtime(store_id) {
-            return Response::err(err.into());
+            return Response::err_from(err);
         }
 
         let roster = match load_replica_roster(store_id) {
             Ok(roster) => roster,
-            Err(err) => return Response::err(OpError::StoreRuntime(Box::new(err)).into()),
+            Err(err) => return Response::err_from(OpError::StoreRuntime(Box::new(err))),
         };
         let output = AdminReloadReplicationOutput {
             store_id,
@@ -540,17 +507,17 @@ impl Daemon {
     pub fn admin_rotate_replica_id(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
         let store = match self.store_runtime_mut(&proof) {
             Ok(store) => store,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
 
         let (old_replica_id, new_replica_id) = match store.rotate_replica_id() {
             Ok(ids) => ids,
-            Err(err) => return Response::err(OpError::StoreRuntime(Box::new(err)).into()),
+            Err(err) => return Response::err_from(OpError::StoreRuntime(Box::new(err))),
         };
         tracing::warn!(
             store_id = %store_id,
@@ -576,11 +543,11 @@ impl Daemon {
     ) -> Response {
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let store = match self.store_runtime_mut(&proof) {
             Ok(store) => store,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
 
         store.maintenance_mode = enabled;
@@ -594,19 +561,16 @@ impl Daemon {
         let limits = self.limits().clone();
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         let store = match self.store_runtime_mut(&proof) {
             Ok(store) => store,
-            Err(err) => return Response::err(err.into()),
+            Err(err) => return Response::err_from(err),
         };
         if !store.maintenance_mode {
-            return Response::err(
-                OpError::MaintenanceMode {
-                    reason: Some("maintenance mode required".into()),
-                }
-                .into(),
-            );
+            return Response::err_from(OpError::MaintenanceMode {
+                reason: Some("maintenance mode required".into()),
+            });
         }
 
         let store_dir = crate::paths::store_dir(proof.store_id());
@@ -614,9 +578,9 @@ impl Daemon {
         {
             Ok(stats) => stats,
             Err(err) => {
-                return Response::err(
-                    OpError::StoreRuntime(Box::new(StoreRuntimeError::from(err))).into(),
-                );
+                return Response::err_from(OpError::StoreRuntime(Box::new(
+                    StoreRuntimeError::from(err),
+                )));
             }
         };
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-use super::codec::IpcError;
+use super::IpcError;
 use super::{IPC_PROTOCOL_VERSION, Request, Response, ResponsePayload};
 use crate::api::QueryResult;
 

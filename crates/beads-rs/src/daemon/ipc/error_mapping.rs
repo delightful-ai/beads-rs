@@ -1,30 +1,31 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-
-use serde_json::Value;
-use thiserror::Error;
-
-use super::{Request, Response};
+use super::{IpcError, Response};
 use crate::core::error::details as error_details;
-use crate::core::{
-    CliErrorCode, ErrorCode, ErrorPayload, InvalidId, Limits, ProtocolErrorCode, StoreId,
-};
+use crate::core::{CliErrorCode, ErrorCode, ErrorPayload, InvalidId, ProtocolErrorCode, StoreId};
 use crate::daemon::ops::OpError;
 use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
 use crate::daemon::store_runtime::StoreRuntimeError;
 use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
-use crate::error::{Effect, Transience};
 use crate::git::error::{SyncError, WireError};
 
 // =============================================================================
 // Error mapping
 // =============================================================================
 
-impl From<OpError> for ErrorPayload {
-    fn from(e: OpError) -> Self {
-        let message = e.to_string();
-        let retryable = e.transience().is_retryable();
-        match e {
+pub trait IntoErrorPayload {
+    fn into_error_payload(self) -> ErrorPayload;
+}
+
+impl IntoErrorPayload for ErrorPayload {
+    fn into_error_payload(self) -> ErrorPayload {
+        self
+    }
+}
+
+impl IntoErrorPayload for OpError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        match self {
             OpError::NotFound(id) => {
                 ErrorPayload::new(CliErrorCode::NotFound.into(), message, retryable)
                     .with_details(error_details::NotFoundDetails { id })
@@ -325,6 +326,66 @@ impl From<OpError> for ErrorPayload {
                 ErrorPayload::new(CliErrorCode::Internal.into(), message, retryable)
             }
         }
+    }
+}
+
+impl IntoErrorPayload for IpcError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        match self {
+            IpcError::Parse(err) => ErrorPayload::new(
+                ProtocolErrorCode::MalformedPayload.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::MalformedPayloadDetails {
+                parser: error_details::ParserKind::Json,
+                reason: Some(err.to_string()),
+            }),
+            IpcError::InvalidRequest { field, reason } => {
+                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable)
+                    .with_details(error_details::InvalidRequestDetails {
+                        field,
+                        reason: Some(reason),
+                    })
+            }
+            IpcError::Io(_) => ErrorPayload::new(CliErrorCode::IoError.into(), message, retryable),
+            IpcError::InvalidId(err) => {
+                ErrorPayload::new(CliErrorCode::InvalidId.into(), message, retryable)
+                    .with_details(invalid_id_details(&err))
+            }
+            IpcError::Disconnected => {
+                ErrorPayload::new(CliErrorCode::Disconnected.into(), message, retryable)
+            }
+            IpcError::DaemonUnavailable(_) => {
+                ErrorPayload::new(CliErrorCode::DaemonUnavailable.into(), message, retryable)
+            }
+            IpcError::DaemonVersionMismatch { .. } => ErrorPayload::new(
+                CliErrorCode::DaemonVersionMismatch.into(),
+                message,
+                retryable,
+            ),
+            IpcError::FrameTooLarge {
+                max_bytes,
+                got_bytes,
+            } => ErrorPayload::new(ProtocolErrorCode::FrameTooLarge.into(), message, retryable)
+                .with_details(error_details::FrameTooLargeDetails {
+                    max_frame_bytes: max_bytes as u64,
+                    got_bytes: got_bytes as u64,
+                }),
+            _ => ErrorPayload::new(CliErrorCode::Internal.into(), message, retryable),
+        }
+    }
+}
+
+pub trait ResponseExt {
+    fn err_from<E: IntoErrorPayload>(e: E) -> Response;
+}
+
+impl ResponseExt for Response {
+    fn err_from<E: IntoErrorPayload>(e: E) -> Response {
+        Response::err(e.into_error_payload())
     }
 }
 
@@ -876,55 +937,6 @@ fn lock_permission_operation(operation: StoreLockOperation) -> error_details::Pe
     }
 }
 
-impl From<IpcError> for ErrorPayload {
-    fn from(e: IpcError) -> Self {
-        let message = e.to_string();
-        let retryable = e.transience().is_retryable();
-        match e {
-            IpcError::Parse(err) => ErrorPayload::new(
-                ProtocolErrorCode::MalformedPayload.into(),
-                message,
-                retryable,
-            )
-            .with_details(error_details::MalformedPayloadDetails {
-                parser: error_details::ParserKind::Json,
-                reason: Some(err.to_string()),
-            }),
-            IpcError::InvalidRequest { field, reason } => {
-                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable)
-                    .with_details(error_details::InvalidRequestDetails {
-                        field,
-                        reason: Some(reason),
-                    })
-            }
-            IpcError::Io(_) => ErrorPayload::new(CliErrorCode::IoError.into(), message, retryable),
-            IpcError::InvalidId(err) => {
-                ErrorPayload::new(CliErrorCode::InvalidId.into(), message, retryable)
-                    .with_details(invalid_id_details(&err))
-            }
-            IpcError::Disconnected => {
-                ErrorPayload::new(CliErrorCode::Disconnected.into(), message, retryable)
-            }
-            IpcError::DaemonUnavailable(_) => {
-                ErrorPayload::new(CliErrorCode::DaemonUnavailable.into(), message, retryable)
-            }
-            IpcError::DaemonVersionMismatch { .. } => ErrorPayload::new(
-                CliErrorCode::DaemonVersionMismatch.into(),
-                message,
-                retryable,
-            ),
-            IpcError::FrameTooLarge {
-                max_bytes,
-                got_bytes,
-            } => ErrorPayload::new(ProtocolErrorCode::FrameTooLarge.into(), message, retryable)
-                .with_details(error_details::FrameTooLargeDetails {
-                    max_frame_bytes: max_bytes as u64,
-                    got_bytes: got_bytes as u64,
-                }),
-        }
-    }
-}
-
 fn invalid_id_details(err: &InvalidId) -> error_details::InvalidIdDetails {
     match err {
         InvalidId::Bead { raw, reason } => error_details::InvalidIdDetails {
@@ -996,145 +1008,14 @@ fn invalid_id_details(err: &InvalidId) -> error_details::InvalidIdDetails {
     }
 }
 
-// =============================================================================
-// IpcError
-// =============================================================================
-
-/// IPC-specific errors.
-#[derive(Error, Debug)]
-#[non_exhaustive]
-pub enum IpcError {
-    #[error("parse error: {0}")]
-    Parse(#[from] serde_json::Error),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    InvalidId(#[from] InvalidId),
-
-    #[error("invalid request: {reason}")]
-    InvalidRequest {
-        field: Option<String>,
-        reason: String,
-    },
-
-    #[error("client disconnected")]
-    Disconnected,
-
-    #[error("daemon unavailable: {0}")]
-    DaemonUnavailable(String),
-
-    #[error("daemon version mismatch; restart the daemon and retry")]
-    DaemonVersionMismatch {
-        daemon: Option<crate::api::DaemonInfo>,
-        client_version: String,
-        protocol_version: u32,
-        /// If set, the mismatch was detected via a parse failure.
-        parse_error: Option<String>,
-    },
-
-    #[error("frame too large: max {max_bytes} bytes, got {got_bytes} bytes")]
-    FrameTooLarge { max_bytes: usize, got_bytes: usize },
-}
-
-impl IpcError {
-    pub fn code(&self) -> ErrorCode {
-        match self {
-            IpcError::Parse(_) => ProtocolErrorCode::MalformedPayload.into(),
-            IpcError::Io(_) => CliErrorCode::IoError.into(),
-            IpcError::InvalidId(_) => CliErrorCode::InvalidId.into(),
-            IpcError::InvalidRequest { .. } => ProtocolErrorCode::InvalidRequest.into(),
-            IpcError::Disconnected => CliErrorCode::Disconnected.into(),
-            IpcError::DaemonUnavailable(_) => CliErrorCode::DaemonUnavailable.into(),
-            IpcError::DaemonVersionMismatch { .. } => CliErrorCode::DaemonVersionMismatch.into(),
-            IpcError::FrameTooLarge { .. } => ProtocolErrorCode::FrameTooLarge.into(),
-        }
-    }
-
-    /// Whether retrying the IPC operation may succeed.
-    pub fn transience(&self) -> Transience {
-        match self {
-            IpcError::DaemonUnavailable(_) | IpcError::Io(_) | IpcError::Disconnected => {
-                Transience::Retryable
-            }
-            IpcError::DaemonVersionMismatch { .. } => Transience::Retryable,
-            IpcError::Parse(_)
-            | IpcError::InvalidId(_)
-            | IpcError::InvalidRequest { .. }
-            | IpcError::FrameTooLarge { .. } => Transience::Permanent,
-        }
-    }
-
-    /// What we know about side effects when this IPC error is returned.
-    pub fn effect(&self) -> Effect {
-        match self {
-            IpcError::Io(_) | IpcError::Disconnected => Effect::Unknown,
-            IpcError::DaemonUnavailable(_)
-            | IpcError::Parse(_)
-            | IpcError::InvalidId(_)
-            | IpcError::InvalidRequest { .. } => Effect::None,
-            IpcError::DaemonVersionMismatch { .. } => Effect::None,
-            IpcError::FrameTooLarge { .. } => Effect::None,
-        }
-    }
-}
-
-// =============================================================================
-// Codec - Encoding/decoding
-// =============================================================================
-
-/// Encode a response to bytes.
-pub fn encode_response(resp: &Response) -> Result<Vec<u8>, IpcError> {
-    let mut bytes = serde_json::to_vec(resp)?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
-/// Decode a request from a line, enforcing limits.
-pub fn decode_request_with_limits(line: &str, limits: &Limits) -> Result<Request, IpcError> {
-    let got_bytes = line.len();
-    if got_bytes > limits.max_frame_bytes {
-        return Err(IpcError::FrameTooLarge {
-            max_bytes: limits.max_frame_bytes,
-            got_bytes,
-        });
-    }
-    let value: Value = serde_json::from_str(line)?;
-    serde_json::from_value(value).map_err(|err| IpcError::InvalidRequest {
-        field: None,
-        reason: err.to_string(),
-    })
-}
-
-/// Decode a request from a line using default limits.
-pub fn decode_request(line: &str) -> Result<Request, IpcError> {
-    decode_request_with_limits(line, &Limits::default())
-}
-
-/// Send a response over a stream.
-pub fn send_response(stream: &mut UnixStream, resp: &Response) -> Result<(), IpcError> {
-    let bytes = encode_response(resp)?;
-    stream.write_all(&bytes)?;
-    Ok(())
-}
-
-/// Read requests from a stream.
-pub fn read_requests(stream: UnixStream) -> impl Iterator<Item = Result<Request, IpcError>> {
-    let reader = BufReader::new(stream);
-    reader.lines().map(|line| {
-        let line = line?;
-        decode_request_with_limits(&line, &Limits::default())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{
-        DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, Seq0, Seq1, StoreEpoch,
+        DurabilityClass, DurabilityReceipt, Limits, NamespaceId, ReplicaId, Seq0, Seq1, StoreEpoch,
         StoreId, StoreIdentity, TxnId,
     };
+    use crate::daemon::ipc::decode_request_with_limits;
     use crate::daemon::wal::{RecordShaMismatchInfo, WalIndexError, WalReplayError};
     use std::io;
     use uuid::Uuid;
@@ -1340,7 +1221,7 @@ mod tests {
     #[test]
     fn decode_request_invalid_json_is_malformed_payload() {
         let err = decode_request_with_limits("{", &Limits::default()).unwrap_err();
-        let payload: ErrorPayload = err.into();
+        let payload = err.into_error_payload();
         assert_eq!(payload.code, ProtocolErrorCode::MalformedPayload.into());
         let details = payload
             .details_as::<error_details::MalformedPayloadDetails>()
@@ -1353,7 +1234,7 @@ mod tests {
     #[test]
     fn decode_request_semantic_error_is_invalid_request() {
         let err = decode_request_with_limits(r#"{"op":"create"}"#, &Limits::default()).unwrap_err();
-        let payload: ErrorPayload = err.into();
+        let payload = err.into_error_payload();
         assert_eq!(payload.code, ProtocolErrorCode::InvalidRequest.into());
         let details = payload
             .details_as::<error_details::InvalidRequestDetails>()
@@ -1370,7 +1251,7 @@ mod tests {
             &Limits::default(),
         )
         .unwrap_err();
-        let payload: ErrorPayload = err.into();
+        let payload = err.into_error_payload();
         assert_eq!(payload.code, ProtocolErrorCode::InvalidRequest.into());
         let details = payload
             .details_as::<error_details::InvalidRequestDetails>()
@@ -1402,7 +1283,7 @@ mod tests {
             receipt: Box::new(receipt.clone()),
         };
 
-        let payload: ErrorPayload = err.into();
+        let payload = err.into_error_payload();
         assert_eq!(payload.code, ProtocolErrorCode::DurabilityTimeout.into());
         let parsed: DurabilityReceipt = payload
             .receipt_as()
@@ -1418,7 +1299,7 @@ mod tests {
             rule: "replicate_mode".to_string(),
             reason: Some("replicate_mode=none".to_string()),
         };
-        let payload: ErrorPayload = err.into();
+        let payload = err.into_error_payload();
         assert_eq!(
             payload.code,
             ProtocolErrorCode::NamespacePolicyViolation.into()

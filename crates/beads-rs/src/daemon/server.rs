@@ -22,7 +22,7 @@ use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::executor::DurabilityWait;
 use super::git_worker::{GitOp, GitResult};
 use super::ipc::{
-    ReadConsistency, Request, Response, ResponsePayload, decode_request_with_limits,
+    ReadConsistency, Request, Response, ResponseExt, ResponsePayload, decode_request_with_limits,
     encode_response, send_response,
 };
 use super::ops::OpError;
@@ -351,14 +351,14 @@ pub fn run_state_loop(
                             let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
                                 Ok(remote) => remote,
                                 Err(err) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(err.into())));
+                                    let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                                     continue;
                                 }
                             };
                             let read = match daemon.normalize_read_consistency(&loaded, read_gate.read) {
                                 Ok(read) => read,
                                 Err(err) => {
-                                    let _ = respond.send(ServerReply::Response(Response::err(err.into())));
+                                    let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                                     continue;
                                 }
                             };
@@ -375,7 +375,7 @@ pub fn run_state_loop(
                                                 required: Box::new(required),
                                                 current_applied: Box::new(current_applied),
                                             };
-                                            let _ = respond.send(ServerReply::Response(Response::err(err.into())));
+                                            let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                                             continue;
                                         }
 
@@ -395,7 +395,7 @@ pub fn run_state_loop(
                                         continue;
                                     }
                                     Err(err) => {
-                                        let _ = respond.send(ServerReply::Response(Response::err(err.into())));
+                                        let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                                         continue;
                                     }
                                 }
@@ -600,7 +600,7 @@ fn process_request_message(
                 let repo_state = match daemon.git_lane_state(&loaded) {
                     Ok(repo_state) => repo_state,
                     Err(e) => {
-                        let _ = respond.send(ServerReply::Response(Response::err(e.into())));
+                        let _ = respond.send(ServerReply::Response(Response::err_from(e)));
                         return RequestOutcome::Continue;
                     }
                 };
@@ -618,7 +618,7 @@ fn process_request_message(
                 }
             }
             Err(e) => {
-                let _ = respond.send(ServerReply::Response(Response::err(e.into())));
+                let _ = respond.send(ServerReply::Response(Response::err_from(e)));
             }
         }
         return RequestOutcome::Continue;
@@ -628,14 +628,14 @@ fn process_request_message(
         let proof = match daemon.ensure_repo_loaded_strict(&repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(err.into())));
+                let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                 return RequestOutcome::Continue;
             }
         };
         let namespace = match daemon.normalize_namespace(&proof, namespace) {
             Ok(namespace) => namespace,
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(err.into())));
+                let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                 return RequestOutcome::Continue;
             }
         };
@@ -643,12 +643,11 @@ fn process_request_message(
         let min_checkpoint_wall_ms = daemon.clock().wall_ms();
         let groups = daemon.force_checkpoint_for_namespace(store_id, &namespace);
         if groups.is_empty() {
-            let _ = respond.send(ServerReply::Response(Response::err(
+            let _ = respond.send(ServerReply::Response(Response::err_from(
                 OpError::InvalidRequest {
                     field: Some("checkpoint".into()),
                     reason: format!("no checkpoint groups scheduled for namespace {namespace}",),
-                }
-                .into(),
+                },
             )));
             return RequestOutcome::Continue;
         }
@@ -675,7 +674,7 @@ fn process_request_message(
                 });
             }
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(err.into())));
+                let _ = respond.send(ServerReply::Response(Response::err_from(err)));
             }
         }
 
@@ -688,7 +687,7 @@ fn process_request_message(
                 let _ = respond.send(ServerReply::Subscribe(reply));
             }
             Err(err) => {
-                let _ = respond.send(ServerReply::Response(Response::err(*err)));
+                let _ = respond.send(ServerReply::Response(Response::err_from(*err)));
             }
         }
         return RequestOutcome::Continue;
@@ -832,7 +831,7 @@ fn flush_read_gate_waiters(
             Err(err) => {
                 let _ = waiter
                     .respond
-                    .send(ServerReply::Response(Response::err(err.into())));
+                    .send(ServerReply::Response(Response::err_from(err)));
                 continue;
             }
         };
@@ -863,7 +862,7 @@ fn flush_read_gate_waiters(
                     };
                     let _ = waiter
                         .respond
-                        .send(ServerReply::Response(Response::err(err.into())));
+                        .send(ServerReply::Response(Response::err_from(err)));
                     continue;
                 }
                 remaining.push(waiter);
@@ -871,7 +870,7 @@ fn flush_read_gate_waiters(
             Err(err) => {
                 let _ = waiter
                     .respond
-                    .send(ServerReply::Response(Response::err(err.into())));
+                    .send(ServerReply::Response(Response::err_from(err)));
             }
         }
     }
@@ -937,7 +936,7 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
                     };
                     let _ = waiter
                         .respond
-                        .send(ServerReply::Response(Response::err(err.into())));
+                        .send(ServerReply::Response(Response::err_from(err)));
                     continue;
                 }
                 remaining.push(waiter);
@@ -945,7 +944,7 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
             Err(err) => {
                 let _ = waiter
                     .respond
-                    .send(ServerReply::Response(Response::err(err.into())));
+                    .send(ServerReply::Response(Response::err_from(err)));
             }
         }
     }
@@ -1025,7 +1024,7 @@ fn flush_checkpoint_waiters(daemon: &Daemon, waiters: &mut Vec<CheckpointWaiter>
             Err(err) => {
                 let _ = waiter
                     .respond
-                    .send(ServerReply::Response(Response::err(err.into())));
+                    .send(ServerReply::Response(Response::err_from(err)));
             }
         }
     }
@@ -1111,7 +1110,7 @@ pub(super) fn handle_client(
         let request = match decode_request_with_limits(&line, &limits) {
             Ok(r) => r,
             Err(e) => {
-                let resp = Response::err(e.into());
+                let resp = Response::err_from(e);
                 let bytes = match encode_response(&resp) {
                     Ok(b) => b,
                     Err(e) => {
@@ -1235,14 +1234,14 @@ fn stream_subscription(writer: &mut UnixStream, reply: SubscribeReply, limits: &
                         max_queue_bytes: Some(subscriber_limits.max_bytes as u64),
                         max_queue_events: Some(subscriber_limits.max_events as u64),
                     });
-                    let _ = send_response(writer, &Response::err(payload));
+                    let _ = send_response(writer, &Response::err_from(payload));
                 } else {
                     let payload = ErrorPayload::new(
                         CliErrorCode::Disconnected.into(),
                         "subscription closed",
                         true,
                     );
-                    let _ = send_response(writer, &Response::err(payload));
+                    let _ = send_response(writer, &Response::err_from(payload));
                 }
                 return;
             }
@@ -1298,7 +1297,7 @@ fn stream_event_response_from_parts(
     let (_, body) = match decode_event_body(bytes, limits) {
         Ok(body) => body,
         Err(err) => {
-            return Response::err(
+            return Response::err_from(
                 ErrorPayload::new(
                     ProtocolErrorCode::WalCorrupt.into(),
                     "event body decode failed",
