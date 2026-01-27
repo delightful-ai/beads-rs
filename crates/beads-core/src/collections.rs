@@ -9,7 +9,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::error::{CoreError, InvalidLabel};
-use super::orset::OrSetValue;
+use super::orset::{OrSetValue, sealed::Sealed};
 
 /// Validated label - non-empty, no newlines.
 ///
@@ -68,6 +68,8 @@ impl From<Label> for String {
         l.0
     }
 }
+
+impl Sealed for Label {}
 
 impl OrSetValue for Label {
     fn collision_bytes(&self) -> Vec<u8> {
