@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::domain::DepKind;
 use super::error::{CoreError, InvalidDependency};
 use super::identity::BeadId;
-use super::orset::OrSetValue;
+use super::orset::{OrSetValue, sealed::Sealed};
 
 /// Parsed dependency spec from CLI/IPC input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +111,8 @@ impl DepKey {
         self.kind
     }
 }
+
+impl Sealed for DepKey {}
 
 impl OrSetValue for DepKey {
     fn collision_bytes(&self) -> Vec<u8> {
