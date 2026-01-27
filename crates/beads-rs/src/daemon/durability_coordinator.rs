@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::core::{
-    DurabilityClass, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaDurabilityRole,
-    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, Seq1,
+    DurabilityClass, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRole,
+    ReplicaRoster, ReplicateMode, Seq0, Seq1,
 };
 use crate::daemon::ops::OpError;
 use crate::daemon::repl::{PeerAckTable, QuorumOutcome};
@@ -237,7 +237,8 @@ fn role_allows_policy(role: ReplicaRole, mode: ReplicateMode) -> bool {
 mod tests {
     use super::*;
     use crate::core::{
-        Durable, HeadStatus, NamespaceId, Seq0, StoreEpoch, StoreId, StoreIdentity, Watermark,
+        Durable, HeadStatus, NamespaceId, ReplicaDurabilityRole, Seq0, StoreEpoch, StoreId,
+        StoreIdentity, Watermark,
     };
     use crate::daemon::repl::proto::WatermarkState;
     use uuid::Uuid;
