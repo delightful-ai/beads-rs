@@ -126,8 +126,10 @@ impl Daemon {
         verify_checkpoint_cache: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let store_id = match self.resolve_store(repo) {
-            Ok(resolved) => resolved.store_id,
+        // Ensure the repo is loaded before snapshotting checkpoint groups so
+        // first-load doctor runs include default checkpoint group config.
+        let store_id = match self.ensure_repo_fresh(repo, git_tx) {
+            Ok(proof) => proof.store_id(),
             Err(e) => return Response::err_from(e),
         };
         let checkpoint_groups = self
@@ -191,8 +193,10 @@ impl Daemon {
         verify_checkpoint_cache: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let store_id = match self.resolve_store(repo) {
-            Ok(resolved) => resolved.store_id,
+        // Ensure the repo is loaded before snapshotting checkpoint groups so
+        // first-load scrub runs include default checkpoint group config.
+        let store_id = match self.ensure_repo_fresh(repo, git_tx) {
+            Ok(proof) => proof.store_id(),
             Err(e) => return Response::err_from(e),
         };
         let checkpoint_groups = self
