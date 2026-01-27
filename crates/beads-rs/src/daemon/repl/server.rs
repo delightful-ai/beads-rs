@@ -379,10 +379,10 @@ where
     }
 
     let role = roster_entry
-        .map(|entry| entry.role)
+        .map(|entry| entry.role())
         .unwrap_or(ReplicaRole::Peer);
     let durability_eligible = roster_entry
-        .map(|entry| entry.durability_eligible)
+        .map(|entry| entry.durability_eligible())
         .unwrap_or(role != ReplicaRole::Observer);
     let durability_role = match ReplicaDurabilityRole::try_from((role, durability_eligible)) {
         Ok(role) => role,

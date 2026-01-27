@@ -165,11 +165,11 @@ where
         }
 
         let role = roster_entry
-            .map(|entry| entry.role)
+            .map(|entry| entry.role())
             .or(peer.role)
             .unwrap_or(ReplicaRole::Peer);
         let durability_eligible = roster_entry
-            .map(|entry| entry.durability_eligible)
+            .map(|entry| entry.durability_eligible())
             .unwrap_or(role != ReplicaRole::Observer);
         let allowed_namespaces = roster_entry
             .and_then(|entry| entry.allowed_namespaces.clone())
