@@ -1280,7 +1280,10 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        core_state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
+        let dep_key_checked = core_state
+            .check_dep_add_key(dep_key.clone())
+            .expect("dep key");
+        core_state.apply_dep_add(dep_key_checked, dep_dot, stamp.clone());
         let mut store_state = StoreState::new();
         store_state.set_core_state(core_state);
         runtime.state = store_state;

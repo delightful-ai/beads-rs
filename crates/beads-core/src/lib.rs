@@ -51,7 +51,7 @@ pub use bead::{Bead, BeadCore, BeadFields, BeadView};
 pub use collections::{Label, Labels};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
-pub use dep::{DepKey, DepSpec};
+pub use dep::{AcyclicDepKey, DepAddKey, DepKey, DepSpec, FreeDepKey, NoCycleProof};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
     DurabilityClass, DurabilityOutcome, DurabilityParseError, DurabilityProofV1, DurabilityReceipt,
@@ -103,7 +103,7 @@ pub use watermark::{
 };
 pub use wire_bead::{
     NoteAppendV1, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull, WireBeadPatch,
-    WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1,
-    WireLabelRemoveV1, WireLabelStateV1, WireLineageStamp, WireNoteV1, WirePatch, WireStamp,
-    WireTombstoneV1, WorkflowStatus,
+    WireClaimSnapshot, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireFieldStamp,
+    WireLabelAddV1, WireLabelRemoveV1, WireLabelStateV1, WireLineageStamp, WireNoteV1, WirePatch,
+    WireStamp, WireTombstoneV1, WireWorkflowSnapshot, WorkflowStatus,
 };

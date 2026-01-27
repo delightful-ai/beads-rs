@@ -11,16 +11,16 @@
 //! Resurrection rule: modification strictly newer than deletion can resurrect.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::bead::{Bead, BeadView};
 use super::collections::{Label, Labels};
 use super::composite::Note;
-use super::dep::DepKey;
+use super::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof};
 use super::domain::DepKind;
-use super::error::CoreError;
+use super::error::{CoreError, InvalidDependency};
 use super::event::sha256_bytes;
 use super::identity::{BeadId, ContentHash, NoteId};
 use super::orset::{Dot, Dvv, OrSet, OrSetChange};
@@ -1030,7 +1030,8 @@ impl CanonicalState {
         }
     }
 
-    pub fn apply_dep_add(&mut self, key: DepKey, dot: Dot, stamp: Stamp) -> OrSetChange<DepKey> {
+    pub fn apply_dep_add(&mut self, key: DepAddKey, dot: Dot, stamp: Stamp) -> OrSetChange<DepKey> {
+        let key = key.into_dep_key();
         let change = self.dep_store.set.apply_add(dot, key.clone());
         if change.changed() {
             self.dep_store.stamp = max_stamp(self.dep_store.stamp.as_ref(), Some(&stamp));
@@ -1045,6 +1046,59 @@ impl CanonicalState {
             }
         }
         change
+    }
+
+    /// Check that adding a DAG-only edge would not introduce a cycle.
+    pub fn check_no_cycle(
+        &self,
+        from: &BeadId,
+        to: &BeadId,
+        kind: DepKind,
+    ) -> Result<NoCycleProof, InvalidDependency> {
+        if !kind.requires_dag() {
+            return Err(InvalidDependency {
+                reason: format!(
+                    "dependency kind {} does not require DAG proof",
+                    kind.as_str()
+                ),
+            });
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = vec![to.clone()];
+
+        while let Some(current) = queue.pop() {
+            if &current == from {
+                return Err(InvalidDependency {
+                    reason: format!(
+                        "circular dependency: {} already depends on {} (directly or transitively)",
+                        to, from
+                    ),
+                });
+            }
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            for key in self.deps_from(&current) {
+                if key.kind().requires_dag() && !visited.contains(key.to()) {
+                    queue.push(key.to().clone());
+                }
+            }
+        }
+
+        Ok(NoCycleProof::new())
+    }
+
+    /// Convert a raw dep key into a typed key, enforcing DAG proofs for ordering deps.
+    pub fn check_dep_add_key(&self, key: DepKey) -> Result<DepAddKey, InvalidDependency> {
+        if key.kind().requires_dag() {
+            let proof = self.check_no_cycle(key.from(), key.to(), key.kind())?;
+            let key = AcyclicDepKey::from_dep_key(key, proof)?;
+            Ok(DepAddKey::Acyclic(key))
+        } else {
+            let key = FreeDepKey::from_dep_key(key)?;
+            Ok(DepAddKey::Free(key))
+        }
     }
 
     pub fn apply_dep_remove(
@@ -1601,6 +1655,7 @@ mod tests {
     use super::*;
     use crate::collections::Label;
     use crate::composite::Note;
+    use crate::dep::{AcyclicDepKey, DepAddKey, NoCycleProof};
     use crate::identity::{ActorId, NoteId, ReplicaId};
     use crate::orset::Dot;
     use crate::time::{Stamp, WriteStamp};
@@ -1620,6 +1675,19 @@ mod tests {
 
     fn bead_id(id: &str) -> BeadId {
         BeadId::parse(id).unwrap_or_else(|e| panic!("invalid bead id {id}: {e}"))
+    }
+
+    fn apply_dep_add_checked(state: &mut CanonicalState, key: DepKey, dot: Dot, stamp: Stamp) {
+        let key = state
+            .check_dep_add_key(key)
+            .unwrap_or_else(|err| panic!("dep key invalid: {}", err.reason));
+        state.apply_dep_add(key, dot, stamp);
+    }
+
+    fn apply_dep_add_unchecked(state: &mut CanonicalState, key: DepKey, dot: Dot, stamp: Stamp) {
+        let key = AcyclicDepKey::from_dep_key(key, NoCycleProof::new())
+            .unwrap_or_else(|err| panic!("dep key invalid: {}", err.reason));
+        state.apply_dep_add(DepAddKey::Acyclic(key), dot, stamp);
     }
 
     fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
@@ -1650,7 +1718,7 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([9u8; 16])),
             counter,
         };
-        state.apply_dep_add(key, dot, stamp.clone());
+        apply_dep_add_checked(state, key, dot, stamp.clone());
     }
 
     fn remove_dep(state: &mut CanonicalState, key: &DepKey, stamp: &Stamp) {
@@ -2057,7 +2125,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
 
         let replica = ReplicaId::from(Uuid::from_bytes([2u8; 16]));
-        state.apply_dep_add(
+        apply_dep_add_unchecked(
+            &mut state,
             ab,
             Dot {
                 replica,
@@ -2065,7 +2134,8 @@ mod tests {
             },
             stamp.clone(),
         );
-        state.apply_dep_add(
+        apply_dep_add_unchecked(
+            &mut state,
             bc,
             Dot {
                 replica,
@@ -2073,7 +2143,8 @@ mod tests {
             },
             stamp.clone(),
         );
-        state.apply_dep_add(
+        apply_dep_add_unchecked(
+            &mut state,
             ca,
             Dot {
                 replica,
@@ -2220,8 +2291,8 @@ mod tests {
             counter: 2,
         };
 
-        state.apply_dep_add(key.clone(), dot_a, stamp_new.clone());
-        state.apply_dep_add(key, dot_b, stamp_old);
+        apply_dep_add_checked(&mut state, key.clone(), dot_a, stamp_new.clone());
+        apply_dep_add_checked(&mut state, key, dot_b, stamp_old);
 
         let stamp = state.dep_store().stamp().expect("dep stamp");
         assert_eq!(stamp, &stamp_new);
@@ -2248,8 +2319,8 @@ mod tests {
             counter: 2,
         };
 
-        state.apply_dep_add(key.clone(), dot_a, stamp_a);
-        state.apply_dep_add(key, dot_b, stamp_b.clone());
+        apply_dep_add_checked(&mut state, key.clone(), dot_a, stamp_a);
+        apply_dep_add_checked(&mut state, key, dot_b, stamp_b.clone());
 
         let stamp = state.dep_store().stamp().expect("dep stamp");
         assert_eq!(stamp, &stamp_b);
@@ -2269,7 +2340,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
 
         let replica = ReplicaId::from(Uuid::from_bytes([3u8; 16]));
-        state.apply_dep_add(
+        apply_dep_add_checked(
+            &mut state,
             ab,
             Dot {
                 replica,
@@ -2277,7 +2349,8 @@ mod tests {
             },
             stamp.clone(),
         );
-        state.apply_dep_add(
+        apply_dep_add_checked(
+            &mut state,
             bc,
             Dot {
                 replica,

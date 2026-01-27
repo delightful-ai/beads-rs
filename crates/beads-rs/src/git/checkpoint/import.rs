@@ -931,9 +931,10 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::core::wire_bead::{WireClaimSnapshot, WireWorkflowSnapshot};
     use crate::core::{
         ActorId, BeadId, BeadType, CanonicalState, Dvv, NamespaceId, Priority, ReplicaId,
-        StoreEpoch, StoreId, WorkflowStatus,
+        StoreEpoch, StoreId,
     };
     use crate::git::checkpoint::ManifestFile;
     use crate::git::wire::{serialize_deps, serialize_state, serialize_tombstones};
@@ -991,14 +992,8 @@ mod tests {
             external_ref: None,
             source_repo: None,
             estimated_minutes: None,
-            status: WorkflowStatus::Open,
-            closed_at: None,
-            closed_by: None,
-            closed_reason: None,
-            closed_on_branch: None,
-            assignee: None,
-            assignee_at: None,
-            assignee_expires: None,
+            workflow: WireWorkflowSnapshot::Open,
+            claim: WireClaimSnapshot::unclaimed(),
             notes: Vec::new(),
             at: WireStamp(1, 0),
             by: ActorId::new("me").unwrap(),

@@ -748,6 +748,7 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
+        let dep_key = state.check_dep_add_key(dep_key).unwrap();
         state.apply_dep_add(dep_key, dep_dot, stamp.clone());
 
         let entry = WalEntry::new(state, None, 7, 42);

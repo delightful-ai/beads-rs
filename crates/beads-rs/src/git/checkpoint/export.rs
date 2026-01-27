@@ -646,7 +646,8 @@ mod tests {
         let mut core_state = CanonicalState::new();
         core_state.insert(bead.clone()).unwrap();
         core_state.insert_tombstone(tombstone.clone());
-        core_state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
+        let dep_key_checked = core_state.check_dep_add_key(dep_key.clone()).unwrap();
+        core_state.apply_dep_add(dep_key_checked, dep_dot, stamp.clone());
         let mut state = StoreState::new();
         state.set_core_state(core_state.clone());
 
