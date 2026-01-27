@@ -2,7 +2,7 @@
 
 use uuid::Uuid;
 
-use beads_rs::daemon::wal::{WalIndex, rebuild_index};
+use beads_rs::daemon::wal::{ClientRequestEventIds, WalIndex, rebuild_index};
 use beads_rs::{
     DurabilityReceipt, EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId,
     StoreIdentity, TxnId, Watermarks, sha256_bytes,
@@ -68,6 +68,7 @@ fn receipt_survives_restart() {
     let client_request_id = identity::client_request_id(22);
     let request_sha = [9u8; 32];
     let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).expect("seq1"));
+    let event_ids = ClientRequestEventIds::single(event_id.clone());
     let txn_id = TxnId::new(Uuid::from_bytes([8u8; 16]));
     let created_at_ms = 1_700_000_000_222;
 
@@ -79,7 +80,7 @@ fn receipt_survives_restart() {
         client_request_id,
         request_sha,
         txn_id,
-        &[event_id],
+        &event_ids,
         created_at_ms,
     )
     .expect("upsert client request");
@@ -105,13 +106,13 @@ fn receipt_survives_restart() {
     let receipt_before = DurabilityReceipt::local_fsync_defaults(
         store,
         row_before.txn_id,
-        row_before.event_ids.clone(),
+        row_before.event_ids.event_ids(),
         row_before.created_at_ms,
     );
     let receipt_after = DurabilityReceipt::local_fsync_defaults(
         store,
         row_after.txn_id,
-        row_after.event_ids.clone(),
+        row_after.event_ids.event_ids(),
         row_after.created_at_ms + 1,
     );
 

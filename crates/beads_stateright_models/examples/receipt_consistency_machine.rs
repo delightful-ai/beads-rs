@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use beads_rs::daemon::wal::WalIndex;
+use beads_rs::daemon::wal::{ClientRequestEventIds, WalIndex};
 use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot};
 use beads_rs::{
     Applied, ClientRequestId, DurabilityReceipt, EventId, NamespaceId, ReplicaId, StoreEpoch,
@@ -235,6 +235,7 @@ fn build_receipt(
             .next_origin_seq(&cfg.namespace, &cfg.local_replica)
             .map_err(|_| ())?;
         let event_id = EventId::new(cfg.local_replica, cfg.namespace.clone(), seq);
+        let event_ids = ClientRequestEventIds::single(event_id.clone());
         let txn_id = TxnId::new(make_uuid(cfg.local_replica, seq.get()));
         txn.upsert_client_request(
             &cfg.namespace,
@@ -242,18 +243,18 @@ fn build_receipt(
             request_id,
             request_sha,
             txn_id,
-            std::slice::from_ref(&event_id),
+            &event_ids,
             now_ms,
         )
         .map_err(|_| ())?;
         txn.commit().map_err(|_| ())?;
-        (txn_id, vec![event_id], now_ms)
+        (txn_id, event_ids, now_ms)
     };
 
     let receipt = DurabilityReceipt::local_fsync(
         cfg.store,
         txn_id,
-        event_ids.clone(),
+        event_ids.event_ids(),
         created_at_ms,
         Watermarks::<beads_rs::Durable>::new(),
         Watermarks::<Applied>::new(),
@@ -278,7 +279,7 @@ fn lookup_receipt(
     Ok(DurabilityReceipt::local_fsync(
         cfg.store,
         row.txn_id,
-        row.event_ids,
+        row.event_ids.event_ids(),
         row.created_at_ms,
         Watermarks::<beads_rs::Durable>::new(),
         Watermarks::<Applied>::new(),
