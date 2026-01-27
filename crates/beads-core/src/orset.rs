@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha256Hasher};
+use thiserror::Error;
 
 use super::identity::ReplicaId;
 
@@ -151,6 +152,29 @@ pub struct OrSetChange<V: Ord + Clone> {
     changed: bool,
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum OrSetError {
+    #[error("orset has dot {dot:?} assigned to multiple values")]
+    DuplicateDot { dot: Dot },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrSetNormalization {
+    pub normalized_cc: bool,
+    pub pruned_dots: usize,
+    pub removed_empty_entries: usize,
+    pub resolved_collisions: usize,
+}
+
+impl OrSetNormalization {
+    pub fn changed(&self) -> bool {
+        self.normalized_cc
+            || self.pruned_dots > 0
+            || self.removed_empty_entries > 0
+            || self.resolved_collisions > 0
+    }
+}
+
 impl<V: Ord + Clone> Default for OrSetChange<V> {
     fn default() -> Self {
         Self {
@@ -205,8 +229,25 @@ impl<V: OrSetValue> OrSet<V> {
         }
     }
 
-    pub fn from_parts(entries: BTreeMap<V, BTreeSet<Dot>>, cc: Dvv) -> Self {
+    pub(crate) fn from_parts(entries: BTreeMap<V, BTreeSet<Dot>>, cc: Dvv) -> Self {
         Self { entries, cc }
+    }
+
+    pub fn try_from_parts(
+        entries: BTreeMap<V, BTreeSet<Dot>>,
+        cc: Dvv,
+    ) -> Result<Self, OrSetError> {
+        validate_no_duplicate_dots(&entries)?;
+        let (entries, cc, _) = normalize_parts(entries, cc);
+        Ok(Self { entries, cc })
+    }
+
+    pub fn normalize_for_import(
+        entries: BTreeMap<V, BTreeSet<Dot>>,
+        cc: Dvv,
+    ) -> (Self, OrSetNormalization) {
+        let (entries, cc, normalization) = normalize_parts(entries, cc);
+        (Self { entries, cc }, normalization)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -394,6 +435,73 @@ impl<V: OrSetValue> OrSet<V> {
             }
         }
     }
+}
+
+fn validate_no_duplicate_dots<V: OrSetValue>(
+    entries: &BTreeMap<V, BTreeSet<Dot>>,
+) -> Result<(), OrSetError> {
+    let mut seen = BTreeSet::new();
+    for dots in entries.values() {
+        for dot in dots {
+            if !seen.insert(*dot) {
+                return Err(OrSetError::DuplicateDot { dot: *dot });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_parts<V: OrSetValue>(
+    mut entries: BTreeMap<V, BTreeSet<Dot>>,
+    mut cc: Dvv,
+) -> (BTreeMap<V, BTreeSet<Dot>>, Dvv, OrSetNormalization) {
+    let mut normalization = OrSetNormalization::default();
+
+    let before_cc = cc.clone();
+    cc.normalize();
+    normalization.normalized_cc = cc != before_cc;
+
+    for dots in entries.values_mut() {
+        let before_len = dots.len();
+        dots.retain(|dot| !cc.dominates(dot));
+        normalization.pruned_dots += before_len - dots.len();
+    }
+    let before_entries = entries.len();
+    entries.retain(|_, dots| !dots.is_empty());
+    normalization.removed_empty_entries += before_entries - entries.len();
+
+    let mut by_dot: BTreeMap<Dot, Vec<V>> = BTreeMap::new();
+    for (value, dots) in &entries {
+        for dot in dots {
+            by_dot.entry(*dot).or_default().push(value.clone());
+        }
+    }
+    for (dot, values) in by_dot {
+        if values.len() <= 1 {
+            continue;
+        }
+        let winner = values
+            .iter()
+            .max_by(|a, b| collision_cmp(dot, *a, *b))
+            .cloned()
+            .expect("winner exists");
+        for value in values {
+            if value == winner {
+                continue;
+            }
+            if let Some(dots) = entries.get_mut(&value) {
+                if dots.remove(&dot) {
+                    normalization.resolved_collisions += 1;
+                }
+                if dots.is_empty() {
+                    entries.remove(&value);
+                    normalization.removed_empty_entries += 1;
+                }
+            }
+        }
+    }
+
+    (entries, cc, normalization)
 }
 
 impl<V: OrSetValue> Default for OrSet<V> {
@@ -623,5 +731,52 @@ mod tests {
 
         let joined = OrSet::join(&a, &b);
         assert!(joined.contains(&value));
+    }
+
+    #[test]
+    fn orset_try_from_parts_prunes_dominated_dots() {
+        let mut entries = BTreeMap::new();
+        entries.insert("a".to_string(), BTreeSet::from([dot(1, 1)]));
+
+        let mut cc = Dvv::default();
+        cc.observe(dot(1, 1));
+
+        let set = OrSet::try_from_parts(entries, cc).unwrap();
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn orset_try_from_parts_drops_empty_entries() {
+        let mut entries = BTreeMap::new();
+        entries.insert("a".to_string(), BTreeSet::new());
+        entries.insert("b".to_string(), BTreeSet::from([dot(2, 1)]));
+
+        let set = OrSet::try_from_parts(entries, Dvv::default()).unwrap();
+        assert!(!set.contains(&"a".to_string()));
+        assert!(set.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn orset_normalize_for_import_resolves_dot_collisions() {
+        let shared = dot(1, 1);
+        let mut entries = BTreeMap::new();
+        entries.insert("alpha".to_string(), BTreeSet::from([shared]));
+        entries.insert("beta".to_string(), BTreeSet::from([shared]));
+
+        let (set, normalization) = OrSet::normalize_for_import(entries, Dvv::default());
+        assert!(set.contains(&"beta".to_string()));
+        assert!(!set.contains(&"alpha".to_string()));
+        assert!(normalization.resolved_collisions > 0);
+    }
+
+    #[test]
+    fn orset_try_from_parts_rejects_duplicate_dots() {
+        let shared = dot(1, 1);
+        let mut entries = BTreeMap::new();
+        entries.insert("alpha".to_string(), BTreeSet::from([shared]));
+        entries.insert("beta".to_string(), BTreeSet::from([shared]));
+
+        let err = OrSet::try_from_parts(entries, Dvv::default()).unwrap_err();
+        assert!(matches!(err, OrSetError::DuplicateDot { .. }));
     }
 }
