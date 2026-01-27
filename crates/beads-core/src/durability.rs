@@ -825,6 +825,7 @@ mod tests {
         let replicated = merged
             .durability_proof()
             .replicated
+            .as_ref()
             .expect("replicated proof");
         assert_eq!(replicated.k.get(), 2);
         assert!(replicated.acked_by.contains(&origin));
