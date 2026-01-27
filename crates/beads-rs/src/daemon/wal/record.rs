@@ -192,9 +192,12 @@ impl RecordHeader {
                 reason: "request_sha256 flag set without client_request_id".to_string(),
             });
         }
-        if header_len < flags.expected_len() {
+        let expected_len = flags.expected_len();
+        if header_len != expected_len {
             return Err(EventWalError::RecordHeaderInvalid {
-                reason: "record header length smaller than flags imply".to_string(),
+                reason: format!(
+                    "record header length {header_len} does not match flags-implied length {expected_len}"
+                ),
             });
         }
 
@@ -545,6 +548,27 @@ mod tests {
         bytes.extend_from_slice(&[5u8; 32]);
 
         let err = RecordHeader::decode(&bytes).unwrap_err();
+        assert!(matches!(err, EventWalError::RecordHeaderInvalid { .. }));
+    }
+
+    #[test]
+    fn record_decode_rejects_header_len_larger_than_flags_imply() {
+        let header = RecordHeader {
+            origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            origin_seq: Seq1::from_u64(9).unwrap(),
+            event_time_ms: 1_700_000_000_000,
+            txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
+            request_proof: RequestProof::None,
+            sha256: [5u8; 32],
+            prev_sha256: None,
+        };
+        let mut bytes = header.encode().expect("encode header");
+        let declared_len = u16::from_le_bytes([bytes[2], bytes[3]]);
+        let inflated_len = declared_len + 2;
+        bytes[2..4].copy_from_slice(&inflated_len.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 2]);
+
+        let err = RecordHeader::decode(&bytes).expect_err("inflated header_len must fail");
         assert!(matches!(err, EventWalError::RecordHeaderInvalid { .. }));
     }
 

@@ -16,7 +16,7 @@ use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
     ActorId, Applied, ApplyOutcome, ContentHash, Durable, ErrorPayload, HeadStatus, Limits,
     NamespaceId, NamespacePolicies, NamespacePolicy, ProtocolErrorCode, ReplicaId, ReplicaRoster,
-    ReplicaRosterError, SegmentId, Seq0, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
+    ReplicaRosterError, SegmentId, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
     StoreMetaVersions, StoreState, WatermarkError, Watermarks, WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
@@ -781,22 +781,8 @@ fn load_watermarks(
         let namespace = row.namespace;
         let origin = row.origin;
 
-        let applied_head =
-            head_status_from_row(row.applied_seq, row.applied_head_sha).map_err(|source| {
-                StoreRuntimeError::WatermarkInvalid {
-                    kind: "applied",
-                    namespace: namespace.clone(),
-                    origin,
-                    source: Box::new(source),
-                }
-            })?;
         applied
-            .observe_at_least(
-                &namespace,
-                &origin,
-                Seq0::new(row.applied_seq),
-                applied_head,
-            )
+            .observe_at_least(&namespace, &origin, row.applied.seq(), row.applied.head())
             .map_err(|source| StoreRuntimeError::WatermarkInvalid {
                 kind: "applied",
                 namespace: namespace.clone(),
@@ -804,22 +790,8 @@ fn load_watermarks(
                 source: Box::new(source),
             })?;
 
-        let durable_head =
-            head_status_from_row(row.durable_seq, row.durable_head_sha).map_err(|source| {
-                StoreRuntimeError::WatermarkInvalid {
-                    kind: "durable",
-                    namespace: namespace.clone(),
-                    origin,
-                    source: Box::new(source),
-                }
-            })?;
         durable
-            .observe_at_least(
-                &namespace,
-                &origin,
-                Seq0::new(row.durable_seq),
-                durable_head,
-            )
+            .observe_at_least(&namespace, &origin, row.durable.seq(), row.durable.head())
             .map_err(|source| StoreRuntimeError::WatermarkInvalid {
                 kind: "durable",
                 namespace: namespace.clone(),
@@ -829,21 +801,6 @@ fn load_watermarks(
     }
 
     Ok((applied, durable))
-}
-
-fn head_status_from_row(seq: u64, head: Option<[u8; 32]>) -> Result<HeadStatus, WatermarkError> {
-    let seq0 = Seq0::new(seq);
-    if seq == 0 {
-        return match head {
-            None => Ok(HeadStatus::Genesis),
-            Some(_) => Err(WatermarkError::UnexpectedHead { seq: seq0 }),
-        };
-    }
-
-    match head {
-        Some(sha) => Ok(HeadStatus::Known(sha)),
-        None => Err(WatermarkError::MissingHead { seq: seq0 }),
-    }
 }
 
 fn head_status_to_sha(head: Option<HeadStatus>) -> Option<[u8; 32]> {
@@ -984,9 +941,13 @@ mod tests {
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, DepKey, Dot, ReplicaId, StoreState};
+    use crate::core::{
+        ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark,
+    };
     use crate::daemon::remote::RemoteUrl;
-    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
+    use crate::daemon::wal::{
+        IndexDurabilityMode, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
+    };
     use crate::paths;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -1020,7 +981,11 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
         let head = [7u8; 32];
         let mut txn = index.writer().begin_txn().expect("begin txn");
-        txn.update_watermark(&namespace, &origin, 2, 2, Some(head), Some(head))
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(head)).expect("watermark");
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known(head)).expect("watermark");
+        txn.update_watermark(&namespace, &origin, applied, durable)
             .expect("update watermark");
         txn.commit().expect("commit watermark");
 
@@ -1066,7 +1031,7 @@ mod tests {
         let replica_id = ReplicaId::new(Uuid::from_bytes([21u8; 16]));
         let now_ms = 1_700_000_000_000;
         let meta = write_meta_for(store_id, replica_id, now_ms);
-        let index = SqliteWalIndex::open(
+        let _index = SqliteWalIndex::open(
             &paths::store_dir(store_id),
             &meta,
             IndexDurabilityMode::Cache,
@@ -1075,10 +1040,21 @@ mod tests {
 
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
-        let mut txn = index.writer().begin_txn().expect("begin txn");
-        txn.update_watermark(&namespace, &origin, 1, 0, None, None)
-            .expect("update watermark");
-        txn.commit().expect("commit watermark");
+        let db_path = paths::store_dir(store_id).join("index").join("wal.sqlite");
+        let conn = rusqlite::Connection::open(&db_path).expect("open wal sqlite");
+        conn.execute(
+            "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                namespace.as_str(),
+                origin.as_uuid().as_bytes().to_vec(),
+                1i64,
+                0i64,
+                Option::<Vec<u8>>::None,
+                Option::<Vec<u8>>::None,
+            ],
+        )
+        .expect("insert invalid watermark");
 
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
@@ -1094,7 +1070,11 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(StoreRuntimeError::WatermarkInvalid { .. })
+            Err(StoreRuntimeError::WalReplay(err))
+                if matches!(
+                    &*err,
+                    WalReplayError::Index(WalIndexError::WatermarkRowDecode(_))
+                )
         ));
     }
 

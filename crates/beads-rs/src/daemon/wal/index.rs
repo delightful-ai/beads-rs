@@ -12,8 +12,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::{
-    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, ReplicaRole, SegmentId, Seq0, Seq1,
-    StoreId, StoreMeta, StoreMetaVersions, TxnId,
+    ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId, ReplicaId,
+    ReplicaRole, SegmentId, Seq0, Seq1, StoreId, StoreMeta, StoreMetaVersions, TxnId, Watermark,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
@@ -125,10 +125,8 @@ pub trait WalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: u64,
-        durable: u64,
-        applied_head_sha: Option<[u8; 32]>,
-        durable_head_sha: Option<[u8; 32]>,
+        applied: Watermark<Applied>,
+        durable: Watermark<Durable>,
     ) -> Result<(), WalIndexError>;
     fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalIndexError>;
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError>;
@@ -308,10 +306,45 @@ impl SegmentRow {
 pub struct WatermarkRow {
     pub namespace: NamespaceId,
     pub origin: ReplicaId,
-    pub applied_seq: u64,
-    pub durable_seq: u64,
-    pub applied_head_sha: Option<[u8; 32]>,
-    pub durable_head_sha: Option<[u8; 32]>,
+    pub applied: Watermark<Applied>,
+    pub durable: Watermark<Durable>,
+}
+
+impl WatermarkRow {
+    pub fn applied_seq(&self) -> u64 {
+        self.applied.seq().get()
+    }
+
+    pub fn durable_seq(&self) -> u64 {
+        self.durable.seq().get()
+    }
+
+    pub fn applied_head_sha(&self) -> Option<[u8; 32]> {
+        head_sha_from_status(self.applied.head())
+    }
+
+    pub fn durable_head_sha(&self) -> Option<[u8; 32]> {
+        head_sha_from_status(self.durable.head())
+    }
+}
+
+fn head_sha_from_status(head: HeadStatus) -> Option<[u8; 32]> {
+    match head {
+        HeadStatus::Known(sha) => Some(sha),
+        HeadStatus::Genesis => None,
+    }
+}
+
+fn watermark_from_columns<K>(
+    seq: u64,
+    head_sha: Option<[u8; 32]>,
+) -> Result<Watermark<K>, WalIndexError> {
+    let seq0 = Seq0::new(seq);
+    let head = match head_sha {
+        Some(sha) => HeadStatus::Known(sha),
+        None => HeadStatus::Genesis,
+    };
+    Watermark::new(seq0, head).map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -703,15 +736,13 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: u64,
-        durable: u64,
-        applied_head_sha: Option<[u8; 32]>,
-        durable_head_sha: Option<[u8; 32]>,
+        applied: Watermark<Applied>,
+        durable: Watermark<Durable>,
     ) -> Result<(), WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
-        let applied_blob = applied_head_sha.map(|value| value.to_vec());
-        let durable_blob = durable_head_sha.map(|value| value.to_vec());
+        let applied_blob = head_sha_from_status(applied.head()).map(|value| value.to_vec());
+        let durable_blob = head_sha_from_status(durable.head()).map(|value| value.to_vec());
 
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
@@ -725,8 +756,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         stmt.execute(params![
             namespace,
             origin_blob,
-            applied as i64,
-            durable as i64,
+            u64::from(applied.seq()) as i64,
+            u64::from(durable.seq()) as i64,
             applied_blob,
             durable_blob,
         ])?;
@@ -1037,10 +1068,8 @@ impl WalIndexReader for SqliteWalIndexReader {
                 watermarks.push(WatermarkRow {
                     namespace,
                     origin: ReplicaId::new(origin_uuid),
-                    applied_seq,
-                    durable_seq,
-                    applied_head_sha,
-                    durable_head_sha,
+                    applied: watermark_from_columns::<Applied>(applied_seq, applied_head_sha)?,
+                    durable: watermark_from_columns::<Durable>(durable_seq, durable_head_sha)?,
                 });
             }
             Ok(watermarks)
@@ -1738,7 +1767,9 @@ mod tests {
         )
         .unwrap();
         let seq = origin_seq.get();
-        txn.update_watermark(&ns, &origin, seq, seq, Some(sha), Some(sha))
+        let applied = Watermark::<Applied>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
+        let durable = Watermark::<Durable>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
+        txn.update_watermark(&ns, &origin, applied, durable)
             .unwrap();
         txn.upsert_client_request(
             &ns,
@@ -1772,6 +1803,64 @@ mod tests {
         assert_eq!(req.event_ids, vec![event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
         assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), Seq0::new(1));
+    }
+
+    #[test]
+    fn sqlite_index_round_trips_watermarks() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+
+        let applied_head = [5u8; 32];
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(applied_head)).unwrap();
+        let durable = Watermark::<Durable>::genesis();
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.update_watermark(&ns, &origin, applied, durable)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let rows = index.reader().load_watermarks().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.namespace, ns);
+        assert_eq!(row.origin, origin);
+        assert_eq!(
+            row.applied,
+            Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(applied_head)).unwrap()
+        );
+        assert_eq!(row.durable, Watermark::<Durable>::genesis());
+    }
+
+    #[test]
+    fn sqlite_index_rejects_invalid_watermark_rows() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+
+        conn.execute(
+            "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                ns.as_str(),
+                uuid_blob(origin.as_uuid()),
+                1i64,
+                0i64,
+                Option::<Vec<u8>>::None,
+                Option::<Vec<u8>>::None,
+            ],
+        )
+        .unwrap();
+
+        let err = index.reader().load_watermarks().unwrap_err();
+        assert!(matches!(err, WalIndexError::WatermarkRowDecode(_)));
     }
 
     #[test]

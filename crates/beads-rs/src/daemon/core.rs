@@ -1687,7 +1687,7 @@ impl Daemon {
 
         txn.commit().map_err(|err| wal_index_error_payload(&err))?;
 
-        let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
+        let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
             for (event, canonical_sha) in batch.iter().zip(canonical_shas.iter().copied()) {
                 let apply_start = Instant::now();
@@ -1759,18 +1759,9 @@ impl Daemon {
                 .get(&namespace, &origin)
                 .copied()
                 .unwrap_or_else(Watermark::genesis);
-            let applied_head = store.applied_head_sha(&namespace, &origin);
-            let durable_head = store.durable_head_sha(&namespace, &origin);
             let remote = store.primary_remote.clone();
 
-            (
-                remote,
-                max_stamp,
-                durable,
-                applied,
-                applied_head,
-                durable_head,
-            )
+            (remote, max_stamp, durable, applied)
         };
 
         for (actor_id, stamp) in actor_stamps {
@@ -1783,22 +1774,12 @@ impl Daemon {
         self.mark_checkpoint_dirty(store_id, &namespace, batch.len() as u64);
         self.schedule_sync(remote);
 
-        let applied_seq = applied.seq().get();
-        let durable_seq = durable.seq().get();
-
         let mut watermark_txn = wal_index
             .writer()
             .begin_txn()
             .map_err(|err| wal_index_error_payload(&err))?;
         watermark_txn
-            .update_watermark(
-                &namespace,
-                &origin,
-                applied_seq,
-                durable_seq,
-                applied_head,
-                durable_head,
-            )
+            .update_watermark(&namespace, &origin, applied, durable)
             .map_err(|err| wal_index_error_payload(&err))?;
         watermark_txn
             .commit()
@@ -2274,23 +2255,7 @@ fn apply_checkpoint_watermarks(
             })?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
 
-            if durable.seq().get() == 0 {
-                txn.update_watermark(&namespace, &origin, 0, 0, None, None)?;
-                continue;
-            }
-
-            let applied_head = head_sha(applied.head());
-            let durable_head = head_sha(durable.head());
-            if let (Some(applied_head), Some(durable_head)) = (applied_head, durable_head) {
-                txn.update_watermark(
-                    &namespace,
-                    &origin,
-                    applied.seq().get(),
-                    durable.seq().get(),
-                    Some(applied_head),
-                    Some(durable_head),
-                )?;
-            }
+            txn.update_watermark(&namespace, &origin, applied, durable)?;
         }
     }
     txn.commit()?;
@@ -2315,13 +2280,6 @@ fn checkpoint_head_status(
     Err(WatermarkError::MissingHead {
         seq: Seq0::new(seq),
     })
-}
-
-fn head_sha(head: HeadStatus) -> Option<[u8; 32]> {
-    match head {
-        HeadStatus::Known(sha) => Some(sha),
-        _ => None,
-    }
 }
 
 fn checkpoint_ref_oid(repo: &Repository, git_ref: &str) -> Result<Option<Oid>, git2::Error> {
@@ -2427,7 +2385,7 @@ pub(crate) fn replay_event_wal(
     let mut applied_any = false;
 
     for row in rows {
-        if row.applied_seq == 0 {
+        if row.applied.seq().get() == 0 {
             continue;
         }
         let namespace = row.namespace.clone();
@@ -2451,7 +2409,7 @@ pub(crate) fn replay_event_wal(
             state.ensure_namespace(non_core)
         };
         let mut from_seq_excl = Seq0::ZERO;
-        while from_seq_excl.get() < row.applied_seq {
+        while from_seq_excl.get() < row.applied.seq().get() {
             let items = wal_index.reader().iter_from(
                 &namespace,
                 &row.origin,
@@ -2470,8 +2428,8 @@ pub(crate) fn replay_event_wal(
             }
             for item in items {
                 let seq = item.event_id.origin_seq.get();
-                if seq > row.applied_seq {
-                    from_seq_excl = Seq0::new(row.applied_seq);
+                if seq > row.applied.seq().get() {
+                    from_seq_excl = row.applied.seq();
                     break;
                 }
                 let segment_path = segments.get(&item.segment_id).ok_or_else(|| {

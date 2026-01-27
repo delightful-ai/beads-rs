@@ -398,14 +398,7 @@ impl Daemon {
         crate::daemon::test_hooks::maybe_pause("wal_before_index_commit");
         txn.commit().map_err(wal_index_to_op)?;
 
-        let (
-            durable_watermarks,
-            applied_watermarks,
-            applied_head,
-            durable_head,
-            applied_seq,
-            durable_seq,
-        ) = {
+        let (durable_watermarks, applied_watermarks, applied, durable) = {
             let (store_runtime, repo_state) = proof.split_mut();
             let apply_start = Instant::now();
             let apply_result = {
@@ -464,43 +457,28 @@ impl Daemon {
                     })
                 })?;
 
-            let applied_head = store_runtime.applied_head_sha(&namespace, &origin_replica_id);
-            let durable_head = store_runtime.durable_head_sha(&namespace, &origin_replica_id);
-            let applied_seq = store_runtime
+            let applied = store_runtime
                 .watermarks_applied
                 .get(&namespace, &origin_replica_id)
                 .copied()
-                .unwrap_or_else(Watermark::genesis)
-                .seq()
-                .get();
-            let durable_seq = store_runtime
+                .unwrap_or_else(Watermark::genesis);
+            let durable = store_runtime
                 .watermarks_durable
                 .get(&namespace, &origin_replica_id)
                 .copied()
-                .unwrap_or_else(Watermark::genesis)
-                .seq()
-                .get();
+                .unwrap_or_else(Watermark::genesis);
 
             (
                 store_runtime.watermarks_durable.clone(),
                 store_runtime.watermarks_applied.clone(),
-                applied_head,
-                durable_head,
-                applied_seq,
-                durable_seq,
+                applied,
+                durable,
             )
         };
 
         let mut watermark_txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
         watermark_txn
-            .update_watermark(
-                &namespace,
-                &origin_replica_id,
-                applied_seq,
-                durable_seq,
-                applied_head,
-                durable_head,
-            )
+            .update_watermark(&namespace, &origin_replica_id, applied, durable)
             .map_err(wal_index_to_op)?;
         watermark_txn.commit().map_err(wal_index_to_op)?;
 

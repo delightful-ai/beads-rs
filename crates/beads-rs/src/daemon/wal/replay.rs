@@ -11,8 +11,9 @@ use crc32c::crc32c;
 use thiserror::Error;
 
 use crate::core::{
-    DecodeError, EncodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1,
-    StoreMeta, decode_event_body, decode_event_hlc_max,
+    Applied, DecodeError, Durable, EncodeError, EventId, HeadStatus, Limits, NamespaceId,
+    ReplicaId, SegmentId, Seq0, Seq1, StoreMeta, Watermark, WatermarkError, decode_event_body,
+    decode_event_hlc_max,
 };
 
 use super::EventWalError;
@@ -368,7 +369,43 @@ fn replay_index(
                     origin,
                 })?;
 
-            txn.update_watermark(&namespace, &origin, seq.get(), seq.get(), head, head)?;
+            let head_status = match head {
+                Some(sha) => HeadStatus::Known(sha),
+                None => HeadStatus::Genesis,
+            };
+            let applied = Watermark::new(seq, head_status).map_err(|err| match err {
+                WatermarkError::MissingHead { .. } => WalReplayError::MissingHead {
+                    namespace: namespace.clone(),
+                    origin,
+                    seq,
+                },
+                WatermarkError::UnexpectedHead { .. } => WalReplayError::UnexpectedHead {
+                    namespace: namespace.clone(),
+                    origin,
+                    seq,
+                },
+                other => {
+                    WalReplayError::Index(WalIndexError::WatermarkRowDecode(other.to_string()))
+                }
+            })?;
+            let durable = Watermark::new(seq, head_status).map_err(|err| match err {
+                WatermarkError::MissingHead { .. } => WalReplayError::MissingHead {
+                    namespace: namespace.clone(),
+                    origin,
+                    seq,
+                },
+                WatermarkError::UnexpectedHead { .. } => WalReplayError::UnexpectedHead {
+                    namespace: namespace.clone(),
+                    origin,
+                    seq,
+                },
+                other => {
+                    WalReplayError::Index(WalIndexError::WatermarkRowDecode(other.to_string()))
+                }
+            })?;
+            let applied: Watermark<Applied> = applied;
+            let durable: Watermark<Durable> = durable;
+            txn.update_watermark(&namespace, &origin, applied, durable)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
         }
     }
@@ -1202,25 +1239,10 @@ impl ReplayTracker {
 
     fn seed_from_watermarks(&mut self, rows: Vec<WatermarkRow>) -> Result<(), WalReplayError> {
         for row in rows {
-            let durable_seq = Seq0::new(row.durable_seq);
-            let head = if durable_seq == Seq0::ZERO {
-                if row.durable_head_sha.is_some() {
-                    return Err(WalReplayError::UnexpectedHead {
-                        namespace: row.namespace.clone(),
-                        origin: row.origin,
-                        seq: durable_seq,
-                    });
-                }
-                None
-            } else {
-                Some(
-                    row.durable_head_sha
-                        .ok_or_else(|| WalReplayError::MissingHead {
-                            namespace: row.namespace.clone(),
-                            origin: row.origin,
-                            seq: durable_seq,
-                        })?,
-                )
+            let durable_seq = row.durable.seq();
+            let head = match row.durable.head() {
+                HeadStatus::Genesis => None,
+                HeadStatus::Known(sha) => Some(sha),
             };
 
             let state = OriginReplayState {
