@@ -19,7 +19,7 @@ fn realtime_smoke_applies_and_persists() {
     let config = generator.config_mut();
     config.workers = 1;
     config.total_requests = 2;
-    config.namespace = Some(namespace.as_str().to_string());
+    config.namespace = Some(namespace.clone());
     config.autostart = Autostart::Disabled;
 
     let report = generator.run();

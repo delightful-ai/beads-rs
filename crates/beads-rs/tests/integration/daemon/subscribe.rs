@@ -179,7 +179,7 @@ fn run_load(
     let config = generator.config_mut();
     config.workers = 1;
     config.total_requests = total;
-    config.namespace = Some(namespace.as_str().to_string());
+    config.namespace = Some(namespace.clone());
     config.autostart = Autostart::Disabled;
     generator.run()
 }

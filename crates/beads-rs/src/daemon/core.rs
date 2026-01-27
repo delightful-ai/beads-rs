@@ -2762,15 +2762,6 @@ mod tests {
         ActorId::new("test@host".to_string()).unwrap()
     }
 
-    fn assert_err_code(outcome: HandleOutcome, expected: ErrorCode) {
-        match outcome {
-            HandleOutcome::Response(Response::Err { err }) => {
-                assert_eq!(err.code, expected);
-            }
-            other => panic!("expected error response, got {other:?}"),
-        }
-    }
-
     fn test_remote() -> RemoteUrl {
         RemoteUrl("example.com/test/repo".into())
     }
