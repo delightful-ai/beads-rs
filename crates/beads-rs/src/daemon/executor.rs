@@ -960,15 +960,22 @@ fn try_reuse_idempotent_response(
         _ => MutationOutcome::Immediate(response),
     };
 
-    tracing::info!(
-        target: "mutation",
+    let span = tracing::info_span!(
+        "mutation",
+        store_id = %store.store_id,
+        store_epoch = store.store_epoch.get(),
+        replica_id = %origin_replica_id,
+        actor_id = %ctx.actor_id,
+        durability = ?durability,
         txn_id = %row.txn_id,
-        client_request_id = %client_request_id,
+        client_request_id = ?ctx.client_request_id,
+        trace_id = %ctx.trace_id,
         namespace = %ctx.namespace,
         origin_replica_id = %origin_replica_id,
-        origin_seq = max_seq.get(),
-        "mutation idempotent reuse"
+        origin_seq = max_seq.get()
     );
+    let _guard = span.enter();
+    tracing::info!(target: "mutation", "mutation idempotent reuse");
 
     Ok(Some(outcome))
 }
