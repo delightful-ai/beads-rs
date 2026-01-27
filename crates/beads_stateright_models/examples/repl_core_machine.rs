@@ -1055,10 +1055,12 @@ fn frame_error_code(err: &EventFrameError) -> &'static str {
     match err {
         EventFrameError::WrongStore { .. } => "wrong_store",
         EventFrameError::FrameMismatch => "frame_mismatch",
+        EventFrameError::NonCanonical => "non_canonical",
         EventFrameError::HashMismatch => "hash_mismatch",
         EventFrameError::PrevMismatch => "prev_mismatch",
         EventFrameError::Validation(_) => "validation",
         EventFrameError::Decode(_) => "decode",
+        EventFrameError::Encode(_) => "encode",
         EventFrameError::Lookup(_) => "lookup",
         EventFrameError::Equivocation => "equivocation",
     }
