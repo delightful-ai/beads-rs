@@ -4,6 +4,7 @@
 //! The serialization point for all mutations - runs on a single thread.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::fs;
 use std::io::{self, Seek, SeekFrom};
 use std::num::NonZeroUsize;
@@ -54,23 +55,56 @@ use crate::paths;
 /// Proof that a repo is loaded. Only created by `Daemon::ensure_repo_loaded`,
 /// `Daemon::ensure_repo_loaded_strict`, or `Daemon::ensure_repo_fresh`.
 ///
-/// This type signals that a repo should exist in the daemon's state; accessors
-/// still return Internal if the invariant is violated.
-#[derive(Debug, Clone)]
-pub struct LoadedStore {
+/// The handle borrows the backing runtime + git lane entries, so it cannot exist
+/// without a loaded store.
+pub struct LoadedStore<'a> {
     store_id: StoreId,
     remote: RemoteUrl,
+    runtime: &'a mut StoreRuntime,
+    lane: &'a mut GitLaneState,
 }
 
-impl LoadedStore {
-    /// Get the store identity.
+impl LoadedStore<'_> {
     pub fn store_id(&self) -> StoreId {
         self.store_id
     }
 
-    /// Get the legacy remote URL.
     pub fn remote(&self) -> &RemoteUrl {
         &self.remote
+    }
+
+    pub fn runtime(&self) -> &StoreRuntime {
+        self.runtime
+    }
+
+    pub fn runtime_mut(&mut self) -> &mut StoreRuntime {
+        self.runtime
+    }
+
+    pub fn lane(&self) -> &GitLaneState {
+        self.lane
+    }
+
+    pub fn lane_mut(&mut self) -> &mut GitLaneState {
+        self.lane
+    }
+
+    pub fn split_mut(&mut self) -> (&mut StoreRuntime, &mut GitLaneState) {
+        (&mut *self.runtime, &mut *self.lane)
+    }
+
+    /// Get the store identity.
+    pub fn store_identity(&self) -> StoreIdentity {
+        self.runtime.meta.identity
+    }
+}
+
+impl fmt::Debug for LoadedStore<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoadedStore")
+            .field("store_id", &self.store_id)
+            .field("remote", &self.remote)
+            .finish()
     }
 }
 
@@ -486,7 +520,7 @@ impl Daemon {
         let store = self
             .stores
             .get(&store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))?;
+            .expect("loaded store missing from state");
         let configs = self.checkpoint_group_configs(store_id, store.meta.replica_id);
         for config in configs {
             self.checkpoint_scheduler.register_group(config);
@@ -562,27 +596,36 @@ impl Daemon {
         configs
     }
 
-    /// Get git lane state. Returns Internal if invariant is violated.
-    pub(crate) fn git_lane_state(&self, proof: &LoadedStore) -> Result<&GitLaneState, OpError> {
-        self.git_lanes
-            .get(&proof.store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))
+    pub(crate) fn loaded_store(&mut self, store_id: StoreId, remote: RemoteUrl) -> LoadedStore<'_> {
+        let store = self
+            .stores
+            .get_mut(&store_id)
+            .expect("loaded store missing from state");
+        let lane = self
+            .git_lanes
+            .get_mut(&store_id)
+            .expect("loaded store missing from state");
+        LoadedStore {
+            store_id,
+            remote,
+            runtime: store,
+            lane,
+        }
     }
 
-    /// Get mutable git lane state. Returns Internal if invariant is violated.
-    pub(crate) fn git_lane_state_mut(
+    pub(crate) fn try_loaded_store(
         &mut self,
-        proof: &LoadedStore,
-    ) -> Result<&mut GitLaneState, OpError> {
-        self.git_lanes
-            .get_mut(&proof.store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))
-    }
-
-    pub(crate) fn store_runtime(&self, proof: &LoadedStore) -> Result<&StoreRuntime, OpError> {
-        self.stores
-            .get(&proof.store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))
+        store_id: StoreId,
+        remote: RemoteUrl,
+    ) -> Option<LoadedStore<'_>> {
+        let store = self.stores.get_mut(&store_id)?;
+        let lane = self.git_lanes.get_mut(&store_id)?;
+        Some(LoadedStore {
+            store_id,
+            remote,
+            runtime: store,
+            lane,
+        })
     }
 
     #[cfg(feature = "test-harness")]
@@ -596,31 +639,6 @@ impl Daemon {
         store_id: StoreId,
     ) -> Option<&mut StoreRuntime> {
         self.stores.get_mut(&store_id)
-    }
-
-    pub(crate) fn store_runtime_mut(
-        &mut self,
-        proof: &LoadedStore,
-    ) -> Result<&mut StoreRuntime, OpError> {
-        self.stores
-            .get_mut(&proof.store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))
-    }
-
-    pub(crate) fn store_and_lane_mut(
-        &mut self,
-        proof: &LoadedStore,
-    ) -> Result<(&mut StoreRuntime, &mut GitLaneState), OpError> {
-        let store_id = proof.store_id();
-        let store = self
-            .stores
-            .get_mut(&store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))?;
-        let lane = self
-            .git_lanes
-            .get_mut(&store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))?;
-        Ok((store, lane))
     }
 
     pub(crate) fn store_id_for_remote(&self, remote: &RemoteUrl) -> Option<StoreId> {
@@ -685,13 +703,6 @@ impl Daemon {
             .and_then(|store_id| self.git_lanes.get(store_id))
     }
 
-    pub(crate) fn store_identity(&self, proof: &LoadedStore) -> Result<StoreIdentity, OpError> {
-        self.stores
-            .get(&proof.store_id)
-            .map(|store| store.meta.identity)
-            .ok_or(OpError::Internal("loaded store missing from state"))
-    }
-
     pub(crate) fn primary_remote_for_store(&self, store_id: &StoreId) -> Option<&RemoteUrl> {
         self.stores.get(store_id).map(|store| &store.primary_remote)
     }
@@ -703,7 +714,7 @@ impl Daemon {
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedStore, OpError> {
+    ) -> Result<LoadedStore<'_>, OpError> {
         let resolved = self.store_caches.resolve_store(repo)?;
         let store_id = resolved.store_id;
         let remote = resolved.remote;
@@ -785,7 +796,7 @@ impl Daemon {
             self.export_go_compat(store_id, &remote);
         }
 
-        Ok(LoadedStore { store_id, remote })
+        Ok(self.loaded_store(store_id, remote))
     }
 
     /// Ensure repo is loaded, fetching from git if needed.
@@ -796,7 +807,7 @@ impl Daemon {
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedStore, OpError> {
+    ) -> Result<LoadedStore<'_>, OpError> {
         let resolved = self.store_caches.resolve_store(repo)?;
         let store_id = resolved.store_id;
         let remote = resolved.remote;
@@ -865,7 +876,7 @@ impl Daemon {
             self.export_go_compat(store_id, &remote);
         }
 
-        Ok(LoadedStore { store_id, remote })
+        Ok(self.loaded_store(store_id, remote))
     }
 
     fn apply_loaded_repo_state(
@@ -905,7 +916,7 @@ impl Daemon {
             let store = self
                 .stores
                 .get(&store_id)
-                .ok_or(OpError::Internal("loaded store missing from state"))?;
+                .expect("loaded store missing from state");
             replay_event_wal(
                 store_id,
                 store.wal_index.as_ref(),
@@ -921,7 +932,7 @@ impl Daemon {
             let store = self
                 .stores
                 .get_mut(&store_id)
-                .ok_or(OpError::Internal("loaded store missing from state"))?;
+                .expect("loaded store missing from state");
             apply_checkpoint_watermarks(store, &checkpoint_imports)?;
         }
 
@@ -963,7 +974,7 @@ impl Daemon {
         let store = self
             .stores
             .get_mut(&store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))?;
+            .expect("loaded store missing from state");
         store.state = state;
         self.git_lanes.insert(store_id, repo_state);
         if store.primary_remote != *remote {
@@ -1246,7 +1257,7 @@ impl Daemon {
         let store = self
             .stores
             .get(&store_id)
-            .ok_or(OpError::Internal("loaded store missing from state"))?;
+            .expect("loaded store missing from state");
 
         let wal_index: Arc<dyn WalIndex> = store.wal_index.clone();
         let wal_reader = Some(WalRangeReader::new(
@@ -3169,11 +3180,6 @@ mod tests {
         let mut daemon = Daemon::new(test_actor());
         let remote = test_remote();
         let store_id = insert_store(&mut daemon, &remote);
-        let proof = LoadedStore {
-            store_id,
-            remote: remote.clone(),
-        };
-
         let namespace = NamespaceId::core();
         let origin = daemon
             .stores
@@ -3181,6 +3187,7 @@ mod tests {
             .expect("store runtime")
             .meta
             .replica_id;
+        let proof = daemon.loaded_store(store_id, remote.clone());
         let mut required = Watermarks::<Applied>::new();
         required
             .observe_at_least(
@@ -3196,7 +3203,7 @@ mod tests {
             require_min_seen: Some(required.clone()),
             wait_timeout_ms: 0,
         };
-        let err = daemon.check_read_gate(&proof, &read).unwrap_err();
+        let err = proof.check_read_gate(&read).unwrap_err();
         match err {
             OpError::RequireMinSeenUnsatisfied {
                 required: got_required,
@@ -3218,7 +3225,7 @@ mod tests {
             require_min_seen: Some(required.clone()),
             wait_timeout_ms: 50,
         };
-        let err = daemon.check_read_gate(&proof, &read).unwrap_err();
+        let err = proof.check_read_gate(&read).unwrap_err();
         match err {
             OpError::RequireMinSeenTimeout {
                 waited_ms,
@@ -3231,6 +3238,7 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
 
+        drop(proof);
         let runtime = daemon.stores.get_mut(&store_id).expect("store runtime");
         runtime
             .watermarks_applied
@@ -3246,7 +3254,8 @@ mod tests {
             require_min_seen: Some(required),
             wait_timeout_ms: 0,
         };
-        assert!(daemon.check_read_gate(&proof, &read).is_ok());
+        let proof = daemon.loaded_store(store_id, remote);
+        assert!(proof.check_read_gate(&read).is_ok());
     }
 
     #[test]

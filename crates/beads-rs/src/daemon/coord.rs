@@ -59,10 +59,10 @@ impl Daemon {
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedStore, OpError> {
-        let loaded = self.ensure_repo_loaded(repo, git_tx)?;
+    ) -> Result<LoadedStore<'_>, OpError> {
+        let mut loaded = self.ensure_repo_loaded(repo, git_tx)?;
 
-        let repo_state = self.git_lane_state(&loaded)?;
+        let repo_state = loaded.lane();
         let needs_refresh = !repo_state.dirty
             && !repo_state.sync_in_progress
             && !repo_state.refresh_in_progress
@@ -77,7 +77,7 @@ impl Daemon {
 
             if let Some(refresh_path) = path {
                 // Mark refresh in progress before sending to avoid races
-                let repo_state = self.git_lane_state_mut(&loaded)?;
+                let repo_state = loaded.lane_mut();
                 repo_state.refresh_in_progress = true;
 
                 // Kick off background refresh - don't wait for result
@@ -188,7 +188,7 @@ impl Daemon {
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedStore, OpError> {
+    ) -> Result<LoadedStore<'_>, OpError> {
         let resolved = self.resolve_store(repo)?;
 
         // Remove cached state so ensure_repo_loaded will do a fresh load
@@ -204,7 +204,8 @@ impl Daemon {
     /// - Repo is dirty
     /// - Not already syncing
     pub fn maybe_start_sync(&mut self, remote: &RemoteUrl, git_tx: &Sender<GitOp>) {
-        if !self.git_sync_policy().allows_sync() {
+        let git_sync_policy = self.git_sync_policy();
+        if !git_sync_policy.allows_sync() {
             return;
         }
         let store_id = match self.store_id_for_remote(remote) {
@@ -212,37 +213,22 @@ impl Daemon {
             None => return,
         };
         let actor = self.actor().clone();
-        let Some((store, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
+        let remote = remote.clone();
+        let Some(mut loaded) = self.try_loaded_store(store_id, remote) else {
             return;
         };
-
-        if !repo_state.dirty || repo_state.sync_in_progress {
-            return;
-        }
-
-        let path = match repo_state.any_valid_path() {
-            Some(p) => p.clone(),
-            None => return,
-        };
-
-        repo_state.start_sync();
-
-        let _ = git_tx.send(GitOp::Sync {
-            repo: path,
-            remote: remote.clone(),
-            store_id,
-            state: store.state.core().clone(),
-            actor,
-        });
+        loaded.maybe_start_sync(git_sync_policy, actor, git_tx);
     }
 
     pub(crate) fn ensure_loaded_and_maybe_start_sync(
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
-    ) -> Result<LoadedStore, OpError> {
-        let loaded = self.ensure_repo_loaded(repo, git_tx)?;
-        self.maybe_start_sync(loaded.remote(), git_tx);
+    ) -> Result<LoadedStore<'_>, OpError> {
+        let actor = self.actor().clone();
+        let git_sync_policy = self.git_sync_policy();
+        let mut loaded = self.ensure_repo_loaded(repo, git_tx)?;
+        loaded.maybe_start_sync(git_sync_policy, actor, git_tx);
         Ok(loaded)
     }
 
@@ -362,110 +348,6 @@ impl Daemon {
 
     pub fn next_checkpoint_deadline(&mut self) -> Option<Instant> {
         self.checkpoint_scheduler_mut().next_deadline()
-    }
-
-    pub(crate) fn parse_mutation_meta(
-        &self,
-        proof: &LoadedStore,
-        meta: MutationMeta,
-    ) -> Result<ParsedMutationMeta, OpError> {
-        let namespace = self.normalize_namespace(proof, meta.namespace)?;
-        let durability = parse_durability_meta(meta.durability)?;
-        let client_request_id = parse_optional_client_request_id(meta.client_request_id)?;
-        let trace_id = client_request_id
-            .map(TraceId::from)
-            .unwrap_or_else(|| TraceId::new(Uuid::new_v4()));
-        let actor_id = parse_optional_actor_id(meta.actor_id, self.actor())?;
-
-        Ok(ParsedMutationMeta {
-            namespace,
-            durability,
-            client_request_id,
-            trace_id,
-            actor_id,
-        })
-    }
-
-    pub(crate) fn normalize_read_consistency(
-        &self,
-        proof: &LoadedStore,
-        read: ReadConsistency,
-    ) -> Result<NormalizedReadConsistency, OpError> {
-        let namespace = self.normalize_namespace(proof, read.namespace)?;
-        Ok(NormalizedReadConsistency::new(
-            namespace,
-            read.require_min_seen,
-            read.wait_timeout_ms.unwrap_or(0),
-        ))
-    }
-
-    pub(crate) fn check_read_gate(
-        &self,
-        proof: &LoadedStore,
-        read: &NormalizedReadConsistency,
-    ) -> Result<(), OpError> {
-        match self.read_gate_status(proof, read)? {
-            ReadGateStatus::Satisfied => Ok(()),
-            ReadGateStatus::Unsatisfied {
-                required,
-                current_applied,
-            } => {
-                if read.wait_timeout_ms() > 0 {
-                    return Err(OpError::RequireMinSeenTimeout {
-                        waited_ms: read.wait_timeout_ms(),
-                        required: Box::new(required),
-                        current_applied: Box::new(current_applied),
-                    });
-                }
-                Err(OpError::RequireMinSeenUnsatisfied {
-                    required: Box::new(required),
-                    current_applied: Box::new(current_applied),
-                })
-            }
-        }
-    }
-
-    pub(crate) fn read_gate_status(
-        &self,
-        proof: &LoadedStore,
-        read: &NormalizedReadConsistency,
-    ) -> Result<ReadGateStatus, OpError> {
-        let Some(required) = read.require_min_seen() else {
-            return Ok(ReadGateStatus::Satisfied);
-        };
-        let current_applied = self.store_runtime(proof)?.watermarks_applied.clone();
-        if current_applied.satisfies_at_least(required) {
-            return Ok(ReadGateStatus::Satisfied);
-        }
-        Ok(ReadGateStatus::Unsatisfied {
-            required: required.clone(),
-            current_applied,
-        })
-    }
-
-    pub(crate) fn normalize_namespace(
-        &self,
-        proof: &LoadedStore,
-        raw: Option<String>,
-    ) -> Result<NamespaceId, OpError> {
-        let namespace = match raw {
-            None => NamespaceId::core(),
-            Some(value) => {
-                let trimmed = value.trim();
-                NamespaceId::parse(trimmed.to_string()).map_err(|err| {
-                    OpError::NamespaceInvalid {
-                        namespace: trimmed.to_string(),
-                        reason: err.to_string(),
-                    }
-                })?
-            }
-        };
-        let store = self.store_runtime(proof)?;
-        if store.policies.contains_key(&namespace) {
-            Ok(namespace)
-        } else {
-            Err(OpError::NamespaceUnknown { namespace })
-        }
     }
 
     /// Handle a request from IPC.
@@ -852,6 +734,131 @@ impl Daemon {
                 Response::ok(ResponsePayload::shutting_down()).into()
             }
         }
+    }
+}
+
+impl LoadedStore<'_> {
+    pub(crate) fn parse_mutation_meta(
+        &self,
+        meta: MutationMeta,
+        actor: &ActorId,
+    ) -> Result<ParsedMutationMeta, OpError> {
+        let namespace = self.normalize_namespace(meta.namespace)?;
+        let durability = parse_durability_meta(meta.durability)?;
+        let client_request_id = parse_optional_client_request_id(meta.client_request_id)?;
+        let trace_id = client_request_id
+            .map(TraceId::from)
+            .unwrap_or_else(|| TraceId::new(Uuid::new_v4()));
+        let actor_id = parse_optional_actor_id(meta.actor_id, actor)?;
+
+        Ok(ParsedMutationMeta {
+            namespace,
+            durability,
+            client_request_id,
+            trace_id,
+            actor_id,
+        })
+    }
+
+    pub(crate) fn normalize_read_consistency(
+        &self,
+        read: ReadConsistency,
+    ) -> Result<NormalizedReadConsistency, OpError> {
+        let namespace = self.normalize_namespace(read.namespace)?;
+        Ok(NormalizedReadConsistency::new(
+            namespace,
+            read.require_min_seen,
+            read.wait_timeout_ms.unwrap_or(0),
+        ))
+    }
+
+    pub(crate) fn check_read_gate(&self, read: &NormalizedReadConsistency) -> Result<(), OpError> {
+        match self.read_gate_status(read)? {
+            ReadGateStatus::Satisfied => Ok(()),
+            ReadGateStatus::Unsatisfied {
+                required,
+                current_applied,
+            } => {
+                if read.wait_timeout_ms() > 0 {
+                    return Err(OpError::RequireMinSeenTimeout {
+                        waited_ms: read.wait_timeout_ms(),
+                        required: Box::new(required),
+                        current_applied: Box::new(current_applied),
+                    });
+                }
+                Err(OpError::RequireMinSeenUnsatisfied {
+                    required: Box::new(required),
+                    current_applied: Box::new(current_applied),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn read_gate_status(
+        &self,
+        read: &NormalizedReadConsistency,
+    ) -> Result<ReadGateStatus, OpError> {
+        let Some(required) = read.require_min_seen() else {
+            return Ok(ReadGateStatus::Satisfied);
+        };
+        let current_applied = self.runtime().watermarks_applied.clone();
+        if current_applied.satisfies_at_least(required) {
+            return Ok(ReadGateStatus::Satisfied);
+        }
+        Ok(ReadGateStatus::Unsatisfied {
+            required: required.clone(),
+            current_applied,
+        })
+    }
+
+    pub(crate) fn normalize_namespace(&self, raw: Option<String>) -> Result<NamespaceId, OpError> {
+        let namespace = match raw {
+            None => NamespaceId::core(),
+            Some(value) => {
+                let trimmed = value.trim();
+                NamespaceId::parse(trimmed.to_string()).map_err(|err| {
+                    OpError::NamespaceInvalid {
+                        namespace: trimmed.to_string(),
+                        reason: err.to_string(),
+                    }
+                })?
+            }
+        };
+        if self.runtime().policies.contains_key(&namespace) {
+            Ok(namespace)
+        } else {
+            Err(OpError::NamespaceUnknown { namespace })
+        }
+    }
+
+    pub(crate) fn maybe_start_sync(
+        &mut self,
+        git_sync_policy: super::core::GitSyncPolicy,
+        actor: ActorId,
+        git_tx: &Sender<GitOp>,
+    ) {
+        if !git_sync_policy.allows_sync() {
+            return;
+        }
+        let repo_state = self.lane_mut();
+        if !repo_state.dirty || repo_state.sync_in_progress {
+            return;
+        }
+
+        let path = match repo_state.any_valid_path() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        repo_state.start_sync();
+
+        let _ = git_tx.send(GitOp::Sync {
+            repo: path,
+            remote: self.remote().clone(),
+            store_id: self.store_id(),
+            state: self.runtime().state.core().clone(),
+            actor,
+        });
     }
 }
 
