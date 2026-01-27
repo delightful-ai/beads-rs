@@ -2,7 +2,6 @@ use std::io::{BufRead, Write};
 
 use clap::Args;
 
-use super::super::render;
 use super::super::{
     Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_json, print_ok,
     resolve_description, send, send_raw,
@@ -181,9 +180,22 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     if ctx.json {
         print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
     } else {
-        println!("{}", render::render_create(&issue));
+        println!("{}", render_create(&issue));
     }
     Ok(())
+}
+
+pub(crate) fn render_created(id: &str) -> String {
+    format!("✓ Created issue: {id}")
+}
+
+fn render_create(issue: &crate::api::Issue) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("✓ Created issue: {}\n", issue.id));
+    out.push_str(&format!("  Title: {}\n", issue.title));
+    out.push_str(&format!("  Priority: P{}\n", issue.priority));
+    out.push_str(&format!("  Status: {}", issue.status));
+    out
 }
 
 fn resolve_title(positional: Option<String>, flag: Option<String>) -> Result<String> {

@@ -24,3 +24,11 @@ pub(crate) fn handle(ctx: &Ctx, args: ClaimArgs) -> Result<()> {
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)
 }
+
+pub(crate) fn render_claimed(id: &str, expires: u64) -> String {
+    format!("✓ Claimed {id} until {expires}")
+}
+
+pub(crate) fn render_claim_extended(id: &str, expires: u64) -> String {
+    format!("✓ Claim extended for {id} until {expires}")
+}

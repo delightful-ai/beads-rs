@@ -1,7 +1,7 @@
 use clap::Args;
 
-use super::super::render;
 use super::super::{Ctx, apply_common_filters, normalize_bead_id_for, print_ok, send};
+use super::{fmt_issue_ref, fmt_labels};
 use crate::api::QueryResult;
 use crate::cli::parse::{
     parse_bead_type, parse_priority, parse_sort, parse_status, parse_time_ms_opt,
@@ -176,10 +176,79 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     if !ctx.json
         && let ResponsePayload::Query(QueryResult::Issues(ref views)) = ok
     {
-        let output = render::render_issue_list_opts(views, args.show_labels);
+        let output = render_issue_list_opts(views, args.show_labels);
         println!("{}", output);
         return Ok(());
     }
 
     print_ok(&ok, ctx.json)
+}
+
+pub(crate) fn render_issue_list_opts(
+    views: &[crate::api::IssueSummary],
+    show_labels: bool,
+) -> String {
+    let mut out = String::new();
+    for v in views {
+        out.push_str(&render_issue_summary_opts(v, show_labels));
+        out.push('\n');
+    }
+    out.trim_end().into()
+}
+
+fn render_issue_summary_opts(v: &crate::api::IssueSummary, show_labels: bool) -> String {
+    let mut s = format!(
+        "{} [P{}] [{}] {}",
+        fmt_issue_ref(&v.namespace, &v.id),
+        v.priority,
+        v.issue_type,
+        v.status
+    );
+    if let Some(a) = &v.assignee
+        && !a.is_empty()
+    {
+        s.push_str(&format!(" @{}", a));
+    }
+    if show_labels && !v.labels.is_empty() {
+        s.push_str(&format!(" {}", fmt_labels(&v.labels)));
+    }
+    s.push_str(&format!(" - {}", v.title));
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{NamespaceId, WriteStamp};
+
+    fn sample_summary(namespace: &str, id: &str) -> crate::api::IssueSummary {
+        crate::api::IssueSummary {
+            id: id.to_string(),
+            namespace: NamespaceId::parse(namespace).expect("namespace"),
+            title: "Title".to_string(),
+            description: String::new(),
+            design: None,
+            acceptance_criteria: None,
+            status: "open".to_string(),
+            priority: 1,
+            issue_type: "task".to_string(),
+            labels: Vec::new(),
+            assignee: None,
+            assignee_expires: None,
+            created_at: WriteStamp::new(0, 0),
+            created_by: "tester".to_string(),
+            updated_at: WriteStamp::new(0, 0),
+            updated_by: "tester".to_string(),
+            estimated_minutes: None,
+            content_hash: "hash".to_string(),
+            note_count: 0,
+        }
+    }
+
+    #[test]
+    fn render_issue_list_includes_namespace() {
+        let summary = sample_summary("wf", "bd-123");
+        let output = render_issue_list_opts(&[summary], false);
+        assert_eq!(output, "wf/bd-123 [P1] [task] open - Title");
+    }
 }

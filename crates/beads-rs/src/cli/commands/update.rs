@@ -1,6 +1,5 @@
 use clap::Args;
 
-use super::super::render;
 use super::super::{
     Ctx, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, print_ok,
     resolve_description, send,
@@ -280,9 +279,13 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         let issue = fetch_issue(ctx, &id)?;
         print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
     } else {
-        println!("{}", render::render_updated(&id_str));
+        println!("{}", render_updated(&id_str));
     }
     Ok(())
+}
+
+pub(crate) fn render_updated(id: &str) -> String {
+    format!("✓ Updated issue: {id}")
 }
 
 fn normalize_reason(reason: Option<String>) -> Option<String> {

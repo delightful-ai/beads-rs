@@ -51,3 +51,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
     }
     Ok(())
 }
+
+pub(crate) fn render_deleted_op(id: &str) -> String {
+    format!("✓ Deleted {id}")
+}

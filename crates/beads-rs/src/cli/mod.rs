@@ -27,7 +27,6 @@ pub use commands::daemon::DaemonCmd;
 
 mod commands;
 mod parse;
-mod render;
 
 thread_local! {
     static COMMAND_CONNECTION: RefCell<Option<IpcConnection>> = const { RefCell::new(None) };
@@ -483,7 +482,7 @@ fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
     if json {
         return print_json(payload);
     }
-    let s = render::render_human(payload);
+    let s = render_human(payload);
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
     if let Err(e) = writeln!(stdout, "{s}")
@@ -492,6 +491,107 @@ fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
         return Err(crate::daemon::IpcError::from(e).into());
     }
     Ok(())
+}
+
+fn render_human(payload: &ResponsePayload) -> String {
+    match payload {
+        ResponsePayload::Op(op) => render_op(&op.result),
+        ResponsePayload::Query(q) => render_query(q),
+        ResponsePayload::Synced(_) => "synced".into(),
+        ResponsePayload::Refreshed(_) => "refreshed".into(),
+        ResponsePayload::Initialized(_) => "initialized".into(),
+        ResponsePayload::ShuttingDown(_) => "shutting down".into(),
+        ResponsePayload::Subscribed(sub) => {
+            format!("subscribed to {}", sub.subscribed.namespace.as_str())
+        }
+        ResponsePayload::Event(ev) => {
+            format!("event {}", ev.event.event_id.origin_seq.get())
+        }
+    }
+}
+
+fn render_op(op: &crate::daemon::ops::OpResult) -> String {
+    match op {
+        crate::daemon::ops::OpResult::Created { id } => {
+            commands::create::render_created(id.as_str())
+        }
+        crate::daemon::ops::OpResult::Updated { id } => {
+            commands::update::render_updated(id.as_str())
+        }
+        crate::daemon::ops::OpResult::Closed { id } => commands::close::render_closed(id.as_str()),
+        crate::daemon::ops::OpResult::Reopened { id } => {
+            commands::reopen::render_reopened(id.as_str())
+        }
+        crate::daemon::ops::OpResult::Deleted { id } => {
+            commands::delete::render_deleted_op(id.as_str())
+        }
+        crate::daemon::ops::OpResult::DepAdded { from, to } => {
+            commands::dep::render_dep_added(from.as_str(), to.as_str())
+        }
+        crate::daemon::ops::OpResult::DepRemoved { from, to } => {
+            commands::dep::render_dep_removed(from.as_str(), to.as_str())
+        }
+        crate::daemon::ops::OpResult::NoteAdded { bead_id, .. } => {
+            commands::comments::render_comment_added(bead_id.as_str())
+        }
+        crate::daemon::ops::OpResult::Claimed { id, expires } => {
+            commands::claim::render_claimed(id.as_str(), expires.0)
+        }
+        crate::daemon::ops::OpResult::Unclaimed { id } => {
+            commands::unclaim::render_unclaimed(id.as_str())
+        }
+        crate::daemon::ops::OpResult::ClaimExtended { id, expires } => {
+            commands::claim::render_claim_extended(id.as_str(), expires.0)
+        }
+    }
+}
+
+fn render_query(q: &QueryResult) -> String {
+    match q {
+        QueryResult::Issue(issue) => commands::show::render_issue_detail(issue),
+        QueryResult::Issues(views) => commands::list::render_issue_list_opts(views, false),
+        QueryResult::DepTree { root, edges } => {
+            commands::dep::render_dep_tree(root.as_str(), edges)
+        }
+        QueryResult::Deps { incoming, outgoing } => commands::dep::render_deps(incoming, outgoing),
+        QueryResult::DepCycles(out) => commands::dep::render_dep_cycles(out),
+        QueryResult::Notes(notes) => commands::comments::render_notes(notes),
+        QueryResult::Status(out) => commands::status::render_status(out),
+        QueryResult::Blocked(blocked) => commands::blocked::render_blocked(blocked),
+        QueryResult::Ready(result) => {
+            commands::ready::render_ready(&result.issues, result.blocked_count, result.closed_count)
+        }
+        QueryResult::Stale(issues) => commands::list::render_issue_list_opts(issues, false),
+        QueryResult::Count(result) => commands::count::render_count(result),
+        QueryResult::Deleted(tombs) => commands::deleted::render_deleted(tombs),
+        QueryResult::DeletedLookup(out) => commands::deleted::render_deleted_lookup(out),
+        QueryResult::EpicStatus(statuses) => commands::epic::render_epic_statuses(statuses),
+        QueryResult::DaemonInfo(info) => commands::daemon::render_daemon_info(info),
+        QueryResult::AdminStatus(status) => commands::admin::render_admin_status(status),
+        QueryResult::AdminMetrics(metrics) => commands::admin::render_admin_metrics(metrics),
+        QueryResult::AdminDoctor(out) => commands::admin::render_admin_doctor(out),
+        QueryResult::AdminScrub(out) => commands::admin::render_admin_scrub(out),
+        QueryResult::AdminFlush(out) => commands::admin::render_admin_flush(out),
+        QueryResult::AdminCheckpoint(out) => commands::admin::render_admin_checkpoint(out),
+        QueryResult::AdminFingerprint(out) => commands::admin::render_admin_fingerprint(out),
+        QueryResult::AdminReloadPolicies(out) => commands::admin::render_admin_reload_policies(out),
+        QueryResult::AdminReloadReplication(out) => {
+            commands::admin::render_admin_reload_replication(out)
+        }
+        QueryResult::AdminReloadLimits(out) => commands::admin::render_admin_reload_limits(out),
+        QueryResult::AdminRotateReplicaId(out) => {
+            commands::admin::render_admin_rotate_replica_id(out)
+        }
+        QueryResult::AdminMaintenanceMode(out) => commands::admin::render_admin_maintenance(out),
+        QueryResult::AdminRebuildIndex(out) => commands::admin::render_admin_rebuild_index(out),
+        QueryResult::Validation { warnings } => {
+            if warnings.is_empty() {
+                "ok".into()
+            } else {
+                warnings.join("\n")
+            }
+        }
+    }
 }
 
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {

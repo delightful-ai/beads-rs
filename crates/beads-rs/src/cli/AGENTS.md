@@ -6,7 +6,7 @@ NEVER: mutate state by directly calling git sync; always go through daemon reque
 
 ## How to work here
 - Keep handlers thin: validate args → build `Request` → send → render.
-- Human output lives in `src/cli/render.rs`; JSON output should use canonical `src/api/` types.
+- Human output lives alongside each command handler in `src/cli/commands/`; JSON output should use canonical `src/api/` types.
 - Golden pattern: `src/cli/commands/create.rs` (request/response + JSON vs human rendering).
 - Command wiring lives in `src/cli/mod.rs` and `src/cli/commands/mod.rs`.
 
