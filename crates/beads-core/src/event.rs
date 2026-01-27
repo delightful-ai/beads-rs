@@ -52,7 +52,7 @@ impl<S> EventBytes<S> {
 
 impl EventBytes<Canonical> {
     /// Construct canonical bytes without validation; only use with encoder output.
-    pub fn new_unchecked(bytes: Bytes) -> Self {
+    pub(crate) fn new_unchecked(bytes: Bytes) -> Self {
         Self {
             bytes,
             _state: PhantomData,
@@ -310,7 +310,7 @@ pub struct PrevDeferred {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedEvent<P> {
     pub body: ValidatedEventBody,
-    pub bytes: EventBytes<Opaque>,
+    pub bytes: EventBytes<Canonical>,
     pub sha256: Sha256,
     pub prev: P,
 }
@@ -404,6 +404,8 @@ pub enum EventFrameError {
     },
     #[error("event id does not match decoded body")]
     FrameMismatch,
+    #[error("event body is not canonically encoded")]
+    NonCanonical,
     #[error("sha256 mismatch")]
     HashMismatch,
     #[error("prev_sha256 mismatch")]
@@ -412,6 +414,8 @@ pub enum EventFrameError {
     Validation(#[from] EventValidationError),
     #[error("event body decode failed: {0}")]
     Decode(#[from] DecodeError),
+    #[error("event body encode failed: {0}")]
+    Encode(#[from] EncodeError),
     #[error(transparent)]
     Lookup(#[from] EventShaLookupError),
     #[error("equivocation detected")]
@@ -2758,6 +2762,7 @@ pub fn verify_event_frame(
         DecodeError::Validation(source) => EventFrameError::Validation(source),
         other => EventFrameError::Decode(other),
     })?;
+    let canonical = encode_event_body_canonical(body.as_ref())?;
 
     if body.store != expected_store {
         return Err(EventFrameError::WrongStore {
@@ -2773,7 +2778,11 @@ pub fn verify_event_frame(
         return Err(EventFrameError::FrameMismatch);
     }
 
-    let computed = hash_event_body(&frame.bytes);
+    if canonical.as_ref() != frame.bytes.as_ref() {
+        return Err(EventFrameError::NonCanonical);
+    }
+
+    let computed = hash_event_body(&canonical);
     if computed != frame.sha256 {
         return Err(EventFrameError::HashMismatch);
     }
@@ -2788,7 +2797,7 @@ pub fn verify_event_frame(
     match (seq, frame.prev_sha256, expected_prev_head) {
         (1, None, _) => Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
             body,
-            bytes: frame.bytes.clone(),
+            bytes: canonical.clone(),
             sha256: frame.sha256,
             prev: PrevVerified { prev: None },
         })),
@@ -2797,7 +2806,7 @@ pub fn verify_event_frame(
         (s, Some(prev), Some(head)) if s > 1 && prev == head => {
             Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
                 body,
-                bytes: frame.bytes.clone(),
+                bytes: canonical.clone(),
                 sha256: frame.sha256,
                 prev: PrevVerified { prev: Some(prev) },
             }))
@@ -2809,7 +2818,7 @@ pub fn verify_event_frame(
                 .expect("seq > 1 must have predecessor");
             Ok(VerifiedEventAny::Deferred(VerifiedEvent {
                 body,
-                bytes: frame.bytes.clone(),
+                bytes: canonical.clone(),
                 sha256: frame.sha256,
                 prev: PrevDeferred {
                     prev,
@@ -3232,6 +3241,78 @@ mod tests {
             prev_sha256,
             bytes: bytes.into(),
         }
+    }
+
+    fn encode_event_body_noncanonical(body: &EventBody) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        let mut len = 9;
+        if body.client_request_id.is_some() {
+            len += 1;
+        }
+        if body.trace_id.is_some() {
+            len += 1;
+        }
+        match &body.kind {
+            EventKindV1::TxnV1(_) => {
+                len += 2;
+            }
+        }
+
+        enc.map(len as u64).unwrap();
+
+        enc.str("txn_id").unwrap();
+        enc.str(&body.txn_id.as_uuid().to_string()).unwrap();
+
+        if let Some(client_request_id) = &body.client_request_id {
+            enc.str("client_request_id").unwrap();
+            enc.str(&client_request_id.as_uuid().to_string()).unwrap();
+        }
+        if let Some(trace_id) = &body.trace_id {
+            enc.str("trace_id").unwrap();
+            enc.str(&trace_id.as_uuid().to_string()).unwrap();
+        }
+
+        match &body.kind {
+            EventKindV1::TxnV1(txn) => {
+                enc.str("delta").unwrap();
+                encode_txn_delta(&mut enc, &txn.delta).unwrap();
+            }
+        }
+
+        enc.str("envelope_v").unwrap();
+        enc.u32(body.envelope_v).unwrap();
+
+        enc.str("event_time_ms").unwrap();
+        enc.u64(body.event_time_ms).unwrap();
+
+        match &body.kind {
+            EventKindV1::TxnV1(txn) => {
+                enc.str("hlc_max").unwrap();
+                encode_hlc_max(&mut enc, &txn.hlc_max).unwrap();
+            }
+        }
+
+        enc.str("kind").unwrap();
+        enc.str(body.kind.as_str()).unwrap();
+
+        enc.str("namespace").unwrap();
+        enc.str(body.namespace.as_str()).unwrap();
+
+        enc.str("origin_replica_id").unwrap();
+        enc.str(&body.origin_replica_id.as_uuid().to_string())
+            .unwrap();
+
+        enc.str("origin_seq").unwrap();
+        enc.u64(body.origin_seq.get()).unwrap();
+
+        enc.str("store_epoch").unwrap();
+        enc.u64(body.store.store_epoch.get()).unwrap();
+
+        enc.str("store_id").unwrap();
+        enc.str(&body.store.store_id.as_uuid().to_string()).unwrap();
+
+        buf
     }
 
     struct MapLookup(std::collections::BTreeMap<EventId, Sha256>);
@@ -3983,6 +4064,48 @@ mod tests {
             VerifiedEventAny::Contiguous(ev) => {
                 assert_eq!(ev.prev.prev, Some(first_frame.sha256));
                 assert_eq!(ev.seq(), Seq1::from_u64(2).unwrap());
+            }
+            other => panic!("expected contiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_event_frame_rejects_non_canonical_bytes() {
+        let limits = Limits::default();
+        let body = sample_body_with_seq(1);
+        let noncanonical = encode_event_body_noncanonical(&body);
+        let canonical = encode_event_body_canonical(&body).unwrap();
+        assert_ne!(canonical.as_ref(), noncanonical.as_slice());
+
+        let bytes = EventBytes::<Opaque>::new(Bytes::from(noncanonical.clone()));
+        let frame = EventFrameV1 {
+            eid: EventId::new(
+                body.origin_replica_id,
+                body.namespace.clone(),
+                body.origin_seq,
+            ),
+            sha256: hash_event_body(&bytes),
+            prev_sha256: None,
+            bytes,
+        };
+        let lookup = MapLookup(std::collections::BTreeMap::new());
+
+        let err = verify_event_frame(&frame, &limits, body.store, None, &lookup).unwrap_err();
+        assert!(matches!(err, EventFrameError::NonCanonical));
+    }
+
+    #[test]
+    fn verify_event_frame_returns_canonical_bytes() {
+        let limits = Limits::default();
+        let body = sample_body_with_seq(1);
+        let frame = sample_frame(&body, None);
+        let lookup = MapLookup(std::collections::BTreeMap::new());
+
+        let verified = verify_event_frame(&frame, &limits, body.store, None, &lookup).unwrap();
+        match verified {
+            VerifiedEventAny::Contiguous(ev) => {
+                let canonical = encode_event_body_canonical(&body).unwrap();
+                assert_eq!(ev.bytes.as_ref(), canonical.as_ref());
             }
             other => panic!("expected contiguous, got {other:?}"),
         }

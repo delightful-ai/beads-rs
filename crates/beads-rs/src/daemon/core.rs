@@ -1717,8 +1717,12 @@ impl Daemon {
 
                 let event_id = event_id_for(origin, namespace.clone(), event.body.origin_seq);
                 let prev_sha = event.prev.prev.map(|sha| Sha256(sha.0));
-                let broadcast =
-                    BroadcastEvent::new(event_id, event.sha256, prev_sha, event.bytes.clone());
+                let broadcast = BroadcastEvent::new(
+                    event_id,
+                    event.sha256,
+                    prev_sha,
+                    event.bytes.clone().into(),
+                );
                 if let Err(err) = store.broadcaster.publish(broadcast) {
                     tracing::warn!("event broadcast failed: {err}");
                 }
@@ -3106,7 +3110,7 @@ mod tests {
         let sha256 = hash_event_body(&bytes);
         VerifiedEvent {
             body,
-            bytes: bytes.into(),
+            bytes,
             sha256,
             prev: PrevVerified { prev },
         }
