@@ -36,7 +36,7 @@ use super::wal::{
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    Applied, BeadId, CanonicalState, Dot, DurabilityClass, DurabilityReceipt, Durable,
+    ActorId, Applied, BeadId, CanonicalState, Dot, DurabilityClass, DurabilityReceipt, Durable,
     EventBody, EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId,
     ReplicaId, Seq1, Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark,
     WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
@@ -1184,9 +1184,9 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, CanonicalState, Claim, ClientRequestId,
-        DurabilityReceipt, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Stamp, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId, TxnOpV1,
+        ActorId, Bead, BeadCore, BeadFields, BeadType, CanonicalState, Claim, ClientRequestId,
+        DurabilityReceipt, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Priority, Stamp,
+        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId, TxnOpV1,
         WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::daemon::Clock;

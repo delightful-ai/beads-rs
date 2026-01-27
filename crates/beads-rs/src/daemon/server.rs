@@ -86,11 +86,11 @@ impl RequestContext {
                 Self::from_mutation("set_parent", &ctx.repo.path, &ctx.meta)
             }
             Request::Close { ctx, .. } => Self::from_mutation("close", &ctx.repo.path, &ctx.meta),
-            Request::Reopen { ctx, .. } => {
-                Self::from_mutation("reopen", &ctx.repo.path, &ctx.meta)
-            }
+            Request::Reopen { ctx, .. } => Self::from_mutation("reopen", &ctx.repo.path, &ctx.meta),
             Request::Delete { ctx, .. } => Self::from_mutation("delete", &ctx.repo.path, &ctx.meta),
-            Request::AddDep { ctx, .. } => Self::from_mutation("add_dep", &ctx.repo.path, &ctx.meta),
+            Request::AddDep { ctx, .. } => {
+                Self::from_mutation("add_dep", &ctx.repo.path, &ctx.meta)
+            }
             Request::RemoveDep { ctx, .. } => {
                 Self::from_mutation("remove_dep", &ctx.repo.path, &ctx.meta)
             }
@@ -167,9 +167,7 @@ impl RequestContext {
             Request::AdminRebuildIndex { ctx, .. } => {
                 Self::from_repo("admin_rebuild_index", &ctx.path)
             }
-            Request::Validate { ctx, .. } => {
-                Self::from_read("validate", &ctx.repo.path, &ctx.read)
-            }
+            Request::Validate { ctx, .. } => Self::from_read("validate", &ctx.repo.path, &ctx.read),
             Request::Subscribe { ctx, .. } => {
                 Self::from_read("subscribe", &ctx.repo.path, &ctx.read)
             }

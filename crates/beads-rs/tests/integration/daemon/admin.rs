@@ -184,7 +184,10 @@ impl AdminFixture {
 
     fn admin_status(&self) -> AdminStatusOutput {
         match self.send_query(Request::AdminStatus {
-            ctx: ReadCtx::new(self.repo_dir.path().to_path_buf(), ReadConsistency::default()),
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
             payload: EmptyPayload {},
         }) {
             beads_rs::api::QueryResult::AdminStatus(status) => status,
@@ -194,7 +197,10 @@ impl AdminFixture {
 
     fn admin_metrics(&self) -> AdminMetricsOutput {
         match self.send_query(Request::AdminMetrics {
-            ctx: ReadCtx::new(self.repo_dir.path().to_path_buf(), ReadConsistency::default()),
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
             payload: EmptyPayload {},
         }) {
             beads_rs::api::QueryResult::AdminMetrics(metrics) => metrics,
@@ -204,7 +210,10 @@ impl AdminFixture {
 
     fn admin_doctor(&self) -> beads_rs::api::AdminDoctorOutput {
         match self.send_query(Request::AdminDoctor {
-            ctx: ReadCtx::new(self.repo_dir.path().to_path_buf(), ReadConsistency::default()),
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
             payload: AdminDoctorPayload {
                 max_records_per_namespace: None,
                 verify_checkpoint_cache: false,
@@ -217,7 +226,10 @@ impl AdminFixture {
 
     fn admin_scrub(&self, max_records_per_namespace: Option<u64>) -> AdminScrubOutput {
         match self.send_query(Request::AdminScrub {
-            ctx: ReadCtx::new(self.repo_dir.path().to_path_buf(), ReadConsistency::default()),
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
             payload: AdminScrubPayload {
                 max_records_per_namespace,
                 verify_checkpoint_cache: false,
@@ -244,7 +256,10 @@ impl AdminFixture {
         sample: Option<AdminFingerprintSample>,
     ) -> AdminFingerprintOutput {
         match self.send_query(Request::AdminFingerprint {
-            ctx: ReadCtx::new(self.repo_dir.path().to_path_buf(), ReadConsistency::default()),
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
             payload: AdminFingerprintPayload { mode, sample },
         }) {
             beads_rs::api::QueryResult::AdminFingerprint(output) => output,

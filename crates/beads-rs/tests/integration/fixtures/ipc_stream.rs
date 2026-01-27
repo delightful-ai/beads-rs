@@ -8,8 +8,8 @@ use thiserror::Error;
 use beads_rs::NamespaceId;
 use beads_rs::api::{StreamEvent, SubscribeInfo};
 use beads_rs::daemon::ipc::{
-    EmptyPayload, IpcClient, IpcError, ReadConsistency, ReadCtx, Request, Response, ResponsePayload,
-    SubscriptionStream,
+    EmptyPayload, IpcClient, IpcError, ReadConsistency, ReadCtx, Request, Response,
+    ResponsePayload, SubscriptionStream,
 };
 
 #[derive(Debug)]

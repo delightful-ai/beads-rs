@@ -249,9 +249,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         if assignee == "none" || assignee == "-" || assignee == "unassigned" {
             let req = Request::Unclaim {
                 ctx: ctx.mutation_ctx(),
-                payload: IdPayload {
-                    id: id_str.clone(),
-                },
+                payload: IdPayload { id: id_str.clone() },
             };
             let _ = send(&req)?;
         } else {

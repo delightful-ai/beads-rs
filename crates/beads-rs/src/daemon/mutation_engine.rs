@@ -2218,7 +2218,6 @@ mod tests {
 
     #[test]
     fn parsed_request_rejects_invalid_id() {
-        let actor = actor_id("alice");
         let err = ParsedMutationRequest::parse_add_labels(LabelsPayload {
             id: "bad".into(),
             labels: vec![],
@@ -2229,7 +2228,6 @@ mod tests {
 
     #[test]
     fn parsed_request_rejects_invalid_label() {
-        let actor = actor_id("alice");
         let err = ParsedMutationRequest::parse_add_labels(LabelsPayload {
             id: "bd-123".into(),
             labels: vec!["bad\nlabel".into()],

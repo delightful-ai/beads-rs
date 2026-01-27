@@ -34,7 +34,9 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             // Fetch deps for richer show output.
             let deps_payload = send(&Request::Deps {
                 ctx: ctx.read_ctx(),
-                payload: IdPayload { id: view.id.clone() },
+                payload: IdPayload {
+                    id: view.id.clone(),
+                },
             })?;
             let (incoming_edges, outgoing_edges) = match deps_payload {
                 ResponsePayload::Query(QueryResult::Deps { incoming, outgoing }) => {
@@ -53,7 +55,9 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             // Human mode: fetch notes and build richer display
             let notes_payload = send(&Request::Notes {
                 ctx: ctx.read_ctx(),
-                payload: IdPayload { id: view.id.clone() },
+                payload: IdPayload {
+                    id: view.id.clone(),
+                },
             })?;
             let notes = match notes_payload {
                 ResponsePayload::Query(QueryResult::Notes(n)) => n,
@@ -346,25 +350,22 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     }
 
     // Sort remaining by priority (P0 first), then by status (in_progress before open)
-    remaining.sort_by(|a, b| {
-        a.priority.cmp(&b.priority).then_with(|| {
-            // in_progress before open
-            let a_prog = a.status == "in_progress";
-            let b_prog = b.status == "in_progress";
-            b_prog.cmp(&a_prog)
-        })
+    remaining.sort_by_key(|child| {
+        (
+            child.priority,
+            std::cmp::Reverse(child.status == "in_progress"),
+        )
     });
 
     // Sort done by updated_at (most recent first)
-    done.sort_by(|a, b| b.updated_at.wall_ms.cmp(&a.updated_at.wall_ms));
+    done.sort_by_key(|child| std::cmp::Reverse(child.updated_at.wall_ms));
 
     let total = children.len();
     let done_count = done.len();
-    let pct = if total > 0 {
-        (done_count * 100) / total
-    } else {
-        0
-    };
+    let pct = done_count
+        .saturating_mul(100)
+        .checked_div(total)
+        .unwrap_or(0);
 
     out.push_str(&format!(
         "\nProgress: {}/{} done ({}%)\n",

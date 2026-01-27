@@ -66,9 +66,15 @@ impl MutationPayload {
                 ParsedMutationRequest::parse_set_parent(payload.clone())
             }
             MutationPayload::Close(payload) => ParsedMutationRequest::parse_close(payload.clone()),
-            MutationPayload::Reopen(payload) => ParsedMutationRequest::parse_reopen(payload.clone()),
-            MutationPayload::Delete(payload) => ParsedMutationRequest::parse_delete(payload.clone()),
-            MutationPayload::AddDep(payload) => ParsedMutationRequest::parse_add_dep(payload.clone()),
+            MutationPayload::Reopen(payload) => {
+                ParsedMutationRequest::parse_reopen(payload.clone())
+            }
+            MutationPayload::Delete(payload) => {
+                ParsedMutationRequest::parse_delete(payload.clone())
+            }
+            MutationPayload::AddDep(payload) => {
+                ParsedMutationRequest::parse_add_dep(payload.clone())
+            }
             MutationPayload::RemoveDep(payload) => {
                 ParsedMutationRequest::parse_remove_dep(payload.clone())
             }

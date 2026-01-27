@@ -558,7 +558,7 @@ impl Daemon {
                 let repo = ctx.repo.path;
                 let meta = ctx.meta;
                 self.apply_extend_claim(&repo, meta, payload, git_tx)
-            },
+            }
 
             // Queries - delegate to query_executor module
             Request::Show { ctx, payload } => {
@@ -581,7 +581,8 @@ impl Daemon {
             Request::List { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                self.query_list(&repo, &payload.filters, read, git_tx).into()
+                self.query_list(&repo, &payload.filters, read, git_tx)
+                    .into()
             }
 
             Request::Ready { ctx, payload } => {

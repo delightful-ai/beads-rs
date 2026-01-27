@@ -408,11 +408,7 @@ impl WalIndexReader for MemoryWalIndexReader {
                 .filter(|row| &row.namespace == ns)
                 .cloned()
                 .collect();
-            rows.sort_by(|a, b| {
-                a.created_at_ms
-                    .cmp(&b.created_at_ms)
-                    .then_with(|| a.segment_id.cmp(&b.segment_id))
-            });
+            rows.sort_by_key(|row| (row.created_at_ms, row.segment_id));
             Ok(rows)
         })
     }
@@ -420,11 +416,7 @@ impl WalIndexReader for MemoryWalIndexReader {
     fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError> {
         self.with_state(|state| {
             let mut rows: Vec<WatermarkRow> = state.watermarks.values().cloned().collect();
-            rows.sort_by(|a, b| {
-                a.namespace
-                    .cmp(&b.namespace)
-                    .then_with(|| a.origin.cmp(&b.origin))
-            });
+            rows.sort_by_key(|row| (row.namespace.clone(), row.origin));
             Ok(rows)
         })
     }
@@ -432,7 +424,7 @@ impl WalIndexReader for MemoryWalIndexReader {
     fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError> {
         self.with_state(|state| {
             let mut rows: Vec<HlcRow> = state.hlc.values().cloned().collect();
-            rows.sort_by(|a, b| a.actor_id.cmp(&b.actor_id));
+            rows.sort_by_key(|row| row.actor_id.clone());
             Ok(rows)
         })
     }
@@ -441,7 +433,7 @@ impl WalIndexReader for MemoryWalIndexReader {
         self.with_state(|state| {
             let mut rows: Vec<ReplicaLivenessRow> =
                 state.replica_liveness.values().cloned().collect();
-            rows.sort_by(|a, b| a.replica_id.cmp(&b.replica_id));
+            rows.sort_by_key(|row| row.replica_id);
             Ok(rows)
         })
     }
