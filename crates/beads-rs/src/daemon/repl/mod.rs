@@ -24,7 +24,7 @@ pub use manager::{
 pub use peer_acks::{PeerAckError, PeerAckTable, QuorumOutcome};
 pub use proto::{
     Ack, Capabilities, Events, Hello, ProtoDecodeError, ProtoEncodeError, ReplEnvelope,
-    ReplMessage, Want, WatermarkHeads, WatermarkMap, decode_envelope, encode_envelope,
+    ReplMessage, Want, WatermarkMap, WatermarkState, decode_envelope, encode_envelope,
 };
 pub use runtime::{ReplIngestRequest, ReplSessionStore, WalRangeError, WalRangeReader};
 pub use server::{
