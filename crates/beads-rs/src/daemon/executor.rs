@@ -36,11 +36,11 @@ use super::wal::{
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    ActorId, Applied, BeadId, BeadType, CanonicalState, DepKind, Dot, DurabilityClass,
-    DurabilityReceipt, Durable, EventBody, EventBytes, EventId, EventKindV1, HeadStatus, Limits,
-    NamespaceId, NoteId, Priority, ReplicaId, Seq1, Sha256, Stamp, StoreIdentity, TxnDeltaV1,
-    TxnOpV1, WallClock, Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event,
-    decode_event_body, hash_event_body,
+    Applied, BeadId, CanonicalState, Dot, DurabilityClass, DurabilityReceipt, Durable,
+    EventBody, EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId,
+    ReplicaId, Seq1, Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark,
+    WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
+    hash_event_body,
 };
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
