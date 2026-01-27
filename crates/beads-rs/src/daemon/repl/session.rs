@@ -552,9 +552,9 @@ impl<R, P: PhasePeerOpt> Session<R, P> {
             next,
             vec![
                 SessionAction::Send(ReplMessage::Error(payload.clone())),
-                SessionAction::Close {
-                    error: Some(payload),
-                },
+                // Error frame already emitted above; close without re-emitting to
+                // avoid duplicate error frames on transports that send close errors.
+                SessionAction::Close { error: None },
             ],
         )
     }
