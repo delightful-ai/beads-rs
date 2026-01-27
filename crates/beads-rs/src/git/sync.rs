@@ -1420,6 +1420,7 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
+        let dep_key = after.check_dep_add_key(dep_key).unwrap();
         after.apply_dep_add(dep_key, dep_dot, stamp);
 
         let diff = compute_diff(&before, &after);

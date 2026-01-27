@@ -332,8 +332,18 @@ pub fn import_go_export(
     }
 
     for (key, dot, stamp) in deps_to_insert {
-        state.apply_dep_add(key, dot, stamp);
-        report.deps += 1;
+        match state.check_dep_add_key(key.clone()) {
+            Ok(key) => {
+                state.apply_dep_add(key, dot, stamp);
+                report.deps += 1;
+            }
+            Err(err) => report.warnings.push(format!(
+                "skipping dependency {} -> {}: {}",
+                key.from(),
+                key.to(),
+                err.reason
+            )),
+        }
     }
 
     report.root_slug = chosen_slug.unwrap_or_else(|| "bd".to_string());

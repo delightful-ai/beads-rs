@@ -1216,6 +1216,8 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
             counter: 1,
         };
+        let ab = state.check_dep_add_key(ab).expect("dep key");
+        let ba = state.check_dep_add_key(ba).expect("dep key");
         state.apply_dep_add(ab, dep_dot, stamp.clone());
         state.apply_dep_add(ba, dep_dot_2, stamp);
 
