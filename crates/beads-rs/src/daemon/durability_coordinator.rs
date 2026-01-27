@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::core::{
-    DurabilityClass, DurabilityOutcome, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaId,
-    ReplicaRole, ReplicaRoster, ReplicateMode, ReplicatedProof, Seq0, Seq1,
+    DurabilityClass, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRole,
+    ReplicaRoster, ReplicateMode, Seq0, Seq1,
 };
 use crate::daemon::ops::OpError;
 use crate::daemon::repl::{PeerAckTable, QuorumOutcome};
@@ -97,7 +97,8 @@ impl DurabilityCoordinator {
                     let elapsed = start.elapsed();
                     if wait_timeout.is_zero() || elapsed >= wait_timeout {
                         let pending = Self::pending_replica_ids(&eligible, &acked_by);
-                        let pending_receipt = Self::pending_receipt(receipt, requested);
+                        let pending_receipt =
+                            Self::pending_receipt(receipt, requested, acked_by.clone());
                         return Err(OpError::DurabilityTimeout {
                             requested,
                             waited_ms: elapsed.as_millis() as u64,
@@ -184,25 +185,30 @@ impl DurabilityCoordinator {
     }
 
     pub(crate) fn pending_receipt(
-        mut receipt: DurabilityReceipt,
+        receipt: DurabilityReceipt,
         requested: DurabilityClass,
+        acked_by: Vec<ReplicaId>,
     ) -> DurabilityReceipt {
-        receipt.outcome = DurabilityOutcome::Pending { requested };
+        let DurabilityClass::ReplicatedFsync { k } = requested else {
+            return receipt;
+        };
         receipt
+            .with_replicated_pending(k, acked_by)
+            .expect("pending receipt invariants")
     }
 
     pub(crate) fn achieved_receipt(
-        mut receipt: DurabilityReceipt,
+        receipt: DurabilityReceipt,
         requested: DurabilityClass,
         k: NonZeroU32,
         acked_by: Vec<ReplicaId>,
     ) -> DurabilityReceipt {
-        receipt.durability_proof.replicated = Some(ReplicatedProof { k, acked_by });
-        receipt.outcome = DurabilityOutcome::Achieved {
-            requested,
-            achieved: DurabilityClass::ReplicatedFsync { k },
+        let DurabilityClass::ReplicatedFsync { k: requested_k } = requested else {
+            return receipt;
         };
         receipt
+            .with_replicated_achieved(requested_k, k, acked_by)
+            .expect("achieved receipt invariants")
     }
 
     pub(crate) fn pending_replica_ids(
@@ -329,19 +335,14 @@ mod tests {
             )
             .unwrap();
 
-        match updated.outcome {
-            DurabilityOutcome::Achieved { achieved, .. } => {
-                assert_eq!(
-                    achieved,
-                    DurabilityClass::ReplicatedFsync {
-                        k: std::num::NonZeroU32::new(2).unwrap()
-                    }
-                );
-            }
-            other => panic!("unexpected outcome: {other:?}"),
-        }
+        assert_eq!(
+            updated.outcome().achieved(),
+            Some(DurabilityClass::ReplicatedFsync {
+                k: std::num::NonZeroU32::new(2).unwrap()
+            })
+        );
         let proof = updated
-            .durability_proof
+            .durability_proof()
             .replicated
             .expect("replicated proof");
         assert_eq!(proof.k.get(), 2);
@@ -438,10 +439,9 @@ mod tests {
             .unwrap_err();
 
         match err {
-            OpError::DurabilityTimeout { receipt, .. } => match receipt.outcome {
-                DurabilityOutcome::Pending { .. } => {}
-                other => panic!("unexpected outcome: {other:?}"),
-            },
+            OpError::DurabilityTimeout { receipt, .. } => {
+                assert!(receipt.outcome().is_pending());
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }

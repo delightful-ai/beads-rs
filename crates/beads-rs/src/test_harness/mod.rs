@@ -845,8 +845,11 @@ impl ReplicationRig {
                             .min(u64::MAX as u128) as u64;
                         let pending =
                             DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
-                        let pending_receipt =
-                            DurabilityCoordinator::pending_receipt(response.receipt, requested);
+                        let pending_receipt = DurabilityCoordinator::pending_receipt(
+                            response.receipt,
+                            requested,
+                            acked_by,
+                        );
                         let err = OpError::DurabilityTimeout {
                             requested,
                             waited_ms,

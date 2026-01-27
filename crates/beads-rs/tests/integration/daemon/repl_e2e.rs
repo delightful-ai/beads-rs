@@ -13,8 +13,8 @@ use crate::fixtures::tailnet_proxy::TailnetTraceMode;
 use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
 use beads_rs::core::{
-    BeadType, DurabilityClass, DurabilityOutcome, HeadStatus, NamespaceId, Priority,
-    ProtocolErrorCode, ReplicaEntry, ReplicaRole, Seq0,
+    BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode, ReplicaEntry,
+    ReplicaRole, Seq0,
 };
 use beads_rs::daemon::ipc::{
     AdminCheckpointWaitPayload, CreatePayload, IdPayload, IpcClient, MutationCtx, MutationMeta,
@@ -506,12 +506,9 @@ fn repl_daemon_replicated_fsync_receipt() {
             k: NonZeroU32::new(2).unwrap(),
         }
     );
-    assert!(matches!(
-        receipt.outcome,
-        DurabilityOutcome::Achieved { .. }
-    ));
+    assert!(receipt.outcome().is_achieved());
     let replicated = receipt
-        .durability_proof
+        .durability_proof()
         .replicated
         .expect("replicated proof");
     assert_eq!(replicated.k, NonZeroU32::new(2).unwrap());
@@ -526,7 +523,7 @@ fn repl_daemon_replicated_fsync_receipt() {
         1,
         &issue_id,
         ReadConsistency {
-            require_min_seen: Some(receipt.min_seen.clone()),
+            require_min_seen: Some(receipt.min_seen().clone()),
             wait_timeout_ms: Some(30_000),
             ..Default::default()
         },
@@ -538,8 +535,8 @@ fn repl_daemon_replicated_fsync_receipt() {
         other => panic!("unexpected show response: {other:?}"),
     }
 
-    let mut impossible = receipt.min_seen.clone();
-    let event_id = receipt.event_ids.first().expect("event id");
+    let mut impossible = receipt.min_seen().clone();
+    let event_id = receipt.event_ids().first().expect("event id");
     let next_seq = event_id.origin_seq.get() + 1;
     impossible
         .observe_at_least(
@@ -634,7 +631,7 @@ fn repl_daemon_replicated_fsync_timeout_receipt() {
                 .receipt_as::<beads_rs::DurabilityReceipt>()
                 .expect("receipt decode");
             let receipt = receipt.expect("receipt missing");
-            assert!(matches!(receipt.outcome, DurabilityOutcome::Pending { .. }));
+            assert!(receipt.outcome().is_pending());
         }
         other => panic!("unexpected durability timeout response: {other:?}"),
     }

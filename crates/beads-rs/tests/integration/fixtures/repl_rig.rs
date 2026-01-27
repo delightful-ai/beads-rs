@@ -581,7 +581,7 @@ impl Node {
                         other => panic!("unexpected create result: {other:?}"),
                     };
                     let id_str = id.as_str().to_string();
-                    self.record_min_seen(&id_str, &op.receipt.min_seen);
+                    self.record_min_seen(&id_str, op.receipt.min_seen());
                     id_str
                 }
                 ResponsePayload::Query(QueryResult::Issue(issue)) => issue.id,
