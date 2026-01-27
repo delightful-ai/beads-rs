@@ -1056,7 +1056,10 @@ impl RigLink {
             }
         }
 
-        if matches!(self.inbound.as_ref(), Some(SessionState::Streaming(_))) {
+        if matches!(
+            self.inbound.as_ref(),
+            Some(SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_))
+        ) {
             let inbound_snapshot = self
                 .inbound_store
                 .watermark_snapshot(&[NamespaceId::core()]);
@@ -1119,10 +1122,20 @@ impl RigLink {
             SessionAction::PeerWant(want) => {
                 let streaming = match endpoint {
                     Endpoint::Outbound => {
-                        matches!(self.outbound.as_ref(), Some(SessionState::Streaming(_)))
+                        matches!(
+                            self.outbound.as_ref(),
+                            Some(
+                                SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_)
+                            )
+                        )
                     }
                     Endpoint::Inbound => {
-                        matches!(self.inbound.as_ref(), Some(SessionState::Streaming(_)))
+                        matches!(
+                            self.inbound.as_ref(),
+                            Some(
+                                SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_)
+                            )
+                        )
                     }
                 };
                 if !streaming {

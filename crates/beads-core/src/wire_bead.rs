@@ -1150,7 +1150,10 @@ mod tests {
     fn wire_claim_snapshot_rejects_expires_without_assignee() {
         let err = serde_json::from_str::<WireClaimSnapshot>(r#"{"assignee_expires":123}"#)
             .expect_err("expires without assignee must fail");
-        assert!(err.to_string().contains("assignee_expires requires assignee"));
+        assert!(
+            err.to_string()
+                .contains("assignee_expires requires assignee")
+        );
     }
 
     #[test]

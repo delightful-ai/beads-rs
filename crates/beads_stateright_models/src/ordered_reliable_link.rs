@@ -149,13 +149,20 @@ where
     ) {
         match msg {
             MsgWrapper::Deliver(seq, wrapped_msg) => {
-                // Always ack the message to prevent re-sends, and early exit if already delivered.
-                o.send(src, MsgWrapper::Ack(seq));
-                if seq <= *state.last_delivered_seqs.get(&src).unwrap_or(&0) {
+                let last_delivered = *state.last_delivered_seqs.get(&src).unwrap_or(&0);
+                if seq <= last_delivered {
+                    // Duplicate delivery, ack so sender can stop retrying.
+                    o.send(src, MsgWrapper::Ack(seq));
+                    return;
+                }
+                let expected_seq = last_delivered.saturating_add(1);
+                if seq != expected_seq {
+                    // Gap/out-of-order delivery. Ignore so sender keeps retrying until the missing
+                    // predecessor is delivered.
                     return;
                 }
 
-                // Process the message, and early exit if ignored.
+                // Process the message.
                 let mut wrapped_state = Cow::Borrowed(&state.wrapped_state);
                 let mut wrapped_out = Out::new();
                 self.wrapped_actor.on_msg(
@@ -165,11 +172,10 @@ where
                     wrapped_msg,
                     &mut wrapped_out,
                 );
-                if is_no_op(&wrapped_state, &wrapped_out) {
-                    return;
-                }
+                let ignored = is_no_op(&wrapped_state, &wrapped_out);
 
-                // Never delivered, and not ignored by actor, so update the sequencer and process the original output.
+                // In-order delivery always advances transport sequence and is acked, even if the
+                // wrapped actor made no state/output changes.
                 if let Cow::Owned(wrapped_state) = wrapped_state {
                     // Avoid unnecessarily cloning wrapped_state by not calling to_mut() in this
                     // case.
@@ -182,6 +188,10 @@ where
                     });
                 }
                 state.to_mut().last_delivered_seqs.insert(src, seq);
+                o.send(src, MsgWrapper::Ack(seq));
+                if ignored {
+                    return;
+                }
                 process_output(state.to_mut(), wrapped_out, o);
             }
             MsgWrapper::Ack(seq) => {

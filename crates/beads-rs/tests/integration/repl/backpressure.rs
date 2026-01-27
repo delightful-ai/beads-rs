@@ -33,7 +33,7 @@ fn inbound_session_with_limits(
         &mut store,
         0,
     );
-    assert!(matches!(session, SessionState::Streaming(_)));
+    assert!(matches!(session, SessionState::StreamingLive(_)));
 
     (session, store, identity)
 }
