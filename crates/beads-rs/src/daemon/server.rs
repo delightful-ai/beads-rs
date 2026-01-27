@@ -1667,7 +1667,7 @@ mod tests {
     #[test]
     fn read_gate_waiter_releases_on_apply() {
         let mut env = TestEnv::new();
-        let mut loaded = env
+        let loaded = env
             .daemon
             .ensure_repo_fresh(&env.repo_path, &env.git_tx)
             .unwrap();
@@ -1720,7 +1720,7 @@ mod tests {
         assert!(respond_rx.try_recv().is_err());
 
         let applied_wm = watermark(1);
-        let loaded = env
+        let mut loaded = env
             .daemon
             .ensure_repo_fresh(&env.repo_path, &env.git_tx)
             .unwrap();
