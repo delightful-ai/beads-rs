@@ -851,7 +851,7 @@ fn label_state_from_wire(
 ) -> LabelState {
     let (set, normalization) = OrSet::normalize_for_import(wire.entries, wire.cc);
     if normalization.changed() {
-        tracing::warn!(
+        tracing::debug!(
             path = %path.display(),
             line = line.line_no,
             namespace = %line.namespace,
@@ -884,7 +884,7 @@ fn dep_store_from_wire(
     }
     let (set, normalization) = OrSet::normalize_for_import(entries, wire.cc.clone());
     if normalization.changed() {
-        tracing::warn!(
+        tracing::debug!(
             path = %path.display(),
             line = line.line_no,
             namespace = %line.namespace,

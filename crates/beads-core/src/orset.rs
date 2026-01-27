@@ -233,7 +233,12 @@ impl<V: OrSetValue> OrSet<V> {
         entries: BTreeMap<V, BTreeSet<Dot>>,
         cc: Dvv,
     ) -> Result<Self, OrSetError> {
-        validate_no_duplicate_dots(&entries)?;
+        // Reject duplicate undominated dots (data corruption), but allow
+        // duplicates that are already dominated by cc since normalize will
+        // prune those safely.
+        let mut normalized_cc = cc.clone();
+        normalized_cc.normalize();
+        validate_no_duplicate_undominated_dots(&entries, &normalized_cc)?;
         let (entries, cc, _) = normalize_parts(entries, cc);
         Ok(Self { entries, cc })
     }
@@ -433,12 +438,16 @@ impl<V: OrSetValue> OrSet<V> {
     }
 }
 
-fn validate_no_duplicate_dots<V: OrSetValue>(
+fn validate_no_duplicate_undominated_dots<V: OrSetValue>(
     entries: &BTreeMap<V, BTreeSet<Dot>>,
+    cc: &Dvv,
 ) -> Result<(), OrSetError> {
     let mut seen = BTreeSet::new();
     for dots in entries.values() {
         for dot in dots {
+            if cc.dominates(dot) {
+                continue;
+            }
             if !seen.insert(*dot) {
                 return Err(OrSetError::DuplicateDot { dot: *dot });
             }
@@ -774,5 +783,19 @@ mod tests {
 
         let err = OrSet::try_from_parts(entries, Dvv::default()).unwrap_err();
         assert!(matches!(err, OrSetError::DuplicateDot { .. }));
+    }
+
+    #[test]
+    fn orset_try_from_parts_allows_duplicates_already_dominated_by_cc() {
+        let shared = dot(1, 1);
+        let mut entries = BTreeMap::new();
+        entries.insert("alpha".to_string(), BTreeSet::from([shared]));
+        entries.insert("beta".to_string(), BTreeSet::from([shared]));
+
+        let mut cc = Dvv::default();
+        cc.observe(shared);
+
+        let set = OrSet::try_from_parts(entries, cc).expect("dominated duplicates should prune");
+        assert!(set.is_empty());
     }
 }

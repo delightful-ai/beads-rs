@@ -2,20 +2,25 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use beads_rs::git::wire::serialize_deps;
 use beads_rs::{
-    BeadId, CanonicalState, DepKey, DepKind, ReplicaId, TxnDeltaV1, TxnOpV1, WireDepAddV1,
-    WireDepRemoveV1, WireDotV1, WireDvvV1, apply_event,
+    BeadId, CanonicalState, DepKey, DepKind, EventBody, Limits, ReplicaId, TxnDeltaV1, TxnOpV1,
+    ValidatedEventBody, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, apply_event,
 };
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::fixtures::event_body::{bead_id, event_body_with_delta, sample_bead_patch};
 
+fn validated(body: EventBody) -> ValidatedEventBody {
+    body.into_validated(&Limits::default())
+        .expect("valid event fixture")
+}
+
 fn apply_bead(state: &mut CanonicalState, seed: u8) {
     let mut delta = TxnDeltaV1::new();
     delta
         .insert(TxnOpV1::BeadUpsert(Box::new(sample_bead_patch(seed))))
         .expect("unique bead upsert");
-    let event = event_body_with_delta(seed, delta);
+    let event = validated(event_body_with_delta(seed, delta));
     apply_event(state, &event).expect("apply bead");
 }
 
@@ -74,7 +79,7 @@ fn dep_add_remove_is_idempotent() {
             },
         }))
         .expect("unique dep add");
-    let add_event = event_body_with_delta(10, add_delta);
+    let add_event = validated(event_body_with_delta(10, add_delta));
 
     let first = apply_event(&mut state, &add_event).expect("apply add");
     let second = apply_event(&mut state, &add_event).expect("apply add again");
@@ -92,7 +97,7 @@ fn dep_add_remove_is_idempotent() {
             },
         }))
         .expect("unique dep remove");
-    let remove_event = event_body_with_delta(11, remove_delta);
+    let remove_event = validated(event_body_with_delta(11, remove_delta));
 
     let first_remove = apply_event(&mut state, &remove_event).expect("apply remove");
     let second_remove = apply_event(&mut state, &remove_event).expect("apply remove again");
@@ -132,7 +137,7 @@ fn dep_indexes_match_dep_store() {
             },
         }))
         .expect("unique dep add");
-    let event = event_body_with_delta(12, delta);
+    let event = validated(event_body_with_delta(12, delta));
     apply_event(&mut state, &event).expect("apply deps");
 
     let store_keys = dep_keys_from_serialize(&state);
@@ -179,7 +184,7 @@ fn dep_kind_ordering_in_serialize_is_canonical() {
             }))
             .expect("unique dep add");
     }
-    let event = event_body_with_delta(13, delta);
+    let event = validated(event_body_with_delta(13, delta));
     apply_event(&mut state, &event).expect("apply deps");
 
     let bytes = serialize_deps(&state).expect("serialize deps");
@@ -236,7 +241,7 @@ fn dep_delete_then_readd_across_kinds() {
             },
         }))
         .expect("unique dep add");
-    let add_event = event_body_with_delta(14, add_delta);
+    let add_event = validated(event_body_with_delta(14, add_delta));
     apply_event(&mut state, &add_event).expect("apply add");
 
     let mut remove_delta = TxnDeltaV1::new();
@@ -258,7 +263,7 @@ fn dep_delete_then_readd_across_kinds() {
             },
         }))
         .expect("unique dep remove");
-    let remove_event = event_body_with_delta(15, remove_delta);
+    let remove_event = validated(event_body_with_delta(15, remove_delta));
     apply_event(&mut state, &remove_event).expect("apply remove");
     assert!(state.deps_from(&from).is_empty());
 
@@ -281,7 +286,7 @@ fn dep_delete_then_readd_across_kinds() {
             },
         }))
         .expect("unique dep add");
-    let readd_event = event_body_with_delta(16, readd_delta);
+    let readd_event = validated(event_body_with_delta(16, readd_delta));
     apply_event(&mut state, &readd_event).expect("apply readd");
 
     let expected = BTreeSet::from([
