@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::core::{
-    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1, TxnId,
+    ActorId, Applied, ClientRequestId, Durable, EventId, NamespaceId, ReplicaId, SegmentId, Seq0,
+    Seq1, TxnId, Watermark,
 };
 
 use super::{
@@ -241,10 +242,8 @@ impl WalIndexTxn for MemoryWalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: u64,
-        durable: u64,
-        applied_head_sha: Option<[u8; 32]>,
-        durable_head_sha: Option<[u8; 32]>,
+        applied: Watermark<Applied>,
+        durable: Watermark<Durable>,
     ) -> Result<(), WalIndexError> {
         self.ensure_live()?;
         self.working.watermarks.insert(
@@ -252,10 +251,8 @@ impl WalIndexTxn for MemoryWalIndexTxn {
             WatermarkRow {
                 namespace: ns.clone(),
                 origin: *origin,
-                applied_seq: applied,
-                durable_seq: durable,
-                applied_head_sha,
-                durable_head_sha,
+                applied,
+                durable,
             },
         );
         Ok(())
@@ -511,7 +508,7 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    use crate::core::{EventId, NamespaceId, SegmentId, Seq1, TxnId};
+    use crate::core::{EventId, HeadStatus, NamespaceId, SegmentId, Seq1, TxnId};
 
     #[test]
     fn memory_index_records_event_and_watermarks() {
@@ -538,7 +535,11 @@ mod tests {
             None,
         )
         .expect("record event");
-        txn.update_watermark(&namespace, &origin, 1, 1, Some(sha), Some(sha))
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(1), HeadStatus::Known(sha)).expect("watermark");
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(1), HeadStatus::Known(sha)).expect("watermark");
+        txn.update_watermark(&namespace, &origin, applied, durable)
             .expect("update watermark");
         txn.commit().expect("commit");
 
@@ -550,8 +551,8 @@ mod tests {
 
         let rows = reader.load_watermarks().expect("load watermarks");
         let row = rows.iter().find(|row| row.origin == origin).expect("row");
-        assert_eq!(row.applied_seq, 1);
-        assert_eq!(row.durable_seq, 1);
+        assert_eq!(row.applied_seq(), 1);
+        assert_eq!(row.durable_seq(), 1);
 
         let max = reader
             .max_origin_seq(&namespace, &origin)

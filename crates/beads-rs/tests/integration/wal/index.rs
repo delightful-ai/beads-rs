@@ -35,10 +35,10 @@ fn index_rebuild_populates_watermarks_and_segments() {
         .iter()
         .find(|row| row.origin == origin && row.namespace == namespace)
         .expect("watermark row");
-    assert_eq!(row.applied_seq, 2);
-    assert_eq!(row.durable_seq, 2);
-    assert_eq!(row.applied_head_sha, Some(records[1].header().sha256));
-    assert_eq!(row.durable_head_sha, Some(records[1].header().sha256));
+    assert_eq!(row.applied_seq(), 2);
+    assert_eq!(row.durable_seq(), 2);
+    assert_eq!(row.applied_head_sha(), Some(records[1].header().sha256));
+    assert_eq!(row.durable_head_sha(), Some(records[1].header().sha256));
 
     let segments = index.reader().list_segments(&namespace).expect("segments");
     assert_eq!(segments.len(), 1);
@@ -95,8 +95,8 @@ fn index_catch_up_scans_new_frames() {
         .iter()
         .find(|row| row.origin == origin && row.namespace == namespace)
         .expect("watermark row");
-    assert_eq!(row.applied_seq, 3);
-    assert_eq!(row.durable_seq, 3);
+    assert_eq!(row.applied_seq(), 3);
+    assert_eq!(row.durable_seq(), 3);
 
     let range = index
         .reader()
