@@ -65,9 +65,11 @@ pub use error::{
 pub use event::{
     Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventFrameError, EventFrameV1,
     EventKindV1, EventShaLookup, EventShaLookupError, EventValidationError, HlcMax, Opaque,
-    PrevDeferred, PrevVerified, Sha256, TxnV1, VerifiedEvent, VerifiedEventAny, decode_event_body,
-    decode_event_hlc_max, encode_event_body_canonical, hash_event_body, sha256_bytes,
-    validate_event_body, validate_event_body_limits, verify_event_frame,
+    PrevDeferred, PrevVerified, Sha256, TxnV1, ValidatedBeadPatch, ValidatedDepAdd,
+    ValidatedDepRemove, ValidatedEventBody, ValidatedEventKindV1, ValidatedTombstone,
+    ValidatedTxnDeltaV1, ValidatedTxnOpV1, ValidatedTxnV1, VerifiedEvent, VerifiedEventAny,
+    decode_event_body, decode_event_hlc_max, encode_event_body_canonical, hash_event_body,
+    sha256_bytes, verify_event_frame,
 };
 pub use identity::{
     ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, EventId, NoteId,
