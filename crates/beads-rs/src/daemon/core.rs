@@ -12,7 +12,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use crossbeam::channel::Sender;
 use git2::{ErrorCode as GitErrorCode, ObjectType, Oid, Repository, TreeWalkMode, TreeWalkResult};
 use thiserror::Error;

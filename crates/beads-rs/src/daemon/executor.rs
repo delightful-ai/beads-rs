@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use crossbeam::channel::Sender;
 
 use super::broadcast::BroadcastEvent;
