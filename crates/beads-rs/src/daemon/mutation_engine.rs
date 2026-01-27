@@ -862,9 +862,12 @@ impl MutationEngine {
         if let Some(parent_id) = parent_id {
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    from: id.clone(),
-                    to: parent_id,
-                    kind: DepKind::Parent,
+                    key: DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
+                        OpError::ValidationFailed {
+                            field: "parent".into(),
+                            reason: e.reason,
+                        }
+                    })?,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -873,9 +876,12 @@ impl MutationEngine {
         for spec in parsed_deps {
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    from: id.clone(),
-                    to: spec.id().clone(),
-                    kind: spec.kind(),
+                    key: DepKey::new(id.clone(), spec.id().clone(), spec.kind()).map_err(|e| {
+                        OpError::ValidationFailed {
+                            field: "dependency".into(),
+                            reason: e.reason,
+                        }
+                    })?,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -1105,10 +1111,11 @@ impl MutationEngine {
         kind: DepKind,
         dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedDelta, OpError> {
-        DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
-            field: "dependency".into(),
-            reason: e.reason,
-        })?;
+        let key =
+            DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: e.reason,
+            })?;
 
         if state.get_live(&from).is_none() {
             return Err(OpError::NotFound(from));
@@ -1129,9 +1136,7 @@ impl MutationEngine {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind,
+                key: key.clone(),
                 dot: WireDotV1::from(dot_alloc.next_dot()?),
             }))
             .map_err(delta_error_to_op)?;
@@ -1158,9 +1163,7 @@ impl MutationEngine {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind,
+                key: key.clone(),
                 ctx: WireDvvV1::from(&state.dep_dvv(&key)),
             }))
             .map_err(delta_error_to_op)?;
@@ -1223,9 +1226,7 @@ impl MutationEngine {
                 })?;
             delta
                 .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                    from: id.clone(),
-                    to: existing_parent,
-                    kind: DepKind::Parent,
+                    key: key.clone(),
                     ctx: WireDvvV1::from(&state.dep_dvv(&key)),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -1234,9 +1235,12 @@ impl MutationEngine {
         if let Some(parent_id) = parent_id.clone() {
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    from: id.clone(),
-                    to: parent_id,
-                    kind: DepKind::Parent,
+                    key: DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
+                        OpError::ValidationFailed {
+                            field: "parent".into(),
+                            reason: e.reason,
+                        }
+                    })?,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
