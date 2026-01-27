@@ -1734,13 +1734,13 @@ mod tests {
             })
             .expect("ack");
 
-        let seq = ack
+        let watermark = ack
             .durable
             .get(&NamespaceId::core())
             .and_then(|m| m.get(&origin))
             .copied()
-            .unwrap_or(Seq0::ZERO);
-        assert_eq!(seq, Seq0::new(2));
+            .unwrap_or_else(Watermark::genesis);
+        assert_eq!(watermark.seq(), Seq0::new(2));
     }
 
     #[test]

@@ -304,6 +304,7 @@ fn update_watermarks<K>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Watermark;
     use uuid::Uuid;
 
     fn replica(seed: u128) -> ReplicaId {

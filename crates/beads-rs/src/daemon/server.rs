@@ -1123,7 +1123,7 @@ mod tests {
     use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
         ActorId, Applied, BeadId, BeadType, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
-        EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
+        Durable, EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
         ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
         Watermark, Watermarks,
     };
