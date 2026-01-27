@@ -272,6 +272,89 @@ impl WorkflowStatus {
     }
 }
 
+/// Workflow snapshot for checkpoints (canonical, no redundant timestamps).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WireWorkflowSnapshot {
+    Open,
+    InProgress,
+    Closed {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        closed_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        closed_on_branch: Option<String>,
+    },
+}
+
+impl WireWorkflowSnapshot {
+    pub fn from_workflow(workflow: &Workflow) -> Self {
+        match workflow {
+            Workflow::Open => WireWorkflowSnapshot::Open,
+            Workflow::InProgress => WireWorkflowSnapshot::InProgress,
+            Workflow::Closed(closure) => WireWorkflowSnapshot::Closed {
+                closed_reason: closure.reason.clone(),
+                closed_on_branch: closure.on_branch.clone(),
+            },
+        }
+    }
+
+    pub fn into_workflow(self) -> Workflow {
+        match self {
+            WireWorkflowSnapshot::Open => Workflow::Open,
+            WireWorkflowSnapshot::InProgress => Workflow::InProgress,
+            WireWorkflowSnapshot::Closed {
+                closed_reason,
+                closed_on_branch,
+            } => Workflow::Closed(Closure::new(closed_reason, closed_on_branch)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireClaimEmpty {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireClaimedSnapshot {
+    pub assignee: ActorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_expires: Option<WallClock>,
+}
+
+/// Claim snapshot for checkpoints (canonical, no redundant timestamps).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WireClaimSnapshot {
+    Unclaimed(WireClaimEmpty),
+    Claimed(WireClaimedSnapshot),
+}
+
+impl WireClaimSnapshot {
+    pub fn unclaimed() -> Self {
+        WireClaimSnapshot::Unclaimed(WireClaimEmpty::default())
+    }
+
+    pub fn from_claim(claim: &Claim) -> Self {
+        match claim {
+            Claim::Unclaimed => WireClaimSnapshot::unclaimed(),
+            Claim::Claimed { assignee, expires } => {
+                WireClaimSnapshot::Claimed(WireClaimedSnapshot {
+                    assignee: assignee.clone(),
+                    assignee_expires: *expires,
+                })
+            }
+        }
+    }
+
+    pub fn into_claim(self) -> Claim {
+        match self {
+            WireClaimSnapshot::Unclaimed(_) => Claim::Unclaimed,
+            WireClaimSnapshot::Claimed(claimed) => {
+                Claim::claimed(claimed.assignee, claimed.assignee_expires)
+            }
+        }
+    }
+}
+
 /// Field-level stamp map entry: (at, by).
 pub type WireFieldStamp = (WireStamp, ActorId);
 
@@ -327,23 +410,12 @@ pub struct WireBeadFull {
     pub estimated_minutes: Option<u32>,
 
     // Workflow state
-    pub status: WorkflowStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closed_at: Option<WireStamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closed_by: Option<ActorId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closed_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closed_on_branch: Option<String>,
+    #[serde(flatten)]
+    pub workflow: WireWorkflowSnapshot,
 
     // Claim
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<ActorId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee_at: Option<WireStamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee_expires: Option<WallClock>,
+    #[serde(flatten)]
+    pub claim: WireClaimSnapshot,
 
     // Notes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -410,28 +482,8 @@ impl WireBeadFull {
         check_field!(bead.fields.workflow, "workflow");
         check_field!(bead.fields.claim, "claim");
 
-        let (closed_at, closed_by, closed_reason, closed_on_branch) =
-            if let Workflow::Closed(ref closure) = bead.fields.workflow.value {
-                (
-                    Some(WireStamp::from(&bead.fields.workflow.stamp.at)),
-                    Some(bead.fields.workflow.stamp.by.clone()),
-                    closure.reason.clone(),
-                    closure.on_branch.clone(),
-                )
-            } else {
-                (None, None, None, None)
-            };
-
-        let (assignee, assignee_at, assignee_expires) =
-            if let Claim::Claimed { assignee, expires } = &bead.fields.claim.value {
-                (
-                    Some(assignee.clone()),
-                    Some(WireStamp::from(&bead.fields.claim.stamp.at)),
-                    *expires,
-                )
-            } else {
-                (None, None, None)
-            };
+        let workflow = WireWorkflowSnapshot::from_workflow(&bead.fields.workflow.value);
+        let claim = WireClaimSnapshot::from_claim(&bead.fields.claim.value);
 
         let mut notes = view.notes.clone();
         notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
@@ -454,14 +506,8 @@ impl WireBeadFull {
             external_ref: bead.fields.external_ref.value.clone(),
             source_repo: bead.fields.source_repo.value.clone(),
             estimated_minutes: bead.fields.estimated_minutes.value,
-            status: WorkflowStatus::from_workflow(&bead.fields.workflow.value),
-            closed_at,
-            closed_by,
-            closed_reason,
-            closed_on_branch,
-            assignee,
-            assignee_at,
-            assignee_expires,
+            workflow,
+            claim,
             notes,
             at: WireStamp::from(&bead_stamp.at),
             by: bead_stamp.by.clone(),
@@ -500,14 +546,8 @@ impl From<WireBeadFull> for Bead {
             wire.created_on_branch,
         );
 
-        let workflow_value = wire
-            .status
-            .into_workflow(wire.closed_reason, wire.closed_on_branch);
-
-        let claim_value = match wire.assignee {
-            Some(assignee) => Claim::claimed(assignee, wire.assignee_expires),
-            None => Claim::Unclaimed,
-        };
+        let workflow_value = wire.workflow.into_workflow();
+        let claim_value = wire.claim.into_claim();
 
         let fields = BeadFields {
             title: Lww::new(wire.title, field_stamp("title")),
@@ -1112,6 +1152,52 @@ mod tests {
             wire.notes,
             notes.iter().map(WireNoteV1::from).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn wire_bead_full_normalizes_legacy_timestamps() {
+        let base = Stamp::new(WriteStamp::new(10, 0), actor_id("alice"));
+        let workflow_stamp = Stamp::new(WriteStamp::new(15, 0), actor_id("bob"));
+        let claim_stamp = Stamp::new(WriteStamp::new(18, 0), actor_id("carol"));
+
+        let core = BeadCore::new(bead_id("bd-legacy1"), base.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("t".to_string(), base.clone()),
+            description: Lww::new("d".to_string(), base.clone()),
+            design: Lww::new(None, base.clone()),
+            acceptance_criteria: Lww::new(None, base.clone()),
+            priority: Lww::new(Priority::default(), base.clone()),
+            bead_type: Lww::new(BeadType::Task, base.clone()),
+            external_ref: Lww::new(None, base.clone()),
+            source_repo: Lww::new(None, base.clone()),
+            estimated_minutes: Lww::new(None, base.clone()),
+            workflow: Lww::new(
+                Workflow::Closed(Closure::new(
+                    Some("done".to_string()),
+                    Some("main".to_string()),
+                )),
+                workflow_stamp,
+            ),
+            claim: Lww::new(Claim::claimed(actor_id("dave"), None), claim_stamp),
+        };
+        let bead = Bead::new(core, fields);
+        let view = BeadView::new(bead, Labels::new(), Vec::new(), Some(base.clone()));
+        let wire = WireBeadFull::from_view(&view, None);
+
+        let mut value = serde_json::to_value(&wire).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.insert("closed_at".to_string(), serde_json::json!([999, 0]));
+        obj.insert("closed_by".to_string(), serde_json::json!("eve"));
+        obj.insert("assignee_at".to_string(), serde_json::json!([777, 0]));
+
+        let parsed: WireBeadFull = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, wire);
+
+        let roundtrip = serde_json::to_value(&parsed).unwrap();
+        let obj = roundtrip.as_object().expect("object");
+        assert!(!obj.contains_key("closed_at"));
+        assert!(!obj.contains_key("closed_by"));
+        assert!(!obj.contains_key("assignee_at"));
     }
 
     #[test]
