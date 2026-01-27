@@ -101,7 +101,7 @@ fn repl_ack_advances_watermarks() {
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
     let e2 = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(e1.sha256));
 
-    let (session, actions) = handle_inbound_message(
+    let (_session, actions) = handle_inbound_message(
         session,
         ReplMessage::Events(Events {
             events: vec![e1, e2.clone()],
