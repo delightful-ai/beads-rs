@@ -316,15 +316,15 @@ impl ContiguousFrames {
                 reason: "record prev sha mismatch with index".to_string(),
             });
         }
-        if let Some(prev_sha) = self.prev_sha {
-            if record_prev != Some(prev_sha) {
-                return Err(WalRangeError::Corrupt {
-                    namespace: namespace.clone(),
-                    segment_id: Some(item.segment_id),
-                    offset: Some(item.offset),
-                    reason: "record prev sha mismatch with previous frame".to_string(),
-                });
-            }
+        if let Some(prev_sha) = self.prev_sha
+            && record_prev != Some(prev_sha)
+        {
+            return Err(WalRangeError::Corrupt {
+                namespace: namespace.clone(),
+                segment_id: Some(item.segment_id),
+                offset: Some(item.offset),
+                reason: "record prev sha mismatch with previous frame".to_string(),
+            });
         }
 
         self.frames.push(EventFrameV1 {
