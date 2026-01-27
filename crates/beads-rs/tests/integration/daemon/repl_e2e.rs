@@ -17,7 +17,8 @@ use beads_rs::core::{
     ProtocolErrorCode, ReplicaEntry, ReplicaRole, Seq0,
 };
 use beads_rs::daemon::ipc::{
-    IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+    AdminCheckpointWaitPayload, CreatePayload, IdPayload, IpcClient, MutationCtx, MutationMeta,
+    ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_rs::daemon::ops::OpResult;
 use tempfile::TempDir;
@@ -82,8 +83,10 @@ fn wait_for_checkpoint(rig: &ReplRig, idx: usize, namespace: &NamespaceId, timeo
     std::thread::spawn(move || {
         let client = IpcClient::for_runtime_dir(&runtime_dir).with_autostart(false);
         let request = Request::AdminCheckpointWait {
-            repo: repo_dir,
-            namespace: Some(request_namespace),
+            ctx: RepoCtx::new(repo_dir),
+            payload: AdminCheckpointWaitPayload {
+                namespace: Some(request_namespace),
+            },
         };
         let response = client.send_request_no_autostart(&request);
         let _ = tx.send(response);
@@ -667,23 +670,27 @@ fn create_issue_with_durability_result(
     let node = rig.node(node_idx);
     let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
     let request = Request::Create {
-        repo: node.repo_dir().to_path_buf(),
-        id: None,
-        parent: None,
-        title: title.to_string(),
-        bead_type: BeadType::Task,
-        priority: Priority::MEDIUM,
-        description: None,
-        design: None,
-        acceptance_criteria: None,
-        assignee: None,
-        external_ref: None,
-        estimated_minutes: None,
-        labels: Vec::new(),
-        dependencies: Vec::new(),
-        meta: MutationMeta {
-            durability: Some(format!("replicated_fsync({})", k)),
-            ..Default::default()
+        ctx: MutationCtx::new(
+            node.repo_dir().to_path_buf(),
+            MutationMeta {
+                durability: Some(format!("replicated_fsync({})", k)),
+                ..Default::default()
+            },
+        ),
+        payload: CreatePayload {
+            id: None,
+            parent: None,
+            title: title.to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
         },
     };
     client.send_request(&request).expect("create response")
@@ -698,9 +705,10 @@ fn show_issue_with_read(
     let node = rig.node(node_idx);
     let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
     let request = Request::Show {
-        repo: node.repo_dir().to_path_buf(),
-        id: issue_id.to_string(),
-        read,
+        ctx: ReadCtx::new(node.repo_dir().to_path_buf(), read),
+        payload: IdPayload {
+            id: issue_id.to_string(),
+        },
     };
     client.send_request(&request).expect("show response")
 }

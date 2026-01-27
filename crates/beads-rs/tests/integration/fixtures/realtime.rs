@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use super::daemon_runtime::shutdown_daemon;
 use super::git::{init_bare_repo, init_repo_with_origin};
 use beads_rs::api::QueryResult;
-use beads_rs::daemon::ipc::{IpcClient, Request, Response, ResponsePayload};
+use beads_rs::daemon::ipc::{EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload};
 
 pub struct RealtimeFixture {
     runtime_dir: TempDir,
@@ -96,7 +96,8 @@ impl RealtimeFixture {
         }
 
         let request = Request::Init {
-            repo: self.repo_dir.path().to_path_buf(),
+            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
+            payload: EmptyPayload {},
         };
         let response = client
             .send_request_no_autostart(&request)

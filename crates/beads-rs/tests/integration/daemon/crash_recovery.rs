@@ -11,7 +11,9 @@ use crate::fixtures::realtime::RealtimeFixture;
 use crate::fixtures::store_lock::unlock_store;
 use beads_rs::api::QueryResult;
 use beads_rs::core::{BeadType, NamespaceId, Priority, StoreId, StoreMeta};
-use beads_rs::daemon::ipc::{IpcClient, MutationMeta, Request, Response, ResponsePayload};
+use beads_rs::daemon::ipc::{
+    CreatePayload, IpcClient, MutationCtx, MutationMeta, Request, Response, ResponsePayload,
+};
 
 fn marker_path(dir: &Path, stage: &str) -> PathBuf {
     dir.join(format!("beads-wal-hang-{stage}"))
@@ -128,21 +130,22 @@ fn ensure_partial_tail(path: &Path) {
 
 fn create_request(repo: &Path, id: &str, title: &str) -> Request {
     Request::Create {
-        repo: repo.to_path_buf(),
-        id: Some(id.to_string()),
-        parent: None,
-        title: title.to_string(),
-        bead_type: BeadType::Task,
-        priority: Priority::MEDIUM,
-        description: None,
-        design: None,
-        acceptance_criteria: None,
-        assignee: None,
-        external_ref: None,
-        estimated_minutes: None,
-        labels: Vec::new(),
-        dependencies: Vec::new(),
-        meta: MutationMeta::default(),
+        ctx: MutationCtx::new(repo.to_path_buf(), MutationMeta::default()),
+        payload: CreatePayload {
+            id: Some(id.to_string()),
+            parent: None,
+            title: title.to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+        },
     }
 }
 

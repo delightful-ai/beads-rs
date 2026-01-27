@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use beads_rs::daemon::ipc::{IpcClient, IpcError, MutationMeta, Request, Response};
+use beads_rs::daemon::ipc::{
+    CreatePayload, IpcClient, IpcError, MutationCtx, MutationMeta, Request, Response,
+};
 use beads_rs::{BeadType, Priority};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,25 +125,29 @@ impl LoadGenerator {
                 let title = format!("load-{seq:06}");
                 seq = seq.saturating_add(1);
                 let request = Request::Create {
-                    repo: self.repo.clone(),
-                    id: None,
-                    parent: None,
-                    title,
-                    bead_type: BeadType::Task,
-                    priority: Priority::MEDIUM,
-                    description: None,
-                    design: None,
-                    acceptance_criteria: None,
-                    assignee: None,
-                    external_ref: None,
-                    estimated_minutes: None,
-                    labels: Vec::new(),
-                    dependencies: Vec::new(),
-                    meta: MutationMeta {
-                        namespace: config.namespace.clone(),
-                        durability: None,
-                        client_request_id: None,
-                        actor_id: config.actor_id.clone(),
+                    ctx: MutationCtx::new(
+                        self.repo.clone(),
+                        MutationMeta {
+                            namespace: config.namespace.clone(),
+                            durability: None,
+                            client_request_id: None,
+                            actor_id: config.actor_id.clone(),
+                        },
+                    ),
+                    payload: CreatePayload {
+                        id: None,
+                        parent: None,
+                        title,
+                        bead_type: BeadType::Task,
+                        priority: Priority::MEDIUM,
+                        description: None,
+                        design: None,
+                        acceptance_criteria: None,
+                        assignee: None,
+                        external_ref: None,
+                        estimated_minutes: None,
+                        labels: Vec::new(),
+                        dependencies: Vec::new(),
                     },
                 };
                 match connection.as_mut() {
@@ -221,25 +227,29 @@ impl LoadGenerator {
                     let seq = counter.fetch_add(1, Ordering::Relaxed);
                     let title = format!("load-{seq:06}");
                     let request = Request::Create {
-                        repo: repo.clone(),
-                        id: None,
-                        parent: None,
-                        title,
-                        bead_type: BeadType::Task,
-                        priority: Priority::MEDIUM,
-                        description: None,
-                        design: None,
-                        acceptance_criteria: None,
-                        assignee: None,
-                        external_ref: None,
-                        estimated_minutes: None,
-                        labels: Vec::new(),
-                        dependencies: Vec::new(),
-                        meta: MutationMeta {
-                            namespace: config.namespace.clone(),
-                            durability: None,
-                            client_request_id: None,
-                            actor_id: config.actor_id.clone(),
+                        ctx: MutationCtx::new(
+                            repo.clone(),
+                            MutationMeta {
+                                namespace: config.namespace.clone(),
+                                durability: None,
+                                client_request_id: None,
+                                actor_id: config.actor_id.clone(),
+                            },
+                        ),
+                        payload: CreatePayload {
+                            id: None,
+                            parent: None,
+                            title,
+                            bead_type: BeadType::Task,
+                            priority: Priority::MEDIUM,
+                            description: None,
+                            design: None,
+                            acceptance_criteria: None,
+                            assignee: None,
+                            external_ref: None,
+                            estimated_minutes: None,
+                            labels: Vec::new(),
+                            dependencies: Vec::new(),
                         },
                     };
                     match connection.as_mut() {

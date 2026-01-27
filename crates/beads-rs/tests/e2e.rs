@@ -8,7 +8,10 @@ use beads_rs::core::{
     BeadId, BeadType, DurabilityClass, DurabilityOutcome, HeadStatus, NamespaceId, Priority,
     ProtocolErrorCode, Seq0, StoreId,
 };
-use beads_rs::daemon::ipc::{MutationMeta, ReadConsistency, Request, Response, ResponsePayload};
+use beads_rs::daemon::ipc::{
+    CreatePayload, IdPayload, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, Request,
+    Response, ResponsePayload,
+};
 use beads_rs::daemon::ops::OpResult;
 use beads_rs::test_harness::{
     Direction, NetworkProfile, NodeOptions, ReplicationRig, TestWorld, latency_budget_ms,
@@ -342,23 +345,27 @@ fn create_issue_with_durability_result(
 ) -> Response {
     let node = rig.node(node_idx);
     let request = Request::Create {
-        repo: node.repo_path(),
-        id: None,
-        parent: None,
-        title: title.to_string(),
-        bead_type: BeadType::Task,
-        priority: Priority::MEDIUM,
-        description: None,
-        design: None,
-        acceptance_criteria: None,
-        assignee: None,
-        external_ref: None,
-        estimated_minutes: None,
-        labels: Vec::new(),
-        dependencies: Vec::new(),
-        meta: MutationMeta {
-            durability: Some(format!("replicated_fsync({})", k)),
-            ..Default::default()
+        ctx: MutationCtx::new(
+            node.repo_path(),
+            MutationMeta {
+                durability: Some(format!("replicated_fsync({})", k)),
+                ..Default::default()
+            },
+        ),
+        payload: CreatePayload {
+            id: None,
+            parent: None,
+            title: title.to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
         },
     };
     rig.apply_request_with_wait(node_idx, request, DURABILITY_STEPS)
@@ -372,9 +379,10 @@ fn show_issue_with_read(
 ) -> Response {
     let node = rig.node(node_idx);
     let request = Request::Show {
-        repo: node.repo_path(),
-        id: issue_id.to_string(),
-        read,
+        ctx: ReadCtx::new(node.repo_path(), read),
+        payload: IdPayload {
+            id: issue_id.to_string(),
+        },
     };
     node.apply_request(request)
 }

@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
-use beads_rs::daemon::mutation_engine::{
-    MutationContext, MutationEngine, MutationRequest, ParsedMutationRequest,
+use beads_rs::daemon::ipc::{
+    AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
+    IdPayload, LabelsPayload, LeasePayload, ParentPayload, UpdatePayload,
 };
+use beads_rs::daemon::mutation_engine::{MutationContext, MutationEngine, ParsedMutationRequest};
 use beads_rs::daemon::ops::{BeadPatch, OpError, Patch};
 use beads_rs::{ActorId, BeadType, DepKind, Limits, NamespaceId, Priority, TraceId};
 use uuid::Uuid;
@@ -27,17 +29,74 @@ pub fn context_with_client_request_id(seed: u8) -> MutationContext {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum MutationPayload {
+    Create(CreatePayload),
+    Update(UpdatePayload),
+    AddLabels(LabelsPayload),
+    RemoveLabels(LabelsPayload),
+    SetParent(ParentPayload),
+    Close(ClosePayload),
+    Reopen(IdPayload),
+    Delete(DeletePayload),
+    AddDep(DepPayload),
+    RemoveDep(DepPayload),
+    AddNote(AddNotePayload),
+    Claim(ClaimPayload),
+    Unclaim(IdPayload),
+    ExtendClaim(LeasePayload),
+}
+
+impl MutationPayload {
+    fn parse(&self, actor: &ActorId) -> Result<ParsedMutationRequest, OpError> {
+        match self {
+            MutationPayload::Create(payload) => {
+                ParsedMutationRequest::parse_create(payload.clone(), actor)
+            }
+            MutationPayload::Update(payload) => {
+                ParsedMutationRequest::parse_update(payload.clone())
+            }
+            MutationPayload::AddLabels(payload) => {
+                ParsedMutationRequest::parse_add_labels(payload.clone())
+            }
+            MutationPayload::RemoveLabels(payload) => {
+                ParsedMutationRequest::parse_remove_labels(payload.clone())
+            }
+            MutationPayload::SetParent(payload) => {
+                ParsedMutationRequest::parse_set_parent(payload.clone())
+            }
+            MutationPayload::Close(payload) => ParsedMutationRequest::parse_close(payload.clone()),
+            MutationPayload::Reopen(payload) => ParsedMutationRequest::parse_reopen(payload.clone()),
+            MutationPayload::Delete(payload) => ParsedMutationRequest::parse_delete(payload.clone()),
+            MutationPayload::AddDep(payload) => ParsedMutationRequest::parse_add_dep(payload.clone()),
+            MutationPayload::RemoveDep(payload) => {
+                ParsedMutationRequest::parse_remove_dep(payload.clone())
+            }
+            MutationPayload::AddNote(payload) => {
+                ParsedMutationRequest::parse_add_note(payload.clone())
+            }
+            MutationPayload::Claim(payload) => ParsedMutationRequest::parse_claim(payload.clone()),
+            MutationPayload::Unclaim(payload) => {
+                ParsedMutationRequest::parse_unclaim(payload.clone())
+            }
+            MutationPayload::ExtendClaim(payload) => {
+                ParsedMutationRequest::parse_extend_claim(payload.clone())
+            }
+        }
+    }
+}
+
 pub fn request_sha256(
     ctx: &MutationContext,
-    request: &MutationRequest,
+    request: &MutationPayload,
 ) -> Result<[u8; 32], OpError> {
     let engine = MutationEngine::new(Limits::default());
-    let parsed = ParsedMutationRequest::parse(request.clone(), &ctx.actor_id)?;
+    let parsed = request.parse(&ctx.actor_id)?;
     engine.request_sha256_for(ctx, &parsed)
 }
 
-pub fn create_request(title: impl Into<String>) -> MutationRequest {
-    MutationRequest::Create {
+pub fn create_request(title: impl Into<String>) -> MutationPayload {
+    MutationPayload::Create(CreatePayload {
         id: None,
         parent: None,
         title: title.into(),
@@ -51,104 +110,104 @@ pub fn create_request(title: impl Into<String>) -> MutationRequest {
         estimated_minutes: None,
         labels: Vec::new(),
         dependencies: Vec::new(),
-    }
+    })
 }
 
-pub fn update_request(id: impl Into<String>, patch: BeadPatch) -> MutationRequest {
-    MutationRequest::Update {
+pub fn update_request(id: impl Into<String>, patch: BeadPatch) -> MutationPayload {
+    MutationPayload::Update(UpdatePayload {
         id: id.into(),
         patch,
         cas: None,
-    }
+    })
 }
 
-pub fn add_labels_request(id: impl Into<String>, labels: Vec<String>) -> MutationRequest {
-    MutationRequest::AddLabels {
+pub fn add_labels_request(id: impl Into<String>, labels: Vec<String>) -> MutationPayload {
+    MutationPayload::AddLabels(LabelsPayload {
         id: id.into(),
         labels,
-    }
+    })
 }
 
-pub fn remove_labels_request(id: impl Into<String>, labels: Vec<String>) -> MutationRequest {
-    MutationRequest::RemoveLabels {
+pub fn remove_labels_request(id: impl Into<String>, labels: Vec<String>) -> MutationPayload {
+    MutationPayload::RemoveLabels(LabelsPayload {
         id: id.into(),
         labels,
-    }
+    })
 }
 
-pub fn set_parent_request(id: impl Into<String>, parent: Option<String>) -> MutationRequest {
-    MutationRequest::SetParent {
+pub fn set_parent_request(id: impl Into<String>, parent: Option<String>) -> MutationPayload {
+    MutationPayload::SetParent(ParentPayload {
         id: id.into(),
         parent,
-    }
+    })
 }
 
-pub fn close_request(id: impl Into<String>, reason: Option<String>) -> MutationRequest {
-    MutationRequest::Close {
+pub fn close_request(id: impl Into<String>, reason: Option<String>) -> MutationPayload {
+    MutationPayload::Close(ClosePayload {
         id: id.into(),
         reason,
         on_branch: None,
-    }
+    })
 }
 
-pub fn reopen_request(id: impl Into<String>) -> MutationRequest {
-    MutationRequest::Reopen { id: id.into() }
+pub fn reopen_request(id: impl Into<String>) -> MutationPayload {
+    MutationPayload::Reopen(IdPayload { id: id.into() })
 }
 
-pub fn delete_request(id: impl Into<String>, reason: Option<String>) -> MutationRequest {
-    MutationRequest::Delete {
+pub fn delete_request(id: impl Into<String>, reason: Option<String>) -> MutationPayload {
+    MutationPayload::Delete(DeletePayload {
         id: id.into(),
         reason,
-    }
+    })
 }
 
 pub fn add_dep_request(
     from: impl Into<String>,
     to: impl Into<String>,
     kind: DepKind,
-) -> MutationRequest {
-    MutationRequest::AddDep {
+) -> MutationPayload {
+    MutationPayload::AddDep(DepPayload {
         from: from.into(),
         to: to.into(),
         kind,
-    }
+    })
 }
 
 pub fn remove_dep_request(
     from: impl Into<String>,
     to: impl Into<String>,
     kind: DepKind,
-) -> MutationRequest {
-    MutationRequest::RemoveDep {
+) -> MutationPayload {
+    MutationPayload::RemoveDep(DepPayload {
         from: from.into(),
         to: to.into(),
         kind,
-    }
+    })
 }
 
-pub fn add_note_request(id: impl Into<String>, content: impl Into<String>) -> MutationRequest {
-    MutationRequest::AddNote {
+pub fn add_note_request(id: impl Into<String>, content: impl Into<String>) -> MutationPayload {
+    MutationPayload::AddNote(AddNotePayload {
         id: id.into(),
         content: content.into(),
-    }
+    })
 }
 
-pub fn claim_request(id: impl Into<String>, lease_secs: u64) -> MutationRequest {
-    MutationRequest::Claim {
+pub fn claim_request(id: impl Into<String>, lease_secs: u64) -> MutationPayload {
+    MutationPayload::Claim(ClaimPayload {
         id: id.into(),
         lease_secs,
-    }
+    })
 }
 
-pub fn unclaim_request(id: impl Into<String>) -> MutationRequest {
-    MutationRequest::Unclaim { id: id.into() }
+pub fn unclaim_request(id: impl Into<String>) -> MutationPayload {
+    MutationPayload::Unclaim(IdPayload { id: id.into() })
 }
 
-pub fn extend_claim_request(id: impl Into<String>, lease_secs: u64) -> MutationRequest {
-    MutationRequest::ExtendClaim {
+pub fn extend_claim_request(id: impl Into<String>, lease_secs: u64) -> MutationPayload {
+    MutationPayload::ExtendClaim(LeasePayload {
         id: id.into(),
         lease_secs,
-    }
+    })
 }
 
 pub fn patch_title(title: impl Into<String>) -> BeadPatch {
@@ -158,7 +217,7 @@ pub fn patch_title(title: impl Into<String>) -> BeadPatch {
     }
 }
 
-pub fn sample_requests() -> Vec<MutationRequest> {
+pub fn sample_requests() -> Vec<MutationPayload> {
     vec![
         create_request("sample"),
         update_request("bd-1", patch_title("updated")),
@@ -186,20 +245,20 @@ mod tests {
         let mut seen = [false; 14];
         for request in sample_requests() {
             match request {
-                MutationRequest::Create { .. } => seen[0] = true,
-                MutationRequest::Update { .. } => seen[1] = true,
-                MutationRequest::AddLabels { .. } => seen[2] = true,
-                MutationRequest::RemoveLabels { .. } => seen[3] = true,
-                MutationRequest::SetParent { .. } => seen[4] = true,
-                MutationRequest::Close { .. } => seen[5] = true,
-                MutationRequest::Reopen { .. } => seen[6] = true,
-                MutationRequest::Delete { .. } => seen[7] = true,
-                MutationRequest::AddDep { .. } => seen[8] = true,
-                MutationRequest::RemoveDep { .. } => seen[9] = true,
-                MutationRequest::AddNote { .. } => seen[10] = true,
-                MutationRequest::Claim { .. } => seen[11] = true,
-                MutationRequest::Unclaim { .. } => seen[12] = true,
-                MutationRequest::ExtendClaim { .. } => seen[13] = true,
+                MutationPayload::Create(_) => seen[0] = true,
+                MutationPayload::Update(_) => seen[1] = true,
+                MutationPayload::AddLabels(_) => seen[2] = true,
+                MutationPayload::RemoveLabels(_) => seen[3] = true,
+                MutationPayload::SetParent(_) => seen[4] = true,
+                MutationPayload::Close(_) => seen[5] = true,
+                MutationPayload::Reopen(_) => seen[6] = true,
+                MutationPayload::Delete(_) => seen[7] = true,
+                MutationPayload::AddDep(_) => seen[8] = true,
+                MutationPayload::RemoveDep(_) => seen[9] = true,
+                MutationPayload::AddNote(_) => seen[10] = true,
+                MutationPayload::Claim(_) => seen[11] = true,
+                MutationPayload::Unclaim(_) => seen[12] = true,
+                MutationPayload::ExtendClaim(_) => seen[13] = true,
             }
         }
 

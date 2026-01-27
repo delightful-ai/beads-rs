@@ -1405,23 +1405,27 @@ mod tests {
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
         let client_request_id = ClientRequestId::new(Uuid::from_bytes([6u8; 16]));
         let request = Request::Create {
-            repo: repo_path.clone(),
-            id: None,
-            parent: None,
-            title: "trace".to_string(),
-            bead_type: BeadType::Task,
-            priority: Priority::MEDIUM,
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta: MutationMeta {
-                client_request_id: Some(client_request_id.to_string()),
-                ..MutationMeta::default()
+            ctx: crate::daemon::ipc::MutationCtx::new(
+                repo_path.clone(),
+                MutationMeta {
+                    client_request_id: Some(client_request_id.to_string()),
+                    ..MutationMeta::default()
+                },
+            ),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: "trace".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
             },
         };
 

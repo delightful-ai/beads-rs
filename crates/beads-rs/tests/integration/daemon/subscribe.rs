@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use beads_rs::daemon::ipc::{IpcError, ReadConsistency, Request, Response};
+use beads_rs::daemon::ipc::{EmptyPayload, IpcError, ReadConsistency, ReadCtx, Request, Response};
 use beads_rs::{
     Applied, CliErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, Watermarks,
 };
@@ -71,8 +71,8 @@ fn subscribe_gates_on_require_min_seen() {
         wait_timeout_ms: None,
     };
     let request = Request::Subscribe {
-        repo: repo.clone(),
-        read,
+        ctx: ReadCtx::new(repo.clone(), read),
+        payload: EmptyPayload {},
     };
 
     let mut stream = ipc_client
