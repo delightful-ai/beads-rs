@@ -130,7 +130,9 @@ fn state_strategy() -> impl Strategy<Value = CanonicalState> {
                 }
             }
             for (key, dot, stamp) in deps {
-                state.apply_dep_add(key, dot, stamp);
+                if let Ok(key) = state.check_dep_add_key(key) {
+                    state.apply_dep_add(key, dot, stamp);
+                }
             }
             state
         })

@@ -163,6 +163,7 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
         replica: origin,
         counter: 1,
     };
+    let dep_key = state.check_dep_add_key(dep_key).expect("dep key");
     state.apply_dep_add(dep_key, dot, stamp.clone());
 
     let mut store_state = StoreState::new();
