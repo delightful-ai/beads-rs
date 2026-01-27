@@ -1692,6 +1692,7 @@ mod tests {
             .receipt
             .durability_proof()
             .replicated
+            .as_ref()
             .expect("replicated proof");
         assert_eq!(proof.k.get(), 2);
         assert_eq!(proof.acked_by.len(), 2);
