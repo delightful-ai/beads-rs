@@ -1333,6 +1333,12 @@ mod tests {
         ) {
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
+            if attrs.metadata().name() == "mutation" {
+                self.spans
+                    .lock()
+                    .expect("span capture")
+                    .push(visitor.fields.clone());
+            }
             if let Some(span) = ctx.span(id) {
                 span.extensions_mut().insert(SpanFields {
                     fields: visitor.fields,
@@ -1356,21 +1362,6 @@ mod tests {
                 let fields = extensions.get_mut::<SpanFields>().expect("span fields");
                 fields.fields.extend(visitor.fields);
             }
-        }
-
-        fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
-            let Some(span) = ctx.span(&id) else {
-                return;
-            };
-            if span.metadata().name() != "mutation" {
-                return;
-            }
-            let fields = span
-                .extensions()
-                .get::<SpanFields>()
-                .map(|fields| fields.fields.clone())
-                .unwrap_or_default();
-            self.spans.lock().expect("span capture").push(fields);
         }
     }
 
