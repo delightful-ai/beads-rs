@@ -34,6 +34,7 @@ use crate::daemon::repl::{
     SessionAction, SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore,
     WalRangeReader, decode_envelope, encode_envelope,
 };
+use crate::daemon::wal::ReplicaDurabilityRole;
 
 #[derive(Clone)]
 pub struct ReplicationServerConfig {
@@ -380,6 +381,24 @@ where
     let durability_eligible = roster_entry
         .map(|entry| entry.durability_eligible)
         .unwrap_or(role != ReplicaRole::Observer);
+    let durability_role = match ReplicaDurabilityRole::try_from((role, durability_eligible)) {
+        Ok(role) => role,
+        Err(err) => {
+            tracing::warn!(
+                peer_replica_id = %hello.sender_replica_id,
+                role = ?role,
+                durability_eligible,
+                "invalid replica durability role: {err}"
+            );
+            let payload = ErrorPayload::new(
+                ProtocolErrorCode::InvalidRequest.into(),
+                "invalid durability eligibility for replica role",
+                false,
+            );
+            let _ = send_pre_handshake_error(&mut writer, payload);
+            return Ok(());
+        }
+    };
     let allowed_namespaces = roster_entry.and_then(|entry| entry.allowed_namespaces.clone());
     let eligible = eligible_namespaces(&runtime.policies, role, allowed_namespaces.as_ref());
 
@@ -442,13 +461,9 @@ where
         accepted_set = peer.accepted_namespaces.iter().cloned().collect();
         live_stream_enabled = peer.live_stream_enabled;
         handshake_at_ms = Some(now_ms_val);
-        if let Err(err) = store.update_replica_liveness(
-            peer_replica_id,
-            now_ms_val,
-            now_ms_val,
-            role,
-            durability_eligible,
-        ) {
+        if let Err(err) =
+            store.update_replica_liveness(peer_replica_id, now_ms_val, now_ms_val, durability_role)
+        {
             tracing::warn!("replica liveness update failed: {err}");
         }
         tracing::info!(
@@ -456,7 +471,7 @@ where
             direction = "inbound",
             peer_replica_id = %peer.replica_id,
             auth_identity = "none",
-            role = ?role,
+            role = ?durability_role,
             requested_namespaces = ?requested_namespaces,
             offered_namespaces = ?offered_namespaces,
             accepted_namespaces = ?peer.accepted_namespaces,
@@ -517,8 +532,7 @@ where
                                     peer_replica_id,
                                     now_ms,
                                     handshake_ms,
-                                    role,
-                                    durability_eligible,
+                                    durability_role,
                                 )
                             {
                                 tracing::warn!("replica liveness update failed: {err}");
@@ -598,13 +612,9 @@ where
             if handshake_at_ms.is_none() {
                 let now_ms = now_ms();
                 handshake_at_ms = Some(now_ms);
-                if let Err(err) = store.update_replica_liveness(
-                    peer_replica_id,
-                    now_ms,
-                    now_ms,
-                    role,
-                    durability_eligible,
-                ) {
+                if let Err(err) =
+                    store.update_replica_liveness(peer_replica_id, now_ms, now_ms, durability_role)
+                {
                     tracing::warn!("replica liveness update failed: {err}");
                 }
             }
@@ -1096,8 +1106,7 @@ mod tests {
             _replica_id: ReplicaId,
             _last_seen_ms: u64,
             _last_handshake_ms: u64,
-            _role: ReplicaRole,
-            _durability_eligible: bool,
+            _role: ReplicaDurabilityRole,
         ) -> Result<(), crate::daemon::wal::WalIndexError> {
             Ok(())
         }

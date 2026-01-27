@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use beads_rs::Limits;
 use beads_rs::core::{
     Applied, Durable, EventFrameV1, EventId, EventShaLookupError, HeadStatus, NamespaceId,
-    ReplicaId, ReplicaRole, Seq0, Seq1, Sha256, StoreIdentity, Watermark,
+    ReplicaId, Seq0, Seq1, Sha256, StoreIdentity, Watermark,
 };
 use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
 use beads_rs::daemon::repl::{
     Ack, Events, IngestOutcome, ReplError, Session, SessionAction, SessionConfig, SessionPhase,
     SessionRole, SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
 };
+use beads_rs::daemon::wal::ReplicaDurabilityRole;
 
 use super::identity;
 use super::repl_frames;
@@ -115,8 +116,7 @@ impl SessionStore for MockStore {
         _replica_id: ReplicaId,
         _last_seen_ms: u64,
         _last_handshake_ms: u64,
-        _role: ReplicaRole,
-        _durability_eligible: bool,
+        _role: ReplicaDurabilityRole,
     ) -> Result<(), beads_rs::daemon::wal::WalIndexError> {
         Ok(())
     }

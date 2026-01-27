@@ -33,6 +33,7 @@ use crate::daemon::repl::{
     SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore, WalRangeReader,
     decode_envelope, encode_envelope,
 };
+use crate::daemon::wal::ReplicaDurabilityRole;
 
 #[derive(Clone, Debug)]
 pub struct PeerConfig {
@@ -178,13 +179,25 @@ where
             return None;
         }
 
+        let durability_role = match ReplicaDurabilityRole::try_from((role, durability_eligible)) {
+            Ok(role) => role,
+            Err(err) => {
+                tracing::warn!(
+                    peer_replica_id = %peer.replica_id,
+                    role = ?role,
+                    durability_eligible,
+                    "invalid replica durability role: {err}"
+                );
+                return None;
+            }
+        };
+
         Some(PeerPlan {
             replica_id: peer.replica_id,
             addr: peer.addr.clone(),
             offered_namespaces: offered.clone(),
             requested_namespaces: offered,
-            role,
-            durability_eligible,
+            durability_role,
         })
     }
 }
@@ -195,8 +208,7 @@ struct PeerPlan {
     addr: String,
     offered_namespaces: Vec<NamespaceId>,
     requested_namespaces: Vec<NamespaceId>,
-    role: ReplicaRole,
-    durability_eligible: bool,
+    durability_role: ReplicaDurabilityRole,
 }
 
 struct PeerRuntime<S> {
@@ -290,7 +302,7 @@ where
         replica_id = %runtime.local_replica_id,
         peer_replica_id = %plan.replica_id,
         peer_addr = %plan.addr,
-        peer_role = ?plan.role
+        peer_role = ?plan.durability_role
     );
     let _guard = span.enter();
 
@@ -449,8 +461,7 @@ where
                                     plan.replica_id,
                                     now_ms,
                                     handshake_ms,
-                                    plan.role,
-                                    plan.durability_eligible,
+                                    plan.durability_role,
                                 )
                             {
                                 tracing::warn!("replica liveness update failed: {err}");
@@ -530,13 +541,9 @@ where
             let now_ms = now_ms();
             handshake_at_ms = Some(now_ms);
             last_hello_at_ms = None;
-            if let Err(err) = store.update_replica_liveness(
-                plan.replica_id,
-                now_ms,
-                now_ms,
-                plan.role,
-                plan.durability_eligible,
-            ) {
+            if let Err(err) =
+                store.update_replica_liveness(plan.replica_id, now_ms, now_ms, plan.durability_role)
+            {
                 tracing::warn!("replica liveness update failed: {err}");
             }
             if let Some(peer) = session.peer() {
@@ -1036,8 +1043,7 @@ mod tests {
             _replica_id: ReplicaId,
             _last_seen_ms: u64,
             _last_handshake_ms: u64,
-            _role: ReplicaRole,
-            _durability_eligible: bool,
+            _role: ReplicaDurabilityRole,
         ) -> Result<(), crate::daemon::wal::WalIndexError> {
             Ok(())
         }

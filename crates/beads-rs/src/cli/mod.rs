@@ -14,8 +14,7 @@ use clap::{ArgAction, Parser, builder::BoolishValueParser};
 use crate::api::QueryResult;
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{
-    ActorId, Applied, BeadId, BeadSlug, BeadType, ClientRequestId, DurabilityClass, NamespaceId,
-    Priority, Watermarks,
+    ActorId, Applied, BeadId, BeadSlug, ClientRequestId, DurabilityClass, NamespaceId, Watermarks,
 };
 use crate::daemon::ipc::{
     IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta, ReadConsistency, ReadCtx,
@@ -25,8 +24,10 @@ use crate::{Error, Result};
 
 pub use commands::Command;
 pub use commands::daemon::DaemonCmd;
+pub(super) use filters::CommonFilterArgs;
 
 mod commands;
+mod filters;
 mod parse;
 
 thread_local! {
@@ -455,26 +456,6 @@ pub(super) fn current_actor_id() -> Result<ActorId> {
     let username = whoami::username();
     let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
     validate_actor_id(&format!("{}@{}", username, hostname))
-}
-
-pub(super) fn apply_common_filters(
-    filters: &mut crate::daemon::query::Filters,
-    status: Option<String>,
-    priority: Option<Priority>,
-    bead_type: Option<BeadType>,
-    assignee: Option<String>,
-    labels: Vec<String>,
-) -> Result<()> {
-    filters.status = status;
-    filters.priority = priority;
-    filters.bead_type = bead_type;
-    filters.assignee = assignee.map(crate::core::ActorId::new).transpose()?;
-    filters.labels = if labels.is_empty() {
-        None
-    } else {
-        Some(labels)
-    };
-    Ok(())
 }
 
 pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {

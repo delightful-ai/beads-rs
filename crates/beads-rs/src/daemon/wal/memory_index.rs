@@ -322,7 +322,6 @@ impl WalIndexTxn for MemoryWalIndexTxn {
                 existing.last_seen_ms = existing.last_seen_ms.max(row.last_seen_ms);
                 existing.last_handshake_ms = existing.last_handshake_ms.max(row.last_handshake_ms);
                 existing.role = row.role;
-                existing.durability_eligible = row.durability_eligible;
             })
             .or_insert_with(|| row.clone());
         Ok(())

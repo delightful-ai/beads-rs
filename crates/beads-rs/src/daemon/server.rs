@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,8 +22,8 @@ use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::executor::DurabilityWait;
 use super::git_worker::{GitOp, GitResult};
 use super::ipc::{
-    ReadConsistency, Request, Response, ResponseExt, ResponsePayload, decode_request_with_limits,
-    encode_response, send_response,
+    ReadConsistency, Request, RequestInfo, Response, ResponseExt, ResponsePayload,
+    decode_request_with_limits, encode_response, send_response,
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
@@ -61,181 +61,6 @@ impl ReadConsistencyTag {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RequestContext {
-    request_type: &'static str,
-    repo: Option<PathBuf>,
-    namespace: Option<String>,
-    actor_id: Option<String>,
-    client_request_id: Option<String>,
-    read_consistency: Option<ReadConsistencyTag>,
-}
-
-impl RequestContext {
-    fn from_request(request: &Request) -> Self {
-        match request {
-            Request::Create { ctx, .. } => Self::from_mutation("create", &ctx.repo.path, &ctx.meta),
-            Request::Update { ctx, .. } => Self::from_mutation("update", &ctx.repo.path, &ctx.meta),
-            Request::AddLabels { ctx, .. } => {
-                Self::from_mutation("add_labels", &ctx.repo.path, &ctx.meta)
-            }
-            Request::RemoveLabels { ctx, .. } => {
-                Self::from_mutation("remove_labels", &ctx.repo.path, &ctx.meta)
-            }
-            Request::SetParent { ctx, .. } => {
-                Self::from_mutation("set_parent", &ctx.repo.path, &ctx.meta)
-            }
-            Request::Close { ctx, .. } => Self::from_mutation("close", &ctx.repo.path, &ctx.meta),
-            Request::Reopen { ctx, .. } => Self::from_mutation("reopen", &ctx.repo.path, &ctx.meta),
-            Request::Delete { ctx, .. } => Self::from_mutation("delete", &ctx.repo.path, &ctx.meta),
-            Request::AddDep { ctx, .. } => {
-                Self::from_mutation("add_dep", &ctx.repo.path, &ctx.meta)
-            }
-            Request::RemoveDep { ctx, .. } => {
-                Self::from_mutation("remove_dep", &ctx.repo.path, &ctx.meta)
-            }
-            Request::AddNote { ctx, .. } => {
-                Self::from_mutation("add_note", &ctx.repo.path, &ctx.meta)
-            }
-            Request::Claim { ctx, .. } => Self::from_mutation("claim", &ctx.repo.path, &ctx.meta),
-            Request::Unclaim { ctx, .. } => {
-                Self::from_mutation("unclaim", &ctx.repo.path, &ctx.meta)
-            }
-            Request::ExtendClaim { ctx, .. } => {
-                Self::from_mutation("extend_claim", &ctx.repo.path, &ctx.meta)
-            }
-            Request::Show { ctx, .. } => Self::from_read("show", &ctx.repo.path, &ctx.read),
-            Request::ShowMultiple { ctx, .. } => {
-                Self::from_read("show_multiple", &ctx.repo.path, &ctx.read)
-            }
-            Request::List { ctx, .. } => Self::from_read("list", &ctx.repo.path, &ctx.read),
-            Request::Ready { ctx, .. } => Self::from_read("ready", &ctx.repo.path, &ctx.read),
-            Request::DepTree { ctx, .. } => Self::from_read("dep_tree", &ctx.repo.path, &ctx.read),
-            Request::DepCycles { ctx, .. } => {
-                Self::from_read("dep_cycles", &ctx.repo.path, &ctx.read)
-            }
-            Request::Deps { ctx, .. } => Self::from_read("deps", &ctx.repo.path, &ctx.read),
-            Request::Notes { ctx, .. } => Self::from_read("notes", &ctx.repo.path, &ctx.read),
-            Request::Blocked { ctx, .. } => Self::from_read("blocked", &ctx.repo.path, &ctx.read),
-            Request::Stale { ctx, .. } => Self::from_read("stale", &ctx.repo.path, &ctx.read),
-            Request::Count { ctx, .. } => Self::from_read("count", &ctx.repo.path, &ctx.read),
-            Request::Deleted { ctx, .. } => Self::from_read("deleted", &ctx.repo.path, &ctx.read),
-            Request::EpicStatus { ctx, .. } => {
-                Self::from_read("epic_status", &ctx.repo.path, &ctx.read)
-            }
-            Request::Refresh { ctx, .. } => Self::from_repo("refresh", &ctx.path),
-            Request::Sync { ctx, .. } => Self::from_repo("sync", &ctx.path),
-            Request::SyncWait { ctx, .. } => Self::from_repo("sync_wait", &ctx.path),
-            Request::Init { ctx, .. } => Self::from_repo("init", &ctx.path),
-            Request::Status { ctx, .. } => Self::from_read("status", &ctx.repo.path, &ctx.read),
-            Request::AdminStatus { ctx, .. } => {
-                Self::from_read("admin_status", &ctx.repo.path, &ctx.read)
-            }
-            Request::AdminMetrics { ctx, .. } => {
-                Self::from_read("admin_metrics", &ctx.repo.path, &ctx.read)
-            }
-            Request::AdminDoctor { ctx, .. } => {
-                Self::from_read("admin_doctor", &ctx.repo.path, &ctx.read)
-            }
-            Request::AdminScrub { ctx, .. } => {
-                Self::from_read("admin_scrub", &ctx.repo.path, &ctx.read)
-            }
-            Request::AdminFlush { ctx, payload } => {
-                Self::from_namespace("admin_flush", &ctx.path, &payload.namespace)
-            }
-            Request::AdminCheckpointWait { ctx, payload } => {
-                Self::from_namespace("admin_checkpoint_wait", &ctx.path, &payload.namespace)
-            }
-            Request::AdminFingerprint { ctx, .. } => {
-                Self::from_read("admin_fingerprint", &ctx.repo.path, &ctx.read)
-            }
-            Request::AdminReloadPolicies { ctx, .. } => {
-                Self::from_repo("admin_reload_policies", &ctx.path)
-            }
-            Request::AdminReloadLimits { ctx, .. } => {
-                Self::from_repo("admin_reload_limits", &ctx.path)
-            }
-            Request::AdminReloadReplication { ctx, .. } => {
-                Self::from_repo("admin_reload_replication", &ctx.path)
-            }
-            Request::AdminRotateReplicaId { ctx, .. } => {
-                Self::from_repo("admin_rotate_replica_id", &ctx.path)
-            }
-            Request::AdminMaintenanceMode { ctx, .. } => {
-                Self::from_repo("admin_maintenance_mode", &ctx.path)
-            }
-            Request::AdminRebuildIndex { ctx, .. } => {
-                Self::from_repo("admin_rebuild_index", &ctx.path)
-            }
-            Request::Validate { ctx, .. } => Self::from_read("validate", &ctx.repo.path, &ctx.read),
-            Request::Subscribe { ctx, .. } => {
-                Self::from_read("subscribe", &ctx.repo.path, &ctx.read)
-            }
-            Request::Ping => Self::without_repo("ping"),
-            Request::Shutdown => Self::without_repo("shutdown"),
-        }
-    }
-
-    fn from_mutation(
-        request_type: &'static str,
-        repo: &Path,
-        meta: &super::ipc::MutationMeta,
-    ) -> Self {
-        Self {
-            request_type,
-            repo: Some(repo.to_path_buf()),
-            namespace: meta.namespace.clone(),
-            actor_id: meta.actor_id.clone(),
-            client_request_id: meta.client_request_id.clone(),
-            read_consistency: None,
-        }
-    }
-
-    fn from_read(request_type: &'static str, repo: &Path, read: &ReadConsistency) -> Self {
-        Self {
-            request_type,
-            repo: Some(repo.to_path_buf()),
-            namespace: read.namespace.clone(),
-            actor_id: None,
-            client_request_id: None,
-            read_consistency: Some(read_consistency_tag(read)),
-        }
-    }
-
-    fn from_repo(request_type: &'static str, repo: &Path) -> Self {
-        Self {
-            request_type,
-            repo: Some(repo.to_path_buf()),
-            namespace: None,
-            actor_id: None,
-            client_request_id: None,
-            read_consistency: None,
-        }
-    }
-
-    fn from_namespace(request_type: &'static str, repo: &Path, namespace: &Option<String>) -> Self {
-        Self {
-            request_type,
-            repo: Some(repo.to_path_buf()),
-            namespace: namespace.clone(),
-            actor_id: None,
-            client_request_id: None,
-            read_consistency: None,
-        }
-    }
-
-    fn without_repo(request_type: &'static str) -> Self {
-        Self {
-            request_type,
-            repo: None,
-            namespace: None,
-            actor_id: None,
-            client_request_id: None,
-            read_consistency: None,
-        }
-    }
-}
-
 fn read_consistency_tag(read: &ReadConsistency) -> ReadConsistencyTag {
     if read.require_min_seen.is_some() {
         ReadConsistencyTag::RequireMinSeen
@@ -244,44 +69,40 @@ fn read_consistency_tag(read: &ReadConsistency) -> ReadConsistencyTag {
     }
 }
 
-fn request_span(context: &RequestContext) -> Span {
+fn request_span(info: &RequestInfo<'_>) -> Span {
     let span = tracing::info_span!(
         "ipc_request",
-        request_type = context.request_type,
+        request_type = info.op,
         repo = tracing::field::Empty,
         namespace = tracing::field::Empty,
         actor_id = tracing::field::Empty,
         client_request_id = tracing::field::Empty,
         read_consistency = tracing::field::Empty,
     );
-    if let Some(repo) = &context.repo {
+    if let Some(repo) = info.repo {
         let repo_display = repo.display();
         span.record("repo", tracing::field::display(repo_display));
     }
-    if let Some(namespace) = &context.namespace {
+    if let Some(namespace) = info.namespace {
         span.record("namespace", tracing::field::display(namespace));
     }
-    if let Some(actor_id) = &context.actor_id {
+    if let Some(actor_id) = info.actor_id {
         span.record("actor_id", tracing::field::display(actor_id));
     }
-    if let Some(client_request_id) = &context.client_request_id {
+    if let Some(client_request_id) = info.client_request_id {
         span.record(
             "client_request_id",
             tracing::field::display(client_request_id),
         );
     }
-    if let Some(read_consistency) = context.read_consistency {
+    if let Some(read) = info.read {
+        let read_consistency = read_consistency_tag(read);
         span.record(
             "read_consistency",
             tracing::field::display(read_consistency.as_str()),
         );
     }
     span
-}
-
-struct ReadGateRequest {
-    repo: PathBuf,
-    read: ReadConsistency,
 }
 
 struct ReadGateWaiter {
@@ -375,19 +196,28 @@ pub fn run_state_loop(
             recv(req_rx) -> msg => {
                 match msg {
                     Ok(RequestMessage { request, respond }) => {
-                        let context = RequestContext::from_request(&request);
-                        let span = request_span(&context);
+                        let (span, read_gate) = {
+                            let info = request.info();
+                            let span = request_span(&info);
+                            let read_gate = info.read.map(|read| {
+                                (
+                                    info.repo.map(|repo| repo.to_path_buf()),
+                                    read.clone(),
+                                )
+                            });
+                            (span, read_gate)
+                        };
                         let _guard = span.enter();
 
-                        if let Some(read_gate) = read_gate_request(&request) {
-                            let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
+                        if let Some((Some(repo), read)) = read_gate {
+                            let loaded = match daemon.ensure_repo_fresh(&repo, &git_tx) {
                                 Ok(loaded) => loaded,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                                     continue;
                                 }
                             };
-                            let read = match loaded.normalize_read_consistency(read_gate.read) {
+                            let read = match loaded.normalize_read_consistency(read) {
                                 Ok(read) => read,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
@@ -418,7 +248,7 @@ pub fn run_state_loop(
                                         read_gate_waiters.push(ReadGateWaiter {
                                             request,
                                             respond,
-                                            repo: read_gate.repo,
+                                            repo,
                                             read,
                                             span: span.clone(),
                                             started_at,
@@ -747,92 +577,6 @@ fn process_request_message(
         RequestOutcome::Shutdown
     } else {
         RequestOutcome::Continue
-    }
-}
-
-fn read_gate_request(request: &Request) -> Option<ReadGateRequest> {
-    match request {
-        Request::Show { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::ShowMultiple { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::List { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Ready { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::DepTree { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Deps { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Notes { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Blocked { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Stale { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Count { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Deleted { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::EpicStatus { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Status { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::AdminStatus { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::AdminMetrics { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::AdminDoctor { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::AdminScrub { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::AdminFingerprint { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Validate { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        Request::Subscribe { ctx, .. } => Some(ReadGateRequest {
-            repo: ctx.repo.path.clone(),
-            read: ctx.read.clone(),
-        }),
-        _ => None,
     }
 }
 
@@ -1457,13 +1201,13 @@ mod tests {
             },
         };
 
-        let context = RequestContext::from_request(&request);
-        assert_eq!(context.request_type, "create");
-        assert_eq!(context.repo, Some(repo));
-        assert_eq!(context.namespace.as_deref(), Some("core"));
-        assert_eq!(context.actor_id.as_deref(), Some("actor@example.com"));
-        assert_eq!(context.client_request_id.as_deref(), Some("req-123"));
-        assert_eq!(context.read_consistency, None);
+        let info = request.info();
+        assert_eq!(info.op, "create");
+        assert_eq!(info.repo, Some(repo.as_path()));
+        assert_eq!(info.namespace, Some("core"));
+        assert_eq!(info.actor_id, Some("actor@example.com"));
+        assert_eq!(info.client_request_id, Some("req-123"));
+        assert!(info.read.is_none());
     }
 
     #[test]
@@ -1481,11 +1225,15 @@ mod tests {
             },
         };
 
-        let context = RequestContext::from_request(&request);
-        assert_eq!(context.request_type, "show");
-        assert_eq!(context.repo, Some(repo));
-        assert_eq!(context.namespace.as_deref(), Some("core"));
-        assert_eq!(context.read_consistency, Some(ReadConsistencyTag::Default));
+        let info = request.info();
+        assert_eq!(info.op, "show");
+        assert_eq!(info.repo, Some(repo.as_path()));
+        assert_eq!(info.namespace, Some("core"));
+        assert!(info.read.is_some());
+        assert_eq!(
+            info.read.map(read_consistency_tag),
+            Some(ReadConsistencyTag::Default)
+        );
     }
 
     #[test]
@@ -1622,8 +1370,8 @@ mod tests {
                     dependencies: Vec::new(),
                 },
             };
-            let context = RequestContext::from_request(&request);
-            let span = request_span(&context);
+            let info = request.info();
+            let span = request_span(&info);
             let _guard = span.enter();
         });
 
