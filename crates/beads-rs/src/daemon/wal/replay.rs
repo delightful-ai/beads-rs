@@ -817,13 +817,24 @@ where
             })?;
         let header = record.header().clone();
         let record = record
-            .verify_with_event_body(&event_body)
+            .verify_with_event_body(event_body)
             .map_err(|err| match err {
                 RecordVerifyError::HeaderMismatch(source) => WalReplayError::RecordHeaderMismatch {
                     path: segment.path.clone(),
                     offset,
                     source,
                 },
+                RecordVerifyError::PayloadMismatch { expected, got } => {
+                    WalReplayError::RecordPayloadMismatch(Box::new(RecordShaMismatchInfo {
+                        namespace: segment.header.namespace.clone(),
+                        origin: header.origin_replica_id,
+                        seq: header.origin_seq,
+                        expected,
+                        got,
+                        path: segment.path.clone(),
+                        offset,
+                    }))
+                }
                 RecordVerifyError::ShaMismatch { expected, got } => {
                     WalReplayError::RecordShaMismatch(Box::new(RecordShaMismatchInfo {
                         namespace: segment.header.namespace.clone(),
@@ -835,6 +846,11 @@ where
                         offset,
                     }))
                 }
+                RecordVerifyError::Encode(source) => WalReplayError::RecordCanonicalEncode {
+                    path: segment.path.clone(),
+                    offset,
+                    source,
+                },
             })?;
         on_record(offset, &record, frame_len as u32)?;
 
@@ -1043,7 +1059,8 @@ mod tests {
             namespace.clone(),
             origin,
         );
-        let bytes = encode_event_body_canonical(&body).unwrap();
+        let body = body.into_validated(&limits).expect("validated");
+        let bytes = encode_event_body_canonical(body.as_ref()).unwrap();
         let expected_sha = sha256_bytes(bytes.as_ref()).0;
 
         let record = VerifiedRecord::new(
@@ -1057,8 +1074,8 @@ mod tests {
                 sha256: expected_sha,
                 prev_sha256: None,
             },
-            Bytes::copy_from_slice(bytes.as_ref()),
-            &body,
+            bytes,
+            body,
         )
         .unwrap();
         writer.append(&record, 10).unwrap();

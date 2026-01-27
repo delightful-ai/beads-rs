@@ -299,8 +299,8 @@ impl Daemon {
                 sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
-            Bytes::copy_from_slice(sequenced.event_bytes.as_ref()),
-            &sequenced.event_body,
+            sequenced.event_bytes.clone(),
+            sequenced.event_body.clone(),
         )
         .map_err(|err| {
             tracing::error!(error = ?err, "record verification failed");
@@ -1656,8 +1656,8 @@ mod tests {
                 sha256: sha,
                 prev_sha256: None,
             },
-            Bytes::copy_from_slice(sequenced.event_bytes.as_ref()),
-            &sequenced.event_body,
+            sequenced.event_bytes.clone(),
+            sequenced.event_body.clone(),
         )
         .unwrap();
 

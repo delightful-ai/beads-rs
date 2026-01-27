@@ -147,8 +147,8 @@ fn event_body(
     event_time_ms: u64,
     txn_id: TxnId,
     client_request_id: Option<ClientRequestId>,
-) -> EventBody {
-    EventBody {
+) -> ValidatedEventBody {
+    let body = EventBody {
         envelope_v: 1,
         store: StoreIdentity::new(meta.store_id(), meta.store_epoch()),
         namespace: namespace.clone(),
@@ -166,19 +166,20 @@ fn event_body(
                 logical: 1,
             },
         }),
-    }
+    };
+    body.into_validated(&Limits::default()).expect("validated")
 }
 
-fn event_body_bytes(body: &EventBody) -> Bytes {
-    let bytes = encode_event_body_canonical(body).expect("encode event body");
-    Bytes::copy_from_slice(bytes.as_ref())
+fn event_body_bytes(body: &ValidatedEventBody) -> EventBytes<Canonical> {
+    encode_event_body_canonical(body.as_ref()).expect("encode event body")
 }
 
-fn verified_record(header: RecordHeader, payload: Bytes, body: &EventBody) -> VerifiedRecord {
-    let mut bytes = header.encode().expect("encode record header");
-    bytes.extend_from_slice(payload.as_ref());
-    let record = UnverifiedRecord::decode_body(&bytes).expect("decode record");
-    record.verify_with_event_body(body).expect("verify record")
+fn verified_record(
+    header: RecordHeader,
+    payload: EventBytes<Canonical>,
+    body: ValidatedEventBody,
+) -> VerifiedRecord {
+    VerifiedRecord::new(header, payload, body).expect("verify record")
 }
 
 pub fn record_for_seq(
@@ -192,7 +193,7 @@ pub fn record_for_seq(
     let txn_id = TxnId::new(Uuid::from_bytes([seq as u8; 16]));
     let body = event_body(meta, namespace, origin, seq, event_time_ms, txn_id, None);
     let payload = event_body_bytes(&body);
-    let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
+    let sha = beads_rs::hash_event_body(&payload).0;
     let header = RecordHeader {
         origin_replica_id: origin,
         origin_seq: Seq1::from_u64(seq).expect("seq1"),
@@ -203,7 +204,7 @@ pub fn record_for_seq(
         sha256: sha,
         prev_sha256: prev_sha,
     };
-    verified_record(header, payload, &body)
+    verified_record(header, payload, body)
 }
 
 pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> VerifiedRecord {

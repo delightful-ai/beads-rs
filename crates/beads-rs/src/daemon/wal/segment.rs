@@ -592,8 +592,8 @@ mod tests {
         )
     }
 
-    fn test_record_with_payload(payload: Bytes) -> VerifiedRecord {
-        let sha = crate::core::sha256_bytes(payload.as_ref()).0;
+    fn test_record() -> VerifiedRecord {
+        let limits = crate::core::Limits::default();
         let header = crate::daemon::wal::record::RecordHeader {
             origin_replica_id: crate::core::ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: crate::core::Seq1::from_u64(1).unwrap(),
@@ -601,7 +601,7 @@ mod tests {
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,
             request_sha256: None,
-            sha256: sha,
+            sha256: [0u8; 32],
             prev_sha256: None,
         };
         let body = crate::core::EventBody {
@@ -626,11 +626,12 @@ mod tests {
                 },
             }),
         };
-        VerifiedRecord::new(header, payload, &body).expect("verified record")
-    }
-
-    fn test_record() -> VerifiedRecord {
-        test_record_with_payload(Bytes::from_static(b"event"))
+        let body = body.into_validated(&limits).expect("validated");
+        let payload = crate::core::encode_event_body_canonical(body.as_ref()).expect("payload");
+        let sha = crate::core::hash_event_body(&payload).0;
+        let mut header = header;
+        header.sha256 = sha;
+        VerifiedRecord::new(header, payload, body).expect("verified record")
     }
 
     fn take_sync_mode() -> Option<SegmentSyncMode> {
@@ -770,7 +771,8 @@ mod tests {
         )
         .unwrap();
 
-        let record = test_record_with_payload(Bytes::from_static(b"this is too large"));
+        let record = test_record();
+        assert!(record.payload_bytes().len() > 8);
 
         let err = writer.append(&record, 10).unwrap_err();
         assert!(matches!(err, EventWalError::RecordTooLarge { .. }));

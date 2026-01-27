@@ -1575,6 +1575,14 @@ impl Daemon {
             .map_err(|err| wal_index_error_payload(&err))?;
 
         for event in &batch {
+            let payload = encode_event_body_canonical(event.body.as_ref()).map_err(|_| {
+                ReplError::new(
+                    CliErrorCode::Internal.into(),
+                    "event body canonical encode failed",
+                    false,
+                )
+            })?;
+            let sha = hash_event_body(&payload).0;
             let record = VerifiedRecord::new(
                 RecordHeader {
                     origin_replica_id: origin,
@@ -1583,11 +1591,11 @@ impl Daemon {
                     txn_id: event.body.txn_id,
                     client_request_id: event.body.client_request_id,
                     request_sha256: None,
-                    sha256: event.sha256.0,
+                    sha256: sha,
                     prev_sha256: event.prev.prev.map(|sha| sha.0),
                 },
-                Bytes::copy_from_slice(event.bytes.as_ref()),
-                &event.body,
+                payload,
+                event.body.clone(),
             )
             .map_err(|err| {
                 tracing::error!(error = ?err, "record verification failed");
@@ -3116,6 +3124,8 @@ mod tests {
     }
 
     fn record_for_event(event: &VerifiedEvent<PrevVerified>) -> VerifiedRecord {
+        let payload = encode_event_body_canonical(event.body.as_ref()).expect("payload");
+        let sha256 = hash_event_body(&payload).0;
         VerifiedRecord::new(
             RecordHeader {
                 origin_replica_id: event.body.origin_replica_id,
@@ -3124,11 +3134,11 @@ mod tests {
                 txn_id: event.body.txn_id,
                 client_request_id: event.body.client_request_id,
                 request_sha256: None,
-                sha256: event.sha256.0,
+                sha256: sha256,
                 prev_sha256: event.prev.prev.map(|sha| sha.0),
             },
-            Bytes::copy_from_slice(event.bytes.as_ref()),
-            &event.body,
+            payload,
+            event.body.clone(),
         )
         .expect("verified record")
     }
