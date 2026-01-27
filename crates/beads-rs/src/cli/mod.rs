@@ -18,7 +18,8 @@ use crate::core::{
     Priority, Watermarks,
 };
 use crate::daemon::ipc::{
-    IpcClient, IpcConnection, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+    IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta, ReadConsistency, ReadCtx,
+    RepoCtx, Request, Response, ResponsePayload,
 };
 use crate::{Error, Result};
 
@@ -236,12 +237,24 @@ impl Ctx {
         }
     }
 
+    fn mutation_ctx(&self) -> MutationCtx {
+        MutationCtx::new(self.repo.clone(), self.mutation_meta())
+    }
+
     fn read_consistency(&self) -> ReadConsistency {
         ReadConsistency {
             namespace: self.namespace.as_ref().map(|ns| ns.as_str().to_string()),
             require_min_seen: self.require_min_seen.clone(),
             wait_timeout_ms: self.wait_timeout_ms,
         }
+    }
+
+    fn read_ctx(&self) -> ReadCtx {
+        ReadCtx::new(self.repo.clone(), self.read_consistency())
+    }
+
+    fn repo_ctx(&self) -> RepoCtx {
+        RepoCtx::new(self.repo.clone())
     }
 
     fn actor_id(&self) -> Result<ActorId> {
@@ -648,9 +661,10 @@ fn send(req: &Request) -> Result<ResponsePayload> {
 
 fn fetch_issue(ctx: &Ctx, id: &BeadId) -> Result<crate::api::Issue> {
     let req = Request::Show {
-        repo: ctx.repo.clone(),
-        id: id.as_str().to_string(),
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: IdPayload {
+            id: id.as_str().to_string(),
+        },
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
