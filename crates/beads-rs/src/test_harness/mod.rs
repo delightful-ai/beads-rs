@@ -31,9 +31,13 @@ use crate::daemon::repl::frame::{FrameReader, encode_frame};
 use crate::daemon::repl::proto::{
     PROTOCOL_VERSION_V1, ReplEnvelope, decode_envelope, encode_envelope,
 };
+use crate::daemon::repl::session::{
+    Inbound, InboundConnecting, Outbound, OutboundConnecting, SessionState, handle_inbound_message,
+    handle_outbound_message,
+};
 use crate::daemon::repl::{
-    Ack, Events, IngestOutcome, ReplError, Session, SessionAction, SessionConfig, SessionRole,
-    SessionStore, Want, WatermarkMap, WatermarkSnapshot, WatermarkState,
+    Ack, Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionStore, Want,
+    WatermarkMap, WatermarkSnapshot, WatermarkState,
 };
 use crate::daemon::wal::{
     EventWal, MemoryWalIndex, SegmentConfig, SegmentSyncMode, WalIndexError, rebuild_index,
@@ -885,10 +889,10 @@ impl ReplicationRig {
                 let to_replica = to_node.replica_id();
                 let outbound_store = from_node.session_store();
                 let inbound_store = to_node.session_store();
-                let mut outbound =
-                    new_session(SessionRole::Outbound, identity, from_replica, &limits);
-                let inbound = new_session(SessionRole::Inbound, identity, to_replica, &limits);
-                let action = outbound.begin_handshake(&outbound_store, self.clock.now_ms());
+                let outbound = new_outbound_session(identity, from_replica, &limits);
+                let inbound = new_inbound_session(identity, to_replica, &limits);
+                let (outbound, action) =
+                    begin_outbound_handshake(outbound, &outbound_store, self.clock.now_ms());
                 let init = RigLinkInit {
                     from,
                     to,
@@ -900,29 +904,52 @@ impl ReplicationRig {
                     from_node,
                     to_node,
                 };
+                let mut link = RigLink::new(init);
                 if let Some(action) = action {
-                    let mut link = RigLink::new(init);
                     link.apply_action(action, Endpoint::Outbound, self.clock.now_ms());
-                    self.links.push(link);
-                } else {
-                    self.links.push(RigLink::new(init));
                 }
+                self.links.push(link);
             }
         }
     }
 }
 
-fn new_session(
-    role: SessionRole,
+fn new_outbound_session(
     identity: StoreIdentity,
     replica: ReplicaId,
     limits: &Limits,
-) -> Session {
+) -> SessionState<Outbound> {
     let mut config = SessionConfig::new(identity, replica, limits);
     config.requested_namespaces = vec![NamespaceId::core()];
     config.offered_namespaces = vec![NamespaceId::core()];
     let admission = AdmissionController::new(limits);
-    Session::new(role, config, limits.clone(), admission)
+    SessionState::Connecting(OutboundConnecting::new(config, limits.clone(), admission))
+}
+
+fn new_inbound_session(
+    identity: StoreIdentity,
+    replica: ReplicaId,
+    limits: &Limits,
+) -> SessionState<Inbound> {
+    let mut config = SessionConfig::new(identity, replica, limits);
+    config.requested_namespaces = vec![NamespaceId::core()];
+    config.offered_namespaces = vec![NamespaceId::core()];
+    let admission = AdmissionController::new(limits);
+    SessionState::Connecting(InboundConnecting::new(config, limits.clone(), admission))
+}
+
+fn begin_outbound_handshake(
+    session: SessionState<Outbound>,
+    store: &impl SessionStore,
+    now_ms: u64,
+) -> (SessionState<Outbound>, Option<SessionAction>) {
+    match session {
+        SessionState::Connecting(session) => {
+            let (session, action) = session.begin_handshake(store, now_ms);
+            (SessionState::Handshaking(session), Some(action))
+        }
+        other => (other, None),
+    }
 }
 
 enum Endpoint {
@@ -934,8 +961,8 @@ struct RigLink {
     from: usize,
     to: usize,
     transport: ChannelTransport,
-    outbound: Session,
-    inbound: Session,
+    outbound: Option<SessionState<Outbound>>,
+    inbound: Option<SessionState<Inbound>>,
     outbound_store: TestSessionStore,
     inbound_store: TestSessionStore,
     from_node: TestNode,
@@ -948,8 +975,8 @@ struct RigLinkInit {
     from: usize,
     to: usize,
     transport: ChannelTransport,
-    outbound: Session,
-    inbound: Session,
+    outbound: SessionState<Outbound>,
+    inbound: SessionState<Inbound>,
     outbound_store: TestSessionStore,
     inbound_store: TestSessionStore,
     from_node: TestNode,
@@ -973,8 +1000,8 @@ impl RigLink {
             from,
             to,
             transport,
-            outbound,
-            inbound,
+            outbound: Some(outbound),
+            inbound: Some(inbound),
             outbound_store,
             inbound_store,
             from_node,
@@ -989,13 +1016,16 @@ impl RigLink {
         let identity = self.from_node.store_identity();
         let from_replica = self.from_node.replica_id();
         let to_replica = self.to_node.replica_id();
-        self.outbound = new_session(SessionRole::Outbound, identity, from_replica, limits);
-        self.inbound = new_session(SessionRole::Inbound, identity, to_replica, limits);
+        let outbound = new_outbound_session(identity, from_replica, limits);
+        let inbound = new_inbound_session(identity, to_replica, limits);
         self.outbound_store = self.from_node.session_store();
         self.inbound_store = self.to_node.session_store();
         self.last_want_sent = None;
         self.last_want_sent_at_ms = None;
-        if let Some(action) = self.outbound.begin_handshake(&self.outbound_store, now_ms) {
+        let (outbound, action) = begin_outbound_handshake(outbound, &self.outbound_store, now_ms);
+        self.outbound = Some(outbound);
+        self.inbound = Some(inbound);
+        if let Some(action) = action {
             self.apply_action(action, Endpoint::Outbound, now_ms);
         }
     }
@@ -1008,11 +1038,14 @@ impl RigLink {
         if !outbound_msgs.is_empty() {
             progressed = true;
             for envelope in outbound_msgs {
-                let actions = self.outbound.handle_message(
+                let outbound = self.outbound.take().expect("outbound session");
+                let (outbound, actions) = handle_outbound_message(
+                    outbound,
                     envelope.message,
                     &mut self.outbound_store,
                     now_ms,
                 );
+                self.outbound = Some(outbound);
                 for action in actions {
                     self.apply_action(action, Endpoint::Outbound, now_ms);
                 }
@@ -1023,19 +1056,21 @@ impl RigLink {
         if !inbound_msgs.is_empty() {
             progressed = true;
             for envelope in inbound_msgs {
-                let actions =
-                    self.inbound
-                        .handle_message(envelope.message, &mut self.inbound_store, now_ms);
+                let inbound = self.inbound.take().expect("inbound session");
+                let (inbound, actions) = handle_inbound_message(
+                    inbound,
+                    envelope.message,
+                    &mut self.inbound_store,
+                    now_ms,
+                );
+                self.inbound = Some(inbound);
                 for action in actions {
                     self.apply_action(action, Endpoint::Inbound, now_ms);
                 }
             }
         }
 
-        if matches!(
-            self.inbound.phase(),
-            crate::daemon::repl::SessionPhase::Streaming
-        ) {
+        if matches!(self.inbound.as_ref(), Some(SessionState::Streaming(_))) {
             let inbound_snapshot = self
                 .inbound_store
                 .watermark_snapshot(&[NamespaceId::core()]);
@@ -1096,6 +1131,17 @@ impl RigLink {
                 Endpoint::Inbound => self.transport.b.send_message(&msg),
             },
             SessionAction::PeerWant(want) => {
+                let streaming = match endpoint {
+                    Endpoint::Outbound => {
+                        matches!(self.outbound.as_ref(), Some(SessionState::Streaming(_)))
+                    }
+                    Endpoint::Inbound => {
+                        matches!(self.inbound.as_ref(), Some(SessionState::Streaming(_)))
+                    }
+                };
+                if !streaming {
+                    return;
+                }
                 let (source, transport) = match endpoint {
                     Endpoint::Outbound => (&self.from_node, &self.transport.a),
                     Endpoint::Inbound => (&self.to_node, &self.transport.b),
@@ -1126,14 +1172,22 @@ impl RigLink {
             },
             SessionAction::PeerError(_err) => {}
             SessionAction::Close { .. } => {
-                self.outbound.mark_closed();
-                self.inbound.mark_closed();
+                if let Some(outbound) = self.outbound.take() {
+                    self.outbound = Some(outbound.close());
+                }
+                if let Some(inbound) = self.inbound.take() {
+                    self.inbound = Some(inbound.close());
+                }
             }
         }
-        if matches!(endpoint, Endpoint::Outbound)
-            && let Some(action) = self.outbound.begin_handshake(&self.outbound_store, now_ms)
-        {
-            self.apply_action(action, Endpoint::Outbound, now_ms);
+        if matches!(endpoint, Endpoint::Outbound) {
+            let outbound = self.outbound.take().expect("outbound session");
+            let (outbound, action) =
+                begin_outbound_handshake(outbound, &self.outbound_store, now_ms);
+            self.outbound = Some(outbound);
+            if let Some(action) = action {
+                self.apply_action(action, Endpoint::Outbound, now_ms);
+            }
         }
     }
 }
