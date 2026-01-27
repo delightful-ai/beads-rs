@@ -323,7 +323,7 @@ fn prune_old_entries(
         });
     }
 
-    entries.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_ms));
 
     let mut keep: HashSet<String> = HashSet::new();
     keep.insert(keep_checkpoint_id.to_string());

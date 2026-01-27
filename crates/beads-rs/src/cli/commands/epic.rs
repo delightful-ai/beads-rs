@@ -132,11 +132,11 @@ pub(crate) fn render_epic_statuses(statuses: &[crate::api::EpicStatus]) -> Strin
 
     let mut out = String::new();
     for s in statuses {
-        let pct = if s.total_children > 0 {
-            (s.closed_children * 100) / s.total_children
-        } else {
-            0
-        };
+        let pct = s
+            .closed_children
+            .saturating_mul(100)
+            .checked_div(s.total_children)
+            .unwrap_or(0);
         let icon = if s.eligible_for_close { "✓" } else { "○" };
         out.push_str(&format!(
             "{icon} {} {}\n",
