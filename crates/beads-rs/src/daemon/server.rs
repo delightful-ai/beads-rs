@@ -1123,8 +1123,8 @@ mod tests {
 
     use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
-        ActorId, Applied, BeadId, BeadType, DurabilityClass, DurabilityReceipt, Durable,
-        EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
+        ActorId, Applied, BeadId, BeadType, ClientRequestId, DurabilityClass, DurabilityReceipt,
+        Durable, EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
         ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
         Watermark, Watermarks,
     };
@@ -1181,9 +1181,9 @@ mod tests {
     fn request_context_extracts_create_fields() {
         let repo = PathBuf::from("/tmp/repo");
         let meta = MutationMeta {
-            namespace: Some("core".to_string()),
-            client_request_id: Some("req-123".to_string()),
-            actor_id: Some("actor@example.com".to_string()),
+            namespace: Some(NamespaceId::core()),
+            client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([7u8; 16]))),
+            actor_id: Some(ActorId::new("actor@example.com").unwrap()),
             durability: None,
         };
         let request = Request::Create {
@@ -1351,9 +1351,9 @@ mod tests {
         tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
             let repo = PathBuf::from("/tmp/repo");
             let meta = MutationMeta {
-                namespace: Some("core".to_string()),
-                client_request_id: Some("req-123".to_string()),
-                actor_id: Some("actor@example.com".to_string()),
+                namespace: Some(NamespaceId::core()),
+                client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([7u8; 16]))),
+                actor_id: Some(ActorId::new("actor@example.com").unwrap()),
                 durability: None,
             };
             let request = Request::Create {

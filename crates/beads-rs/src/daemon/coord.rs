@@ -744,12 +744,12 @@ impl LoadedStore<'_> {
         actor: &ActorId,
     ) -> Result<ParsedMutationMeta, OpError> {
         let namespace = self.normalize_namespace(meta.namespace)?;
-        let durability = parse_durability_meta(meta.durability)?;
-        let client_request_id = parse_optional_client_request_id(meta.client_request_id)?;
+        let durability = meta.durability.unwrap_or(DurabilityClass::LocalFsync);
+        let client_request_id = meta.client_request_id;
         let trace_id = client_request_id
             .map(TraceId::from)
             .unwrap_or_else(|| TraceId::new(Uuid::new_v4()));
-        let actor_id = parse_optional_actor_id(meta.actor_id, actor)?;
+        let actor_id = meta.actor_id.unwrap_or_else(|| actor.clone());
 
         Ok(ParsedMutationMeta {
             namespace,
@@ -811,19 +811,11 @@ impl LoadedStore<'_> {
         })
     }
 
-    pub(crate) fn normalize_namespace(&self, raw: Option<String>) -> Result<NamespaceId, OpError> {
-        let namespace = match raw {
-            None => NamespaceId::core(),
-            Some(value) => {
-                let trimmed = value.trim();
-                NamespaceId::parse(trimmed.to_string()).map_err(|err| {
-                    OpError::NamespaceInvalid {
-                        namespace: trimmed.to_string(),
-                        reason: err.to_string(),
-                    }
-                })?
-            }
-        };
+    pub(crate) fn normalize_namespace(
+        &self,
+        raw: Option<NamespaceId>,
+    ) -> Result<NamespaceId, OpError> {
+        let namespace = raw.unwrap_or_else(NamespaceId::core);
         if self.runtime().policies.contains_key(&namespace) {
             Ok(namespace)
         } else {
@@ -875,49 +867,4 @@ fn invalid_id_payload(err: CoreError) -> ErrorPayload {
             false,
         ),
     }
-}
-
-fn parse_optional_client_request_id(
-    raw: Option<String>,
-) -> Result<Option<ClientRequestId>, OpError> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(OpError::InvalidRequest {
-            field: Some("client_request_id".into()),
-            reason: "client_request_id cannot be empty".into(),
-        });
-    }
-    ClientRequestId::parse_str(trimmed)
-        .map(Some)
-        .map_err(|err| OpError::InvalidRequest {
-            field: Some("client_request_id".into()),
-            reason: err.to_string(),
-        })
-}
-
-fn parse_optional_actor_id(raw: Option<String>, fallback: &ActorId) -> Result<ActorId, OpError> {
-    let Some(raw) = raw else {
-        return Ok(fallback.clone());
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(OpError::InvalidRequest {
-            field: Some("actor_id".into()),
-            reason: "actor_id cannot be empty".into(),
-        });
-    }
-    ActorId::new(trimmed.to_string()).map_err(|err| OpError::InvalidRequest {
-        field: Some("actor_id".into()),
-        reason: err.to_string(),
-    })
-}
-
-fn parse_durability_meta(raw: Option<String>) -> Result<DurabilityClass, OpError> {
-    DurabilityClass::parse_optional(raw.as_deref()).map_err(|err| OpError::InvalidRequest {
-        field: Some("durability".into()),
-        reason: err.to_string(),
-    })
 }
