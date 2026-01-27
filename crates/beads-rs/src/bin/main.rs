@@ -7,7 +7,10 @@ fn main() {
     // but CLI is single-threaded at this point)
     if let Some(actor) = &cli.actor {
         // SAFETY: CLI is single-threaded at this point, no concurrent env access
-        unsafe { std::env::set_var("BD_ACTOR", actor) };
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("BD_ACTOR", actor)
+        };
     }
 
     let is_daemon = matches!(
