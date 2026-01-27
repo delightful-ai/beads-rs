@@ -223,13 +223,74 @@ pub struct HlcRow {
     pub last_logical: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReplicaDurabilityRole {
+    Anchor { eligible: bool },
+    Peer { eligible: bool },
+    Observer,
+}
+
+impl ReplicaDurabilityRole {
+    pub fn anchor(eligible: bool) -> Self {
+        Self::Anchor { eligible }
+    }
+
+    pub fn peer(eligible: bool) -> Self {
+        Self::Peer { eligible }
+    }
+
+    pub fn observer() -> Self {
+        Self::Observer
+    }
+
+    pub fn role(&self) -> ReplicaRole {
+        match self {
+            Self::Anchor { .. } => ReplicaRole::Anchor,
+            Self::Peer { .. } => ReplicaRole::Peer,
+            Self::Observer => ReplicaRole::Observer,
+        }
+    }
+
+    pub fn durability_eligible(&self) -> bool {
+        match self {
+            Self::Anchor { eligible } | Self::Peer { eligible } => *eligible,
+            Self::Observer => false,
+        }
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("durability eligibility {eligible} invalid for role {role:?}")]
+pub struct ReplicaDurabilityRoleError {
+    pub role: ReplicaRole,
+    pub eligible: bool,
+}
+
+impl TryFrom<(ReplicaRole, bool)> for ReplicaDurabilityRole {
+    type Error = ReplicaDurabilityRoleError;
+
+    fn try_from(value: (ReplicaRole, bool)) -> Result<Self, Self::Error> {
+        let (role, eligible) = value;
+        match role {
+            ReplicaRole::Anchor => Ok(Self::Anchor { eligible }),
+            ReplicaRole::Peer => Ok(Self::Peer { eligible }),
+            ReplicaRole::Observer => {
+                if eligible {
+                    Err(ReplicaDurabilityRoleError { role, eligible })
+                } else {
+                    Ok(Self::Observer)
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ReplicaLivenessRow {
     pub replica_id: ReplicaId,
     pub last_seen_ms: u64,
     pub last_handshake_ms: u64,
-    pub role: ReplicaRole,
-    pub durability_eligible: bool,
+    pub role: ReplicaDurabilityRole,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -692,8 +753,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let last_handshake_ms = i64::try_from(row.last_handshake_ms).map_err(|_| {
             WalIndexError::ReplicaLivenessRowDecode("last_handshake_ms out of range".to_string())
         })?;
-        let role = replica_role_str(row.role);
-        let durability_eligible = if row.durability_eligible { 1 } else { 0 };
+        let role = replica_role_str(row.role.role());
+        let durability_eligible = if row.role.durability_eligible() { 1 } else { 0 };
 
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO replica_liveness (replica_id, last_seen_ms, last_handshake_ms, role, durability_eligible) \
@@ -922,13 +983,15 @@ impl WalIndexReader for SqliteWalIndexReader {
                     )
                 })?;
                 let role = parse_replica_role(&role)?;
+                let durability_eligible = durability_eligible != 0;
+                let role = ReplicaDurabilityRole::try_from((role, durability_eligible))
+                    .map_err(|err| WalIndexError::ReplicaLivenessRowDecode(err.to_string()))?;
 
                 out.push(ReplicaLivenessRow {
                     replica_id: ReplicaId::new(replica_uuid),
                     last_seen_ms,
                     last_handshake_ms,
                     role,
-                    durability_eligible: durability_eligible != 0,
                 });
             }
             Ok(out)
@@ -1410,6 +1473,33 @@ mod tests {
     }
 
     #[test]
+    fn replica_durability_role_rejects_observer_eligible() {
+        let err = ReplicaDurabilityRole::try_from((ReplicaRole::Observer, true)).unwrap_err();
+        assert_eq!(
+            err,
+            ReplicaDurabilityRoleError {
+                role: ReplicaRole::Observer,
+                eligible: true
+            }
+        );
+    }
+
+    #[test]
+    fn replica_durability_role_reports_role_and_eligibility() {
+        let anchor = ReplicaDurabilityRole::anchor(true);
+        assert_eq!(anchor.role(), ReplicaRole::Anchor);
+        assert!(anchor.durability_eligible());
+
+        let peer = ReplicaDurabilityRole::peer(false);
+        assert_eq!(peer.role(), ReplicaRole::Peer);
+        assert!(!peer.durability_eligible());
+
+        let observer = ReplicaDurabilityRole::observer();
+        assert_eq!(observer.role(), ReplicaRole::Observer);
+        assert!(!observer.durability_eligible());
+    }
+
+    #[test]
     fn sqlite_index_initializes_schema_and_meta() {
         let temp = TempDir::new().unwrap();
         let meta = test_meta();
@@ -1575,15 +1665,13 @@ mod tests {
             replica_id,
             last_seen_ms: 100,
             last_handshake_ms: 90,
-            role: ReplicaRole::Anchor,
-            durability_eligible: true,
+            role: ReplicaDurabilityRole::anchor(true),
         };
         let second = ReplicaLivenessRow {
             replica_id,
             last_seen_ms: 80,
             last_handshake_ms: 110,
-            role: ReplicaRole::Peer,
-            durability_eligible: false,
+            role: ReplicaDurabilityRole::peer(false),
         };
 
         let mut txn = index.writer().begin_txn().unwrap();
@@ -1602,8 +1690,7 @@ mod tests {
                 replica_id,
                 last_seen_ms: 100,
                 last_handshake_ms: 110,
-                role: ReplicaRole::Peer,
-                durability_eligible: false,
+                role: ReplicaDurabilityRole::peer(false),
             }
         );
     }
