@@ -36,8 +36,8 @@ use crate::daemon::repl::session::{
     handle_outbound_message,
 };
 use crate::daemon::repl::{
-    Ack, Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionStore, Want,
-    WatermarkMap, WatermarkSnapshot, WatermarkState,
+    Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionStore, ValidatedAck,
+    Want, WatermarkMap, WatermarkSnapshot, WatermarkState,
 };
 use crate::daemon::wal::{
     EventWal, MemoryWalIndex, SegmentConfig, SegmentSyncMode, WalIndexError, rebuild_index,
@@ -489,15 +489,15 @@ impl TestNode {
         })
     }
 
-    pub fn record_peer_ack(&self, peer: ReplicaId, ack: &Ack) {
+    pub fn record_peer_ack(&self, peer: ReplicaId, ack: &ValidatedAck) {
         self.with_daemon(|daemon| {
             let store_id = self.store_id();
             let runtime = daemon.store_runtime_by_id(store_id).expect("store runtime");
             let mut table = runtime.peer_acks.lock().expect("peer ack lock poisoned");
             let _ = table.update_peer(
                 peer,
-                &ack.durable,
-                ack.applied.as_ref(),
+                ack.durable(),
+                ack.applied(),
                 crate::core::WallClock::now().0,
             );
         });

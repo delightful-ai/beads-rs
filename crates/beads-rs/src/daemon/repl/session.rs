@@ -60,13 +60,12 @@ impl AllowedNamespaces {
         {
             return Err(namespace_policy_violation_error(namespace));
         }
-        if let Some(applied) = ack.applied.as_ref() {
-            if let Some(namespace) = applied
+        if let Some(applied) = ack.applied.as_ref()
+            && let Some(namespace) = applied
                 .keys()
                 .find(|namespace| !self.0.contains(*namespace))
-            {
-                return Err(namespace_policy_violation_error(namespace));
-            }
+        {
+            return Err(namespace_policy_violation_error(namespace));
         }
 
         Ok(ValidatedAck {

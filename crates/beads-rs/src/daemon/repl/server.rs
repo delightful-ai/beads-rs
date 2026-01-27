@@ -27,14 +27,14 @@ use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
-use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkState};
+use crate::daemon::repl::proto::{Events, PROTOCOL_VERSION_V1, Want, WatermarkState};
 use crate::daemon::repl::session::{
     InboundConnecting, Session, SessionState, SessionWire, Streaming, handle_inbound_message,
 };
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, PeerAckTable, ReplEnvelope, ReplMessage, SessionAction,
-    SessionConfig, SessionStore, SharedSessionStore, WalRangeReader, decode_envelope,
+    SessionConfig, SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader, decode_envelope,
     encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
@@ -939,14 +939,14 @@ fn update_peer_ack(
     store: &impl SessionStore,
     peer_acks: &Arc<Mutex<PeerAckTable>>,
     peer: ReplicaId,
-    ack: &Ack,
+    ack: &ValidatedAck,
 ) -> Result<(), Box<crate::daemon::repl::PeerAckError>> {
     let now_ms = now_ms();
     let mut table = peer_acks.lock().expect("peer ack lock poisoned");
-    table.update_peer(peer, &ack.durable, ack.applied.as_ref(), now_ms)?;
-    let namespaces: Vec<NamespaceId> = ack.durable.keys().cloned().collect();
+    table.update_peer(peer, ack.durable(), ack.applied(), now_ms)?;
+    let namespaces: Vec<NamespaceId> = ack.durable().keys().cloned().collect();
     let snapshot = store.watermark_snapshot(&namespaces);
-    emit_peer_lag(peer, &snapshot.durable, &ack.durable);
+    emit_peer_lag(peer, &snapshot.durable, ack.durable());
     Ok(())
 }
 
