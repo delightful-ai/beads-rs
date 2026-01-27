@@ -8,9 +8,10 @@ use beads_rs::core::{
     ReplicaId, Seq0, Seq1, Sha256, StoreIdentity, Watermark,
 };
 use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
+use beads_rs::daemon::repl::proto::WatermarkState;
 use beads_rs::daemon::repl::{
     Ack, Events, IngestOutcome, ReplError, Session, SessionAction, SessionConfig, SessionPhase,
-    SessionRole, SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
+    SessionRole, SessionStore, Want, WatermarkSnapshot,
 };
 use beads_rs::daemon::wal::ReplicaDurabilityRole;
 
@@ -25,48 +26,25 @@ pub struct MockStore {
     applied: WatermarkState<Applied>,
 }
 
-type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
-
 impl MockStore {
     pub fn has_event(&self, eid: &EventId) -> bool {
         self.lookup.contains_key(eid)
     }
 
     fn snapshot_for(&self, namespaces: &[NamespaceId]) -> WatermarkSnapshot {
-        let mut durable: WatermarkMap = BTreeMap::new();
-        let mut durable_heads: WatermarkHeads = BTreeMap::new();
-        let mut applied: WatermarkMap = BTreeMap::new();
-        let mut applied_heads: WatermarkHeads = BTreeMap::new();
+        let mut durable = WatermarkState::new();
+        let mut applied = WatermarkState::new();
 
         for ns in namespaces {
             if let Some(origins) = self.durable.get(ns) {
-                let ns_map = durable.entry(ns.clone()).or_default();
-                let ns_heads = durable_heads.entry(ns.clone()).or_default();
-                for (origin, wm) in origins {
-                    ns_map.insert(*origin, wm.seq());
-                    if let HeadStatus::Known(head) = wm.head() {
-                        ns_heads.insert(*origin, Sha256(head));
-                    }
-                }
+                durable.insert(ns.clone(), origins.clone());
             }
             if let Some(origins) = self.applied.get(ns) {
-                let ns_map = applied.entry(ns.clone()).or_default();
-                let ns_heads = applied_heads.entry(ns.clone()).or_default();
-                for (origin, wm) in origins {
-                    ns_map.insert(*origin, wm.seq());
-                    if let HeadStatus::Known(head) = wm.head() {
-                        ns_heads.insert(*origin, Sha256(head));
-                    }
-                }
+                applied.insert(ns.clone(), origins.clone());
             }
         }
 
-        WatermarkSnapshot {
-            durable,
-            durable_heads,
-            applied,
-            applied_heads,
-        }
+        WatermarkSnapshot { durable, applied }
     }
 }
 

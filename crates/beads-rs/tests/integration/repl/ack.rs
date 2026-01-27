@@ -15,9 +15,9 @@ use beads_rs::daemon::wal::{
 };
 use beads_rs::paths;
 use beads_rs::{
-    ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
+    ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HeadStatus, HlcMax, Limits,
     NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
-    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
+    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, Watermark,
     encode_event_body_canonical, hash_event_body,
 };
 
@@ -112,22 +112,14 @@ fn repl_ack_advances_watermarks() {
         })
         .expect("ack");
 
-    let seq = ack
+    let watermark = ack
         .durable
         .get(&namespace)
         .and_then(|m| m.get(&origin))
         .copied()
-        .unwrap_or(Seq0::ZERO);
-    assert_eq!(seq, Seq0::new(2));
-
-    let head = ack
-        .durable_heads
-        .as_ref()
-        .and_then(|heads| heads.get(&namespace))
-        .and_then(|m| m.get(&origin))
-        .copied()
-        .expect("head");
-    assert_eq!(head, e2.sha256);
+        .unwrap_or_else(Watermark::genesis);
+    assert_eq!(watermark.seq(), Seq0::new(2));
+    assert_eq!(watermark.head(), HeadStatus::Known(e2.sha256.0));
 
     let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(2).expect("seq1"));
     assert!(store.has_event(&event_id));

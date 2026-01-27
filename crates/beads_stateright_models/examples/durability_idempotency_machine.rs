@@ -9,13 +9,13 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use beads_rs::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
+use beads_rs::daemon::repl::proto::WatermarkState;
 use beads_rs::daemon::wal::WalIndex;
 use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot, PeerAckTable, durability};
 use beads_rs::{
-    Applied, ClientRequestId, DurabilityClass, DurabilityOutcome, DurabilityReceipt, EventId,
-    NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
-    Watermarks,
+    Applied, ClientRequestId, DurabilityClass, DurabilityOutcome, DurabilityReceipt, Durable,
+    EventId, HeadStatus, NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
+    StoreIdentity, TxnId, Watermark, Watermarks,
 };
 use stateright::actor::{
     Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out, model_timeout,
@@ -455,18 +455,14 @@ fn handle_peer_ack(
     head: Sha256,
     o: &mut Out<ModelActor>,
 ) -> Result<(), ()> {
-    let mut map: WatermarkMap = BTreeMap::new();
+    let mut map: WatermarkState<Durable> = BTreeMap::new();
+    let watermark = Watermark::new(seq, HeadStatus::Known(head.0)).map_err(|_| ())?;
     map.entry(cfg.namespace.clone())
         .or_default()
-        .insert(cfg.local_replica, seq);
-    let mut heads: WatermarkHeads = BTreeMap::new();
-    heads
-        .entry(cfg.namespace.clone())
-        .or_default()
-        .insert(cfg.local_replica, head);
+        .insert(cfg.local_replica, watermark);
     state
         .peer_acks
-        .update_peer(peer, &map, Some(&heads), None, None, state.now_ms)
+        .update_peer(peer, &map, None, state.now_ms)
         .map_err(|_| ())?;
 
     if let Some(pending) = state.pending.take() {

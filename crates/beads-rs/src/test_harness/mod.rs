@@ -13,9 +13,9 @@ use uuid::Uuid;
 
 use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
 use crate::core::{
-    ActorId, BeadId, DurabilityClass, EventId, EventShaLookupError, Limits, NamespaceId,
-    ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0, Sha256, StoreEpoch, StoreId,
-    StoreIdentity,
+    ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, HeadStatus,
+    Limits, NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0, Sha256,
+    StoreEpoch, StoreId, StoreIdentity, Watermark,
 };
 use crate::daemon::Clock;
 use crate::daemon::admission::AdmissionController;
@@ -33,7 +33,7 @@ use crate::daemon::repl::proto::{
 };
 use crate::daemon::repl::{
     Ack, Events, IngestOutcome, ReplError, Session, SessionAction, SessionConfig, SessionRole,
-    SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
+    SessionStore, Want, WatermarkMap, WatermarkSnapshot, WatermarkState,
 };
 use crate::daemon::wal::{
     EventWal, MemoryWalIndex, SegmentConfig, SegmentSyncMode, WalIndexError, rebuild_index,
@@ -538,18 +538,14 @@ impl SessionStore for TestSessionStore {
                 Ok(rows) => rows,
                 Err(_) => {
                     return WatermarkSnapshot {
-                        durable: WatermarkMap::new(),
-                        durable_heads: WatermarkHeads::new(),
-                        applied: WatermarkMap::new(),
-                        applied_heads: WatermarkHeads::new(),
+                        durable: WatermarkState::new(),
+                        applied: WatermarkState::new(),
                     };
                 }
             };
 
-            let mut durable = WatermarkMap::new();
-            let mut durable_heads = WatermarkHeads::new();
-            let mut applied = WatermarkMap::new();
-            let mut applied_heads = WatermarkHeads::new();
+            let mut durable: WatermarkState<Durable> = WatermarkState::new();
+            let mut applied: WatermarkState<Applied> = WatermarkState::new();
 
             for row in rows {
                 if let Some(filter) = &namespace_filter
@@ -560,35 +556,27 @@ impl SessionStore for TestSessionStore {
 
                 let ns = row.namespace.clone();
                 let origin = row.origin;
-                durable
-                    .entry(ns.clone())
-                    .or_default()
-                    .insert(origin, Seq0::new(row.durable_seq));
-                applied
-                    .entry(ns.clone())
-                    .or_default()
-                    .insert(origin, Seq0::new(row.applied_seq));
-
-                if let Some(head) = row.durable_head_sha {
-                    durable_heads
+                let durable_head = match row.durable_head_sha {
+                    Some(head) => HeadStatus::Known(head),
+                    None => HeadStatus::Genesis,
+                };
+                if let Ok(watermark) = Watermark::new(Seq0::new(row.durable_seq), durable_head) {
+                    durable
                         .entry(ns.clone())
                         .or_default()
-                        .insert(origin, Sha256(head));
+                        .insert(origin, watermark);
                 }
-                if let Some(head) = row.applied_head_sha {
-                    applied_heads
-                        .entry(ns)
-                        .or_default()
-                        .insert(origin, Sha256(head));
+
+                let applied_head = match row.applied_head_sha {
+                    Some(head) => HeadStatus::Known(head),
+                    None => HeadStatus::Genesis,
+                };
+                if let Ok(watermark) = Watermark::new(Seq0::new(row.applied_seq), applied_head) {
+                    applied.entry(ns).or_default().insert(origin, watermark);
                 }
             }
 
-            WatermarkSnapshot {
-                durable,
-                durable_heads,
-                applied,
-                applied_heads,
-            }
+            WatermarkSnapshot { durable, applied }
         })
     }
 
@@ -809,12 +797,8 @@ impl ReplicationRig {
         let Some(first) = snapshots.next() else {
             return true;
         };
-        snapshots.all(|snapshot| {
-            snapshot.durable == first.durable
-                && snapshot.durable_heads == first.durable_heads
-                && snapshot.applied == first.applied
-                && snapshot.applied_heads == first.applied_heads
-        })
+        snapshots
+            .all(|snapshot| snapshot.durable == first.durable && snapshot.applied == first.applied)
     }
 
     pub fn assert_converged(&self, namespaces: &[NamespaceId]) {
