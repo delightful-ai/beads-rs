@@ -235,7 +235,7 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
         sha256: sha,
         prev_sha256: None,
     };
-    verified_record(header, payload, &body)
+    verified_record(header, payload, body)
 }
 
 pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> VerifiedRecord {
@@ -264,7 +264,7 @@ pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
         sha256: sha,
         prev_sha256: None,
     };
-    verified_record(header, payload, &body)
+    verified_record(header, payload, body)
 }
 
 pub fn frame_bytes(record: &VerifiedRecord) -> EventWalResult<Vec<u8>> {
