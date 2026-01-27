@@ -1,5 +1,7 @@
 pub mod client;
 pub mod codec;
+pub mod ctx;
+pub mod payload;
 pub mod types;
 
 use beads_api::DaemonInfo;
@@ -9,6 +11,10 @@ use thiserror::Error;
 pub use client::*;
 pub use codec::*;
 pub use types::*;
+
+pub(crate) fn default_lease_secs() -> u64 {
+    3600 // 1 hour default
+}
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
