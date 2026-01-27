@@ -8,7 +8,6 @@ use thiserror::Error;
 use super::bead::{Bead, BeadCore, BeadFields};
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
-use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
 use super::event::{EventBody, EventKindV1, TxnV1};
 use super::identity::{ActorId, BeadId, NoteId};
@@ -287,8 +286,7 @@ fn apply_dep_add(
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
-        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
+    let key = dep.key.clone();
     let dot = dep.dot.into();
     let change = state.apply_dep_add(key.clone(), dot, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -303,8 +301,7 @@ fn apply_dep_remove(
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
-        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
+    let key = dep.key.clone();
     let ctx = (&dep.ctx).into();
     let change = state.apply_dep_remove(&key, &ctx, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -640,6 +637,7 @@ fn default_fields(stamp: Stamp) -> BeadFields {
 mod tests {
     use super::*;
     use crate::collections::Label;
+    use crate::dep::DepKey;
     use crate::domain::DepKind;
     use crate::event::{EventKindV1, HlcMax};
     use crate::identity::{
@@ -948,9 +946,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
                 ctx: WireDvvV1 {
                     max: std::collections::BTreeMap::from([(replica_id, 10)]),
                     dots: Vec::new(),
@@ -964,9 +960,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
                 dot: WireDotV1 {
                     replica: replica_id,
                     counter: 5,
@@ -980,9 +974,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(from, to, DepKind::Blocks).unwrap(),
                 dot: WireDotV1 {
                     replica: replica_id,
                     counter: 20,
