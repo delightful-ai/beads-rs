@@ -535,6 +535,7 @@ impl Daemon {
                             let pending_receipt = DurabilityCoordinator::pending_receipt(
                                 response.receipt,
                                 durability,
+                                acked_by,
                             );
                             return Err(OpError::DurabilityTimeout {
                                 requested: durability,
@@ -963,8 +964,11 @@ fn try_reuse_idempotent_response(
                     if wait_timeout.is_zero() {
                         let pending =
                             DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
-                        let pending_receipt =
-                            DurabilityCoordinator::pending_receipt(response.receipt, durability);
+                        let pending_receipt = DurabilityCoordinator::pending_receipt(
+                            response.receipt,
+                            durability,
+                            acked_by,
+                        );
                         return Err(OpError::DurabilityTimeout {
                             requested: durability,
                             waited_ms: 0,
@@ -1705,9 +1709,9 @@ mod tests {
             MutationOutcome::Pending(_) => panic!("expected immediate response"),
         };
 
-        assert_eq!(response.receipt.txn_id, sequenced.event_body.txn_id);
+        assert_eq!(response.receipt.txn_id(), sequenced.event_body.txn_id);
         assert_eq!(
-            response.receipt.event_ids,
+            response.receipt.event_ids(),
             vec![EventId::new(replica_id, ctx.namespace.clone(), origin_seq)]
         );
     }

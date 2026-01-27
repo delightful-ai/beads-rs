@@ -33,8 +33,8 @@ struct ReceiptKey {
 impl ReceiptKey {
     fn from_receipt(receipt: &DurabilityReceipt) -> Self {
         Self {
-            txn_id: receipt.txn_id,
-            event_ids: receipt.event_ids.clone(),
+            txn_id: receipt.txn_id(),
+            event_ids: receipt.event_ids().to_vec(),
         }
     }
 }

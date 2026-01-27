@@ -5,8 +5,8 @@ use std::num::NonZeroU32;
 use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
 use beads_rs::core::{
-    BeadId, BeadType, DurabilityClass, DurabilityOutcome, HeadStatus, NamespaceId, Priority,
-    ProtocolErrorCode, Seq0, StoreId,
+    BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode, Seq0,
+    StoreId,
 };
 use beads_rs::daemon::ipc::{
     CreatePayload, IdPayload, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, Request,
@@ -172,22 +172,16 @@ fn e2e_replicated_fsync_receipt() {
     let (issue_id, receipt) =
         create_issue_with_durability(&mut rig, 0, "durability-ok", NonZeroU32::new(2).expect("k"));
 
-    let requested = match receipt.outcome {
-        DurabilityOutcome::Achieved { requested, .. } => requested,
-        DurabilityOutcome::Pending { requested } => requested,
-    };
+    let requested = receipt.outcome().requested();
     assert_eq!(
         requested,
         DurabilityClass::ReplicatedFsync {
             k: NonZeroU32::new(2).expect("k"),
         }
     );
-    assert!(matches!(
-        receipt.outcome,
-        DurabilityOutcome::Achieved { .. }
-    ));
+    assert!(receipt.outcome().is_achieved());
     let replicated = receipt
-        .durability_proof
+        .durability_proof()
         .replicated
         .expect("replicated proof");
     assert_eq!(replicated.k, NonZeroU32::new(2).expect("k"));
@@ -202,7 +196,7 @@ fn e2e_replicated_fsync_receipt() {
         1,
         &issue_id,
         ReadConsistency {
-            require_min_seen: Some(receipt.min_seen.clone()),
+            require_min_seen: Some(receipt.min_seen().clone()),
             wait_timeout_ms: Some(30_000),
             ..Default::default()
         },
@@ -214,8 +208,8 @@ fn e2e_replicated_fsync_receipt() {
         other => panic!("unexpected show response: {other:?}"),
     }
 
-    let mut impossible = receipt.min_seen.clone();
-    let event_id = receipt.event_ids.first().expect("event id");
+    let mut impossible = receipt.min_seen().clone();
+    let event_id = receipt.event_ids().first().expect("event id");
     let next_seq = event_id.origin_seq.get() + 1;
     impossible
         .observe_at_least(
@@ -310,7 +304,7 @@ fn e2e_replicated_fsync_timeout_receipt() {
                 .receipt_as::<beads_rs::DurabilityReceipt>()
                 .expect("receipt decode");
             let receipt = receipt.expect("receipt missing");
-            assert!(matches!(receipt.outcome, DurabilityOutcome::Pending { .. }));
+            assert!(receipt.outcome().is_pending());
         }
         other => panic!("unexpected durability timeout response: {other:?}"),
     }

@@ -704,6 +704,7 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
                     let pending_receipt = DurabilityCoordinator::pending_receipt(
                         waiter.wait.response.receipt,
                         requested,
+                        acked_by,
                     );
                     let err = OpError::DurabilityTimeout {
                         requested,
@@ -1122,8 +1123,8 @@ mod tests {
 
     use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
-        ActorId, Applied, BeadId, BeadType, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
-        Durable, EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
+        ActorId, Applied, BeadId, BeadType, DurabilityClass, DurabilityReceipt, Durable,
+        EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
         ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
         Watermark, Watermarks,
     };
@@ -1673,30 +1674,23 @@ mod tests {
             panic!("expected op response");
         };
 
-        match op.receipt.outcome {
-            DurabilityOutcome::Achieved {
-                requested,
-                achieved,
-            } => {
-                assert_eq!(
-                    requested,
-                    DurabilityClass::ReplicatedFsync {
-                        k: NonZeroU32::new(2).unwrap()
-                    }
-                );
-                assert_eq!(
-                    achieved,
-                    DurabilityClass::ReplicatedFsync {
-                        k: NonZeroU32::new(2).unwrap()
-                    }
-                );
+        assert!(op.receipt.outcome().is_achieved());
+        assert_eq!(
+            op.receipt.outcome().requested(),
+            DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).unwrap()
             }
-            other => panic!("unexpected outcome: {other:?}"),
-        }
+        );
+        assert_eq!(
+            op.receipt.outcome().achieved(),
+            Some(DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).unwrap()
+            })
+        );
 
         let proof = op
             .receipt
-            .durability_proof
+            .durability_proof()
             .replicated
             .expect("replicated proof");
         assert_eq!(proof.k.get(), 2);
@@ -1783,6 +1777,6 @@ mod tests {
             .receipt_as::<DurabilityReceipt>()
             .unwrap()
             .expect("receipt");
-        assert!(matches!(receipt.outcome, DurabilityOutcome::Pending { .. }));
+        assert!(receipt.outcome().is_pending());
     }
 }

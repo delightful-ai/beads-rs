@@ -13,9 +13,9 @@ use beads_rs::daemon::repl::proto::WatermarkState;
 use beads_rs::daemon::wal::WalIndex;
 use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot, PeerAckTable, durability};
 use beads_rs::{
-    Applied, ClientRequestId, DurabilityClass, DurabilityOutcome, DurabilityReceipt, Durable,
-    EventId, HeadStatus, NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
-    StoreIdentity, TxnId, Watermark, Watermarks,
+    Applied, ClientRequestId, DurabilityClass, DurabilityReceipt, Durable, EventId, HeadStatus,
+    NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
+    Watermark, Watermarks,
 };
 use stateright::actor::{
     Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out, model_timeout,
@@ -85,13 +85,14 @@ struct ReceiptDigest {
 
 impl ReceiptDigest {
     fn from_receipt(receipt: &DurabilityReceipt) -> Self {
-        let outcome = match receipt.outcome {
-            DurabilityOutcome::Achieved { .. } => OutcomeKind::Achieved,
-            DurabilityOutcome::Pending { .. } => OutcomeKind::Pending,
+        let outcome = if receipt.outcome().is_achieved() {
+            OutcomeKind::Achieved
+        } else {
+            OutcomeKind::Pending
         };
         Self {
-            txn_id: receipt.txn_id,
-            event_ids: receipt.event_ids.clone(),
+            txn_id: receipt.txn_id(),
+            event_ids: receipt.event_ids().to_vec(),
             outcome,
         }
     }
@@ -516,7 +517,7 @@ fn resolve_pending(
             }
             Resolution::Timeout => {
                 let pending_receipt =
-                    durability::pending_receipt(receipt, pending.durability.to_class());
+                    durability::pending_receipt(receipt, pending.durability.to_class(), Vec::new());
                 send_receipt(
                     o,
                     pending.request_id,
