@@ -17,8 +17,7 @@ use super::{CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermark
 use crate::core::error::CoreError;
 use crate::core::state::LabelState;
 use crate::core::wire_bead::{
-    WireBeadFull, WireClaimSnapshot, WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1,
-    WireWorkflowSnapshot,
+    WireBeadFull, WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1,
 };
 use crate::core::{
     BeadId, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore, Limits, NamespaceId,
@@ -932,6 +931,7 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::core::wire_bead::{WireClaimSnapshot, WireWorkflowSnapshot};
     use crate::core::{
         ActorId, BeadId, BeadType, CanonicalState, Dvv, NamespaceId, Priority, ReplicaId,
         StoreEpoch, StoreId,
