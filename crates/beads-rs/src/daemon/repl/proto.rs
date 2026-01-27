@@ -66,6 +66,83 @@ pub struct Hello {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct WireHello {
+    protocol_version: u32,
+    min_protocol_version: u32,
+    store_id: StoreId,
+    store_epoch: StoreEpoch,
+    sender_replica_id: ReplicaId,
+    hello_nonce: u64,
+    max_frame_bytes: u32,
+    requested_namespaces: Vec<NamespaceId>,
+    offered_namespaces: Vec<NamespaceId>,
+    seen_durable: WatermarkMap,
+    seen_durable_heads: Option<WatermarkHeads>,
+    seen_applied: Option<WatermarkMap>,
+    seen_applied_heads: Option<WatermarkHeads>,
+    capabilities: Capabilities,
+}
+
+impl WireHello {
+    fn from_hello(hello: &Hello) -> Self {
+        let (seen_durable, seen_durable_heads) = watermark_maps_from_state(&hello.seen_durable);
+        let (seen_applied, seen_applied_heads) = match &hello.seen_applied {
+            Some(applied) => {
+                let (map, heads) = watermark_maps_from_state(applied);
+                (Some(map), heads)
+            }
+            None => (None, None),
+        };
+        Self {
+            protocol_version: hello.protocol_version,
+            min_protocol_version: hello.min_protocol_version,
+            store_id: hello.store_id,
+            store_epoch: hello.store_epoch,
+            sender_replica_id: hello.sender_replica_id,
+            hello_nonce: hello.hello_nonce,
+            max_frame_bytes: hello.max_frame_bytes,
+            requested_namespaces: hello.requested_namespaces.clone(),
+            offered_namespaces: hello.offered_namespaces.clone(),
+            seen_durable,
+            seen_durable_heads,
+            seen_applied,
+            seen_applied_heads,
+            capabilities: hello.capabilities.clone(),
+        }
+    }
+}
+
+impl TryFrom<WireHello> for Hello {
+    type Error = ProtoDecodeError;
+
+    fn try_from(wire: WireHello) -> Result<Self, Self::Error> {
+        Ok(Self {
+            protocol_version: wire.protocol_version,
+            min_protocol_version: wire.min_protocol_version,
+            store_id: wire.store_id,
+            store_epoch: wire.store_epoch,
+            sender_replica_id: wire.sender_replica_id,
+            hello_nonce: wire.hello_nonce,
+            max_frame_bytes: wire.max_frame_bytes,
+            requested_namespaces: wire.requested_namespaces,
+            offered_namespaces: wire.offered_namespaces,
+            seen_durable: watermark_state_from_wire(
+                wire.seen_durable,
+                wire.seen_durable_heads,
+                "seen_durable",
+            )?,
+            seen_applied: optional_watermark_state_from_wire(
+                wire.seen_applied,
+                wire.seen_applied_heads,
+                "seen_applied",
+                "seen_applied_heads",
+            )?,
+            capabilities: wire.capabilities,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Welcome {
     pub protocol_version: u32,
     pub store_id: StoreId,
@@ -80,6 +157,79 @@ pub struct Welcome {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct WireWelcome {
+    protocol_version: u32,
+    store_id: StoreId,
+    store_epoch: StoreEpoch,
+    receiver_replica_id: ReplicaId,
+    welcome_nonce: u64,
+    accepted_namespaces: Vec<NamespaceId>,
+    receiver_seen_durable: WatermarkMap,
+    receiver_seen_durable_heads: Option<WatermarkHeads>,
+    receiver_seen_applied: Option<WatermarkMap>,
+    receiver_seen_applied_heads: Option<WatermarkHeads>,
+    live_stream_enabled: bool,
+    max_frame_bytes: u32,
+}
+
+impl WireWelcome {
+    fn from_welcome(welcome: &Welcome) -> Self {
+        let (receiver_seen_durable, receiver_seen_durable_heads) =
+            watermark_maps_from_state(&welcome.receiver_seen_durable);
+        let (receiver_seen_applied, receiver_seen_applied_heads) =
+            match &welcome.receiver_seen_applied {
+                Some(applied) => {
+                    let (map, heads) = watermark_maps_from_state(applied);
+                    (Some(map), heads)
+                }
+                None => (None, None),
+            };
+        Self {
+            protocol_version: welcome.protocol_version,
+            store_id: welcome.store_id,
+            store_epoch: welcome.store_epoch,
+            receiver_replica_id: welcome.receiver_replica_id,
+            welcome_nonce: welcome.welcome_nonce,
+            accepted_namespaces: welcome.accepted_namespaces.clone(),
+            receiver_seen_durable,
+            receiver_seen_durable_heads,
+            receiver_seen_applied,
+            receiver_seen_applied_heads,
+            live_stream_enabled: welcome.live_stream_enabled,
+            max_frame_bytes: welcome.max_frame_bytes,
+        }
+    }
+}
+
+impl TryFrom<WireWelcome> for Welcome {
+    type Error = ProtoDecodeError;
+
+    fn try_from(wire: WireWelcome) -> Result<Self, Self::Error> {
+        Ok(Self {
+            protocol_version: wire.protocol_version,
+            store_id: wire.store_id,
+            store_epoch: wire.store_epoch,
+            receiver_replica_id: wire.receiver_replica_id,
+            welcome_nonce: wire.welcome_nonce,
+            accepted_namespaces: wire.accepted_namespaces,
+            receiver_seen_durable: watermark_state_from_wire(
+                wire.receiver_seen_durable,
+                wire.receiver_seen_durable_heads,
+                "receiver_seen_durable",
+            )?,
+            receiver_seen_applied: optional_watermark_state_from_wire(
+                wire.receiver_seen_applied,
+                wire.receiver_seen_applied_heads,
+                "receiver_seen_applied",
+                "receiver_seen_applied_heads",
+            )?,
+            live_stream_enabled: wire.live_stream_enabled,
+            max_frame_bytes: wire.max_frame_bytes,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Events {
     pub events: Vec<EventFrameV1>,
 }
@@ -88,6 +238,49 @@ pub struct Events {
 pub struct Ack {
     pub durable: WatermarkState<Durable>,
     pub applied: Option<WatermarkState<Applied>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct WireAck {
+    durable: WatermarkMap,
+    durable_heads: Option<WatermarkHeads>,
+    applied: Option<WatermarkMap>,
+    applied_heads: Option<WatermarkHeads>,
+}
+
+impl WireAck {
+    fn from_ack(ack: &Ack) -> Self {
+        let (durable, durable_heads) = watermark_maps_from_state(&ack.durable);
+        let (applied, applied_heads) = match &ack.applied {
+            Some(applied) => {
+                let (map, heads) = watermark_maps_from_state(applied);
+                (Some(map), heads)
+            }
+            None => (None, None),
+        };
+        Self {
+            durable,
+            durable_heads,
+            applied,
+            applied_heads,
+        }
+    }
+}
+
+impl TryFrom<WireAck> for Ack {
+    type Error = ProtoDecodeError;
+
+    fn try_from(wire: WireAck) -> Result<Self, Self::Error> {
+        Ok(Self {
+            durable: watermark_state_from_wire(wire.durable, wire.durable_heads, "durable")?,
+            applied: optional_watermark_state_from_wire(
+                wire.applied,
+                wire.applied_heads,
+                "applied",
+                "applied_heads",
+            )?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -401,57 +594,56 @@ fn decode_message_body(
 }
 
 fn encode_hello(enc: &mut Encoder<&mut Vec<u8>>, hello: &Hello) -> Result<(), ProtoEncodeError> {
-    let (seen_durable, seen_durable_heads) = watermark_maps_from_state(&hello.seen_durable);
-    let seen_applied = hello.seen_applied.as_ref().map(watermark_maps_from_state);
+    let wire = WireHello::from_hello(hello);
 
     let mut len = 11;
-    if seen_durable_heads.is_some() {
+    if wire.seen_durable_heads.is_some() {
         len += 1;
     }
-    if let Some((_, heads)) = &seen_applied {
+    if let Some(_applied) = &wire.seen_applied {
         len += 1;
-        if heads.is_some() {
+        if wire.seen_applied_heads.is_some() {
             len += 1;
         }
     }
     enc.map(len)?;
 
     enc.str("protocol_version")?;
-    enc.u32(hello.protocol_version)?;
+    enc.u32(wire.protocol_version)?;
     enc.str("min_protocol_version")?;
-    enc.u32(hello.min_protocol_version)?;
+    enc.u32(wire.min_protocol_version)?;
     enc.str("store_id")?;
-    encode_store_id(enc, &hello.store_id)?;
+    encode_store_id(enc, &wire.store_id)?;
     enc.str("store_epoch")?;
-    enc.u64(hello.store_epoch.get())?;
+    enc.u64(wire.store_epoch.get())?;
     enc.str("sender_replica_id")?;
-    encode_replica_id(enc, &hello.sender_replica_id)?;
+    encode_replica_id(enc, &wire.sender_replica_id)?;
     enc.str("hello_nonce")?;
-    enc.u64(hello.hello_nonce)?;
+    enc.u64(wire.hello_nonce)?;
     enc.str("max_frame_bytes")?;
-    enc.u32(hello.max_frame_bytes)?;
+    enc.u32(wire.max_frame_bytes)?;
     enc.str("requested_namespaces")?;
-    encode_namespace_list(enc, &hello.requested_namespaces)?;
+    encode_namespace_list(enc, &wire.requested_namespaces)?;
     enc.str("offered_namespaces")?;
-    encode_namespace_list(enc, &hello.offered_namespaces)?;
+    encode_namespace_list(enc, &wire.offered_namespaces)?;
     enc.str("seen_durable")?;
-    encode_watermark_map(enc, &seen_durable)?;
+    encode_watermark_map(enc, &wire.seen_durable)?;
 
-    if let Some(heads) = &seen_durable_heads {
+    if let Some(heads) = &wire.seen_durable_heads {
         enc.str("seen_durable_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
-    if let Some((applied, _)) = &seen_applied {
+    if let Some(applied) = &wire.seen_applied {
         enc.str("seen_applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some((_, Some(heads))) = &seen_applied {
+    if let Some(heads) = &wire.seen_applied_heads {
         enc.str("seen_applied_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
 
     enc.str("capabilities")?;
-    encode_capabilities(enc, &hello.capabilities)?;
+    encode_capabilities(enc, &wire.capabilities)?;
 
     Ok(())
 }
@@ -512,7 +704,7 @@ fn decode_hello(dec: &mut Decoder, limits: &Limits) -> Result<Hello, ProtoDecode
         }
     }
 
-    Ok(Hello {
+    Hello::try_from(WireHello {
         protocol_version: protocol_version
             .ok_or(ProtoDecodeError::MissingField("protocol_version"))?,
         min_protocol_version: min_protocol_version
@@ -528,25 +720,10 @@ fn decode_hello(dec: &mut Decoder, limits: &Limits) -> Result<Hello, ProtoDecode
             .ok_or(ProtoDecodeError::MissingField("requested_namespaces"))?,
         offered_namespaces: offered_namespaces
             .ok_or(ProtoDecodeError::MissingField("offered_namespaces"))?,
-        seen_durable: watermark_state_from_wire(
-            seen_durable.ok_or(ProtoDecodeError::MissingField("seen_durable"))?,
-            seen_durable_heads,
-            "seen_durable",
-        )?,
-        seen_applied: match seen_applied {
-            Some(applied) => Some(watermark_state_from_wire(
-                applied,
-                seen_applied_heads,
-                "seen_applied",
-            )?),
-            None if seen_applied_heads.is_some() => {
-                return Err(ProtoDecodeError::InvalidField {
-                    field: "seen_applied_heads",
-                    reason: "seen_applied missing for heads".to_string(),
-                });
-            }
-            None => None,
-        },
+        seen_durable: seen_durable.ok_or(ProtoDecodeError::MissingField("seen_durable"))?,
+        seen_durable_heads,
+        seen_applied,
+        seen_applied_heads,
         capabilities: capabilities.ok_or(ProtoDecodeError::MissingField("capabilities"))?,
     })
 }
@@ -555,55 +732,50 @@ fn encode_welcome(
     enc: &mut Encoder<&mut Vec<u8>>,
     welcome: &Welcome,
 ) -> Result<(), ProtoEncodeError> {
-    let (receiver_seen_durable, receiver_seen_durable_heads) =
-        watermark_maps_from_state(&welcome.receiver_seen_durable);
-    let receiver_seen_applied = welcome
-        .receiver_seen_applied
-        .as_ref()
-        .map(watermark_maps_from_state);
+    let wire = WireWelcome::from_welcome(welcome);
 
     let mut len = 9;
-    if receiver_seen_durable_heads.is_some() {
+    if wire.receiver_seen_durable_heads.is_some() {
         len += 1;
     }
-    if let Some((_, heads)) = &receiver_seen_applied {
+    if let Some(_applied) = &wire.receiver_seen_applied {
         len += 1;
-        if heads.is_some() {
+        if wire.receiver_seen_applied_heads.is_some() {
             len += 1;
         }
     }
     enc.map(len)?;
 
     enc.str("protocol_version")?;
-    enc.u32(welcome.protocol_version)?;
+    enc.u32(wire.protocol_version)?;
     enc.str("store_id")?;
-    encode_store_id(enc, &welcome.store_id)?;
+    encode_store_id(enc, &wire.store_id)?;
     enc.str("store_epoch")?;
-    enc.u64(welcome.store_epoch.get())?;
+    enc.u64(wire.store_epoch.get())?;
     enc.str("receiver_replica_id")?;
-    encode_replica_id(enc, &welcome.receiver_replica_id)?;
+    encode_replica_id(enc, &wire.receiver_replica_id)?;
     enc.str("welcome_nonce")?;
-    enc.u64(welcome.welcome_nonce)?;
+    enc.u64(wire.welcome_nonce)?;
     enc.str("accepted_namespaces")?;
-    encode_namespace_list(enc, &welcome.accepted_namespaces)?;
+    encode_namespace_list(enc, &wire.accepted_namespaces)?;
     enc.str("receiver_seen_durable")?;
-    encode_watermark_map(enc, &receiver_seen_durable)?;
-    if let Some(heads) = &receiver_seen_durable_heads {
+    encode_watermark_map(enc, &wire.receiver_seen_durable)?;
+    if let Some(heads) = &wire.receiver_seen_durable_heads {
         enc.str("receiver_seen_durable_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
-    if let Some((applied, _)) = &receiver_seen_applied {
+    if let Some(applied) = &wire.receiver_seen_applied {
         enc.str("receiver_seen_applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some((_, Some(heads))) = &receiver_seen_applied {
+    if let Some(heads) = &wire.receiver_seen_applied_heads {
         enc.str("receiver_seen_applied_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
     enc.str("live_stream_enabled")?;
-    enc.bool(welcome.live_stream_enabled)?;
+    enc.bool(wire.live_stream_enabled)?;
     enc.str("max_frame_bytes")?;
-    enc.u32(welcome.max_frame_bytes)?;
+    enc.u32(wire.max_frame_bytes)?;
 
     Ok(())
 }
@@ -660,7 +832,7 @@ fn decode_welcome(dec: &mut Decoder, limits: &Limits) -> Result<Welcome, ProtoDe
         }
     }
 
-    Ok(Welcome {
+    Welcome::try_from(WireWelcome {
         protocol_version: protocol_version
             .ok_or(ProtoDecodeError::MissingField("protocol_version"))?,
         store_id: store_id.ok_or(ProtoDecodeError::MissingField("store_id"))?,
@@ -670,25 +842,11 @@ fn decode_welcome(dec: &mut Decoder, limits: &Limits) -> Result<Welcome, ProtoDe
         welcome_nonce: welcome_nonce.ok_or(ProtoDecodeError::MissingField("welcome_nonce"))?,
         accepted_namespaces: accepted_namespaces
             .ok_or(ProtoDecodeError::MissingField("accepted_namespaces"))?,
-        receiver_seen_durable: watermark_state_from_wire(
-            receiver_seen_durable.ok_or(ProtoDecodeError::MissingField("receiver_seen_durable"))?,
-            receiver_seen_durable_heads,
-            "receiver_seen_durable",
-        )?,
-        receiver_seen_applied: match receiver_seen_applied {
-            Some(applied) => Some(watermark_state_from_wire(
-                applied,
-                receiver_seen_applied_heads,
-                "receiver_seen_applied",
-            )?),
-            None if receiver_seen_applied_heads.is_some() => {
-                return Err(ProtoDecodeError::InvalidField {
-                    field: "receiver_seen_applied_heads",
-                    reason: "receiver_seen_applied missing for heads".to_string(),
-                });
-            }
-            None => None,
-        },
+        receiver_seen_durable: receiver_seen_durable
+            .ok_or(ProtoDecodeError::MissingField("receiver_seen_durable"))?,
+        receiver_seen_durable_heads,
+        receiver_seen_applied,
+        receiver_seen_applied_heads,
         live_stream_enabled: live_stream_enabled
             .ok_or(ProtoDecodeError::MissingField("live_stream_enabled"))?,
         max_frame_bytes: max_frame_bytes
@@ -759,32 +917,31 @@ fn decode_events(dec: &mut Decoder, limits: &Limits) -> Result<Events, ProtoDeco
 }
 
 fn encode_ack(enc: &mut Encoder<&mut Vec<u8>>, ack: &Ack) -> Result<(), ProtoEncodeError> {
-    let (durable, durable_heads) = watermark_maps_from_state(&ack.durable);
-    let applied = ack.applied.as_ref().map(watermark_maps_from_state);
+    let wire = WireAck::from_ack(ack);
 
     let mut len = 1;
-    if durable_heads.is_some() {
+    if wire.durable_heads.is_some() {
         len += 1;
     }
-    if let Some((_, heads)) = &applied {
+    if let Some(_applied) = &wire.applied {
         len += 1;
-        if heads.is_some() {
+        if wire.applied_heads.is_some() {
             len += 1;
         }
     }
 
     enc.map(len)?;
     enc.str("durable")?;
-    encode_watermark_map(enc, &durable)?;
-    if let Some(heads) = &durable_heads {
+    encode_watermark_map(enc, &wire.durable)?;
+    if let Some(heads) = &wire.durable_heads {
         enc.str("durable_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
-    if let Some((applied, _)) = &applied {
+    if let Some(applied) = &wire.applied {
         enc.str("applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some((_, Some(heads))) = &applied {
+    if let Some(heads) = &wire.applied_heads {
         enc.str("applied_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
@@ -815,26 +972,11 @@ fn decode_ack(dec: &mut Decoder, limits: &Limits) -> Result<Ack, ProtoDecodeErro
         }
     }
 
-    Ok(Ack {
-        durable: watermark_state_from_wire(
-            durable.ok_or(ProtoDecodeError::MissingField("durable"))?,
-            durable_heads,
-            "durable",
-        )?,
-        applied: match applied {
-            Some(applied) => Some(watermark_state_from_wire(
-                applied,
-                applied_heads,
-                "applied",
-            )?),
-            None if applied_heads.is_some() => {
-                return Err(ProtoDecodeError::InvalidField {
-                    field: "applied_heads",
-                    reason: "applied missing for heads".to_string(),
-                });
-            }
-            None => None,
-        },
+    Ack::try_from(WireAck {
+        durable: durable.ok_or(ProtoDecodeError::MissingField("durable"))?,
+        durable_heads,
+        applied,
+        applied_heads,
     })
 }
 
@@ -1232,6 +1374,26 @@ fn watermark_state_from_wire<K>(
         }
     }
     Ok(out)
+}
+
+fn optional_watermark_state_from_wire<K>(
+    map: Option<WatermarkMap>,
+    heads: Option<WatermarkHeads>,
+    field: &'static str,
+    heads_field: &'static str,
+) -> Result<Option<WatermarkState<K>>, ProtoDecodeError> {
+    match map {
+        Some(map) => Ok(Some(watermark_state_from_wire(map, heads, field)?)),
+        None => {
+            if heads.is_some() {
+                return Err(ProtoDecodeError::InvalidField {
+                    field: heads_field,
+                    reason: format!("{field} missing for heads"),
+                });
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn watermark_maps_from_state<K>(
@@ -1769,6 +1931,63 @@ mod tests {
         buf
     }
 
+    fn encode_custom_welcome_body(
+        receiver_seen_durable: WatermarkMap,
+        receiver_seen_durable_heads: Option<WatermarkHeads>,
+    ) -> Vec<u8> {
+        let welcome = sample_welcome();
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        let mut len = 9;
+        if receiver_seen_durable_heads.is_some() {
+            len += 1;
+        }
+        enc.map(len).unwrap();
+        enc.str("protocol_version").unwrap();
+        enc.u32(welcome.protocol_version).unwrap();
+        enc.str("store_id").unwrap();
+        encode_store_id(&mut enc, &welcome.store_id).unwrap();
+        enc.str("store_epoch").unwrap();
+        enc.u64(welcome.store_epoch.get()).unwrap();
+        enc.str("receiver_replica_id").unwrap();
+        encode_replica_id(&mut enc, &welcome.receiver_replica_id).unwrap();
+        enc.str("welcome_nonce").unwrap();
+        enc.u64(welcome.welcome_nonce).unwrap();
+        enc.str("accepted_namespaces").unwrap();
+        encode_namespace_list(&mut enc, &welcome.accepted_namespaces).unwrap();
+        enc.str("receiver_seen_durable").unwrap();
+        encode_watermark_map(&mut enc, &receiver_seen_durable).unwrap();
+        if let Some(heads) = &receiver_seen_durable_heads {
+            enc.str("receiver_seen_durable_heads").unwrap();
+            encode_watermark_heads(&mut enc, heads).unwrap();
+        }
+        enc.str("live_stream_enabled").unwrap();
+        enc.bool(welcome.live_stream_enabled).unwrap();
+        enc.str("max_frame_bytes").unwrap();
+        enc.u32(welcome.max_frame_bytes).unwrap();
+        buf
+    }
+
+    fn encode_custom_ack_body(
+        durable: WatermarkMap,
+        durable_heads: Option<WatermarkHeads>,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        let mut len = 1;
+        if durable_heads.is_some() {
+            len += 1;
+        }
+        enc.map(len).unwrap();
+        enc.str("durable").unwrap();
+        encode_watermark_map(&mut enc, &durable).unwrap();
+        if let Some(heads) = &durable_heads {
+            enc.str("durable_heads").unwrap();
+            encode_watermark_heads(&mut enc, heads).unwrap();
+        }
+        buf
+    }
+
     fn encode_body_bytes(envelope: &ReplEnvelope) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut enc = Encoder::new(&mut buf);
@@ -1845,6 +2064,94 @@ mod tests {
             err,
             ProtoDecodeError::InvalidField {
                 field: "seen_durable",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_welcome_rejects_missing_head_for_nonzero_seq() {
+        let mut receiver_seen_durable = WatermarkMap::new();
+        receiver_seen_durable
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(ReplicaId::new(Uuid::from_bytes([3u8; 16])), Seq0::new(1));
+        let bytes = encode_custom_welcome_body(receiver_seen_durable, None);
+        let mut dec = Decoder::new(&bytes);
+        let err = decode_welcome(&mut dec, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoDecodeError::InvalidField {
+                field: "receiver_seen_durable",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_welcome_rejects_head_at_genesis() {
+        let mut receiver_seen_durable = WatermarkMap::new();
+        let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        receiver_seen_durable
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(origin, Seq0::ZERO);
+        let mut heads = WatermarkHeads::new();
+        heads
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(origin, Sha256([8u8; 32]));
+        let bytes = encode_custom_welcome_body(receiver_seen_durable, Some(heads));
+        let mut dec = Decoder::new(&bytes);
+        let err = decode_welcome(&mut dec, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoDecodeError::InvalidField {
+                field: "receiver_seen_durable",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_ack_rejects_missing_head_for_nonzero_seq() {
+        let mut durable = WatermarkMap::new();
+        durable
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(ReplicaId::new(Uuid::from_bytes([5u8; 16])), Seq0::new(1));
+        let bytes = encode_custom_ack_body(durable, None);
+        let mut dec = Decoder::new(&bytes);
+        let err = decode_ack(&mut dec, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoDecodeError::InvalidField {
+                field: "durable",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_ack_rejects_head_at_genesis() {
+        let mut durable = WatermarkMap::new();
+        let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
+        durable
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(origin, Seq0::ZERO);
+        let mut heads = WatermarkHeads::new();
+        heads
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(origin, Sha256([7u8; 32]));
+        let bytes = encode_custom_ack_body(durable, Some(heads));
+        let mut dec = Decoder::new(&bytes);
+        let err = decode_ack(&mut dec, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoDecodeError::InvalidField {
+                field: "durable",
                 ..
             }
         ));
