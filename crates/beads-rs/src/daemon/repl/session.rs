@@ -793,7 +793,7 @@ impl Session {
 
     fn initial_wants(
         &self,
-        peer_seen: &WatermarkMap,
+        peer_seen: &WatermarkState<Durable>,
         incoming_namespaces: &[NamespaceId],
     ) -> WatermarkMap {
         let mut wants = WatermarkMap::new();
@@ -801,9 +801,9 @@ impl Session {
             let Some(origins) = peer_seen.get(namespace) else {
                 continue;
             };
-            for (origin, peer_seq) in origins {
+            for (origin, peer_wm) in origins {
                 let local_seq = self.durable_for(namespace, origin).seq();
-                if peer_seq.get() > local_seq.get() {
+                if peer_wm.seq().get() > local_seq.get() {
                     wants
                         .entry(namespace.clone())
                         .or_default()
