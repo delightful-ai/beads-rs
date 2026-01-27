@@ -632,8 +632,7 @@ impl SessionStore for TestSessionStore {
         replica_id: ReplicaId,
         last_seen_ms: u64,
         last_handshake_ms: u64,
-        role: crate::core::ReplicaRole,
-        durability_eligible: bool,
+        role: crate::daemon::wal::ReplicaDurabilityRole,
     ) -> Result<(), WalIndexError> {
         self.node.with_daemon(|daemon| {
             let runtime = daemon
@@ -645,7 +644,6 @@ impl SessionStore for TestSessionStore {
                 last_seen_ms,
                 last_handshake_ms,
                 role,
-                durability_eligible,
             })?;
             txn.commit()
         })

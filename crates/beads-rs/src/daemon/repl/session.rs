@@ -11,12 +11,12 @@ use crate::core::error::details::{
 use crate::core::{
     Applied, DecodeError, Durable, ErrorPayload, EventFrameError, EventFrameV1, EventId,
     EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, PrevVerified,
-    ProtocolErrorCode, ReplicaId, ReplicaRole, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
-    StoreIdentity, VerifiedEvent, Watermark, WatermarkError, hash_event_body, verify_event_frame,
+    ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
+    VerifiedEvent, Watermark, WatermarkError, hash_event_body, verify_event_frame,
 };
 use crate::daemon::admission::{AdmissionController, AdmissionRejection};
 use crate::daemon::metrics;
-use crate::daemon::wal::WalIndexError;
+use crate::daemon::wal::{ReplicaDurabilityRole, WalIndexError};
 
 use super::error::{ReplError, ReplErrorDetails};
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
@@ -152,8 +152,7 @@ pub trait SessionStore {
         replica_id: ReplicaId,
         last_seen_ms: u64,
         last_handshake_ms: u64,
-        role: ReplicaRole,
-        durability_eligible: bool,
+        role: ReplicaDurabilityRole,
     ) -> Result<(), WalIndexError>;
 }
 
@@ -1428,8 +1427,7 @@ mod tests {
             _replica_id: ReplicaId,
             _last_seen_ms: u64,
             _last_handshake_ms: u64,
-            _role: ReplicaRole,
-            _durability_eligible: bool,
+            _role: ReplicaDurabilityRole,
         ) -> Result<(), WalIndexError> {
             Ok(())
         }
