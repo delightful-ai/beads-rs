@@ -717,16 +717,23 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
         let meta = test_meta(store_id, StoreEpoch::new(1));
         let namespace = NamespaceId::core();
+        let record = test_record();
+        let frame_len = encode_frame(&record, 1024).expect("frame").len() as u64;
+        let header_len =
+            SegmentHeader::new(&meta, namespace.clone(), 10, SegmentId::new(Uuid::nil()))
+                .encode()
+                .expect("header")
+                .len() as u64;
+        let max_segment_bytes = (header_len + frame_len + 1) as usize;
         let mut writer = SegmentWriter::open(
             temp.path(),
             &meta,
             &namespace,
             10,
-            SegmentConfig::new(1024, 200, 60_000),
+            SegmentConfig::new(1024, max_segment_bytes, 60_000),
         )
         .unwrap();
 
-        let record = test_record();
         let first = writer.append(&record, 10).unwrap();
         assert!(!first.rotated);
         let first_name = writer
