@@ -250,9 +250,7 @@ fn orphan_dep_ops_become_visible_after_create() {
     let mut delta = TxnDeltaV1::new();
     delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Blocks,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
             dot: WireDotV1 {
                 replica: replica.clone(),
                 counter: 1,
@@ -261,9 +259,7 @@ fn orphan_dep_ops_become_visible_after_create() {
         .expect("unique dep add");
     delta
         .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-            from: from.clone(),
-            to: to_removed.clone(),
-            kind: DepKind::Related,
+            key: DepKey::new(from.clone(), to_removed.clone(), DepKind::Related).unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(remove_replica.clone(), 5)]),
                 dots: Vec::new(),
@@ -365,9 +361,7 @@ fn dep_dot_collision_is_deterministic() {
     let mut delta_low = TxnDeltaV1::new();
     delta_low
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to_low.clone(),
-            kind: DepKind::Blocks,
+            key: DepKey::new(from.clone(), to_low.clone(), DepKind::Blocks).unwrap(),
             dot,
         }))
         .expect("unique dep add");
@@ -376,9 +370,7 @@ fn dep_dot_collision_is_deterministic() {
     let mut delta_high = TxnDeltaV1::new();
     delta_high
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to_high.clone(),
-            kind: DepKind::Related,
+            key: DepKey::new(from.clone(), to_high.clone(), DepKind::Related).unwrap(),
             dot,
         }))
         .expect("unique dep add");
@@ -420,9 +412,7 @@ fn dep_delete_then_readd_restores_indexes() {
     let mut add_delta = TxnDeltaV1::new();
     add_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind,
+            key: DepKey::new(from.clone(), to.clone(), kind).unwrap(),
             dot: WireDotV1 {
                 replica,
                 counter: 1,
@@ -452,9 +442,7 @@ fn dep_delete_then_readd_restores_indexes() {
     let mut remove_delta = TxnDeltaV1::new();
     remove_delta
         .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind,
+            key: DepKey::new(from.clone(), to.clone(), kind).unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(replica, 1)]),
                 dots: Vec::new(),
@@ -472,9 +460,7 @@ fn dep_delete_then_readd_restores_indexes() {
     let mut readd_delta = TxnDeltaV1::new();
     readd_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind,
+            key: DepKey::new(from.clone(), to.clone(), kind).unwrap(),
             dot: WireDotV1 {
                 replica,
                 counter: 2,

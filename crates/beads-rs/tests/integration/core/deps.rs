@@ -67,9 +67,7 @@ fn dep_add_remove_is_idempotent() {
     let mut add_delta = TxnDeltaV1::new();
     add_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Blocks,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
             dot: WireDotV1 {
                 replica: replica.clone(),
                 counter: 1,
@@ -87,9 +85,7 @@ fn dep_add_remove_is_idempotent() {
     let mut remove_delta = TxnDeltaV1::new();
     remove_delta
         .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Blocks,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(replica.clone(), 1)]),
                 dots: Vec::new(),
@@ -120,9 +116,7 @@ fn dep_indexes_match_dep_store() {
     let mut delta = TxnDeltaV1::new();
     delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to_a.clone(),
-            kind: DepKind::Blocks,
+            key: DepKey::new(from.clone(), to_a.clone(), DepKind::Blocks).unwrap(),
             dot: WireDotV1 {
                 replica: ReplicaId::new(Uuid::from_bytes([9u8; 16])),
                 counter: 1,
@@ -131,9 +125,7 @@ fn dep_indexes_match_dep_store() {
         .expect("unique dep add");
     delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to_b.clone(),
-            kind: DepKind::Related,
+            key: DepKey::new(from.clone(), to_b.clone(), DepKind::Related).unwrap(),
             dot: WireDotV1 {
                 replica: ReplicaId::new(Uuid::from_bytes([10u8; 16])),
                 counter: 1,
@@ -179,9 +171,7 @@ fn dep_kind_ordering_in_serialize_is_canonical() {
     {
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind: *kind,
+                key: DepKey::new(from.clone(), to.clone(), *kind).unwrap(),
                 dot: WireDotV1 {
                     replica: ReplicaId::new(Uuid::from_bytes([11u8; 16])),
                     counter: idx as u64 + 1,
@@ -230,9 +220,7 @@ fn dep_delete_then_readd_across_kinds() {
     let mut add_delta = TxnDeltaV1::new();
     add_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Blocks,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
             dot: WireDotV1 {
                 replica: blocks_replica.clone(),
                 counter: 1,
@@ -241,9 +229,7 @@ fn dep_delete_then_readd_across_kinds() {
         .expect("unique dep add");
     add_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Related,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap(),
             dot: WireDotV1 {
                 replica: related_replica.clone(),
                 counter: 1,
@@ -256,9 +242,7 @@ fn dep_delete_then_readd_across_kinds() {
     let mut remove_delta = TxnDeltaV1::new();
     remove_delta
         .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Blocks,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(blocks_replica.clone(), 1)]),
                 dots: Vec::new(),
@@ -267,9 +251,7 @@ fn dep_delete_then_readd_across_kinds() {
         .expect("unique dep remove");
     remove_delta
         .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Related,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(related_replica.clone(), 1)]),
                 dots: Vec::new(),
@@ -283,9 +265,7 @@ fn dep_delete_then_readd_across_kinds() {
     let mut readd_delta = TxnDeltaV1::new();
     readd_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Blocks,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
             dot: WireDotV1 {
                 replica: blocks_replica.clone(),
                 counter: 2,
@@ -294,9 +274,7 @@ fn dep_delete_then_readd_across_kinds() {
         .expect("unique dep add");
     readd_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            from: from.clone(),
-            to: to.clone(),
-            kind: DepKind::Related,
+            key: DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap(),
             dot: WireDotV1 {
                 replica: related_replica.clone(),
                 counter: 2,
