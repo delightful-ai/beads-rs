@@ -283,6 +283,10 @@ impl ClientRequestEventIds {
         self.seqs.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.seqs.is_empty()
+    }
+
     pub fn max_seq(&self) -> Seq1 {
         self.seqs
             .last()
