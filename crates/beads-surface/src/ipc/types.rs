@@ -3,12 +3,12 @@ use serde::{Deserialize, Serialize};
 use beads_api::StreamEvent;
 use beads_api::{Issue, QueryResult, SubscribeInfo};
 use beads_core::ErrorPayload;
-use beads_core::{Applied, DurabilityReceipt, Watermarks};
+use beads_core::{Applied, BeadType, DepKind, DurabilityReceipt, Priority, Watermarks};
 
 use super::{ctx::*, payload::*};
-pub use super::{ctx::*, payload::*};
 
-use crate::ops::OpResult;
+use crate::ops::{BeadPatch, OpResult};
+use crate::query::Filters;
 
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 

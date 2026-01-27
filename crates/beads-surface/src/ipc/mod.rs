@@ -10,6 +10,8 @@ use thiserror::Error;
 
 pub use client::*;
 pub use codec::*;
+pub use ctx::*;
+pub use payload::*;
 pub use types::*;
 
 pub(crate) fn default_lease_secs() -> u64 {
