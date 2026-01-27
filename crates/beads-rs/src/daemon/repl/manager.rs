@@ -26,9 +26,12 @@ use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
-use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkState};
+#[cfg(test)]
+use crate::daemon::repl::proto::PROTOCOL_VERSION_V1;
+use crate::daemon::repl::proto::{Ack, Events, Want, WatermarkState};
 use crate::daemon::repl::session::{
-    OutboundConnecting, Session, SessionState, SessionWire, Streaming, handle_outbound_message,
+    Outbound, OutboundConnecting, Session, SessionState, SessionWire, Streaming,
+    handle_outbound_message,
 };
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
@@ -418,12 +421,11 @@ where
 
     let session = OutboundConnecting::new(config, limits.clone(), admission);
     let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
-    let mut last_hello_at_ms = None;
 
     let (session, action) = session.begin_handshake(&store, now_ms());
     let mut session = SessionState::Handshaking(session);
     apply_action(&mut writer, &session, action, &mut keepalive)?;
-    last_hello_at_ms = Some(now_ms());
+    let mut last_hello_at_ms = Some(now_ms());
 
     let mut sent_hot_cache = false;
     let mut handshake_at_ms = None;
@@ -623,7 +625,7 @@ where
                     .unwrap_or(true);
                 if should_retry {
                     let action = session.resend_handshake(&store, now_ms);
-                    apply_action(&mut writer, &session, action, &mut keepalive)?;
+                    apply_action(&mut writer, session, action, &mut keepalive)?;
                     last_hello_at_ms = Some(now_ms);
                 }
             }

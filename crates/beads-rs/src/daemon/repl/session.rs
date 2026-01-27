@@ -112,7 +112,7 @@ pub(crate) struct Draining {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Closed;
 
-trait PhaseMarker {
+pub trait PhaseMarker {
     const PHASE: SessionPhase;
 }
 
@@ -136,18 +136,13 @@ impl PhaseMarker for Closed {
     const PHASE: SessionPhase = SessionPhase::Closed;
 }
 
-trait PhasePeer {
+pub trait PhasePeer {
     fn peer(&self) -> &SessionPeer;
-    fn into_peer(self) -> SessionPeer;
 }
 
 impl PhasePeer for Streaming {
     fn peer(&self) -> &SessionPeer {
         &self.peer
-    }
-
-    fn into_peer(self) -> SessionPeer {
-        self.peer
     }
 }
 
@@ -155,13 +150,9 @@ impl PhasePeer for Draining {
     fn peer(&self) -> &SessionPeer {
         &self.peer
     }
-
-    fn into_peer(self) -> SessionPeer {
-        self.peer
-    }
 }
 
-trait PhasePeerOpt {
+pub trait PhasePeerOpt {
     fn into_peer(self) -> Option<SessionPeer>;
 }
 
@@ -250,7 +241,7 @@ impl PhaseWire for Closed {
     }
 }
 
-trait PhaseWrap: PhaseMarker + PhasePeer + PhasePeerOpt + PhaseWire + Sized {
+pub trait PhaseWrap: PhaseMarker + PhasePeer + PhasePeerOpt + PhaseWire + Sized {
     fn wrap<R>(session: Session<R, Self>) -> SessionState<R>;
 }
 
@@ -283,6 +274,7 @@ pub(crate) trait SessionWire {
 }
 
 impl<R> SessionState<R> {
+    #[allow(dead_code)]
     pub fn phase(&self) -> SessionPhase {
         match self {
             SessionState::Connecting(_) => SessionPhase::Connecting,
@@ -313,6 +305,7 @@ impl<R> SessionState<R> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn close(self) -> SessionState<R> {
         match self {
             SessionState::Connecting(session) => SessionState::Closed(session.with_phase(Closed)),
@@ -734,12 +727,12 @@ impl Session<Outbound, Handshaking> {
             return self.fail(error);
         }
 
-        if welcome.protocol_version < self.config.protocol.min
-            || welcome.protocol_version > self.config.protocol.max
-        {
+        let local_min = self.config.protocol.min;
+        let local_max = self.config.protocol.max;
+        if welcome.protocol_version < local_min || welcome.protocol_version > local_max {
             return self.fail(version_incompatible_error(&ProtocolIncompatible {
-                local_min: self.config.protocol.min,
-                local_max: self.config.protocol.max,
+                local_min,
+                local_max,
                 peer_min: welcome.protocol_version,
                 peer_max: welcome.protocol_version,
             }));
@@ -775,7 +768,7 @@ impl Session<Outbound, Handshaking> {
 
 impl Session<Outbound, Streaming> {
     fn handle_welcome_replay(
-        mut self,
+        self,
         welcome: super::proto::Welcome,
     ) -> (SessionState<Outbound>, Vec<SessionAction>) {
         let peer = self.peer().clone();
@@ -943,6 +936,8 @@ impl<R, P: PhaseWrap> Session<R, P> {
         store: &mut impl SessionStore,
         now_ms: u64,
     ) -> (SessionState<R>, Vec<SessionAction>) {
+        let limits = self.limits.clone();
+        let local_store = self.config.local_store;
         let incoming_namespaces = self.peer().incoming_namespaces.clone();
         let total_bytes: u64 = events
             .events
@@ -986,21 +981,11 @@ impl<R, P: PhaseWrap> Session<R, P> {
 
             let verified = {
                 let lookup = SessionLookup { store };
-                match verify_event_frame(
-                    &frame,
-                    &self.limits,
-                    self.config.local_store,
-                    expected_prev,
-                    &lookup,
-                ) {
+                match verify_event_frame(&frame, &limits, local_store, expected_prev, &lookup) {
                     Ok(event) => event,
                     Err(err) => {
                         return self.fail(event_frame_error_payload(
-                            &frame,
-                            &self.limits,
-                            err,
-                            head_sha,
-                            head_seq,
+                            &frame, &limits, err, head_sha, head_seq,
                         ));
                     }
                 }
@@ -1032,7 +1017,7 @@ impl<R, P: PhaseWrap> Session<R, P> {
                 }
                 IngestDecision::DuplicateNoop => {}
                 IngestDecision::Reject { reason } => {
-                    return self.fail(repl_lagged_error(reason, &self.limits));
+                    return self.fail(repl_lagged_error(reason, &limits));
                 }
             }
         }
