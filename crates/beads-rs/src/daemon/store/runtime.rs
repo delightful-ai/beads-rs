@@ -1282,7 +1282,7 @@ mod tests {
         };
         core_state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
         let mut store_state = StoreState::new();
-        store_state.set_namespace_state(namespace.clone(), core_state);
+        store_state.set_core_state(core_state);
         runtime.state = store_state;
 
         let mut outcome = ApplyOutcome::default();

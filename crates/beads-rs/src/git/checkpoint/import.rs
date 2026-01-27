@@ -146,6 +146,21 @@ pub struct CheckpointImport {
     pub included_heads: Option<IncludedHeads>,
 }
 
+fn state_for_namespace<'a>(
+    state: &'a mut StoreState,
+    namespace: &NamespaceId,
+) -> &'a mut CanonicalState {
+    if namespace.is_core() {
+        state.core_mut()
+    } else {
+        let non_core = namespace
+            .clone()
+            .try_non_core()
+            .expect("non-core namespace");
+        state.ensure_namespace(non_core)
+    }
+}
+
 pub fn import_checkpoint(
     dir: &Path,
     limits: &Limits,
@@ -279,7 +294,7 @@ pub fn import_checkpoint(
 
                     let notes = wire.notes.clone();
                     let bead = crate::core::Bead::from(wire);
-                    let state = state.ensure_namespace(ns);
+                    let state = state_for_namespace(&mut state, &ns);
                     state.insert_live(bead);
 
                     for note in notes {
@@ -297,7 +312,7 @@ pub fn import_checkpoint(
                 |line, wire| {
                     let ns = line.namespace.clone();
                     let tomb = tombstone_from_wire(&wire, &full_path, line)?;
-                    state.ensure_namespace(ns).insert_tombstone(tomb);
+                    state_for_namespace(&mut state, &ns).insert_tombstone(tomb);
                     Ok(())
                 },
             )?,
@@ -319,10 +334,10 @@ pub fn import_checkpoint(
     }
 
     for (ns, labels) in label_stores {
-        state.ensure_namespace(ns).set_label_store(labels);
+        state_for_namespace(&mut state, &ns).set_label_store(labels);
     }
     for (ns, deps) in dep_stores {
-        state.ensure_namespace(ns).set_dep_store(deps);
+        state_for_namespace(&mut state, &ns).set_dep_store(deps);
     }
 
     Ok(CheckpointImport {
@@ -478,7 +493,7 @@ pub fn import_checkpoint_export(
 
                     let notes = wire.notes.clone();
                     let bead = crate::core::Bead::from(wire);
-                    let state = state.ensure_namespace(ns);
+                    let state = state_for_namespace(&mut state, &ns);
                     state.insert_live(bead);
 
                     for note in notes {
@@ -497,7 +512,7 @@ pub fn import_checkpoint_export(
                 |line, wire| {
                     let ns = line.namespace.clone();
                     let tomb = tombstone_from_wire(&wire, &path, line)?;
-                    state.ensure_namespace(ns).insert_tombstone(tomb);
+                    state_for_namespace(&mut state, &ns).insert_tombstone(tomb);
                     Ok(())
                 },
             )?,
@@ -518,10 +533,10 @@ pub fn import_checkpoint_export(
     }
 
     for (ns, labels) in label_stores {
-        state.ensure_namespace(ns).set_label_store(labels);
+        state_for_namespace(&mut state, &ns).set_label_store(labels);
     }
     for (ns, deps) in dep_stores {
-        state.ensure_namespace(ns).set_dep_store(deps);
+        state_for_namespace(&mut state, &ns).set_dep_store(deps);
     }
 
     Ok(CheckpointImport {
@@ -542,8 +557,8 @@ pub fn merge_store_states(
     let mut errors = Vec::new();
 
     let mut namespaces: BTreeSet<NamespaceId> = BTreeSet::new();
-    namespaces.extend(a.namespaces().map(|(ns, _)| ns.clone()));
-    namespaces.extend(b.namespaces().map(|(ns, _)| ns.clone()));
+    namespaces.extend(a.namespaces().map(|(ns, _)| ns));
+    namespaces.extend(b.namespaces().map(|(ns, _)| ns));
 
     for namespace in namespaces {
         let left = a.get(&namespace);
@@ -559,7 +574,7 @@ pub fn merge_store_states(
             (Some(state), None) | (None, Some(state)) => state.clone(),
             (None, None) => CanonicalState::default(),
         };
-        merged.ensure_namespace(namespace).clone_from(&out);
+        state_for_namespace(&mut merged, &namespace).clone_from(&out);
     }
 
     if errors.is_empty() {
@@ -572,7 +587,7 @@ pub fn merge_store_states(
 /// Lift a legacy, non-namespaced state into the core namespace.
 pub fn store_state_from_legacy(state: CanonicalState) -> StoreState {
     let mut store = StoreState::new();
-    *store.ensure_namespace(NamespaceId::core()) = state;
+    store.set_core_state(state);
     store
 }
 
@@ -1139,16 +1154,13 @@ mod tests {
         let mut state = CanonicalState::default();
         let bead = crate::core::Bead::from(sample_wire_bead_full("bd-abc"));
         state.insert_live(bead);
-        left.ensure_namespace(NamespaceId::core())
-            .clone_from(&state);
-        right
-            .ensure_namespace(NamespaceId::core())
-            .clone_from(&state);
+        left.core_mut().clone_from(&state);
+        right.core_mut().clone_from(&state);
 
         let merged_a = merge_store_states(&left, &right).unwrap();
         let merged_b = merge_store_states(&right, &left).unwrap();
-        let merged_a_state = merged_a.get(&NamespaceId::core()).expect("merged a state");
-        let merged_b_state = merged_b.get(&NamespaceId::core()).expect("merged b state");
+        let merged_a_state = merged_a.core();
+        let merged_b_state = merged_b.core();
         assert_eq!(
             state_fingerprint(merged_a_state),
             state_fingerprint(merged_b_state)

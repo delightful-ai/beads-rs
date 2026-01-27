@@ -648,7 +648,7 @@ mod tests {
         core_state.insert_tombstone(tombstone.clone());
         core_state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state.clone());
+        state.set_core_state(core_state.clone());
 
         let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
         let mut watermarks = Watermarks::<Durable>::new();
@@ -745,7 +745,7 @@ mod tests {
         let mut core_state = CanonicalState::new();
         core_state.insert(bead.clone()).unwrap();
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state);
+        state.set_core_state(core_state);
 
         let origin = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
         let mut watermarks = Watermarks::<Durable>::new();
@@ -793,7 +793,7 @@ mod tests {
         let mut core_state = CanonicalState::new();
         core_state.insert(bead.clone()).unwrap();
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state);
+        state.set_core_state(core_state);
 
         let origin = ReplicaId::new(Uuid::from_bytes([1u8; 16]));
         let snapshot = build_test_snapshot(&state, &namespace, origin, 5);
@@ -851,7 +851,7 @@ mod tests {
         core_state.insert(bead_dirty.clone()).unwrap();
         core_state.insert(bead_clean.clone()).unwrap();
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state);
+        state.set_core_state(core_state);
 
         let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let snapshot = build_test_snapshot(&state, &namespace, origin, 1);
@@ -914,7 +914,7 @@ mod tests {
         core_state.insert(bead_b.clone()).unwrap();
         core_state.insert(bead_a.clone()).unwrap();
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state);
+        state.set_core_state(core_state);
 
         let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let snapshot = build_test_snapshot(&state, &namespace, origin, 2);
