@@ -666,7 +666,8 @@ fn wire_dep_store_to_state(wire: WireDepStore) -> Result<DepStore, WireError> {
         Some(stamp) => Some(wire_field_to_stamp(stamp)?),
         None => None,
     };
-    let set = OrSet::from_parts(entries, wire.cc);
+    let set = OrSet::try_from_parts(entries, wire.cc)
+        .map_err(|err| WireError::InvalidValue(format!("dep orset invalid: {err}")))?;
     Ok(DepStore::from_parts(set, stamp))
 }
 
@@ -839,7 +840,8 @@ fn wire_to_parts(wire: WireBead) -> Result<ParsedWireBead, WireError> {
     };
 
     let label_state = {
-        let set = OrSet::from_parts(wire.labels.entries, wire.labels.cc);
+        let set = OrSet::try_from_parts(wire.labels.entries, wire.labels.cc)
+            .map_err(|err| WireError::InvalidValue(format!("label orset invalid: {err}")))?;
         LabelState::from_parts(set, Some(label_stamp.clone()))
     };
 
