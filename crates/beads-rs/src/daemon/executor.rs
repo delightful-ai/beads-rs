@@ -142,7 +142,7 @@ impl Daemon {
         };
         let parsed_request = parse(&ctx.actor_id)?;
 
-        let mut proof = self.loaded_store(store_id, remote.clone());
+        let proof = self.loaded_store(store_id, remote.clone());
         if proof.runtime().maintenance_mode {
             return Err(OpError::MaintenanceMode {
                 reason: Some("maintenance mode enabled".into()),
