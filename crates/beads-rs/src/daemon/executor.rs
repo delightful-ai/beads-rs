@@ -1405,7 +1405,7 @@ mod tests {
             ctx: crate::daemon::ipc::MutationCtx::new(
                 repo_path.clone(),
                 MutationMeta {
-                    client_request_id: Some(client_request_id.to_string()),
+                    client_request_id: Some(client_request_id),
                     ..MutationMeta::default()
                 },
             ),
@@ -1597,7 +1597,7 @@ mod tests {
             trace_id: TraceId::from(client_request_id),
         };
         let request = ParsedMutationRequest::parse_add_labels(LabelsPayload {
-            id: "bd-123".into(),
+            id: BeadId::parse("bd-123").expect("bead id"),
             labels: vec!["alpha".into()],
         })
         .unwrap();

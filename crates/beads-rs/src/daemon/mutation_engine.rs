@@ -1987,12 +1987,12 @@ mod tests {
         let state = make_state_with_bead("bd-123", &actor);
 
         let req_a = ParsedMutationRequest::parse_add_labels(LabelsPayload {
-            id: "bd-123".into(),
+            id: BeadId::parse("bd-123").expect("bead id"),
             labels: vec!["b".into(), "a".into()],
         })
         .unwrap();
         let req_b = ParsedMutationRequest::parse_add_labels(LabelsPayload {
-            id: "bd-123".into(),
+            id: BeadId::parse("bd-123").expect("bead id"),
             labels: vec!["a".into(), "b".into()],
         })
         .unwrap();
@@ -2051,7 +2051,7 @@ mod tests {
         let state = make_state_with_bead("bd-456", &actor);
 
         let req = ParsedMutationRequest::parse_add_note(AddNotePayload {
-            id: "bd-456".into(),
+            id: BeadId::parse("bd-456").expect("bead id"),
             content: "hey".into(),
         })
         .unwrap();
@@ -2084,7 +2084,7 @@ mod tests {
         let state = make_state_with_bead("bd-789", &actor);
 
         let req = ParsedMutationRequest::parse_add_labels(LabelsPayload {
-            id: "bd-789".into(),
+            id: BeadId::parse("bd-789").expect("bead id"),
             labels: vec!["alpha".into()],
         })
         .unwrap();
@@ -2114,7 +2114,7 @@ mod tests {
         let before = serde_json::to_string(&state).unwrap();
 
         let req = ParsedMutationRequest::parse_add_labels(LabelsPayload {
-            id: "bd-000".into(),
+            id: BeadId::parse("bd-000").expect("bead id"),
             labels: vec!["alpha".into()],
         })
         .unwrap();
@@ -2143,19 +2143,9 @@ mod tests {
     }
 
     #[test]
-    fn parsed_request_rejects_invalid_id() {
-        let err = ParsedMutationRequest::parse_add_labels(LabelsPayload {
-            id: "bad".into(),
-            labels: vec![],
-        })
-        .unwrap_err();
-        assert!(matches!(err, OpError::InvalidId(_)));
-    }
-
-    #[test]
     fn parsed_request_rejects_invalid_label() {
         let err = ParsedMutationRequest::parse_add_labels(LabelsPayload {
-            id: "bd-123".into(),
+            id: BeadId::parse("bd-123").expect("bead id"),
             labels: vec!["bad\nlabel".into()],
         })
         .unwrap_err();
