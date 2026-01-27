@@ -71,6 +71,51 @@ impl Daemon {
         })
     }
 
+    fn with_read_ctx_without_gate<F, T>(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+        want_repo_state: bool,
+        f: F,
+    ) -> Result<T, OpError>
+    where
+        F: for<'a> FnOnce(ReadCtx<'a>) -> Result<T, OpError>,
+    {
+        let loaded = self.ensure_repo_fresh(repo, git_tx)?;
+        let read = loaded.normalize_read_consistency(read)?;
+        let store = loaded.runtime();
+        let empty_state = CanonicalState::new();
+        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
+        let repo_state = want_repo_state.then(|| loaded.lane());
+        let remote = loaded.remote().clone();
+
+        f(ReadCtx {
+            remote,
+            read,
+            store,
+            state,
+            repo_state,
+        })
+    }
+
+    fn with_read_ctx_response_without_gate<F>(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+        want_repo_state: bool,
+        f: F,
+    ) -> Response
+    where
+        F: for<'a> FnOnce(ReadCtx<'a>) -> Result<ResponsePayload, OpError>,
+    {
+        match self.with_read_ctx_without_gate(repo, read, git_tx, want_repo_state, f) {
+            Ok(payload) => Response::ok(payload),
+            Err(err) => Response::err_from(err),
+        }
+    }
+
     fn with_read_ctx_response<F>(
         &mut self,
         repo: &Path,
@@ -916,7 +961,9 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+        // `dep_cycles` is diagnostic/structural and should remain queryable even
+        // when min-seen watermarks are not yet satisfied.
+        self.with_read_ctx_response_without_gate(repo, read, git_tx, false, |ctx| {
             let cycles = dep_cycles_from_state(ctx.state);
             Ok(ResponsePayload::query(QueryResult::DepCycles(cycles)))
         })

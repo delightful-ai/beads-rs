@@ -199,12 +199,16 @@ pub fn run_state_loop(
                         let (span, read_gate) = {
                             let info = request.info();
                             let span = request_span(&info);
-                            let read_gate = info.read.map(|read| {
-                                (
-                                    info.repo.map(|repo| repo.to_path_buf()),
-                                    read.clone(),
-                                )
-                            });
+                            let read_gate = if info.op == "dep_cycles" {
+                                None
+                            } else {
+                                info.read.map(|read| {
+                                    (
+                                        info.repo.map(|repo| repo.to_path_buf()),
+                                        read.clone(),
+                                    )
+                                })
+                            };
                             (span, read_gate)
                         };
                         let _guard = span.enter();

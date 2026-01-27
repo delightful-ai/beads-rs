@@ -14,8 +14,7 @@ use clap::{ArgAction, Parser, builder::BoolishValueParser};
 use crate::api::QueryResult;
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{
-    ActorId, Applied, BeadId, BeadSlug, BeadType, ClientRequestId, DurabilityClass, NamespaceId,
-    Priority, Watermarks,
+    ActorId, Applied, BeadId, BeadSlug, ClientRequestId, DurabilityClass, NamespaceId, Watermarks,
 };
 use crate::daemon::ipc::{
     IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta, ReadConsistency, ReadCtx,
