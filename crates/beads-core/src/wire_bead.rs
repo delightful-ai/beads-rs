@@ -311,7 +311,6 @@ impl WireWorkflowSnapshot {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WireClaimEmpty {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,11 +321,43 @@ pub struct WireClaimedSnapshot {
 }
 
 /// Claim snapshot for checkpoints (canonical, no redundant timestamps).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum WireClaimSnapshot {
-    Unclaimed(WireClaimEmpty),
     Claimed(WireClaimedSnapshot),
+    Unclaimed(WireClaimEmpty),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireClaimSnapshotFields {
+    #[serde(default)]
+    assignee: Option<ActorId>,
+    #[serde(default)]
+    assignee_expires: Option<WallClock>,
+}
+
+impl<'de> Deserialize<'de> for WireClaimSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let parsed = WireClaimSnapshotFields::deserialize(deserializer)?;
+        match parsed.assignee {
+            Some(assignee) => Ok(Self::Claimed(WireClaimedSnapshot {
+                assignee,
+                assignee_expires: parsed.assignee_expires,
+            })),
+            None => {
+                if parsed.assignee_expires.is_some() {
+                    return Err(de::Error::custom(
+                        "assignee_expires requires assignee in claim snapshot",
+                    ));
+                }
+                Ok(Self::unclaimed())
+            }
+        }
+    }
 }
 
 impl WireClaimSnapshot {
@@ -1107,6 +1138,26 @@ mod tests {
         let wire = WireNoteV1::from(&note);
         let back = Note::from(wire);
         assert_eq!(note, back);
+    }
+
+    #[test]
+    fn wire_claim_snapshot_unclaimed_when_fields_absent() {
+        let parsed: WireClaimSnapshot = serde_json::from_str("{}").expect("unclaimed");
+        assert_eq!(parsed, WireClaimSnapshot::unclaimed());
+    }
+
+    #[test]
+    fn wire_claim_snapshot_rejects_expires_without_assignee() {
+        let err = serde_json::from_str::<WireClaimSnapshot>(r#"{"assignee_expires":123}"#)
+            .expect_err("expires without assignee must fail");
+        assert!(err.to_string().contains("assignee_expires requires assignee"));
+    }
+
+    #[test]
+    fn wire_claim_snapshot_rejects_invalid_assignee_instead_of_falling_back() {
+        let err = serde_json::from_str::<WireClaimSnapshot>(r#"{"assignee":""}"#)
+            .expect_err("invalid assignee must fail");
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]
