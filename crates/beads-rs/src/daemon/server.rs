@@ -381,13 +381,13 @@ pub fn run_state_loop(
 
                         if let Some(read_gate) = read_gate_request(&request) {
                             let loaded = match daemon.ensure_repo_fresh(&read_gate.repo, &git_tx) {
-                                Ok(remote) => remote,
+                                Ok(loaded) => loaded,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                                     continue;
                                 }
                             };
-                            let read = match daemon.normalize_read_consistency(&loaded, read_gate.read) {
+                            let read = match loaded.normalize_read_consistency(read_gate.read) {
                                 Ok(read) => read,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
@@ -396,7 +396,7 @@ pub fn run_state_loop(
                             };
 
                             if read.require_min_seen().is_some() {
-                                match daemon.read_gate_status(&loaded, &read) {
+                                match loaded.read_gate_status(&read) {
                                     Ok(ReadGateStatus::Satisfied) => {}
                                     Ok(ReadGateStatus::Unsatisfied {
                                         required,
@@ -629,13 +629,7 @@ fn process_request_message(
     if let Request::SyncWait { ctx, .. } = request {
         match daemon.ensure_loaded_and_maybe_start_sync(&ctx.path, git_tx) {
             Ok(loaded) => {
-                let repo_state = match daemon.git_lane_state(&loaded) {
-                    Ok(repo_state) => repo_state,
-                    Err(e) => {
-                        let _ = respond.send(ServerReply::Response(Response::err_from(e)));
-                        return RequestOutcome::Continue;
-                    }
-                };
+                let repo_state = loaded.lane();
                 let clean = !repo_state.dirty && !repo_state.sync_in_progress;
 
                 if clean {
@@ -664,7 +658,7 @@ fn process_request_message(
                 return RequestOutcome::Continue;
             }
         };
-        let namespace = match daemon.normalize_namespace(&proof, payload.namespace) {
+        let namespace = match proof.normalize_namespace(payload.namespace) {
             Ok(namespace) => namespace,
             Err(err) => {
                 let _ = respond.send(ServerReply::Response(Response::err_from(err)));
@@ -672,6 +666,7 @@ fn process_request_message(
             }
         };
         let store_id = proof.store_id();
+        drop(proof);
         let min_checkpoint_wall_ms = daemon.clock().wall_ms();
         let groups = daemon.force_checkpoint_for_namespace(store_id, &namespace);
         if groups.is_empty() {
@@ -859,7 +854,7 @@ fn flush_read_gate_waiters(
         let span = waiter.span.clone();
         let _guard = span.enter();
         let loaded = match daemon.ensure_repo_fresh(&waiter.repo, git_tx) {
-            Ok(remote) => remote,
+            Ok(loaded) => loaded,
             Err(err) => {
                 let _ = waiter
                     .respond
@@ -868,7 +863,9 @@ fn flush_read_gate_waiters(
             }
         };
 
-        match daemon.read_gate_status(&loaded, &waiter.read) {
+        let status = loaded.read_gate_status(&waiter.read);
+        drop(loaded);
+        match status {
             Ok(ReadGateStatus::Satisfied) => {
                 let _ = process_request_message(
                     daemon,
@@ -1674,7 +1671,7 @@ mod tests {
             .daemon
             .ensure_repo_fresh(&env.repo_path, &env.git_tx)
             .unwrap();
-        let origin = env.daemon.store_runtime(&loaded).unwrap().meta.replica_id;
+        let origin = loaded.runtime().meta.replica_id;
         let namespace = NamespaceId::core();
 
         let mut required = Watermarks::<Applied>::new();
@@ -1692,10 +1689,8 @@ mod tests {
             ctx: crate::daemon::ipc::ReadCtx::new(env.repo_path.clone(), read.clone()),
             payload: crate::daemon::ipc::EmptyPayload {},
         };
-        let normalized = env
-            .daemon
-            .normalize_read_consistency(&loaded, read)
-            .unwrap();
+        let normalized = loaded.normalize_read_consistency(read).unwrap();
+        drop(loaded);
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let started_at = Instant::now();
         let deadline = started_at + Duration::from_millis(normalized.wait_timeout_ms());
@@ -1725,12 +1720,16 @@ mod tests {
         assert!(respond_rx.try_recv().is_err());
 
         let applied_wm = watermark(1);
-        env.daemon
-            .store_runtime_mut(&loaded)
-            .unwrap()
+        let mut loaded = env
+            .daemon
+            .ensure_repo_fresh(&env.repo_path, &env.git_tx)
+            .unwrap();
+        loaded
+            .runtime_mut()
             .watermarks_applied
             .observe_at_least(&namespace, &origin, applied_wm.seq(), applied_wm.head())
             .unwrap();
+        drop(loaded);
 
         flush_read_gate_waiters(
             &mut env.daemon,
@@ -1756,7 +1755,7 @@ mod tests {
             .daemon
             .ensure_repo_fresh(&env.repo_path, &env.git_tx)
             .unwrap();
-        let origin = env.daemon.store_runtime(&loaded).unwrap().meta.replica_id;
+        let origin = loaded.runtime().meta.replica_id;
         let namespace = NamespaceId::core();
 
         let mut required = Watermarks::<Applied>::new();
@@ -1774,10 +1773,8 @@ mod tests {
             ctx: crate::daemon::ipc::ReadCtx::new(env.repo_path.clone(), read.clone()),
             payload: crate::daemon::ipc::EmptyPayload {},
         };
-        let normalized = env
-            .daemon
-            .normalize_read_consistency(&loaded, read)
-            .unwrap();
+        let normalized = loaded.normalize_read_consistency(read).unwrap();
+        drop(loaded);
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let started_at = Instant::now() - Duration::from_millis(20);
         let deadline = started_at;

@@ -2,49 +2,86 @@
 
 use std::collections::BTreeMap;
 
-use super::{CanonicalState, NamespaceId, WriteStamp};
+use super::{CanonicalState, NamespaceId, NonCoreNamespaceId, WriteStamp};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct StoreState {
-    namespaces: BTreeMap<NamespaceId, CanonicalState>,
+    core: CanonicalState,
+    other: BTreeMap<NamespaceId, CanonicalState>,
 }
 
 impl StoreState {
     pub fn new() -> Self {
         Self {
-            namespaces: BTreeMap::new(),
+            core: CanonicalState::default(),
+            other: BTreeMap::new(),
         }
     }
 
+    pub fn core(&self) -> &CanonicalState {
+        &self.core
+    }
+
+    pub fn core_mut(&mut self) -> &mut CanonicalState {
+        &mut self.core
+    }
+
+    pub fn set_core_state(&mut self, state: CanonicalState) {
+        self.core = state;
+    }
+
     pub fn get(&self, namespace: &NamespaceId) -> Option<&CanonicalState> {
-        self.namespaces.get(namespace)
+        if namespace.is_core() {
+            Some(&self.core)
+        } else {
+            self.other.get(namespace)
+        }
     }
 
     pub fn get_mut(&mut self, namespace: &NamespaceId) -> Option<&mut CanonicalState> {
-        self.namespaces.get_mut(namespace)
+        if namespace.is_core() {
+            Some(&mut self.core)
+        } else {
+            self.other.get_mut(namespace)
+        }
     }
 
     pub fn get_or_default(&self, namespace: &NamespaceId) -> CanonicalState {
-        self.namespaces.get(namespace).cloned().unwrap_or_default()
+        if namespace.is_core() {
+            self.core.clone()
+        } else {
+            self.other.get(namespace).cloned().unwrap_or_default()
+        }
     }
 
-    pub fn ensure_namespace(&mut self, namespace: NamespaceId) -> &mut CanonicalState {
-        self.namespaces.entry(namespace).or_default()
+    pub fn ensure_namespace(&mut self, namespace: NonCoreNamespaceId) -> &mut CanonicalState {
+        self.other.entry(namespace.into_namespace()).or_default()
     }
 
-    pub fn set_namespace_state(&mut self, namespace: NamespaceId, state: CanonicalState) {
-        *self.ensure_namespace(namespace) = state;
+    pub fn set_namespace_state(&mut self, namespace: NonCoreNamespaceId, state: CanonicalState) {
+        self.other.insert(namespace.into_namespace(), state);
     }
 
-    pub fn namespaces(&self) -> impl Iterator<Item = (&NamespaceId, &CanonicalState)> {
-        self.namespaces.iter()
+    pub fn namespaces(&self) -> impl Iterator<Item = (NamespaceId, &CanonicalState)> {
+        std::iter::once((NamespaceId::core(), &self.core)).chain(
+            self.other
+                .iter()
+                .map(|(namespace, state)| (namespace.clone(), state)),
+        )
     }
 
     pub fn max_write_stamp(&self) -> Option<WriteStamp> {
-        self.namespaces
+        self.other
             .values()
             .filter_map(|state| state.max_write_stamp())
+            .chain(self.core.max_write_stamp())
             .max()
+    }
+}
+
+impl Default for StoreState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -53,13 +90,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn core_namespace_is_explicit() {
-        let mut state = StoreState::new();
+    fn core_namespace_is_always_present() {
+        let state = StoreState::new();
         let core = NamespaceId::core();
         assert_eq!(core.as_str(), "core");
-        assert!(state.get(&core).is_none());
+        let core_state = state.core();
+        assert_eq!(core_state.live_count(), 0);
+        assert_eq!(core_state.tombstone_count(), 0);
+        assert_eq!(core_state.dep_count(), 0);
+    }
 
-        state.ensure_namespace(core.clone());
-        assert!(state.get(&core).is_some());
+    #[test]
+    fn core_namespace_rejects_non_core_wrapper() {
+        let core = NamespaceId::core();
+        assert!(core.try_non_core().is_none());
     }
 }

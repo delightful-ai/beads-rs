@@ -56,8 +56,39 @@ impl NamespaceId {
         Self(Self::CORE.to_string())
     }
 
+    pub fn is_core(&self) -> bool {
+        self.0 == Self::CORE
+    }
+
+    pub fn try_non_core(self) -> Option<NonCoreNamespaceId> {
+        if self.is_core() {
+            None
+        } else {
+            Some(NonCoreNamespaceId(self))
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct NonCoreNamespaceId(NamespaceId);
+
+impl NonCoreNamespaceId {
+    pub fn as_namespace(&self) -> &NamespaceId {
+        &self.0
+    }
+
+    pub fn into_namespace(self) -> NamespaceId {
+        self.0
+    }
+}
+
+impl From<NonCoreNamespaceId> for NamespaceId {
+    fn from(id: NonCoreNamespaceId) -> NamespaceId {
+        id.0
     }
 }
 

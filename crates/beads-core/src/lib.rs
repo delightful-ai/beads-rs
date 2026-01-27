@@ -79,8 +79,8 @@ pub use json_canon::{CanonJsonError, to_canon_json_bytes};
 pub use limits::Limits;
 pub use meta::{FormatVersion, Meta};
 pub use namespace::{
-    CheckpointGroup, GcAuthority, NamespaceId, NamespacePolicy, NamespaceVisibility, ReplicateMode,
-    RetentionPolicy, TtlBasis,
+    CheckpointGroup, GcAuthority, NamespaceId, NamespacePolicy, NamespaceVisibility,
+    NonCoreNamespaceId, ReplicateMode, RetentionPolicy, TtlBasis,
 };
 pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
 pub use namespaced_state::StoreState;
