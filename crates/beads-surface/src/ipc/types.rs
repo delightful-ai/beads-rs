@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use beads_api::StreamEvent;
 use beads_api::{Issue, QueryResult, SubscribeInfo};
 use beads_core::ErrorPayload;
-use beads_core::{Applied, DurabilityReceipt, Watermarks};
+use beads_core::{
+    ActorId, Applied, ClientRequestId, DurabilityClass, DurabilityReceipt, NamespaceId, Watermarks,
+};
 
 use super::{ctx::*, payload::*};
 
@@ -20,19 +22,57 @@ pub const IPC_PROTOCOL_VERSION: u32 = 2;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MutationMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
+    pub namespace: Option<NamespaceId>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "durability_serde::serialize_opt",
+        deserialize_with = "durability_serde::deserialize_opt"
+    )]
+    pub durability: Option<DurabilityClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub durability: Option<String>,
+    pub client_request_id: Option<ClientRequestId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_request_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor_id: Option<String>,
+    pub actor_id: Option<ActorId>,
+}
+
+mod durability_serde {
+    use super::DurabilityClass;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize_opt<S>(
+        value: &Option<DurabilityClass>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            None => serializer.serialize_none(),
+            Some(class) => serializer.serialize_some(&class.to_string()),
+        }
+    }
+
+    pub(super) fn deserialize_opt<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<DurabilityClass>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        match raw {
+            None => Ok(None),
+            Some(raw) => DurabilityClass::parse(&raw)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReadConsistency {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
+    pub namespace: Option<NamespaceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_min_seen: Option<Watermarks<Applied>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
