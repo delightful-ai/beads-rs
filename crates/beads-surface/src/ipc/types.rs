@@ -6,8 +6,7 @@ use beads_api::StreamEvent;
 use beads_api::{Issue, QueryResult, SubscribeInfo};
 use beads_core::ErrorPayload;
 use beads_core::{
-    ActorId, Applied, BeadId, ClientRequestId, DurabilityClass, DurabilityReceipt, NamespaceId,
-    Watermarks,
+    ActorId, Applied, ClientRequestId, DurabilityClass, DurabilityReceipt, NamespaceId, Watermarks,
 };
 
 use super::{ctx::*, payload::*};
@@ -794,6 +793,7 @@ pub struct StreamEventPayload {
 mod tests {
     use super::*;
     use beads_api::DaemonInfo;
+    use beads_core::BeadId;
     use beads_core::{BeadType, Priority, Watermarks};
     use std::path::PathBuf;
 
