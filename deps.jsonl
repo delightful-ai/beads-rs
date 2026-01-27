@@ -27,6 +27,7 @@
 {"from":"bd-14fs.9","to":"bd-14fs.8","kind":"blocks","created_at":[1769398717919,1],"created_by":"darin@book"}
 {"from":"bd-1bs5","to":"bd-cfqx","kind":"blocks","created_at":[1768680821480,1],"created_by":"darin@book"}
 {"from":"bd-1h02","to":"bd-doms","kind":"blocks","created_at":[1768508738380,1],"created_by":"darin@book"}
+{"from":"bd-1nxv","to":"bd-5xvc","kind":"discovered_from","created_at":[1768689822716,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-1u2","to":"bd-dqe","kind":"discovered_from","created_at":[1765835915424,0],"created_by":"darin@dusk"}
 {"from":"bd-23h","to":"bd-3m5","kind":"parent","created_at":[1768449376545,1],"created_by":"darin@book"}
 {"from":"bd-2us","to":"bd-3m5","kind":"blocks","created_at":[1768182696346,1],"created_by":"darin@darinsmacstudio.lan"}
@@ -370,6 +371,7 @@
 {"from":"bd-a6k","to":"bd-3m5","kind":"blocks","created_at":[1768182703950,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-ayl","to":"bd-3m5","kind":"parent","created_at":[1768449375900,1],"created_by":"darin@book"}
 {"from":"bd-bk2","to":"bd-3m5","kind":"blocks","created_at":[1768182704052,1],"created_by":"darin@darinsmacstudio.lan"}
+{"from":"bd-bpo6","to":"bd-6k70","kind":"discovered_from","created_at":[1768701673166,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-c1a","to":"bd-bk2","kind":"discovered_from","created_at":[1768427184513,1],"created_by":"darin@book"}
 {"from":"bd-c2r","to":"bd-3m5","kind":"parent","created_at":[1768449375488,1],"created_by":"darin@book"}
 {"from":"bd-cfqx","to":"bd-0863","kind":"blocks","created_at":[1768680821379,1],"created_by":"darin@book"}
@@ -443,6 +445,7 @@
 {"from":"bd-qz97.8","to":"bd-qz97","kind":"parent","created_at":[1769209800798,1],"created_by":"darin@book"}
 {"from":"bd-qz97.9","to":"bd-qz97","kind":"parent","created_at":[1769209801009,1],"created_by":"darin@book"}
 {"from":"bd-sz4","to":"bd-3m5","kind":"blocks","created_at":[1768182696555,1],"created_by":"darin@darinsmacstudio.lan"}
+{"from":"bd-w9og","to":"bd-6k70","kind":"discovered_from","created_at":[1768704221218,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-xmr","to":"bd-roy","kind":"blocks","created_at":[1765744658975,0],"created_by":"darin@book"}
 {"from":"bd-ze0x.1","to":"bd-ze0x","kind":"parent","created_at":[1768622383738,1],"created_by":"darin@book"}
 {"from":"bd-ze0x.10","to":"bd-ze0x","kind":"parent","created_at":[1768622414118,1],"created_by":"darin@book"}
