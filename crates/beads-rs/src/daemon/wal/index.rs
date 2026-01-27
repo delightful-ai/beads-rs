@@ -22,6 +22,21 @@ const CACHE_SIZE_KB: i64 = -16_000;
 const MAX_IDLE_CONNECTIONS: usize = 8;
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ClientRequestEventIdsError {
+    #[error("event_ids must be non-empty")]
+    Empty,
+    #[error("event_ids namespace mismatch (expected {expected}, got {got})")]
+    MixedNamespace {
+        expected: NamespaceId,
+        got: NamespaceId,
+    },
+    #[error("event_ids origin mismatch (expected {expected}, got {got})")]
+    MixedOrigin { expected: ReplicaId, got: ReplicaId },
+    #[error("event_ids must be strictly increasing (prev {prev}, next {next})")]
+    NonIncreasing { prev: Seq1, next: Seq1 },
+}
+
 #[derive(Debug, Error)]
 pub enum WalIndexError {
     #[error("sqlite error: {0}")]
@@ -51,6 +66,8 @@ pub enum WalIndexError {
     CborDecode(#[from] minicbor::decode::Error),
     #[error("event id decode invalid: {0}")]
     EventIdDecode(String),
+    #[error("client request event ids invalid: {0}")]
+    ClientRequestEventIds(#[from] ClientRequestEventIdsError),
     #[error("origin_seq overflow for {namespace} {origin}")]
     OriginSeqOverflow {
         namespace: String,
@@ -138,7 +155,7 @@ pub trait WalIndexTxn {
         client_request_id: ClientRequestId,
         request_sha256: [u8; 32],
         txn_id: TxnId,
-        event_ids: &[EventId],
+        event_ids: &ClientRequestEventIds,
         created_at_ms: u64,
     ) -> Result<(), WalIndexError>;
     fn upsert_replica_liveness(&mut self, row: &ReplicaLivenessRow) -> Result<(), WalIndexError>;
@@ -173,10 +190,123 @@ pub trait WalIndexReader {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ClientRequestEventIds {
+    namespace: NamespaceId,
+    origin: ReplicaId,
+    seqs: Vec<Seq1>,
+}
+
+impl ClientRequestEventIds {
+    pub fn new(event_ids: Vec<EventId>) -> Result<Self, ClientRequestEventIdsError> {
+        let mut iter = event_ids.into_iter();
+        let first = iter.next().ok_or(ClientRequestEventIdsError::Empty)?;
+        let namespace = first.namespace.clone();
+        let origin = first.origin_replica_id;
+        let mut seqs = Vec::with_capacity(iter.size_hint().0 + 1);
+        let mut prev = first.origin_seq;
+        seqs.push(prev);
+        for id in iter {
+            let EventId {
+                origin_replica_id,
+                namespace: id_namespace,
+                origin_seq,
+            } = id;
+            if id_namespace != namespace {
+                return Err(ClientRequestEventIdsError::MixedNamespace {
+                    expected: namespace,
+                    got: id_namespace,
+                });
+            }
+            if origin_replica_id != origin {
+                return Err(ClientRequestEventIdsError::MixedOrigin {
+                    expected: origin,
+                    got: origin_replica_id,
+                });
+            }
+            if origin_seq <= prev {
+                return Err(ClientRequestEventIdsError::NonIncreasing {
+                    prev,
+                    next: origin_seq,
+                });
+            }
+            prev = origin_seq;
+            seqs.push(prev);
+        }
+        Ok(Self {
+            namespace,
+            origin,
+            seqs,
+        })
+    }
+
+    pub fn single(event_id: EventId) -> Self {
+        Self {
+            namespace: event_id.namespace,
+            origin: event_id.origin_replica_id,
+            seqs: vec![event_id.origin_seq],
+        }
+    }
+
+    pub fn namespace(&self) -> &NamespaceId {
+        &self.namespace
+    }
+
+    pub fn origin(&self) -> ReplicaId {
+        self.origin
+    }
+
+    pub fn ensure_matches(
+        &self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+    ) -> Result<(), ClientRequestEventIdsError> {
+        if &self.namespace != namespace {
+            return Err(ClientRequestEventIdsError::MixedNamespace {
+                expected: namespace.clone(),
+                got: self.namespace.clone(),
+            });
+        }
+        if &self.origin != origin {
+            return Err(ClientRequestEventIdsError::MixedOrigin {
+                expected: *origin,
+                got: self.origin,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn seqs(&self) -> &[Seq1] {
+        &self.seqs
+    }
+
+    pub fn len(&self) -> usize {
+        self.seqs.len()
+    }
+
+    pub fn max_seq(&self) -> Seq1 {
+        self.seqs
+            .last()
+            .copied()
+            .expect("ClientRequestEventIds is non-empty")
+    }
+
+    pub fn first_event_id(&self) -> EventId {
+        EventId::new(self.origin, self.namespace.clone(), self.seqs[0])
+    }
+
+    pub fn event_ids(&self) -> Vec<EventId> {
+        self.seqs
+            .iter()
+            .map(|seq| EventId::new(self.origin, self.namespace.clone(), *seq))
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientRequestRow {
     pub request_sha256: [u8; 32],
     pub txn_id: TxnId,
-    pub event_ids: Vec<EventId>,
+    pub event_ids: ClientRequestEventIds,
     pub created_at_ms: u64,
 }
 
@@ -819,9 +949,10 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         client_request_id: ClientRequestId,
         request_sha256: [u8; 32],
         txn_id: TxnId,
-        event_ids: &[EventId],
+        event_ids: &ClientRequestEventIds,
         created_at_ms: u64,
     ) -> Result<(), WalIndexError> {
+        event_ids.ensure_matches(ns, origin)?;
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
         let client_blob = uuid_blob(client_request_id.as_uuid());
@@ -1552,25 +1683,32 @@ fn parse_replica_role(value: &str) -> Result<ReplicaRole, WalIndexError> {
     }
 }
 
-pub(crate) fn encode_event_ids(event_ids: &[EventId]) -> Result<Vec<u8>, WalIndexError> {
+pub(crate) fn encode_event_ids(
+    event_ids: &ClientRequestEventIds,
+) -> Result<Vec<u8>, WalIndexError> {
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
     enc.array(event_ids.len() as u64)?;
-    for id in event_ids {
-        encode_event_id(&mut enc, id)?;
+    for seq in event_ids.seqs() {
+        encode_event_id(&mut enc, event_ids.origin(), event_ids.namespace(), *seq)?;
     }
     Ok(buf)
 }
 
-fn encode_event_id(enc: &mut Encoder<&mut Vec<u8>>, id: &EventId) -> Result<(), WalIndexError> {
+fn encode_event_id(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    origin: ReplicaId,
+    namespace: &NamespaceId,
+    origin_seq: Seq1,
+) -> Result<(), WalIndexError> {
     enc.array(3)?;
-    enc.bytes(id.origin_replica_id.as_uuid().as_bytes())?;
-    enc.str(id.namespace.as_str())?;
-    enc.u64(id.origin_seq.get())?;
+    enc.bytes(origin.as_uuid().as_bytes())?;
+    enc.str(namespace.as_str())?;
+    enc.u64(origin_seq.get())?;
     Ok(())
 }
 
-fn decode_event_ids(bytes: &[u8]) -> Result<Vec<EventId>, WalIndexError> {
+fn decode_event_ids(bytes: &[u8]) -> Result<ClientRequestEventIds, WalIndexError> {
     let mut dec = Decoder::new(bytes);
     let len = dec.array()?.ok_or_else(|| {
         WalIndexError::EventIdDecode("event_ids CBOR must be definite".to_string())
@@ -1599,7 +1737,7 @@ fn decode_event_ids(bytes: &[u8]) -> Result<Vec<EventId>, WalIndexError> {
             origin_seq,
         ));
     }
-    Ok(ids)
+    Ok(ClientRequestEventIds::new(ids)?)
 }
 
 #[cfg(test)]
@@ -1619,6 +1757,65 @@ mod tests {
             versions,
             1_700_000_000_000,
         )
+    }
+
+    #[test]
+    fn client_request_event_ids_rejects_empty() {
+        let err = ClientRequestEventIds::new(Vec::new()).unwrap_err();
+        assert!(matches!(err, ClientRequestEventIdsError::Empty));
+    }
+
+    #[test]
+    fn client_request_event_ids_rejects_mixed_namespace() {
+        let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+        let core = NamespaceId::core();
+        let other = NamespaceId::parse("other").unwrap();
+        let first = EventId::new(origin, core.clone(), Seq1::from_u64(1).unwrap());
+        let second = EventId::new(origin, other, Seq1::from_u64(2).unwrap());
+        let err = ClientRequestEventIds::new(vec![first, second]).unwrap_err();
+        assert!(matches!(
+            err,
+            ClientRequestEventIdsError::MixedNamespace { .. }
+        ));
+    }
+
+    #[test]
+    fn client_request_event_ids_rejects_mixed_origin() {
+        let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+        let other_origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        let namespace = NamespaceId::core();
+        let first = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).unwrap());
+        let second = EventId::new(other_origin, namespace.clone(), Seq1::from_u64(2).unwrap());
+        let err = ClientRequestEventIds::new(vec![first, second]).unwrap_err();
+        assert!(matches!(
+            err,
+            ClientRequestEventIdsError::MixedOrigin { .. }
+        ));
+    }
+
+    #[test]
+    fn client_request_event_ids_rejects_out_of_order() {
+        let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+        let namespace = NamespaceId::core();
+        let first = EventId::new(origin, namespace.clone(), Seq1::from_u64(2).unwrap());
+        let second = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).unwrap());
+        let err = ClientRequestEventIds::new(vec![first, second]).unwrap_err();
+        assert!(matches!(
+            err,
+            ClientRequestEventIdsError::NonIncreasing { .. }
+        ));
+    }
+
+    #[test]
+    fn client_request_event_ids_round_trip_encode() {
+        let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+        let namespace = NamespaceId::core();
+        let first = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).unwrap());
+        let second = EventId::new(origin, namespace.clone(), Seq1::from_u64(2).unwrap());
+        let ids = ClientRequestEventIds::new(vec![first.clone(), second.clone()]).unwrap();
+        let encoded = encode_event_ids(&ids).unwrap();
+        let decoded = decode_event_ids(&encoded).unwrap();
+        assert_eq!(decoded.event_ids(), vec![first, second]);
     }
 
     #[test]
@@ -1771,13 +1968,14 @@ mod tests {
         let durable = Watermark::<Durable>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
         txn.update_watermark(&ns, &origin, applied, durable)
             .unwrap();
+        let event_ids = ClientRequestEventIds::single(event_id.clone());
         txn.upsert_client_request(
             &ns,
             &origin,
             client_request_id,
             [7u8; 32],
             txn_id,
-            std::slice::from_ref(&event_id),
+            &event_ids,
             1_700_000,
         )
         .unwrap();
@@ -1800,7 +1998,7 @@ mod tests {
             .unwrap();
         assert_eq!(req.request_sha256, [7u8; 32]);
         assert_eq!(req.txn_id, txn_id);
-        assert_eq!(req.event_ids, vec![event_id]);
+        assert_eq!(req.event_ids.event_ids(), vec![event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
         assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), Seq0::new(1));
     }
@@ -2045,6 +2243,8 @@ mod tests {
         let second_txn_id = TxnId::new(Uuid::from_bytes([4u8; 16]));
         let first_event_id = EventId::new(origin, ns.clone(), Seq1::from_u64(1).unwrap());
         let second_event_id = EventId::new(origin, ns.clone(), Seq1::from_u64(2).unwrap());
+        let first_event_ids = ClientRequestEventIds::single(first_event_id.clone());
+        let second_event_ids = ClientRequestEventIds::single(second_event_id.clone());
 
         let mut txn = index.writer().begin_txn().unwrap();
         txn.upsert_client_request(
@@ -2053,7 +2253,7 @@ mod tests {
             client_request_id,
             [7u8; 32],
             first_txn_id,
-            std::slice::from_ref(&first_event_id),
+            &first_event_ids,
             1_700_000,
         )
         .unwrap();
@@ -2066,7 +2266,7 @@ mod tests {
             client_request_id,
             [7u8; 32],
             second_txn_id,
-            std::slice::from_ref(&second_event_id),
+            &second_event_ids,
             1_800_000,
         )
         .unwrap();
@@ -2079,7 +2279,7 @@ mod tests {
             .unwrap();
         assert_eq!(req.request_sha256, [7u8; 32]);
         assert_eq!(req.txn_id, first_txn_id);
-        assert_eq!(req.event_ids, vec![first_event_id.clone()]);
+        assert_eq!(req.event_ids.event_ids(), vec![first_event_id.clone()]);
         assert_eq!(req.created_at_ms, 1_700_000);
 
         let mut txn = index.writer().begin_txn().unwrap();
@@ -2090,7 +2290,7 @@ mod tests {
                 client_request_id,
                 [9u8; 32],
                 second_txn_id,
-                &[second_event_id],
+                &second_event_ids,
                 1_900_000,
             )
             .unwrap_err();
@@ -2107,7 +2307,7 @@ mod tests {
             .unwrap();
         assert_eq!(req.request_sha256, [7u8; 32]);
         assert_eq!(req.txn_id, first_txn_id);
-        assert_eq!(req.event_ids, vec![first_event_id]);
+        assert_eq!(req.event_ids.event_ids(), vec![first_event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
     }
 
