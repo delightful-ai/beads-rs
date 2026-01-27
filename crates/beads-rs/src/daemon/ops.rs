@@ -549,10 +549,13 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
         WalReplayError::SegmentHeaderMismatch { .. } => {
             ProtocolErrorCode::SegmentHeaderMismatch.into()
         }
-        WalReplayError::RecordShaMismatch(_) => ProtocolErrorCode::HashMismatch.into(),
+        WalReplayError::RecordShaMismatch(_) | WalReplayError::RecordPayloadMismatch(_) => {
+            ProtocolErrorCode::HashMismatch.into()
+        }
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
         | WalReplayError::RecordHeaderMismatch { .. }
+        | WalReplayError::RecordCanonicalEncode { .. }
         | WalReplayError::MissingHead { .. }
         | WalReplayError::UnexpectedHead { .. }
         | WalReplayError::SealedSegmentFinalLenMissing { .. }

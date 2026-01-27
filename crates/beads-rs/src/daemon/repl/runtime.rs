@@ -304,7 +304,7 @@ impl WalRangeReader {
                 eid: item.event_id,
                 sha256: Sha256(item.sha),
                 prev_sha256: item.prev_sha.map(Sha256),
-                bytes: EventBytes::<Opaque>::new(Bytes::clone(record.payload())),
+                bytes: EventBytes::<Opaque>::new(Bytes::copy_from_slice(record.payload_bytes())),
             });
         }
 
@@ -414,7 +414,7 @@ fn read_record_at(
         }
     })?;
     record
-        .verify_with_event_body(&event_body)
+        .verify_with_event_body(event_body)
         .map_err(|err| EventWalError::RecordHeaderInvalid {
             reason: err.to_string(),
         })

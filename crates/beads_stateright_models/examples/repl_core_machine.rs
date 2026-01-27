@@ -411,7 +411,6 @@ struct NodeState {
 enum HeadDigest {
     Genesis,
     Known(Sha256),
-    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -445,7 +444,6 @@ struct StateDigest {
 enum HeadOrderKey {
     Genesis,
     Known([u8; 32]),
-    Unknown,
 }
 
 impl From<&HeadSnapshot> for HeadOrderKey {
@@ -453,7 +451,6 @@ impl From<&HeadSnapshot> for HeadOrderKey {
         match head {
             HeadSnapshot::Genesis => HeadOrderKey::Genesis,
             HeadSnapshot::Known(bytes) => HeadOrderKey::Known(bytes.0),
-            HeadSnapshot::Unknown => HeadOrderKey::Unknown,
         }
     }
 }
@@ -463,7 +460,6 @@ impl From<&HeadDigest> for HeadOrderKey {
         match head {
             HeadDigest::Genesis => HeadOrderKey::Genesis,
             HeadDigest::Known(bytes) => HeadOrderKey::Known(bytes.0),
-            HeadDigest::Unknown => HeadOrderKey::Unknown,
         }
     }
 }
@@ -922,7 +918,6 @@ impl WatermarkDigest {
         let head = match wm.head() {
             HeadStatus::Genesis => HeadDigest::Genesis,
             HeadStatus::Known(bytes) => HeadDigest::Known(Sha256(bytes)),
-            HeadStatus::Unknown => HeadDigest::Unknown,
         };
         Self {
             seq: wm.seq(),
@@ -1053,7 +1048,6 @@ fn expected_prev_head(durable: Watermark<Durable>, seq: Seq1) -> Option<Sha256> 
     match durable.head() {
         HeadStatus::Genesis => None,
         HeadStatus::Known(bytes) => Some(Sha256(bytes)),
-        HeadStatus::Unknown => None,
     }
 }
 

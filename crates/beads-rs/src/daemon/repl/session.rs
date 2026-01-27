@@ -570,7 +570,6 @@ impl Session {
             let head_sha = match durable.head() {
                 HeadStatus::Genesis => None,
                 HeadStatus::Known(head) => Some(Sha256(head)),
-                HeadStatus::Unknown => None,
             };
 
             let expected_prev = match self.expected_prev_head(durable, frame.eid.origin_seq) {
@@ -735,7 +734,6 @@ impl Session {
         match durable.head() {
             HeadStatus::Genesis => Ok(None),
             HeadStatus::Known(head) => Ok(Some(Sha256(head))),
-            HeadStatus::Unknown => unreachable!("unknown head should never reach session state"),
         }
     }
 
@@ -1323,7 +1321,7 @@ mod tests {
 
     use crate::core::{
         ActorId, EventBody, EventBytes, EventFrameV1, EventKindV1, HlcMax, NamespaceId, ReplicaId,
-        Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
+        Seq0, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1, WatermarkError,
         encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::repl::proto;
@@ -1380,6 +1378,19 @@ mod tests {
                 applied_heads,
             }
         }
+    }
+
+    #[test]
+    fn watermark_snapshot_requires_heads_for_nonzero_seq() {
+        let ns = NamespaceId::parse("core").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
+        let mut map: WatermarkMap = BTreeMap::new();
+        map.entry(ns.clone())
+            .or_default()
+            .insert(origin, Seq0::new(1));
+
+        let err = watermark_state_from_snapshot::<Durable>(&map, None).unwrap_err();
+        assert_eq!(err, WatermarkError::MissingHead { seq: Seq0::new(1) });
     }
 
     impl SessionStore for TestStore {
