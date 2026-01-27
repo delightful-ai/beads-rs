@@ -5,7 +5,8 @@ use std::fs::{self, OpenOptions};
 use uuid::Uuid;
 
 use beads_rs::daemon::wal::{
-    FrameWriter, VerifiedRecord, WalIndex, WalReplayError, catch_up_index, rebuild_index,
+    FrameWriter, SegmentRow, VerifiedRecord, WalIndex, WalReplayError, catch_up_index,
+    rebuild_index,
 };
 use beads_rs::{Limits, NamespaceId, ReplicaId, Seq0, Seq1, StoreMeta};
 
@@ -34,17 +35,17 @@ fn index_rebuild_populates_watermarks_and_segments() {
         .iter()
         .find(|row| row.origin == origin && row.namespace == namespace)
         .expect("watermark row");
-    assert_eq!(row.applied_seq, 2);
-    assert_eq!(row.durable_seq, 2);
-    assert_eq!(row.applied_head_sha, Some(records[1].header().sha256));
-    assert_eq!(row.durable_head_sha, Some(records[1].header().sha256));
+    assert_eq!(row.applied_seq(), 2);
+    assert_eq!(row.durable_seq(), 2);
+    assert_eq!(row.applied_head_sha(), Some(records[1].header().sha256));
+    assert_eq!(row.durable_head_sha(), Some(records[1].header().sha256));
 
     let segments = index.reader().list_segments(&namespace).expect("segments");
     assert_eq!(segments.len(), 1);
     let expected_offset = segment
         .frame_offset(1)
         .saturating_add(segment.frame_len(1) as u64);
-    assert_eq!(segments[0].last_indexed_offset, expected_offset);
+    assert_eq!(segments[0].last_indexed_offset(), expected_offset);
 
     let range = index
         .reader()
@@ -87,15 +88,15 @@ fn index_catch_up_scans_new_frames() {
     let expected_offset = segment
         .frame_offset(1)
         .saturating_add(segment.frame_len(1) as u64 + len as u64);
-    assert_eq!(segments[0].last_indexed_offset, expected_offset);
+    assert_eq!(segments[0].last_indexed_offset(), expected_offset);
 
     let watermarks = index.reader().load_watermarks().expect("load watermarks");
     let row = watermarks
         .iter()
         .find(|row| row.origin == origin && row.namespace == namespace)
         .expect("watermark row");
-    assert_eq!(row.applied_seq, 3);
-    assert_eq!(row.durable_seq, 3);
+    assert_eq!(row.applied_seq(), 3);
+    assert_eq!(row.durable_seq(), 3);
 
     let range = index
         .reader()
@@ -132,20 +133,20 @@ fn index_marks_sealed_segments() {
     let segments = index.reader().list_segments(&namespace).expect("segments");
     let seg1 = segments
         .iter()
-        .find(|row| row.segment_id == segment1.header.segment_id)
+        .find(|row| row.segment_id() == segment1.header.segment_id)
         .expect("segment1 row");
     let seg2 = segments
         .iter()
-        .find(|row| row.segment_id == segment2.header.segment_id)
+        .find(|row| row.segment_id() == segment2.header.segment_id)
         .expect("segment2 row");
     let seg1_len = fs::metadata(&segment1.path)
         .expect("segment1 metadata")
         .len();
 
-    assert!(seg1.sealed);
-    assert_eq!(seg1.final_len, Some(seg1_len));
-    assert!(!seg2.sealed);
-    assert_eq!(seg2.final_len, None);
+    assert!(seg1.is_sealed());
+    assert_eq!(seg1.final_len(), Some(seg1_len));
+    assert!(!seg2.is_sealed());
+    assert_eq!(seg2.final_len(), None);
 }
 
 #[test]
@@ -172,13 +173,37 @@ fn index_replay_rejects_sealed_len_mismatch() {
     rebuild_index(temp.store_dir(), temp.meta(), &index, &limits).expect("rebuild index");
 
     let rows = index.reader().list_segments(&namespace).expect("segments");
-    let mut sealed = rows
+    let sealed = rows
         .iter()
-        .find(|row| row.segment_id == segment1.header.segment_id)
-        .expect("segment1 row")
-        .clone();
-    let final_len = sealed.final_len.expect("sealed final_len");
-    sealed.final_len = Some(final_len.saturating_add(1));
+        .find(|row| row.segment_id() == segment1.header.segment_id)
+        .expect("segment1 row");
+    let (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, final_len) =
+        match sealed {
+            SegmentRow::Sealed {
+                namespace,
+                segment_id,
+                segment_path,
+                created_at_ms,
+                last_indexed_offset,
+                final_len,
+            } => (
+                namespace.clone(),
+                *segment_id,
+                segment_path.clone(),
+                *created_at_ms,
+                *last_indexed_offset,
+                *final_len,
+            ),
+            SegmentRow::Open { .. } => panic!("expected sealed segment row"),
+        };
+    let sealed = SegmentRow::sealed(
+        namespace,
+        segment_id,
+        segment_path,
+        created_at_ms,
+        last_indexed_offset,
+        final_len.saturating_add(1),
+    );
     let mut txn = index.writer().begin_txn().expect("begin txn");
     txn.upsert_segment(&sealed).expect("upsert segment");
     txn.commit().expect("commit");

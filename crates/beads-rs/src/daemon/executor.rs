@@ -30,8 +30,8 @@ use super::mutation_engine::{
 use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
-    WalIndexError, WalIndexTxn, WalReplayError, open_segment_reader,
+    EventWalError, FrameReader, HlcRow, RecordHeader, RecordRequest, SegmentRow, VerifiedRecord,
+    WalIndex, WalIndexError, WalIndexTxn, WalReplayError, open_segment_reader,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
@@ -283,9 +283,12 @@ impl Daemon {
 
         let sha = hash_event_body(&sequenced.event_bytes);
         let sha_bytes = sha.0;
-        let request_sha256 = sequenced
+        let request = sequenced
             .client_request_id
-            .map(|_| sequenced.request_sha256);
+            .map(|client_request_id| RecordRequest {
+                client_request_id,
+                request_sha256: Some(sequenced.request_sha256),
+            });
 
         let record = VerifiedRecord::new(
             RecordHeader {
@@ -293,8 +296,7 @@ impl Daemon {
                 origin_seq,
                 event_time_ms: sequenced.event_body.event_time_ms,
                 txn_id: sequenced.event_body.txn_id,
-                client_request_id: sequenced.event_body.client_request_id,
-                request_sha256,
+                request,
                 sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
@@ -331,15 +333,13 @@ impl Daemon {
             (append, snapshot)
         };
         let last_indexed_offset = append.offset + append.len as u64;
-        let segment_row = SegmentRow {
-            namespace: namespace.clone(),
-            segment_id: append.segment_id,
-            segment_path: segment_rel_path(&store_dir, &segment_snapshot.path),
-            created_at_ms: segment_snapshot.created_at_ms,
+        let segment_row = SegmentRow::open(
+            namespace.clone(),
+            append.segment_id,
+            segment_rel_path(&store_dir, &segment_snapshot.path),
+            segment_snapshot.created_at_ms,
             last_indexed_offset,
-            sealed: false,
-            final_len: None,
-        };
+        );
 
         let broadcast_prev = prev_sha.map(Sha256);
         let event_id = EventId::new(origin_replica_id, namespace.clone(), origin_seq);
@@ -352,15 +352,14 @@ impl Daemon {
         let event_ids = vec![event_id];
         txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
         if let Some(sealed) = append.sealed.as_ref() {
-            let sealed_row = SegmentRow {
-                namespace: namespace.clone(),
-                segment_id: sealed.segment_id,
-                segment_path: segment_rel_path(&store_dir, &sealed.path),
-                created_at_ms: sealed.created_at_ms,
-                last_indexed_offset: sealed.final_len,
-                sealed: true,
-                final_len: Some(sealed.final_len),
-            };
+            let sealed_row = SegmentRow::sealed(
+                namespace.clone(),
+                sealed.segment_id,
+                segment_rel_path(&store_dir, &sealed.path),
+                sealed.created_at_ms,
+                sealed.final_len,
+                sealed.final_len,
+            );
             txn.upsert_segment(&sealed_row).map_err(wal_index_to_op)?;
         }
         txn.record_event(
@@ -399,14 +398,7 @@ impl Daemon {
         crate::daemon::test_hooks::maybe_pause("wal_before_index_commit");
         txn.commit().map_err(wal_index_to_op)?;
 
-        let (
-            durable_watermarks,
-            applied_watermarks,
-            applied_head,
-            durable_head,
-            applied_seq,
-            durable_seq,
-        ) = {
+        let (durable_watermarks, applied_watermarks, applied, durable) = {
             let (store_runtime, repo_state) = proof.split_mut();
             let apply_start = Instant::now();
             let apply_result = {
@@ -465,43 +457,28 @@ impl Daemon {
                     })
                 })?;
 
-            let applied_head = store_runtime.applied_head_sha(&namespace, &origin_replica_id);
-            let durable_head = store_runtime.durable_head_sha(&namespace, &origin_replica_id);
-            let applied_seq = store_runtime
+            let applied = store_runtime
                 .watermarks_applied
                 .get(&namespace, &origin_replica_id)
                 .copied()
-                .unwrap_or_else(Watermark::genesis)
-                .seq()
-                .get();
-            let durable_seq = store_runtime
+                .unwrap_or_else(Watermark::genesis);
+            let durable = store_runtime
                 .watermarks_durable
                 .get(&namespace, &origin_replica_id)
                 .copied()
-                .unwrap_or_else(Watermark::genesis)
-                .seq()
-                .get();
+                .unwrap_or_else(Watermark::genesis);
 
             (
                 store_runtime.watermarks_durable.clone(),
                 store_runtime.watermarks_applied.clone(),
-                applied_head,
-                durable_head,
-                applied_seq,
-                durable_seq,
+                applied,
+                durable,
             )
         };
 
         let mut watermark_txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
         watermark_txn
-            .update_watermark(
-                &namespace,
-                &origin_replica_id,
-                applied_seq,
-                durable_seq,
-                applied_head,
-                durable_head,
-            )
+            .update_watermark(&namespace, &origin_replica_id, applied, durable)
             .map_err(wal_index_to_op)?;
         watermark_txn.commit().map_err(wal_index_to_op)?;
 
@@ -1033,12 +1010,12 @@ fn load_event_body(
         .map_err(wal_index_to_op)?;
     let segment = segments
         .into_iter()
-        .find(|segment| segment.segment_id == item.segment_id)
+        .find(|segment| segment.segment_id() == item.segment_id)
         .ok_or(OpError::Internal("wal index missing segment for event"))?;
-    let path = if segment.segment_path.is_absolute() {
-        segment.segment_path
+    let path = if segment.segment_path().is_absolute() {
+        segment.segment_path().to_path_buf()
     } else {
-        store_dir.join(&segment.segment_path)
+        store_dir.join(segment.segment_path())
     };
 
     let mut reader =
@@ -1653,8 +1630,13 @@ mod tests {
                 origin_seq,
                 event_time_ms: sequenced.event_body.event_time_ms,
                 txn_id: sequenced.event_body.txn_id,
-                client_request_id: sequenced.event_body.client_request_id,
-                request_sha256: Some(sequenced.request_sha256),
+                request: sequenced
+                    .event_body
+                    .client_request_id
+                    .map(|client_request_id| RecordRequest {
+                        client_request_id,
+                        request_sha256: Some(sequenced.request_sha256),
+                    }),
                 sha256: sha,
                 prev_sha256: None,
             },
