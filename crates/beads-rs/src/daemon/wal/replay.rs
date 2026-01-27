@@ -407,11 +407,11 @@ fn index_record(
         frame_len,
         header.event_time_ms,
         header.txn_id,
-        header.client_request_id,
+        header.client_request_id(),
     )?;
 
     if let (Some(client_request_id), Some(request_sha256)) =
-        (header.client_request_id, header.request_sha256)
+        (header.client_request_id(), header.request_sha256())
     {
         txn.upsert_client_request(
             namespace,
@@ -972,7 +972,7 @@ mod tests {
         encode_event_body_canonical,
     };
     use crate::daemon::wal::SegmentConfig;
-    use crate::daemon::wal::record::RecordHeader;
+    use crate::daemon::wal::record::{RecordHeader, RecordRequest};
     use crate::daemon::wal::segment::SegmentWriter;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex};
 
@@ -1078,8 +1078,12 @@ mod tests {
                 origin_seq: body.origin_seq,
                 event_time_ms: body.event_time_ms,
                 txn_id: body.txn_id,
-                client_request_id: body.client_request_id,
-                request_sha256: None,
+                request: body
+                    .client_request_id
+                    .map(|client_request_id| RecordRequest {
+                        client_request_id,
+                        request_sha256: None,
+                    }),
                 sha256: expected_sha,
                 prev_sha256: None,
             },

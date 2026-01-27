@@ -286,8 +286,8 @@ mod tests {
         ActorId, NamespaceId, ReplicaId, SegmentId, Seq1, StoreEpoch, StoreId, StoreIdentity,
         StoreMeta, StoreMetaVersions, TxnId,
     };
-    use crate::daemon::wal::RecordHeader;
     use crate::daemon::wal::segment::SegmentHeader;
+    use crate::daemon::wal::{RecordHeader, RecordRequest};
 
     fn read_record_at_path(
         path: &Path,
@@ -365,8 +365,12 @@ mod tests {
             origin_seq: body.origin_seq,
             event_time_ms: body.event_time_ms,
             txn_id: body.txn_id,
-            client_request_id: body.client_request_id,
-            request_sha256: None,
+            request: body
+                .client_request_id
+                .map(|client_request_id| RecordRequest {
+                    client_request_id,
+                    request_sha256: None,
+                }),
             sha256: sha,
             prev_sha256: None,
         };
