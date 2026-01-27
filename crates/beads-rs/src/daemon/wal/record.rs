@@ -71,10 +71,15 @@ pub struct RecordHeader {
     pub origin_seq: Seq1,
     pub event_time_ms: u64,
     pub txn_id: TxnId,
-    pub client_request_id: Option<ClientRequestId>,
-    pub request_sha256: Option<[u8; 32]>,
+    pub request: Option<RecordRequest>,
     pub sha256: [u8; 32],
     pub prev_sha256: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordRequest {
+    pub client_request_id: ClientRequestId,
+    pub request_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -96,20 +101,23 @@ pub enum RecordHeaderMismatch {
 
 impl RecordHeader {
     pub fn flags(&self) -> RecordFlags {
+        let request_sha256 = self.request.and_then(|request| request.request_sha256);
         RecordFlags {
             has_prev_sha: self.prev_sha256.is_some(),
-            has_client_request_id: self.client_request_id.is_some(),
-            has_request_sha256: self.request_sha256.is_some(),
+            has_client_request_id: self.request.is_some(),
+            has_request_sha256: request_sha256.is_some(),
         }
     }
 
-    pub fn encode(&self) -> EventWalResult<Vec<u8>> {
-        if self.request_sha256.is_some() && self.client_request_id.is_none() {
-            return Err(EventWalError::RecordHeaderInvalid {
-                reason: "request_sha256 requires client_request_id".to_string(),
-            });
-        }
+    pub fn client_request_id(&self) -> Option<ClientRequestId> {
+        self.request.map(|request| request.client_request_id)
+    }
 
+    pub fn request_sha256(&self) -> Option<[u8; 32]> {
+        self.request.and_then(|request| request.request_sha256)
+    }
+
+    pub fn encode(&self) -> EventWalResult<Vec<u8>> {
         let flags = self.flags();
         let header_len = flags.expected_len();
         let header_len_u16 =
@@ -127,11 +135,11 @@ impl RecordHeader {
         buf.extend_from_slice(&self.event_time_ms.to_le_bytes());
         buf.extend_from_slice(self.txn_id.as_uuid().as_bytes());
 
-        if let Some(client_request_id) = self.client_request_id {
-            buf.extend_from_slice(client_request_id.as_uuid().as_bytes());
-        }
-        if let Some(request_sha256) = self.request_sha256 {
-            buf.extend_from_slice(&request_sha256);
+        if let Some(request) = self.request {
+            buf.extend_from_slice(request.client_request_id.as_uuid().as_bytes());
+            if let Some(request_sha256) = request.request_sha256 {
+                buf.extend_from_slice(&request_sha256);
+            }
         }
 
         buf.extend_from_slice(&self.sha256);
@@ -199,14 +207,17 @@ impl RecordHeader {
         let event_time_ms = read_u64_le(bytes, &mut offset)?;
         let txn_id = TxnId::new(read_uuid(bytes, &mut offset)?);
 
-        let client_request_id = if flags.has_client_request_id {
-            Some(ClientRequestId::new(read_uuid(bytes, &mut offset)?))
-        } else {
-            None
-        };
-
-        let request_sha256 = if flags.has_request_sha256 {
-            Some(read_array::<32>(bytes, &mut offset)?)
+        let request = if flags.has_client_request_id {
+            let client_request_id = ClientRequestId::new(read_uuid(bytes, &mut offset)?);
+            let request_sha256 = if flags.has_request_sha256 {
+                Some(read_array::<32>(bytes, &mut offset)?)
+            } else {
+                None
+            };
+            Some(RecordRequest {
+                client_request_id,
+                request_sha256,
+            })
         } else {
             None
         };
@@ -230,8 +241,7 @@ impl RecordHeader {
                 origin_seq,
                 event_time_ms,
                 txn_id,
-                client_request_id,
-                request_sha256,
+                request,
                 sha256,
                 prev_sha256,
             },
@@ -268,9 +278,9 @@ pub fn validate_header_matches_body(
             body: body.txn_id,
         });
     }
-    if header.client_request_id != body.client_request_id {
+    if header.client_request_id() != body.client_request_id {
         return Err(RecordHeaderMismatch::ClientRequestId {
-            header: header.client_request_id,
+            header: header.client_request_id(),
             body: body.client_request_id,
         });
     }
@@ -456,8 +466,8 @@ mod tests {
             origin_seq: header.origin_seq,
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
-            client_request_id: header.client_request_id,
-            trace_id: header.client_request_id.map(TraceId::from),
+            client_request_id: header.client_request_id(),
+            trace_id: header.client_request_id().map(TraceId::from),
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta: TxnDeltaV1::new(),
                 hlc_max: HlcMax {
@@ -477,8 +487,10 @@ mod tests {
             origin_seq: Seq1::from_u64(42).unwrap(),
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
-            client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([3u8; 16]))),
-            request_sha256: Some([4u8; 32]),
+            request: Some(RecordRequest {
+                client_request_id: ClientRequestId::new(Uuid::from_bytes([3u8; 16])),
+                request_sha256: Some([4u8; 32]),
+            }),
             sha256: [0u8; 32],
             prev_sha256: Some([6u8; 32]),
         };
@@ -500,19 +512,19 @@ mod tests {
     }
 
     #[test]
-    fn record_encode_rejects_request_sha_without_client_request_id() {
+    fn record_encode_roundtrip_without_request() {
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: Seq1::from_u64(42).unwrap(),
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
-            client_request_id: None,
-            request_sha256: Some([4u8; 32]),
+            request: None,
             sha256: [5u8; 32],
             prev_sha256: None,
         };
-        let err = header.encode().unwrap_err();
-        assert!(matches!(err, EventWalError::RecordHeaderInvalid { .. }));
+        let encoded = header.encode().expect("encode");
+        let decoded = RecordHeader::decode(&encoded).expect("decode").0;
+        assert_eq!(decoded, header);
     }
 
     #[test]
@@ -564,8 +576,7 @@ mod tests {
             origin_seq: Seq1::from_u64(1).unwrap(),
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
-            client_request_id: None,
-            request_sha256: None,
+            request: None,
             sha256: [0u8; 32],
             prev_sha256: None,
         };
@@ -594,8 +605,7 @@ mod tests {
             origin_seq: Seq1::from_u64(1).unwrap(),
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
-            client_request_id: None,
-            request_sha256: None,
+            request: None,
             sha256: [0u8; 32],
             prev_sha256: None,
         };

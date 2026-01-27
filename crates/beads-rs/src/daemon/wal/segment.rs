@@ -598,8 +598,7 @@ mod tests {
             origin_seq: crate::core::Seq1::from_u64(1).unwrap(),
             event_time_ms: 1_700_000_000_100,
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
-            client_request_id: None,
-            request_sha256: None,
+            request: None,
             sha256: [0u8; 32],
             prev_sha256: None,
         };
@@ -614,7 +613,7 @@ mod tests {
             origin_seq: header.origin_seq,
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
-            client_request_id: header.client_request_id,
+            client_request_id: header.client_request_id(),
             trace_id: None,
             kind: crate::core::EventKindV1::TxnV1(crate::core::TxnV1 {
                 delta: crate::core::TxnDeltaV1::new(),

@@ -30,8 +30,8 @@ use super::mutation_engine::{
 use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
-    WalIndexError, WalIndexTxn, WalReplayError, open_segment_reader,
+    EventWalError, FrameReader, HlcRow, RecordHeader, RecordRequest, SegmentRow, VerifiedRecord,
+    WalIndex, WalIndexError, WalIndexTxn, WalReplayError, open_segment_reader,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
@@ -283,9 +283,12 @@ impl Daemon {
 
         let sha = hash_event_body(&sequenced.event_bytes);
         let sha_bytes = sha.0;
-        let request_sha256 = sequenced
+        let request = sequenced
             .client_request_id
-            .map(|_| sequenced.request_sha256);
+            .map(|client_request_id| RecordRequest {
+                client_request_id,
+                request_sha256: Some(sequenced.request_sha256),
+            });
 
         let record = VerifiedRecord::new(
             RecordHeader {
@@ -293,8 +296,7 @@ impl Daemon {
                 origin_seq,
                 event_time_ms: sequenced.event_body.event_time_ms,
                 txn_id: sequenced.event_body.txn_id,
-                client_request_id: sequenced.event_body.client_request_id,
-                request_sha256,
+                request,
                 sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
@@ -1653,8 +1655,13 @@ mod tests {
                 origin_seq,
                 event_time_ms: sequenced.event_body.event_time_ms,
                 txn_id: sequenced.event_body.txn_id,
-                client_request_id: sequenced.event_body.client_request_id,
-                request_sha256: Some(sequenced.request_sha256),
+                request: sequenced
+                    .event_body
+                    .client_request_id
+                    .map(|client_request_id| RecordRequest {
+                        client_request_id,
+                        request_sha256: Some(sequenced.request_sha256),
+                    }),
                 sha256: sha,
                 prev_sha256: None,
             },
