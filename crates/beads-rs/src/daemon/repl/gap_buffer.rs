@@ -476,12 +476,12 @@ impl GapBufferByNsOrigin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use uuid::Uuid;
 
     use crate::core::{
         ActorId, EventBody, EventBytes, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, Seq1,
         StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1, ValidatedEventBody,
+        encode_event_body_canonical,
     };
 
     fn sample_body(seq: u64) -> ValidatedEventBody {
@@ -513,24 +513,27 @@ mod tests {
         .expect("valid event fixture")
     }
 
-    fn event_bytes(len: usize) -> EventBytes<crate::core::Opaque> {
-        let payload = vec![1u8; len.max(1)];
-        EventBytes::<crate::core::Opaque>::new(Bytes::from(payload))
+    fn event_bytes(body: &ValidatedEventBody) -> EventBytes<crate::core::Canonical> {
+        encode_event_body_canonical(body.as_ref()).expect("encode body")
     }
 
     fn contiguous_event(seq: u64) -> VerifiedEventAny {
+        let body = sample_body(seq);
+        let bytes = event_bytes(&body);
         VerifiedEventAny::Contiguous(VerifiedEvent {
-            body: sample_body(seq),
-            bytes: event_bytes(8),
+            body,
+            bytes,
             sha256: crate::core::Sha256([seq as u8; 32]),
             prev: crate::core::PrevVerified { prev: None },
         })
     }
 
     fn deferred_event(seq: u64) -> VerifiedEventAny {
+        let body = sample_body(seq);
+        let bytes = event_bytes(&body);
         VerifiedEventAny::Deferred(VerifiedEvent {
-            body: sample_body(seq),
-            bytes: event_bytes(8),
+            body,
+            bytes,
             sha256: crate::core::Sha256([seq as u8; 32]),
             prev: crate::core::PrevDeferred {
                 prev: crate::core::Sha256([0u8; 32]),
