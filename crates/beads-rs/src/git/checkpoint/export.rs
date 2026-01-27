@@ -502,7 +502,9 @@ mod tests {
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, Dot, ReplicaEntry, ReplicaRole, Seq0};
+    use crate::core::{
+        ActorId, CanonicalState, Dot, ReplicaDurabilityRole, ReplicaEntry, ReplicaRole, Seq0,
+    };
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -562,16 +564,14 @@ mod tests {
         let entry_a = ReplicaEntry {
             replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             name: "alpha".to_string(),
-            role: ReplicaRole::Anchor,
-            durability_eligible: true,
+            role: ReplicaDurabilityRole::anchor(true),
             allowed_namespaces: Some(vec![NamespaceId::core()]),
             expire_after_ms: None,
         };
         let entry_b = ReplicaEntry {
             replica_id: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
             name: "beta".to_string(),
-            role: ReplicaRole::Peer,
-            durability_eligible: false,
+            role: ReplicaDurabilityRole::peer(false),
             allowed_namespaces: Some(vec![
                 NamespaceId::core(),
                 NamespaceId::parse("tmp").expect("tmp namespace"),

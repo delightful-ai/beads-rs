@@ -20,7 +20,8 @@ use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_rs::core::error::CliErrorCode;
 use beads_rs::core::{
     Applied, BeadId, BeadType, ErrorPayload, NamespaceId, Priority, ProtocolErrorCode,
-    ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch, StoreMeta, Watermarks,
+    ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch,
+    StoreMeta, Watermarks,
 };
 use beads_rs::daemon::ipc::{
     CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta,
@@ -870,8 +871,7 @@ fn build_roster_entries(nodes: &[Node]) -> Vec<ReplicaEntry> {
         .map(|(idx, node)| ReplicaEntry {
             replica_id: node.replica_id,
             name: format!("node-{idx}"),
-            role: ReplicaRole::Peer,
-            durability_eligible: true,
+            role: ReplicaDurabilityRole::peer(true),
             allowed_namespaces: Some(vec![NamespaceId::core()]),
             expire_after_ms: None,
         })

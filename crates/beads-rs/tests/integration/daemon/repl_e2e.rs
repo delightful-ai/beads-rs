@@ -14,7 +14,7 @@ use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
 use beads_rs::core::{
     BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode,
-    ReplicaEntry, ReplicaRole, Seq0,
+    ReplicaDurabilityRole, ReplicaEntry, ReplicaRole, Seq0,
 };
 use beads_rs::daemon::ipc::{
     AdminCheckpointWaitPayload, CreatePayload, IdPayload, IpcClient, MutationCtx, MutationMeta,
@@ -383,7 +383,7 @@ fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
     wait_for_sample(&rig, &initial, Duration::from_secs(10));
 
     let mut entries = roster_entries(&rig);
-    entries[1].durability_eligible = false;
+    entries[1].role = ReplicaDurabilityRole::peer(false);
     rig.overwrite_roster(entries);
     for idx in 0..2 {
         rig.reload_replication(idx);
@@ -584,8 +584,7 @@ fn roster_entries(rig: &ReplRig) -> Vec<ReplicaEntry> {
         .map(|(idx, node)| ReplicaEntry {
             replica_id: node.replica_id(),
             name: format!("node-{idx}"),
-            role: ReplicaRole::Peer,
-            durability_eligible: true,
+            role: ReplicaDurabilityRole::peer(true),
             allowed_namespaces: Some(vec![NamespaceId::core()]),
             expire_after_ms: None,
         })

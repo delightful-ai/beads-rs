@@ -194,16 +194,14 @@ impl ModelActor {
                 beads_rs::ReplicaEntry {
                     replica_id: local_replica,
                     name: "local".to_string(),
-                    role: beads_rs::ReplicaRole::Anchor,
-                    durability_eligible: true,
+                    role: beads_rs::ReplicaDurabilityRole::anchor(true),
                     allowed_namespaces: None,
                     expire_after_ms: None,
                 },
                 beads_rs::ReplicaEntry {
                     replica_id: replica_for(PEER_ID),
                     name: "peer".to_string(),
-                    role: beads_rs::ReplicaRole::Peer,
-                    durability_eligible: true,
+                    role: beads_rs::ReplicaDurabilityRole::peer(true),
                     allowed_namespaces: None,
                     expire_after_ms: None,
                 },

@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
 use crate::core::{
     ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, Limits,
-    NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0, Sha256, StoreEpoch,
-    StoreId, StoreIdentity, Watermark,
+    NamespaceId, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0,
+    Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark,
 };
 use crate::daemon::Clock;
 use crate::daemon::admission::AdmissionController;
@@ -676,8 +676,7 @@ impl ReplicationRig {
             .map(|(idx, node)| ReplicaEntry {
                 replica_id: node.replica_id(),
                 name: format!("node-{idx}"),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: Some(vec![NamespaceId::core()]),
                 expire_after_ms: None,
             })

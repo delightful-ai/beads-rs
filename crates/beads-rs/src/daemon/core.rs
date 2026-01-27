@@ -2739,11 +2739,11 @@ mod tests {
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
         ContentHash, Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId,
-        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry, ReplicaId,
-        ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
-        StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
-        VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
-        WriteStamp, encode_event_body_canonical, hash_event_body,
+        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaDurabilityRole,
+        ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp,
+        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+        TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp,
+        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -2961,8 +2961,7 @@ mod tests {
             replicas: vec![ReplicaEntry {
                 replica_id: ReplicaId::new(Uuid::from_bytes([45u8; 16])),
                 name: "alpha".to_string(),
-                role: ReplicaRole::Anchor,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::anchor(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             }],

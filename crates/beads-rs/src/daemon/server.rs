@@ -1125,8 +1125,8 @@ mod tests {
     use crate::core::{
         ActorId, Applied, BeadId, BeadType, ClientRequestId, DurabilityClass, DurabilityReceipt,
         Durable, EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
-        ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
-        Watermark, Watermarks,
+        ReplicaDurabilityRole, ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
+        StoreIdentity, TxnId, Watermark, Watermarks,
     };
     use crate::daemon::core::insert_store_for_tests;
     use crate::daemon::ipc::MutationMeta;
@@ -1586,24 +1586,21 @@ mod tests {
             ReplicaEntry {
                 replica_id: local,
                 name: "local".to_string(),
-                role: ReplicaRole::Anchor,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::anchor(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
             ReplicaEntry {
                 replica_id: peer_a,
                 name: "peer-a".to_string(),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
             ReplicaEntry {
                 replica_id: peer_b,
                 name: "peer-b".to_string(),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
@@ -1713,16 +1710,14 @@ mod tests {
             ReplicaEntry {
                 replica_id: local,
                 name: "local".to_string(),
-                role: ReplicaRole::Anchor,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::anchor(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
             ReplicaEntry {
                 replica_id: peer,
                 name: "peer".to_string(),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
