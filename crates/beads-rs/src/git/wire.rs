@@ -1364,7 +1364,7 @@ mod tests {
 
         let wire = WireDepStore {
             cc: Dvv {
-                max: BTreeMap::from([(replica_a, 2), (replica_b, 5)]),
+                max: BTreeMap::from([(replica_a, 1), (replica_b, 2)]),
                 dots: BTreeSet::new(),
             },
             entries: vec![
@@ -1387,8 +1387,8 @@ mod tests {
         assert!(parsed.contains(&key_blocks));
         assert!(parsed.contains(&key_related));
         assert_eq!(parsed.stamp(), Some(&stamp));
-        assert_eq!(parsed.cc().max.get(&replica_a), Some(&2));
-        assert_eq!(parsed.cc().max.get(&replica_b), Some(&5));
+        assert_eq!(parsed.cc().max.get(&replica_a), Some(&1));
+        assert_eq!(parsed.cc().max.get(&replica_b), Some(&2));
         let related_dots = parsed.dots_for(&key_related).expect("related dots");
         assert_eq!(related_dots, &BTreeSet::from([dot(7, 5), dot(7, 3)]));
     }
