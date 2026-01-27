@@ -28,21 +28,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -65,21 +62,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -106,21 +100,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -221,21 +212,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -296,21 +284,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -355,21 +340,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -408,21 +390,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -443,25 +422,19 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let repo_state = match self.git_lane_state(&remote) {
-            Ok(repo_state) => repo_state,
-            Err(e) => return Response::err_from(e),
-        };
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let repo_state = loaded.lane();
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -543,7 +516,13 @@ impl Daemon {
             });
         }
 
-        let next_retry = self.next_sync_deadline_for(remote.remote());
+        let remote_url = loaded.remote().clone();
+        let sync_dirty = repo_state.dirty;
+        let sync_in_progress = repo_state.sync_in_progress;
+        let last_sync_wall_ms = repo_state.last_sync_wall_ms;
+        let consecutive_failures = repo_state.consecutive_failures;
+        drop(loaded);
+        let next_retry = self.next_sync_deadline_for(&remote_url);
         let (next_retry_wall_ms, next_retry_in_ms) = match next_retry {
             Some(deadline) => {
                 let now = Instant::now();
@@ -556,12 +535,12 @@ impl Daemon {
         };
 
         let sync = SyncStatus {
-            dirty: repo_state.dirty,
-            sync_in_progress: repo_state.sync_in_progress,
-            last_sync_wall_ms: repo_state.last_sync_wall_ms,
+            dirty: sync_dirty,
+            sync_in_progress,
+            last_sync_wall_ms,
             next_retry_wall_ms,
             next_retry_in_ms,
-            consecutive_failures: repo_state.consecutive_failures,
+            consecutive_failures,
             warnings,
         };
 
@@ -580,21 +559,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -643,21 +619,22 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let cutoff_ms = self
+            .clock()
+            .wall_ms()
+            .saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let status = status.map(|s| s.trim()).filter(|s| !s.is_empty());
         if let Some(s) = status
@@ -674,10 +651,6 @@ impl Daemon {
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
         let blocked_by = compute_blocked_by(state);
-        let cutoff_ms = self
-            .clock()
-            .wall_ms()
-            .saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
 
         let mut out: Vec<IssueSummary> = Vec::new();
 
@@ -737,21 +710,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -891,21 +861,19 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let cutoff_ms = since_ms.map(|d| self.clock().wall_ms().saturating_sub(d));
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -920,7 +888,6 @@ impl Daemon {
             return Response::ok(ResponsePayload::query(QueryResult::DeletedLookup(out)));
         }
 
-        let cutoff_ms = since_ms.map(|d| self.clock().wall_ms().saturating_sub(d));
         let mut tombs: Vec<Tombstone> = state
             .iter_tombstones()
             .filter(|(_, t)| {
@@ -943,21 +910,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -973,21 +937,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
@@ -1048,21 +1009,18 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let remote = match self.ensure_repo_fresh(repo, git_tx) {
+        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(r) => r,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&remote, read) {
+        let read = match loaded.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&remote, &read) {
+        if let Err(err) = loaded.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&remote) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = loaded.runtime();
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);

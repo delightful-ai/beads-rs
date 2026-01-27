@@ -34,22 +34,21 @@ pub fn prepare_subscription(
     read: ReadConsistency,
     git_tx: &Sender<GitOp>,
 ) -> Result<SubscribeReply, Box<ErrorPayload>> {
+    let limits = daemon.limits().clone();
     let loaded = daemon
         .ensure_repo_fresh(repo, git_tx)
         .map_err(|err| box_error(err.into_error_payload()))?;
-    let read = daemon
-        .normalize_read_consistency(&loaded, read)
+    let read = loaded
+        .normalize_read_consistency(read)
         .map_err(|err| box_error(err.into_error_payload()))?;
-    daemon
-        .check_read_gate(&loaded, &read)
+    loaded
+        .check_read_gate(&read)
         .map_err(|err| box_error(err.into_error_payload()))?;
 
-    let store_runtime = daemon
-        .store_runtime(&loaded)
-        .map_err(|err| box_error(err.into_error_payload()))?;
+    let store_runtime = loaded.runtime();
     let subscription = store_runtime
         .broadcaster
-        .subscribe(subscriber_limits(daemon.limits()))
+        .subscribe(subscriber_limits(&limits))
         .map_err(|err| box_error(broadcast_error_to_op(err).into_error_payload()))?;
     let hot_cache = store_runtime
         .broadcaster
@@ -61,14 +60,14 @@ pub fn prepare_subscription(
     let wal_reader = WalRangeReader::new(
         store_runtime.meta.store_id(),
         store_runtime.wal_index.clone(),
-        daemon.limits().clone(),
+        limits.clone(),
     );
     let backfill = build_backfill_plan(
         read.require_min_seen(),
         &namespace,
         &watermarks_applied,
         &wal_reader,
-        daemon.limits(),
+        &limits,
     )?;
 
     let info = crate::api::SubscribeInfo {
