@@ -485,6 +485,7 @@ impl Session<Outbound, Handshaking> {
     }
 }
 
+#[allow(private_bounds)]
 impl<R, P: PhaseWrap> Session<R, P> {
     fn handle_ack(self, ack: Ack) -> (SessionState<R>, Vec<SessionAction>) {
         (P::wrap(self), vec![SessionAction::PeerAck(ack)])
@@ -929,6 +930,7 @@ pub fn handle_inbound_message(
     }
 }
 
+#[allow(private_bounds)]
 impl<R, P: PhaseWrap> Session<R, P> {
     fn handle_events(
         mut self,
