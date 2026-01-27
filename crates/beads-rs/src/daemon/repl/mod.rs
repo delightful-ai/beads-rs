@@ -32,6 +32,6 @@ pub use server::{
 };
 pub use session::{
     IngestOutcome, ProtocolRange, Session, SessionAction, SessionConfig, SessionPeer, SessionPhase,
-    SessionStore, WatermarkSnapshot,
+    SessionStore, ValidatedAck, WatermarkSnapshot,
 };
 pub use store::SharedSessionStore;

@@ -26,6 +26,56 @@ use super::proto::{
     WatermarkMap, WatermarkState,
 };
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedAck {
+    durable: WatermarkState<Durable>,
+    applied: Option<WatermarkState<Applied>>,
+}
+
+impl ValidatedAck {
+    pub fn durable(&self) -> &WatermarkState<Durable> {
+        &self.durable
+    }
+
+    pub fn applied(&self) -> Option<&WatermarkState<Applied>> {
+        self.applied.as_ref()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AllowedNamespaces(BTreeSet<NamespaceId>);
+
+impl AllowedNamespaces {
+    fn new(namespaces: &[NamespaceId]) -> Self {
+        let mut set = BTreeSet::new();
+        set.extend(namespaces.iter().cloned());
+        Self(set)
+    }
+
+    fn validate_ack(&self, ack: Ack) -> Result<ValidatedAck, ReplError> {
+        if let Some(namespace) = ack
+            .durable
+            .keys()
+            .find(|namespace| !self.0.contains(*namespace))
+        {
+            return Err(namespace_policy_violation_error(namespace));
+        }
+        if let Some(applied) = ack.applied.as_ref() {
+            if let Some(namespace) = applied
+                .keys()
+                .find(|namespace| !self.0.contains(*namespace))
+            {
+                return Err(namespace_policy_violation_error(namespace));
+            }
+        }
+
+        Ok(ValidatedAck {
+            durable: ack.durable,
+            applied: ack.applied,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
     Connecting,
@@ -365,7 +415,7 @@ pub trait SessionStore {
 pub enum SessionAction {
     Send(ReplMessage),
     Close { error: Option<ErrorPayload> },
-    PeerAck(Ack),
+    PeerAck(ValidatedAck),
     PeerWant(Want),
     PeerError(ErrorPayload),
 }
@@ -486,9 +536,13 @@ impl Session<Outbound, Handshaking> {
 }
 
 #[allow(private_bounds)]
-impl<R, P: PhaseWrap> Session<R, P> {
+impl<R, P: PhaseWrap + PhasePeer + PhasePeerOpt> Session<R, P> {
     fn handle_ack(self, ack: Ack) -> (SessionState<R>, Vec<SessionAction>) {
-        (P::wrap(self), vec![SessionAction::PeerAck(ack)])
+        let allowed = AllowedNamespaces::new(&self.peer().accepted_namespaces);
+        match allowed.validate_ack(ack) {
+            Ok(ack) => (P::wrap(self), vec![SessionAction::PeerAck(ack)]),
+            Err(err) => self.fail(err),
+        }
     }
 
     fn handle_want(self, want: Want) -> (SessionState<R>, Vec<SessionAction>) {
@@ -1750,6 +1804,65 @@ mod tests {
         (TestStore::new(), identity, replica)
     }
 
+    fn inbound_streaming_session(
+        namespaces: Vec<NamespaceId>,
+    ) -> (SessionState<Inbound>, TestStore, StoreIdentity) {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = namespaces.clone();
+        config.offered_namespaces = namespaces.clone();
+
+        let session = InboundConnecting::new(config, limits, admission);
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: ReplicaId::new(Uuid::from_bytes([3u8; 16])),
+            hello_nonce: 10,
+            max_frame_bytes: 1024,
+            requested_namespaces: namespaces.clone(),
+            offered_namespaces: namespaces,
+            seen_durable: BTreeMap::new(),
+            seen_applied: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        };
+
+        let (session, _actions) = apply_inbound_hello(session, hello, &mut store);
+        (session, store, identity)
+    }
+
+    fn ack_for(namespace: NamespaceId, origin: ReplicaId, seq: u64, applied: bool) -> Ack {
+        let head = HeadStatus::Known([seq as u8; 32]);
+        let durable = Watermark::new(Seq0::new(seq), head).unwrap_or_else(|_| Watermark::genesis());
+        let mut durable_state = WatermarkState::new();
+        durable_state
+            .entry(namespace.clone())
+            .or_default()
+            .insert(origin, durable);
+
+        let applied_state = if applied {
+            let applied =
+                Watermark::new(Seq0::new(seq), head).unwrap_or_else(|_| Watermark::genesis());
+            let mut state = WatermarkState::new();
+            state.entry(namespace).or_default().insert(origin, applied);
+            Some(state)
+        } else {
+            None
+        };
+
+        Ack {
+            durable: durable_state,
+            applied: applied_state,
+        }
+    }
+
     fn make_event(
         store: StoreIdentity,
         namespace: NamespaceId,
@@ -1955,6 +2068,84 @@ mod tests {
         };
         let _ = session.peer();
         let _ = session.negotiated_max_frame_bytes();
+    }
+
+    #[test]
+    fn ack_allowed_namespace_forwards_validated_ack() {
+        let namespace = NamespaceId::core();
+        let (session, mut store, _identity) = inbound_streaming_session(vec![namespace.clone()]);
+        let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        let ack = ack_for(namespace.clone(), origin, 5, false);
+
+        let (session, actions) =
+            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+
+        assert!(matches!(session, SessionState::Streaming(_)));
+        let ack = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::PeerAck(ack) => Some(ack),
+                _ => None,
+            })
+            .expect("validated ack");
+        assert!(ack.applied().is_none());
+        assert!(ack.durable().contains_key(&namespace));
+    }
+
+    #[test]
+    fn ack_rejects_disallowed_namespace() {
+        let namespace = NamespaceId::core();
+        let disallowed = NamespaceId::parse("other").expect("namespace");
+        let (session, mut store, _identity) = inbound_streaming_session(vec![namespace.clone()]);
+        let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
+        let ack = ack_for(disallowed.clone(), origin, 2, false);
+
+        let (session, actions) =
+            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+
+        assert!(matches!(session, SessionState::Draining(_)));
+        let error = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+                _ => None,
+            })
+            .expect("error payload");
+        assert_eq!(
+            error.code,
+            ProtocolErrorCode::NamespacePolicyViolation.into()
+        );
+    }
+
+    #[test]
+    fn ack_rejects_mixed_namespaces() {
+        let namespace = NamespaceId::core();
+        let disallowed = NamespaceId::parse("other").expect("namespace");
+        let (session, mut store, _identity) = inbound_streaming_session(vec![namespace.clone()]);
+        let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
+        let mut ack = ack_for(namespace.clone(), origin, 1, false);
+        let head = HeadStatus::Known([3u8; 32]);
+        let other = Watermark::new(Seq0::new(3), head).unwrap();
+        ack.durable
+            .entry(disallowed.clone())
+            .or_default()
+            .insert(origin, other);
+
+        let (session, actions) =
+            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+
+        assert!(matches!(session, SessionState::Draining(_)));
+        let error = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+                _ => None,
+            })
+            .expect("error payload");
+        assert_eq!(
+            error.code,
+            ProtocolErrorCode::NamespacePolicyViolation.into()
+        );
     }
 
     #[test]
