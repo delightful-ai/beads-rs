@@ -1193,7 +1193,7 @@ impl CanonicalState {
         let merged = match self.beads.remove(&id) {
             Some(BeadEntry::Live(existing)) => {
                 let (a, b) = Bead::same_lineage(existing.as_ref(), &bead)?;
-                SameLineageBead::join(a, b)
+                SameLineageBead::join(a, b)?
             }
             Some(BeadEntry::Tombstone(_)) | None => bead,
         };
@@ -1330,8 +1330,10 @@ impl CanonicalState {
 
             // Merge beads if both exist (resolve collisions deterministically)
             let merged_bead = match (a_bead, b_bead) {
-                (Some(ab), Some(bb)) => match Bead::same_lineage(ab, bb) {
-                    Ok((a, b)) => Some(SameLineageBead::join(a, b)),
+                (Some(ab), Some(bb)) => match Bead::same_lineage(ab, bb)
+                    .and_then(|(a, b)| SameLineageBead::join(a, b))
+                {
+                    Ok(merged) => Some(merged),
                     Err(_) => {
                         let ordering = bead_collision_cmp(&result, ab, bb);
                         let (winner, loser_stamp) = if ordering == Ordering::Less {

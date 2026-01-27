@@ -189,17 +189,17 @@ pub struct SameLineageBead<'a> {
 }
 
 impl<'a> SameLineageBead<'a> {
-    pub fn join(a: Self, b: Self) -> Bead {
-        Bead {
+    pub fn join(a: Self, b: Self) -> Result<Bead, CoreError> {
+        if a.bead.core.id != b.bead.core.id || a.bead.core.created() != b.bead.core.created() {
+            return Err(CollisionError {
+                id: a.bead.core.id.as_str().to_string(),
+            }
+            .into());
+        }
+        Ok(Bead {
             core: a.bead.core.clone(), // immutable, should be identical
             fields: BeadFields::join(&a.bead.fields, &b.bead.fields),
-        }
-    }
-}
-
-impl<'a> AsRef<Bead> for SameLineageBead<'a> {
-    fn as_ref(&self) -> &Bead {
-        self.bead
+        })
     }
 }
 
@@ -284,8 +284,23 @@ mod tests {
         b.fields.title = Lww::new("right".to_string(), stamp(12, 0, "bob"));
 
         let (sa, sb) = Bead::same_lineage(&a, &b).expect("same lineage");
-        let merged = SameLineageBead::join(sa, sb);
+        let merged = SameLineageBead::join(sa, sb).expect("join");
         assert_eq!(merged.title(), "right");
+    }
+
+    #[test]
+    fn same_lineage_join_rejects_mixed_wrapper_pairs() {
+        let left_base = stamp(10, 0, "alice");
+        let right_base = stamp(20, 0, "bob");
+        let a1 = bead("bd-join-left", left_base.clone());
+        let a2 = bead("bd-join-left", left_base);
+        let b1 = bead("bd-join-right", right_base.clone());
+        let b2 = bead("bd-join-right", right_base);
+
+        let (left, _) = Bead::same_lineage(&a1, &a2).expect("left pair");
+        let (_, right) = Bead::same_lineage(&b1, &b2).expect("right pair");
+
+        assert!(SameLineageBead::join(left, right).is_err());
     }
 }
 
