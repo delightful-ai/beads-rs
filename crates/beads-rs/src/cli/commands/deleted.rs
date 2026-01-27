@@ -3,7 +3,7 @@ use clap::Args;
 use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use super::fmt_wall_ms;
 use crate::api::QueryResult;
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{DeletedPayload, Request, ResponsePayload};
 use crate::{Error, Result};
 
 #[derive(Args, Debug)]
@@ -35,10 +35,8 @@ pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
         .transpose()?
         .map(|id| id.as_str().to_string());
     let req = Request::Deleted {
-        repo: ctx.repo.clone(),
-        since_ms,
-        id,
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: DeletedPayload { since_ms, id },
     };
     let ok = send(&req)?;
     if ctx.json {

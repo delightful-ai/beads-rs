@@ -8,7 +8,8 @@ use thiserror::Error;
 use beads_rs::NamespaceId;
 use beads_rs::api::{StreamEvent, SubscribeInfo};
 use beads_rs::daemon::ipc::{
-    IpcClient, IpcError, ReadConsistency, Request, Response, ResponsePayload, SubscriptionStream,
+    EmptyPayload, IpcClient, IpcError, ReadConsistency, ReadCtx, Request, Response,
+    ResponsePayload, SubscriptionStream,
 };
 
 #[derive(Debug)]
@@ -53,7 +54,10 @@ impl StreamingClient {
         read: ReadConsistency,
         client: IpcClient,
     ) -> Result<Self, StreamClientError> {
-        let request = Request::Subscribe { repo, read };
+        let request = Request::Subscribe {
+            ctx: ReadCtx::new(repo, read),
+            payload: EmptyPayload {},
+        };
         let mut stream = client.subscribe_stream(&request)?;
         let subscribed = loop {
             match Self::read_message_from_stream(&mut stream)? {

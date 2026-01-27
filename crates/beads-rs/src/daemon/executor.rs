@@ -19,10 +19,14 @@ use super::broadcast::BroadcastEvent;
 use super::core::{Daemon, HandleOutcome, ParsedMutationMeta, detect_clock_skew};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
-use super::ipc::{MutationMeta, OpResponse, Response, ResponseExt, ResponsePayload};
+use super::ipc::{
+    AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
+    IdPayload, LabelsPayload, LeasePayload, MutationMeta, OpResponse, ParentPayload, Response,
+    ResponseExt, ResponsePayload, UpdatePayload,
+};
 use super::mutation_engine::{
-    DotAllocator, EventDraft, IdContext, MutationContext, MutationEngine, MutationRequest,
-    ParsedMutationRequest, SequencedEvent,
+    DotAllocator, EventDraft, IdContext, MutationContext, MutationEngine, ParsedMutationRequest,
+    SequencedEvent,
 };
 use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
@@ -32,16 +36,16 @@ use super::wal::{
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    Applied, BeadId, BeadType, CanonicalState, DepKind, Dot, DurabilityClass, DurabilityReceipt,
-    Durable, EventBody, EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId,
-    Priority, ReplicaId, Seq1, Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock,
-    Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
+    ActorId, Applied, BeadId, CanonicalState, Dot, DurabilityClass, DurabilityReceipt, Durable,
+    EventBody, EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId,
+    ReplicaId, Seq1, Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark,
+    WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
     hash_event_body,
 };
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
 use crate::paths;
-use beads_surface::ops::{BeadPatch, OpResult};
+use beads_surface::ops::OpResult;
 
 #[derive(Debug)]
 pub(crate) struct DurabilityWait {
@@ -78,26 +82,32 @@ impl MutationOutcome {
 }
 
 impl Daemon {
-    fn apply_mutation_request(
+    fn apply_mutation_request_with<F>(
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        request: MutationRequest,
+        parse: F,
         git_tx: &Sender<GitOp>,
-    ) -> HandleOutcome {
-        match self.apply_mutation_request_inner(repo, meta, request, git_tx) {
+    ) -> HandleOutcome
+    where
+        F: FnOnce(&ActorId) -> Result<ParsedMutationRequest, OpError>,
+    {
+        match self.apply_mutation_request_with_inner(repo, meta, parse, git_tx) {
             Ok(outcome) => outcome.into_handle(),
             Err(err) => HandleOutcome::Response(Response::err_from(err)),
         }
     }
 
-    fn apply_mutation_request_inner(
+    fn apply_mutation_request_with_inner<F>(
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        request: MutationRequest,
+        parse: F,
         git_tx: &Sender<GitOp>,
-    ) -> Result<MutationOutcome, OpError> {
+    ) -> Result<MutationOutcome, OpError>
+    where
+        F: FnOnce(&ActorId) -> Result<ParsedMutationRequest, OpError>,
+    {
         if self.is_shutting_down() {
             return Err(OpError::Overloaded {
                 subsystem: OverloadedSubsystem::Ipc,
@@ -159,7 +169,7 @@ impl Daemon {
             trace_id,
         };
 
-        let parsed_request = ParsedMutationRequest::parse(request, &ctx.actor_id)?;
+        let parsed_request = parse(&ctx.actor_id)?;
 
         if ctx.client_request_id.is_some()
             && let Some(mut outcome) = try_reuse_idempotent_response(
@@ -546,42 +556,19 @@ impl Daemon {
     }
 
     /// Create a new bead.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_create(
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        requested_id: Option<String>,
-        parent: Option<String>,
-        title: String,
-        bead_type: BeadType,
-        priority: Priority,
-        description: Option<String>,
-        design: Option<String>,
-        acceptance_criteria: Option<String>,
-        assignee: Option<String>,
-        external_ref: Option<String>,
-        estimated_minutes: Option<u32>,
-        labels: Vec<String>,
-        dependencies: Vec<String>,
+        payload: CreatePayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Create {
-            id: requested_id,
-            parent,
-            title,
-            bead_type,
-            priority,
-            description,
-            design,
-            acceptance_criteria,
-            assignee,
-            external_ref,
-            estimated_minutes,
-            labels,
-            dependencies,
-        };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |actor| ParsedMutationRequest::parse_create(payload, actor),
+            git_tx,
+        )
     }
 
     /// Update an existing bead.
@@ -589,13 +576,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        patch: BeadPatch,
-        cas: Option<String>,
+        payload: UpdatePayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Update { id, patch, cas };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_update(payload),
+            git_tx,
+        )
     }
 
     /// Add labels to a bead.
@@ -603,12 +592,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        labels: Vec<String>,
+        payload: LabelsPayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::AddLabels { id, labels };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_add_labels(payload),
+            git_tx,
+        )
     }
 
     /// Remove labels from a bead.
@@ -616,12 +608,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        labels: Vec<String>,
+        payload: LabelsPayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::RemoveLabels { id, labels };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_remove_labels(payload),
+            git_tx,
+        )
     }
 
     /// Replace the parent relationship for a bead.
@@ -629,12 +624,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        parent: Option<String>,
+        payload: ParentPayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::SetParent { id, parent };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_set_parent(payload),
+            git_tx,
+        )
     }
 
     /// Close a bead.
@@ -642,17 +640,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        reason: Option<String>,
-        on_branch: Option<String>,
+        payload: ClosePayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Close {
-            id,
-            reason,
-            on_branch,
-        };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_close(payload),
+            git_tx,
+        )
     }
 
     /// Reopen a closed bead.
@@ -660,11 +656,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
+        payload: IdPayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Reopen { id };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_reopen(payload),
+            git_tx,
+        )
     }
 
     /// Delete a bead (soft delete via tombstone).
@@ -672,12 +672,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        reason: Option<String>,
+        payload: DeletePayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Delete { id, reason };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_delete(payload),
+            git_tx,
+        )
     }
 
     /// Add a dependency.
@@ -685,13 +688,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        from: String,
-        to: String,
-        kind: DepKind,
+        payload: DepPayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::AddDep { from, to, kind };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_add_dep(payload),
+            git_tx,
+        )
     }
 
     /// Remove a dependency (soft delete).
@@ -699,13 +704,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        from: String,
-        to: String,
-        kind: DepKind,
+        payload: DepPayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::RemoveDep { from, to, kind };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_remove_dep(payload),
+            git_tx,
+        )
     }
 
     /// Add a note to a bead.
@@ -713,12 +720,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        content: String,
+        payload: AddNotePayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::AddNote { id, content };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_add_note(payload),
+            git_tx,
+        )
     }
 
     /// Claim a bead.
@@ -726,12 +736,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        lease_secs: u64,
+        payload: ClaimPayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Claim { id, lease_secs };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_claim(payload),
+            git_tx,
+        )
     }
 
     /// Release a claim.
@@ -739,11 +752,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
+        payload: IdPayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::Unclaim { id };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_unclaim(payload),
+            git_tx,
+        )
     }
 
     /// Extend an existing claim.
@@ -751,12 +768,15 @@ impl Daemon {
         &mut self,
         repo: &Path,
         meta: MutationMeta,
-        id: String,
-        lease_secs: u64,
+        payload: LeasePayload,
         git_tx: &Sender<GitOp>,
     ) -> HandleOutcome {
-        let request = MutationRequest::ExtendClaim { id, lease_secs };
-        self.apply_mutation_request(repo, meta, request, git_tx)
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_extend_claim(payload),
+            git_tx,
+        )
     }
 }
 
@@ -1164,9 +1184,9 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, CanonicalState, Claim, ClientRequestId,
-        DurabilityReceipt, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Stamp, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId, TxnOpV1,
+        ActorId, Bead, BeadCore, BeadFields, BeadType, CanonicalState, Claim, ClientRequestId,
+        DurabilityReceipt, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Priority, Stamp,
+        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId, TxnOpV1,
         WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::daemon::Clock;
@@ -1385,23 +1405,27 @@ mod tests {
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
         let client_request_id = ClientRequestId::new(Uuid::from_bytes([6u8; 16]));
         let request = Request::Create {
-            repo: repo_path.clone(),
-            id: None,
-            parent: None,
-            title: "trace".to_string(),
-            bead_type: BeadType::Task,
-            priority: Priority::MEDIUM,
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta: MutationMeta {
-                client_request_id: Some(client_request_id.to_string()),
-                ..MutationMeta::default()
+            ctx: crate::daemon::ipc::MutationCtx::new(
+                repo_path.clone(),
+                MutationMeta {
+                    client_request_id: Some(client_request_id.to_string()),
+                    ..MutationMeta::default()
+                },
+            ),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: "trace".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
             },
         };
 
@@ -1575,13 +1599,10 @@ mod tests {
             client_request_id: Some(client_request_id),
             trace_id: TraceId::from(client_request_id),
         };
-        let request = ParsedMutationRequest::parse(
-            MutationRequest::AddLabels {
-                id: "bd-123".into(),
-                labels: vec!["alpha".into()],
-            },
-            &actor,
-        )
+        let request = ParsedMutationRequest::parse_add_labels(LabelsPayload {
+            id: "bd-123".into(),
+            labels: vec!["alpha".into()],
+        })
         .unwrap();
 
         let origin_seq = Seq1::new(std::num::NonZeroU64::new(1).unwrap());

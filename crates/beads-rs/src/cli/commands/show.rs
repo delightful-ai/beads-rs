@@ -7,7 +7,7 @@ use crate::api::IssueSummary;
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::Filters;
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Args, Debug)]
@@ -22,9 +22,10 @@ pub struct ShowArgs {
 pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Show {
-        repo: ctx.repo.clone(),
-        id: id.as_str().to_string(),
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: IdPayload {
+            id: id.as_str().to_string(),
+        },
     };
     let ok = send(&req)?;
 
@@ -32,9 +33,10 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
         ResponsePayload::Query(QueryResult::Issue(mut view)) => {
             // Fetch deps for richer show output.
             let deps_payload = send(&Request::Deps {
-                repo: ctx.repo.clone(),
-                id: view.id.clone(),
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: IdPayload {
+                    id: view.id.clone(),
+                },
             })?;
             let (incoming_edges, outgoing_edges) = match deps_payload {
                 ResponsePayload::Query(QueryResult::Deps { incoming, outgoing }) => {
@@ -52,9 +54,10 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
 
             // Human mode: fetch notes and build richer display
             let notes_payload = send(&Request::Notes {
-                repo: ctx.repo.clone(),
-                id: view.id.clone(),
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: IdPayload {
+                    id: view.id.clone(),
+                },
             })?;
             let notes = match notes_payload {
                 ResponsePayload::Query(QueryResult::Notes(n)) => n,
@@ -128,9 +131,8 @@ fn fetch_summary_map(ctx: &Ctx, ids: &BTreeSet<String>) -> Result<HashMap<String
         ..Filters::default()
     };
     let req = Request::List {
-        repo: ctx.repo.clone(),
-        filters,
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: ListPayload { filters },
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::Issues(summaries)) => Ok(summaries
@@ -348,25 +350,22 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     }
 
     // Sort remaining by priority (P0 first), then by status (in_progress before open)
-    remaining.sort_by(|a, b| {
-        a.priority.cmp(&b.priority).then_with(|| {
-            // in_progress before open
-            let a_prog = a.status == "in_progress";
-            let b_prog = b.status == "in_progress";
-            b_prog.cmp(&a_prog)
-        })
+    remaining.sort_by_key(|child| {
+        (
+            child.priority,
+            std::cmp::Reverse(child.status == "in_progress"),
+        )
     });
 
     // Sort done by updated_at (most recent first)
-    done.sort_by(|a, b| b.updated_at.wall_ms.cmp(&a.updated_at.wall_ms));
+    done.sort_by_key(|child| std::cmp::Reverse(child.updated_at.wall_ms));
 
     let total = children.len();
     let done_count = done.len();
-    let pct = if total > 0 {
-        (done_count * 100) / total
-    } else {
-        0
-    };
+    let pct = done_count
+        .saturating_mul(100)
+        .checked_div(total)
+        .unwrap_or(0);
 
     out.push_str(&format!(
         "\nProgress: {}/{} done ({}%)\n",

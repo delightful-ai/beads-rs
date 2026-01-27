@@ -2,7 +2,7 @@ use clap::Args;
 
 use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use crate::Result;
-use crate::daemon::ipc::Request;
+use crate::daemon::ipc::{IdPayload, Request};
 
 #[derive(Args, Debug)]
 pub struct ReopenArgs {
@@ -12,9 +12,10 @@ pub struct ReopenArgs {
 pub(crate) fn handle(ctx: &Ctx, args: ReopenArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Reopen {
-        repo: ctx.repo.clone(),
-        id: id.as_str().to_string(),
-        meta: ctx.mutation_meta(),
+        ctx: ctx.mutation_ctx(),
+        payload: IdPayload {
+            id: id.as_str().to_string(),
+        },
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

@@ -4,7 +4,7 @@ use super::super::{Ctx, print_ok, send};
 use super::fmt_issue_ref;
 use crate::Result;
 use crate::api::QueryResult;
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{Request, ResponsePayload, StalePayload};
 
 #[derive(Args, Debug)]
 pub struct StaleArgs {
@@ -23,11 +23,12 @@ pub struct StaleArgs {
 
 pub(crate) fn handle(ctx: &Ctx, args: StaleArgs) -> Result<()> {
     let req = Request::Stale {
-        repo: ctx.repo.clone(),
-        days: args.days,
-        status: args.status.clone(),
-        limit: Some(args.limit),
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: StalePayload {
+            days: args.days,
+            status: args.status.clone(),
+            limit: Some(args.limit),
+        },
     };
     let ok = send(&req)?;
     if ctx.json {

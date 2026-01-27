@@ -4,7 +4,7 @@ use super::super::{Ctx, print_ok, send};
 use super::fmt_issue_ref;
 use crate::Result;
 use crate::api::QueryResult;
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{ReadyPayload, Request, ResponsePayload};
 
 #[derive(Args, Debug)]
 pub struct ReadyArgs {
@@ -15,9 +15,8 @@ pub struct ReadyArgs {
 
 pub(crate) fn handle(ctx: &Ctx, args: ReadyArgs) -> Result<()> {
     let req = Request::Ready {
-        repo: ctx.repo.clone(),
-        limit: args.limit,
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: ReadyPayload { limit: args.limit },
     };
     let ok = send(&req)?;
     if ctx.json {

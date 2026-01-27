@@ -4,7 +4,7 @@ use serde::Serialize;
 use super::super::{Ctx, fetch_issue, normalize_bead_id, print_json, send};
 use crate::api::QueryResult;
 use crate::core::BeadId;
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{LabelsPayload, ListPayload, Request, ResponsePayload};
 use crate::daemon::query::Filters;
 use crate::{Error, Result};
 
@@ -49,10 +49,11 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             for id in ids {
                 let id_str = id.as_str().to_string();
                 let req = Request::AddLabels {
-                    repo: ctx.repo.clone(),
-                    id: id_str.clone(),
-                    labels: vec![label.clone()],
-                    meta: ctx.mutation_meta(),
+                    ctx: ctx.mutation_ctx(),
+                    payload: LabelsPayload {
+                        id: id_str.clone(),
+                        labels: vec![label.clone()],
+                    },
                 };
                 let _ = send(&req)?;
 
@@ -79,10 +80,11 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             for id in ids {
                 let id_str = id.as_str().to_string();
                 let req = Request::RemoveLabels {
-                    repo: ctx.repo.clone(),
-                    id: id_str.clone(),
-                    labels: vec![label.clone()],
-                    meta: ctx.mutation_meta(),
+                    ctx: ctx.mutation_ctx(),
+                    payload: LabelsPayload {
+                        id: id_str.clone(),
+                        labels: vec![label.clone()],
+                    },
                 };
                 let _ = send(&req)?;
 
@@ -115,9 +117,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
         }
         LabelCmd::ListAll => {
             let req = Request::List {
-                repo: ctx.repo.clone(),
-                filters: Filters::default(),
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: ListPayload {
+                    filters: Filters::default(),
+                },
             };
             let ok = send(&req)?;
             let mut counts = std::collections::BTreeMap::<String, usize>::new();

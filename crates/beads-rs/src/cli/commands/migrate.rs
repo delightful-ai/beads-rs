@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use super::super::{Ctx, normalize_bead_slug_for, print_json};
 use crate::core::FormatVersion;
-use crate::daemon::ipc::{Request, send_request};
+use crate::daemon::ipc::{EmptyPayload, Request, send_request};
 use crate::{Error, Result};
 use std::path::PathBuf;
 
@@ -142,7 +142,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
             // Notify daemon to refresh its cached state (if running).
             // Ignore errors - daemon may not be running.
             let _ = send_request(&Request::Refresh {
-                repo: ctx.repo.clone(),
+                ctx: ctx.repo_ctx(),
+                payload: EmptyPayload {},
             });
 
             let payload = serde_json::json!({

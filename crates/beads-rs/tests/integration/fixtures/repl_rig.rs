@@ -23,7 +23,8 @@ use beads_rs::core::{
     ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch, StoreMeta, Watermarks,
 };
 use beads_rs::daemon::ipc::{
-    IpcClient, IpcConnection, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+    CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta,
+    ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_rs::daemon::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 
@@ -554,21 +555,22 @@ impl Node {
 
     pub fn create_issue(&self, title: &str) -> String {
         let request = Request::Create {
-            repo: self.repo_dir.clone(),
-            id: None,
-            parent: None,
-            title: title.to_string(),
-            bead_type: BeadType::Task,
-            priority: Priority::default(),
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta: MutationMeta::default(),
+            ctx: MutationCtx::new(self.repo_dir.clone(), MutationMeta::default()),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: title.to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::default(),
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
         };
         let response = self.send_request(&request).expect("bd create");
         match response {
@@ -604,9 +606,10 @@ impl Node {
                 ..ReadConsistency::default()
             };
             let request = Request::Show {
-                repo: self.repo_dir.clone(),
-                id: issue_id.to_string(),
-                read,
+                ctx: ReadCtx::new(self.repo_dir.clone(), read),
+                payload: IdPayload {
+                    id: issue_id.to_string(),
+                },
             };
             let response = self.send_request(&request).expect("bd show");
             match response {
@@ -642,7 +645,8 @@ impl Node {
 
     pub fn reload_replication(&self) {
         let request = Request::AdminReloadReplication {
-            repo: self.repo_dir.clone(),
+            ctx: RepoCtx::new(self.repo_dir.clone()),
+            payload: EmptyPayload {},
         };
         let response = self
             .send_admin_request(&request)
@@ -665,8 +669,8 @@ impl Node {
         read: ReadConsistency,
     ) -> Result<AdminStatusOutput, ErrorPayload> {
         let request = Request::AdminStatus {
-            repo: self.repo_dir.clone(),
-            read,
+            ctx: ReadCtx::new(self.repo_dir.clone(), read),
+            payload: EmptyPayload {},
         };
         let response = self
             .send_admin_request(&request)

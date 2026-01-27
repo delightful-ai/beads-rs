@@ -22,7 +22,9 @@ use crate::daemon::admission::AdmissionController;
 use crate::daemon::core::{Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal};
 use crate::daemon::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use crate::daemon::executor::DurabilityWait;
-use crate::daemon::ipc::{MutationMeta, Request, Response, ResponseExt, ResponsePayload};
+use crate::daemon::ipc::{
+    CreatePayload, MutationCtx, MutationMeta, Request, Response, ResponseExt, ResponsePayload,
+};
 use crate::daemon::ops::OpError;
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repl::frame::{FrameReader, encode_frame};
@@ -386,21 +388,22 @@ impl TestNode {
 
     pub fn create_issue(&self, title: &str) -> String {
         let request = Request::Create {
-            repo: self.repo_path(),
-            id: None,
-            parent: None,
-            title: title.to_string(),
-            bead_type: crate::core::BeadType::Task,
-            priority: crate::core::Priority::MEDIUM,
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta: MutationMeta::default(),
+            ctx: MutationCtx::new(self.repo_path(), MutationMeta::default()),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: title.to_string(),
+                bead_type: crate::core::BeadType::Task,
+                priority: crate::core::Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
         };
 
         let response = self.apply_request(request);

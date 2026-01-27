@@ -9,7 +9,7 @@ use super::super::{
 use crate::api::QueryResult;
 use crate::cli::parse::{parse_bead_type, parse_priority};
 use crate::core::{BeadType, Priority};
-use crate::daemon::ipc::{Request, Response, ResponsePayload};
+use crate::daemon::ipc::{CreatePayload, Request, Response, ResponsePayload};
 use crate::daemon::ops::OpResult;
 use crate::{Error, Result};
 
@@ -132,21 +132,22 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     let dependencies = normalize_dep_specs(args.deps)?;
 
     let req = Request::Create {
-        repo: ctx.repo.clone(),
-        id: id.as_ref().map(|id| id.as_str().to_string()),
-        parent: parent.as_ref().map(|id| id.as_str().to_string()),
-        title,
-        bead_type,
-        priority,
-        description,
-        design: args.design,
-        acceptance_criteria: args.acceptance,
-        assignee: args.assignee,
-        external_ref: args.external_ref,
-        estimated_minutes: args.estimate,
-        labels,
-        dependencies,
-        meta: ctx.mutation_meta(),
+        ctx: ctx.mutation_ctx(),
+        payload: CreatePayload {
+            id: id.as_ref().map(|id| id.as_str().to_string()),
+            parent: parent.as_ref().map(|id| id.as_str().to_string()),
+            title,
+            bead_type,
+            priority,
+            description,
+            design: args.design,
+            acceptance_criteria: args.acceptance,
+            assignee: args.assignee,
+            external_ref: args.external_ref,
+            estimated_minutes: args.estimate,
+            labels,
+            dependencies,
+        },
     };
 
     let created_payload = send(&req)?;
@@ -244,21 +245,22 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
         };
 
         let req = Request::Create {
-            repo: ctx.repo.clone(),
-            id: None,
-            parent: None,
-            title: t.title.clone(),
-            bead_type: t.bead_type,
-            priority: t.priority,
-            description: Some(t.description.clone()),
-            design: t.design.clone(),
-            acceptance_criteria: t.acceptance_criteria.clone(),
-            assignee: t.assignee.clone(),
-            external_ref: None,
-            estimated_minutes: None,
-            labels: t.labels.clone(),
-            dependencies,
-            meta: ctx.mutation_meta(),
+            ctx: ctx.mutation_ctx(),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: t.title.clone(),
+                bead_type: t.bead_type,
+                priority: t.priority,
+                description: Some(t.description.clone()),
+                design: t.design.clone(),
+                acceptance_criteria: t.acceptance_criteria.clone(),
+                assignee: t.assignee.clone(),
+                external_ref: None,
+                estimated_minutes: None,
+                labels: t.labels.clone(),
+                dependencies,
+            },
         };
 
         // Best-effort: keep going on per-issue failures.

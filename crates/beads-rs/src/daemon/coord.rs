@@ -476,203 +476,194 @@ impl Daemon {
     pub(crate) fn handle_request(&mut self, req: Request, git_tx: &Sender<GitOp>) -> HandleOutcome {
         match req {
             // Mutations - delegate to executor module
-            Request::Create {
-                repo,
-                id,
-                parent,
-                title,
-                bead_type,
-                priority,
-                description,
-                design,
-                acceptance_criteria,
-                assignee,
-                external_ref,
-                estimated_minutes,
-                labels,
-                dependencies,
-                meta,
-            } => self.apply_create(
-                &repo,
-                meta,
-                id,
-                parent,
-                title,
-                bead_type,
-                priority,
-                description,
-                design,
-                acceptance_criteria,
-                assignee,
-                external_ref,
-                estimated_minutes,
-                labels,
-                dependencies,
-                git_tx,
-            ),
+            Request::Create { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_create(&repo, meta, payload, git_tx)
+            }
 
-            Request::Update {
-                repo,
-                id,
-                patch,
-                cas,
-                meta,
-            } => self.apply_update(&repo, meta, id, patch, cas, git_tx),
+            Request::Update { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_update(&repo, meta, payload, git_tx)
+            }
 
-            Request::AddLabels {
-                repo,
-                id,
-                labels,
-                meta,
-            } => self.apply_add_labels(&repo, meta, id, labels, git_tx),
+            Request::AddLabels { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_add_labels(&repo, meta, payload, git_tx)
+            }
 
-            Request::RemoveLabels {
-                repo,
-                id,
-                labels,
-                meta,
-            } => self.apply_remove_labels(&repo, meta, id, labels, git_tx),
+            Request::RemoveLabels { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_remove_labels(&repo, meta, payload, git_tx)
+            }
 
-            Request::SetParent {
-                repo,
-                id,
-                parent,
-                meta,
-            } => self.apply_set_parent(&repo, meta, id, parent, git_tx),
+            Request::SetParent { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_set_parent(&repo, meta, payload, git_tx)
+            }
 
-            Request::Close {
-                repo,
-                id,
-                reason,
-                on_branch,
-                meta,
-            } => self.apply_close(&repo, meta, id, reason, on_branch, git_tx),
+            Request::Close { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_close(&repo, meta, payload, git_tx)
+            }
 
-            Request::Reopen { repo, id, meta } => self.apply_reopen(&repo, meta, id, git_tx),
+            Request::Reopen { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_reopen(&repo, meta, payload, git_tx)
+            }
 
-            Request::Delete {
-                repo,
-                id,
-                reason,
-                meta,
-            } => self.apply_delete(&repo, meta, id, reason, git_tx),
+            Request::Delete { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_delete(&repo, meta, payload, git_tx)
+            }
 
-            Request::AddDep {
-                repo,
-                from,
-                to,
-                kind,
-                meta,
-            } => self.apply_add_dep(&repo, meta, from, to, kind, git_tx),
+            Request::AddDep { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_add_dep(&repo, meta, payload, git_tx)
+            }
 
-            Request::RemoveDep {
-                repo,
-                from,
-                to,
-                kind,
-                meta,
-            } => self.apply_remove_dep(&repo, meta, from, to, kind, git_tx),
+            Request::RemoveDep { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_remove_dep(&repo, meta, payload, git_tx)
+            }
 
-            Request::AddNote {
-                repo,
-                id,
-                content,
-                meta,
-            } => self.apply_add_note(&repo, meta, id, content, git_tx),
+            Request::AddNote { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_add_note(&repo, meta, payload, git_tx)
+            }
 
-            Request::Claim {
-                repo,
-                id,
-                lease_secs,
-                meta,
-            } => self.apply_claim(&repo, meta, id, lease_secs, git_tx),
+            Request::Claim { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_claim(&repo, meta, payload, git_tx)
+            }
 
-            Request::Unclaim { repo, id, meta } => self.apply_unclaim(&repo, meta, id, git_tx),
+            Request::Unclaim { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_unclaim(&repo, meta, payload, git_tx)
+            }
 
-            Request::ExtendClaim {
-                repo,
-                id,
-                lease_secs,
-                meta,
-            } => self.apply_extend_claim(&repo, meta, id, lease_secs, git_tx),
+            Request::ExtendClaim { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_extend_claim(&repo, meta, payload, git_tx)
+            }
 
             // Queries - delegate to query_executor module
-            Request::Show { repo, id, read } => {
-                let id = match BeadId::parse(&id) {
+            Request::Show { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                let id = match BeadId::parse(&payload.id) {
                     Ok(id) => id,
                     Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
                 };
                 self.query_show(&repo, &id, read, git_tx).into()
             }
 
-            Request::ShowMultiple { repo, ids, read } => {
-                self.query_show_multiple(&repo, &ids, read, git_tx).into()
+            Request::ShowMultiple { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_show_multiple(&repo, &payload.ids, read, git_tx)
+                    .into()
             }
 
-            Request::List {
-                repo,
-                filters,
-                read,
-            } => self.query_list(&repo, &filters, read, git_tx).into(),
-
-            Request::Ready { repo, limit, read } => {
-                self.query_ready(&repo, limit, read, git_tx).into()
+            Request::List { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_list(&repo, &payload.filters, read, git_tx)
+                    .into()
             }
 
-            Request::DepTree { repo, id, read } => {
-                let id = match BeadId::parse(&id) {
+            Request::Ready { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_ready(&repo, payload.limit, read, git_tx).into()
+            }
+
+            Request::DepTree { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                let id = match BeadId::parse(&payload.id) {
                     Ok(id) => id,
                     Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
                 };
                 self.query_dep_tree(&repo, &id, read, git_tx).into()
             }
 
-            Request::DepCycles { repo, read } => self.query_dep_cycles(&repo, read, git_tx).into(),
+            Request::DepCycles { ctx, .. } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_dep_cycles(&repo, read, git_tx).into()
+            }
 
-            Request::Deps { repo, id, read } => {
-                let id = match BeadId::parse(&id) {
+            Request::Deps { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                let id = match BeadId::parse(&payload.id) {
                     Ok(id) => id,
                     Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
                 };
                 self.query_deps(&repo, &id, read, git_tx).into()
             }
 
-            Request::Notes { repo, id, read } => {
-                let id = match BeadId::parse(&id) {
+            Request::Notes { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                let id = match BeadId::parse(&payload.id) {
                     Ok(id) => id,
                     Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
                 };
                 self.query_notes(&repo, &id, read, git_tx).into()
             }
 
-            Request::Blocked { repo, read } => self.query_blocked(&repo, read, git_tx).into(),
+            Request::Blocked { ctx, .. } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_blocked(&repo, read, git_tx).into()
+            }
 
-            Request::Stale {
-                repo,
-                days,
-                status,
-                limit,
-                read,
-            } => self
-                .query_stale(&repo, days, status.as_deref(), limit, read, git_tx)
-                .into(),
+            Request::Stale { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_stale(
+                    &repo,
+                    payload.days,
+                    payload.status.as_deref(),
+                    payload.limit,
+                    read,
+                    git_tx,
+                )
+                .into()
+            }
 
-            Request::Count {
-                repo,
-                filters,
-                group_by,
-                read,
-            } => self
-                .query_count(&repo, &filters, group_by.as_deref(), read, git_tx)
-                .into(),
+            Request::Count { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_count(
+                    &repo,
+                    &payload.filters,
+                    payload.group_by.as_deref(),
+                    read,
+                    git_tx,
+                )
+                .into()
+            }
 
-            Request::Deleted {
-                repo,
-                since_ms,
-                id,
-                read,
-            } => {
-                let id = match id {
+            Request::Deleted { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                let id = match payload.id {
                     Some(s) => Some(match BeadId::parse(&s) {
                         Ok(id) => id,
                         Err(e) => {
@@ -681,96 +672,105 @@ impl Daemon {
                     }),
                     None => None,
                 };
-                self.query_deleted(&repo, since_ms, id.as_ref(), read, git_tx)
+                self.query_deleted(&repo, payload.since_ms, id.as_ref(), read, git_tx)
                     .into()
             }
 
-            Request::EpicStatus {
-                repo,
-                eligible_only,
-                read,
-            } => self
-                .query_epic_status(&repo, eligible_only, read, git_tx)
-                .into(),
+            Request::EpicStatus { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_epic_status(&repo, payload.eligible_only, read, git_tx)
+                    .into()
+            }
 
-            Request::Status { repo, read } => self.query_status(&repo, read, git_tx).into(),
+            Request::Status { ctx, .. } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_status(&repo, read, git_tx).into()
+            }
 
-            Request::AdminStatus { repo, read } => self.admin_status(&repo, read, git_tx).into(),
+            Request::AdminStatus { ctx, .. } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.admin_status(&repo, read, git_tx).into()
+            }
 
-            Request::AdminMetrics { repo, read } => self.admin_metrics(&repo, read, git_tx).into(),
+            Request::AdminMetrics { ctx, .. } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.admin_metrics(&repo, read, git_tx).into()
+            }
 
-            Request::AdminDoctor {
-                repo,
-                read,
-                max_records_per_namespace,
-                verify_checkpoint_cache,
-            } => self
-                .admin_doctor(
+            Request::AdminDoctor { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.admin_doctor(
                     &repo,
                     read,
-                    max_records_per_namespace,
-                    verify_checkpoint_cache,
+                    payload.max_records_per_namespace,
+                    payload.verify_checkpoint_cache,
                     git_tx,
                 )
-                .into(),
+                .into()
+            }
 
-            Request::AdminScrub {
-                repo,
-                read,
-                max_records_per_namespace,
-                verify_checkpoint_cache,
-            } => self
-                .admin_scrub_now(
+            Request::AdminScrub { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.admin_scrub_now(
                     &repo,
                     read,
-                    max_records_per_namespace,
-                    verify_checkpoint_cache,
+                    payload.max_records_per_namespace,
+                    payload.verify_checkpoint_cache,
                     git_tx,
                 )
-                .into(),
+                .into()
+            }
 
-            Request::AdminFlush {
-                repo,
-                namespace,
-                checkpoint_now,
-            } => self
-                .admin_flush(&repo, namespace, checkpoint_now, git_tx)
+            Request::AdminFlush { ctx, payload } => self
+                .admin_flush(&ctx.path, payload.namespace, payload.checkpoint_now, git_tx)
                 .into(),
 
             Request::AdminCheckpointWait { .. } => {
                 unreachable!("AdminCheckpointWait is handled by the daemon state loop")
             }
 
-            Request::AdminFingerprint {
-                repo,
-                read,
-                mode,
-                sample,
-            } => self
-                .admin_fingerprint(&repo, read, mode, sample, git_tx)
+            Request::AdminFingerprint { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.admin_fingerprint(&repo, read, payload.mode, payload.sample, git_tx)
+                    .into()
+            }
+
+            Request::AdminReloadPolicies { ctx, .. } => {
+                self.admin_reload_policies(&ctx.path, git_tx).into()
+            }
+
+            Request::AdminReloadLimits { ctx, .. } => {
+                self.admin_reload_limits(&ctx.path, git_tx).into()
+            }
+
+            Request::AdminReloadReplication { ctx, .. } => {
+                self.admin_reload_replication(&ctx.path, git_tx).into()
+            }
+
+            Request::AdminRotateReplicaId { ctx, .. } => {
+                self.admin_rotate_replica_id(&ctx.path, git_tx).into()
+            }
+
+            Request::AdminMaintenanceMode { ctx, payload } => self
+                .admin_maintenance_mode(&ctx.path, payload.enabled, git_tx)
                 .into(),
 
-            Request::AdminReloadPolicies { repo } => {
-                self.admin_reload_policies(&repo, git_tx).into()
+            Request::AdminRebuildIndex { ctx, .. } => {
+                self.admin_rebuild_index(&ctx.path, git_tx).into()
             }
 
-            Request::AdminReloadLimits { repo } => self.admin_reload_limits(&repo, git_tx).into(),
-
-            Request::AdminReloadReplication { repo } => {
-                self.admin_reload_replication(&repo, git_tx).into()
+            Request::Validate { ctx, .. } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_validate(&repo, read, git_tx).into()
             }
-
-            Request::AdminRotateReplicaId { repo } => {
-                self.admin_rotate_replica_id(&repo, git_tx).into()
-            }
-
-            Request::AdminMaintenanceMode { repo, enabled } => {
-                self.admin_maintenance_mode(&repo, enabled, git_tx).into()
-            }
-
-            Request::AdminRebuildIndex { repo } => self.admin_rebuild_index(&repo, git_tx).into(),
-
-            Request::Validate { repo, read } => self.query_validate(&repo, read, git_tx).into(),
 
             Request::Subscribe { .. } => Response::err_from(error_payload(
                 ProtocolErrorCode::InvalidRequest.into(),
@@ -780,19 +780,19 @@ impl Daemon {
             .into(),
 
             // Control
-            Request::Refresh { repo } => {
+            Request::Refresh { ctx, .. } => {
                 // Force reload from git (invalidates cached state).
                 // Used after external changes like migration.
-                match self.force_reload(&repo, git_tx) {
+                match self.force_reload(&ctx.path, git_tx) {
                     Ok(_) => Response::ok(ResponsePayload::refreshed()),
                     Err(e) => Response::err_from(e),
                 }
                 .into()
             }
 
-            Request::Sync { repo } => {
+            Request::Sync { ctx, .. } => {
                 // Force immediate sync (used for graceful shutdown)
-                match self.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
+                match self.ensure_loaded_and_maybe_start_sync(&ctx.path, git_tx) {
                     Ok(_) => Response::ok(ResponsePayload::synced()),
                     Err(e) => Response::err_from(e),
                 }
@@ -803,7 +803,8 @@ impl Daemon {
                 unreachable!("SyncWait is handled by the daemon state loop")
             }
 
-            Request::Init { repo } => {
+            Request::Init { ctx, .. } => {
+                let repo = ctx.path;
                 let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
                 if git_tx
                     .send(GitOp::Init {

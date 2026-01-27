@@ -1,14 +1,13 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use beads_api::StreamEvent;
-use beads_api::{AdminFingerprintMode, AdminFingerprintSample, Issue, QueryResult, SubscribeInfo};
+use beads_api::{Issue, QueryResult, SubscribeInfo};
 use beads_core::ErrorPayload;
-use beads_core::{Applied, BeadType, DepKind, DurabilityReceipt, Priority, Watermarks};
+use beads_core::{Applied, DurabilityReceipt, Watermarks};
 
-use crate::ops::{BeadPatch, OpResult};
-use crate::query::Filters;
+use super::{ctx::*, payload::*};
+
+use crate::ops::OpResult;
 
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
@@ -45,390 +44,381 @@ pub enum Request {
     // === Mutations ===
     /// Create a new bead.
     Create {
-        repo: PathBuf,
-        #[serde(default)]
-        id: Option<String>,
-        #[serde(default)]
-        parent: Option<String>,
-        title: String,
-        #[serde(rename = "type")]
-        bead_type: BeadType,
-        priority: Priority,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        design: Option<String>,
-        #[serde(default)]
-        acceptance_criteria: Option<String>,
-        #[serde(default)]
-        assignee: Option<String>,
-        #[serde(default)]
-        external_ref: Option<String>,
-        #[serde(default)]
-        estimated_minutes: Option<u32>,
-        #[serde(default)]
-        labels: Vec<String>,
-        #[serde(default)]
-        dependencies: Vec<String>,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: CreatePayload,
     },
 
     /// Update an existing bead.
     Update {
-        repo: PathBuf,
-        id: String,
-        patch: BeadPatch,
-        #[serde(default)]
-        cas: Option<String>,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: UpdatePayload,
     },
 
     /// Add labels to a bead.
     AddLabels {
-        repo: PathBuf,
-        id: String,
-        labels: Vec<String>,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: LabelsPayload,
     },
 
     /// Remove labels from a bead.
     RemoveLabels {
-        repo: PathBuf,
-        id: String,
-        labels: Vec<String>,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: LabelsPayload,
     },
 
     /// Set or clear a parent relationship.
     SetParent {
-        repo: PathBuf,
-        id: String,
-        #[serde(default)]
-        parent: Option<String>,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: ParentPayload,
     },
 
     /// Close a bead.
     Close {
-        repo: PathBuf,
-        id: String,
-        #[serde(default)]
-        reason: Option<String>,
-        #[serde(default)]
-        on_branch: Option<String>,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: ClosePayload,
     },
 
     /// Reopen a closed bead.
     Reopen {
-        repo: PathBuf,
-        id: String,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: IdPayload,
     },
 
     /// Delete a bead (soft delete).
     Delete {
-        repo: PathBuf,
-        id: String,
-        #[serde(default)]
-        reason: Option<String>,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: DeletePayload,
     },
 
     /// Add a dependency.
     AddDep {
-        repo: PathBuf,
-        from: String,
-        to: String,
-        kind: DepKind,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: DepPayload,
     },
 
     /// Remove a dependency.
     RemoveDep {
-        repo: PathBuf,
-        from: String,
-        to: String,
-        kind: DepKind,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: DepPayload,
     },
 
     /// Add a note.
     AddNote {
-        repo: PathBuf,
-        id: String,
-        content: String,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: AddNotePayload,
     },
 
     /// Claim a bead.
     Claim {
-        repo: PathBuf,
-        id: String,
-        #[serde(default = "default_lease_secs")]
-        lease_secs: u64,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: ClaimPayload,
     },
 
     /// Release a claim.
     Unclaim {
-        repo: PathBuf,
-        id: String,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: IdPayload,
     },
 
     /// Extend a claim.
     ExtendClaim {
-        repo: PathBuf,
-        id: String,
-        lease_secs: u64,
-        #[serde(default, flatten)]
-        meta: MutationMeta,
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: LeasePayload,
     },
 
     // === Queries ===
     /// Get a single bead.
     Show {
-        repo: PathBuf,
-        id: String,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: IdPayload,
     },
 
     /// Show multiple beads (batch fetch for summaries).
     ShowMultiple {
-        repo: PathBuf,
-        ids: Vec<String>,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: IdsPayload,
     },
 
     /// List beads.
     List {
-        repo: PathBuf,
-        #[serde(default)]
-        filters: Filters,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: ListPayload,
     },
 
     /// Get ready beads.
     Ready {
-        repo: PathBuf,
-        #[serde(default)]
-        limit: Option<usize>,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: ReadyPayload,
     },
 
     /// Get dependency tree.
     DepTree {
-        repo: PathBuf,
-        id: String,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: IdPayload,
     },
 
     /// Get dependency cycles.
     DepCycles {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
     },
 
     /// Get dependencies.
     Deps {
-        repo: PathBuf,
-        id: String,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: IdPayload,
     },
 
     /// Get notes.
     Notes {
-        repo: PathBuf,
-        id: String,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: IdPayload,
     },
 
     /// Get blocked issues.
     Blocked {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
     },
 
     /// Get stale issues.
     Stale {
-        repo: PathBuf,
-        #[serde(default)]
-        days: u32,
-        #[serde(default)]
-        status: Option<String>,
-        #[serde(default)]
-        limit: Option<usize>,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: StalePayload,
     },
 
     /// Count issues matching filters.
     Count {
-        repo: PathBuf,
-        #[serde(default)]
-        filters: Filters,
-        #[serde(default)]
-        group_by: Option<String>,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: CountPayload,
     },
 
     /// Show deleted (tombstoned) issues.
     Deleted {
-        repo: PathBuf,
-        #[serde(default)]
-        since_ms: Option<u64>,
-        #[serde(default)]
-        id: Option<String>,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: DeletedPayload,
     },
 
     /// Epic completion status.
     EpicStatus {
-        repo: PathBuf,
-        #[serde(default)]
-        eligible_only: bool,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EpicStatusPayload,
     },
 
     // === Control ===
     /// Force reload state from git (invalidates cache).
     /// Use after external changes to refs/heads/beads/store (e.g., migration).
-    Refresh { repo: PathBuf },
+    Refresh {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Force sync now.
-    Sync { repo: PathBuf },
+    Sync {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Wait until repo is clean (debounced sync flushed).
-    SyncWait { repo: PathBuf },
+    SyncWait {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Initialize beads ref.
-    Init { repo: PathBuf },
+    Init {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Get sync status.
     Status {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
     },
 
     /// Admin status snapshot.
     AdminStatus {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
     },
 
     /// Admin metrics snapshot.
     AdminMetrics {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
     },
 
     /// Admin doctor report.
     AdminDoctor {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
-        #[serde(default)]
-        max_records_per_namespace: Option<u64>,
-        #[serde(default)]
-        verify_checkpoint_cache: bool,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: AdminDoctorPayload,
     },
 
     /// Admin scrub now.
     AdminScrub {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
-        #[serde(default)]
-        max_records_per_namespace: Option<u64>,
-        #[serde(default)]
-        verify_checkpoint_cache: bool,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: AdminScrubPayload,
     },
 
     /// Admin flush WAL namespace.
     AdminFlush {
-        repo: PathBuf,
-        #[serde(default)]
-        namespace: Option<String>,
-        #[serde(default)]
-        checkpoint_now: bool,
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: AdminFlushPayload,
     },
 
     /// Admin checkpoint wait (force checkpoint and block until complete).
     AdminCheckpointWait {
-        repo: PathBuf,
-        #[serde(default)]
-        namespace: Option<String>,
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: AdminCheckpointWaitPayload,
     },
 
     /// Admin fingerprint report.
     AdminFingerprint {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
-        mode: AdminFingerprintMode,
-        #[serde(default)]
-        sample: Option<AdminFingerprintSample>,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: AdminFingerprintPayload,
     },
 
     /// Admin reload namespace policies.
-    AdminReloadPolicies { repo: PathBuf },
+    AdminReloadPolicies {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Admin reload limits.
-    AdminReloadLimits { repo: PathBuf },
+    AdminReloadLimits {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Admin reload replication runtime.
-    AdminReloadReplication { repo: PathBuf },
+    AdminReloadReplication {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Admin rotate replica id.
-    AdminRotateReplicaId { repo: PathBuf },
+    AdminRotateReplicaId {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Admin maintenance mode toggle.
-    AdminMaintenanceMode { repo: PathBuf, enabled: bool },
+    AdminMaintenanceMode {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: AdminMaintenanceModePayload,
+    },
 
     /// Rebuild WAL index from segments.
-    AdminRebuildIndex { repo: PathBuf },
+    AdminRebuildIndex {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 
     /// Validate state.
     Validate {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
     },
 
     /// Subscribe to realtime events.
     Subscribe {
-        repo: PathBuf,
-        #[serde(default, flatten)]
-        read: ReadConsistency,
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
     },
 
     /// Ping (health check).
@@ -436,10 +426,6 @@ pub enum Request {
 
     /// Shutdown daemon.
     Shutdown,
-}
-
-fn default_lease_secs() -> u64 {
-    3600 // 1 hour default
 }
 
 // =============================================================================
@@ -625,33 +611,35 @@ pub struct StreamEventPayload {
 mod tests {
     use super::*;
     use beads_api::DaemonInfo;
-    use beads_core::Watermarks;
+    use beads_core::{BeadType, Priority, Watermarks};
+    use std::path::PathBuf;
 
     #[test]
     fn request_roundtrip() {
         let req = Request::Create {
-            repo: PathBuf::from("/test"),
-            id: None,
-            parent: None,
-            title: "test".to_string(),
-            bead_type: BeadType::Task,
-            priority: Priority::default(),
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta: MutationMeta::default(),
+            ctx: MutationCtx::new(PathBuf::from("/test"), MutationMeta::default()),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: "test".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::default(),
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
         };
 
         let json = serde_json::to_string(&req).unwrap();
         let parsed: Request = serde_json::from_str(&json).unwrap();
 
         match parsed {
-            Request::Create { title, .. } => assert_eq!(title, "test"),
+            Request::Create { payload, .. } => assert_eq!(payload.title, "test"),
             _ => panic!("wrong request type"),
         }
     }
@@ -659,9 +647,10 @@ mod tests {
     #[test]
     fn show_multiple_roundtrip() {
         let req = Request::ShowMultiple {
-            repo: PathBuf::from("/test"),
-            ids: vec!["bd-abc".to_string(), "bd-xyz".to_string()],
-            read: ReadConsistency::default(),
+            ctx: ReadCtx::new(PathBuf::from("/test"), ReadConsistency::default()),
+            payload: IdsPayload {
+                ids: vec!["bd-abc".to_string(), "bd-xyz".to_string()],
+            },
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -670,9 +659,9 @@ mod tests {
 
         let parsed: Request = serde_json::from_str(&json).unwrap();
         match parsed {
-            Request::ShowMultiple { ids, .. } => {
-                assert_eq!(ids.len(), 2);
-                assert_eq!(ids[0], "bd-abc");
+            Request::ShowMultiple { payload, .. } => {
+                assert_eq!(payload.ids.len(), 2);
+                assert_eq!(payload.ids[0], "bd-abc");
             }
             _ => panic!("wrong request type"),
         }
@@ -681,12 +670,15 @@ mod tests {
     #[test]
     fn subscribe_roundtrip() {
         let req = Request::Subscribe {
-            repo: PathBuf::from("/test"),
-            read: ReadConsistency {
-                namespace: Some("core".to_string()),
-                require_min_seen: None,
-                wait_timeout_ms: Some(50),
-            },
+            ctx: ReadCtx::new(
+                PathBuf::from("/test"),
+                ReadConsistency {
+                    namespace: Some("core".to_string()),
+                    require_min_seen: None,
+                    wait_timeout_ms: Some(50),
+                },
+            ),
+            payload: EmptyPayload {},
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -694,12 +686,41 @@ mod tests {
 
         let parsed: Request = serde_json::from_str(&json).unwrap();
         match parsed {
-            Request::Subscribe { read, .. } => {
-                assert_eq!(read.namespace.as_deref(), Some("core"));
-                assert_eq!(read.wait_timeout_ms, Some(50));
+            Request::Subscribe { ctx, .. } => {
+                assert_eq!(ctx.read.namespace.as_deref(), Some("core"));
+                assert_eq!(ctx.read.wait_timeout_ms, Some(50));
             }
             _ => panic!("wrong request type"),
         }
+    }
+
+    #[test]
+    fn claim_defaults_lease_secs() {
+        let json = r#"{"op":"claim","repo":"/test","id":"bd-123"}"#;
+        let parsed: Request = serde_json::from_str(json).unwrap();
+        match parsed {
+            Request::Claim { payload, .. } => {
+                assert_eq!(payload.lease_secs, 3600);
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn extend_claim_requires_lease_secs() {
+        let json = r#"{"op":"extend_claim","repo":"/test","id":"bd-123"}"#;
+        assert!(serde_json::from_str::<Request>(json).is_err());
+    }
+
+    #[test]
+    fn repo_ctx_serializes_as_repo_field() {
+        let req = Request::Refresh {
+            ctx: RepoCtx::new(PathBuf::from("/test")),
+            payload: EmptyPayload {},
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"repo\""));
+        assert!(!json.contains("\"path\""));
     }
 
     #[test]

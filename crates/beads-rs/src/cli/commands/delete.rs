@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use super::super::{Ctx, normalize_bead_ids, print_json, send};
 use crate::Result;
-use crate::daemon::ipc::Request;
+use crate::daemon::ipc::{DeletePayload, Request};
 
 #[derive(Debug, Clone, Serialize)]
 struct DeleteResult {
@@ -28,10 +28,11 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
     for id in ids {
         let id_str = id.as_str().to_string();
         let req = Request::Delete {
-            repo: ctx.repo.clone(),
-            id: id_str.clone(),
-            reason: args.reason.clone(),
-            meta: ctx.mutation_meta(),
+            ctx: ctx.mutation_ctx(),
+            payload: DeletePayload {
+                id: id_str.clone(),
+                reason: args.reason.clone(),
+            },
         };
         let _ = send(&req)?;
 

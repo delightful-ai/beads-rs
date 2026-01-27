@@ -2715,7 +2715,9 @@ pub(crate) fn insert_store_for_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::ipc::{MutationMeta, ReadConsistency, Request, ResponsePayload};
+    use crate::daemon::ipc::{
+        CreatePayload, MutationCtx, MutationMeta, ReadConsistency, Request, ResponsePayload,
+    };
     use crate::daemon::store::discovery::store_id_from_remote;
     use crate::git::sync::SyncOutcome;
     use beads_api::QueryResult;
@@ -3496,23 +3498,27 @@ mod tests {
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
         let response = daemon.handle_request(
             Request::Create {
-                repo: repo_path.clone(),
-                id: None,
-                parent: None,
-                title: "non-core".to_string(),
-                bead_type: BeadType::Task,
-                priority: Priority::MEDIUM,
-                description: None,
-                design: None,
-                acceptance_criteria: None,
-                assignee: None,
-                external_ref: None,
-                estimated_minutes: None,
-                labels: Vec::new(),
-                dependencies: Vec::new(),
-                meta: MutationMeta {
-                    namespace: Some(tmp_ns.as_str().to_string()),
-                    ..MutationMeta::default()
+                ctx: MutationCtx::new(
+                    repo_path.clone(),
+                    MutationMeta {
+                        namespace: Some(tmp_ns.as_str().to_string()),
+                        ..MutationMeta::default()
+                    },
+                ),
+                payload: CreatePayload {
+                    id: None,
+                    parent: None,
+                    title: "non-core".to_string(),
+                    bead_type: BeadType::Task,
+                    priority: Priority::MEDIUM,
+                    description: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    assignee: None,
+                    external_ref: None,
+                    estimated_minutes: None,
+                    labels: Vec::new(),
+                    dependencies: Vec::new(),
                 },
             },
             &git_tx,
@@ -3567,21 +3573,22 @@ mod tests {
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
 
         let base_request = |meta| Request::Create {
-            repo: repo_path.clone(),
-            id: None,
-            parent: None,
-            title: "bad".to_string(),
-            bead_type: BeadType::Task,
-            priority: Priority::MEDIUM,
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta,
+            ctx: MutationCtx::new(repo_path.clone(), meta),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: "bad".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
         };
 
         assert_err_code(
@@ -3657,23 +3664,27 @@ mod tests {
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
         let response = daemon.handle_request(
             Request::Create {
-                repo: repo_path.clone(),
-                id: None,
-                parent: None,
-                title: "hlc".to_string(),
-                bead_type: BeadType::Task,
-                priority: Priority::MEDIUM,
-                description: None,
-                design: None,
-                acceptance_criteria: None,
-                assignee: None,
-                external_ref: None,
-                estimated_minutes: None,
-                labels: Vec::new(),
-                dependencies: Vec::new(),
-                meta: MutationMeta {
-                    actor_id: Some(actor.as_str().to_string()),
-                    ..MutationMeta::default()
+                ctx: MutationCtx::new(
+                    repo_path.clone(),
+                    MutationMeta {
+                        actor_id: Some(actor.as_str().to_string()),
+                        ..MutationMeta::default()
+                    },
+                ),
+                payload: CreatePayload {
+                    id: None,
+                    parent: None,
+                    title: "hlc".to_string(),
+                    bead_type: BeadType::Task,
+                    priority: Priority::MEDIUM,
+                    description: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    assignee: None,
+                    external_ref: None,
+                    estimated_minutes: None,
+                    labels: Vec::new(),
+                    dependencies: Vec::new(),
                 },
             },
             &git_tx,

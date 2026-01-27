@@ -2,7 +2,7 @@ use clap::Args;
 
 use super::super::{Ctx, print_ok, send};
 use crate::Result;
-use crate::daemon::ipc::Request;
+use crate::daemon::ipc::{ListPayload, Request};
 use crate::daemon::query::Filters;
 
 #[derive(Args, Debug)]
@@ -23,9 +23,8 @@ pub(crate) fn handle(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         ..Default::default()
     };
     let req = Request::List {
-        repo: ctx.repo.clone(),
-        filters,
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: ListPayload { filters },
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

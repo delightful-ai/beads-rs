@@ -8,7 +8,8 @@ use thiserror::Error;
 use beads_rs::api::AdminStatusOutput;
 use beads_rs::api::QueryResult;
 use beads_rs::daemon::ipc::{
-    IpcClient, IpcConnection, IpcError, ReadConsistency, Request, Response, ResponsePayload,
+    EmptyPayload, IpcClient, IpcConnection, IpcError, ReadConsistency, ReadCtx, Request, Response,
+    ResponsePayload,
 };
 use beads_rs::{
     ErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, WatermarkError, Watermarks,
@@ -87,8 +88,8 @@ impl StatusCollector {
         read: ReadConsistency,
     ) -> Result<&AdminStatusOutput, StatusError> {
         let request = Request::AdminStatus {
-            repo: self.repo.clone(),
-            read,
+            ctx: ReadCtx::new(self.repo.clone(), read),
+            payload: EmptyPayload {},
         };
         let response = self.send_request(&request)?;
         let status = parse_admin_status(response)?;

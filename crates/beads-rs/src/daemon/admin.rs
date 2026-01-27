@@ -626,11 +626,7 @@ fn build_wal_status(
         let mut segments = reader
             .list_segments(namespace)
             .map_err(|err| OpError::StoreRuntime(Box::new(StoreRuntimeError::WalIndex(err))))?;
-        segments.sort_by(|a, b| {
-            a.created_at_ms
-                .cmp(&b.created_at_ms)
-                .then_with(|| a.segment_id.cmp(&b.segment_id))
-        });
+        segments.sort_by_key(|segment| (segment.created_at_ms, segment.segment_id));
         let mut segment_infos = Vec::new();
         let mut segment_stats = Vec::new();
         let mut total_bytes = 0u64;
@@ -851,7 +847,7 @@ fn build_replica_liveness(
         }
     };
 
-    rows.sort_by(|a, b| a.replica_id.cmp(&b.replica_id));
+    rows.sort_by_key(|row| row.replica_id);
     rows.into_iter()
         .map(|row| AdminReplicaLiveness {
             replica_id: row.replica_id,

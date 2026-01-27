@@ -20,7 +20,9 @@ use beads_rs::api::{
 use beads_rs::api::{AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample};
 use beads_rs::core::BeadType;
 use beads_rs::daemon::ipc::{
-    IpcClient, MutationMeta, ReadConsistency, Request, Response, ResponsePayload,
+    AdminDoctorPayload, AdminFingerprintPayload, AdminMaintenanceModePayload, AdminScrubPayload,
+    CreatePayload, EmptyPayload, IpcClient, MutationCtx, MutationMeta, ReadConsistency, ReadCtx,
+    RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_rs::daemon::ops::OpResult;
 use beads_rs::{
@@ -112,7 +114,8 @@ impl AdminFixture {
         }
 
         let request = Request::Init {
-            repo: self.repo_dir.path().to_path_buf(),
+            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
+            payload: EmptyPayload {},
         };
         let response = client
             .send_request_no_autostart(&request)
@@ -127,21 +130,22 @@ impl AdminFixture {
 
     fn create_issue(&self, title: &str) {
         let request = Request::Create {
-            repo: self.repo_dir.path().to_path_buf(),
-            id: None,
-            parent: None,
-            title: title.to_string(),
-            bead_type: BeadType::Task,
-            priority: Priority::default(),
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta: MutationMeta::default(),
+            ctx: MutationCtx::new(self.repo_dir.path().to_path_buf(), MutationMeta::default()),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: title.to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::default(),
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
         };
         let response = self.send_request(&request);
         match response {
@@ -158,29 +162,33 @@ impl AdminFixture {
 
     fn create_issue_result(&self, title: &str) -> Response {
         let request = Request::Create {
-            repo: self.repo_dir.path().to_path_buf(),
-            id: None,
-            parent: None,
-            title: title.to_string(),
-            bead_type: BeadType::Task,
-            priority: Priority::default(),
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta: MutationMeta::default(),
+            ctx: MutationCtx::new(self.repo_dir.path().to_path_buf(), MutationMeta::default()),
+            payload: CreatePayload {
+                id: None,
+                parent: None,
+                title: title.to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::default(),
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
         };
         self.send_request(&request)
     }
 
     fn admin_status(&self) -> AdminStatusOutput {
         match self.send_query(Request::AdminStatus {
-            repo: self.repo_dir.path().to_path_buf(),
-            read: ReadConsistency::default(),
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
+            payload: EmptyPayload {},
         }) {
             beads_rs::api::QueryResult::AdminStatus(status) => status,
             other => panic!("unexpected admin status payload: {other:?}"),
@@ -189,8 +197,11 @@ impl AdminFixture {
 
     fn admin_metrics(&self) -> AdminMetricsOutput {
         match self.send_query(Request::AdminMetrics {
-            repo: self.repo_dir.path().to_path_buf(),
-            read: ReadConsistency::default(),
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
+            payload: EmptyPayload {},
         }) {
             beads_rs::api::QueryResult::AdminMetrics(metrics) => metrics,
             other => panic!("unexpected admin metrics payload: {other:?}"),
@@ -199,10 +210,14 @@ impl AdminFixture {
 
     fn admin_doctor(&self) -> beads_rs::api::AdminDoctorOutput {
         match self.send_query(Request::AdminDoctor {
-            repo: self.repo_dir.path().to_path_buf(),
-            read: ReadConsistency::default(),
-            max_records_per_namespace: None,
-            verify_checkpoint_cache: false,
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
+            payload: AdminDoctorPayload {
+                max_records_per_namespace: None,
+                verify_checkpoint_cache: false,
+            },
         }) {
             beads_rs::api::QueryResult::AdminDoctor(output) => output,
             other => panic!("unexpected admin doctor payload: {other:?}"),
@@ -211,10 +226,14 @@ impl AdminFixture {
 
     fn admin_scrub(&self, max_records_per_namespace: Option<u64>) -> AdminScrubOutput {
         match self.send_query(Request::AdminScrub {
-            repo: self.repo_dir.path().to_path_buf(),
-            read: ReadConsistency::default(),
-            max_records_per_namespace,
-            verify_checkpoint_cache: false,
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
+            payload: AdminScrubPayload {
+                max_records_per_namespace,
+                verify_checkpoint_cache: false,
+            },
         }) {
             beads_rs::api::QueryResult::AdminScrub(output) => output,
             other => panic!("unexpected admin scrub payload: {other:?}"),
@@ -223,7 +242,8 @@ impl AdminFixture {
 
     fn admin_reload_policies(&self) -> AdminReloadPoliciesOutput {
         match self.send_query(Request::AdminReloadPolicies {
-            repo: self.repo_dir.path().to_path_buf(),
+            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
+            payload: EmptyPayload {},
         }) {
             beads_rs::api::QueryResult::AdminReloadPolicies(output) => output,
             other => panic!("unexpected admin reload policies payload: {other:?}"),
@@ -236,10 +256,11 @@ impl AdminFixture {
         sample: Option<AdminFingerprintSample>,
     ) -> AdminFingerprintOutput {
         match self.send_query(Request::AdminFingerprint {
-            repo: self.repo_dir.path().to_path_buf(),
-            read: ReadConsistency::default(),
-            mode,
-            sample,
+            ctx: ReadCtx::new(
+                self.repo_dir.path().to_path_buf(),
+                ReadConsistency::default(),
+            ),
+            payload: AdminFingerprintPayload { mode, sample },
         }) {
             beads_rs::api::QueryResult::AdminFingerprint(output) => output,
             other => panic!("unexpected admin fingerprint payload: {other:?}"),
@@ -248,14 +269,15 @@ impl AdminFixture {
 
     fn admin_maintenance(&self, enabled: bool) -> Response {
         self.send_request(&Request::AdminMaintenanceMode {
-            repo: self.repo_dir.path().to_path_buf(),
-            enabled,
+            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
+            payload: AdminMaintenanceModePayload { enabled },
         })
     }
 
     fn admin_rebuild_index(&self) -> Response {
         self.send_request(&Request::AdminRebuildIndex {
-            repo: self.repo_dir.path().to_path_buf(),
+            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
+            payload: EmptyPayload {},
         })
     }
 

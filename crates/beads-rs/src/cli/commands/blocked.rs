@@ -1,12 +1,12 @@
 use super::super::{Ctx, print_ok, send};
 use super::fmt_issue_ref;
 use crate::Result;
-use crate::daemon::ipc::Request;
+use crate::daemon::ipc::{EmptyPayload, Request};
 
 pub(crate) fn handle(ctx: &Ctx) -> Result<()> {
     let req = Request::Blocked {
-        repo: ctx.repo.clone(),
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: EmptyPayload {},
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)
