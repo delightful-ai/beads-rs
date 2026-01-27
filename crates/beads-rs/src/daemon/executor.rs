@@ -1420,6 +1420,7 @@ mod tests {
         });
 
         let captured = spans.lock().expect("span capture");
+        assert!(!captured.is_empty(), "expected mutation span fields");
         let fields = captured
             .iter()
             .find(|fields| fields.contains_key("store_id"))
