@@ -371,6 +371,7 @@
 {"from":"bd-9nf","to":"bd-3m5","kind":"blocks","created_at":[1768182703428,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-a6k","to":"bd-3m5","kind":"blocks","created_at":[1768182703950,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-ayl","to":"bd-3m5","kind":"parent","created_at":[1768449375900,1],"created_by":"darin@book"}
+{"from":"bd-bfb7","to":"bd-si5m","kind":"discovered_from","created_at":[1769555663242,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-bk2","to":"bd-3m5","kind":"blocks","created_at":[1768182704052,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-bpo6","to":"bd-6k70","kind":"discovered_from","created_at":[1768701673166,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-c1a","to":"bd-bk2","kind":"discovered_from","created_at":[1768427184513,1],"created_by":"darin@book"}
