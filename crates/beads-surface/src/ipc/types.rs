@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use beads_api::StreamEvent;
@@ -426,6 +428,146 @@ pub enum Request {
 
     /// Shutdown daemon.
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RequestInfo<'a> {
+    pub op: &'static str,
+    pub repo: Option<&'a Path>,
+    pub namespace: Option<&'a str>,
+    pub actor_id: Option<&'a str>,
+    pub client_request_id: Option<&'a str>,
+    pub read: Option<&'a ReadConsistency>,
+}
+
+impl Request {
+    pub fn info(&self) -> RequestInfo<'_> {
+        match self {
+            Request::Create { ctx, .. } => info_from_mutation("create", ctx),
+            Request::Update { ctx, .. } => info_from_mutation("update", ctx),
+            Request::AddLabels { ctx, .. } => info_from_mutation("add_labels", ctx),
+            Request::RemoveLabels { ctx, .. } => info_from_mutation("remove_labels", ctx),
+            Request::SetParent { ctx, .. } => info_from_mutation("set_parent", ctx),
+            Request::Close { ctx, .. } => info_from_mutation("close", ctx),
+            Request::Reopen { ctx, .. } => info_from_mutation("reopen", ctx),
+            Request::Delete { ctx, .. } => info_from_mutation("delete", ctx),
+            Request::AddDep { ctx, .. } => info_from_mutation("add_dep", ctx),
+            Request::RemoveDep { ctx, .. } => info_from_mutation("remove_dep", ctx),
+            Request::AddNote { ctx, .. } => info_from_mutation("add_note", ctx),
+            Request::Claim { ctx, .. } => info_from_mutation("claim", ctx),
+            Request::Unclaim { ctx, .. } => info_from_mutation("unclaim", ctx),
+            Request::ExtendClaim { ctx, .. } => info_from_mutation("extend_claim", ctx),
+            Request::Show { ctx, .. } => info_from_read("show", ctx),
+            Request::ShowMultiple { ctx, .. } => info_from_read("show_multiple", ctx),
+            Request::List { ctx, .. } => info_from_read("list", ctx),
+            Request::Ready { ctx, .. } => info_from_read("ready", ctx),
+            Request::DepTree { ctx, .. } => info_from_read("dep_tree", ctx),
+            Request::DepCycles { ctx, .. } => info_from_read("dep_cycles", ctx),
+            Request::Deps { ctx, .. } => info_from_read("deps", ctx),
+            Request::Notes { ctx, .. } => info_from_read("notes", ctx),
+            Request::Blocked { ctx, .. } => info_from_read("blocked", ctx),
+            Request::Stale { ctx, .. } => info_from_read("stale", ctx),
+            Request::Count { ctx, .. } => info_from_read("count", ctx),
+            Request::Deleted { ctx, .. } => info_from_read("deleted", ctx),
+            Request::EpicStatus { ctx, .. } => info_from_read("epic_status", ctx),
+            Request::Refresh { ctx, .. } => info_from_repo("refresh", ctx),
+            Request::Sync { ctx, .. } => info_from_repo("sync", ctx),
+            Request::SyncWait { ctx, .. } => info_from_repo("sync_wait", ctx),
+            Request::Init { ctx, .. } => info_from_repo("init", ctx),
+            Request::Status { ctx, .. } => info_from_read("status", ctx),
+            Request::AdminStatus { ctx, .. } => info_from_read("admin_status", ctx),
+            Request::AdminMetrics { ctx, .. } => info_from_read("admin_metrics", ctx),
+            Request::AdminDoctor { ctx, .. } => info_from_read("admin_doctor", ctx),
+            Request::AdminScrub { ctx, .. } => info_from_read("admin_scrub", ctx),
+            Request::AdminFlush { ctx, payload, .. } => {
+                info_from_namespace("admin_flush", ctx, payload.namespace.as_deref())
+            }
+            Request::AdminCheckpointWait { ctx, payload, .. } => {
+                info_from_namespace("admin_checkpoint_wait", ctx, payload.namespace.as_deref())
+            }
+            Request::AdminFingerprint { ctx, .. } => info_from_read("admin_fingerprint", ctx),
+            Request::AdminReloadPolicies { ctx, .. } => {
+                info_from_repo("admin_reload_policies", ctx)
+            }
+            Request::AdminReloadLimits { ctx, .. } => info_from_repo("admin_reload_limits", ctx),
+            Request::AdminReloadReplication { ctx, .. } => {
+                info_from_repo("admin_reload_replication", ctx)
+            }
+            Request::AdminRotateReplicaId { ctx, .. } => {
+                info_from_repo("admin_rotate_replica_id", ctx)
+            }
+            Request::AdminMaintenanceMode { ctx, .. } => {
+                info_from_repo("admin_maintenance_mode", ctx)
+            }
+            Request::AdminRebuildIndex { ctx, .. } => info_from_repo("admin_rebuild_index", ctx),
+            Request::Validate { ctx, .. } => info_from_read("validate", ctx),
+            Request::Subscribe { ctx, .. } => info_from_read("subscribe", ctx),
+            Request::Ping => RequestInfo {
+                op: "ping",
+                repo: None,
+                namespace: None,
+                actor_id: None,
+                client_request_id: None,
+                read: None,
+            },
+            Request::Shutdown => RequestInfo {
+                op: "shutdown",
+                repo: None,
+                namespace: None,
+                actor_id: None,
+                client_request_id: None,
+                read: None,
+            },
+        }
+    }
+}
+
+fn info_from_mutation<'a>(op: &'static str, ctx: &'a MutationCtx) -> RequestInfo<'a> {
+    RequestInfo {
+        op,
+        repo: Some(&ctx.repo.path),
+        namespace: ctx.meta.namespace.as_deref(),
+        actor_id: ctx.meta.actor_id.as_deref(),
+        client_request_id: ctx.meta.client_request_id.as_deref(),
+        read: None,
+    }
+}
+
+fn info_from_read<'a>(op: &'static str, ctx: &'a ReadCtx) -> RequestInfo<'a> {
+    RequestInfo {
+        op,
+        repo: Some(&ctx.repo.path),
+        namespace: ctx.read.namespace.as_deref(),
+        actor_id: None,
+        client_request_id: None,
+        read: Some(&ctx.read),
+    }
+}
+
+fn info_from_repo<'a>(op: &'static str, ctx: &'a RepoCtx) -> RequestInfo<'a> {
+    RequestInfo {
+        op,
+        repo: Some(&ctx.path),
+        namespace: None,
+        actor_id: None,
+        client_request_id: None,
+        read: None,
+    }
+}
+
+fn info_from_namespace<'a>(
+    op: &'static str,
+    ctx: &'a RepoCtx,
+    namespace: Option<&'a str>,
+) -> RequestInfo<'a> {
+    RequestInfo {
+        op,
+        repo: Some(&ctx.path),
+        namespace,
+        actor_id: None,
+        client_request_id: None,
+        read: None,
+    }
 }
 
 // =============================================================================
