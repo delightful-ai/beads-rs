@@ -2886,6 +2886,20 @@ mod tests {
     }
 
     #[test]
+    fn ensure_repo_loaded_rejects_non_git_repo() {
+        let _tmp = test_store_dir();
+        let repo_dir = TempDir::new().unwrap();
+        let mut daemon = Daemon::new(test_actor());
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+
+        let err = daemon
+            .ensure_repo_loaded(repo_dir.path(), &git_tx)
+            .unwrap_err();
+
+        assert!(matches!(err, OpError::NotAGitRepo(path) if path == repo_dir.path()));
+    }
+
+    #[test]
     fn wal_checkpoint_deadline_tracks_interval() {
         let _tmp = test_store_dir();
         let limits = Limits {
