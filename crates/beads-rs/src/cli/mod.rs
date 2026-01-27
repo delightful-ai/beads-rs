@@ -758,7 +758,12 @@ mod tests {
         let namespace = resolve_namespace(None, &config).expect("namespace");
         assert_eq!(namespace, Some(NamespaceId::parse("wf").unwrap()));
         let durability = resolve_durability(None, &config).expect("durability");
-        assert_eq!(durability, Some("replicated_fsync(2)".to_string()));
+        assert_eq!(
+            durability,
+            Some(DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).expect("k")
+            })
+        );
     }
 
     #[test]
@@ -776,7 +781,12 @@ mod tests {
         assert_eq!(namespace, Some(NamespaceId::core()));
         let durability =
             resolve_durability(Some("replicated_fsync(3)"), &config).expect("durability");
-        assert_eq!(durability, Some("replicated_fsync(3)".to_string()));
+        assert_eq!(
+            durability,
+            Some(DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(3).expect("k")
+            })
+        );
     }
 
     #[test]
@@ -818,7 +828,7 @@ mod tests {
             actor_id: Some(actor.clone()),
         };
         let meta = ctx.mutation_meta();
-        assert_eq!(meta.actor_id, Some(actor.as_str().to_string()));
+        assert_eq!(meta.actor_id, Some(actor));
     }
 
     #[test]
