@@ -88,29 +88,29 @@ pub struct SessionPeer {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Inbound;
+pub struct Inbound;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Outbound;
+pub struct Outbound;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Connecting;
+pub struct Connecting;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Handshaking;
+pub struct Handshaking;
 
 #[derive(Clone, Debug)]
-pub(crate) struct Streaming {
+pub struct Streaming {
     peer: SessionPeer,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Draining {
+pub struct Draining {
     peer: SessionPeer,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Closed;
+pub struct Closed;
 
 pub trait PhaseMarker {
     const PHASE: SessionPhase;
@@ -241,7 +241,7 @@ impl PhaseWire for Closed {
     }
 }
 
-pub trait PhaseWrap: PhaseMarker + PhasePeer + PhasePeerOpt + PhaseWire + Sized {
+trait PhaseWrap: PhaseMarker + PhasePeer + PhasePeerOpt + PhaseWire + Sized {
     fn wrap<R>(session: Session<R, Self>) -> SessionState<R>;
 }
 
@@ -257,7 +257,7 @@ impl PhaseWrap for Draining {
     }
 }
 
-pub(crate) enum SessionState<R> {
+pub enum SessionState<R> {
     Connecting(Session<R, Connecting>),
     Handshaking(Session<R, Handshaking>),
     Streaming(Session<R, Streaming>),
@@ -265,8 +265,8 @@ pub(crate) enum SessionState<R> {
     Closed(Session<R, Closed>),
 }
 
-pub(crate) type InboundConnecting = Session<Inbound, Connecting>;
-pub(crate) type OutboundConnecting = Session<Outbound, Connecting>;
+pub type InboundConnecting = Session<Inbound, Connecting>;
+pub type OutboundConnecting = Session<Outbound, Connecting>;
 
 pub(crate) trait SessionWire {
     fn wire_version(&self) -> u32;
@@ -793,7 +793,7 @@ impl Session<Outbound, Streaming> {
     }
 }
 
-pub(crate) fn handle_outbound_message(
+pub fn handle_outbound_message(
     session: SessionState<Outbound>,
     msg: ReplMessage,
     store: &mut impl SessionStore,
@@ -861,7 +861,7 @@ pub(crate) fn handle_outbound_message(
     }
 }
 
-pub(crate) fn handle_inbound_message(
+pub fn handle_inbound_message(
     session: SessionState<Inbound>,
     msg: ReplMessage,
     store: &mut impl SessionStore,
