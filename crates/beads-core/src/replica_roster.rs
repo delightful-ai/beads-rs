@@ -263,10 +263,16 @@ replica_id = "00000000-0000-0000-0000-000000000001"
 name = "alpha"
 role = "anchor"
 durability_eligible = true
+
+[[replicas]]
+replica_id = "00000000-0000-0000-0000-000000000002"
+name = "beta"
+role = "peer"
+durability_eligible = false
 "#;
 
         let roster = ReplicaRoster::from_toml_str(input).unwrap();
-        assert_eq!(roster.replicas.len(), 1);
+        assert_eq!(roster.replicas.len(), 2);
         let entry = &roster.replicas[0];
         let expected = Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid");
         assert_eq!(entry.replica_id, ReplicaId::new(expected));
@@ -275,6 +281,13 @@ durability_eligible = true
         assert!(entry.durability_eligible());
         assert!(entry.allowed_namespaces.is_none());
         assert!(entry.expire_after_ms.is_none());
+
+        let entry = &roster.replicas[1];
+        let expected = Uuid::parse_str("00000000-0000-0000-0000-000000000002").expect("uuid");
+        assert_eq!(entry.replica_id, ReplicaId::new(expected));
+        assert_eq!(entry.role, ReplicaDurabilityRole::peer(false));
+        assert_eq!(entry.role(), ReplicaRole::Peer);
+        assert!(!entry.durability_eligible());
     }
 
     #[test]
@@ -335,5 +348,23 @@ durability_eligible = true
                 eligible: true
             }
         ));
+    }
+
+    #[test]
+    fn parses_observer_without_durability_eligibility() {
+        let input = r#"
+[[replicas]]
+replica_id = "00000000-0000-0000-0000-000000000001"
+name = "observer"
+role = "observer"
+durability_eligible = false
+"#;
+
+        let roster = ReplicaRoster::from_toml_str(input).unwrap();
+        assert_eq!(roster.replicas.len(), 1);
+        let entry = &roster.replicas[0];
+        assert_eq!(entry.role, ReplicaDurabilityRole::observer());
+        assert_eq!(entry.role(), ReplicaRole::Observer);
+        assert!(!entry.durability_eligible());
     }
 }
