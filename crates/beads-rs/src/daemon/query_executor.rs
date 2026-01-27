@@ -8,10 +8,13 @@ use std::time::Instant;
 use crossbeam::channel::Sender;
 
 use super::core::{Daemon, NormalizedReadConsistency};
+use super::git_lane::GitLaneState;
 use super::git_worker::GitOp;
 use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
+use super::remote::RemoteUrl;
+use super::store_runtime::StoreRuntime;
 use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
 use beads_api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
@@ -20,8 +23,21 @@ use beads_api::{
 };
 
 struct ReadCtx<'a> {
+    remote: RemoteUrl,
     read: NormalizedReadConsistency,
+    store: &'a StoreRuntime,
     state: &'a CanonicalState,
+    repo_state: Option<&'a GitLaneState>,
+}
+
+struct StatusParts {
+    summary: StatusSummary,
+    warnings: Vec<SyncWarning>,
+    sync_dirty: bool,
+    sync_in_progress: bool,
+    last_sync_wall_ms: Option<u64>,
+    consecutive_failures: u32,
+    remote_url: RemoteUrl,
 }
 
 impl Daemon {
@@ -30,7 +46,7 @@ impl Daemon {
         repo: &Path,
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
-        _want_repo_state: bool,
+        want_repo_state: bool,
         f: F,
     ) -> Result<T, OpError>
     where
@@ -43,8 +59,16 @@ impl Daemon {
 
         let empty_state = CanonicalState::new();
         let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
+        let repo_state = want_repo_state.then(|| loaded.lane());
+        let remote = loaded.remote().clone();
 
-        f(ReadCtx { read, state })
+        f(ReadCtx {
+            remote,
+            read,
+            store,
+            state,
+            repo_state,
+        })
     }
 
     fn with_read_ctx_response<F>(
@@ -374,107 +398,109 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let loaded = match self.ensure_repo_fresh(repo, git_tx) {
-            Ok(r) => r,
-            Err(e) => return Response::err_from(e),
-        };
-        let read = match loaded.normalize_read_consistency(read) {
-            Ok(read) => read,
-            Err(e) => return Response::err_from(e),
-        };
-        if let Err(err) = loaded.check_read_gate(&read) {
-            return Response::err_from(err);
-        }
-        let repo_state = loaded.lane();
-        let store = loaded.runtime();
+        let parts = match self.with_read_ctx(repo, read, git_tx, true, |ctx| {
+            let ReadCtx {
+                remote,
+                read,
+                store,
+                state,
+                repo_state,
+            } = ctx;
+            let repo_state = repo_state.expect("repo state requested");
 
-        let empty_state = CanonicalState::new();
-        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
+            let blocked_by = compute_blocked_by(state);
+            let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
 
-        let blocked_by = compute_blocked_by(state);
-        let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
+            let mut open_issues = 0usize;
+            let mut in_progress_issues = 0usize;
+            let mut closed_issues = 0usize;
+            let mut blocked_issues = 0usize;
+            let mut ready_issues = 0usize;
 
-        let mut open_issues = 0usize;
-        let mut in_progress_issues = 0usize;
-        let mut closed_issues = 0usize;
-        let mut blocked_issues = 0usize;
-        let mut ready_issues = 0usize;
+            for (id, bead) in state.iter_live() {
+                if bead.fields.workflow.value.is_closed() {
+                    closed_issues += 1;
+                    continue;
+                }
 
-        for (id, bead) in state.iter_live() {
-            if bead.fields.workflow.value.is_closed() {
-                closed_issues += 1;
-                continue;
+                match bead.fields.workflow.value.status() {
+                    "open" => open_issues += 1,
+                    "in_progress" => in_progress_issues += 1,
+                    _ => {}
+                }
+
+                if blocked_set.contains(id) {
+                    blocked_issues += 1;
+                } else {
+                    ready_issues += 1;
+                }
             }
 
-            match bead.fields.workflow.value.status() {
-                "open" => open_issues += 1,
-                "in_progress" => in_progress_issues += 1,
-                _ => {}
+            let epics_eligible_for_closure =
+                compute_epic_statuses(read.namespace(), state, true).len();
+
+            let summary = StatusSummary {
+                total_issues: state.live_count(),
+                open_issues,
+                in_progress_issues,
+                blocked_issues,
+                closed_issues,
+                ready_issues,
+                tombstone_issues: Some(state.tombstone_count()),
+                epics_eligible_for_closure: Some(epics_eligible_for_closure),
+            };
+
+            let mut warnings = Vec::new();
+            if let Some(fetch) = &repo_state.last_fetch_error {
+                warnings.push(SyncWarning::Fetch {
+                    message: fetch.message.clone(),
+                    at_wall_ms: fetch.wall_ms,
+                });
+            }
+            if let Some(diverged) = &repo_state.last_divergence {
+                warnings.push(SyncWarning::Diverged {
+                    local_oid: diverged.local_oid.clone(),
+                    remote_oid: diverged.remote_oid.clone(),
+                    at_wall_ms: diverged.wall_ms,
+                });
+            }
+            if let Some(force_push) = &repo_state.last_force_push {
+                warnings.push(SyncWarning::ForcePush {
+                    previous_remote_oid: force_push.previous_remote_oid.clone(),
+                    remote_oid: force_push.remote_oid.clone(),
+                    at_wall_ms: force_push.wall_ms,
+                });
+            }
+            if let Some(skew) = &repo_state.last_clock_skew {
+                warnings.push(SyncWarning::ClockSkew {
+                    delta_ms: skew.delta_ms,
+                    at_wall_ms: skew.wall_ms,
+                });
+            }
+            if let Some(repair) = &store.last_wal_tail_truncated {
+                warnings.push(SyncWarning::WalTailTruncated {
+                    namespace: repair.namespace.clone(),
+                    segment_id: repair.segment_id,
+                    truncated_from_offset: repair.truncated_from_offset,
+                    at_wall_ms: repair.wall_ms,
+                });
             }
 
-            if blocked_set.contains(id) {
-                blocked_issues += 1;
-            } else {
-                ready_issues += 1;
-            }
-        }
-
-        let epics_eligible_for_closure = compute_epic_statuses(read.namespace(), state, true).len();
-
-        let summary = StatusSummary {
-            total_issues: state.live_count(),
-            open_issues,
-            in_progress_issues,
-            blocked_issues,
-            closed_issues,
-            ready_issues,
-            tombstone_issues: Some(state.tombstone_count()),
-            epics_eligible_for_closure: Some(epics_eligible_for_closure),
+            Ok(StatusParts {
+                summary,
+                warnings,
+                sync_dirty: repo_state.dirty,
+                sync_in_progress: repo_state.sync_in_progress,
+                last_sync_wall_ms: repo_state.last_sync_wall_ms,
+                consecutive_failures: repo_state.consecutive_failures,
+                remote_url: remote,
+            })
+        }) {
+            Ok(parts) => parts,
+            Err(err) => return Response::err_from(err),
         };
 
-        let mut warnings = Vec::new();
-        if let Some(fetch) = &repo_state.last_fetch_error {
-            warnings.push(SyncWarning::Fetch {
-                message: fetch.message.clone(),
-                at_wall_ms: fetch.wall_ms,
-            });
-        }
-        if let Some(diverged) = &repo_state.last_divergence {
-            warnings.push(SyncWarning::Diverged {
-                local_oid: diverged.local_oid.clone(),
-                remote_oid: diverged.remote_oid.clone(),
-                at_wall_ms: diverged.wall_ms,
-            });
-        }
-        if let Some(force_push) = &repo_state.last_force_push {
-            warnings.push(SyncWarning::ForcePush {
-                previous_remote_oid: force_push.previous_remote_oid.clone(),
-                remote_oid: force_push.remote_oid.clone(),
-                at_wall_ms: force_push.wall_ms,
-            });
-        }
-        if let Some(skew) = &repo_state.last_clock_skew {
-            warnings.push(SyncWarning::ClockSkew {
-                delta_ms: skew.delta_ms,
-                at_wall_ms: skew.wall_ms,
-            });
-        }
-        if let Some(repair) = &store.last_wal_tail_truncated {
-            warnings.push(SyncWarning::WalTailTruncated {
-                namespace: repair.namespace.clone(),
-                segment_id: repair.segment_id,
-                truncated_from_offset: repair.truncated_from_offset,
-                at_wall_ms: repair.wall_ms,
-            });
-        }
-
-        let remote_url = loaded.remote().clone();
-        let sync_dirty = repo_state.dirty;
-        let sync_in_progress = repo_state.sync_in_progress;
-        let last_sync_wall_ms = repo_state.last_sync_wall_ms;
-        let consecutive_failures = repo_state.consecutive_failures;
-        drop(loaded);
-        let next_retry = self.next_sync_deadline_for(&remote_url);
+        let next_retry = self.next_sync_deadline_for(&parts.remote_url);
         let (next_retry_wall_ms, next_retry_in_ms) = match next_retry {
             Some(deadline) => {
                 let now = Instant::now();
@@ -487,17 +513,17 @@ impl Daemon {
         };
 
         let sync = SyncStatus {
-            dirty: sync_dirty,
-            sync_in_progress,
-            last_sync_wall_ms,
+            dirty: parts.sync_dirty,
+            sync_in_progress: parts.sync_in_progress,
+            last_sync_wall_ms: parts.last_sync_wall_ms,
             next_retry_wall_ms,
             next_retry_in_ms,
-            consecutive_failures,
-            warnings,
+            consecutive_failures: parts.consecutive_failures,
+            warnings: parts.warnings,
         };
 
         let out = StatusOutput {
-            summary,
+            summary: parts.summary,
             sync: Some(sync),
         };
 
