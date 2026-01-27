@@ -26,9 +26,7 @@ use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
-use crate::daemon::repl::proto::{
-    Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap, WatermarkState,
-};
+use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkState};
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, Session, SessionAction,
