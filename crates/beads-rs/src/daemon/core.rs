@@ -2738,10 +2738,10 @@ mod tests {
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww,
-        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry,
-        ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
+        ContentHash, Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId,
+        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry, ReplicaId,
+        ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId,
+        StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
         VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
         WriteStamp, encode_event_body_canonical, hash_event_body,
     };
