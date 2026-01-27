@@ -3,9 +3,10 @@
 use beads_rs::core::Label;
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
-    ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, ReplicaId, Stamp,
-    TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
-    WireLabelAddV1, WireLabelRemoveV1, WireStamp, WriteStamp, apply_event, sha256_bytes,
+    ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, Limits, ReplicaId,
+    Stamp, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WireBeadPatch, WireDepAddV1, WireDepRemoveV1,
+    WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireStamp, WriteStamp, apply_event,
+    sha256_bytes,
 };
 
 use crate::fixtures::apply_harness::{
@@ -18,7 +19,16 @@ use crate::fixtures::event_body::{
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -> EventBody {
+fn validated(body: EventBody) -> ValidatedEventBody {
+    body.into_validated(&Limits::default())
+        .expect("valid event fixture")
+}
+
+fn update_title_event(
+    bead_id: &beads_rs::BeadId,
+    title: &str,
+    actor: ActorId,
+) -> ValidatedEventBody {
     let mut patch = WireBeadPatch::new(bead_id.clone());
     patch.title = Some(title.to_string());
 
@@ -35,21 +45,21 @@ fn update_title_event(bead_id: &beads_rs::BeadId, title: &str, actor: ActorId) -
         physical_ms: event.event_time_ms,
         logical: 42,
     };
-    event
+    validated(event)
 }
 
-fn bead_create_event(seed: u8) -> EventBody {
+fn bead_create_event(seed: u8) -> ValidatedEventBody {
     let mut delta = TxnDeltaV1::new();
     delta
         .insert(TxnOpV1::BeadUpsert(Box::new(sample_bead_patch(seed))))
         .expect("unique bead upsert");
-    event_body_with_delta(seed, delta)
+    validated(event_body_with_delta(seed, delta))
 }
 
 #[test]
 fn apply_event_is_idempotent() {
     let mut harness = ApplyHarness::new();
-    let event = sample_event_body(1);
+    let event = validated(sample_event_body(1));
     let bead_id = bead_id(1);
     let note_id = note_id(2);
 
@@ -66,7 +76,7 @@ fn apply_event_is_idempotent() {
 #[test]
 fn note_collision_is_deterministic() {
     let mut state = CanonicalState::new();
-    let base = sample_event_body(1);
+    let base = validated(sample_event_body(1));
     apply_event(&mut state, &base).expect("apply base");
 
     let bead_id = bead_id(1);
@@ -83,7 +93,7 @@ fn note_collision_is_deterministic() {
         }))
         .expect("unique note append");
 
-    let event = event_body_with_delta(2, delta);
+    let event = validated(event_body_with_delta(2, delta));
     apply_event(&mut state, &event).expect("apply collision");
 
     let stored = state
@@ -122,7 +132,7 @@ fn join_bead_collision_is_deterministic_and_inserts_lineage_tombstone() {
     delta_a
         .insert(TxnOpV1::BeadUpsert(Box::new(patch_a)))
         .expect("unique bead upsert");
-    let event_a = event_body_with_delta(50, delta_a);
+    let event_a = validated(event_body_with_delta(50, delta_a));
     apply_event(&mut state_a, &event_a).expect("apply a");
 
     let mut state_b = CanonicalState::new();
@@ -130,7 +140,7 @@ fn join_bead_collision_is_deterministic_and_inserts_lineage_tombstone() {
     delta_b
         .insert(TxnOpV1::BeadUpsert(Box::new(patch_b)))
         .expect("unique bead upsert");
-    let event_b = event_body_with_delta(51, delta_b);
+    let event_b = validated(event_body_with_delta(51, delta_b));
     apply_event(&mut state_b, &event_b).expect("apply b");
 
     let merged_ab = CanonicalState::join(&state_a, &state_b).expect("merge ab");
@@ -148,7 +158,7 @@ fn join_bead_collision_is_deterministic_and_inserts_lineage_tombstone() {
 
 #[test]
 fn lww_merge_ordering_is_deterministic() {
-    let base = sample_event_body(1);
+    let base = validated(sample_event_body(1));
     let bead_id = bead_id(1);
 
     let mut state_a = CanonicalState::new();
@@ -222,7 +232,7 @@ fn orphan_label_and_note_ops_become_visible_after_create() {
         }))
         .expect("unique note append");
 
-    let orphan_event = event_body_with_delta(10, delta);
+    let orphan_event = validated(event_body_with_delta(10, delta));
     apply_event(&mut state, &orphan_event).expect("apply orphan ops");
 
     assert!(state.labels_for(&bead).is_empty());
@@ -267,7 +277,7 @@ fn orphan_dep_ops_become_visible_after_create() {
         }))
         .expect("unique dep remove");
 
-    let orphan_event = event_body_with_delta(12, delta);
+    let orphan_event = validated(event_body_with_delta(12, delta));
     apply_event(&mut state, &orphan_event).expect("apply orphan deps");
 
     assert!(state.deps_from(&from).is_empty());
@@ -287,10 +297,10 @@ fn orphan_dep_ops_become_visible_after_create() {
 fn label_dot_collision_is_deterministic() {
     let bead = bead_id(1);
     let mut state_a = CanonicalState::new();
-    apply_event(&mut state_a, &sample_event_body(1)).expect("apply base");
+    apply_event(&mut state_a, &validated(sample_event_body(1))).expect("apply base");
 
     let mut state_b = CanonicalState::new();
-    apply_event(&mut state_b, &sample_event_body(1)).expect("apply base");
+    apply_event(&mut state_b, &validated(sample_event_body(1))).expect("apply base");
 
     let label_low = Label::parse("alpha").expect("label");
     let label_high = Label::parse("beta").expect("label");
@@ -308,7 +318,7 @@ fn label_dot_collision_is_deterministic() {
             lineage: None,
         }))
         .expect("unique label add");
-    let event_low = event_body_with_delta(10, delta_low);
+    let event_low = validated(event_body_with_delta(10, delta_low));
 
     let mut delta_high = TxnDeltaV1::new();
     delta_high
@@ -319,7 +329,7 @@ fn label_dot_collision_is_deterministic() {
             lineage: None,
         }))
         .expect("unique label add");
-    let event_high = event_body_with_delta(11, delta_high);
+    let event_high = validated(event_body_with_delta(11, delta_high));
 
     apply_event(&mut state_a, &event_low).expect("apply low");
     apply_event(&mut state_a, &event_high).expect("apply high");
@@ -342,14 +352,14 @@ fn dep_dot_collision_is_deterministic() {
     let to_high = bead_id(3);
 
     let mut state_a = CanonicalState::new();
-    apply_event(&mut state_a, &sample_event_body(1)).expect("apply base from");
-    apply_event(&mut state_a, &sample_event_body(2)).expect("apply base to");
-    apply_event(&mut state_a, &sample_event_body(3)).expect("apply base to");
+    apply_event(&mut state_a, &validated(sample_event_body(1))).expect("apply base from");
+    apply_event(&mut state_a, &validated(sample_event_body(2))).expect("apply base to");
+    apply_event(&mut state_a, &validated(sample_event_body(3))).expect("apply base to");
 
     let mut state_b = CanonicalState::new();
-    apply_event(&mut state_b, &sample_event_body(1)).expect("apply base from");
-    apply_event(&mut state_b, &sample_event_body(2)).expect("apply base to");
-    apply_event(&mut state_b, &sample_event_body(3)).expect("apply base to");
+    apply_event(&mut state_b, &validated(sample_event_body(1))).expect("apply base from");
+    apply_event(&mut state_b, &validated(sample_event_body(2))).expect("apply base to");
+    apply_event(&mut state_b, &validated(sample_event_body(3))).expect("apply base to");
 
     let key_low = DepKey::new(from.clone(), to_low.clone(), DepKind::Blocks).expect("dep key");
     let key_high = DepKey::new(from.clone(), to_high.clone(), DepKind::Related).expect("dep key");
@@ -365,7 +375,7 @@ fn dep_dot_collision_is_deterministic() {
             dot,
         }))
         .expect("unique dep add");
-    let event_low = event_body_with_delta(12, delta_low);
+    let event_low = validated(event_body_with_delta(12, delta_low));
 
     let mut delta_high = TxnDeltaV1::new();
     delta_high
@@ -374,7 +384,7 @@ fn dep_dot_collision_is_deterministic() {
             dot,
         }))
         .expect("unique dep add");
-    let event_high = event_body_with_delta(13, delta_high);
+    let event_high = validated(event_body_with_delta(13, delta_high));
 
     apply_event(&mut state_a, &event_low).expect("apply low");
     apply_event(&mut state_a, &event_high).expect("apply high");
@@ -404,8 +414,8 @@ fn dep_delete_then_readd_restores_indexes() {
     let kind = DepKind::Blocks;
     let key = DepKey::new(from.clone(), to.clone(), kind).expect("valid dep key");
 
-    apply_event(&mut state, &sample_event_body(1)).expect("apply base 1");
-    apply_event(&mut state, &sample_event_body(2)).expect("apply base 2");
+    apply_event(&mut state, &validated(sample_event_body(1))).expect("apply base 1");
+    apply_event(&mut state, &validated(sample_event_body(2))).expect("apply base 2");
 
     let replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
 
@@ -419,7 +429,7 @@ fn dep_delete_then_readd_restores_indexes() {
             },
         }))
         .expect("unique dep add");
-    let add_event = event_body_with_delta(3, add_delta);
+    let add_event = validated(event_body_with_delta(3, add_delta));
     apply_event(&mut state, &add_event).expect("apply dep add");
 
     assert!(state.deps_from(&from).contains(&key));
@@ -449,7 +459,7 @@ fn dep_delete_then_readd_restores_indexes() {
             },
         }))
         .expect("unique dep remove");
-    let remove_event = event_body_with_delta(4, remove_delta);
+    let remove_event = validated(event_body_with_delta(4, remove_delta));
     apply_event(&mut state, &remove_event).expect("apply dep remove");
 
     assert!(state.deps_from(&from).is_empty());
@@ -467,7 +477,7 @@ fn dep_delete_then_readd_restores_indexes() {
             },
         }))
         .expect("unique dep add");
-    let readd_event = event_body_with_delta(5, readd_delta);
+    let readd_event = validated(event_body_with_delta(5, readd_delta));
     apply_event(&mut state, &readd_event).expect("apply dep re-add");
 
     assert_eq!(state.deps_from(&from), vec![key.clone()]);
