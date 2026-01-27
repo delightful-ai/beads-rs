@@ -119,7 +119,6 @@ impl From<Seq1> for u64 {
 pub enum HeadStatus {
     Genesis,
     Known([u8; 32]),
-    Unknown,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -227,7 +226,6 @@ fn head_key(head: HeadStatus) -> (u8, [u8; 32]) {
     match head {
         HeadStatus::Genesis => (0, [0u8; 32]),
         HeadStatus::Known(bytes) => (1, bytes),
-        HeadStatus::Unknown => (2, [0u8; 32]),
     }
 }
 
@@ -397,24 +395,10 @@ mod tests {
     }
 
     #[test]
-    fn watermark_rejects_unknown_at_genesis() {
-        let seq = Seq0::ZERO;
-        let err = Watermark::<Applied>::new(seq, HeadStatus::Unknown).unwrap_err();
-        assert_eq!(err, WatermarkError::UnexpectedHead { seq });
-    }
-
-    #[test]
-    fn watermark_rejects_unknown_for_nonzero_seq() {
-        let seq = Seq0::new(2);
-        let err = Watermark::<Applied>::new(seq, HeadStatus::Unknown).unwrap_err();
-        assert_eq!(err, WatermarkError::MissingHead { seq });
-    }
-
-    #[test]
     fn watermark_rejects_unknown_on_deserialize() {
         let raw = r#"{"seq":2,"head":"Unknown"}"#;
         let err = serde_json::from_str::<Watermark<Applied>>(raw).unwrap_err();
-        assert!(err.to_string().contains("head hash required"));
+        assert!(err.to_string().contains("unknown variant"));
     }
 
     #[test]
