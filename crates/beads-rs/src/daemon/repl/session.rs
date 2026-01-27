@@ -12,7 +12,7 @@ use crate::core::{
     Applied, DecodeError, Durable, ErrorPayload, EventFrameError, EventFrameV1, EventId,
     EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, PrevVerified,
     ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
-    VerifiedEvent, Watermark, WatermarkError, hash_event_body, verify_event_frame,
+    VerifiedEvent, Watermark, hash_event_body, verify_event_frame,
 };
 use crate::daemon::admission::{AdmissionController, AdmissionRejection};
 use crate::daemon::metrics;
@@ -22,7 +22,7 @@ use super::error::{ReplError, ReplErrorDetails};
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
     Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want,
-    WatermarkHeads, WatermarkMap,
+    WatermarkMap, WatermarkState,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,10 +122,8 @@ impl SessionState {
 
 #[derive(Clone, Debug)]
 pub struct WatermarkSnapshot {
-    pub durable: WatermarkMap,
-    pub durable_heads: WatermarkHeads,
-    pub applied: WatermarkMap,
-    pub applied_heads: WatermarkHeads,
+    pub durable: WatermarkState<Durable>,
+    pub applied: WatermarkState<Applied>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,7 +163,6 @@ pub enum SessionAction {
     PeerError(ErrorPayload),
 }
 
-type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
 type SessionResult<T> = Result<T, ReplError>;
 
 struct IngestUpdates<'a> {
@@ -657,9 +654,7 @@ impl Session {
             requested_namespaces: self.config.requested_namespaces.clone(),
             offered_namespaces: self.config.offered_namespaces.clone(),
             seen_durable: snapshot.durable,
-            seen_durable_heads: optional_heads(snapshot.durable_heads),
             seen_applied: Some(snapshot.applied),
-            seen_applied_heads: optional_heads(snapshot.applied_heads),
             capabilities: self.config.capabilities.clone(),
         }
     }
@@ -681,9 +676,7 @@ impl Session {
             welcome_nonce: self.next_nonce(),
             accepted_namespaces,
             receiver_seen_durable: snapshot.durable,
-            receiver_seen_durable_heads: optional_heads(snapshot.durable_heads),
             receiver_seen_applied: Some(snapshot.applied),
-            receiver_seen_applied_heads: optional_heads(snapshot.applied_heads),
             live_stream_enabled,
             max_frame_bytes: std::cmp::min(self.config.max_frame_bytes, hello.max_frame_bytes),
         }
@@ -701,16 +694,8 @@ impl Session {
         namespaces: &[NamespaceId],
     ) -> SessionResult<()> {
         let snapshot = store.watermark_snapshot(namespaces);
-        self.durable =
-            watermark_state_from_snapshot(&snapshot.durable, Some(&snapshot.durable_heads))
-                .map_err(|err| {
-                    internal_error(format!("invalid durable watermark snapshot: {err}"))
-                })?;
-        self.applied =
-            watermark_state_from_snapshot(&snapshot.applied, Some(&snapshot.applied_heads))
-                .map_err(|err| {
-                    internal_error(format!("invalid applied watermark snapshot: {err}"))
-                })?;
+        self.durable = snapshot.durable;
+        self.applied = snapshot.applied;
         Ok(())
     }
 
@@ -931,38 +916,6 @@ fn intersect_namespaces(a: &[NamespaceId], b: &[NamespaceId]) -> Vec<NamespaceId
     out
 }
 
-fn optional_heads(mut heads: WatermarkHeads) -> Option<WatermarkHeads> {
-    if heads.is_empty() {
-        None
-    } else {
-        heads.retain(|_, origins| !origins.is_empty());
-        if heads.is_empty() { None } else { Some(heads) }
-    }
-}
-
-fn watermark_state_from_snapshot<K>(
-    map: &WatermarkMap,
-    heads: Option<&WatermarkHeads>,
-) -> Result<WatermarkState<K>, WatermarkError> {
-    let mut out: WatermarkState<K> = BTreeMap::new();
-    for (namespace, origins) in map {
-        let ns_map = out.entry(namespace.clone()).or_default();
-        for (origin, seq) in origins {
-            let head = match heads
-                .and_then(|heads| heads.get(namespace))
-                .and_then(|origins| origins.get(origin))
-            {
-                Some(sha) => HeadStatus::Known(sha.0),
-                None if *seq == Seq0::ZERO => HeadStatus::Genesis,
-                None => return Err(WatermarkError::MissingHead { seq: *seq }),
-            };
-            let watermark = Watermark::new(*seq, head)?;
-            ns_map.insert(*origin, watermark);
-        }
-    }
-    Ok(out)
-}
-
 fn insert_want(want: &mut WatermarkMap, namespace: NamespaceId, origin: ReplicaId, from: Seq0) {
     let ns = want.entry(namespace).or_default();
     ns.entry(origin)
@@ -994,44 +947,14 @@ fn build_ack(
         return None;
     }
 
-    let (durable, durable_heads) = watermark_maps_from_state(durable_updates);
-    let (applied, applied_heads) = watermark_maps_from_state(applied_updates);
-
     Some(Ack {
-        durable,
-        durable_heads,
-        applied: if applied.is_empty() {
+        durable: durable_updates.clone(),
+        applied: if applied_updates.is_empty() {
             None
         } else {
-            Some(applied)
+            Some(applied_updates.clone())
         },
-        applied_heads,
     })
-}
-
-fn watermark_maps_from_state<K>(
-    state: &WatermarkState<K>,
-) -> (WatermarkMap, Option<WatermarkHeads>) {
-    let mut map: WatermarkMap = BTreeMap::new();
-    let mut heads: WatermarkHeads = BTreeMap::new();
-
-    for (namespace, origins) in state {
-        let ns_map = map.entry(namespace.clone()).or_default();
-        let ns_heads = heads.entry(namespace.clone()).or_default();
-        for (origin, watermark) in origins {
-            ns_map.insert(*origin, watermark.seq());
-            if let HeadStatus::Known(head) = watermark.head() {
-                ns_heads.insert(*origin, Sha256(head));
-            }
-        }
-    }
-
-    let heads = if heads.values().all(|origins| origins.is_empty()) {
-        None
-    } else {
-        Some(heads)
-    };
-    (map, heads)
 }
 
 fn repl_lagged_error(reason: ReplRejectReason, limits: &Limits) -> ReplError {
@@ -1331,7 +1254,7 @@ mod tests {
 
     use crate::core::{
         ActorId, EventBody, EventBytes, EventFrameV1, EventKindV1, HlcMax, NamespaceId, ReplicaId,
-        Seq0, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1, WatermarkError,
+        Seq0, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
         encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::repl::proto;
@@ -1353,54 +1276,20 @@ mod tests {
         }
 
         fn snapshot_for(&self, namespaces: &[NamespaceId]) -> WatermarkSnapshot {
-            let mut durable: WatermarkMap = BTreeMap::new();
-            let mut durable_heads: WatermarkHeads = BTreeMap::new();
-            let mut applied: WatermarkMap = BTreeMap::new();
-            let mut applied_heads: WatermarkHeads = BTreeMap::new();
+            let mut durable: WatermarkState<Durable> = BTreeMap::new();
+            let mut applied: WatermarkState<Applied> = BTreeMap::new();
 
             for ns in namespaces {
                 if let Some(origins) = self.durable.get(ns) {
-                    let ns_map = durable.entry(ns.clone()).or_default();
-                    let ns_heads = durable_heads.entry(ns.clone()).or_default();
-                    for (origin, wm) in origins {
-                        ns_map.insert(*origin, wm.seq());
-                        if let HeadStatus::Known(head) = wm.head() {
-                            ns_heads.insert(*origin, Sha256(head));
-                        }
-                    }
+                    durable.insert(ns.clone(), origins.clone());
                 }
                 if let Some(origins) = self.applied.get(ns) {
-                    let ns_map = applied.entry(ns.clone()).or_default();
-                    let ns_heads = applied_heads.entry(ns.clone()).or_default();
-                    for (origin, wm) in origins {
-                        ns_map.insert(*origin, wm.seq());
-                        if let HeadStatus::Known(head) = wm.head() {
-                            ns_heads.insert(*origin, Sha256(head));
-                        }
-                    }
+                    applied.insert(ns.clone(), origins.clone());
                 }
             }
 
-            WatermarkSnapshot {
-                durable,
-                durable_heads,
-                applied,
-                applied_heads,
-            }
+            WatermarkSnapshot { durable, applied }
         }
-    }
-
-    #[test]
-    fn watermark_snapshot_requires_heads_for_nonzero_seq() {
-        let ns = NamespaceId::parse("core").unwrap();
-        let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
-        let mut map: WatermarkMap = BTreeMap::new();
-        map.entry(ns.clone())
-            .or_default()
-            .insert(origin, Seq0::new(1));
-
-        let err = watermark_state_from_snapshot::<Durable>(&map, None).unwrap_err();
-        assert_eq!(err, WatermarkError::MissingHead { seq: Seq0::new(1) });
     }
 
     impl SessionStore for TestStore {
@@ -1520,9 +1409,7 @@ mod tests {
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
             seen_durable: BTreeMap::new(),
-            seen_durable_heads: None,
             seen_applied: None,
-            seen_applied_heads: None,
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
@@ -1557,11 +1444,14 @@ mod tests {
         session.begin_handshake(&store, 0).expect("hello action");
 
         let peer_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
-        let mut receiver_seen: WatermarkMap = BTreeMap::new();
+        let mut receiver_seen: WatermarkState<Durable> = BTreeMap::new();
         receiver_seen
             .entry(NamespaceId::core())
             .or_default()
-            .insert(peer_replica, Seq0::new(2));
+            .insert(
+                peer_replica,
+                Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+            );
 
         let welcome = proto::Welcome {
             protocol_version: PROTOCOL_VERSION_V1,
@@ -1571,9 +1461,7 @@ mod tests {
             welcome_nonce: 10,
             accepted_namespaces: vec![NamespaceId::core()],
             receiver_seen_durable: receiver_seen,
-            receiver_seen_durable_heads: None,
             receiver_seen_applied: None,
-            receiver_seen_applied_heads: None,
             live_stream_enabled: true,
             max_frame_bytes: 1024,
         };
@@ -1616,9 +1504,7 @@ mod tests {
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
             seen_durable: BTreeMap::new(),
-            seen_durable_heads: None,
             seen_applied: None,
-            seen_applied_heads: None,
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
@@ -1656,9 +1542,7 @@ mod tests {
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
             seen_durable: BTreeMap::new(),
-            seen_durable_heads: None,
             seen_applied: None,
-            seen_applied_heads: None,
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
@@ -1695,20 +1579,14 @@ mod tests {
             })
             .expect("ack");
 
-        let seq = ack
+        let watermark = ack
             .durable
             .get(&NamespaceId::core())
             .and_then(|m| m.get(&origin))
             .copied()
-            .unwrap_or(Seq0::ZERO);
-        assert_eq!(seq, Seq0::new(2));
-        let heads = ack.durable_heads.as_ref().expect("heads");
-        let head = heads
-            .get(&NamespaceId::core())
-            .and_then(|m| m.get(&origin))
-            .copied()
-            .expect("head");
-        assert_eq!(head, e2_sha);
+            .unwrap_or_else(Watermark::genesis);
+        assert_eq!(watermark.seq(), Seq0::new(2));
+        assert_eq!(watermark.head(), HeadStatus::Known(e2_sha.0));
     }
 
     #[test]
@@ -1732,9 +1610,7 @@ mod tests {
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
             seen_durable: BTreeMap::new(),
-            seen_durable_heads: None,
             seen_applied: None,
-            seen_applied_heads: None,
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
@@ -1813,9 +1689,7 @@ mod tests {
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
             seen_durable: BTreeMap::new(),
-            seen_durable_heads: None,
             seen_applied: None,
-            seen_applied_heads: None,
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
@@ -1890,9 +1764,7 @@ mod tests {
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
             seen_durable: BTreeMap::new(),
-            seen_durable_heads: None,
             seen_applied: None,
-            seen_applied_heads: None,
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
@@ -1947,9 +1819,7 @@ mod tests {
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
             seen_durable: BTreeMap::new(),
-            seen_durable_heads: None,
             seen_applied: None,
-            seen_applied_heads: None,
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
