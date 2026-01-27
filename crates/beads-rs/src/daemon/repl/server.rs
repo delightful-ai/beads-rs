@@ -16,8 +16,8 @@ use crate::core::error::details::{
     BootstrapRequiredDetails, SnapshotRangeReason, UnknownReplicaDetails,
 };
 use crate::core::{
-    ErrorPayload, EventFrameV1, Limits, NamespaceId, NamespacePolicy, ProtocolErrorCode, ReplicaId,
-    ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    Durable, ErrorPayload, EventFrameV1, Limits, NamespaceId, NamespacePolicy, ProtocolErrorCode,
+    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
@@ -27,7 +27,9 @@ use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
-use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap};
+use crate::daemon::repl::proto::{
+    Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap, WatermarkState,
+};
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, PeerAckTable, ReplEnvelope, ReplMessage, Session,
@@ -914,30 +916,23 @@ fn update_peer_ack(
 ) -> Result<(), Box<crate::daemon::repl::PeerAckError>> {
     let now_ms = now_ms();
     let mut table = peer_acks.lock().expect("peer ack lock poisoned");
-    table.update_peer(
-        peer,
-        &ack.durable,
-        ack.durable_heads.as_ref(),
-        ack.applied.as_ref(),
-        ack.applied_heads.as_ref(),
-        now_ms,
-    )?;
+    table.update_peer(peer, &ack.durable, ack.applied.as_ref(), now_ms)?;
     let namespaces: Vec<NamespaceId> = ack.durable.keys().cloned().collect();
     let snapshot = store.watermark_snapshot(&namespaces);
     emit_peer_lag(peer, &snapshot.durable, &ack.durable);
     Ok(())
 }
 
-fn emit_peer_lag(peer: ReplicaId, local: &WatermarkMap, ack: &WatermarkMap) {
+fn emit_peer_lag(peer: ReplicaId, local: &WatermarkState<Durable>, ack: &WatermarkState<Durable>) {
     for (namespace, origins) in local {
         let mut max_lag = 0u64;
         let acked = ack.get(namespace);
-        for (origin, local_seq) in origins {
+        for (origin, local_wm) in origins {
             let acked_seq = acked
                 .and_then(|map| map.get(origin))
-                .copied()
+                .map(|wm| wm.seq())
                 .unwrap_or(Seq0::ZERO);
-            let lag = local_seq.get().saturating_sub(acked_seq.get());
+            let lag = local_wm.seq().get().saturating_sub(acked_seq.get());
             max_lag = max_lag.max(lag);
         }
         metrics::set_repl_peer_lag(peer, namespace, max_lag);
@@ -1056,7 +1051,7 @@ mod tests {
         Watermark,
     };
     use crate::daemon::broadcast::BroadcasterLimits;
-    use crate::daemon::repl::proto::{Capabilities, Hello, WatermarkHeads, WatermarkMap};
+    use crate::daemon::repl::proto::{Capabilities, Hello};
     use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
 
     #[derive(Default)]
@@ -1065,10 +1060,8 @@ mod tests {
     impl SessionStore for TestStore {
         fn watermark_snapshot(&self, _namespaces: &[NamespaceId]) -> WatermarkSnapshot {
             WatermarkSnapshot {
-                durable: WatermarkMap::new(),
-                durable_heads: WatermarkHeads::new(),
-                applied: WatermarkMap::new(),
-                applied_heads: WatermarkHeads::new(),
+                durable: BTreeMap::new(),
+                applied: BTreeMap::new(),
             }
         }
 
@@ -1143,10 +1136,8 @@ mod tests {
             max_frame_bytes: limits.max_frame_bytes as u32,
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
-            seen_durable: WatermarkMap::new(),
-            seen_durable_heads: None,
-            seen_applied: Some(WatermarkMap::new()),
-            seen_applied_heads: None,
+            seen_durable: BTreeMap::new(),
+            seen_applied: Some(BTreeMap::new()),
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
