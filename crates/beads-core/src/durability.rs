@@ -367,17 +367,13 @@ impl DurabilityReceipt {
         )
     }
 
-    pub fn replicated_pending(
-        store: StoreIdentity,
-        txn_id: TxnId,
-        event_ids: Vec<EventId>,
-        local_fsync: LocalFsyncProof,
-        min_seen: Watermarks<Applied>,
+    pub fn with_replicated_pending(
+        self,
         requested: NonZeroU32,
         acked_by: Vec<ReplicaId>,
     ) -> Result<Self, ReceiptBuildError> {
         let durability_proof = DurabilityProofV1 {
-            local_fsync,
+            local_fsync: self.durability_proof.local_fsync,
             replicated: Some(ReplicatedProof {
                 k: requested,
                 acked_by,
@@ -385,27 +381,23 @@ impl DurabilityReceipt {
         };
         let outcome = DurabilityOutcome::pending(DurabilityClass::ReplicatedFsync { k: requested });
         Self::new_checked(
-            store,
-            txn_id,
-            event_ids,
+            self.store,
+            self.txn_id,
+            self.event_ids,
             durability_proof,
             outcome,
-            min_seen,
+            self.min_seen,
         )
     }
 
-    pub fn replicated_achieved(
-        store: StoreIdentity,
-        txn_id: TxnId,
-        event_ids: Vec<EventId>,
-        local_fsync: LocalFsyncProof,
-        min_seen: Watermarks<Applied>,
+    pub fn with_replicated_achieved(
+        self,
         requested: NonZeroU32,
         achieved: NonZeroU32,
         acked_by: Vec<ReplicaId>,
     ) -> Result<Self, ReceiptBuildError> {
         let durability_proof = DurabilityProofV1 {
-            local_fsync,
+            local_fsync: self.durability_proof.local_fsync,
             replicated: Some(ReplicatedProof {
                 k: achieved,
                 acked_by,
@@ -416,46 +408,12 @@ impl DurabilityReceipt {
             DurabilityClass::ReplicatedFsync { k: achieved },
         );
         Self::new_checked(
-            store,
-            txn_id,
-            event_ids,
+            self.store,
+            self.txn_id,
+            self.event_ids,
             durability_proof,
             outcome,
-            min_seen,
-        )
-    }
-
-    pub fn with_replicated_pending(
-        self,
-        requested: NonZeroU32,
-        acked_by: Vec<ReplicaId>,
-    ) -> Result<Self, ReceiptBuildError> {
-        Self::replicated_pending(
-            self.store,
-            self.txn_id,
-            self.event_ids,
-            self.durability_proof.local_fsync,
             self.min_seen,
-            requested,
-            acked_by,
-        )
-    }
-
-    pub fn with_replicated_achieved(
-        self,
-        requested: NonZeroU32,
-        achieved: NonZeroU32,
-        acked_by: Vec<ReplicaId>,
-    ) -> Result<Self, ReceiptBuildError> {
-        Self::replicated_achieved(
-            self.store,
-            self.txn_id,
-            self.event_ids,
-            self.durability_proof.local_fsync,
-            self.min_seen,
-            requested,
-            achieved,
-            acked_by,
         )
     }
 
@@ -831,18 +789,15 @@ mod tests {
             StoreIdentity::new(StoreId::new(Uuid::from_bytes([10u8; 16])), StoreEpoch::ZERO);
         let txn_id = TxnId::new(Uuid::from_bytes([11u8; 16]));
 
-        let pending = DurabilityReceipt::replicated_pending(
+        let pending = DurabilityReceipt::local_fsync(
             store,
             txn_id,
             vec![event_id.clone()],
-            LocalFsyncProof {
-                at_ms: 10,
-                durable_seq: Watermarks::<Durable>::new(),
-            },
+            10,
+            Watermarks::<Durable>::new(),
             Watermarks::<Applied>::new(),
-            NonZeroU32::new(2).unwrap(),
-            vec![origin],
         )
+        .with_replicated_pending(NonZeroU32::new(2).unwrap(), vec![origin])
         .expect("pending receipt");
 
         let mut min_seen = Watermarks::<Applied>::new();
@@ -850,15 +805,15 @@ mod tests {
             .observe_at_least(&ns, &origin, Seq0::new(1), HeadStatus::Known([1u8; 32]))
             .unwrap();
 
-        let achieved = DurabilityReceipt::replicated_achieved(
+        let achieved = DurabilityReceipt::local_fsync(
             store,
             txn_id,
             vec![event_id],
-            LocalFsyncProof {
-                at_ms: 20,
-                durable_seq: Watermarks::<Durable>::new(),
-            },
+            20,
+            Watermarks::<Durable>::new(),
             min_seen,
+        )
+        .with_replicated_achieved(
             NonZeroU32::new(2).unwrap(),
             NonZeroU32::new(2).unwrap(),
             vec![origin, other_replica],
