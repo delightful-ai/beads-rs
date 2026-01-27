@@ -21,9 +21,9 @@ use beads_rs::{
     Limits, NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
     TxnDeltaV1, TxnId, Watermark,
 };
+use beads_stateright_models::ordered_reliable_link::{ActorWrapper, MsgWrapper};
 use stateright::actor::{
     Actor, ActorModel, Envelope, Id, LossyNetwork, Network, Out, model_peers, model_timeout,
-    ordered_reliable_link::ActorWrapper, ordered_reliable_link::MsgWrapper,
 };
 use stateright::{
     Checker, Expectation, Model, Representative, Rewrite, RewritePlan, report::WriteReporter,
@@ -1164,9 +1164,16 @@ where
         )
 }
 
-fn add_base_properties(
-    model: ActorModel<ReplActor, (), History>,
-) -> ActorModel<ReplActor, (), History> {
+fn add_node_properties<A, F>(
+    model: ActorModel<A, (), History>,
+    state_of: F,
+) -> ActorModel<A, (), History>
+where
+    A: Actor,
+    A::Msg: Ord,
+    A::Timer: Ord,
+    F: Fn(&A::State) -> &NodeState + Copy + 'static,
+{
     let model = add_history_properties(model);
     model
         .property(
@@ -1174,6 +1181,7 @@ fn add_base_properties(
             "ack never exceeds contiguous seen",
             |_, s| {
                 s.actor_states.iter().all(|state| {
+                    let state = state_of(state);
                     state.ack_durable.iter().all(|(key, ack)| {
                         let seen = state
                             .durable
@@ -1187,6 +1195,7 @@ fn add_base_properties(
         )
         .property(Expectation::Always, "seen map is monotonic", |_, s| {
             s.actor_states.iter().all(|state| {
+                let state = state_of(state);
                 state.durable.iter().all(|(key, wm)| {
                     state.durable_max.get(key).copied().unwrap_or(Seq0::ZERO) == wm.seq()
                 })
@@ -1194,6 +1203,7 @@ fn add_base_properties(
         })
         .property(Expectation::Always, "ack map is monotonic", |_, s| {
             s.actor_states.iter().all(|state| {
+                let state = state_of(state);
                 state
                     .ack_durable
                     .iter()
@@ -1205,6 +1215,7 @@ fn add_base_properties(
             "contiguous seen implies applied prefix",
             |_, s| {
                 s.actor_states.iter().all(|state| {
+                    let state = state_of(state);
                     state.durable.iter().all(|(key, wm)| {
                         let seen = wm.seq().get();
                         (1..=seen).all(|seq| {
@@ -1222,7 +1233,7 @@ fn add_base_properties(
             |_, s| {
                 s.actor_states
                     .iter()
-                    .all(|state| match state.last_effect.as_ref() {
+                    .all(|state| match state_of(state).last_effect.as_ref() {
                         Some(LastEffect {
                             kind: LastEffectKind::Applied { seq, prev_seen, .. },
                             ..
@@ -1236,6 +1247,7 @@ fn add_base_properties(
             "buffered items are beyond next expected",
             |_, s| {
                 s.actor_states.iter().all(|state| {
+                    let state = state_of(state);
                     let snapshot = state.gap.model_snapshot();
                     snapshot.origins.iter().all(|origin| {
                         let durable_seq = origin.durable.seq.get();
@@ -1253,6 +1265,7 @@ fn add_base_properties(
             "buffer stays within bounds unless closed",
             |_, s| {
                 s.actor_states.iter().all(|state| {
+                    let state = state_of(state);
                     if state.errored {
                         return true;
                     }
@@ -1268,9 +1281,10 @@ fn add_base_properties(
             Expectation::Always,
             "equivocation implies hard close",
             |_, s| {
-                s.actor_states
-                    .iter()
-                    .all(|state| !state.equivocation_seen || state.errored)
+                s.actor_states.iter().all(|state| {
+                    let state = state_of(state);
+                    !state.equivocation_seen || state.errored
+                })
             },
         )
         .property(
@@ -1279,7 +1293,7 @@ fn add_base_properties(
             |_, s| {
                 s.actor_states
                     .iter()
-                    .all(|state| match state.last_effect.as_ref() {
+                    .all(|state| match state_of(state).last_effect.as_ref() {
                         Some(LastEffect {
                             kind: LastEffectKind::Duplicate { .. },
                             changed,
@@ -1294,9 +1308,10 @@ fn add_base_properties(
             |_, s| {
                 s.actor_states
                     .iter()
-                    .all(|state| match state.last_want.as_ref() {
+                    .all(|state| match state_of(state).last_want.as_ref() {
                         None => true,
                         Some(WantInfo { key, from }) => {
+                            let state = state_of(state);
                             let seen = state
                                 .durable
                                 .get(key)
@@ -1319,6 +1334,7 @@ fn add_base_properties(
             |_, s| {
                 s.actor_states.iter().enumerate().all(|(ix, state)| {
                     let id = Id::from(ix);
+                    let state = state_of(state);
                     state.applied.iter().all(|(key, wm)| {
                         let delivered = s
                             .history
@@ -1333,16 +1349,23 @@ fn add_base_properties(
         )
         .property(Expectation::Sometimes, "can fully catch up", |_, s| {
             s.actor_states.iter().all(|state| {
+                let state = state_of(state);
                 state.durable.len() == s.actor_states.len().saturating_sub(1)
                     && state.durable.values().all(|wm| wm.seq().get() >= MAX_SEQ)
             })
         })
 }
 
+fn add_base_properties(
+    model: ActorModel<ReplActor, (), History>,
+) -> ActorModel<ReplActor, (), History> {
+    add_node_properties(model, |state| state)
+}
+
 fn add_orl_properties(
     model: ActorModel<ActorWrapper<ReplActor>, (), History>,
 ) -> ActorModel<ActorWrapper<ReplActor>, (), History> {
-    add_history_properties(model)
+    add_node_properties(model, |state| state.wrapped_state())
 }
 
 fn build_model(
