@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::core::{
-    DurabilityClass, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRole,
-    ReplicaRoster, ReplicateMode, Seq0, Seq1,
+    DurabilityClass, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaDurabilityRole,
+    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, Seq1,
 };
 use crate::daemon::ops::OpError;
 use crate::daemon::repl::{PeerAckTable, QuorumOutcome};
@@ -167,10 +167,10 @@ impl DurabilityCoordinator {
             if entry.replica_id == self.local_replica_id {
                 continue;
             }
-            if !entry.durability_eligible {
+            if !entry.durability_eligible() {
                 continue;
             }
-            if !role_allows_policy(entry.role, policy.replicate_mode) {
+            if !role_allows_policy(entry.role(), policy.replicate_mode) {
                 continue;
             }
             if let Some(allowed) = &entry.allowed_namespaces
@@ -277,24 +277,21 @@ mod tests {
             ReplicaEntry {
                 replica_id: local,
                 name: "local".to_string(),
-                role: ReplicaRole::Anchor,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::anchor(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
             ReplicaEntry {
                 replica_id: peer_a,
                 name: "peer-a".to_string(),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
             ReplicaEntry {
                 replica_id: peer_b,
                 name: "peer-b".to_string(),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
@@ -359,16 +356,14 @@ mod tests {
             ReplicaEntry {
                 replica_id: local,
                 name: "local".to_string(),
-                role: ReplicaRole::Anchor,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::anchor(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
             ReplicaEntry {
                 replica_id: peer,
                 name: "peer".to_string(),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
@@ -402,16 +397,14 @@ mod tests {
             ReplicaEntry {
                 replica_id: local,
                 name: "local".to_string(),
-                role: ReplicaRole::Anchor,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::anchor(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
             ReplicaEntry {
                 replica_id: peer,
                 name: "peer".to_string(),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             },
