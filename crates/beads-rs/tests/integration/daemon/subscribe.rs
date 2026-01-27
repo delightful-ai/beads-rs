@@ -29,7 +29,7 @@ fn subscribe_streams_events_in_order() {
 
     let required = require_min_seen(&namespace, origin, start_seq);
     let read = ReadConsistency {
-        namespace: Some(namespace.as_str().to_string()),
+        namespace: Some(namespace.clone()),
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
@@ -66,7 +66,7 @@ fn subscribe_gates_on_require_min_seen() {
     let required_seq = start_seq + 1;
     let required = require_min_seen(&namespace, origin, required_seq);
     let read = ReadConsistency {
-        namespace: Some(namespace.as_str().to_string()),
+        namespace: Some(namespace.clone()),
         require_min_seen: Some(required.clone()),
         wait_timeout_ms: None,
     };
@@ -97,7 +97,7 @@ fn subscribe_gates_on_require_min_seen() {
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);
 
     let read = ReadConsistency {
-        namespace: Some(namespace.as_str().to_string()),
+        namespace: Some(namespace.clone()),
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
@@ -132,7 +132,7 @@ fn subscribe_multiple_clients_receive_same_events() {
 
     let required = require_min_seen(&namespace, origin, start_seq);
     let read = ReadConsistency {
-        namespace: Some(namespace.as_str().to_string()),
+        namespace: Some(namespace.clone()),
         require_min_seen: Some(required),
         wait_timeout_ms: None,
     };
