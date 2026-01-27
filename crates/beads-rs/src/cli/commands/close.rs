@@ -18,7 +18,7 @@ pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
     let req = Request::Close {
         ctx: ctx.mutation_ctx(),
         payload: ClosePayload {
-            id: id.as_str().to_string(),
+            id: id.clone(),
             reason: args.reason.clone(),
             on_branch: None,
         },

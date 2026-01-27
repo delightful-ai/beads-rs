@@ -48,11 +48,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
                 })?;
             let req = Request::AddDep {
                 ctx: ctx.mutation_ctx(),
-                payload: DepPayload {
-                    from: from.as_str().to_string(),
-                    to: to.as_str().to_string(),
-                    kind,
-                },
+                payload: DepPayload { from, to, kind },
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -67,11 +63,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
                 })?;
             let req = Request::RemoveDep {
                 ctx: ctx.mutation_ctx(),
-                payload: DepPayload {
-                    from: from.as_str().to_string(),
-                    to: to.as_str().to_string(),
-                    kind,
-                },
+                payload: DepPayload { from, to, kind },
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -80,9 +72,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
             let id = normalize_bead_id(&id)?;
             let req = Request::DepTree {
                 ctx: ctx.read_ctx(),
-                payload: IdPayload {
-                    id: id.as_str().to_string(),
-                },
+                payload: IdPayload { id },
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)

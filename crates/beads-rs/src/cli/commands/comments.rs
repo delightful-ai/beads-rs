@@ -43,10 +43,11 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
                 })
             })?;
             let id_for_render = normalize_bead_id(&id)?;
-            let id = id_for_render.as_str().to_string();
             let req = Request::Notes {
                 ctx: ctx.read_ctx(),
-                payload: IdPayload { id },
+                payload: IdPayload {
+                    id: id_for_render.clone(),
+                },
             };
             let ok = send(&req)?;
             if ctx.json {
@@ -80,7 +81,7 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
     let req = Request::AddNote {
         ctx: ctx.mutation_ctx(),
         payload: AddNotePayload {
-            id: id.as_str().to_string(),
+            id: id.clone(),
             content,
         },
     };

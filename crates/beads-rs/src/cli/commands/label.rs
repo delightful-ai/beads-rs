@@ -51,7 +51,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 let req = Request::AddLabels {
                     ctx: ctx.mutation_ctx(),
                     payload: LabelsPayload {
-                        id: id_str.clone(),
+                        id: id.clone(),
                         labels: vec![label.clone()],
                     },
                 };
@@ -82,7 +82,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 let req = Request::RemoveLabels {
                     ctx: ctx.mutation_ctx(),
                     payload: LabelsPayload {
-                        id: id_str.clone(),
+                        id: id.clone(),
                         labels: vec![label.clone()],
                     },
                 };

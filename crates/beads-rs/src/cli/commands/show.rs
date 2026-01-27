@@ -23,9 +23,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Show {
         ctx: ctx.read_ctx(),
-        payload: IdPayload {
-            id: id.as_str().to_string(),
-        },
+        payload: IdPayload { id: id.clone() },
     };
     let ok = send(&req)?;
 
@@ -34,9 +32,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             // Fetch deps for richer show output.
             let deps_payload = send(&Request::Deps {
                 ctx: ctx.read_ctx(),
-                payload: IdPayload {
-                    id: view.id.clone(),
-                },
+                payload: IdPayload { id: id.clone() },
             })?;
             let (incoming_edges, outgoing_edges) = match deps_payload {
                 ResponsePayload::Query(QueryResult::Deps { incoming, outgoing }) => {
@@ -55,9 +51,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             // Human mode: fetch notes and build richer display
             let notes_payload = send(&Request::Notes {
                 ctx: ctx.read_ctx(),
-                payload: IdPayload {
-                    id: view.id.clone(),
-                },
+                payload: IdPayload { id: id.clone() },
             })?;
             let notes = match notes_payload {
                 ResponsePayload::Query(QueryResult::Notes(n)) => n,

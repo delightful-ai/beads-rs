@@ -18,7 +18,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ClaimArgs) -> Result<()> {
     let req = Request::Claim {
         ctx: ctx.mutation_ctx(),
         payload: ClaimPayload {
-            id: id.as_str().to_string(),
+            id: id.clone(),
             lease_secs: args.lease_secs,
         },
     };
