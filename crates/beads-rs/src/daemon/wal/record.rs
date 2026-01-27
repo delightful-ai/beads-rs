@@ -312,7 +312,7 @@ impl<State> Record<State> {
     }
 }
 
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum RecordVerifyError {
     #[error(transparent)]
     HeaderMismatch(#[from] RecordHeaderMismatch),
