@@ -493,9 +493,7 @@ impl TestNode {
             let _ = table.update_peer(
                 peer,
                 &ack.durable,
-                ack.durable_heads.as_ref(),
                 ack.applied.as_ref(),
-                ack.applied_heads.as_ref(),
                 crate::core::WallClock::now().0,
             );
         });

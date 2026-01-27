@@ -230,8 +230,10 @@ fn role_allows_policy(role: ReplicaRole, mode: ReplicateMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{NamespaceId, Seq0, StoreEpoch, StoreId, StoreIdentity};
-    use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
+    use crate::core::{
+        Durable, HeadStatus, NamespaceId, Seq0, StoreEpoch, StoreId, StoreIdentity, Watermark,
+    };
+    use crate::daemon::repl::proto::WatermarkState;
     use uuid::Uuid;
 
     fn replica(seed: u128) -> ReplicaId {
@@ -296,25 +298,20 @@ mod tests {
         let coordinator =
             DurabilityCoordinator::new(local, policy_peers(), Some(roster), peer_acks.clone());
 
-        let mut durable = WatermarkMap::new();
-        durable
-            .entry(namespace.clone())
-            .or_default()
-            .insert(local, Seq0::new(2));
-        let mut durable_heads = WatermarkHeads::new();
-        durable_heads
-            .entry(namespace.clone())
-            .or_default()
-            .insert(local, crate::core::Sha256([2u8; 32]));
+        let mut durable: WatermarkState<Durable> = std::collections::BTreeMap::new();
+        durable.entry(namespace.clone()).or_default().insert(
+            local,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
         peer_acks
             .lock()
             .unwrap()
-            .update_peer(peer_a, &durable, Some(&durable_heads), None, None, 10)
+            .update_peer(peer_a, &durable, None, 10)
             .unwrap();
         peer_acks
             .lock()
             .unwrap()
-            .update_peer(peer_b, &durable, Some(&durable_heads), None, None, 12)
+            .update_peer(peer_b, &durable, None, 12)
             .unwrap();
 
         let store = StoreIdentity::new(StoreId::new(Uuid::from_u128(100)), StoreEpoch::ZERO);
