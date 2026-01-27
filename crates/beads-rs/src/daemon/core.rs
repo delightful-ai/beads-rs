@@ -1669,7 +1669,15 @@ impl Daemon {
             for event in &batch {
                 let apply_start = Instant::now();
                 let apply_result = {
-                    let state = store.state.ensure_namespace(namespace.clone());
+                    let state = if namespace.is_core() {
+                        store.state.core_mut()
+                    } else {
+                        let non_core = namespace
+                            .clone()
+                            .try_non_core()
+                            .expect("non-core namespace");
+                        store.state.ensure_namespace(non_core)
+                    };
                     apply_event(state, &event.body)
                 };
                 let outcome = match apply_result {
@@ -2405,7 +2413,15 @@ pub(crate) fn replay_event_wal(
             ))
         })?;
 
-        let state_for_namespace = state.ensure_namespace(namespace.clone());
+        let state_for_namespace = if namespace.is_core() {
+            state.core_mut()
+        } else {
+            let non_core = namespace
+                .clone()
+                .try_non_core()
+                .expect("non-core namespace");
+            state.ensure_namespace(non_core)
+        };
         let mut from_seq_excl = Seq0::ZERO;
         while from_seq_excl.get() < row.applied_seq {
             let items = wal_index.reader().iter_from(
@@ -3453,7 +3469,7 @@ mod tests {
             .expect("load repo");
 
         let store = daemon.stores.get(&store_id).expect("store runtime");
-        let core = store.state.get(&NamespaceId::core()).expect("core state");
+        let core = store.state.core();
         assert!(core.get_live(&bead_id).is_some());
 
         let durable = store
@@ -3782,9 +3798,7 @@ mod tests {
 
         {
             let store = daemon.stores.get_mut(&store_id).unwrap();
-            store
-                .state
-                .set_namespace_state(NamespaceId::core(), local_state);
+            store.state.set_core_state(local_state);
         }
         {
             let repo_state = daemon.git_lanes.get_mut(&store_id).unwrap();

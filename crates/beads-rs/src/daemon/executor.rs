@@ -225,7 +225,11 @@ impl Daemon {
         };
         let draft = {
             let store_runtime = self.store_runtime_mut(&proof)?;
-            let state_snapshot = store_runtime.state.get_or_default(&namespace);
+            let state_snapshot = if namespace.is_core() {
+                store_runtime.state.core().clone()
+            } else {
+                store_runtime.state.get_or_default(&namespace)
+            };
             let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, store_runtime);
             engine.plan(
                 &state_snapshot,
@@ -400,7 +404,15 @@ impl Daemon {
             let (store_runtime, repo_state) = self.store_and_lane_mut(&proof)?;
             let apply_start = Instant::now();
             let apply_result = {
-                let state = store_runtime.state.ensure_namespace(namespace.clone());
+                let state = if namespace.is_core() {
+                    store_runtime.state.core_mut()
+                } else {
+                    let non_core = namespace
+                        .clone()
+                        .try_non_core()
+                        .expect("non-core namespace");
+                    store_runtime.state.ensure_namespace(non_core)
+                };
                 apply_event(state, &sequenced.event_body)
             };
             let outcome = match apply_result {

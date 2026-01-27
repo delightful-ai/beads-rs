@@ -74,7 +74,7 @@ impl StoreState {
         self.other
             .values()
             .filter_map(|state| state.max_write_stamp())
-            .chain(self.core.max_write_stamp().into_iter())
+            .chain(self.core.max_write_stamp())
             .max()
     }
 }
@@ -94,8 +94,10 @@ mod tests {
         let state = StoreState::new();
         let core = NamespaceId::core();
         assert_eq!(core.as_str(), "core");
-        assert!(state.get(&core).is_some());
-        assert_eq!(state.core(), &CanonicalState::default());
+        let core_state = state.core();
+        assert_eq!(core_state.live_count(), 0);
+        assert_eq!(core_state.tombstone_count(), 0);
+        assert_eq!(core_state.dep_count(), 0);
     }
 
     #[test]
