@@ -502,9 +502,7 @@ mod tests {
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{
-        ActorId, CanonicalState, Dot, ReplicaDurabilityRole, ReplicaEntry, ReplicaRole, Seq0,
-    };
+    use crate::core::{ActorId, CanonicalState, Dot, ReplicaDurabilityRole, ReplicaEntry, Seq0};
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(

@@ -1304,7 +1304,7 @@ mod tests {
             replicas: vec![crate::core::ReplicaEntry {
                 replica_id: roster_replica,
                 name: "alpha".to_string(),
-                role: ReplicaDurabilityRole::peer(false),
+                role: crate::core::ReplicaDurabilityRole::peer(false),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             }],

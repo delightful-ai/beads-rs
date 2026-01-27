@@ -1125,7 +1125,7 @@ mod tests {
     use crate::core::{
         ActorId, Applied, BeadId, BeadType, ClientRequestId, DurabilityClass, DurabilityReceipt,
         Durable, EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
-        ReplicaDurabilityRole, ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
+        ReplicaDurabilityRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
         StoreIdentity, TxnId, Watermark, Watermarks,
     };
     use crate::daemon::core::insert_store_for_tests;
