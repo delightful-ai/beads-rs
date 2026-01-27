@@ -161,7 +161,6 @@ impl DiskEventWal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use tempfile::TempDir;
     use uuid::Uuid;
 

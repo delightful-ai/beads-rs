@@ -961,7 +961,6 @@ fn read_segment_header(path: &Path) -> Result<(SegmentHeader, u64), WalReplayErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
@@ -1069,6 +1068,7 @@ mod tests {
             origin,
         );
         let body = body.into_validated(&limits).expect("validated");
+        let origin_seq = body.origin_seq;
         let bytes = encode_event_body_canonical(body.as_ref()).unwrap();
         let expected_sha = sha256_bytes(bytes.as_ref()).0;
 
@@ -1136,7 +1136,7 @@ mod tests {
                 let info = info.as_ref();
                 assert_eq!(info.namespace, namespace);
                 assert_eq!(info.origin, origin);
-                assert_eq!(info.seq, body.origin_seq);
+                assert_eq!(info.seq, origin_seq);
                 assert_eq!(info.expected, expected_sha);
                 assert_ne!(info.got, expected_sha);
             }
