@@ -12,16 +12,15 @@ use super::core::{
 };
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
-    ErrorPayload, IntoErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response,
-    ResponseExt, ResponsePayload,
+    ErrorPayload, MutationMeta, ReadConsistency, Request, Response, ResponseExt, ResponsePayload,
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
-    ActorId, BeadId, CanonicalState, CliErrorCode, ClientRequestId, CoreError, DurabilityClass,
-    ErrorCode, NamespaceId, ProtocolErrorCode, TraceId, WallClock,
+    ActorId, CanonicalState, CliErrorCode, DurabilityClass, ErrorCode, NamespaceId,
+    ProtocolErrorCode, TraceId, WallClock,
 };
 use crate::git::{SyncError, SyncOutcome};
 
@@ -444,11 +443,7 @@ impl Daemon {
             Request::Show { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match BeadId::parse(&payload.id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
-                };
-                self.query_show(&repo, &id, read, git_tx).into()
+                self.query_show(&repo, &payload.id, read, git_tx).into()
             }
 
             Request::ShowMultiple { ctx, payload } => {
@@ -474,11 +469,7 @@ impl Daemon {
             Request::DepTree { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match BeadId::parse(&payload.id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
-                };
-                self.query_dep_tree(&repo, &id, read, git_tx).into()
+                self.query_dep_tree(&repo, &payload.id, read, git_tx).into()
             }
 
             Request::DepCycles { ctx, .. } => {
@@ -490,21 +481,13 @@ impl Daemon {
             Request::Deps { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match BeadId::parse(&payload.id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
-                };
-                self.query_deps(&repo, &id, read, git_tx).into()
+                self.query_deps(&repo, &payload.id, read, git_tx).into()
             }
 
             Request::Notes { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match BeadId::parse(&payload.id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
-                };
-                self.query_notes(&repo, &id, read, git_tx).into()
+                self.query_notes(&repo, &payload.id, read, git_tx).into()
             }
 
             Request::Blocked { ctx, .. } => {
@@ -543,16 +526,7 @@ impl Daemon {
             Request::Deleted { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match payload.id {
-                    Some(s) => Some(match BeadId::parse(&s) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            return Response::err_from(invalid_id_payload(e)).into();
-                        }
-                    }),
-                    None => None,
-                };
-                self.query_deleted(&repo, payload.since_ms, id.as_ref(), read, git_tx)
+                self.query_deleted(&repo, payload.since_ms, payload.id.as_ref(), read, git_tx)
                     .into()
             }
 
@@ -856,15 +830,4 @@ impl LoadedStore<'_> {
 
 fn error_payload(code: ErrorCode, message: &str, retryable: bool) -> ErrorPayload {
     ErrorPayload::new(code, message, retryable)
-}
-
-fn invalid_id_payload(err: CoreError) -> ErrorPayload {
-    match err {
-        CoreError::InvalidId(id) => IpcError::from(id).into_error_payload(),
-        other => ErrorPayload::new(
-            ProtocolErrorCode::InternalError.into(),
-            other.to_string(),
-            false,
-        ),
-    }
 }

@@ -157,18 +157,14 @@ impl Daemon {
     pub fn query_show_multiple(
         &mut self,
         repo: &Path,
-        ids: &[String],
+        ids: &[BeadId],
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
             let mut summaries = Vec::with_capacity(ids.len());
-            for id_str in ids {
-                let id = match BeadId::parse(id_str) {
-                    Ok(id) => id,
-                    Err(_) => continue, // Skip invalid IDs silently
-                };
-                if let Some(view) = ctx.state.bead_view(&id) {
+            for id in ids {
+                if let Some(view) = ctx.state.bead_view(id) {
                     summaries.push(IssueSummary::from_view(ctx.read.namespace(), &view));
                 }
             }
