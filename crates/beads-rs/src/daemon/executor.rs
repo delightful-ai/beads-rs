@@ -875,7 +875,6 @@ fn plan_local_append(
     let prev_sha = match durable_watermark.head() {
         HeadStatus::Genesis => None,
         HeadStatus::Known(sha) => Some(sha),
-        HeadStatus::Unknown => unreachable!("durable watermark head should be known"),
     };
     let sequenced = engine.build_event(draft, store, namespace, origin_replica_id, origin_seq)?;
 
