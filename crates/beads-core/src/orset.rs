@@ -229,10 +229,6 @@ impl<V: OrSetValue> OrSet<V> {
         }
     }
 
-    pub(crate) fn from_parts(entries: BTreeMap<V, BTreeSet<Dot>>, cc: Dvv) -> Self {
-        Self { entries, cc }
-    }
-
     pub fn try_from_parts(
         entries: BTreeMap<V, BTreeSet<Dot>>,
         cc: Dvv,
