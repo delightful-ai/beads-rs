@@ -7,7 +7,7 @@ use crate::cli::parse::{
     parse_bead_type, parse_priority, parse_sort, parse_status, parse_time_ms_opt,
 };
 use crate::core::{BeadType, Priority};
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{ListPayload, Request, ResponsePayload};
 use crate::daemon::query::Filters;
 use crate::{Error, Result};
 
@@ -166,9 +166,8 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     }
 
     let req = Request::List {
-        repo: ctx.repo.clone(),
-        filters,
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: ListPayload { filters },
     };
     let ok = send(&req)?;
 

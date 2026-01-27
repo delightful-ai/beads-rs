@@ -3,7 +3,7 @@ use clap::{Args, Subcommand};
 use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use super::fmt_wall_ms;
 use crate::api::QueryResult;
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{AddNotePayload, IdPayload, Request, ResponsePayload};
 use crate::{Error, Result};
 
 #[derive(Args, Debug)]
@@ -45,9 +45,8 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
             let id_for_render = normalize_bead_id(&id)?;
             let id = id_for_render.as_str().to_string();
             let req = Request::Notes {
-                repo: ctx.repo.clone(),
-                id,
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: IdPayload { id },
             };
             let ok = send(&req)?;
             if ctx.json {
@@ -79,10 +78,11 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
 
     let id = normalize_bead_id(&args.id)?;
     let req = Request::AddNote {
-        repo: ctx.repo.clone(),
-        id: id.as_str().to_string(),
-        content,
-        meta: ctx.mutation_meta(),
+        ctx: ctx.mutation_ctx(),
+        payload: AddNotePayload {
+            id: id.as_str().to_string(),
+            content,
+        },
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

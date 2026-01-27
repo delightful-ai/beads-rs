@@ -3,7 +3,7 @@ use clap::Args;
 use super::super::{Ctx, apply_common_filters, normalize_bead_id_for, print_ok, send};
 use crate::cli::parse::{parse_bead_type, parse_priority, parse_time_ms_opt};
 use crate::core::{BeadType, Priority};
-use crate::daemon::ipc::Request;
+use crate::daemon::ipc::{CountPayload, Request};
 use crate::daemon::query::Filters;
 use crate::{Error, Result};
 
@@ -172,10 +172,8 @@ pub(crate) fn handle(ctx: &Ctx, args: CountArgs) -> Result<()> {
     let group_by = resolve_group_by(&args)?;
 
     let req = Request::Count {
-        repo: ctx.repo.clone(),
-        filters,
-        group_by,
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: CountPayload { filters, group_by },
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

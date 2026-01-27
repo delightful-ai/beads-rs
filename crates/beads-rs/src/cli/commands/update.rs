@@ -8,7 +8,10 @@ use crate::api::QueryResult;
 use crate::cli::parse::{parse_bead_type, parse_priority, parse_status as parse_status_arg};
 use crate::core::{BeadType, Priority};
 use crate::core::{DepKind, WorkflowStatus};
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{
+    AddNotePayload, ClaimPayload, ClosePayload, DepPayload, IdPayload, LabelsPayload,
+    ParentPayload, Request, ResponsePayload, UpdatePayload,
+};
 use crate::daemon::ops::BeadPatchDaemonExt;
 use crate::{Error, Result};
 use beads_surface::ops::{BeadPatch, Patch};
@@ -165,31 +168,34 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if !patch.is_empty() {
         patch.validate_for_daemon()?;
         let req = Request::Update {
-            repo: ctx.repo.clone(),
-            id: id_str.clone(),
-            patch,
-            cas: None,
-            meta: ctx.mutation_meta(),
+            ctx: ctx.mutation_ctx(),
+            payload: UpdatePayload {
+                id: id_str.clone(),
+                patch,
+                cas: None,
+            },
         };
         let _ = send(&req)?;
     }
 
     if !add_labels.is_empty() {
         let req = Request::AddLabels {
-            repo: ctx.repo.clone(),
-            id: id_str.clone(),
-            labels: add_labels,
-            meta: ctx.mutation_meta(),
+            ctx: ctx.mutation_ctx(),
+            payload: LabelsPayload {
+                id: id_str.clone(),
+                labels: add_labels,
+            },
         };
         let _ = send(&req)?;
     }
 
     if !remove_labels.is_empty() {
         let req = Request::RemoveLabels {
-            repo: ctx.repo.clone(),
-            id: id_str.clone(),
-            labels: remove_labels,
-            meta: ctx.mutation_meta(),
+            ctx: ctx.mutation_ctx(),
+            payload: LabelsPayload {
+                id: id_str.clone(),
+                labels: remove_labels,
+            },
         };
         let _ = send(&req)?;
     }
@@ -197,10 +203,11 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     // Parent relationship (child -> parent edge).
     if let Some(new_parent) = parent_action {
         let req = Request::SetParent {
-            repo: ctx.repo.clone(),
-            id: id_str.clone(),
-            parent: new_parent,
-            meta: ctx.mutation_meta(),
+            ctx: ctx.mutation_ctx(),
+            payload: ParentPayload {
+                id: id_str.clone(),
+                parent: new_parent,
+            },
         };
         let _ = send(&req)?;
     }
@@ -215,11 +222,12 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
                 (DepKind::Blocks, spec)
             };
             let _ = send(&Request::AddDep {
-                repo: ctx.repo.clone(),
-                from: id_str.clone(),
-                to,
-                kind,
-                meta: ctx.mutation_meta(),
+                ctx: ctx.mutation_ctx(),
+                payload: DepPayload {
+                    from: id_str.clone(),
+                    to,
+                    kind,
+                },
             })?;
         }
     }
@@ -227,10 +235,11 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     // Notes
     if let Some(content) = args.notes {
         let note = Request::AddNote {
-            repo: ctx.repo.clone(),
-            id: id_str.clone(),
-            content,
-            meta: ctx.mutation_meta(),
+            ctx: ctx.mutation_ctx(),
+            payload: AddNotePayload {
+                id: id_str.clone(),
+                content,
+            },
         };
         let _ = send(&note)?;
     }
@@ -239,9 +248,10 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if let Some(assignee) = args.assignee {
         if assignee == "none" || assignee == "-" || assignee == "unassigned" {
             let req = Request::Unclaim {
-                repo: ctx.repo.clone(),
-                id: id_str.clone(),
-                meta: ctx.mutation_meta(),
+                ctx: ctx.mutation_ctx(),
+                payload: IdPayload {
+                    id: id_str.clone(),
+                },
             };
             let _ = send(&req)?;
         } else {
@@ -254,10 +264,11 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
                 }));
             }
             let req = Request::Claim {
-                repo: ctx.repo.clone(),
-                id: id_str.clone(),
-                lease_secs: 3600,
-                meta: ctx.mutation_meta(),
+                ctx: ctx.mutation_ctx(),
+                payload: ClaimPayload {
+                    id: id_str.clone(),
+                    lease_secs: 3600,
+                },
             };
             let _ = send(&req)?;
         }
@@ -265,11 +276,12 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
 
     if status_closed && close_reason.is_some() {
         let req = Request::Close {
-            repo: ctx.repo.clone(),
-            id: id_str.clone(),
-            reason: close_reason,
-            on_branch: None,
-            meta: ctx.mutation_meta(),
+            ctx: ctx.mutation_ctx(),
+            payload: ClosePayload {
+                id: id_str.clone(),
+                reason: close_reason,
+                on_branch: None,
+            },
         };
         let _ = send(&req)?;
     }

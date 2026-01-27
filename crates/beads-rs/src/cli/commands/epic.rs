@@ -5,7 +5,7 @@ use super::super::{Ctx, print_json, print_ok, send};
 use super::fmt_issue_ref;
 use crate::Result;
 use crate::api::QueryResult;
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{ClosePayload, EpicStatusPayload, Request, ResponsePayload};
 
 #[derive(Subcommand, Debug)]
 pub enum EpicCmd {
@@ -40,9 +40,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
     match cmd {
         EpicCmd::Status(args) => {
             let req = Request::EpicStatus {
-                repo: ctx.repo.clone(),
-                eligible_only: args.eligible_only,
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: EpicStatusPayload {
+                    eligible_only: args.eligible_only,
+                },
             };
             let ok = send(&req)?;
             if ctx.json {
@@ -58,9 +59,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
         }
         EpicCmd::CloseEligible(args) => {
             let req = Request::EpicStatus {
-                repo: ctx.repo.clone(),
-                eligible_only: true,
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: EpicStatusPayload { eligible_only: true },
             };
             let ok = send(&req)?;
             let statuses = match ok {
@@ -101,11 +101,12 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
             for s in &statuses {
                 let epic_id = s.epic.id.clone();
                 let req = Request::Close {
-                    repo: ctx.repo.clone(),
-                    id: epic_id.clone(),
-                    reason: Some("All children completed".into()),
-                    on_branch: None,
-                    meta: ctx.mutation_meta(),
+                    ctx: ctx.mutation_ctx(),
+                    payload: ClosePayload {
+                        id: epic_id.clone(),
+                        reason: Some("All children completed".into()),
+                        on_branch: None,
+                    },
                 };
                 let _ = send(&req)?;
                 closed.push(epic_id);

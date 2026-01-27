@@ -3,7 +3,7 @@ use clap::{Args, Subcommand};
 use super::super::{Ctx, normalize_bead_id, print_ok, send};
 use crate::cli::parse::{parse_dep_edge, parse_dep_kind};
 use crate::core::DepKind;
-use crate::daemon::ipc::Request;
+use crate::daemon::ipc::{DepPayload, EmptyPayload, IdPayload, Request};
 use crate::{Error, Result};
 
 #[derive(Subcommand, Debug)]
@@ -47,11 +47,12 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
                     })
                 })?;
             let req = Request::AddDep {
-                repo: ctx.repo.clone(),
-                from: from.as_str().to_string(),
-                to: to.as_str().to_string(),
-                kind,
-                meta: ctx.mutation_meta(),
+                ctx: ctx.mutation_ctx(),
+                payload: DepPayload {
+                    from: from.as_str().to_string(),
+                    to: to.as_str().to_string(),
+                    kind,
+                },
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -65,11 +66,12 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
                     })
                 })?;
             let req = Request::RemoveDep {
-                repo: ctx.repo.clone(),
-                from: from.as_str().to_string(),
-                to: to.as_str().to_string(),
-                kind,
-                meta: ctx.mutation_meta(),
+                ctx: ctx.mutation_ctx(),
+                payload: DepPayload {
+                    from: from.as_str().to_string(),
+                    to: to.as_str().to_string(),
+                    kind,
+                },
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -77,17 +79,18 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
         DepCmd::Tree { id } => {
             let id = normalize_bead_id(&id)?;
             let req = Request::DepTree {
-                repo: ctx.repo.clone(),
-                id: id.as_str().to_string(),
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: IdPayload {
+                    id: id.as_str().to_string(),
+                },
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         DepCmd::Cycles => {
             let req = Request::DepCycles {
-                repo: ctx.repo.clone(),
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: EmptyPayload {},
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)

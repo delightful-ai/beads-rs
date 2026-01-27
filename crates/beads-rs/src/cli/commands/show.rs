@@ -7,7 +7,7 @@ use crate::api::IssueSummary;
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::Filters;
-use crate::daemon::ipc::{Request, ResponsePayload};
+use crate::daemon::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Args, Debug)]
@@ -22,9 +22,10 @@ pub struct ShowArgs {
 pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Show {
-        repo: ctx.repo.clone(),
-        id: id.as_str().to_string(),
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: IdPayload {
+            id: id.as_str().to_string(),
+        },
     };
     let ok = send(&req)?;
 
@@ -32,9 +33,8 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
         ResponsePayload::Query(QueryResult::Issue(mut view)) => {
             // Fetch deps for richer show output.
             let deps_payload = send(&Request::Deps {
-                repo: ctx.repo.clone(),
-                id: view.id.clone(),
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: IdPayload { id: view.id.clone() },
             })?;
             let (incoming_edges, outgoing_edges) = match deps_payload {
                 ResponsePayload::Query(QueryResult::Deps { incoming, outgoing }) => {
@@ -52,9 +52,8 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
 
             // Human mode: fetch notes and build richer display
             let notes_payload = send(&Request::Notes {
-                repo: ctx.repo.clone(),
-                id: view.id.clone(),
-                read: ctx.read_consistency(),
+                ctx: ctx.read_ctx(),
+                payload: IdPayload { id: view.id.clone() },
             })?;
             let notes = match notes_payload {
                 ResponsePayload::Query(QueryResult::Notes(n)) => n,
@@ -128,9 +127,8 @@ fn fetch_summary_map(ctx: &Ctx, ids: &BTreeSet<String>) -> Result<HashMap<String
         ..Filters::default()
     };
     let req = Request::List {
-        repo: ctx.repo.clone(),
-        filters,
-        read: ctx.read_consistency(),
+        ctx: ctx.read_ctx(),
+        payload: ListPayload { filters },
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::Issues(summaries)) => Ok(summaries

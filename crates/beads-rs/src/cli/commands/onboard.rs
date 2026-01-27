@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 
 use crate::Result;
-use crate::daemon::ipc::{Request, Response, send_request};
+use crate::daemon::ipc::{EmptyPayload, RepoCtx, Request, Response, send_request};
 use crate::repo;
 
 /// The core philosophical content for AGENTS.md.
@@ -54,7 +54,10 @@ pub(crate) fn handle(output: Option<&Path>) -> Result<()> {
 /// Try to initialize beads. Returns true if init succeeded or already initialized.
 fn try_init() -> bool {
     if let Ok((_repo, path)) = repo::discover() {
-        let req = Request::Init { repo: path };
+        let req = Request::Init {
+            ctx: RepoCtx::new(path),
+            payload: EmptyPayload {},
+        };
         matches!(send_request(&req), Ok(Response::Ok { .. }))
     } else {
         false
