@@ -11,8 +11,8 @@ use crc32c::crc32c;
 use thiserror::Error;
 
 use crate::core::{
-    DecodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1, StoreMeta,
-    decode_event_body, decode_event_hlc_max,
+    DecodeError, EncodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1,
+    StoreMeta, decode_event_body, decode_event_hlc_max,
 };
 
 use super::EventWalError;
@@ -161,6 +161,15 @@ pub enum WalReplayError {
     },
     #[error("{0}")]
     RecordShaMismatch(Box<RecordShaMismatchInfo>),
+    #[error("{0}")]
+    RecordPayloadMismatch(Box<RecordShaMismatchInfo>),
+    #[error("record payload canonical encode failed at {path:?} offset {offset}: {source}")]
+    RecordCanonicalEncode {
+        path: PathBuf,
+        offset: u64,
+        #[source]
+        source: EncodeError,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

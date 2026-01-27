@@ -4,20 +4,19 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use bytes::Bytes;
 use tempfile::TempDir;
 use uuid::Uuid;
 
 use beads_rs::core::{
-    ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-    StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnDeltaV1, TxnId, TxnV1,
-    encode_event_body_canonical,
+    ActorId, Canonical, ClientRequestId, EventBody, EventBytes, EventKindV1, HlcMax, Limits,
+    NamespaceId, ReplicaId, Seq1, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnDeltaV1,
+    TxnId, TxnV1, ValidatedEventBody, encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
     EventWalError, EventWalResult, FRAME_HEADER_LEN, IndexDurabilityMode, RecordHeader,
     SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentWriter, SqliteWalIndex,
-    UnverifiedRecord, VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError,
+    VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError,
 };
 
 use super::identity;

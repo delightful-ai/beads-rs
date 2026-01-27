@@ -128,6 +128,7 @@ use crate::core::{
     PrevVerified, ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1, Sha256,
     StoreId, StoreIdentity, StoreState, TraceId, ValidatedEventBody, VerifiedEvent, WallClock,
     Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
+    encode_event_body_canonical, hash_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
