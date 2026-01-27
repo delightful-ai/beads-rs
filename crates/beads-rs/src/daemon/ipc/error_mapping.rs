@@ -579,7 +579,7 @@ fn wal_replay_error_payload(
         .with_details(error_details::PathSymlinkRejectedDetails {
             path: path.display().to_string(),
         }),
-        WalReplayError::RecordShaMismatch(info) => {
+        WalReplayError::RecordShaMismatch(info) | WalReplayError::RecordPayloadMismatch(info) => {
             let info = info.as_ref();
             ErrorPayload::new(ProtocolErrorCode::HashMismatch.into(), message, retryable)
                 .with_details(error_details::HashMismatchDetails {
@@ -825,10 +825,13 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
         WalReplayError::SegmentHeaderMismatch { .. } => {
             ProtocolErrorCode::SegmentHeaderMismatch.into()
         }
-        WalReplayError::RecordShaMismatch(_) => ProtocolErrorCode::HashMismatch.into(),
+        WalReplayError::RecordShaMismatch(_) | WalReplayError::RecordPayloadMismatch(_) => {
+            ProtocolErrorCode::HashMismatch.into()
+        }
         WalReplayError::RecordDecode { .. }
         | WalReplayError::EventBodyDecode { .. }
         | WalReplayError::RecordHeaderMismatch { .. }
+        | WalReplayError::RecordCanonicalEncode { .. }
         | WalReplayError::MissingHead { .. }
         | WalReplayError::UnexpectedHead { .. }
         | WalReplayError::SealedSegmentFinalLenMissing { .. }
