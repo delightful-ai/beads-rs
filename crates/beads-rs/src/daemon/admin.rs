@@ -40,40 +40,43 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let limits = self.limits().clone();
+        let last_clock_anomaly = clock_anomaly_output(self.clock().last_anomaly());
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&proof, read) {
+        let read = match proof.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&proof, &read) {
+        if let Err(err) = proof.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&proof) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = proof.runtime();
+        let store_id = store.meta.store_id();
+        let replica_id = store.meta.replica_id;
 
         let namespaces = collect_namespaces(store);
         let now_ms = WallClock::now().0;
-        let wal_report = match build_wal_status(store, &namespaces, self.limits(), now_ms) {
+        let wal_report = match build_wal_status(store, &namespaces, &limits, now_ms) {
             Ok(wal_report) => wal_report,
             Err(err) => return Response::err_from(err),
         };
         let replication = build_replication_status(store, &namespaces);
         let replica_liveness = build_replica_liveness(store);
-        let checkpoints =
-            build_checkpoint_status(self.checkpoint_group_snapshots(store.meta.store_id()));
+        let watermarks_applied = store.watermarks_applied.clone();
+        let watermarks_durable = store.watermarks_durable.clone();
+        drop(proof);
+        let checkpoints = build_checkpoint_status(self.checkpoint_group_snapshots(store_id));
 
         let output = AdminStatusOutput {
-            store_id: store.meta.store_id(),
-            replica_id: store.meta.replica_id,
+            store_id,
+            replica_id,
             namespaces: namespaces.into_iter().collect(),
-            watermarks_applied: store.watermarks_applied.clone(),
-            watermarks_durable: store.watermarks_durable.clone(),
-            last_clock_anomaly: clock_anomaly_output(self.clock().last_anomaly()),
+            watermarks_applied,
+            watermarks_durable,
+            last_clock_anomaly,
             wal: wal_report.namespaces,
             wal_warnings: wal_report.warnings,
             replication,
@@ -90,27 +93,26 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let limits = self.limits().clone();
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&proof, read) {
+        let read = match proof.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&proof, &read) {
+        if let Err(err) = proof.check_read_gate(&read) {
             return Response::err_from(err);
         }
 
-        let store = match self.store_runtime(&proof) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = proof.runtime();
         let namespaces = collect_namespaces(store);
         let now_ms = WallClock::now().0;
-        if let Err(err) = build_wal_status(store, &namespaces, self.limits(), now_ms) {
+        if let Err(err) = build_wal_status(store, &namespaces, &limits, now_ms) {
             return Response::err_from(err);
         }
+        drop(proof);
         let snapshot = crate::daemon::metrics::snapshot();
         let output = build_metrics_output(snapshot);
         Response::ok(ResponsePayload::query(QueryResult::AdminMetrics(output)))
@@ -124,21 +126,29 @@ impl Daemon {
         verify_checkpoint_cache: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let store_id = match self.resolve_store(repo) {
+            Ok(resolved) => resolved.store_id,
+            Err(e) => return Response::err_from(e),
+        };
+        let checkpoint_groups = self
+            .checkpoint_group_snapshots(store_id)
+            .into_iter()
+            .map(|snapshot| snapshot.group)
+            .collect::<Vec<_>>();
+        let limits = self.limits().clone();
+        let last_clock_anomaly = clock_anomaly_output(self.clock().last_anomaly());
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&proof, read) {
+        let read = match proof.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&proof, &read) {
+        if let Err(err) = proof.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&proof) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = proof.runtime();
 
         let mut options = ScrubOptions::default_for_doctor();
         if let Some(value) = max_records_per_namespace {
@@ -159,14 +169,9 @@ impl Daemon {
         }
         options.verify_checkpoint_cache = verify_checkpoint_cache;
 
-        let checkpoint_groups = self
-            .checkpoint_group_snapshots(store.meta.store_id())
-            .into_iter()
-            .map(|snapshot| snapshot.group)
-            .collect::<Vec<_>>();
-
-        let mut report = scrub_store(store, self.limits(), &checkpoint_groups, options);
-        report.last_clock_anomaly = clock_anomaly_output(self.clock().last_anomaly());
+        let mut report = scrub_store(store, &limits, &checkpoint_groups, options);
+        drop(proof);
+        report.last_clock_anomaly = last_clock_anomaly;
         if report.summary.safe_to_accept_writes {
             crate::daemon::metrics::scrub_ok();
         } else {
@@ -186,21 +191,29 @@ impl Daemon {
         verify_checkpoint_cache: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let store_id = match self.resolve_store(repo) {
+            Ok(resolved) => resolved.store_id,
+            Err(e) => return Response::err_from(e),
+        };
+        let checkpoint_groups = self
+            .checkpoint_group_snapshots(store_id)
+            .into_iter()
+            .map(|snapshot| snapshot.group)
+            .collect::<Vec<_>>();
+        let limits = self.limits().clone();
+        let last_clock_anomaly = clock_anomaly_output(self.clock().last_anomaly());
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&proof, read) {
+        let read = match proof.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&proof, &read) {
+        if let Err(err) = proof.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&proof) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = proof.runtime();
 
         let mut options = ScrubOptions::default_for_scrub();
         if let Some(value) = max_records_per_namespace {
@@ -221,14 +234,9 @@ impl Daemon {
         }
         options.verify_checkpoint_cache = verify_checkpoint_cache;
 
-        let checkpoint_groups = self
-            .checkpoint_group_snapshots(store.meta.store_id())
-            .into_iter()
-            .map(|snapshot| snapshot.group)
-            .collect::<Vec<_>>();
-
-        let mut report = scrub_store(store, self.limits(), &checkpoint_groups, options);
-        report.last_clock_anomaly = clock_anomaly_output(self.clock().last_anomaly());
+        let mut report = scrub_store(store, &limits, &checkpoint_groups, options);
+        drop(proof);
+        report.last_clock_anomaly = last_clock_anomaly;
         if report.summary.safe_to_accept_writes {
             crate::daemon::metrics::scrub_ok();
         } else {
@@ -247,26 +255,25 @@ impl Daemon {
         checkpoint_now: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+        let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
         };
-        let namespace = match self.normalize_namespace(&proof, namespace) {
+        let namespace = match proof.normalize_namespace(namespace) {
             Ok(namespace) => namespace,
             Err(err) => return Response::err_from(err),
         };
         let flushed_at_ms = WallClock::now().0;
-        let (segment, store_id) = match self.store_runtime_mut(&proof) {
-            Ok(store) => {
-                let store_id = store.meta.store_id();
-                let segment = match store.event_wal.flush(&namespace) {
-                    Ok(segment) => segment,
-                    Err(err) => return Response::err_from(OpError::EventWal(Box::new(err))),
-                };
-                (segment, store_id)
-            }
-            Err(err) => return Response::err_from(err),
+        let (segment, store_id) = {
+            let store = proof.runtime_mut();
+            let store_id = store.meta.store_id();
+            let segment = match store.event_wal.flush(&namespace) {
+                Ok(segment) => segment,
+                Err(err) => return Response::err_from(OpError::EventWal(Box::new(err))),
+            };
+            (segment, store_id)
         };
+        drop(proof);
 
         let checkpoint_groups = if checkpoint_now {
             self.force_checkpoint_for_namespace(store_id, &namespace)
@@ -302,17 +309,14 @@ impl Daemon {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match self.normalize_read_consistency(&proof, read) {
+        let read = match proof.normalize_read_consistency(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
-        if let Err(err) = self.check_read_gate(&proof, &read) {
+        if let Err(err) = proof.check_read_gate(&read) {
             return Response::err_from(err);
         }
-        let store = match self.store_runtime(&proof) {
-            Ok(store) => store,
-            Err(e) => return Response::err_from(e),
-        };
+        let store = proof.runtime();
 
         let fingerprint_mode = match mode {
             AdminFingerprintMode::Full => {
@@ -391,15 +395,12 @@ impl Daemon {
     }
 
     pub fn admin_reload_policies(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
-        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+        let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
-        let store = match self.store_runtime_mut(&proof) {
-            Ok(store) => store,
-            Err(err) => return Response::err_from(err),
-        };
+        let store = proof.runtime_mut();
 
         let path = crate::paths::namespaces_path(store_id);
         let raw = match fs::read_to_string(&path) {
@@ -439,6 +440,7 @@ impl Daemon {
             Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
+        drop(proof);
 
         let config = match crate::config::load_for_repo(Some(repo)) {
             Ok(config) => config,
@@ -481,6 +483,7 @@ impl Daemon {
             Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
+        drop(proof);
 
         // Reload replication config from disk
         if let Err(err) = self.reload_replication_config(repo) {
@@ -505,15 +508,12 @@ impl Daemon {
     }
 
     pub fn admin_rotate_replica_id(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
-        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+        let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
-        let store = match self.store_runtime_mut(&proof) {
-            Ok(store) => store,
-            Err(err) => return Response::err_from(err),
-        };
+        let store = proof.runtime_mut();
 
         let (old_replica_id, new_replica_id) = match store.rotate_replica_id() {
             Ok(ids) => ids,
@@ -541,14 +541,11 @@ impl Daemon {
         enabled: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {
-        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+        let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
         };
-        let store = match self.store_runtime_mut(&proof) {
-            Ok(store) => store,
-            Err(err) => return Response::err_from(err),
-        };
+        let store = proof.runtime_mut();
 
         store.maintenance_mode = enabled;
         let output = AdminMaintenanceModeOutput { enabled };
@@ -559,14 +556,11 @@ impl Daemon {
 
     pub fn admin_rebuild_index(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let limits = self.limits().clone();
-        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+        let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
         };
-        let store = match self.store_runtime_mut(&proof) {
-            Ok(store) => store,
-            Err(err) => return Response::err_from(err),
-        };
+        let store = proof.runtime_mut();
         if !store.maintenance_mode {
             return Response::err_from(OpError::MaintenanceMode {
                 reason: Some("maintenance mode required".into()),
