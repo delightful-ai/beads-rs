@@ -560,6 +560,8 @@ impl Daemon {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
         };
+        let store_id = proof.store_id();
+        let store_dir = crate::paths::store_dir(store_id);
         let store = proof.runtime_mut();
         if !store.maintenance_mode {
             return Response::err_from(OpError::MaintenanceMode {
@@ -567,7 +569,6 @@ impl Daemon {
             });
         }
 
-        let store_dir = crate::paths::store_dir(proof.store_id());
         let stats = match rebuild_index(&store_dir, &store.meta, store.wal_index.as_ref(), &limits)
         {
             Ok(stats) => stats,

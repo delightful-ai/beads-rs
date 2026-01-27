@@ -142,13 +142,6 @@ impl Daemon {
         };
         let parsed_request = parse(&ctx.actor_id)?;
 
-        let (now_ms, stamp) = {
-            let clock = self.clock_for_actor_mut(&ctx.actor_id);
-            let now_ms = clock.wall_ms();
-            let write_stamp = clock.tick();
-            (now_ms, Stamp::new(write_stamp, ctx.actor_id.clone()))
-        };
-
         let mut proof = self.loaded_store(store_id, remote.clone());
         if proof.runtime().maintenance_mode {
             return Err(OpError::MaintenanceMode {
@@ -229,12 +222,14 @@ impl Daemon {
             .copied()
             .unwrap_or_else(Watermark::genesis);
 
+        drop(proof);
         let (now_ms, stamp) = {
             let clock = self.clock_for_actor_mut(&ctx.actor_id);
             let now_ms = clock.wall_ms();
             let write_stamp = clock.tick();
             (now_ms, Stamp::new(write_stamp, ctx.actor_id.clone()))
         };
+        let mut proof = self.loaded_store(store_id, remote.clone());
         let draft = {
             let store_runtime = proof.runtime_mut();
             let state_snapshot = if namespace.is_core() {
