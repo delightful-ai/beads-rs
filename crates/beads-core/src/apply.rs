@@ -292,9 +292,11 @@ fn apply_dep_add(
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = dep.key.clone();
+    let key = state
+        .check_dep_add_key(dep.key.clone())
+        .map_err(|err| ApplyError::InvalidDependency { reason: err.reason })?;
     let dot = dep.dot.into();
-    let change = state.apply_dep_add(key.clone(), dot, event_stamp.clone());
+    let change = state.apply_dep_add(key, dot, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
         outcome.changed_deps.insert(changed.clone());
     }
@@ -1004,6 +1006,87 @@ mod tests {
         apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();
 
         assert!(state.dep_contains(&key));
+    }
+
+    #[test]
+    fn dep_add_accepts_acyclic_dag_edge() {
+        let mut state = CanonicalState::new();
+        let from = BeadId::parse("bd-acyclic-from").unwrap();
+        let to = BeadId::parse("bd-acyclic-to").unwrap();
+
+        apply_event(
+            &mut state,
+            &bead_upsert_event(from.clone(), WireStamp(1, 0), actor_id("alice"), "from", 10),
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &bead_upsert_event(to.clone(), WireStamp(2, 0), actor_id("bob"), "to", 11),
+        )
+        .unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
+                dot: WireDotV1 {
+                    replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+
+        apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();
+        assert!(state.dep_contains(&DepKey::new(from, to, DepKind::Blocks).unwrap()));
+    }
+
+    #[test]
+    fn dep_add_rejects_cycle_from_apply_event() {
+        let mut state = CanonicalState::new();
+        let a = BeadId::parse("bd-cycle-a").unwrap();
+        let b = BeadId::parse("bd-cycle-b").unwrap();
+
+        apply_event(
+            &mut state,
+            &bead_upsert_event(a.clone(), WireStamp(1, 0), actor_id("alice"), "a", 20),
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &bead_upsert_event(b.clone(), WireStamp(2, 0), actor_id("bob"), "b", 21),
+        )
+        .unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(a.clone(), b.clone(), DepKind::Blocks).unwrap(),
+                dot: WireDotV1 {
+                    replica: ReplicaId::new(Uuid::from_bytes([3u8; 16])),
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(delta, 22)).unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(b.clone(), a.clone(), DepKind::Blocks).unwrap(),
+                dot: WireDotV1 {
+                    replica: ReplicaId::new(Uuid::from_bytes([4u8; 16])),
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+
+        let err = apply_event(&mut state, &event_with_delta(delta, 23)).unwrap_err();
+        match err {
+            ApplyError::InvalidDependency { reason } => {
+                assert!(reason.contains("circular dependency"));
+            }
+            other => panic!("expected InvalidDependency, got {other:?}"),
+        }
     }
 
     #[test]
