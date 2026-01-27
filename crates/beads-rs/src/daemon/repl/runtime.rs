@@ -15,14 +15,14 @@ use crate::core::error::details::{
 use crate::core::{
     Applied, CliErrorCode, Durable, ErrorPayload, EventBytes, EventFrameV1, EventId,
     EventShaLookupError, Limits, NamespaceId, Opaque, PrevVerified, ProtocolErrorCode, ReplicaId,
-    SegmentId, Seq0, Sha256, StoreId, VerifiedEvent, decode_event_body,
+    SegmentId, Seq0, Seq1, Sha256, StoreId, VerifiedEvent, decode_event_body,
 };
 use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
 use crate::daemon::repl::proto::WatermarkState;
 use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
-    EventWalError, FrameReader, ReplicaDurabilityRole, ReplicaLivenessRow, VerifiedRecord,
-    WalIndex, WalIndexError, open_segment_reader,
+    EventWalError, FrameReader, IndexedRangeItem, ReplicaDurabilityRole, ReplicaLivenessRow,
+    VerifiedRecord, WalIndex, WalIndexError, open_segment_reader,
 };
 use crate::paths;
 
@@ -205,14 +205,7 @@ impl WalRangeReader {
             .iter_from(namespace, origin, from_seq_excl, max_bytes)
             .map_err(WalRangeError::Index)?;
 
-        let Some(first) = items.first() else {
-            return Err(WalRangeError::MissingRange {
-                namespace: namespace.clone(),
-                origin: *origin,
-                from_seq_excl,
-            });
-        };
-        if first.event_id.origin_seq != from_seq_excl.next() {
+        if items.is_empty() {
             return Err(WalRangeError::MissingRange {
                 namespace: namespace.clone(),
                 origin: *origin,
@@ -223,9 +216,9 @@ impl WalRangeReader {
         let segments =
             segment_paths_for_namespace(&self.store_dir, self.wal_index.as_ref(), namespace)?;
 
-        let mut frames = Vec::new();
+        let mut batch = ContiguousFrames::new(from_seq_excl);
         for item in items {
-            if frames.len() >= self.limits.max_event_batch_events {
+            if batch.len() >= self.limits.max_event_batch_events {
                 break;
             }
 
@@ -272,15 +265,81 @@ impl WalRangeReader {
                 });
             }
 
-            frames.push(EventFrameV1 {
-                eid: item.event_id,
-                sha256: Sha256(item.sha),
-                prev_sha256: item.prev_sha.map(Sha256),
-                bytes: EventBytes::<Opaque>::new(Bytes::copy_from_slice(record.payload_bytes())),
+            batch.push(namespace, origin, &item, &record)?;
+        }
+
+        Ok(batch.into_vec())
+    }
+}
+
+struct ContiguousFrames {
+    expected_seq: Seq1,
+    prev_sha: Option<[u8; 32]>,
+    frames: Vec<EventFrameV1>,
+}
+
+impl ContiguousFrames {
+    fn new(from_seq_excl: Seq0) -> Self {
+        Self {
+            expected_seq: from_seq_excl.next(),
+            prev_sha: None,
+            frames: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    fn push(
+        &mut self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+        item: &IndexedRangeItem,
+        record: &VerifiedRecord,
+    ) -> Result<(), WalRangeError> {
+        if item.event_id.origin_seq != self.expected_seq {
+            let missing_from = Seq0::new(self.expected_seq.get().saturating_sub(1));
+            return Err(WalRangeError::MissingRange {
+                namespace: namespace.clone(),
+                origin: *origin,
+                from_seq_excl: missing_from,
             });
         }
 
-        Ok(frames)
+        let record_prev = record.header().prev_sha256;
+        if record_prev != item.prev_sha {
+            return Err(WalRangeError::Corrupt {
+                namespace: namespace.clone(),
+                segment_id: Some(item.segment_id),
+                offset: Some(item.offset),
+                reason: "record prev sha mismatch with index".to_string(),
+            });
+        }
+        if let Some(prev_sha) = self.prev_sha {
+            if record_prev != Some(prev_sha) {
+                return Err(WalRangeError::Corrupt {
+                    namespace: namespace.clone(),
+                    segment_id: Some(item.segment_id),
+                    offset: Some(item.offset),
+                    reason: "record prev sha mismatch with previous frame".to_string(),
+                });
+            }
+        }
+
+        self.frames.push(EventFrameV1 {
+            eid: item.event_id.clone(),
+            sha256: Sha256(item.sha),
+            prev_sha256: item.prev_sha.map(Sha256),
+            bytes: EventBytes::<Opaque>::new(Bytes::copy_from_slice(record.payload_bytes())),
+        });
+        self.prev_sha = Some(item.sha);
+        self.expected_seq = self.expected_seq.next();
+        Ok(())
+    }
+
+    fn into_vec(self) -> Vec<EventFrameV1> {
+        self.frames
     }
 }
 
