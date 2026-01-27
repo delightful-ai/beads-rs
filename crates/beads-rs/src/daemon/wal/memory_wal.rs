@@ -279,7 +279,6 @@ fn new_segment_id() -> SegmentId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use std::io::{Cursor, Seek, SeekFrom};
     use tempfile::TempDir;
 

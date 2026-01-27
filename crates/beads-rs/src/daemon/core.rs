@@ -2764,7 +2764,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use bytes::Bytes;
     use git2::Repository;
     use tracing::{Dispatch, Level};
     use tracing_subscriber::fmt::MakeWriter;

@@ -1196,7 +1196,6 @@ mod tests {
         atomic::{AtomicU64, Ordering},
     };
 
-    use bytes::Bytes;
     use tempfile::TempDir;
     use uuid::Uuid;
 

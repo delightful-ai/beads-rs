@@ -576,7 +576,6 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::TempDir;

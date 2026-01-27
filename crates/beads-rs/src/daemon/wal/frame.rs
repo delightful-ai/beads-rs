@@ -138,7 +138,6 @@ mod tests {
         encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::wal::record::{RecordHeader, VerifiedRecord};
-    use bytes::Bytes;
     use std::io::Cursor;
     use uuid::Uuid;
 
