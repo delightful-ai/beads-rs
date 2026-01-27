@@ -3113,7 +3113,7 @@ mod tests {
         let sha256 = hash_event_body(&bytes);
         VerifiedEvent {
             body,
-            bytes: bytes.into(),
+            bytes,
             sha256,
             prev: PrevVerified { prev },
         }
