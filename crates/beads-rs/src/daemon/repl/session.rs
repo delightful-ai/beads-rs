@@ -1,6 +1,7 @@
 //! Replication session state machine.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::marker::PhantomData;
 
 use crate::core::error::details::{
     EventIdDetails, FrameTooLargeDetails, HashMismatchDetails, InternalErrorDetails,
@@ -24,12 +25,6 @@ use super::proto::{
     Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want,
     WatermarkMap, WatermarkState,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionRole {
-    Inbound,
-    Outbound,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
@@ -92,31 +87,250 @@ pub struct SessionPeer {
     pub live_stream_enabled: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Inbound;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Outbound;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Connecting;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Handshaking;
+
 #[derive(Clone, Debug)]
-enum SessionState {
-    Connecting,
-    Handshaking,
-    Streaming { peer: SessionPeer },
-    Draining { peer: SessionPeer },
-    Closed,
+pub(crate) struct Streaming {
+    peer: SessionPeer,
 }
 
-impl SessionState {
-    fn phase(&self) -> SessionPhase {
+#[derive(Clone, Debug)]
+pub(crate) struct Draining {
+    peer: SessionPeer,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Closed;
+
+trait PhaseMarker {
+    const PHASE: SessionPhase;
+}
+
+impl PhaseMarker for Connecting {
+    const PHASE: SessionPhase = SessionPhase::Connecting;
+}
+
+impl PhaseMarker for Handshaking {
+    const PHASE: SessionPhase = SessionPhase::Handshaking;
+}
+
+impl PhaseMarker for Streaming {
+    const PHASE: SessionPhase = SessionPhase::Streaming;
+}
+
+impl PhaseMarker for Draining {
+    const PHASE: SessionPhase = SessionPhase::Draining;
+}
+
+impl PhaseMarker for Closed {
+    const PHASE: SessionPhase = SessionPhase::Closed;
+}
+
+trait PhasePeer {
+    fn peer(&self) -> &SessionPeer;
+    fn into_peer(self) -> SessionPeer;
+}
+
+impl PhasePeer for Streaming {
+    fn peer(&self) -> &SessionPeer {
+        &self.peer
+    }
+
+    fn into_peer(self) -> SessionPeer {
+        self.peer
+    }
+}
+
+impl PhasePeer for Draining {
+    fn peer(&self) -> &SessionPeer {
+        &self.peer
+    }
+
+    fn into_peer(self) -> SessionPeer {
+        self.peer
+    }
+}
+
+trait PhasePeerOpt {
+    fn into_peer(self) -> Option<SessionPeer>;
+}
+
+impl PhasePeerOpt for Connecting {
+    fn into_peer(self) -> Option<SessionPeer> {
+        None
+    }
+}
+
+impl PhasePeerOpt for Handshaking {
+    fn into_peer(self) -> Option<SessionPeer> {
+        None
+    }
+}
+
+impl PhasePeerOpt for Streaming {
+    fn into_peer(self) -> Option<SessionPeer> {
+        Some(self.peer)
+    }
+}
+
+impl PhasePeerOpt for Draining {
+    fn into_peer(self) -> Option<SessionPeer> {
+        Some(self.peer)
+    }
+}
+
+impl PhasePeerOpt for Closed {
+    fn into_peer(self) -> Option<SessionPeer> {
+        None
+    }
+}
+
+trait PhaseWire {
+    fn frame_limit(&self, config: &SessionConfig) -> usize;
+    fn wire_version(&self, _config: &SessionConfig) -> u32;
+}
+
+impl PhaseWire for Connecting {
+    fn frame_limit(&self, config: &SessionConfig) -> usize {
+        config.max_frame_bytes as usize
+    }
+
+    fn wire_version(&self, _config: &SessionConfig) -> u32 {
+        PROTOCOL_VERSION_V1
+    }
+}
+
+impl PhaseWire for Handshaking {
+    fn frame_limit(&self, config: &SessionConfig) -> usize {
+        config.max_frame_bytes as usize
+    }
+
+    fn wire_version(&self, _config: &SessionConfig) -> u32 {
+        PROTOCOL_VERSION_V1
+    }
+}
+
+impl PhaseWire for Streaming {
+    fn frame_limit(&self, _config: &SessionConfig) -> usize {
+        self.peer.max_frame_bytes as usize
+    }
+
+    fn wire_version(&self, _config: &SessionConfig) -> u32 {
+        self.peer.protocol_version
+    }
+}
+
+impl PhaseWire for Draining {
+    fn frame_limit(&self, _config: &SessionConfig) -> usize {
+        self.peer.max_frame_bytes as usize
+    }
+
+    fn wire_version(&self, _config: &SessionConfig) -> u32 {
+        self.peer.protocol_version
+    }
+}
+
+impl PhaseWire for Closed {
+    fn frame_limit(&self, config: &SessionConfig) -> usize {
+        config.max_frame_bytes as usize
+    }
+
+    fn wire_version(&self, _config: &SessionConfig) -> u32 {
+        PROTOCOL_VERSION_V1
+    }
+}
+
+trait PhaseWrap: PhaseMarker + PhasePeer + PhasePeerOpt + PhaseWire + Sized {
+    fn wrap<R>(session: Session<R, Self>) -> SessionState<R>;
+}
+
+impl PhaseWrap for Streaming {
+    fn wrap<R>(session: Session<R, Streaming>) -> SessionState<R> {
+        SessionState::Streaming(session)
+    }
+}
+
+impl PhaseWrap for Draining {
+    fn wrap<R>(session: Session<R, Draining>) -> SessionState<R> {
+        SessionState::Draining(session)
+    }
+}
+
+pub(crate) enum SessionState<R> {
+    Connecting(Session<R, Connecting>),
+    Handshaking(Session<R, Handshaking>),
+    Streaming(Session<R, Streaming>),
+    Draining(Session<R, Draining>),
+    Closed(Session<R, Closed>),
+}
+
+pub(crate) type InboundConnecting = Session<Inbound, Connecting>;
+pub(crate) type OutboundConnecting = Session<Outbound, Connecting>;
+
+pub(crate) trait SessionWire {
+    fn wire_version(&self) -> u32;
+    fn frame_limit(&self) -> usize;
+}
+
+impl<R> SessionState<R> {
+    pub fn phase(&self) -> SessionPhase {
         match self {
-            SessionState::Connecting => SessionPhase::Connecting,
-            SessionState::Handshaking => SessionPhase::Handshaking,
-            SessionState::Streaming { .. } => SessionPhase::Streaming,
-            SessionState::Draining { .. } => SessionPhase::Draining,
-            SessionState::Closed => SessionPhase::Closed,
+            SessionState::Connecting(_) => SessionPhase::Connecting,
+            SessionState::Handshaking(_) => SessionPhase::Handshaking,
+            SessionState::Streaming(_) => SessionPhase::Streaming,
+            SessionState::Draining(_) => SessionPhase::Draining,
+            SessionState::Closed(_) => SessionPhase::Closed,
         }
     }
 
-    fn peer(&self) -> Option<&SessionPeer> {
+    pub(crate) fn wire_version(&self) -> u32 {
         match self {
-            SessionState::Streaming { peer } | SessionState::Draining { peer } => Some(peer),
-            SessionState::Connecting | SessionState::Handshaking | SessionState::Closed => None,
+            SessionState::Connecting(session) => session.wire_version(),
+            SessionState::Handshaking(session) => session.wire_version(),
+            SessionState::Streaming(session) => session.wire_version(),
+            SessionState::Draining(session) => session.wire_version(),
+            SessionState::Closed(session) => session.wire_version(),
         }
+    }
+
+    pub(crate) fn frame_limit(&self) -> usize {
+        match self {
+            SessionState::Connecting(session) => session.frame_limit(),
+            SessionState::Handshaking(session) => session.frame_limit(),
+            SessionState::Streaming(session) => session.frame_limit(),
+            SessionState::Draining(session) => session.frame_limit(),
+            SessionState::Closed(session) => session.frame_limit(),
+        }
+    }
+
+    pub(crate) fn close(self) -> SessionState<R> {
+        match self {
+            SessionState::Connecting(session) => SessionState::Closed(session.with_phase(Closed)),
+            SessionState::Handshaking(session) => SessionState::Closed(session.with_phase(Closed)),
+            SessionState::Streaming(session) => SessionState::Closed(session.with_phase(Closed)),
+            SessionState::Draining(session) => SessionState::Closed(session.with_phase(Closed)),
+            SessionState::Closed(session) => SessionState::Closed(session),
+        }
+    }
+}
+
+impl<R> SessionWire for SessionState<R> {
+    fn wire_version(&self) -> u32 {
+        SessionState::wire_version(self)
+    }
+
+    fn frame_limit(&self) -> usize {
+        SessionState::frame_limit(self)
     }
 }
 
@@ -171,9 +385,9 @@ struct IngestUpdates<'a> {
 }
 
 #[derive(Debug)]
-pub struct Session {
-    role: SessionRole,
-    state: SessionState,
+pub struct Session<R, P> {
+    role: PhantomData<R>,
+    phase: P,
     config: SessionConfig,
     limits: Limits,
     admission: AdmissionController,
@@ -183,18 +397,13 @@ pub struct Session {
     next_nonce: u64,
 }
 
-impl Session {
-    pub fn new(
-        role: SessionRole,
-        mut config: SessionConfig,
-        limits: Limits,
-        admission: AdmissionController,
-    ) -> Self {
+impl<R> Session<R, Connecting> {
+    pub fn new(mut config: SessionConfig, limits: Limits, admission: AdmissionController) -> Self {
         normalize_namespaces(&mut config.requested_namespaces);
         normalize_namespaces(&mut config.offered_namespaces);
         Self {
-            role,
-            state: SessionState::Connecting,
+            role: PhantomData,
+            phase: Connecting,
             config,
             gap_buffer: GapBufferByNsOrigin::new(limits.clone()),
             limits,
@@ -204,148 +413,213 @@ impl Session {
             next_nonce: 1,
         }
     }
+}
 
-    pub fn phase(&self) -> SessionPhase {
-        self.state.phase()
+impl<R, P> Session<R, P> {
+    fn with_phase<Next>(self, phase: Next) -> Session<R, Next> {
+        Session {
+            role: PhantomData,
+            phase,
+            config: self.config,
+            limits: self.limits,
+            admission: self.admission,
+            gap_buffer: self.gap_buffer,
+            durable: self.durable,
+            applied: self.applied,
+            next_nonce: self.next_nonce,
+        }
     }
 
-    pub fn peer(&self) -> Option<&SessionPeer> {
-        self.state.peer()
+    fn wire_version(&self) -> u32
+    where
+        P: PhaseWire,
+    {
+        self.phase.wire_version(&self.config)
+    }
+
+    fn frame_limit(&self) -> usize
+    where
+        P: PhaseWire,
+    {
+        self.phase.frame_limit(&self.config)
+    }
+}
+
+impl<R, P: PhaseWire> SessionWire for Session<R, P> {
+    fn wire_version(&self) -> u32 {
+        Session::wire_version(self)
+    }
+
+    fn frame_limit(&self) -> usize {
+        Session::frame_limit(self)
+    }
+}
+
+impl<R, P: PhaseMarker> Session<R, P> {
+    pub fn phase(&self) -> SessionPhase {
+        P::PHASE
+    }
+}
+
+impl<R, P: PhasePeer> Session<R, P> {
+    pub fn peer(&self) -> &SessionPeer {
+        self.phase.peer()
     }
 
     pub fn negotiated_max_frame_bytes(&self) -> usize {
-        self.peer()
-            .map(|peer| peer.max_frame_bytes as usize)
-            .unwrap_or(self.config.max_frame_bytes as usize)
+        self.peer().max_frame_bytes as usize
     }
+}
 
+impl Session<Outbound, Connecting> {
     pub fn begin_handshake(
-        &mut self,
+        mut self,
         store: &impl SessionStore,
         now_ms: u64,
-    ) -> Option<SessionAction> {
-        if self.role != SessionRole::Outbound || !matches!(self.state, SessionState::Connecting) {
-            return None;
-        }
+    ) -> (Session<Outbound, Handshaking>, SessionAction) {
         let hello = self.build_hello(store, now_ms);
-        self.state = SessionState::Handshaking;
-        Some(SessionAction::Send(ReplMessage::Hello(hello)))
+        (
+            self.with_phase(Handshaking),
+            SessionAction::Send(ReplMessage::Hello(hello)),
+        )
     }
+}
 
-    pub fn resend_handshake(
-        &mut self,
-        store: &impl SessionStore,
-        now_ms: u64,
-    ) -> Option<SessionAction> {
-        if self.role != SessionRole::Outbound || !matches!(self.state, SessionState::Handshaking) {
-            return None;
-        }
+impl Session<Outbound, Handshaking> {
+    pub fn resend_handshake(&mut self, store: &impl SessionStore, now_ms: u64) -> SessionAction {
         let hello = self.build_hello(store, now_ms);
-        Some(SessionAction::Send(ReplMessage::Hello(hello)))
+        SessionAction::Send(ReplMessage::Hello(hello))
+    }
+}
+
+impl<R, P: PhaseWrap> Session<R, P> {
+    fn handle_ack(self, ack: Ack) -> (SessionState<R>, Vec<SessionAction>) {
+        (P::wrap(self), vec![SessionAction::PeerAck(ack)])
     }
 
-    pub fn handle_message(
-        &mut self,
-        msg: ReplMessage,
-        store: &mut impl SessionStore,
-        now_ms: u64,
-    ) -> Vec<SessionAction> {
-        let state = self.state.clone();
-        match msg {
-            ReplMessage::Hello(msg) => match state {
-                SessionState::Connecting => self.handle_hello(msg, store, now_ms),
-                SessionState::Streaming { ref peer } if self.role == SessionRole::Inbound => {
-                    self.handle_hello_replay(msg, peer, store)
-                }
-                _ => self.invalid_request("unexpected HELLO"),
-            },
-            ReplMessage::Welcome(msg) => match state {
-                SessionState::Handshaking => self.handle_welcome(msg, store, now_ms),
-                SessionState::Streaming { ref peer } if self.role == SessionRole::Outbound => {
-                    self.handle_welcome_replay(msg, peer)
-                }
-                _ => self.invalid_request("unexpected WELCOME"),
-            },
-            ReplMessage::Events(msg) => match &self.state {
-                SessionState::Streaming { peer } | SessionState::Draining { peer } => {
-                    let incoming_namespaces = peer.incoming_namespaces.clone();
-                    self.handle_events(msg, incoming_namespaces, store, now_ms)
-                }
-                _ => self.invalid_request("EVENTS before handshake"),
-            },
-            ReplMessage::Ack(msg) => match &self.state {
-                SessionState::Streaming { .. } | SessionState::Draining { .. } => {
-                    self.handle_ack(msg)
-                }
-                _ => self.invalid_request("ACK before handshake"),
-            },
-            ReplMessage::Want(msg) => match &self.state {
-                SessionState::Streaming { .. } | SessionState::Draining { .. } => {
-                    self.handle_want(msg)
-                }
-                _ => self.invalid_request("WANT before handshake"),
-            },
-            ReplMessage::Ping(msg) => match &self.state {
-                SessionState::Streaming { .. } | SessionState::Draining { .. } => {
-                    self.handle_ping(msg)
-                }
-                _ => self.invalid_request("PING before handshake"),
-            },
-            ReplMessage::Pong(msg) => match &self.state {
-                SessionState::Streaming { .. } | SessionState::Draining { .. } => {
-                    self.handle_pong(msg)
-                }
-                _ => self.invalid_request("PONG before handshake"),
-            },
-            ReplMessage::Error(msg) => self.handle_peer_error(msg),
-        }
+    fn handle_want(self, want: Want) -> (SessionState<R>, Vec<SessionAction>) {
+        (P::wrap(self), vec![SessionAction::PeerWant(want)])
     }
 
-    pub fn mark_closed(&mut self) {
-        self.state = SessionState::Closed;
+    fn handle_ping(self, ping: Ping) -> (SessionState<R>, Vec<SessionAction>) {
+        let action = SessionAction::Send(ReplMessage::Pong(Pong { nonce: ping.nonce }));
+        (P::wrap(self), vec![action])
     }
 
-    fn handle_ack(&mut self, ack: Ack) -> Vec<SessionAction> {
-        vec![SessionAction::PeerAck(ack)]
+    fn handle_pong(self, _pong: Pong) -> (SessionState<R>, Vec<SessionAction>) {
+        (P::wrap(self), Vec::new())
+    }
+}
+
+impl<R, P: PhasePeerOpt> Session<R, P> {
+    fn invalid_request(self, reason: impl Into<String>) -> (SessionState<R>, Vec<SessionAction>) {
+        let error = invalid_request_error(reason);
+        self.fail(error)
     }
 
-    fn handle_want(&mut self, want: Want) -> Vec<SessionAction> {
-        vec![SessionAction::PeerWant(want)]
-    }
-
-    fn handle_ping(&mut self, ping: Ping) -> Vec<SessionAction> {
-        vec![SessionAction::Send(ReplMessage::Pong(Pong {
-            nonce: ping.nonce,
-        }))]
-    }
-
-    fn handle_pong(&mut self, _pong: Pong) -> Vec<SessionAction> {
-        Vec::new()
-    }
-
-    fn handle_peer_error(&mut self, payload: ErrorPayload) -> Vec<SessionAction> {
-        self.state = match self.peer().cloned() {
-            Some(peer) => SessionState::Draining { peer },
-            None => SessionState::Closed,
+    fn fail(self, error: ReplError) -> (SessionState<R>, Vec<SessionAction>) {
+        let payload = error.to_payload();
+        let Session {
+            role: _,
+            phase,
+            config,
+            limits,
+            admission,
+            gap_buffer,
+            durable,
+            applied,
+            next_nonce,
+        } = self;
+        let next = match phase.into_peer() {
+            Some(peer) => SessionState::Draining(Session {
+                role: PhantomData,
+                phase: Draining { peer },
+                config,
+                limits,
+                admission,
+                gap_buffer,
+                durable,
+                applied,
+                next_nonce,
+            }),
+            None => SessionState::Closed(Session {
+                role: PhantomData,
+                phase: Closed,
+                config,
+                limits,
+                admission,
+                gap_buffer,
+                durable,
+                applied,
+                next_nonce,
+            }),
         };
-        vec![
-            SessionAction::PeerError(payload.clone()),
-            SessionAction::Close {
-                error: Some(payload),
-            },
-        ]
+        (
+            next,
+            vec![
+                SessionAction::Send(ReplMessage::Error(payload.clone())),
+                SessionAction::Close {
+                    error: Some(payload),
+                },
+            ],
+        )
     }
 
+    fn handle_peer_error(self, payload: ErrorPayload) -> (SessionState<R>, Vec<SessionAction>) {
+        let Session {
+            role: _,
+            phase,
+            config,
+            limits,
+            admission,
+            gap_buffer,
+            durable,
+            applied,
+            next_nonce,
+        } = self;
+        let next = match phase.into_peer() {
+            Some(peer) => SessionState::Draining(Session {
+                role: PhantomData,
+                phase: Draining { peer },
+                config,
+                limits,
+                admission,
+                gap_buffer,
+                durable,
+                applied,
+                next_nonce,
+            }),
+            None => SessionState::Closed(Session {
+                role: PhantomData,
+                phase: Closed,
+                config,
+                limits,
+                admission,
+                gap_buffer,
+                durable,
+                applied,
+                next_nonce,
+            }),
+        };
+        (
+            next,
+            vec![
+                SessionAction::PeerError(payload.clone()),
+                SessionAction::Close {
+                    error: Some(payload),
+                },
+            ],
+        )
+    }
+}
+
+impl Session<Inbound, Connecting> {
     fn handle_hello(
-        &mut self,
+        mut self,
         hello: Hello,
         store: &mut impl SessionStore,
         _now_ms: u64,
-    ) -> Vec<SessionAction> {
-        if self.role != SessionRole::Inbound {
-            return self.invalid_request("unexpected HELLO");
-        }
-
+    ) -> (SessionState<Inbound>, Vec<SessionAction>) {
         if let Err(error) =
             self.validate_peer_store(hello.store_id, hello.store_epoch, hello.sender_replica_id)
         {
@@ -386,24 +660,22 @@ impl Session {
             accepted_namespaces,
             live_stream_enabled: welcome.live_stream_enabled,
         };
-        self.state = SessionState::Streaming { peer };
+        let session = self.with_phase(Streaming { peer });
         let mut actions = vec![SessionAction::Send(ReplMessage::Welcome(welcome))];
         if !wants.is_empty() {
             actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
         }
-        actions
+        (SessionState::Streaming(session), actions)
     }
+}
 
+impl Session<Inbound, Streaming> {
     fn handle_hello_replay(
-        &mut self,
+        mut self,
         hello: Hello,
-        peer: &SessionPeer,
         store: &mut impl SessionStore,
-    ) -> Vec<SessionAction> {
-        if self.role != SessionRole::Inbound {
-            return self.invalid_request("unexpected HELLO");
-        }
-
+    ) -> (SessionState<Inbound>, Vec<SessionAction>) {
+        let peer = self.peer().clone();
         if let Err(error) =
             self.validate_peer_store(hello.store_id, hello.store_epoch, hello.sender_replica_id)
         {
@@ -440,19 +712,20 @@ impl Session {
 
         let snapshot = store.watermark_snapshot(&accepted_namespaces);
         let welcome = self.build_welcome(negotiated, &hello, snapshot, accepted_namespaces);
-        vec![SessionAction::Send(ReplMessage::Welcome(welcome))]
+        (
+            SessionState::Streaming(self),
+            vec![SessionAction::Send(ReplMessage::Welcome(welcome))],
+        )
     }
+}
 
+impl Session<Outbound, Handshaking> {
     fn handle_welcome(
-        &mut self,
+        mut self,
         welcome: super::proto::Welcome,
         store: &mut impl SessionStore,
         _now_ms: u64,
-    ) -> Vec<SessionAction> {
-        if self.role != SessionRole::Outbound {
-            return self.invalid_request("unexpected WELCOME");
-        }
-
+    ) -> (SessionState<Outbound>, Vec<SessionAction>) {
         if let Err(error) = self.validate_peer_store(
             welcome.store_id,
             welcome.store_epoch,
@@ -490,23 +763,22 @@ impl Session {
             accepted_namespaces: welcome.accepted_namespaces.clone(),
             live_stream_enabled: welcome.live_stream_enabled,
         };
-        self.state = SessionState::Streaming { peer };
-        if wants.is_empty() {
+        let session = self.with_phase(Streaming { peer });
+        let actions = if wants.is_empty() {
             Vec::new()
         } else {
             vec![SessionAction::Send(ReplMessage::Want(Want { want: wants }))]
-        }
+        };
+        (SessionState::Streaming(session), actions)
     }
+}
 
+impl Session<Outbound, Streaming> {
     fn handle_welcome_replay(
-        &mut self,
+        mut self,
         welcome: super::proto::Welcome,
-        peer: &SessionPeer,
-    ) -> Vec<SessionAction> {
-        if self.role != SessionRole::Outbound {
-            return self.invalid_request("unexpected WELCOME");
-        }
-
+    ) -> (SessionState<Outbound>, Vec<SessionAction>) {
+        let peer = self.peer().clone();
         if let Err(error) = self.validate_peer_store(
             welcome.store_id,
             welcome.store_epoch,
@@ -524,16 +796,154 @@ impl Session {
             return self.invalid_request("WELCOME namespaces changed");
         }
 
-        Vec::new()
+        (SessionState::Streaming(self), Vec::new())
     }
+}
 
+pub(crate) fn handle_outbound_message(
+    session: SessionState<Outbound>,
+    msg: ReplMessage,
+    store: &mut impl SessionStore,
+    now_ms: u64,
+) -> (SessionState<Outbound>, Vec<SessionAction>) {
+    match msg {
+        ReplMessage::Hello(_) => match session {
+            SessionState::Connecting(session) => session.invalid_request("unexpected HELLO"),
+            SessionState::Handshaking(session) => session.invalid_request("unexpected HELLO"),
+            SessionState::Streaming(session) => session.invalid_request("unexpected HELLO"),
+            SessionState::Draining(session) => session.invalid_request("unexpected HELLO"),
+            SessionState::Closed(session) => session.invalid_request("unexpected HELLO"),
+        },
+        ReplMessage::Welcome(msg) => match session {
+            SessionState::Handshaking(session) => session.handle_welcome(msg, store, now_ms),
+            SessionState::Streaming(session) => session.handle_welcome_replay(msg),
+            SessionState::Connecting(session) => session.invalid_request("unexpected WELCOME"),
+            SessionState::Draining(session) => session.invalid_request("unexpected WELCOME"),
+            SessionState::Closed(session) => session.invalid_request("unexpected WELCOME"),
+        },
+        ReplMessage::Events(msg) => match session {
+            SessionState::Streaming(session) => session.handle_events(msg, store, now_ms),
+            SessionState::Draining(session) => session.handle_events(msg, store, now_ms),
+            SessionState::Connecting(session) => session.invalid_request("EVENTS before handshake"),
+            SessionState::Handshaking(session) => {
+                session.invalid_request("EVENTS before handshake")
+            }
+            SessionState::Closed(session) => session.invalid_request("EVENTS before handshake"),
+        },
+        ReplMessage::Ack(msg) => match session {
+            SessionState::Streaming(session) => session.handle_ack(msg),
+            SessionState::Draining(session) => session.handle_ack(msg),
+            SessionState::Connecting(session) => session.invalid_request("ACK before handshake"),
+            SessionState::Handshaking(session) => session.invalid_request("ACK before handshake"),
+            SessionState::Closed(session) => session.invalid_request("ACK before handshake"),
+        },
+        ReplMessage::Want(msg) => match session {
+            SessionState::Streaming(session) => session.handle_want(msg),
+            SessionState::Draining(session) => session.handle_want(msg),
+            SessionState::Connecting(session) => session.invalid_request("WANT before handshake"),
+            SessionState::Handshaking(session) => session.invalid_request("WANT before handshake"),
+            SessionState::Closed(session) => session.invalid_request("WANT before handshake"),
+        },
+        ReplMessage::Ping(msg) => match session {
+            SessionState::Streaming(session) => session.handle_ping(msg),
+            SessionState::Draining(session) => session.handle_ping(msg),
+            SessionState::Connecting(session) => session.invalid_request("PING before handshake"),
+            SessionState::Handshaking(session) => session.invalid_request("PING before handshake"),
+            SessionState::Closed(session) => session.invalid_request("PING before handshake"),
+        },
+        ReplMessage::Pong(msg) => match session {
+            SessionState::Streaming(session) => session.handle_pong(msg),
+            SessionState::Draining(session) => session.handle_pong(msg),
+            SessionState::Connecting(session) => session.invalid_request("PONG before handshake"),
+            SessionState::Handshaking(session) => session.invalid_request("PONG before handshake"),
+            SessionState::Closed(session) => session.invalid_request("PONG before handshake"),
+        },
+        ReplMessage::Error(msg) => match session {
+            SessionState::Connecting(session) => session.handle_peer_error(msg),
+            SessionState::Handshaking(session) => session.handle_peer_error(msg),
+            SessionState::Streaming(session) => session.handle_peer_error(msg),
+            SessionState::Draining(session) => session.handle_peer_error(msg),
+            SessionState::Closed(session) => session.handle_peer_error(msg),
+        },
+    }
+}
+
+pub(crate) fn handle_inbound_message(
+    session: SessionState<Inbound>,
+    msg: ReplMessage,
+    store: &mut impl SessionStore,
+    now_ms: u64,
+) -> (SessionState<Inbound>, Vec<SessionAction>) {
+    match msg {
+        ReplMessage::Hello(msg) => match session {
+            SessionState::Connecting(session) => session.handle_hello(msg, store, now_ms),
+            SessionState::Streaming(session) => session.handle_hello_replay(msg, store),
+            SessionState::Draining(session) => session.invalid_request("unexpected HELLO"),
+            SessionState::Handshaking(session) => session.invalid_request("unexpected HELLO"),
+            SessionState::Closed(session) => session.invalid_request("unexpected HELLO"),
+        },
+        ReplMessage::Welcome(_) => match session {
+            SessionState::Connecting(session) => session.invalid_request("unexpected WELCOME"),
+            SessionState::Handshaking(session) => session.invalid_request("unexpected WELCOME"),
+            SessionState::Streaming(session) => session.invalid_request("unexpected WELCOME"),
+            SessionState::Draining(session) => session.invalid_request("unexpected WELCOME"),
+            SessionState::Closed(session) => session.invalid_request("unexpected WELCOME"),
+        },
+        ReplMessage::Events(msg) => match session {
+            SessionState::Streaming(session) => session.handle_events(msg, store, now_ms),
+            SessionState::Draining(session) => session.handle_events(msg, store, now_ms),
+            SessionState::Connecting(session) => session.invalid_request("EVENTS before handshake"),
+            SessionState::Handshaking(session) => {
+                session.invalid_request("EVENTS before handshake")
+            }
+            SessionState::Closed(session) => session.invalid_request("EVENTS before handshake"),
+        },
+        ReplMessage::Ack(msg) => match session {
+            SessionState::Streaming(session) => session.handle_ack(msg),
+            SessionState::Draining(session) => session.handle_ack(msg),
+            SessionState::Connecting(session) => session.invalid_request("ACK before handshake"),
+            SessionState::Handshaking(session) => session.invalid_request("ACK before handshake"),
+            SessionState::Closed(session) => session.invalid_request("ACK before handshake"),
+        },
+        ReplMessage::Want(msg) => match session {
+            SessionState::Streaming(session) => session.handle_want(msg),
+            SessionState::Draining(session) => session.handle_want(msg),
+            SessionState::Connecting(session) => session.invalid_request("WANT before handshake"),
+            SessionState::Handshaking(session) => session.invalid_request("WANT before handshake"),
+            SessionState::Closed(session) => session.invalid_request("WANT before handshake"),
+        },
+        ReplMessage::Ping(msg) => match session {
+            SessionState::Streaming(session) => session.handle_ping(msg),
+            SessionState::Draining(session) => session.handle_ping(msg),
+            SessionState::Connecting(session) => session.invalid_request("PING before handshake"),
+            SessionState::Handshaking(session) => session.invalid_request("PING before handshake"),
+            SessionState::Closed(session) => session.invalid_request("PING before handshake"),
+        },
+        ReplMessage::Pong(msg) => match session {
+            SessionState::Streaming(session) => session.handle_pong(msg),
+            SessionState::Draining(session) => session.handle_pong(msg),
+            SessionState::Connecting(session) => session.invalid_request("PONG before handshake"),
+            SessionState::Handshaking(session) => session.invalid_request("PONG before handshake"),
+            SessionState::Closed(session) => session.invalid_request("PONG before handshake"),
+        },
+        ReplMessage::Error(msg) => match session {
+            SessionState::Connecting(session) => session.handle_peer_error(msg),
+            SessionState::Handshaking(session) => session.handle_peer_error(msg),
+            SessionState::Streaming(session) => session.handle_peer_error(msg),
+            SessionState::Draining(session) => session.handle_peer_error(msg),
+            SessionState::Closed(session) => session.handle_peer_error(msg),
+        },
+    }
+}
+
+impl<R, P: PhaseWrap> Session<R, P> {
     fn handle_events(
-        &mut self,
+        mut self,
         events: Events,
-        incoming_namespaces: Vec<NamespaceId>,
         store: &mut impl SessionStore,
         now_ms: u64,
-    ) -> Vec<SessionAction> {
+    ) -> (SessionState<R>, Vec<SessionAction>) {
+        let incoming_namespaces = self.peer().incoming_namespaces.clone();
         let total_bytes: u64 = events
             .events
             .iter()
@@ -638,9 +1048,11 @@ impl Session {
         if !wants.is_empty() {
             actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
         }
-        actions
+        (P::wrap(self), actions)
     }
+}
 
+impl<R, P> Session<R, P> {
     fn build_hello(&mut self, store: &impl SessionStore, _now_ms: u64) -> Hello {
         let snapshot = store.watermark_snapshot(&self.config.requested_namespaces);
         Hello {
@@ -837,25 +1249,6 @@ impl Session {
             ));
         }
         Ok(())
-    }
-
-    fn invalid_request(&mut self, reason: impl Into<String>) -> Vec<SessionAction> {
-        let error = invalid_request_error(reason);
-        self.fail(error)
-    }
-
-    fn fail(&mut self, error: ReplError) -> Vec<SessionAction> {
-        self.state = match self.peer().cloned() {
-            Some(peer) => SessionState::Draining { peer },
-            None => SessionState::Closed,
-        };
-        let payload = error.to_payload();
-        vec![
-            SessionAction::Send(ReplMessage::Error(payload.clone())),
-            SessionAction::Close {
-                error: Some(payload),
-            },
-        ]
     }
 }
 
@@ -1343,6 +1736,26 @@ mod tests {
         }
     }
 
+    fn apply_inbound_hello(
+        session: InboundConnecting,
+        hello: Hello,
+        store: &mut TestStore,
+    ) -> (SessionState<Inbound>, Vec<SessionAction>) {
+        handle_inbound_message(
+            SessionState::Connecting(session),
+            ReplMessage::Hello(hello),
+            store,
+            0,
+        )
+    }
+
+    fn expect_inbound_streaming(session: SessionState<Inbound>) -> Session<Inbound, Streaming> {
+        let SessionState::Streaming(session) = session else {
+            panic!("expected streaming session");
+        };
+        session
+    }
+
     fn base_store() -> (TestStore, StoreIdentity, ReplicaId) {
         let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));
@@ -1395,7 +1808,7 @@ mod tests {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
 
-        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let session = InboundConnecting::new(config, limits, admission);
 
         let peer_store = StoreIdentity::new(identity.store_id, identity.store_epoch);
         let hello = Hello {
@@ -1417,9 +1830,9 @@ mod tests {
             },
         };
 
-        let actions = session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+        let (session, actions) = apply_inbound_hello(session, hello, &mut store);
+        let session = expect_inbound_streaming(session);
         assert!(matches!(session.phase(), SessionPhase::Streaming));
-        assert!(session.peer().is_some());
         assert!(matches!(
             actions.as_slice(),
             [SessionAction::Send(ReplMessage::Welcome(_))]
@@ -1440,8 +1853,9 @@ mod tests {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
 
-        let mut session = Session::new(SessionRole::Outbound, config, limits, admission);
-        session.begin_handshake(&store, 0).expect("hello action");
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (session, _action) = session.begin_handshake(&store, 0);
+        let session = SessionState::Handshaking(session);
 
         let peer_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         let mut receiver_seen: WatermarkState<Durable> = BTreeMap::new();
@@ -1466,7 +1880,8 @@ mod tests {
             max_frame_bytes: 1024,
         };
 
-        let actions = session.handle_message(ReplMessage::Welcome(welcome), &mut store, 0);
+        let (_session, actions) =
+            handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, 0);
         let want = actions
             .iter()
             .find_map(|action| match action {
@@ -1492,7 +1907,7 @@ mod tests {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
 
-        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
             protocol_version: 2,
             min_protocol_version: 2,
@@ -1512,13 +1927,47 @@ mod tests {
             },
         };
 
-        let actions = session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
-        assert!(matches!(session.phase(), SessionPhase::Closed));
-        assert!(session.peer().is_none());
+        let (session, actions) = apply_inbound_hello(session, hello, &mut store);
+        assert!(matches!(session, SessionState::Closed(_)));
         let SessionAction::Send(ReplMessage::Error(payload)) = &actions[0] else {
             panic!("expected error payload");
         };
         assert_eq!(payload.code, ProtocolErrorCode::VersionIncompatible.into());
+    }
+
+    #[test]
+    fn typestate_outbound_reaches_streaming() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()];
+        config.offered_namespaces = vec![NamespaceId::core()];
+
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (session, _action) = session.begin_handshake(&store, 0);
+        let session = SessionState::Handshaking(session);
+
+        let welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: ReplicaId::new(Uuid::from_bytes([12u8; 16])),
+            welcome_nonce: 10,
+            accepted_namespaces: vec![NamespaceId::core()],
+            receiver_seen_durable: BTreeMap::new(),
+            receiver_seen_applied: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 1024,
+        };
+
+        let (session, _actions) =
+            handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, 0);
+        let SessionState::Streaming(session) = session else {
+            panic!("expected streaming session");
+        };
+        let _ = session.peer();
+        let _ = session.negotiated_max_frame_bytes();
     }
 
     #[test]
@@ -1530,7 +1979,7 @@ mod tests {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
 
-        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION_V1,
             min_protocol_version: PROTOCOL_VERSION_V1,
@@ -1549,14 +1998,16 @@ mod tests {
                 supports_compression: false,
             },
         };
-        session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+        let (session, _actions) = apply_inbound_hello(session, hello, &mut store);
+        let session = expect_inbound_streaming(session);
 
         let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
         let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
         let e2_sha = e2.sha256;
 
-        let actions = session.handle_message(
+        let (_session, actions) = handle_inbound_message(
+            SessionState::Streaming(session),
             ReplMessage::Events(Events {
                 events: vec![e1, e2],
             }),
@@ -1598,7 +2049,7 @@ mod tests {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
 
-        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION_V1,
             min_protocol_version: PROTOCOL_VERSION_V1,
@@ -1617,13 +2068,15 @@ mod tests {
                 supports_compression: false,
             },
         };
-        session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+        let (session, _actions) = apply_inbound_hello(session, hello, &mut store);
+        let session = expect_inbound_streaming(session);
 
         let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
         let e3 = make_event(identity, NamespaceId::core(), origin, 3, Some(e1.sha256));
 
-        let actions = session.handle_message(
+        let (_session, actions) = handle_inbound_message(
+            SessionState::Streaming(session),
             ReplMessage::Events(Events { events: vec![e3] }),
             &mut store,
             10,
@@ -1677,7 +2130,7 @@ mod tests {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
 
-        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION_V1,
             min_protocol_version: PROTOCOL_VERSION_V1,
@@ -1696,13 +2149,15 @@ mod tests {
                 supports_compression: false,
             },
         };
-        session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+        let (session, _actions) = apply_inbound_hello(session, hello, &mut store);
+        let session = expect_inbound_streaming(session);
 
         let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
         let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
 
-        let actions = session.handle_message(
+        let (session, actions) = handle_inbound_message(
+            SessionState::Streaming(session),
             ReplMessage::Events(Events { events: vec![e2] }),
             &mut store,
             10,
@@ -1713,7 +2168,9 @@ mod tests {
                 .any(|action| matches!(action, SessionAction::Send(ReplMessage::Want(_))))
         );
 
-        let actions = session.handle_message(
+        let session = expect_inbound_streaming(session);
+        let (_session, actions) = handle_inbound_message(
+            SessionState::Streaming(session),
             ReplMessage::Events(Events { events: vec![e1] }),
             &mut store,
             11,
@@ -1752,7 +2209,7 @@ mod tests {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
 
-        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION_V1,
             min_protocol_version: PROTOCOL_VERSION_V1,
@@ -1771,20 +2228,20 @@ mod tests {
                 supports_compression: false,
             },
         };
-        session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+        let (session, _actions) = apply_inbound_hello(session, hello, &mut store);
+        let session = expect_inbound_streaming(session);
 
         let origin = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
         let other_namespace = NamespaceId::parse("tmp").unwrap();
         let e1 = make_event(identity, other_namespace, origin, 1, None);
 
-        let actions = session.handle_message(
+        let (session, actions) = handle_inbound_message(
+            SessionState::Streaming(session),
             ReplMessage::Events(Events { events: vec![e1] }),
             &mut store,
             10,
         );
-
-        assert!(matches!(session.phase(), SessionPhase::Draining));
-        assert!(session.peer().is_some());
+        assert!(matches!(session, SessionState::Draining(_)));
         let payload = actions
             .iter()
             .find_map(|action| match action {
@@ -1807,7 +2264,7 @@ mod tests {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
 
-        let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION_V1,
             min_protocol_version: PROTOCOL_VERSION_V1,
@@ -1826,7 +2283,8 @@ mod tests {
                 supports_compression: false,
             },
         };
-        session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
+        let (session, _actions) = apply_inbound_hello(session, hello, &mut store);
+        let session = expect_inbound_streaming(session);
 
         let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         let wrong_store = StoreIdentity::new(
@@ -1835,7 +2293,8 @@ mod tests {
         );
         let e1 = make_event(wrong_store, NamespaceId::core(), origin, 1, None);
 
-        let actions = session.handle_message(
+        let (_session, actions) = handle_inbound_message(
+            SessionState::Streaming(session),
             ReplMessage::Events(Events { events: vec![e1] }),
             &mut store,
             10,
