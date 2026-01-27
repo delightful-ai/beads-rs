@@ -369,7 +369,7 @@ impl Record<Unverified> {
 }
 
 impl VerifiedRecord {
-    pub(crate) fn new(
+    pub fn new(
         header: RecordHeader,
         payload: EventBytes<crate::core::Canonical>,
         body: ValidatedEventBody,
