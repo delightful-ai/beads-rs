@@ -724,7 +724,7 @@ mod tests {
                 .encode()
                 .expect("header")
                 .len() as u64;
-        let max_segment_bytes = (header_len + frame_len + 1) as usize;
+        let max_segment_bytes = header_len + frame_len + 1;
         let mut writer = SegmentWriter::open(
             temp.path(),
             &meta,
