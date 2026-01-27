@@ -189,15 +189,17 @@ pub struct SameLineageBead<'a> {
 }
 
 impl<'a> SameLineageBead<'a> {
-    pub fn as_ref(&self) -> &'a Bead {
-        self.bead
-    }
-
     pub fn join(a: Self, b: Self) -> Bead {
         Bead {
             core: a.bead.core.clone(), // immutable, should be identical
             fields: BeadFields::join(&a.bead.fields, &b.bead.fields),
         }
+    }
+}
+
+impl<'a> AsRef<Bead> for SameLineageBead<'a> {
+    fn as_ref(&self) -> &Bead {
+        self.bead
     }
 }
 
