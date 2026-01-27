@@ -335,6 +335,7 @@ mod tests {
     }
 
     fn test_record() -> VerifiedRecord {
+        let limits = crate::core::Limits::default();
         let body = crate::core::EventBody {
             envelope_v: 1,
             store: StoreIdentity::new(
@@ -357,9 +358,9 @@ mod tests {
                 },
             }),
         };
-        let payload_bytes = crate::core::encode_event_body_canonical(&body).expect("payload");
-        let payload = Bytes::copy_from_slice(payload_bytes.as_ref());
-        let sha = crate::core::sha256_bytes(payload.as_ref()).0;
+        let body = body.into_validated(&limits).expect("validated");
+        let payload = crate::core::encode_event_body_canonical(body.as_ref()).expect("payload");
+        let sha = crate::core::hash_event_body(&payload).0;
         let header = RecordHeader {
             origin_replica_id: body.origin_replica_id,
             origin_seq: body.origin_seq,
@@ -370,7 +371,7 @@ mod tests {
             sha256: sha,
             prev_sha256: None,
         };
-        VerifiedRecord::new(header, payload, &body).expect("verified record")
+        VerifiedRecord::new(header, payload, body).expect("verified record")
     }
 
     fn frame_len(record: &VerifiedRecord, max_record_bytes: usize) -> u64 {
@@ -393,7 +394,7 @@ mod tests {
         let (_, event_body) =
             crate::core::decode_event_body(read.payload_bytes(), &crate::core::Limits::default())
                 .unwrap();
-        let verified = read.verify_with_event_body(&event_body).unwrap();
+        let verified = read.verify_with_event_body(event_body).unwrap();
         assert_eq!(verified.header().origin_seq, record.header().origin_seq);
     }
 

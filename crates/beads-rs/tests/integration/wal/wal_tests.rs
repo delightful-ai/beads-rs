@@ -34,7 +34,7 @@ fn wal_framing_roundtrips_records() {
     let (_, event_body) =
         decode_event_body(decoded.payload_bytes(), &Limits::default()).expect("decode event body");
     let verified = decoded
-        .verify_with_event_body(&event_body)
+        .verify_with_event_body(event_body)
         .expect("verify record");
     assert_eq!(verified, record);
 }
