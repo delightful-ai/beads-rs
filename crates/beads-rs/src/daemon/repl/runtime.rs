@@ -366,12 +366,12 @@ fn segment_paths_for_namespace(
     let segments = wal_index.reader().list_segments(namespace)?;
     let mut map = HashMap::new();
     for segment in segments {
-        let path = if segment.segment_path.is_absolute() {
-            segment.segment_path
+        let path = if segment.segment_path().is_absolute() {
+            segment.segment_path().to_path_buf()
         } else {
-            store_dir.join(&segment.segment_path)
+            store_dir.join(segment.segment_path())
         };
-        map.insert(segment.segment_id, path);
+        map.insert(segment.segment_id(), path);
     }
     Ok(map)
 }

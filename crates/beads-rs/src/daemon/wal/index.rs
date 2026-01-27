@@ -196,14 +196,112 @@ pub struct IndexedRangeItem {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SegmentRow {
-    pub namespace: NamespaceId,
-    pub segment_id: SegmentId,
-    pub segment_path: PathBuf,
-    pub created_at_ms: u64,
-    pub last_indexed_offset: u64,
-    pub sealed: bool,
-    pub final_len: Option<u64>,
+pub enum SegmentRow {
+    Open {
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+    },
+    Sealed {
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+        final_len: u64,
+    },
+}
+
+impl SegmentRow {
+    pub fn open(
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+    ) -> Self {
+        Self::Open {
+            namespace,
+            segment_id,
+            segment_path,
+            created_at_ms,
+            last_indexed_offset,
+        }
+    }
+
+    pub fn sealed(
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+        final_len: u64,
+    ) -> Self {
+        Self::Sealed {
+            namespace,
+            segment_id,
+            segment_path,
+            created_at_ms,
+            last_indexed_offset,
+            final_len,
+        }
+    }
+
+    pub fn namespace(&self) -> &NamespaceId {
+        match self {
+            SegmentRow::Open { namespace, .. } | SegmentRow::Sealed { namespace, .. } => namespace,
+        }
+    }
+
+    pub fn segment_id(&self) -> SegmentId {
+        match self {
+            SegmentRow::Open { segment_id, .. } | SegmentRow::Sealed { segment_id, .. } => {
+                *segment_id
+            }
+        }
+    }
+
+    pub fn segment_path(&self) -> &Path {
+        match self {
+            SegmentRow::Open { segment_path, .. } | SegmentRow::Sealed { segment_path, .. } => {
+                segment_path.as_path()
+            }
+        }
+    }
+
+    pub fn created_at_ms(&self) -> u64 {
+        match self {
+            SegmentRow::Open { created_at_ms, .. } | SegmentRow::Sealed { created_at_ms, .. } => {
+                *created_at_ms
+            }
+        }
+    }
+
+    pub fn last_indexed_offset(&self) -> u64 {
+        match self {
+            SegmentRow::Open {
+                last_indexed_offset,
+                ..
+            }
+            | SegmentRow::Sealed {
+                last_indexed_offset,
+                ..
+            } => *last_indexed_offset,
+        }
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, SegmentRow::Sealed { .. })
+    }
+
+    pub fn final_len(&self) -> Option<u64> {
+        match self {
+            SegmentRow::Open { .. } => None,
+            SegmentRow::Sealed { final_len, .. } => Some(*final_len),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -655,11 +753,11 @@ impl WalIndexTxn for SqliteWalIndexTxn {
     }
 
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError> {
-        let namespace = segment.namespace.as_str();
-        let segment_blob = uuid_blob(segment.segment_id.as_uuid());
-        let path_str = segment.segment_path.to_string_lossy();
-        let sealed = if segment.sealed { 1 } else { 0 };
-        let final_len = segment.final_len.map(|value| value as i64);
+        let namespace = segment.namespace().as_str();
+        let segment_blob = uuid_blob(segment.segment_id().as_uuid());
+        let path_str = segment.segment_path().to_string_lossy();
+        let sealed = if segment.is_sealed() { 1 } else { 0 };
+        let final_len = segment.final_len().map(|value| value as i64);
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO segments (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
@@ -674,8 +772,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             namespace,
             segment_blob,
             path_str.as_ref(),
-            segment.created_at_ms as i64,
-            segment.last_indexed_offset as i64,
+            segment.created_at_ms() as i64,
+            segment.last_indexed_offset() as i64,
             sealed,
             final_len,
         ])?;
@@ -864,16 +962,38 @@ impl WalIndexReader for SqliteWalIndexReader {
 
                 let segment_uuid = blob_uuid(segment_id)
                     .map_err(|err| WalIndexError::SegmentRowDecode(err.to_string()))?;
-
-                segments.push(SegmentRow {
-                    namespace: ns.clone(),
-                    segment_id: SegmentId::new(segment_uuid),
-                    segment_path: PathBuf::from(segment_path),
-                    created_at_ms,
-                    last_indexed_offset,
-                    sealed: sealed != 0,
-                    final_len,
-                });
+                let namespace = ns.clone();
+                let segment_id = SegmentId::new(segment_uuid);
+                let segment_path = PathBuf::from(segment_path);
+                let sealed = sealed != 0;
+                let segment_row = match (sealed, final_len) {
+                    (false, None) => SegmentRow::open(
+                        namespace,
+                        segment_id,
+                        segment_path,
+                        created_at_ms,
+                        last_indexed_offset,
+                    ),
+                    (true, Some(final_len)) => SegmentRow::sealed(
+                        namespace,
+                        segment_id,
+                        segment_path,
+                        created_at_ms,
+                        last_indexed_offset,
+                        final_len,
+                    ),
+                    (true, None) => {
+                        return Err(WalIndexError::SegmentRowDecode(
+                            "sealed segment missing final_len".to_string(),
+                        ));
+                    }
+                    (false, Some(_)) => {
+                        return Err(WalIndexError::SegmentRowDecode(
+                            "open segment has final_len".to_string(),
+                        ));
+                    }
+                };
+                segments.push(segment_row);
             }
             Ok(segments)
         })
@@ -1652,6 +1772,102 @@ mod tests {
         assert_eq!(req.event_ids, vec![event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
         assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), Seq0::new(1));
+    }
+
+    #[test]
+    fn sqlite_index_round_trips_segments() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let open = SegmentRow::open(
+            ns.clone(),
+            SegmentId::new(Uuid::from_bytes([1u8; 16])),
+            PathBuf::from("open.wal"),
+            1_700_000,
+            0,
+        );
+        let sealed = SegmentRow::sealed(
+            ns.clone(),
+            SegmentId::new(Uuid::from_bytes([2u8; 16])),
+            PathBuf::from("sealed.wal"),
+            1_700_100,
+            128,
+            128,
+        );
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.upsert_segment(&open).unwrap();
+        txn.upsert_segment(&sealed).unwrap();
+        txn.commit().unwrap();
+
+        let rows = index.reader().list_segments(&ns).unwrap();
+        assert!(rows.contains(&open));
+        assert!(rows.contains(&sealed));
+    }
+
+    #[test]
+    fn sqlite_index_rejects_sealed_segment_without_final_len() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+        let segment_id = SegmentId::new(Uuid::from_bytes([9u8; 16]));
+        conn.execute(
+            "INSERT INTO segments (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                ns.as_str(),
+                uuid_blob(segment_id.as_uuid()),
+                "bad-sealed.wal",
+                1_700_000i64,
+                0i64,
+                1i64,
+                Option::<i64>::None,
+            ],
+        )
+        .unwrap();
+
+        let err = index.reader().list_segments(&ns).unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::SegmentRowDecode(msg)
+                if msg.contains("sealed segment missing final_len")
+        ));
+    }
+
+    #[test]
+    fn sqlite_index_rejects_open_segment_with_final_len() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+        let segment_id = SegmentId::new(Uuid::from_bytes([10u8; 16]));
+        conn.execute(
+            "INSERT INTO segments (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                ns.as_str(),
+                uuid_blob(segment_id.as_uuid()),
+                "bad-open.wal",
+                1_700_000i64,
+                0i64,
+                0i64,
+                Some(64i64),
+            ],
+        )
+        .unwrap();
+
+        let err = index.reader().list_segments(&ns).unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::SegmentRowDecode(msg)
+                if msg.contains("open segment has final_len")
+        ));
     }
 
     #[test]

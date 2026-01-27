@@ -333,15 +333,13 @@ impl Daemon {
             (append, snapshot)
         };
         let last_indexed_offset = append.offset + append.len as u64;
-        let segment_row = SegmentRow {
-            namespace: namespace.clone(),
-            segment_id: append.segment_id,
-            segment_path: segment_rel_path(&store_dir, &segment_snapshot.path),
-            created_at_ms: segment_snapshot.created_at_ms,
+        let segment_row = SegmentRow::open(
+            namespace.clone(),
+            append.segment_id,
+            segment_rel_path(&store_dir, &segment_snapshot.path),
+            segment_snapshot.created_at_ms,
             last_indexed_offset,
-            sealed: false,
-            final_len: None,
-        };
+        );
 
         let broadcast_prev = prev_sha.map(Sha256);
         let event_id = EventId::new(origin_replica_id, namespace.clone(), origin_seq);
@@ -354,15 +352,14 @@ impl Daemon {
         let event_ids = vec![event_id];
         txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
         if let Some(sealed) = append.sealed.as_ref() {
-            let sealed_row = SegmentRow {
-                namespace: namespace.clone(),
-                segment_id: sealed.segment_id,
-                segment_path: segment_rel_path(&store_dir, &sealed.path),
-                created_at_ms: sealed.created_at_ms,
-                last_indexed_offset: sealed.final_len,
-                sealed: true,
-                final_len: Some(sealed.final_len),
-            };
+            let sealed_row = SegmentRow::sealed(
+                namespace.clone(),
+                sealed.segment_id,
+                segment_rel_path(&store_dir, &sealed.path),
+                sealed.created_at_ms,
+                sealed.final_len,
+                sealed.final_len,
+            );
             txn.upsert_segment(&sealed_row).map_err(wal_index_to_op)?;
         }
         txn.record_event(
@@ -1035,12 +1032,12 @@ fn load_event_body(
         .map_err(wal_index_to_op)?;
     let segment = segments
         .into_iter()
-        .find(|segment| segment.segment_id == item.segment_id)
+        .find(|segment| segment.segment_id() == item.segment_id)
         .ok_or(OpError::Internal("wal index missing segment for event"))?;
-    let path = if segment.segment_path.is_absolute() {
-        segment.segment_path
+    let path = if segment.segment_path().is_absolute() {
+        segment.segment_path().to_path_buf()
     } else {
-        store_dir.join(&segment.segment_path)
+        store_dir.join(segment.segment_path())
     };
 
     let mut reader =
