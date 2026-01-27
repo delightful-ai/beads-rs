@@ -1180,10 +1180,13 @@ mod tests {
     #[test]
     fn request_context_extracts_create_fields() {
         let repo = PathBuf::from("/tmp/repo");
+        let namespace = NamespaceId::core();
+        let actor = ActorId::new("actor@example.com").unwrap();
+        let client_request_id = ClientRequestId::new(Uuid::from_bytes([7u8; 16]));
         let meta = MutationMeta {
-            namespace: Some(NamespaceId::core()),
-            client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([7u8; 16]))),
-            actor_id: Some(ActorId::new("actor@example.com").unwrap()),
+            namespace: Some(namespace.clone()),
+            client_request_id: Some(client_request_id),
+            actor_id: Some(actor.clone()),
             durability: None,
         };
         let request = Request::Create {
@@ -1208,31 +1211,32 @@ mod tests {
         let info = request.info();
         assert_eq!(info.op, "create");
         assert_eq!(info.repo, Some(repo.as_path()));
-        assert_eq!(info.namespace, Some("core"));
-        assert_eq!(info.actor_id, Some("actor@example.com"));
-        assert_eq!(info.client_request_id, Some("req-123"));
+        assert_eq!(info.namespace, Some(&namespace));
+        assert_eq!(info.actor_id, Some(&actor));
+        assert_eq!(info.client_request_id, Some(&client_request_id));
         assert!(info.read.is_none());
     }
 
     #[test]
     fn request_context_extracts_show_fields() {
         let repo = PathBuf::from("/tmp/repo");
+        let namespace = NamespaceId::core();
         let read = ReadConsistency {
-            namespace: Some("core".to_string()),
+            namespace: Some(namespace.clone()),
             require_min_seen: None,
             wait_timeout_ms: None,
         };
         let request = Request::Show {
             ctx: crate::daemon::ipc::ReadCtx::new(repo.clone(), read),
             payload: crate::daemon::ipc::IdPayload {
-                id: "bd-123".to_string(),
+                id: BeadId::parse("bd-123").expect("bead id"),
             },
         };
 
         let info = request.info();
         assert_eq!(info.op, "show");
         assert_eq!(info.repo, Some(repo.as_path()));
-        assert_eq!(info.namespace, Some("core"));
+        assert_eq!(info.namespace, Some(&namespace));
         assert!(info.read.is_some());
         assert_eq!(
             info.read.map(read_consistency_tag),
@@ -1433,7 +1437,7 @@ mod tests {
             .unwrap();
 
         let read = ReadConsistency {
-            namespace: Some("core".to_string()),
+            namespace: Some(namespace.clone()),
             require_min_seen: Some(required),
             wait_timeout_ms: Some(200),
         };
@@ -1517,7 +1521,7 @@ mod tests {
             .unwrap();
 
         let read = ReadConsistency {
-            namespace: Some("core".to_string()),
+            namespace: Some(namespace.clone()),
             require_min_seen: Some(required),
             wait_timeout_ms: Some(10),
         };

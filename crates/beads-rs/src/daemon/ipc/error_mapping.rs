@@ -1014,10 +1014,10 @@ fn invalid_id_details(err: &InvalidId) -> error_details::InvalidIdDetails {
 mod tests {
     use super::*;
     use crate::core::{
-        DurabilityClass, DurabilityReceipt, Limits, NamespaceId, ReplicaId, Seq0, Seq1, StoreEpoch,
-        StoreId, StoreIdentity, TxnId,
+        BeadId, DurabilityClass, DurabilityReceipt, Limits, NamespaceId, ReplicaId, Seq0, Seq1,
+        StoreEpoch, StoreId, StoreIdentity, TxnId,
     };
-    use crate::daemon::ipc::decode_request_with_limits;
+    use crate::daemon::ipc::{Request, decode_request_with_limits};
     use crate::daemon::wal::{RecordShaMismatchInfo, WalIndexError, WalReplayError};
     use std::io;
     use uuid::Uuid;
@@ -1260,6 +1260,54 @@ mod tests {
             .unwrap()
             .expect("details");
         assert!(details.reason.is_some());
+    }
+
+    #[test]
+    fn decode_request_rejects_invalid_bead_id() {
+        let err = decode_request_with_limits(
+            r#"{"op":"show","repo":".","id":"BAD"}"#,
+            &Limits::default(),
+        )
+        .unwrap_err();
+        let payload = err.into_error_payload();
+        assert_eq!(payload.code, ProtocolErrorCode::InvalidRequest.into());
+    }
+
+    #[test]
+    fn decode_request_rejects_invalid_namespace() {
+        let err = decode_request_with_limits(
+            r#"{"op":"status","repo":".","namespace":"BAD"}"#,
+            &Limits::default(),
+        )
+        .unwrap_err();
+        let payload = err.into_error_payload();
+        assert_eq!(payload.code, ProtocolErrorCode::InvalidRequest.into());
+    }
+
+    #[test]
+    fn decode_request_rejects_invalid_durability() {
+        let err = decode_request_with_limits(
+            r#"{"op":"create","repo":".","durability":"nope","title":"bad","type":"task","priority":2}"#,
+            &Limits::default(),
+        )
+        .unwrap_err();
+        let payload = err.into_error_payload();
+        assert_eq!(payload.code, ProtocolErrorCode::InvalidRequest.into());
+    }
+
+    #[test]
+    fn decode_request_accepts_valid_bead_id() {
+        let request = decode_request_with_limits(
+            r#"{"op":"show","repo":".","id":"bd-123"}"#,
+            &Limits::default(),
+        )
+        .expect("decode");
+        match request {
+            Request::Show { payload, .. } => {
+                assert_eq!(payload.id, BeadId::parse("bd-123").expect("bead id"));
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
     }
 
     #[test]

@@ -6,7 +6,8 @@ use beads_api::StreamEvent;
 use beads_api::{Issue, QueryResult, SubscribeInfo};
 use beads_core::ErrorPayload;
 use beads_core::{
-    ActorId, Applied, ClientRequestId, DurabilityClass, DurabilityReceipt, NamespaceId, Watermarks,
+    ActorId, Applied, BeadId, ClientRequestId, DurabilityClass, DurabilityReceipt, NamespaceId,
+    Watermarks,
 };
 
 use super::{ctx::*, payload::*};
@@ -474,9 +475,9 @@ pub enum Request {
 pub struct RequestInfo<'a> {
     pub op: &'static str,
     pub repo: Option<&'a Path>,
-    pub namespace: Option<&'a str>,
-    pub actor_id: Option<&'a str>,
-    pub client_request_id: Option<&'a str>,
+    pub namespace: Option<&'a NamespaceId>,
+    pub actor_id: Option<&'a ActorId>,
+    pub client_request_id: Option<&'a ClientRequestId>,
     pub read: Option<&'a ReadConsistency>,
 }
 
@@ -520,10 +521,10 @@ impl Request {
             Request::AdminDoctor { ctx, .. } => info_from_read("admin_doctor", ctx),
             Request::AdminScrub { ctx, .. } => info_from_read("admin_scrub", ctx),
             Request::AdminFlush { ctx, payload, .. } => {
-                info_from_namespace("admin_flush", ctx, payload.namespace.as_deref())
+                info_from_namespace("admin_flush", ctx, payload.namespace.as_ref())
             }
             Request::AdminCheckpointWait { ctx, payload, .. } => {
-                info_from_namespace("admin_checkpoint_wait", ctx, payload.namespace.as_deref())
+                info_from_namespace("admin_checkpoint_wait", ctx, payload.namespace.as_ref())
             }
             Request::AdminFingerprint { ctx, .. } => info_from_read("admin_fingerprint", ctx),
             Request::AdminReloadPolicies { ctx, .. } => {
@@ -566,9 +567,9 @@ fn info_from_mutation<'a>(op: &'static str, ctx: &'a MutationCtx) -> RequestInfo
     RequestInfo {
         op,
         repo: Some(&ctx.repo.path),
-        namespace: ctx.meta.namespace.as_deref(),
-        actor_id: ctx.meta.actor_id.as_deref(),
-        client_request_id: ctx.meta.client_request_id.as_deref(),
+        namespace: ctx.meta.namespace.as_ref(),
+        actor_id: ctx.meta.actor_id.as_ref(),
+        client_request_id: ctx.meta.client_request_id.as_ref(),
         read: None,
     }
 }
@@ -577,7 +578,7 @@ fn info_from_read<'a>(op: &'static str, ctx: &'a ReadCtx) -> RequestInfo<'a> {
     RequestInfo {
         op,
         repo: Some(&ctx.repo.path),
-        namespace: ctx.read.namespace.as_deref(),
+        namespace: ctx.read.namespace.as_ref(),
         actor_id: None,
         client_request_id: None,
         read: Some(&ctx.read),
@@ -598,7 +599,7 @@ fn info_from_repo<'a>(op: &'static str, ctx: &'a RepoCtx) -> RequestInfo<'a> {
 fn info_from_namespace<'a>(
     op: &'static str,
     ctx: &'a RepoCtx,
-    namespace: Option<&'a str>,
+    namespace: Option<&'a NamespaceId>,
 ) -> RequestInfo<'a> {
     RequestInfo {
         op,
@@ -831,7 +832,10 @@ mod tests {
         let req = Request::ShowMultiple {
             ctx: ReadCtx::new(PathBuf::from("/test"), ReadConsistency::default()),
             payload: IdsPayload {
-                ids: vec!["bd-abc".to_string(), "bd-xyz".to_string()],
+                ids: vec![
+                    BeadId::parse("bd-abc").expect("bead id"),
+                    BeadId::parse("bd-xyz").expect("bead id"),
+                ],
             },
         };
 
@@ -843,7 +847,7 @@ mod tests {
         match parsed {
             Request::ShowMultiple { payload, .. } => {
                 assert_eq!(payload.ids.len(), 2);
-                assert_eq!(payload.ids[0], "bd-abc");
+                assert_eq!(payload.ids[0], BeadId::parse("bd-abc").expect("bead id"));
             }
             _ => panic!("wrong request type"),
         }
@@ -855,7 +859,7 @@ mod tests {
             ctx: ReadCtx::new(
                 PathBuf::from("/test"),
                 ReadConsistency {
-                    namespace: Some("core".to_string()),
+                    namespace: Some(NamespaceId::core()),
                     require_min_seen: None,
                     wait_timeout_ms: Some(50),
                 },
@@ -869,7 +873,7 @@ mod tests {
         let parsed: Request = serde_json::from_str(&json).unwrap();
         match parsed {
             Request::Subscribe { ctx, .. } => {
-                assert_eq!(ctx.read.namespace.as_deref(), Some("core"));
+                assert_eq!(ctx.read.namespace.as_ref(), Some(&NamespaceId::core()));
                 assert_eq!(ctx.read.wait_timeout_ms, Some(50));
             }
             _ => panic!("wrong request type"),
@@ -979,13 +983,13 @@ mod tests {
     #[test]
     fn read_consistency_roundtrip_preserves_namespace() {
         let read = ReadConsistency {
-            namespace: Some("core".to_string()),
+            namespace: Some(NamespaceId::core()),
             require_min_seen: Some(Watermarks::new()),
             wait_timeout_ms: None,
         };
         let json = serde_json::to_string(&read).unwrap();
         let parsed: ReadConsistency = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.namespace, Some("core".to_string()));
+        assert_eq!(parsed.namespace, Some(NamespaceId::core()));
         assert_eq!(parsed.require_min_seen, Some(Watermarks::new()));
     }
 }
