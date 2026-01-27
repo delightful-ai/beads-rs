@@ -311,7 +311,6 @@ impl WireWorkflowSnapshot {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WireClaimEmpty {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,8 +324,8 @@ pub struct WireClaimedSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WireClaimSnapshot {
-    Unclaimed(WireClaimEmpty),
     Claimed(WireClaimedSnapshot),
+    Unclaimed(WireClaimEmpty),
 }
 
 impl WireClaimSnapshot {
