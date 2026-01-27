@@ -13,14 +13,16 @@ use crate::core::error::details::{
     BatchTooLargeDetails, InvalidRequestDetails, MalformedPayloadDetails, ParserKind,
 };
 use crate::core::{
-    ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, Limits, NamespaceId, Opaque,
-    ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
+    Applied, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, HeadStatus,
+    Limits, NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch,
+    StoreId, Watermark,
 };
 
 pub const PROTOCOL_VERSION_V1: u32 = crate::core::StoreMetaVersions::REPLICATION_PROTOCOL_VERSION;
 
 pub type WatermarkMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Seq0>>;
-pub type WatermarkHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Sha256>>;
+pub type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
+type WatermarkHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Sha256>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplEnvelope {
@@ -58,10 +60,8 @@ pub struct Hello {
     pub max_frame_bytes: u32,
     pub requested_namespaces: Vec<NamespaceId>,
     pub offered_namespaces: Vec<NamespaceId>,
-    pub seen_durable: WatermarkMap,
-    pub seen_durable_heads: Option<WatermarkHeads>,
-    pub seen_applied: Option<WatermarkMap>,
-    pub seen_applied_heads: Option<WatermarkHeads>,
+    pub seen_durable: WatermarkState<Durable>,
+    pub seen_applied: Option<WatermarkState<Applied>>,
     pub capabilities: Capabilities,
 }
 
@@ -73,10 +73,8 @@ pub struct Welcome {
     pub receiver_replica_id: ReplicaId,
     pub welcome_nonce: u64,
     pub accepted_namespaces: Vec<NamespaceId>,
-    pub receiver_seen_durable: WatermarkMap,
-    pub receiver_seen_durable_heads: Option<WatermarkHeads>,
-    pub receiver_seen_applied: Option<WatermarkMap>,
-    pub receiver_seen_applied_heads: Option<WatermarkHeads>,
+    pub receiver_seen_durable: WatermarkState<Durable>,
+    pub receiver_seen_applied: Option<WatermarkState<Applied>>,
     pub live_stream_enabled: bool,
     pub max_frame_bytes: u32,
 }
@@ -88,10 +86,8 @@ pub struct Events {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ack {
-    pub durable: WatermarkMap,
-    pub durable_heads: Option<WatermarkHeads>,
-    pub applied: Option<WatermarkMap>,
-    pub applied_heads: Option<WatermarkHeads>,
+    pub durable: WatermarkState<Durable>,
+    pub applied: Option<WatermarkState<Applied>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -405,15 +401,21 @@ fn decode_message_body(
 }
 
 fn encode_hello(enc: &mut Encoder<&mut Vec<u8>>, hello: &Hello) -> Result<(), ProtoEncodeError> {
+    let (seen_durable, seen_durable_heads) = watermark_maps_from_state(&hello.seen_durable);
+    let seen_applied = hello
+        .seen_applied
+        .as_ref()
+        .map(|state| watermark_maps_from_state(state));
+
     let mut len = 11;
-    if hello.seen_durable_heads.is_some() {
+    if seen_durable_heads.is_some() {
         len += 1;
     }
-    if hello.seen_applied.is_some() {
+    if let Some((_, heads)) = &seen_applied {
         len += 1;
-    }
-    if hello.seen_applied_heads.is_some() {
-        len += 1;
+        if heads.is_some() {
+            len += 1;
+        }
     }
     enc.map(len)?;
 
@@ -436,19 +438,21 @@ fn encode_hello(enc: &mut Encoder<&mut Vec<u8>>, hello: &Hello) -> Result<(), Pr
     enc.str("offered_namespaces")?;
     encode_namespace_list(enc, &hello.offered_namespaces)?;
     enc.str("seen_durable")?;
-    encode_watermark_map(enc, &hello.seen_durable)?;
+    encode_watermark_map(enc, &seen_durable)?;
 
-    if let Some(heads) = &hello.seen_durable_heads {
+    if let Some(heads) = &seen_durable_heads {
         enc.str("seen_durable_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
-    if let Some(applied) = &hello.seen_applied {
+    if let Some((applied, _)) = &seen_applied {
         enc.str("seen_applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some(heads) = &hello.seen_applied_heads {
-        enc.str("seen_applied_heads")?;
-        encode_watermark_heads(enc, heads)?;
+    if let Some((_, applied_heads)) = &seen_applied {
+        if let Some(heads) = applied_heads {
+            enc.str("seen_applied_heads")?;
+            encode_watermark_heads(enc, heads)?;
+        }
     }
 
     enc.str("capabilities")?;
@@ -529,10 +533,25 @@ fn decode_hello(dec: &mut Decoder, limits: &Limits) -> Result<Hello, ProtoDecode
             .ok_or(ProtoDecodeError::MissingField("requested_namespaces"))?,
         offered_namespaces: offered_namespaces
             .ok_or(ProtoDecodeError::MissingField("offered_namespaces"))?,
-        seen_durable: seen_durable.ok_or(ProtoDecodeError::MissingField("seen_durable"))?,
-        seen_durable_heads,
-        seen_applied,
-        seen_applied_heads,
+        seen_durable: watermark_state_from_wire(
+            seen_durable.ok_or(ProtoDecodeError::MissingField("seen_durable"))?,
+            seen_durable_heads,
+            "seen_durable",
+        )?,
+        seen_applied: match seen_applied {
+            Some(applied) => Some(watermark_state_from_wire(
+                applied,
+                seen_applied_heads,
+                "seen_applied",
+            )?),
+            None if seen_applied_heads.is_some() => {
+                return Err(ProtoDecodeError::InvalidField {
+                    field: "seen_applied_heads",
+                    reason: "seen_applied missing for heads".to_string(),
+                });
+            }
+            None => None,
+        },
         capabilities: capabilities.ok_or(ProtoDecodeError::MissingField("capabilities"))?,
     })
 }
@@ -541,15 +560,22 @@ fn encode_welcome(
     enc: &mut Encoder<&mut Vec<u8>>,
     welcome: &Welcome,
 ) -> Result<(), ProtoEncodeError> {
+    let (receiver_seen_durable, receiver_seen_durable_heads) =
+        watermark_maps_from_state(&welcome.receiver_seen_durable);
+    let receiver_seen_applied = welcome
+        .receiver_seen_applied
+        .as_ref()
+        .map(|state| watermark_maps_from_state(state));
+
     let mut len = 9;
-    if welcome.receiver_seen_durable_heads.is_some() {
+    if receiver_seen_durable_heads.is_some() {
         len += 1;
     }
-    if welcome.receiver_seen_applied.is_some() {
+    if let Some((_, heads)) = &receiver_seen_applied {
         len += 1;
-    }
-    if welcome.receiver_seen_applied_heads.is_some() {
-        len += 1;
+        if heads.is_some() {
+            len += 1;
+        }
     }
     enc.map(len)?;
 
@@ -566,18 +592,20 @@ fn encode_welcome(
     enc.str("accepted_namespaces")?;
     encode_namespace_list(enc, &welcome.accepted_namespaces)?;
     enc.str("receiver_seen_durable")?;
-    encode_watermark_map(enc, &welcome.receiver_seen_durable)?;
-    if let Some(heads) = &welcome.receiver_seen_durable_heads {
+    encode_watermark_map(enc, &receiver_seen_durable)?;
+    if let Some(heads) = &receiver_seen_durable_heads {
         enc.str("receiver_seen_durable_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
-    if let Some(applied) = &welcome.receiver_seen_applied {
+    if let Some((applied, _)) = &receiver_seen_applied {
         enc.str("receiver_seen_applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some(heads) = &welcome.receiver_seen_applied_heads {
-        enc.str("receiver_seen_applied_heads")?;
-        encode_watermark_heads(enc, heads)?;
+    if let Some((_, applied_heads)) = &receiver_seen_applied {
+        if let Some(heads) = applied_heads {
+            enc.str("receiver_seen_applied_heads")?;
+            encode_watermark_heads(enc, heads)?;
+        }
     }
     enc.str("live_stream_enabled")?;
     enc.bool(welcome.live_stream_enabled)?;
@@ -649,11 +677,25 @@ fn decode_welcome(dec: &mut Decoder, limits: &Limits) -> Result<Welcome, ProtoDe
         welcome_nonce: welcome_nonce.ok_or(ProtoDecodeError::MissingField("welcome_nonce"))?,
         accepted_namespaces: accepted_namespaces
             .ok_or(ProtoDecodeError::MissingField("accepted_namespaces"))?,
-        receiver_seen_durable: receiver_seen_durable
-            .ok_or(ProtoDecodeError::MissingField("receiver_seen_durable"))?,
-        receiver_seen_durable_heads,
-        receiver_seen_applied,
-        receiver_seen_applied_heads,
+        receiver_seen_durable: watermark_state_from_wire(
+            receiver_seen_durable.ok_or(ProtoDecodeError::MissingField("receiver_seen_durable"))?,
+            receiver_seen_durable_heads,
+            "receiver_seen_durable",
+        )?,
+        receiver_seen_applied: match receiver_seen_applied {
+            Some(applied) => Some(watermark_state_from_wire(
+                applied,
+                receiver_seen_applied_heads,
+                "receiver_seen_applied",
+            )?),
+            None if receiver_seen_applied_heads.is_some() => {
+                return Err(ProtoDecodeError::InvalidField {
+                    field: "receiver_seen_applied_heads",
+                    reason: "receiver_seen_applied missing for heads".to_string(),
+                });
+            }
+            None => None,
+        },
         live_stream_enabled: live_stream_enabled
             .ok_or(ProtoDecodeError::MissingField("live_stream_enabled"))?,
         max_frame_bytes: max_frame_bytes
@@ -724,31 +766,39 @@ fn decode_events(dec: &mut Decoder, limits: &Limits) -> Result<Events, ProtoDeco
 }
 
 fn encode_ack(enc: &mut Encoder<&mut Vec<u8>>, ack: &Ack) -> Result<(), ProtoEncodeError> {
+    let (durable, durable_heads) = watermark_maps_from_state(&ack.durable);
+    let applied = ack
+        .applied
+        .as_ref()
+        .map(|state| watermark_maps_from_state(state));
+
     let mut len = 1;
-    if ack.durable_heads.is_some() {
+    if durable_heads.is_some() {
         len += 1;
     }
-    if ack.applied.is_some() {
+    if let Some((_, heads)) = &applied {
         len += 1;
-    }
-    if ack.applied_heads.is_some() {
-        len += 1;
+        if heads.is_some() {
+            len += 1;
+        }
     }
 
     enc.map(len)?;
     enc.str("durable")?;
-    encode_watermark_map(enc, &ack.durable)?;
-    if let Some(heads) = &ack.durable_heads {
+    encode_watermark_map(enc, &durable)?;
+    if let Some(heads) = &durable_heads {
         enc.str("durable_heads")?;
         encode_watermark_heads(enc, heads)?;
     }
-    if let Some(applied) = &ack.applied {
+    if let Some((applied, _)) = &applied {
         enc.str("applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some(heads) = &ack.applied_heads {
-        enc.str("applied_heads")?;
-        encode_watermark_heads(enc, heads)?;
+    if let Some((_, applied_heads)) = &applied {
+        if let Some(heads) = applied_heads {
+            enc.str("applied_heads")?;
+            encode_watermark_heads(enc, heads)?;
+        }
     }
     Ok(())
 }
@@ -778,10 +828,25 @@ fn decode_ack(dec: &mut Decoder, limits: &Limits) -> Result<Ack, ProtoDecodeErro
     }
 
     Ok(Ack {
-        durable: durable.ok_or(ProtoDecodeError::MissingField("durable"))?,
-        durable_heads,
-        applied,
-        applied_heads,
+        durable: watermark_state_from_wire(
+            durable.ok_or(ProtoDecodeError::MissingField("durable"))?,
+            durable_heads,
+            "durable",
+        )?,
+        applied: match applied {
+            Some(applied) => Some(watermark_state_from_wire(
+                applied,
+                applied_heads,
+                "applied",
+            )?),
+            None if applied_heads.is_some() => {
+                return Err(ProtoDecodeError::InvalidField {
+                    field: "applied_heads",
+                    reason: "applied missing for heads".to_string(),
+                });
+            }
+            None => None,
+        },
     })
 }
 
@@ -1134,6 +1199,76 @@ fn decode_watermark_heads(
         out.insert(namespace, origins);
     }
     Ok(out)
+}
+
+fn watermark_state_from_wire<K>(
+    map: WatermarkMap,
+    heads: Option<WatermarkHeads>,
+    field: &'static str,
+) -> Result<WatermarkState<K>, ProtoDecodeError> {
+    if let Some(heads) = &heads {
+        for (namespace, origins) in heads {
+            let Some(seqs) = map.get(namespace) else {
+                return Err(ProtoDecodeError::InvalidField {
+                    field,
+                    reason: format!("head namespace {namespace} missing seq map"),
+                });
+            };
+            for origin in origins.keys() {
+                if !seqs.contains_key(origin) {
+                    return Err(ProtoDecodeError::InvalidField {
+                        field,
+                        reason: format!("head for {namespace} {origin} missing seq"),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut out: WatermarkState<K> = BTreeMap::new();
+    for (namespace, origins) in map {
+        let ns_map = out.entry(namespace.clone()).or_default();
+        let heads_ns = heads.as_ref().and_then(|heads| heads.get(&namespace));
+        for (origin, seq) in origins {
+            let head = heads_ns.and_then(|origins| origins.get(&origin)).copied();
+            let status = match head {
+                Some(sha) => HeadStatus::Known(sha.0),
+                None => HeadStatus::Genesis,
+            };
+            let watermark =
+                Watermark::new(seq, status).map_err(|err| ProtoDecodeError::InvalidField {
+                    field,
+                    reason: format!("invalid watermark for {namespace} {origin}: {err}"),
+                })?;
+            ns_map.insert(origin, watermark);
+        }
+    }
+    Ok(out)
+}
+
+fn watermark_maps_from_state<K>(
+    state: &WatermarkState<K>,
+) -> (WatermarkMap, Option<WatermarkHeads>) {
+    let mut map: WatermarkMap = BTreeMap::new();
+    let mut heads: WatermarkHeads = BTreeMap::new();
+
+    for (namespace, origins) in state {
+        let ns_map = map.entry(namespace.clone()).or_default();
+        let ns_heads = heads.entry(namespace.clone()).or_default();
+        for (origin, watermark) in origins {
+            ns_map.insert(*origin, watermark.seq());
+            if let HeadStatus::Known(head) = watermark.head() {
+                ns_heads.insert(*origin, Sha256(head));
+            }
+        }
+    }
+
+    let heads = if heads.values().all(|origins| origins.is_empty()) {
+        None
+    } else {
+        Some(heads)
+    };
+    (map, heads)
 }
 
 fn encode_store_id(
@@ -1501,6 +1636,7 @@ mod tests {
         NoteAppendV1, ReplicaId, StoreIdentity, TraceId, TxnDeltaV1, TxnId, TxnV1, WireBeadPatch,
         WireNoteV1, WireStamp, encode_event_body_canonical, hash_event_body,
     };
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     fn sample_event_body(seq: u64) -> EventBody {
@@ -1579,10 +1715,8 @@ mod tests {
             max_frame_bytes: 1_024,
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
-            seen_durable: WatermarkMap::new(),
-            seen_durable_heads: None,
+            seen_durable: BTreeMap::new(),
             seen_applied: None,
-            seen_applied_heads: None,
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
@@ -1599,13 +1733,52 @@ mod tests {
             receiver_replica_id: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
             welcome_nonce: 24,
             accepted_namespaces: vec![NamespaceId::core()],
-            receiver_seen_durable: WatermarkMap::new(),
-            receiver_seen_durable_heads: None,
+            receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
-            receiver_seen_applied_heads: None,
             live_stream_enabled: true,
             max_frame_bytes: 2_048,
         }
+    }
+
+    fn encode_custom_hello_body(
+        seen_durable: WatermarkMap,
+        seen_durable_heads: Option<WatermarkHeads>,
+    ) -> Vec<u8> {
+        let hello = sample_hello();
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        let mut len = 11;
+        if seen_durable_heads.is_some() {
+            len += 1;
+        }
+        enc.map(len).unwrap();
+        enc.str("protocol_version").unwrap();
+        enc.u32(hello.protocol_version).unwrap();
+        enc.str("min_protocol_version").unwrap();
+        enc.u32(hello.min_protocol_version).unwrap();
+        enc.str("store_id").unwrap();
+        encode_store_id(&mut enc, &hello.store_id).unwrap();
+        enc.str("store_epoch").unwrap();
+        enc.u64(hello.store_epoch.get()).unwrap();
+        enc.str("sender_replica_id").unwrap();
+        encode_replica_id(&mut enc, &hello.sender_replica_id).unwrap();
+        enc.str("hello_nonce").unwrap();
+        enc.u64(hello.hello_nonce).unwrap();
+        enc.str("max_frame_bytes").unwrap();
+        enc.u32(hello.max_frame_bytes).unwrap();
+        enc.str("requested_namespaces").unwrap();
+        encode_namespace_list(&mut enc, &hello.requested_namespaces).unwrap();
+        enc.str("offered_namespaces").unwrap();
+        encode_namespace_list(&mut enc, &hello.offered_namespaces).unwrap();
+        enc.str("seen_durable").unwrap();
+        encode_watermark_map(&mut enc, &seen_durable).unwrap();
+        if let Some(heads) = &seen_durable_heads {
+            enc.str("seen_durable_heads").unwrap();
+            encode_watermark_heads(&mut enc, heads).unwrap();
+        }
+        enc.str("capabilities").unwrap();
+        encode_capabilities(&mut enc, &hello.capabilities).unwrap();
+        buf
     }
 
     fn encode_body_bytes(envelope: &ReplEnvelope) -> Vec<u8> {
@@ -1643,6 +1816,50 @@ mod tests {
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn decode_hello_rejects_missing_head_for_nonzero_seq() {
+        let mut seen_durable = WatermarkMap::new();
+        seen_durable
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(ReplicaId::new(Uuid::from_bytes([1u8; 16])), Seq0::new(1));
+        let bytes = encode_custom_hello_body(seen_durable, None);
+        let mut dec = Decoder::new(&bytes);
+        let err = decode_hello(&mut dec, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoDecodeError::InvalidField {
+                field: "seen_durable",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_hello_rejects_head_at_genesis() {
+        let mut seen_durable = WatermarkMap::new();
+        let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+        seen_durable
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(origin, Seq0::ZERO);
+        let mut heads = WatermarkHeads::new();
+        heads
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(origin, Sha256([9u8; 32]));
+        let bytes = encode_custom_hello_body(seen_durable, Some(heads));
+        let mut dec = Decoder::new(&bytes);
+        let err = decode_hello(&mut dec, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoDecodeError::InvalidField {
+                field: "seen_durable",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1710,10 +1927,8 @@ mod tests {
         let ack = ReplEnvelope {
             version: PROTOCOL_VERSION_V1,
             message: ReplMessage::Ack(Ack {
-                durable: WatermarkMap::new(),
-                durable_heads: None,
+                durable: BTreeMap::new(),
                 applied: None,
-                applied_heads: None,
             }),
         };
         assert_map_keys(&encode_body_bytes(&ack), &["durable"]);
@@ -1786,10 +2001,8 @@ mod tests {
         let envelope = ReplEnvelope {
             version: PROTOCOL_VERSION_V1,
             message: ReplMessage::Ack(Ack {
-                durable: WatermarkMap::new(),
-                durable_heads: None,
+                durable: BTreeMap::new(),
                 applied: None,
-                applied_heads: None,
             }),
         };
         let bytes = encode_envelope(&envelope).unwrap();
