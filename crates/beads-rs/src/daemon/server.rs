@@ -74,71 +74,105 @@ struct RequestContext {
 impl RequestContext {
     fn from_request(request: &Request) -> Self {
         match request {
-            Request::Create { repo, meta, .. } => Self::from_mutation("create", repo, meta),
-            Request::Update { repo, meta, .. } => Self::from_mutation("update", repo, meta),
-            Request::AddLabels { repo, meta, .. } => Self::from_mutation("add_labels", repo, meta),
-            Request::RemoveLabels { repo, meta, .. } => {
-                Self::from_mutation("remove_labels", repo, meta)
+            Request::Create { ctx, .. } => Self::from_mutation("create", &ctx.repo.path, &ctx.meta),
+            Request::Update { ctx, .. } => Self::from_mutation("update", &ctx.repo.path, &ctx.meta),
+            Request::AddLabels { ctx, .. } => {
+                Self::from_mutation("add_labels", &ctx.repo.path, &ctx.meta)
             }
-            Request::SetParent { repo, meta, .. } => Self::from_mutation("set_parent", repo, meta),
-            Request::Close { repo, meta, .. } => Self::from_mutation("close", repo, meta),
-            Request::Reopen { repo, meta, .. } => Self::from_mutation("reopen", repo, meta),
-            Request::Delete { repo, meta, .. } => Self::from_mutation("delete", repo, meta),
-            Request::AddDep { repo, meta, .. } => Self::from_mutation("add_dep", repo, meta),
-            Request::RemoveDep { repo, meta, .. } => Self::from_mutation("remove_dep", repo, meta),
-            Request::AddNote { repo, meta, .. } => Self::from_mutation("add_note", repo, meta),
-            Request::Claim { repo, meta, .. } => Self::from_mutation("claim", repo, meta),
-            Request::Unclaim { repo, meta, .. } => Self::from_mutation("unclaim", repo, meta),
-            Request::ExtendClaim { repo, meta, .. } => {
-                Self::from_mutation("extend_claim", repo, meta)
+            Request::RemoveLabels { ctx, .. } => {
+                Self::from_mutation("remove_labels", &ctx.repo.path, &ctx.meta)
             }
-            Request::Show { repo, read, .. } => Self::from_read("show", repo, read),
-            Request::ShowMultiple { repo, read, .. } => {
-                Self::from_read("show_multiple", repo, read)
+            Request::SetParent { ctx, .. } => {
+                Self::from_mutation("set_parent", &ctx.repo.path, &ctx.meta)
             }
-            Request::List { repo, read, .. } => Self::from_read("list", repo, read),
-            Request::Ready { repo, read, .. } => Self::from_read("ready", repo, read),
-            Request::DepTree { repo, read, .. } => Self::from_read("dep_tree", repo, read),
-            Request::DepCycles { repo, read, .. } => Self::from_read("dep_cycles", repo, read),
-            Request::Deps { repo, read, .. } => Self::from_read("deps", repo, read),
-            Request::Notes { repo, read, .. } => Self::from_read("notes", repo, read),
-            Request::Blocked { repo, read } => Self::from_read("blocked", repo, read),
-            Request::Stale { repo, read, .. } => Self::from_read("stale", repo, read),
-            Request::Count { repo, read, .. } => Self::from_read("count", repo, read),
-            Request::Deleted { repo, read, .. } => Self::from_read("deleted", repo, read),
-            Request::EpicStatus { repo, read, .. } => Self::from_read("epic_status", repo, read),
-            Request::Refresh { repo } => Self::from_repo("refresh", repo),
-            Request::Sync { repo } => Self::from_repo("sync", repo),
-            Request::SyncWait { repo } => Self::from_repo("sync_wait", repo),
-            Request::Init { repo } => Self::from_repo("init", repo),
-            Request::Status { repo, read } => Self::from_read("status", repo, read),
-            Request::AdminStatus { repo, read } => Self::from_read("admin_status", repo, read),
-            Request::AdminMetrics { repo, read } => Self::from_read("admin_metrics", repo, read),
-            Request::AdminDoctor { repo, read, .. } => Self::from_read("admin_doctor", repo, read),
-            Request::AdminScrub { repo, read, .. } => Self::from_read("admin_scrub", repo, read),
-            Request::AdminFlush {
-                repo, namespace, ..
-            } => Self::from_namespace("admin_flush", repo, namespace),
-            Request::AdminCheckpointWait { repo, namespace } => {
-                Self::from_namespace("admin_checkpoint_wait", repo, namespace)
+            Request::Close { ctx, .. } => Self::from_mutation("close", &ctx.repo.path, &ctx.meta),
+            Request::Reopen { ctx, .. } => {
+                Self::from_mutation("reopen", &ctx.repo.path, &ctx.meta)
             }
-            Request::AdminFingerprint { repo, read, .. } => {
-                Self::from_read("admin_fingerprint", repo, read)
+            Request::Delete { ctx, .. } => Self::from_mutation("delete", &ctx.repo.path, &ctx.meta),
+            Request::AddDep { ctx, .. } => Self::from_mutation("add_dep", &ctx.repo.path, &ctx.meta),
+            Request::RemoveDep { ctx, .. } => {
+                Self::from_mutation("remove_dep", &ctx.repo.path, &ctx.meta)
             }
-            Request::AdminReloadPolicies { repo } => Self::from_repo("admin_reload_policies", repo),
-            Request::AdminReloadLimits { repo } => Self::from_repo("admin_reload_limits", repo),
-            Request::AdminReloadReplication { repo } => {
-                Self::from_repo("admin_reload_replication", repo)
+            Request::AddNote { ctx, .. } => {
+                Self::from_mutation("add_note", &ctx.repo.path, &ctx.meta)
             }
-            Request::AdminRotateReplicaId { repo } => {
-                Self::from_repo("admin_rotate_replica_id", repo)
+            Request::Claim { ctx, .. } => Self::from_mutation("claim", &ctx.repo.path, &ctx.meta),
+            Request::Unclaim { ctx, .. } => {
+                Self::from_mutation("unclaim", &ctx.repo.path, &ctx.meta)
             }
-            Request::AdminMaintenanceMode { repo, .. } => {
-                Self::from_repo("admin_maintenance_mode", repo)
+            Request::ExtendClaim { ctx, .. } => {
+                Self::from_mutation("extend_claim", &ctx.repo.path, &ctx.meta)
             }
-            Request::AdminRebuildIndex { repo } => Self::from_repo("admin_rebuild_index", repo),
-            Request::Validate { repo, read } => Self::from_read("validate", repo, read),
-            Request::Subscribe { repo, read } => Self::from_read("subscribe", repo, read),
+            Request::Show { ctx, .. } => Self::from_read("show", &ctx.repo.path, &ctx.read),
+            Request::ShowMultiple { ctx, .. } => {
+                Self::from_read("show_multiple", &ctx.repo.path, &ctx.read)
+            }
+            Request::List { ctx, .. } => Self::from_read("list", &ctx.repo.path, &ctx.read),
+            Request::Ready { ctx, .. } => Self::from_read("ready", &ctx.repo.path, &ctx.read),
+            Request::DepTree { ctx, .. } => Self::from_read("dep_tree", &ctx.repo.path, &ctx.read),
+            Request::DepCycles { ctx, .. } => {
+                Self::from_read("dep_cycles", &ctx.repo.path, &ctx.read)
+            }
+            Request::Deps { ctx, .. } => Self::from_read("deps", &ctx.repo.path, &ctx.read),
+            Request::Notes { ctx, .. } => Self::from_read("notes", &ctx.repo.path, &ctx.read),
+            Request::Blocked { ctx, .. } => Self::from_read("blocked", &ctx.repo.path, &ctx.read),
+            Request::Stale { ctx, .. } => Self::from_read("stale", &ctx.repo.path, &ctx.read),
+            Request::Count { ctx, .. } => Self::from_read("count", &ctx.repo.path, &ctx.read),
+            Request::Deleted { ctx, .. } => Self::from_read("deleted", &ctx.repo.path, &ctx.read),
+            Request::EpicStatus { ctx, .. } => {
+                Self::from_read("epic_status", &ctx.repo.path, &ctx.read)
+            }
+            Request::Refresh { ctx, .. } => Self::from_repo("refresh", &ctx.path),
+            Request::Sync { ctx, .. } => Self::from_repo("sync", &ctx.path),
+            Request::SyncWait { ctx, .. } => Self::from_repo("sync_wait", &ctx.path),
+            Request::Init { ctx, .. } => Self::from_repo("init", &ctx.path),
+            Request::Status { ctx, .. } => Self::from_read("status", &ctx.repo.path, &ctx.read),
+            Request::AdminStatus { ctx, .. } => {
+                Self::from_read("admin_status", &ctx.repo.path, &ctx.read)
+            }
+            Request::AdminMetrics { ctx, .. } => {
+                Self::from_read("admin_metrics", &ctx.repo.path, &ctx.read)
+            }
+            Request::AdminDoctor { ctx, .. } => {
+                Self::from_read("admin_doctor", &ctx.repo.path, &ctx.read)
+            }
+            Request::AdminScrub { ctx, .. } => {
+                Self::from_read("admin_scrub", &ctx.repo.path, &ctx.read)
+            }
+            Request::AdminFlush { ctx, payload } => {
+                Self::from_namespace("admin_flush", &ctx.path, &payload.namespace)
+            }
+            Request::AdminCheckpointWait { ctx, payload } => {
+                Self::from_namespace("admin_checkpoint_wait", &ctx.path, &payload.namespace)
+            }
+            Request::AdminFingerprint { ctx, .. } => {
+                Self::from_read("admin_fingerprint", &ctx.repo.path, &ctx.read)
+            }
+            Request::AdminReloadPolicies { ctx, .. } => {
+                Self::from_repo("admin_reload_policies", &ctx.path)
+            }
+            Request::AdminReloadLimits { ctx, .. } => {
+                Self::from_repo("admin_reload_limits", &ctx.path)
+            }
+            Request::AdminReloadReplication { ctx, .. } => {
+                Self::from_repo("admin_reload_replication", &ctx.path)
+            }
+            Request::AdminRotateReplicaId { ctx, .. } => {
+                Self::from_repo("admin_rotate_replica_id", &ctx.path)
+            }
+            Request::AdminMaintenanceMode { ctx, .. } => {
+                Self::from_repo("admin_maintenance_mode", &ctx.path)
+            }
+            Request::AdminRebuildIndex { ctx, .. } => {
+                Self::from_repo("admin_rebuild_index", &ctx.path)
+            }
+            Request::Validate { ctx, .. } => {
+                Self::from_read("validate", &ctx.repo.path, &ctx.read)
+            }
+            Request::Subscribe { ctx, .. } => {
+                Self::from_read("subscribe", &ctx.repo.path, &ctx.read)
+            }
             Request::Ping => Self::without_repo("ping"),
             Request::Shutdown => Self::without_repo("shutdown"),
         }
@@ -594,8 +628,8 @@ fn process_request_message(
     durability_waiters: &mut Vec<DurabilityWaiter>,
 ) -> RequestOutcome {
     // Sync barrier: wait until repo is clean.
-    if let Request::SyncWait { repo } = request {
-        match daemon.ensure_loaded_and_maybe_start_sync(&repo, git_tx) {
+    if let Request::SyncWait { ctx, .. } = request {
+        match daemon.ensure_loaded_and_maybe_start_sync(&ctx.path, git_tx) {
             Ok(loaded) => {
                 let repo_state = match daemon.git_lane_state(&loaded) {
                     Ok(repo_state) => repo_state,
@@ -624,15 +658,15 @@ fn process_request_message(
         return RequestOutcome::Continue;
     }
 
-    if let Request::AdminCheckpointWait { repo, namespace } = request {
-        let proof = match daemon.ensure_repo_loaded_strict(&repo, git_tx) {
+    if let Request::AdminCheckpointWait { ctx, payload } = request {
+        let proof = match daemon.ensure_repo_loaded_strict(&ctx.path, git_tx) {
             Ok(proof) => proof,
             Err(err) => {
                 let _ = respond.send(ServerReply::Response(Response::err_from(err)));
                 return RequestOutcome::Continue;
             }
         };
-        let namespace = match daemon.normalize_namespace(&proof, namespace) {
+        let namespace = match daemon.normalize_namespace(&proof, payload.namespace) {
             Ok(namespace) => namespace,
             Err(err) => {
                 let _ = respond.send(ServerReply::Response(Response::err_from(err)));
@@ -681,8 +715,8 @@ fn process_request_message(
         return RequestOutcome::Continue;
     }
 
-    if let Request::Subscribe { repo, read } = request {
-        match prepare_subscription(daemon, &repo, read, git_tx) {
+    if let Request::Subscribe { ctx, .. } = request {
+        match prepare_subscription(daemon, &ctx.repo.path, ctx.read, git_tx) {
             Ok(reply) => {
                 let _ = respond.send(ServerReply::Subscribe(reply));
             }
@@ -725,85 +759,85 @@ fn process_request_message(
 
 fn read_gate_request(request: &Request) -> Option<ReadGateRequest> {
     match request {
-        Request::Show { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Show { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::ShowMultiple { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::ShowMultiple { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::List { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::List { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Ready { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Ready { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::DepTree { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::DepTree { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Deps { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Deps { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Notes { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Notes { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Blocked { repo, read } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Blocked { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Stale { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Stale { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Count { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Count { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Deleted { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Deleted { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::EpicStatus { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::EpicStatus { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Status { repo, read } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Status { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::AdminStatus { repo, read } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::AdminStatus { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::AdminMetrics { repo, read } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::AdminMetrics { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::AdminDoctor { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::AdminDoctor { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::AdminScrub { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::AdminScrub { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::AdminFingerprint { repo, read, .. } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::AdminFingerprint { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Validate { repo, read } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Validate { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
-        Request::Subscribe { repo, read } => Some(ReadGateRequest {
-            repo: repo.clone(),
-            read: read.clone(),
+        Request::Subscribe { ctx, .. } => Some(ReadGateRequest {
+            repo: ctx.repo.path.clone(),
+            read: ctx.read.clone(),
         }),
         _ => None,
     }
@@ -1410,21 +1444,22 @@ mod tests {
             durability: None,
         };
         let request = Request::Create {
-            repo: repo.clone(),
-            id: None,
-            parent: None,
-            title: "title".to_string(),
-            bead_type: BeadType::Task,
-            priority: Priority::MEDIUM,
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            assignee: None,
-            external_ref: None,
-            estimated_minutes: None,
-            labels: Vec::new(),
-            dependencies: Vec::new(),
-            meta,
+            ctx: crate::daemon::ipc::MutationCtx::new(repo.clone(), meta),
+            payload: crate::daemon::ipc::CreatePayload {
+                id: None,
+                parent: None,
+                title: "title".to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
         };
 
         let context = RequestContext::from_request(&request);
@@ -1445,9 +1480,10 @@ mod tests {
             wait_timeout_ms: None,
         };
         let request = Request::Show {
-            repo: repo.clone(),
-            id: "bd-123".to_string(),
-            read,
+            ctx: crate::daemon::ipc::ReadCtx::new(repo.clone(), read),
+            payload: crate::daemon::ipc::IdPayload {
+                id: "bd-123".to_string(),
+            },
         };
 
         let context = RequestContext::from_request(&request);
@@ -1574,21 +1610,22 @@ mod tests {
                 durability: None,
             };
             let request = Request::Create {
-                repo: repo.clone(),
-                id: None,
-                parent: None,
-                title: "title".to_string(),
-                bead_type: BeadType::Task,
-                priority: Priority::MEDIUM,
-                description: None,
-                design: None,
-                acceptance_criteria: None,
-                assignee: None,
-                external_ref: None,
-                estimated_minutes: None,
-                labels: Vec::new(),
-                dependencies: Vec::new(),
-                meta,
+                ctx: crate::daemon::ipc::MutationCtx::new(repo.clone(), meta),
+                payload: crate::daemon::ipc::CreatePayload {
+                    id: None,
+                    parent: None,
+                    title: "title".to_string(),
+                    bead_type: BeadType::Task,
+                    priority: Priority::MEDIUM,
+                    description: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    assignee: None,
+                    external_ref: None,
+                    estimated_minutes: None,
+                    labels: Vec::new(),
+                    dependencies: Vec::new(),
+                },
             };
             let context = RequestContext::from_request(&request);
             let span = request_span(&context);
@@ -1654,8 +1691,8 @@ mod tests {
             wait_timeout_ms: Some(200),
         };
         let request = Request::Status {
-            repo: env.repo_path.clone(),
-            read: read.clone(),
+            ctx: crate::daemon::ipc::ReadCtx::new(env.repo_path.clone(), read.clone()),
+            payload: crate::daemon::ipc::EmptyPayload {},
         };
         let normalized = env
             .daemon
@@ -1736,8 +1773,8 @@ mod tests {
             wait_timeout_ms: Some(10),
         };
         let request = Request::Status {
-            repo: env.repo_path.clone(),
-            read: read.clone(),
+            ctx: crate::daemon::ipc::ReadCtx::new(env.repo_path.clone(), read.clone()),
+            payload: crate::daemon::ipc::EmptyPayload {},
         };
         let normalized = env
             .daemon
