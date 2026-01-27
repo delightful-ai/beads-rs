@@ -109,8 +109,6 @@ pub enum WalReplayError {
         offset: u64,
         len: u64,
     },
-    #[error("sealed segment missing final_len at {path:?}. Run `bd store fsck` to repair.")]
-    SealedSegmentFinalLenMissing { path: PathBuf },
     #[error(
         "sealed segment length mismatch at {path:?}: expected {expected}, got {actual}. Run `bd store fsck` to repair."
     )]
@@ -240,7 +238,7 @@ fn replay_index(
         let mut existing = BTreeMap::new();
         if mode == ReplayMode::CatchUp {
             for row in index.reader().list_segments(&namespace)? {
-                existing.insert(row.segment_id, row);
+                existing.insert(row.segment_id(), row);
             }
         }
 
@@ -251,7 +249,7 @@ fn replay_index(
                 ReplayMode::Rebuild => segment.header_len,
                 ReplayMode::CatchUp => existing
                     .get(&segment.header.segment_id)
-                    .map(|row| row.last_indexed_offset)
+                    .map(|row| row.last_indexed_offset())
                     .unwrap_or(segment.header_len),
             };
 
@@ -273,13 +271,11 @@ fn replay_index(
             if mode == ReplayMode::CatchUp
                 && let Some(row) = existing
                     .get(&segment.header.segment_id)
-                    .filter(|row| row.sealed)
+                    .filter(|row| row.is_sealed())
             {
-                let final_len =
-                    row.final_len
-                        .ok_or_else(|| WalReplayError::SealedSegmentFinalLenMissing {
-                            path: segment.path.clone(),
-                        })?;
+                let final_len = row
+                    .final_len()
+                    .expect("sealed segment rows always carry final_len");
                 if segment.file_len != final_len {
                     return Err(WalReplayError::SealedSegmentLenMismatch {
                         path: segment.path.clone(),
@@ -321,16 +317,23 @@ fn replay_index(
                 }
             }
 
-            let sealed = !is_last;
-            let final_len = sealed.then_some(scan.last_indexed_offset);
-            let segment_row = SegmentRow {
-                namespace: namespace.clone(),
-                segment_id: segment.header.segment_id,
-                segment_path: segment_rel_path(store_dir, &segment.path),
-                created_at_ms: segment.header.created_at_ms,
-                last_indexed_offset: scan.last_indexed_offset,
-                sealed,
-                final_len,
+            let segment_row = if is_last {
+                SegmentRow::open(
+                    namespace.clone(),
+                    segment.header.segment_id,
+                    segment_rel_path(store_dir, &segment.path),
+                    segment.header.created_at_ms,
+                    scan.last_indexed_offset,
+                )
+            } else {
+                SegmentRow::sealed(
+                    namespace.clone(),
+                    segment.header.segment_id,
+                    segment_rel_path(store_dir, &segment.path),
+                    segment.header.created_at_ms,
+                    scan.last_indexed_offset,
+                    scan.last_indexed_offset,
+                )
             };
             txn.upsert_segment(&segment_row)?;
             txn.commit()?;
@@ -523,7 +526,10 @@ fn cleanup_orphan_tmp_segments(
 ) -> Result<(), WalReplayError> {
     reject_symlink(namespace_dir)?;
     let referenced: BTreeSet<PathBuf> = match index.reader().list_segments(namespace) {
-        Ok(rows) => rows.into_iter().map(|row| row.segment_path).collect(),
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| row.segment_path().to_path_buf())
+            .collect(),
         Err(err) => {
             tracing::warn!(
                 namespace = %namespace,
@@ -1167,15 +1173,13 @@ mod tests {
         std::fs::write(&orphan, b"orphan").unwrap();
 
         let mut txn = index.writer().begin_txn().unwrap();
-        let segment_row = SegmentRow {
-            namespace: namespace.clone(),
-            segment_id: SegmentId::new(Uuid::from_bytes([1u8; 16])),
-            segment_path: segment_rel_path(temp.path(), &keep),
-            created_at_ms: 1,
-            last_indexed_offset: 0,
-            sealed: false,
-            final_len: None,
-        };
+        let segment_row = SegmentRow::open(
+            namespace.clone(),
+            SegmentId::new(Uuid::from_bytes([1u8; 16])),
+            segment_rel_path(temp.path(), &keep),
+            1,
+            0,
+        );
         txn.upsert_segment(&segment_row).unwrap();
         txn.commit().unwrap();
 

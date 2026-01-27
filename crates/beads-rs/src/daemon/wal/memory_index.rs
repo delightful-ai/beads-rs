@@ -270,7 +270,7 @@ impl WalIndexTxn for MemoryWalIndexTxn {
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError> {
         self.ensure_live()?;
         self.working.segments.insert(
-            (segment.namespace.clone(), segment.segment_id),
+            (segment.namespace().clone(), segment.segment_id()),
             segment.clone(),
         );
         Ok(())
@@ -404,10 +404,10 @@ impl WalIndexReader for MemoryWalIndexReader {
             let mut rows: Vec<SegmentRow> = state
                 .segments
                 .values()
-                .filter(|row| &row.namespace == ns)
+                .filter(|row| row.namespace() == ns)
                 .cloned()
                 .collect();
-            rows.sort_by_key(|row| (row.created_at_ms, row.segment_id));
+            rows.sort_by_key(|row| (row.created_at_ms(), row.segment_id()));
             Ok(rows)
         })
     }

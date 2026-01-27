@@ -558,7 +558,6 @@ fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
         | WalReplayError::RecordCanonicalEncode { .. }
         | WalReplayError::MissingHead { .. }
         | WalReplayError::UnexpectedHead { .. }
-        | WalReplayError::SealedSegmentFinalLenMissing { .. }
         | WalReplayError::SealedSegmentLenMismatch { .. }
         | WalReplayError::MidFileCorruption { .. } => ProtocolErrorCode::WalCorrupt.into(),
         WalReplayError::NonContiguousSeq { .. } => ProtocolErrorCode::GapDetected.into(),

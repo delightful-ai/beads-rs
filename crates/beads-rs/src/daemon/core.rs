@@ -1640,28 +1640,25 @@ impl Daemon {
                         )
                     })?;
             let last_indexed_offset = append.offset + append.len as u64;
-            let segment_row = SegmentRow {
-                namespace: namespace.clone(),
-                segment_id: append.segment_id,
-                segment_path: segment_rel_path(&store_dir, &segment_snapshot.path),
-                created_at_ms: segment_snapshot.created_at_ms,
+            let segment_row = SegmentRow::open(
+                namespace.clone(),
+                append.segment_id,
+                segment_rel_path(&store_dir, &segment_snapshot.path),
+                segment_snapshot.created_at_ms,
                 last_indexed_offset,
-                sealed: false,
-                final_len: None,
-            };
+            );
 
             txn.upsert_segment(&segment_row)
                 .map_err(|err| wal_index_error_payload(&err))?;
             if let Some(sealed) = append.sealed.as_ref() {
-                let sealed_row = SegmentRow {
-                    namespace: namespace.clone(),
-                    segment_id: sealed.segment_id,
-                    segment_path: segment_rel_path(&store_dir, &sealed.path),
-                    created_at_ms: sealed.created_at_ms,
-                    last_indexed_offset: sealed.final_len,
-                    sealed: true,
-                    final_len: Some(sealed.final_len),
-                };
+                let sealed_row = SegmentRow::sealed(
+                    namespace.clone(),
+                    sealed.segment_id,
+                    segment_rel_path(&store_dir, &sealed.path),
+                    sealed.created_at_ms,
+                    sealed.final_len,
+                    sealed.final_len,
+                );
                 txn.upsert_segment(&sealed_row)
                     .map_err(|err| wal_index_error_payload(&err))?;
             }
@@ -2510,12 +2507,12 @@ fn segment_paths_for_namespace(
     let segments = wal_index.reader().list_segments(namespace)?;
     let mut map = HashMap::new();
     for segment in segments {
-        let path = if segment.segment_path.is_absolute() {
-            segment.segment_path
+        let path = if segment.segment_path().is_absolute() {
+            segment.segment_path().to_path_buf()
         } else {
-            store_dir.join(&segment.segment_path)
+            store_dir.join(segment.segment_path())
         };
-        map.insert(segment.segment_id, path);
+        map.insert(segment.segment_id(), path);
     }
     Ok(map)
 }
@@ -3941,13 +3938,13 @@ mod tests {
             .expect("segments");
         assert_eq!(segments.len(), 2);
 
-        let sealed = segments.iter().find(|row| row.sealed).expect("sealed");
-        assert!(segments.iter().any(|row| !row.sealed));
-        let sealed_path = paths::store_dir(store_id).join(&sealed.segment_path);
+        let sealed = segments.iter().find(|row| row.is_sealed()).expect("sealed");
+        assert!(segments.iter().any(|row| !row.is_sealed()));
+        let sealed_path = paths::store_dir(store_id).join(sealed.segment_path());
         let sealed_len = std::fs::metadata(&sealed_path)
             .expect("sealed segment metadata")
             .len();
-        assert_eq!(sealed.final_len, Some(sealed_len));
+        assert_eq!(sealed.final_len(), Some(sealed_len));
     }
 
     #[test]
