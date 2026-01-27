@@ -13,12 +13,12 @@ use crate::core::error::details::{
     IndexCorruptDetails, OverloadedDetails, OverloadedSubsystem, WalCorruptDetails,
 };
 use crate::core::{
-    CliErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, EventShaLookupError, Limits,
-    NamespaceId, Opaque, PrevVerified, ProtocolErrorCode, ReplicaId, SegmentId, Seq0, Sha256,
-    StoreId, VerifiedEvent, decode_event_body,
+    Applied, CliErrorCode, Durable, ErrorPayload, EventBytes, EventFrameV1, EventId,
+    EventShaLookupError, HeadStatus, Limits, NamespaceId, Opaque, PrevVerified, ProtocolErrorCode,
+    ReplicaId, SegmentId, Seq0, Sha256, StoreId, VerifiedEvent, Watermark, decode_event_body,
 };
 use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
-use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap};
+use crate::daemon::repl::proto::WatermarkState;
 use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
     EventWalError, FrameReader, ReplicaDurabilityRole, ReplicaLivenessRow, VerifiedRecord,
@@ -71,10 +71,8 @@ impl ReplSessionStore {
 
 impl SessionStore for ReplSessionStore {
     fn watermark_snapshot(&self, namespaces: &[NamespaceId]) -> WatermarkSnapshot {
-        let mut durable: WatermarkMap = BTreeMap::new();
-        let mut durable_heads: WatermarkHeads = BTreeMap::new();
-        let mut applied: WatermarkMap = BTreeMap::new();
-        let mut applied_heads: WatermarkHeads = BTreeMap::new();
+        let mut durable: WatermarkState<Durable> = BTreeMap::new();
+        let mut applied: WatermarkState<Applied> = BTreeMap::new();
 
         let namespace_filter: Option<BTreeSet<NamespaceId>> = if namespaces.is_empty() {
             None
@@ -89,12 +87,7 @@ impl SessionStore for ReplSessionStore {
                     "replication watermark snapshot failed for {}: {err}",
                     self.store_id
                 );
-                return WatermarkSnapshot {
-                    durable,
-                    durable_heads,
-                    applied,
-                    applied_heads,
-                };
+                return WatermarkSnapshot { durable, applied };
             }
         };
 
@@ -107,35 +100,37 @@ impl SessionStore for ReplSessionStore {
 
             let ns = row.namespace.clone();
             let origin = row.origin;
-            durable
-                .entry(ns.clone())
-                .or_default()
-                .insert(origin, Seq0::new(row.durable_seq));
-            applied
-                .entry(ns.clone())
-                .or_default()
-                .insert(origin, Seq0::new(row.applied_seq));
-
-            if let Some(head) = row.durable_head_sha {
-                durable_heads
-                    .entry(ns.clone())
-                    .or_default()
-                    .insert(origin, Sha256(head));
+            let durable_head = match row.durable_head_sha {
+                Some(head) => HeadStatus::Known(head),
+                None => HeadStatus::Genesis,
+            };
+            match Watermark::new(Seq0::new(row.durable_seq), durable_head) {
+                Ok(watermark) => {
+                    durable
+                        .entry(ns.clone())
+                        .or_default()
+                        .insert(origin, watermark);
+                }
+                Err(err) => {
+                    tracing::warn!("invalid durable watermark snapshot for {ns} {origin}: {err}");
+                }
             }
-            if let Some(head) = row.applied_head_sha {
-                applied_heads
-                    .entry(ns)
-                    .or_default()
-                    .insert(origin, Sha256(head));
+
+            let applied_head = match row.applied_head_sha {
+                Some(head) => HeadStatus::Known(head),
+                None => HeadStatus::Genesis,
+            };
+            match Watermark::new(Seq0::new(row.applied_seq), applied_head) {
+                Ok(watermark) => {
+                    applied.entry(ns).or_default().insert(origin, watermark);
+                }
+                Err(err) => {
+                    tracing::warn!("invalid applied watermark snapshot for {ns} {origin}: {err}");
+                }
             }
         }
 
-        WatermarkSnapshot {
-            durable,
-            durable_heads,
-            applied,
-            applied_heads,
-        }
+        WatermarkSnapshot { durable, applied }
     }
 
     fn lookup_event_sha(&self, eid: &EventId) -> Result<Option<Sha256>, EventShaLookupError> {

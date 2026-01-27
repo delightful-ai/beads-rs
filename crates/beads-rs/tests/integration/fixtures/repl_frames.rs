@@ -8,14 +8,14 @@ use uuid::Uuid;
 
 use beads_rs::Limits;
 use beads_rs::core::{
-    ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, NamespaceId,
-    Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
+    ActorId, Durable, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax,
+    NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
     encode_event_body_canonical, hash_event_body,
 };
 use beads_rs::daemon::repl::frame::{FrameReader, encode_frame};
 use beads_rs::daemon::repl::proto::{
     Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplEnvelope, ReplMessage, Want,
-    WatermarkHeads, WatermarkMap, Welcome, decode_envelope, encode_envelope,
+    WatermarkMap, WatermarkState, Welcome, decode_envelope, encode_envelope,
 };
 
 use super::identity;
@@ -49,9 +49,7 @@ pub fn hello_with_namespaces(
         requested_namespaces: namespaces.clone(),
         offered_namespaces: namespaces,
         seen_durable: BTreeMap::new(),
-        seen_durable_heads: None,
         seen_applied: None,
-        seen_applied_heads: None,
         capabilities: default_capabilities(),
     }
 }
@@ -74,9 +72,7 @@ pub fn welcome_with_namespaces(
         welcome_nonce: 2,
         accepted_namespaces: namespaces,
         receiver_seen_durable: BTreeMap::new(),
-        receiver_seen_durable_heads: None,
         receiver_seen_applied: None,
-        receiver_seen_applied_heads: None,
         live_stream_enabled: true,
         max_frame_bytes: limits.max_frame_bytes.min(u32::MAX as usize) as u32,
     }
@@ -86,12 +82,10 @@ pub fn events(frames: Vec<EventFrameV1>) -> Events {
     Events { events: frames }
 }
 
-pub fn ack(durable: WatermarkMap, durable_heads: Option<WatermarkHeads>) -> Ack {
+pub fn ack(durable: WatermarkState<Durable>) -> Ack {
     Ack {
         durable,
-        durable_heads,
         applied: None,
-        applied_heads: None,
     }
 }
 

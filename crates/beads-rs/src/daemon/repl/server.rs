@@ -16,8 +16,8 @@ use crate::core::error::details::{
     BootstrapRequiredDetails, SnapshotRangeReason, UnknownReplicaDetails,
 };
 use crate::core::{
-    ErrorPayload, EventFrameV1, Limits, NamespaceId, NamespacePolicy, ProtocolErrorCode, ReplicaId,
-    ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    Durable, ErrorPayload, EventFrameV1, Limits, NamespaceId, NamespacePolicy, ProtocolErrorCode,
+    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
@@ -27,12 +27,15 @@ use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
-use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap};
+use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkState};
+use crate::daemon::repl::session::{
+    InboundConnecting, Session, SessionState, SessionWire, Streaming, handle_inbound_message,
+};
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
-    FrameError, FrameReader, FrameWriter, PeerAckTable, ReplEnvelope, ReplMessage, Session,
-    SessionAction, SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore,
-    WalRangeReader, decode_envelope, encode_envelope,
+    FrameError, FrameReader, FrameWriter, PeerAckTable, ReplEnvelope, ReplMessage, SessionAction,
+    SessionConfig, SessionStore, SharedSessionStore, WalRangeReader, decode_envelope,
+    encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
 
@@ -410,12 +413,17 @@ where
     tracing::Span::current().record("peer_replica_id", tracing::field::display(peer_replica_id));
     let requested_namespaces = hello.requested_namespaces.clone();
     let offered_namespaces = hello.offered_namespaces.clone();
-    let mut session = Session::new(SessionRole::Inbound, config, limits.clone(), admission);
+    let session = InboundConnecting::new(config, limits.clone(), admission);
     let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
     let mut handshake_at_ms = None;
     let now_ms_val = now_ms();
     keepalive.note_recv(now_ms_val);
-    let actions = session.handle_message(ReplMessage::Hello(hello), &mut store, now_ms_val);
+    let (mut session, actions) = handle_inbound_message(
+        SessionState::Connecting(session),
+        ReplMessage::Hello(hello),
+        &mut store,
+        now_ms_val,
+    );
 
     for action in actions {
         if let SessionAction::PeerAck(ack) = &action
@@ -425,9 +433,12 @@ where
         }
 
         if let SessionAction::PeerWant(want) = &action {
+            let SessionState::Streaming(streaming_session) = &session else {
+                continue;
+            };
             let mut ctx = WantContext {
                 writer: &mut writer,
-                session: &session,
+                session: streaming_session,
                 broadcaster: &broadcaster,
                 wal_reader: runtime.wal_reader.as_ref(),
                 limits: &limits,
@@ -453,12 +464,9 @@ where
         });
     });
 
-    let mut accepted_set = BTreeSet::new();
     let mut live_stream_enabled = false;
-    if session.phase() == SessionPhase::Streaming
-        && let Some(peer) = session.peer()
-    {
-        accepted_set = peer.accepted_namespaces.iter().cloned().collect();
+    if let SessionState::Streaming(streaming_session) = &session {
+        let peer = streaming_session.peer();
         live_stream_enabled = peer.live_stream_enabled;
         handshake_at_ms = Some(now_ms_val);
         if let Err(err) =
@@ -496,7 +504,6 @@ where
         (crossbeam::channel::never(), None)
     };
 
-    let mut streaming = session.phase() == SessionPhase::Streaming;
     let mut sent_hot_cache = false;
     let mut pending_events =
         PendingEvents::new(limits.max_event_batch_events, limits.max_event_batch_bytes);
@@ -518,7 +525,9 @@ where
                     InboundMessage::Message(msg) => {
                         let now_ms = now_ms();
                         keepalive.note_recv(now_ms);
-                        let actions = session.handle_message(msg, &mut store, now_ms);
+                        let (next_session, actions) =
+                            handle_inbound_message(session, msg, &mut store, now_ms);
+                        session = next_session;
                         for action in actions {
                             if let SessionAction::PeerAck(ack) = &action
                                 && let Err(err) =
@@ -539,13 +548,22 @@ where
                             }
 
                             if let SessionAction::PeerWant(want) = &action {
+                                let SessionState::Streaming(streaming_session) = &session else {
+                                    continue;
+                                };
+                                let allowed_set = streaming_session
+                                    .peer()
+                                    .accepted_namespaces
+                                    .iter()
+                                    .cloned()
+                                    .collect::<BTreeSet<_>>();
                                 let mut ctx = WantContext {
                                     writer: &mut writer,
-                                    session: &session,
+                                    session: streaming_session,
                                     broadcaster: &broadcaster,
                                     wal_reader: runtime.wal_reader.as_ref(),
                                     limits: &limits,
-                                    allowed_set: Some(&accepted_set),
+                                    allowed_set: Some(&allowed_set),
                                     keepalive: &mut keepalive,
                                 };
                                 if let Err(err) = handle_want(want, &mut ctx) {
@@ -576,7 +594,7 @@ where
                     Err(_) => break,
                 };
 
-                if !streaming {
+                let SessionState::Streaming(streaming_session) = &session else {
                     let drop = pending_events.push(event);
                     if drop.dropped_any() {
                         let dropped_events = drop.total_events();
@@ -597,18 +615,27 @@ where
                         );
                     }
                     continue;
-                }
-                if !accepted_set.contains(&event.namespace) {
+                };
+                if !streaming_session
+                    .peer()
+                    .accepted_namespaces
+                    .contains(&event.namespace)
+                {
                     continue;
                 }
                 let frame = broadcast_to_frame(event);
-                send_events(&mut writer, &session, vec![frame], &limits, &mut keepalive)?;
+                send_events(
+                    &mut writer,
+                    streaming_session,
+                    vec![frame],
+                    &limits,
+                    &mut keepalive,
+                )?;
             }
             recv(tick) -> _ => {}
         }
 
-        if !streaming && session.phase() == SessionPhase::Streaming {
-            streaming = true;
+        if let SessionState::Streaming(streaming_session) = &session {
             if handshake_at_ms.is_none() {
                 let now_ms = now_ms();
                 handshake_at_ms = Some(now_ms);
@@ -618,28 +645,36 @@ where
                     tracing::warn!("replica liveness update failed: {err}");
                 }
             }
-        }
-        if streaming && !pending_events.is_empty() {
-            let frames = pending_events
-                .drain()
-                .filter(|event| accepted_set.contains(&event.namespace))
-                .map(broadcast_to_frame)
-                .collect::<Vec<_>>();
-            send_events(&mut writer, &session, frames, &limits, &mut keepalive)?;
-        }
-        if streaming && live_stream_enabled && !sent_hot_cache {
-            send_hot_cache(
-                &mut writer,
-                &session,
-                &broadcaster,
-                &accepted_set,
-                &limits,
-                &mut keepalive,
-            )?;
-            sent_hot_cache = true;
+            if !pending_events.is_empty() {
+                let peer = streaming_session.peer();
+                let frames = pending_events
+                    .drain()
+                    .filter(|event| peer.accepted_namespaces.contains(&event.namespace))
+                    .map(broadcast_to_frame)
+                    .collect::<Vec<_>>();
+                send_events(
+                    &mut writer,
+                    streaming_session,
+                    frames,
+                    &limits,
+                    &mut keepalive,
+                )?;
+            }
+            if live_stream_enabled && !sent_hot_cache {
+                let peer = streaming_session.peer();
+                send_hot_cache(
+                    &mut writer,
+                    streaming_session,
+                    &broadcaster,
+                    &peer.accepted_namespaces,
+                    &limits,
+                    &mut keepalive,
+                )?;
+                sent_hot_cache = true;
+            }
         }
 
-        if session.phase() == SessionPhase::Streaming {
+        if matches!(session, SessionState::Streaming(_)) {
             let now_ms = now_ms();
             if let Some(decision) = keepalive.poll(now_ms) {
                 match decision {
@@ -747,9 +782,9 @@ fn run_event_forwarder(
     }
 }
 
-fn apply_action(
+fn apply_action<S: SessionWire>(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
+    session: &S,
     action: SessionAction,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<bool, ConnectionError> {
@@ -770,19 +805,16 @@ fn apply_action(
     }
 }
 
-fn send_payload(
+fn send_payload<S: SessionWire>(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
+    session: &S,
     message: ReplMessage,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<(), ConnectionError> {
-    let version = session
-        .peer()
-        .map(|peer| peer.protocol_version)
-        .unwrap_or(PROTOCOL_VERSION_V1);
+    let version = SessionWire::wire_version(session);
     let envelope = ReplEnvelope { version, message };
     let bytes = encode_envelope(&envelope)?;
-    writer.write_frame_with_limit(&bytes, session.negotiated_max_frame_bytes())?;
+    writer.write_frame_with_limit(&bytes, SessionWire::frame_limit(session))?;
     keepalive.note_send(now_ms());
     Ok(())
 }
@@ -800,9 +832,9 @@ fn send_pre_handshake_error(
     Ok(())
 }
 
-fn send_events(
+fn send_events<R>(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
+    session: &Session<R, Streaming>,
     frames: Vec<EventFrameV1>,
     limits: &Limits,
     keepalive: &mut KeepaliveTracker,
@@ -871,14 +903,11 @@ fn send_events(
     Ok(())
 }
 
-fn events_envelope_len(
-    session: &Session,
+fn events_envelope_len<R>(
+    session: &Session<R, Streaming>,
     batch: &[EventFrameV1],
 ) -> Result<usize, ConnectionError> {
-    let version = session
-        .peer()
-        .map(|peer| peer.protocol_version)
-        .unwrap_or(PROTOCOL_VERSION_V1);
+    let version = session.peer().protocol_version;
     let envelope = ReplEnvelope {
         version,
         message: ReplMessage::Events(Events {
@@ -889,11 +918,11 @@ fn events_envelope_len(
     Ok(bytes.len())
 }
 
-fn send_hot_cache(
+fn send_hot_cache<R>(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
+    session: &Session<R, Streaming>,
     broadcaster: &EventBroadcaster,
-    allowed_set: &BTreeSet<NamespaceId>,
+    allowed_set: &[NamespaceId],
     limits: &Limits,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<(), ConnectionError> {
@@ -914,39 +943,32 @@ fn update_peer_ack(
 ) -> Result<(), Box<crate::daemon::repl::PeerAckError>> {
     let now_ms = now_ms();
     let mut table = peer_acks.lock().expect("peer ack lock poisoned");
-    table.update_peer(
-        peer,
-        &ack.durable,
-        ack.durable_heads.as_ref(),
-        ack.applied.as_ref(),
-        ack.applied_heads.as_ref(),
-        now_ms,
-    )?;
+    table.update_peer(peer, &ack.durable, ack.applied.as_ref(), now_ms)?;
     let namespaces: Vec<NamespaceId> = ack.durable.keys().cloned().collect();
     let snapshot = store.watermark_snapshot(&namespaces);
     emit_peer_lag(peer, &snapshot.durable, &ack.durable);
     Ok(())
 }
 
-fn emit_peer_lag(peer: ReplicaId, local: &WatermarkMap, ack: &WatermarkMap) {
+fn emit_peer_lag(peer: ReplicaId, local: &WatermarkState<Durable>, ack: &WatermarkState<Durable>) {
     for (namespace, origins) in local {
         let mut max_lag = 0u64;
         let acked = ack.get(namespace);
-        for (origin, local_seq) in origins {
+        for (origin, local_wm) in origins {
             let acked_seq = acked
                 .and_then(|map| map.get(origin))
-                .copied()
+                .map(|wm| wm.seq())
                 .unwrap_or(Seq0::ZERO);
-            let lag = local_seq.get().saturating_sub(acked_seq.get());
+            let lag = local_wm.seq().get().saturating_sub(acked_seq.get());
             max_lag = max_lag.max(lag);
         }
         metrics::set_repl_peer_lag(peer, namespace, max_lag);
     }
 }
 
-struct WantContext<'a> {
+struct WantContext<'a, R> {
     writer: &'a mut FrameWriter<TcpStream>,
-    session: &'a Session,
+    session: &'a Session<R, Streaming>,
     broadcaster: &'a EventBroadcaster,
     wal_reader: Option<&'a WalRangeReader>,
     limits: &'a Limits,
@@ -954,7 +976,7 @@ struct WantContext<'a> {
     keepalive: &'a mut KeepaliveTracker,
 }
 
-fn handle_want(want: &Want, ctx: &mut WantContext<'_>) -> Result<(), ConnectionError> {
+fn handle_want<R>(want: &Want, ctx: &mut WantContext<'_, R>) -> Result<(), ConnectionError> {
     if want.want.is_empty() {
         return Ok(());
     }
@@ -1056,7 +1078,7 @@ mod tests {
         Watermark,
     };
     use crate::daemon::broadcast::BroadcasterLimits;
-    use crate::daemon::repl::proto::{Capabilities, Hello, WatermarkHeads, WatermarkMap};
+    use crate::daemon::repl::proto::{Capabilities, Hello};
     use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
 
     #[derive(Default)]
@@ -1065,10 +1087,8 @@ mod tests {
     impl SessionStore for TestStore {
         fn watermark_snapshot(&self, _namespaces: &[NamespaceId]) -> WatermarkSnapshot {
             WatermarkSnapshot {
-                durable: WatermarkMap::new(),
-                durable_heads: WatermarkHeads::new(),
-                applied: WatermarkMap::new(),
-                applied_heads: WatermarkHeads::new(),
+                durable: BTreeMap::new(),
+                applied: BTreeMap::new(),
             }
         }
 
@@ -1143,10 +1163,8 @@ mod tests {
             max_frame_bytes: limits.max_frame_bytes as u32,
             requested_namespaces: vec![NamespaceId::core()],
             offered_namespaces: vec![NamespaceId::core()],
-            seen_durable: WatermarkMap::new(),
-            seen_durable_heads: None,
-            seen_applied: Some(WatermarkMap::new()),
-            seen_applied_heads: None,
+            seen_durable: BTreeMap::new(),
+            seen_applied: Some(BTreeMap::new()),
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,

@@ -19,8 +19,9 @@ pub fn poll_replicated(
 pub fn pending_receipt(
     receipt: DurabilityReceipt,
     requested: DurabilityClass,
+    acked_by: Vec<ReplicaId>,
 ) -> DurabilityReceipt {
-    DurabilityCoordinator::pending_receipt(receipt, requested)
+    DurabilityCoordinator::pending_receipt(receipt, requested, acked_by)
 }
 
 pub fn achieved_receipt(
