@@ -295,7 +295,7 @@ pub type UnverifiedRecord = Record<Unverified>;
 pub struct VerifiedRecord {
     header: RecordHeader,
     payload: EventBytes<crate::core::Canonical>,
-    body: ValidatedEventBody,
+    _body: ValidatedEventBody,
 }
 
 impl<State> Record<State> {
@@ -363,7 +363,7 @@ impl Record<Unverified> {
         Ok(VerifiedRecord {
             header: self.header,
             payload: canonical,
-            body,
+            _body: body,
         })
     }
 }
@@ -388,10 +388,6 @@ impl VerifiedRecord {
 
     pub fn payload_bytes(&self) -> &[u8] {
         self.payload.as_ref()
-    }
-
-    pub fn event_body(&self) -> &ValidatedEventBody {
-        &self.body
     }
 
     pub fn encode_body(&self) -> EventWalResult<Vec<u8>> {

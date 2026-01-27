@@ -12,7 +12,8 @@ use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
 use crate::fixtures::wal_corrupt::{
-    corrupt_frame_body, corrupt_record_header_event_time, truncate_frame_mid_body,
+    corrupt_frame_body, corrupt_record_header_event_time, corrupt_record_header_sha,
+    truncate_frame_mid_body,
 };
 
 #[test]
@@ -136,6 +137,44 @@ fn fsck_reports_header_mismatch() {
             .iter()
             .any(|e| e.code == FsckEvidenceCode::RecordHeaderMismatch)
     );
+}
+
+#[test]
+fn fsck_stops_after_record_sha_mismatch() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
+    let records = record_chain(temp.meta(), &namespace, origin, 1, 2);
+    let segment = temp
+        .write_segment(&namespace, 1_700_000_000_000, &records)
+        .expect("write segment");
+    corrupt_record_header_sha(&segment, 0).expect("corrupt header sha");
+
+    let report = fsck_store_dir(
+        temp.store_dir(),
+        temp.meta(),
+        FsckOptions::new(false, Limits::default()),
+    )
+    .expect("fsck store dir");
+
+    let hashes_check = report
+        .checks
+        .iter()
+        .find(|check| check.id == FsckCheckId::RecordHashes)
+        .expect("record hashes check");
+    assert!(
+        hashes_check
+            .evidence
+            .iter()
+            .any(|e| e.code == FsckEvidenceCode::RecordShaMismatch)
+    );
+
+    let contiguity_check = report
+        .checks
+        .iter()
+        .find(|check| check.id == FsckCheckId::OriginContiguity)
+        .expect("origin contiguity check");
+    assert_eq!(contiguity_check.status, FsckStatus::Pass);
 }
 
 #[test]

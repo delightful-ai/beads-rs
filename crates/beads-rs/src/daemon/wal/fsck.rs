@@ -609,6 +609,7 @@ fn scan_segment(
                     },
                     Some("rebuild WAL from source of truth or restore from backup"),
                 );
+                break;
             }
             Err(RecordVerifyError::ShaMismatch { .. }) => {
                 builder.record_issue(
@@ -626,6 +627,7 @@ fn scan_segment(
                     },
                     Some("rebuild WAL from source of truth or restore from backup"),
                 );
+                break;
             }
         }
 
