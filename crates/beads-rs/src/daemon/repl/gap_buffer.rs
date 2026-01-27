@@ -483,11 +483,11 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, EventBody, EventBytes, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-        StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
+        ActorId, EventBody, EventBytes, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, Seq1,
+        StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1, ValidatedEventBody,
     };
 
-    fn sample_body(seq: u64) -> EventBody {
+    fn sample_body(seq: u64) -> ValidatedEventBody {
         let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let store = StoreIdentity::new(store_id, StoreEpoch::new(2));
         let origin = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
@@ -512,6 +512,8 @@ mod tests {
                 },
             }),
         }
+        .into_validated(&Limits::default())
+        .expect("valid event fixture")
     }
 
     fn event_bytes(len: usize) -> EventBytes<crate::core::Opaque> {

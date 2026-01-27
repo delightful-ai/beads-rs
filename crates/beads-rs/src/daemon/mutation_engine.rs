@@ -11,10 +11,10 @@ use crate::core::{
     ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, CoreError, DepKey,
     DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
     NamespaceId, NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId,
-    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepAddV1,
-    WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
-    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
-    sha256_bytes, to_canon_json_bytes, validate_event_body,
+    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedEventBody, WallClock, WireBeadPatch,
+    WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1,
+    WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
+    sha256_bytes, to_canon_json_bytes,
 };
 use crate::daemon::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
@@ -54,7 +54,7 @@ pub struct EventDraft {
 
 #[derive(Clone, Debug)]
 pub struct SequencedEvent {
-    pub event_body: EventBody,
+    pub event_body: ValidatedEventBody,
     pub event_bytes: EventBytes<crate::core::Canonical>,
     pub request_sha256: [u8; 32],
     pub client_request_id: Option<ClientRequestId>,
@@ -500,12 +500,13 @@ impl MutationEngine {
             }),
         };
 
-        validate_event_body(&event_body, &self.limits).map_err(|err| {
-            OpError::ValidationFailed {
-                field: "event".into(),
-                reason: err.to_string(),
-            }
-        })?;
+        let event_body =
+            event_body
+                .into_validated(&self.limits)
+                .map_err(|err| OpError::ValidationFailed {
+                    field: "event".into(),
+                    reason: err.to_string(),
+                })?;
 
         let event_bytes = encode_event_body_canonical(&event_body)
             .map_err(|_| OpError::Internal("event_body encode failed"))?;

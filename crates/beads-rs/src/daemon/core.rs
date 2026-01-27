@@ -90,10 +90,10 @@ enum CheckpointTreeError {
 
 use crate::core::{
     ActorId, Applied, ApplyError, CanonicalState, CliErrorCode, ClientRequestId, ContentHash,
-    DurabilityClass, EventBody, EventId, EventKindV1, HeadStatus, Limits, NamespaceId,
-    NamespacePolicy, PrevVerified, ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0,
-    Seq1, Sha256, StoreId, StoreIdentity, StoreState, TraceId, VerifiedEvent, WallClock, Watermark,
-    WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
+    DurabilityClass, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NamespacePolicy,
+    PrevVerified, ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1, Sha256,
+    StoreId, StoreIdentity, StoreState, TraceId, ValidatedEventBody, VerifiedEvent, WallClock,
+    Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
@@ -2477,7 +2477,7 @@ fn load_event_body_at(
     path: &Path,
     offset: u64,
     limits: &Limits,
-) -> Result<EventBody, StoreRuntimeError> {
+) -> Result<ValidatedEventBody, StoreRuntimeError> {
     let mut reader = open_segment_reader(path).map_err(|source| {
         StoreRuntimeError::WalReplay(Box::new(match source {
             EventWalError::Io { source, .. } => WalReplayError::Io {
@@ -3051,6 +3051,9 @@ mod tests {
                 },
             }),
         };
+        let body = body
+            .into_validated(&Limits::default())
+            .expect("valid event");
         let bytes = encode_event_body_canonical(&body).unwrap();
         let sha256 = hash_event_body(&bytes);
         VerifiedEvent {
