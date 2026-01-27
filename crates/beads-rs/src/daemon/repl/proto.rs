@@ -402,10 +402,7 @@ fn decode_message_body(
 
 fn encode_hello(enc: &mut Encoder<&mut Vec<u8>>, hello: &Hello) -> Result<(), ProtoEncodeError> {
     let (seen_durable, seen_durable_heads) = watermark_maps_from_state(&hello.seen_durable);
-    let seen_applied = hello
-        .seen_applied
-        .as_ref()
-        .map(|state| watermark_maps_from_state(state));
+    let seen_applied = hello.seen_applied.as_ref().map(watermark_maps_from_state);
 
     let mut len = 11;
     if seen_durable_heads.is_some() {
@@ -448,11 +445,9 @@ fn encode_hello(enc: &mut Encoder<&mut Vec<u8>>, hello: &Hello) -> Result<(), Pr
         enc.str("seen_applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some((_, applied_heads)) = &seen_applied {
-        if let Some(heads) = applied_heads {
-            enc.str("seen_applied_heads")?;
-            encode_watermark_heads(enc, heads)?;
-        }
+    if let Some((_, Some(heads))) = &seen_applied {
+        enc.str("seen_applied_heads")?;
+        encode_watermark_heads(enc, heads)?;
     }
 
     enc.str("capabilities")?;
@@ -565,7 +560,7 @@ fn encode_welcome(
     let receiver_seen_applied = welcome
         .receiver_seen_applied
         .as_ref()
-        .map(|state| watermark_maps_from_state(state));
+        .map(watermark_maps_from_state);
 
     let mut len = 9;
     if receiver_seen_durable_heads.is_some() {
@@ -601,11 +596,9 @@ fn encode_welcome(
         enc.str("receiver_seen_applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some((_, applied_heads)) = &receiver_seen_applied {
-        if let Some(heads) = applied_heads {
-            enc.str("receiver_seen_applied_heads")?;
-            encode_watermark_heads(enc, heads)?;
-        }
+    if let Some((_, Some(heads))) = &receiver_seen_applied {
+        enc.str("receiver_seen_applied_heads")?;
+        encode_watermark_heads(enc, heads)?;
     }
     enc.str("live_stream_enabled")?;
     enc.bool(welcome.live_stream_enabled)?;
@@ -767,10 +760,7 @@ fn decode_events(dec: &mut Decoder, limits: &Limits) -> Result<Events, ProtoDeco
 
 fn encode_ack(enc: &mut Encoder<&mut Vec<u8>>, ack: &Ack) -> Result<(), ProtoEncodeError> {
     let (durable, durable_heads) = watermark_maps_from_state(&ack.durable);
-    let applied = ack
-        .applied
-        .as_ref()
-        .map(|state| watermark_maps_from_state(state));
+    let applied = ack.applied.as_ref().map(watermark_maps_from_state);
 
     let mut len = 1;
     if durable_heads.is_some() {
@@ -794,11 +784,9 @@ fn encode_ack(enc: &mut Encoder<&mut Vec<u8>>, ack: &Ack) -> Result<(), ProtoEnc
         enc.str("applied")?;
         encode_watermark_map(enc, applied)?;
     }
-    if let Some((_, applied_heads)) = &applied {
-        if let Some(heads) = applied_heads {
-            enc.str("applied_heads")?;
-            encode_watermark_heads(enc, heads)?;
-        }
+    if let Some((_, Some(heads))) = &applied {
+        enc.str("applied_heads")?;
+        encode_watermark_heads(enc, heads)?;
     }
     Ok(())
 }
