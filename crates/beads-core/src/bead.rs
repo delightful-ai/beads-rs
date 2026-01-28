@@ -12,7 +12,7 @@ use super::composite::{Claim, Note, Workflow};
 use super::crdt::Lww;
 use super::domain::{BeadType, Priority};
 use super::error::{CollisionError, CoreError};
-use super::identity::{BeadId, ContentHash};
+use super::identity::{BeadId, BranchName, ContentHash};
 use super::time::Stamp;
 
 /// Immutable creation provenance.
@@ -22,11 +22,11 @@ use super::time::Stamp;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Creation {
     stamp: Stamp,
-    on_branch: Option<String>,
+    on_branch: Option<BranchName>,
 }
 
 impl Creation {
-    pub fn new(stamp: Stamp, on_branch: Option<String>) -> Self {
+    pub fn new(stamp: Stamp, on_branch: Option<BranchName>) -> Self {
         Self { stamp, on_branch }
     }
 
@@ -42,8 +42,8 @@ impl Creation {
         &self.stamp.by
     }
 
-    pub fn on_branch(&self) -> Option<&str> {
-        self.on_branch.as_deref()
+    pub fn on_branch(&self) -> Option<&BranchName> {
+        self.on_branch.as_ref()
     }
 }
 
@@ -56,7 +56,7 @@ pub struct BeadCore {
 }
 
 impl BeadCore {
-    pub fn new(id: BeadId, created: Stamp, created_on_branch: Option<String>) -> Self {
+    pub fn new(id: BeadId, created: Stamp, created_on_branch: Option<BranchName>) -> Self {
         Self {
             id,
             creation: Creation::new(created, created_on_branch),
@@ -74,7 +74,7 @@ impl BeadCore {
     }
 
     /// Get the branch the bead was created on.
-    pub fn created_on_branch(&self) -> Option<&str> {
+    pub fn created_on_branch(&self) -> Option<&BranchName> {
         self.creation.on_branch()
     }
 }
@@ -417,7 +417,7 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
 
     // created_on_branch
     if let Some(branch) = bead.core.created_on_branch() {
-        h.update(branch.as_bytes());
+        h.update(branch.as_str().as_bytes());
     }
     h.update([0]);
 
@@ -435,7 +435,7 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
         }
         h.update([0]);
         if let Some(branch) = closure.on_branch.as_ref() {
-            h.update(branch.as_bytes());
+            h.update(branch.as_str().as_bytes());
         }
         h.update([0]);
     } else {

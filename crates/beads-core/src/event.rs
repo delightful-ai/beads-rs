@@ -12,7 +12,8 @@ use thiserror::Error;
 use super::dep::DepKey;
 use super::domain::DepKind;
 use super::identity::{
-    ActorId, BeadId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TraceId, TxnId,
+    ActorId, BeadId, BranchName, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity,
+    TraceId, TxnId,
 };
 use super::limits::Limits;
 use super::namespace::NamespaceId;
@@ -1330,7 +1331,7 @@ fn encode_wire_bead_patch(
     }
     if !patch.closed_on_branch.is_keep() {
         enc.str("closed_on_branch")?;
-        encode_wire_patch_str(enc, &patch.closed_on_branch)?;
+        encode_wire_patch_branch(enc, &patch.closed_on_branch)?;
     }
     if !patch.closed_reason.is_keep() {
         enc.str("closed_reason")?;
@@ -1346,7 +1347,7 @@ fn encode_wire_bead_patch(
     }
     if let Some(created_on_branch) = &patch.created_on_branch {
         enc.str("created_on_branch")?;
-        enc.str(created_on_branch)?;
+        enc.str(created_on_branch.as_str())?;
     }
     if let Some(description) = &patch.description {
         enc.str("description")?;
@@ -1414,7 +1415,7 @@ fn decode_wire_bead_patch(
                 patch.assignee_expires = decode_wire_patch_wallclock(dec, limits)?;
             }
             "closed_on_branch" => {
-                patch.closed_on_branch = decode_wire_patch_str(dec, limits)?;
+                patch.closed_on_branch = decode_wire_patch_branch(dec, limits, "closed_on_branch")?;
             }
             "closed_reason" => {
                 patch.closed_reason = decode_wire_patch_str(dec, limits)?;
@@ -1427,7 +1428,8 @@ fn decode_wire_bead_patch(
                 patch.created_by = Some(parse_actor_id(raw, "created_by")?);
             }
             "created_on_branch" => {
-                patch.created_on_branch = Some(decode_text(dec, limits)?.to_string());
+                let raw = decode_text(dec, limits)?;
+                patch.created_on_branch = Some(parse_branch_name(raw, "created_on_branch")?);
             }
             "description" => {
                 patch.description = Some(decode_text(dec, limits)?.to_string());
@@ -2165,6 +2167,23 @@ fn encode_wire_patch_str(
     }
 }
 
+fn encode_wire_patch_branch(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    patch: &WirePatch<BranchName>,
+) -> Result<(), EncodeError> {
+    match patch {
+        WirePatch::Keep => Ok(()),
+        WirePatch::Clear => {
+            enc.null()?;
+            Ok(())
+        }
+        WirePatch::Set(value) => {
+            enc.str(value.as_str())?;
+            Ok(())
+        }
+    }
+}
+
 fn encode_wire_patch_u32(
     enc: &mut Encoder<&mut Vec<u8>>,
     patch: &WirePatch<u32>,
@@ -2229,6 +2248,28 @@ fn decode_wire_patch_str(
         Type::String => Ok(WirePatch::Set(decode_text(dec, limits)?.to_string())),
         other => Err(DecodeError::InvalidField {
             field: "patch",
+            reason: format!("expected null or string, got {other:?}"),
+        }),
+    }
+}
+
+fn decode_wire_patch_branch(
+    dec: &mut Decoder,
+    limits: &Limits,
+    field: &'static str,
+) -> Result<WirePatch<BranchName>, DecodeError> {
+    match dec.datatype()? {
+        Type::Null => {
+            dec.null()?;
+            Ok(WirePatch::Clear)
+        }
+        Type::StringIndef => Err(DecodeError::IndefiniteLength),
+        Type::String => {
+            let raw = decode_text(dec, limits)?;
+            Ok(WirePatch::Set(parse_branch_name(raw, field)?))
+        }
+        other => Err(DecodeError::InvalidField {
+            field,
             reason: format!("expected null or string, got {other:?}"),
         }),
     }
@@ -2604,6 +2645,13 @@ fn parse_actor_id(raw: &str, field: &'static str) -> Result<ActorId, DecodeError
     })
 }
 
+fn parse_branch_name(raw: &str, field: &'static str) -> Result<BranchName, DecodeError> {
+    BranchName::parse(raw.to_string()).map_err(|e| DecodeError::InvalidField {
+        field,
+        reason: e.to_string(),
+    })
+}
+
 fn parse_bead_id(raw: &str) -> Result<super::identity::BeadId, DecodeError> {
     super::identity::BeadId::parse(raw).map_err(|e| DecodeError::InvalidField {
         field: "bead_id",
@@ -2682,7 +2730,7 @@ pub(crate) enum WorkflowPatch {
     SetStatus {
         status: WorkflowStatus,
         closed_reason: WirePatch<String>,
-        closed_on_branch: WirePatch<String>,
+        closed_on_branch: WirePatch<BranchName>,
     },
 }
 
@@ -3546,6 +3594,23 @@ mod tests {
         let mut dec = Decoder::new(buf.as_slice());
         let err = decode_wire_tombstone(&mut dec, &Limits::default(), 0).unwrap_err();
         assert!(matches!(err, DecodeError::InvalidField { field, .. } if field == "bead_delete"));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_branch_name() {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.map(2).unwrap();
+        enc.str("id").unwrap();
+        enc.str("bd-test1").unwrap();
+        enc.str("created_on_branch").unwrap();
+        enc.str("bad branch").unwrap();
+
+        let mut dec = Decoder::new(buf.as_slice());
+        let err = decode_wire_bead_patch(&mut dec, &Limits::default(), 0).unwrap_err();
+        assert!(
+            matches!(err, DecodeError::InvalidField { field, .. } if field == "created_on_branch")
+        );
     }
 
     #[test]

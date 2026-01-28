@@ -16,7 +16,7 @@ use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::DepKey;
 use super::domain::{BeadType, DepKind, Priority};
-use super::identity::{ActorId, BeadId, NoteId, ReplicaId};
+use super::identity::{ActorId, BeadId, BranchName, NoteId, ReplicaId};
 use super::orset::{Dot, Dvv};
 use super::state::LabelState;
 use super::time::{Stamp, WallClock, WriteStamp};
@@ -260,7 +260,7 @@ impl WorkflowStatus {
     pub fn into_workflow(
         self,
         closed_reason: Option<String>,
-        closed_on_branch: Option<String>,
+        closed_on_branch: Option<BranchName>,
     ) -> Workflow {
         match self {
             WorkflowStatus::Open => Workflow::Open,
@@ -282,7 +282,7 @@ pub enum WireWorkflowSnapshot {
         #[serde(skip_serializing_if = "Option::is_none")]
         closed_reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        closed_on_branch: Option<String>,
+        closed_on_branch: Option<BranchName>,
     },
 }
 
@@ -421,7 +421,7 @@ pub struct WireBeadFull {
     pub created_at: WireStamp,
     pub created_by: ActorId,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_on_branch: Option<String>,
+    pub created_on_branch: Option<BranchName>,
 
     // Fields (mutable)
     pub title: String,
@@ -530,7 +530,7 @@ impl WireBeadFull {
             id: bead.core.id.clone(),
             created_at: WireStamp::from(&bead.core.created().at),
             created_by: bead.core.created().by.clone(),
-            created_on_branch: bead.core.created_on_branch().map(|s| s.to_string()),
+            created_on_branch: bead.core.created_on_branch().cloned(),
             title: bead.fields.title.value.clone(),
             description: bead.fields.description.value.clone(),
             design: bead.fields.design.value.clone(),
@@ -613,7 +613,7 @@ pub struct WireBeadPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<ActorId>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_on_branch: Option<String>,
+    pub created_on_branch: Option<BranchName>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -639,7 +639,7 @@ pub struct WireBeadPatch {
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
     pub closed_reason: WirePatch<String>,
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
-    pub closed_on_branch: WirePatch<String>,
+    pub closed_on_branch: WirePatch<BranchName>,
 
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
     pub assignee: WirePatch<ActorId>,
@@ -1174,7 +1174,11 @@ mod tests {
         let base = Stamp::new(WriteStamp::new(10, 0), actor_id("alice"));
         let newer = Stamp::new(WriteStamp::new(20, 0), actor_id("bob"));
 
-        let core = BeadCore::new(bead_id("bd-abc123"), base.clone(), Some("main".to_string()));
+        let core = BeadCore::new(
+            bead_id("bd-abc123"),
+            base.clone(),
+            Some(BranchName::parse("main").expect("valid branch name")),
+        );
         let fields = BeadFields {
             title: Lww::new("t".to_string(), newer.clone()),
             description: Lww::new("d".to_string(), base.clone()),
@@ -1235,7 +1239,7 @@ mod tests {
             workflow: Lww::new(
                 Workflow::Closed(Closure::new(
                     Some("done".to_string()),
-                    Some("main".to_string()),
+                    Some(BranchName::parse("main").expect("valid branch name")),
                 )),
                 workflow_stamp,
             ),
