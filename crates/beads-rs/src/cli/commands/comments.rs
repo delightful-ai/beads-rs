@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send};
 use super::fmt_wall_ms;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{AddNotePayload, IdPayload, Request, ResponsePayload};
@@ -56,7 +56,7 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
             match ok {
                 ResponsePayload::Query(QueryResult::Notes(notes)) => {
                     // Render like beads-go: "Comments on <id>:" + entries.
-                    println!("{}", render_comments_list(id_for_render.as_str(), &notes));
+                    print_line(&render_comments_list(id_for_render.as_str(), &notes))?;
                     Ok(())
                 }
                 other => print_ok(&other, false),
