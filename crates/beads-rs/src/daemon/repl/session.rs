@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
+use thiserror::Error;
+
 use crate::core::error::details::{
     EventIdDetails, FrameTooLargeDetails, HashMismatchDetails, InternalErrorDetails,
     InvalidRequestDetails, NamespacePolicyViolationDetails, NonCanonicalDetails, OverloadedDetails,
@@ -92,9 +94,31 @@ pub struct ProtocolRange {
     pub max: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("protocol range invalid: min {min} greater than max {max}")]
+pub struct ProtocolRangeError {
+    min: u32,
+    max: u32,
+}
+
 impl ProtocolRange {
-    pub fn new(min: u32, max: u32) -> Self {
-        Self { min, max }
+    pub fn new(min: u32, max: u32) -> Result<Self, ProtocolRangeError> {
+        if min <= max {
+            Ok(Self { min, max })
+        } else {
+            Err(ProtocolRangeError { min, max })
+        }
+    }
+
+    pub fn exact(version: u32) -> Self {
+        Self {
+            min: version,
+            max: version,
+        }
+    }
+
+    pub fn range(min: u32, max: u32) -> Result<Self, ProtocolRangeError> {
+        Self::new(min, max)
     }
 }
 
@@ -114,7 +138,7 @@ impl SessionConfig {
         Self {
             local_store,
             local_replica_id,
-            protocol: ProtocolRange::new(PROTOCOL_VERSION_V1, PROTOCOL_VERSION_V1),
+            protocol: ProtocolRange::exact(PROTOCOL_VERSION_V1),
             requested_namespaces: Vec::new(),
             offered_namespaces: Vec::new(),
             capabilities: Capabilities {
@@ -1879,6 +1903,19 @@ mod tests {
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));
         let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         (TestStore::new(), identity, replica)
+    }
+
+    #[test]
+    fn protocol_range_rejects_inverted() {
+        let err = ProtocolRange::range(3, 2).unwrap_err();
+        assert_eq!(err.min, 3);
+        assert_eq!(err.max, 2);
+    }
+
+    #[test]
+    fn protocol_range_exact_negotiates() {
+        let negotiated = negotiate_version(ProtocolRange::exact(2), 3, 1).unwrap();
+        assert_eq!(negotiated, 2);
     }
 
     fn inbound_streaming_session(
