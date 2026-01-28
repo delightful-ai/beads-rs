@@ -871,6 +871,9 @@ impl MutationEngine {
             let expires = WallClock(stamp.at.wall_ms.saturating_add(3600 * 1000));
             patch.assignee = WirePatch::Set(assignee);
             patch.assignee_expires = WirePatch::Set(expires);
+            patch.status = Some(WorkflowStatus::InProgress);
+            patch.closed_reason = WirePatch::Clear;
+            patch.closed_on_branch = WirePatch::Clear;
         }
 
         let mut delta = TxnDeltaV1::new();
@@ -1442,6 +1445,9 @@ impl MutationEngine {
         let mut patch = BeadPatchWireV1::new(id.clone());
         patch.assignee = WirePatch::Set(assignee);
         patch.assignee_expires = WirePatch::Set(expires);
+        patch.status = Some(WorkflowStatus::InProgress);
+        patch.closed_reason = WirePatch::Clear;
+        patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
         delta
