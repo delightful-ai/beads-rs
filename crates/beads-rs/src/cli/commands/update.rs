@@ -14,7 +14,7 @@ use crate::daemon::ipc::{
     ParentPayload, Request, ResponsePayload, UpdatePayload,
 };
 use crate::daemon::ops::BeadPatchDaemonExt;
-use beads_surface::ops::{BeadPatch, Patch};
+use beads_surface::ops::{BeadPatch, OpenInProgress, Patch};
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -156,10 +156,16 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         patch.bead_type = Patch::Set(bead_type);
     }
     if let Some(status) = status {
-        if status == WorkflowStatus::Closed && close_reason.is_some() {
-            // Close via explicit close op to preserve reason.
-        } else {
-            patch.status = Patch::Set(status);
+        match status {
+            WorkflowStatus::Closed => {
+                // Close via explicit close op to preserve reason/branch semantics.
+            }
+            WorkflowStatus::Open => {
+                patch.status = Patch::Set(OpenInProgress::Open);
+            }
+            WorkflowStatus::InProgress => {
+                patch.status = Patch::Set(OpenInProgress::InProgress);
+            }
         }
     }
 
@@ -271,7 +277,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         }
     }
 
-    if status_closed && close_reason.is_some() {
+    if status_closed {
         let req = Request::Close {
             ctx: ctx.mutation_ctx(),
             payload: ClosePayload {
