@@ -66,10 +66,11 @@ pub use event::{
     Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventFrameError, EventFrameV1,
     EventKindV1, EventShaLookup, EventShaLookupError, EventValidationError, HlcMax, Opaque,
     PrevDeferred, PrevVerified, Sha256, TxnV1, ValidatedBeadPatch, ValidatedDepAdd,
-    ValidatedDepRemove, ValidatedEventBody, ValidatedEventKindV1, ValidatedTombstone,
-    ValidatedTxnDeltaV1, ValidatedTxnOpV1, ValidatedTxnV1, VerifiedEvent, VerifiedEventAny,
-    VerifiedEventFrame, decode_event_body, decode_event_hlc_max, encode_event_body_canonical,
-    hash_event_body, sha256_bytes, verify_event_frame,
+    ValidatedDepRemove, ValidatedEventBody, ValidatedEventKindV1, ValidatedParentAdd,
+    ValidatedParentRemove, ValidatedTombstone, ValidatedTxnDeltaV1, ValidatedTxnOpV1,
+    ValidatedTxnV1, VerifiedEvent, VerifiedEventAny, VerifiedEventFrame, decode_event_body,
+    decode_event_hlc_max, encode_event_body_canonical, hash_event_body, sha256_bytes,
+    verify_event_frame,
 };
 pub use identity::{
     ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, EventId, NoteId,
@@ -108,6 +109,7 @@ pub use wire_bead::{
     BeadPatchWireV1, BeadSnapshotWireV1, NoteAppendV1, TxnDeltaError, TxnDeltaV1, TxnOpKey,
     TxnOpV1, WireBeadFull, WireBeadPatch, WireClaimSnapshot, WireDepAddV1, WireDepEntryV1,
     WireDepRemoveV1, WireDepStoreV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1,
-    WireLabelRemoveV1, WireLabelStateV1, WireLineageStamp, WireNoteV1, WirePatch, WireStamp,
-    WireTombstoneV1, WireWorkflowSnapshot, WorkflowStatus,
+    WireLabelRemoveV1, WireLabelStateV1, WireLineageStamp, WireNoteV1, WireParentAddV1,
+    WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1, WireWorkflowSnapshot,
+    WorkflowStatus,
 };

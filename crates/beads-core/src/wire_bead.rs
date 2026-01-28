@@ -14,7 +14,7 @@ use super::bead::{BeadCore, BeadFields};
 use super::collections::Label;
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
-use super::dep::DepKey;
+use super::dep::{DepKey, ParentEdge};
 use super::domain::{BeadType, DepKind, Priority};
 use super::identity::{ActorId, BeadId, BranchName, NoteId, ReplicaId};
 use super::orset::{Dot, Dvv};
@@ -809,6 +809,48 @@ impl WireDepRemoveV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireParentAddV1 {
+    #[serde(flatten)]
+    pub edge: ParentEdge,
+    pub dot: WireDotV1,
+}
+
+impl WireParentAddV1 {
+    pub fn edge(&self) -> &ParentEdge {
+        &self.edge
+    }
+
+    pub fn child(&self) -> &BeadId {
+        self.edge.child()
+    }
+
+    pub fn parent(&self) -> &BeadId {
+        self.edge.parent()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireParentRemoveV1 {
+    #[serde(flatten)]
+    pub edge: ParentEdge,
+    pub ctx: WireDvvV1,
+}
+
+impl WireParentRemoveV1 {
+    pub fn edge(&self) -> &ParentEdge {
+        &self.edge
+    }
+
+    pub fn child(&self) -> &BeadId {
+        self.edge.child()
+    }
+
+    pub fn parent(&self) -> &BeadId {
+        self.edge.parent()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteAppendV1 {
     pub bead_id: BeadId,
     pub note: WireNoteV1,
@@ -831,6 +873,8 @@ pub enum TxnOpV1 {
     LabelRemove(WireLabelRemoveV1),
     DepAdd(WireDepAddV1),
     DepRemove(WireDepRemoveV1),
+    ParentAdd(WireParentAddV1),
+    ParentRemove(WireParentRemoveV1),
     NoteAppend(NoteAppendV1),
 }
 
@@ -861,6 +905,13 @@ impl TxnOpV1 {
             },
             TxnOpV1::DepRemove(dep) => TxnOpKey::DepRemove {
                 key: dep.key.clone(),
+            },
+            TxnOpV1::ParentAdd(op) => TxnOpKey::ParentAdd {
+                edge: op.edge.clone(),
+                dot: op.dot.into(),
+            },
+            TxnOpV1::ParentRemove(op) => TxnOpKey::ParentRemove {
+                edge: op.edge.clone(),
             },
             TxnOpV1::NoteAppend(append) => TxnOpKey::NoteAppend {
                 bead_id: append.bead_id.clone(),
@@ -898,6 +949,13 @@ pub enum TxnOpKey {
     DepRemove {
         key: DepKey,
     },
+    ParentAdd {
+        edge: ParentEdge,
+        dot: Dot,
+    },
+    ParentRemove {
+        edge: ParentEdge,
+    },
     NoteAppend {
         bead_id: BeadId,
         note_id: NoteId,
@@ -914,6 +972,8 @@ impl TxnOpKey {
             TxnOpKey::LabelRemove { .. } => "label_remove",
             TxnOpKey::DepAdd { .. } => "dep_add",
             TxnOpKey::DepRemove { .. } => "dep_remove",
+            TxnOpKey::ParentAdd { .. } => "parent_add",
+            TxnOpKey::ParentRemove { .. } => "parent_remove",
             TxnOpKey::NoteAppend { .. } => "note_append",
         }
     }
@@ -969,6 +1029,18 @@ impl TxnOpKey {
                 key.from().as_str(),
                 key.to().as_str(),
                 key.kind().as_str()
+            ),
+            TxnOpKey::ParentAdd { edge, dot } => format!(
+                "parent_add:{}:{}:{}:{}",
+                edge.child().as_str(),
+                edge.parent().as_str(),
+                dot.replica,
+                dot.counter
+            ),
+            TxnOpKey::ParentRemove { edge } => format!(
+                "parent_remove:{}:{}",
+                edge.child().as_str(),
+                edge.parent().as_str()
             ),
             TxnOpKey::NoteAppend {
                 bead_id,
@@ -1039,6 +1111,8 @@ impl TxnDeltaV1 {
         label_removes: Vec<WireLabelRemoveV1>,
         dep_adds: Vec<WireDepAddV1>,
         dep_removes: Vec<WireDepRemoveV1>,
+        parent_adds: Vec<WireParentAddV1>,
+        parent_removes: Vec<WireParentRemoveV1>,
         note_appends: Vec<NoteAppendV1>,
     ) -> Result<Self, TxnDeltaError> {
         let mut delta = TxnDeltaV1::new();
@@ -1059,6 +1133,12 @@ impl TxnDeltaV1 {
         }
         for dep in dep_removes {
             delta.insert(TxnOpV1::DepRemove(dep))?;
+        }
+        for op in parent_adds {
+            delta.insert(TxnOpV1::ParentAdd(op))?;
+        }
+        for op in parent_removes {
+            delta.insert(TxnOpV1::ParentRemove(op))?;
         }
         for na in note_appends {
             delta.insert(TxnOpV1::NoteAppend(na))?;

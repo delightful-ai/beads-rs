@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use beads_rs::git::wire::serialize_deps;
 use beads_rs::{
-    BeadId, CanonicalState, DepKey, DepKind, EventBody, Limits, ReplicaId, TxnDeltaV1, TxnOpV1,
-    ValidatedEventBody, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, apply_event,
+    BeadId, CanonicalState, DepKey, DepKind, EventBody, Limits, ParentEdge, ReplicaId, TxnDeltaV1,
+    TxnOpV1, ValidatedEventBody, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
+    WireParentAddV1, WireParentRemoveV1, apply_event,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -165,25 +166,28 @@ fn dep_kind_ordering_in_serialize_is_canonical() {
     let to = bead_id(71);
 
     let mut delta = TxnDeltaV1::new();
-    for (idx, kind) in [
-        DepKind::Blocks,
-        DepKind::DiscoveredFrom,
-        DepKind::Parent,
-        DepKind::Related,
-    ]
-    .iter()
-    .enumerate()
-    {
+    let replica = ReplicaId::new(Uuid::from_bytes([11u8; 16]));
+    let kinds = [DepKind::Blocks, DepKind::DiscoveredFrom, DepKind::Related];
+    for (idx, kind) in kinds.iter().enumerate() {
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 key: DepKey::new(from.clone(), to.clone(), *kind).unwrap(),
                 dot: WireDotV1 {
-                    replica: ReplicaId::new(Uuid::from_bytes([11u8; 16])),
+                    replica: replica.clone(),
                     counter: idx as u64 + 1,
                 },
             }))
             .expect("unique dep add");
     }
+    delta
+        .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
+            edge: ParentEdge::new(from.clone(), to.clone()).unwrap(),
+            dot: WireDotV1 {
+                replica,
+                counter: 99,
+            },
+        }))
+        .expect("unique parent add");
     let event = validated(event_body_with_delta(13, delta));
     apply_event(&mut state, &event).expect("apply deps");
 
@@ -208,6 +212,50 @@ fn dep_kind_ordering_in_serialize_is_canonical() {
 
     let expected = vec!["blocks", "discovered_from", "parent", "related"];
     assert_eq!(kinds, expected);
+}
+
+#[test]
+fn parent_edge_add_remove_updates_state() {
+    let mut state = CanonicalState::new();
+    apply_bead(&mut state, 90);
+    apply_bead(&mut state, 91);
+
+    let child = bead_id(90);
+    let parent = bead_id(91);
+    let edge = ParentEdge::new(child.clone(), parent.clone()).unwrap();
+    let replica = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
+
+    let mut add_delta = TxnDeltaV1::new();
+    add_delta
+        .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
+            edge: edge.clone(),
+            dot: WireDotV1 {
+                replica: replica.clone(),
+                counter: 1,
+            },
+        }))
+        .expect("unique parent add");
+    let add_event = validated(event_body_with_delta(20, add_delta));
+    apply_event(&mut state, &add_event).expect("apply parent add");
+
+    let parents = state.parent_edges_from(&child);
+    assert_eq!(parents.len(), 1);
+    assert_eq!(parents[0].parent(), &parent);
+
+    let mut remove_delta = TxnDeltaV1::new();
+    remove_delta
+        .insert(TxnOpV1::ParentRemove(WireParentRemoveV1 {
+            edge,
+            ctx: WireDvvV1 {
+                max: BTreeMap::from([(replica.clone(), 1)]),
+                dots: Vec::new(),
+            },
+        }))
+        .expect("unique parent remove");
+    let remove_event = validated(event_body_with_delta(21, remove_delta));
+    apply_event(&mut state, &remove_event).expect("apply parent remove");
+
+    assert!(state.parent_edges_from(&child).is_empty());
 }
 
 #[test]

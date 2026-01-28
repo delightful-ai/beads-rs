@@ -778,7 +778,7 @@ mod tests {
     use super::*;
     use crate::core::{
         ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Label, Lww, NoteId, OrSet,
-        Priority, ReplicaId, Workflow,
+        ParentEdge, Priority, ReplicaId, Workflow,
     };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -861,19 +861,16 @@ mod tests {
     }
 
     fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
-        let kind = prop_oneof![
+        let non_parent_kind = prop_oneof![
             Just(DepKind::Blocks),
-            Just(DepKind::Parent),
             Just(DepKind::Related),
             Just(DepKind::DiscoveredFrom),
         ];
-        let dot_strategy =
-            (0u8..=255, 0u64..10_000).prop_map(|(replica, counter)| dot(replica, counter));
-        (
+        let non_parent = (
             base58_id_strategy(),
             base58_id_strategy(),
-            kind,
-            dot_strategy,
+            non_parent_kind,
+            (0u8..=255, 0u64..10_000).prop_map(|(replica, counter)| dot(replica, counter)),
             stamp_strategy(),
         )
             .prop_filter("deps cannot be self-referential", |(from, to, _, _, _)| {
@@ -883,7 +880,25 @@ mod tests {
                 let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
                     .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
                 (key, dot, stamp)
-            })
+            });
+
+        let parent = (
+            base58_id_strategy(),
+            base58_id_strategy(),
+            (0u8..=255, 0u64..10_000).prop_map(|(replica, counter)| dot(replica, counter)),
+            stamp_strategy(),
+        )
+            .prop_filter(
+                "deps cannot be self-referential",
+                |(child, parent, _, _)| child != parent,
+            )
+            .prop_map(|(child, parent, dot, stamp)| {
+                let edge = ParentEdge::new(bead_id(&child), bead_id(&parent))
+                    .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason));
+                (edge.to_dep_key(), dot, stamp)
+            });
+
+        prop_oneof![non_parent, parent]
     }
 
     fn jsonl_lines(bytes: &[u8]) -> Vec<String> {
@@ -1457,7 +1472,9 @@ mod tests {
         let key_blocks = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
         let key_discovered =
             DepKey::new(from.clone(), to.clone(), DepKind::DiscoveredFrom).unwrap();
-        let key_parent = DepKey::new(from.clone(), to.clone(), DepKind::Parent).unwrap();
+        let key_parent = ParentEdge::new(from.clone(), to.clone())
+            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason))
+            .to_dep_key();
         let key_related = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
 
         apply_dep_add_checked(&mut state, key_related, dot(1, 4), stamp.clone());
@@ -1531,12 +1548,9 @@ mod tests {
 
     #[test]
     fn legacy_deps_parse_then_serialize_is_deterministic() {
-        let key_parent = DepKey::new(
-            bead_id("bd-legacy-a"),
-            bead_id("bd-legacy-b"),
-            DepKind::Parent,
-        )
-        .unwrap();
+        let key_parent = ParentEdge::new(bead_id("bd-legacy-a"), bead_id("bd-legacy-b"))
+            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason))
+            .to_dep_key();
         let key_blocks = DepKey::new(
             bead_id("bd-legacy-a"),
             bead_id("bd-legacy-c"),

@@ -4,7 +4,6 @@
 //! serialized representations. They depend on git::wire serialization and thus
 //! live in beads-rs rather than beads-core.
 
-use beads_rs::core::DepKey;
 use beads_rs::core::bead::{Bead, BeadCore, BeadFields};
 use beads_rs::core::composite::{Claim, Workflow};
 use beads_rs::core::crdt::Lww;
@@ -14,6 +13,7 @@ use beads_rs::core::orset::Dot;
 use beads_rs::core::state::CanonicalState;
 use beads_rs::core::time::{Stamp, WriteStamp};
 use beads_rs::core::tombstone::Tombstone;
+use beads_rs::core::{DepKey, ParentEdge};
 use beads_rs::git::wire;
 use proptest::prelude::*;
 use uuid::Uuid;
@@ -84,19 +84,22 @@ fn entry_strategy() -> impl Strategy<Value = Entry> {
 }
 
 fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
-    let kind = prop_oneof![
+    let non_parent_kind = prop_oneof![
         Just(DepKind::Blocks),
-        Just(DepKind::Parent),
         Just(DepKind::Related),
         Just(DepKind::DiscoveredFrom),
     ];
     let replica = any::<u128>().prop_map(|raw| ReplicaId::new(Uuid::from_u128(raw)));
-    let dot = (replica, 0u64..10_000).prop_map(|(replica, counter)| Dot { replica, counter });
-    (
+    let dot_non_parent =
+        (replica.clone(), 0u64..10_000).prop_map(|(replica, counter)| Dot { replica, counter });
+    let dot_parent =
+        (replica, 0u64..10_000).prop_map(|(replica, counter)| Dot { replica, counter });
+
+    let non_parent = (
         base58_id_strategy(),
         base58_id_strategy(),
-        kind,
-        dot,
+        non_parent_kind,
+        dot_non_parent,
         stamp_strategy(),
     )
         .prop_filter("deps cannot be self-referential", |(from, to, _, _, _)| {
@@ -106,7 +109,25 @@ fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
             let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
                 .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
             (key, dot, stamp)
-        })
+        });
+
+    let parent = (
+        base58_id_strategy(),
+        base58_id_strategy(),
+        dot_parent,
+        stamp_strategy(),
+    )
+        .prop_filter(
+            "deps cannot be self-referential",
+            |(child, parent, _, _)| child != parent,
+        )
+        .prop_map(|(child, parent, dot, stamp)| {
+            let edge = ParentEdge::new(bead_id(&child), bead_id(&parent))
+                .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason));
+            (edge.to_dep_key(), dot, stamp)
+        });
+
+    prop_oneof![non_parent, parent]
 }
 
 fn state_strategy() -> impl Strategy<Value = CanonicalState> {

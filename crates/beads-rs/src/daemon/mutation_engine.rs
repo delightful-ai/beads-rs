@@ -10,11 +10,12 @@ use crate::core::event::ValidatedBeadPatch;
 use crate::core::{
     ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
     ClientRequestId, DepKey, DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax,
-    Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp,
-    StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedEventBody,
-    WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1,
-    WireLabelRemoveV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
-    encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
+    Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge, Priority, ReplicaId,
+    Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
+    ValidatedEventBody, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
+    WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1, WirePatch,
+    WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical, sha256_bytes,
+    to_canon_json_bytes,
 };
 use crate::daemon::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
@@ -312,11 +313,23 @@ impl ParsedMutationRequest {
 
     pub fn parse_add_dep(payload: DepPayload) -> Result<Self, OpError> {
         let DepPayload { from, to, kind } = payload;
+        if kind == DepKind::Parent {
+            return Err(OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: "parent edges must use set-parent".into(),
+            });
+        }
         Ok(ParsedMutationRequest::AddDep { from, to, kind })
     }
 
     pub fn parse_remove_dep(payload: DepPayload) -> Result<Self, OpError> {
         let DepPayload { from, to, kind } = payload;
+        if kind == DepKind::Parent {
+            return Err(OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: "parent edges must use set-parent".into(),
+            });
+        }
         Ok(ParsedMutationRequest::RemoveDep { from, to, kind })
     }
 
@@ -662,6 +675,8 @@ impl MutationEngine {
                 TxnOpV1::LabelRemove(_) => {}
                 TxnOpV1::DepAdd(_) => {}
                 TxnOpV1::DepRemove(_) => {}
+                TxnOpV1::ParentAdd(_) => {}
+                TxnOpV1::ParentRemove(_) => {}
                 TxnOpV1::NoteAppend(append) => {
                     note_appends += 1;
                     enforce_note_limit(&append.note.content, &self.limits)?;
@@ -862,14 +877,14 @@ impl MutationEngine {
         }
 
         if let Some(parent_id) = parent_id {
+            let edge =
+                ParentEdge::new(id.clone(), parent_id).map_err(|e| OpError::ValidationFailed {
+                    field: "parent".into(),
+                    reason: e.reason,
+                })?;
             delta
-                .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    key: DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
-                        OpError::ValidationFailed {
-                            field: "parent".into(),
-                            reason: e.reason,
-                        }
-                    })?,
+                .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
+                    edge,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -1123,6 +1138,12 @@ impl MutationEngine {
         kind: DepKind,
         dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedDelta, OpError> {
+        if kind == DepKind::Parent {
+            return Err(OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: "parent edges must use set-parent".into(),
+            });
+        }
         let key =
             DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
                 field: "dependency".into(),
@@ -1165,6 +1186,12 @@ impl MutationEngine {
         to: BeadId,
         kind: DepKind,
     ) -> Result<PlannedDelta, OpError> {
+        if kind == DepKind::Parent {
+            return Err(OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: "parent edges must use set-parent".into(),
+            });
+        }
         let key =
             DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
                 field: "dependency".into(),
@@ -1194,9 +1221,9 @@ impl MutationEngine {
     ) -> Result<PlannedDelta, OpError> {
         state.require_live(&id).map_live_err(&id)?;
 
-        let parent_id = match parent.as_ref() {
+        let parent_edge = match parent.as_ref() {
             Some(parent_id) => {
-                DepKey::new(id.clone(), parent_id.clone(), DepKind::Parent).map_err(|e| {
+                let edge = ParentEdge::new(id.clone(), parent_id.clone()).map_err(|e| {
                     OpError::ValidationFailed {
                         field: "parent".into(),
                         reason: e.reason,
@@ -1205,50 +1232,35 @@ impl MutationEngine {
                 if state.get_live(parent_id).is_none() {
                     return Err(OpError::NotFound(parent_id.clone()));
                 }
-                if let Err(err) = state.check_no_cycle(&id, parent_id, DepKind::Parent) {
+                if let Err(err) = state.check_no_cycle(edge.child(), edge.parent(), DepKind::Parent)
+                {
                     return Err(OpError::ValidationFailed {
                         field: "parent".into(),
                         reason: err.reason,
                     });
                 }
-                Some(parent_id.clone())
+                Some(edge)
             }
             None => None,
         };
 
-        let existing_parents: Vec<BeadId> = state
-            .deps_from(&id)
-            .into_iter()
-            .filter(|key| key.kind() == DepKind::Parent)
-            .map(|key| key.to().clone())
-            .collect();
+        let existing_parents = state.parent_edges_from(&id);
 
         let mut delta = TxnDeltaV1::new();
         for existing_parent in existing_parents {
-            let key =
-                DepKey::new(id.clone(), existing_parent.clone(), DepKind::Parent).map_err(|e| {
-                    OpError::ValidationFailed {
-                        field: "parent".into(),
-                        reason: e.reason,
-                    }
-                })?;
+            let key = existing_parent.to_dep_key();
             delta
-                .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                    key: key.clone(),
+                .insert(TxnOpV1::ParentRemove(WireParentRemoveV1 {
+                    edge: existing_parent,
                     ctx: WireDvvV1::from(&state.dep_dvv(&key)),
                 }))
                 .map_err(delta_error_to_op)?;
         }
 
-        if let Some(parent_id) = parent_id.clone() {
+        if let Some(parent_edge) = parent_edge.clone() {
             delta
-                .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    key: DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
-                        OpError::ValidationFailed {
-                            field: "parent".into(),
-                            reason: e.reason,
-                        }
-                    })?,
+                .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
+                    edge: parent_edge,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -1256,7 +1268,7 @@ impl MutationEngine {
 
         let canonical = CanonicalMutationOp::SetParent {
             id,
-            parent: parent_id,
+            parent: parent_edge.map(|edge| edge.parent().clone()),
         };
 
         Ok(PlannedDelta { delta, canonical })
@@ -1958,6 +1970,13 @@ mod tests {
     }
 
     fn make_state_with_bead(id: &str, actor: &ActorId) -> CanonicalState {
+        let bead = make_bead(id, actor);
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+        state
+    }
+
+    fn make_bead(id: &str, actor: &ActorId) -> Bead {
         let stamp = Stamp::new(WriteStamp::new(10, 0), actor.clone());
         let core = BeadCore::new(BeadId::parse(id).unwrap(), stamp.clone(), None);
         let fields = BeadFields {
@@ -1973,10 +1992,7 @@ mod tests {
             workflow: Lww::new(Workflow::Open, stamp.clone()),
             claim: Lww::new(Claim::Unclaimed, stamp),
         };
-        let bead = Bead::new(core, fields);
-        let mut state = CanonicalState::new();
-        state.insert(bead).unwrap();
-        state
+        Bead::new(core, fields)
     }
 
     fn make_stamp(now_ms: u64, actor: &ActorId) -> Stamp {
@@ -2070,6 +2086,80 @@ mod tests {
             err,
             OpError::ValidationFailed { field, .. } if field == "stamp"
         ));
+    }
+
+    #[test]
+    fn add_dep_rejects_parent_kind() {
+        let err = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from: BeadId::parse("bd-child").unwrap(),
+            to: BeadId::parse("bd-parent").unwrap(),
+            kind: DepKind::Parent,
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "dependency"
+        ));
+    }
+
+    #[test]
+    fn set_parent_replaces_existing_parent_with_parent_ops() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let child_id = BeadId::parse("bd-child").unwrap();
+        let parent_a = BeadId::parse("bd-parent-a").unwrap();
+        let parent_b = BeadId::parse("bd-parent-b").unwrap();
+
+        let mut state = CanonicalState::new();
+        for id in [&child_id, &parent_a, &parent_b] {
+            state.insert(make_bead(id.as_str(), &actor)).unwrap();
+        }
+
+        let edge = ParentEdge::new(child_id.clone(), parent_a.clone()).unwrap();
+        let dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let stamp = make_stamp(10, &actor);
+        let key = state
+            .check_dep_add_key(edge.to_dep_key())
+            .expect("parent dep key");
+        state.apply_dep_add(key, dot, stamp.clone());
+
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let stamped = make_stamped_context(ctx, stamp.clone());
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
+        let req = ParsedMutationRequest::SetParent {
+            id: child_id.clone(),
+            parent: Some(parent_b.clone()),
+        };
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let draft = engine
+            .plan(
+                &state,
+                stamp.at.wall_ms,
+                stamped,
+                store,
+                None,
+                req,
+                &mut dots,
+            )
+            .expect("plan set parent");
+
+        let ops: Vec<_> = draft.delta.iter().collect();
+        assert!(ops.iter().any(|op| matches!(op, TxnOpV1::ParentRemove(_))));
+        assert!(ops.iter().any(|op| matches!(op, TxnOpV1::ParentAdd(_))));
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, TxnOpV1::DepAdd(dep) if dep.kind() == DepKind::Parent))
+        );
     }
 
     #[test]

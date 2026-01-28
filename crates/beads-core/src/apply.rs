@@ -11,7 +11,8 @@ use super::crdt::Lww;
 use super::domain::{BeadType, Priority};
 use super::event::{
     ValidatedBeadPatch, ValidatedDepAdd, ValidatedDepRemove, ValidatedEventBody,
-    ValidatedEventKindV1, ValidatedTombstone, ValidatedTxnOpV1, ValidatedTxnV1,
+    ValidatedEventKindV1, ValidatedParentAdd, ValidatedParentRemove, ValidatedTombstone,
+    ValidatedTxnOpV1, ValidatedTxnV1,
 };
 use super::identity::{ActorId, BeadId, BranchName, NoteId};
 use super::state::{CanonicalState, bead_collision_cmp, note_collision_cmp};
@@ -84,6 +85,12 @@ pub fn apply_event(
             }
             ValidatedTxnOpV1::DepRemove(dep) => {
                 apply_dep_remove(state, dep, &stamp, &mut outcome)?;
+            }
+            ValidatedTxnOpV1::ParentAdd(op) => {
+                apply_parent_add(state, op, &stamp, &mut outcome)?;
+            }
+            ValidatedTxnOpV1::ParentRemove(op) => {
+                apply_parent_remove(state, op, &stamp, &mut outcome)?;
             }
             ValidatedTxnOpV1::NoteAppend(append) => {
                 apply_note_append(
@@ -311,6 +318,38 @@ fn apply_dep_remove(
 ) -> Result<(), ApplyError> {
     let key = dep.key.clone();
     let ctx = (&dep.ctx).into();
+    let change = state.apply_dep_remove(&key, &ctx, event_stamp.clone());
+    for changed in change.added.iter().chain(change.removed.iter()) {
+        outcome.changed_deps.insert(changed.clone());
+    }
+    Ok(())
+}
+
+fn apply_parent_add(
+    state: &mut CanonicalState,
+    op: &ValidatedParentAdd,
+    event_stamp: &Stamp,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let key = state
+        .check_dep_add_key(op.edge().to_dep_key())
+        .map_err(|err| ApplyError::InvalidDependency { reason: err.reason })?;
+    let dot = op.dot.into();
+    let change = state.apply_dep_add(key, dot, event_stamp.clone());
+    for changed in change.added.iter().chain(change.removed.iter()) {
+        outcome.changed_deps.insert(changed.clone());
+    }
+    Ok(())
+}
+
+fn apply_parent_remove(
+    state: &mut CanonicalState,
+    op: &ValidatedParentRemove,
+    event_stamp: &Stamp,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    let key = op.edge().to_dep_key();
+    let ctx = (&op.ctx).into();
     let change = state.apply_dep_remove(&key, &ctx, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
         outcome.changed_deps.insert(changed.clone());

@@ -9,7 +9,7 @@ use minicbor::{Decoder, Encoder};
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
 
-use super::dep::DepKey;
+use super::dep::{DepKey, ParentEdge};
 use super::domain::DepKind;
 use super::identity::{
     ActorId, BeadId, BranchName, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity,
@@ -21,8 +21,8 @@ use super::time::WallClock;
 use super::watermark::Seq1;
 use super::wire_bead::{
     NoteAppendV1, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1,
-    WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WirePatch,
-    WireStamp, WireTombstoneV1, WorkflowStatus,
+    WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WireParentAddV1,
+    WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,10 +257,26 @@ impl ValidatedTxnDeltaV1 {
                 TxnOpV1::LabelAdd(op) => ValidatedTxnOpV1::LabelAdd(op.clone()),
                 TxnOpV1::LabelRemove(op) => ValidatedTxnOpV1::LabelRemove(op.clone()),
                 TxnOpV1::DepAdd(dep) => {
-                    ValidatedTxnOpV1::DepAdd(ValidatedDepAdd::try_from(dep.clone())?)
+                    if dep.kind() == DepKind::Parent {
+                        ValidatedTxnOpV1::ParentAdd(ValidatedParentAdd::try_from(dep.clone())?)
+                    } else {
+                        ValidatedTxnOpV1::DepAdd(ValidatedDepAdd::try_from(dep.clone())?)
+                    }
                 }
                 TxnOpV1::DepRemove(dep) => {
-                    ValidatedTxnOpV1::DepRemove(ValidatedDepRemove::try_from(dep.clone())?)
+                    if dep.kind() == DepKind::Parent {
+                        ValidatedTxnOpV1::ParentRemove(ValidatedParentRemove::try_from(
+                            dep.clone(),
+                        )?)
+                    } else {
+                        ValidatedTxnOpV1::DepRemove(ValidatedDepRemove::try_from(dep.clone())?)
+                    }
+                }
+                TxnOpV1::ParentAdd(op) => {
+                    ValidatedTxnOpV1::ParentAdd(ValidatedParentAdd::try_from(op.clone())?)
+                }
+                TxnOpV1::ParentRemove(op) => {
+                    ValidatedTxnOpV1::ParentRemove(ValidatedParentRemove::try_from(op.clone())?)
                 }
                 TxnOpV1::NoteAppend(append) => ValidatedTxnOpV1::NoteAppend(append.clone()),
             };
@@ -286,6 +302,8 @@ pub enum ValidatedTxnOpV1 {
     LabelRemove(WireLabelRemoveV1),
     DepAdd(ValidatedDepAdd),
     DepRemove(ValidatedDepRemove),
+    ParentAdd(ValidatedParentAdd),
+    ParentRemove(ValidatedParentRemove),
     NoteAppend(NoteAppendV1),
 }
 
@@ -909,6 +927,8 @@ fn encode_txn_delta(
     let mut label_removes: Vec<&WireLabelRemoveV1> = Vec::new();
     let mut dep_adds: Vec<&WireDepAddV1> = Vec::new();
     let mut dep_removes: Vec<&WireDepRemoveV1> = Vec::new();
+    let mut parent_adds: Vec<&WireParentAddV1> = Vec::new();
+    let mut parent_removes: Vec<&WireParentRemoveV1> = Vec::new();
     let mut note_appends: Vec<&NoteAppendV1> = Vec::new();
 
     for op in delta.iter() {
@@ -919,6 +939,8 @@ fn encode_txn_delta(
             TxnOpV1::LabelRemove(op) => label_removes.push(op),
             TxnOpV1::DepAdd(dep) => dep_adds.push(dep),
             TxnOpV1::DepRemove(dep) => dep_removes.push(dep),
+            TxnOpV1::ParentAdd(op) => parent_adds.push(op),
+            TxnOpV1::ParentRemove(op) => parent_removes.push(op),
             TxnOpV1::NoteAppend(append) => note_appends.push(append),
         }
     }
@@ -940,6 +962,12 @@ fn encode_txn_delta(
         len += 1;
     }
     if !dep_removes.is_empty() {
+        len += 1;
+    }
+    if !parent_adds.is_empty() {
+        len += 1;
+    }
+    if !parent_removes.is_empty() {
         len += 1;
     }
     if !note_appends.is_empty() {
@@ -998,6 +1026,22 @@ fn encode_txn_delta(
         }
     }
 
+    if !parent_adds.is_empty() {
+        enc.str("parent_adds")?;
+        enc.array(parent_adds.len() as u64)?;
+        for op in parent_adds {
+            encode_wire_parent_add(enc, op)?;
+        }
+    }
+
+    if !parent_removes.is_empty() {
+        enc.str("parent_removes")?;
+        enc.array(parent_removes.len() as u64)?;
+        for op in parent_removes {
+            encode_wire_parent_remove(enc, op)?;
+        }
+    }
+
     if !note_appends.is_empty() {
         enc.str("note_appends")?;
         enc.array(note_appends.len() as u64)?;
@@ -1041,6 +1085,8 @@ fn decode_txn_delta(
     let mut label_removes: Vec<WireLabelRemoveV1> = Vec::new();
     let mut dep_adds: Vec<WireDepAddV1> = Vec::new();
     let mut dep_removes: Vec<WireDepRemoveV1> = Vec::new();
+    let mut parent_adds: Vec<WireParentAddV1> = Vec::new();
+    let mut parent_removes: Vec<WireParentRemoveV1> = Vec::new();
     let mut note_appends: Vec<NoteAppendV1> = Vec::new();
     let mut ops_total: usize = 0;
 
@@ -1120,6 +1166,26 @@ fn decode_txn_delta(
                 }
                 for _ in 0..arr_len {
                     dep_removes.push(decode_wire_dep_remove(dec, limits, depth + 2)?);
+                }
+            }
+            "parent_adds" => {
+                let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
+                for _ in 0..arr_len {
+                    parent_adds.push(decode_wire_parent_add(dec, limits, depth + 2)?);
+                }
+            }
+            "parent_removes" => {
+                let arr_len = decode_array_len(dec, limits, depth + 1)?;
+                ops_total = ops_total.saturating_add(arr_len);
+                if ops_total > limits.max_ops_per_txn {
+                    return Err(DecodeError::DecodeLimit("max_ops_per_txn"));
+                }
+                for _ in 0..arr_len {
+                    parent_removes.push(decode_wire_parent_remove(dec, limits, depth + 2)?);
                 }
             }
             "note_appends" => {
@@ -1237,6 +1303,16 @@ fn decode_txn_delta(
     for dep in dep_removes {
         delta
             .insert(TxnOpV1::DepRemove(dep))
+            .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
+    }
+    for op in parent_adds {
+        delta
+            .insert(TxnOpV1::ParentAdd(op))
+            .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
+    }
+    for op in parent_removes {
+        delta
+            .insert(TxnOpV1::ParentRemove(op))
             .map_err(|e| DecodeError::DuplicateOp(e.to_string()))?;
     }
     for na in note_appends {
@@ -2112,6 +2188,134 @@ fn decode_wire_dep_remove(
     })
 }
 
+fn encode_wire_parent_add(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    op: &WireParentAddV1,
+) -> Result<(), EncodeError> {
+    enc.map(3)?;
+    enc.str("child")?;
+    enc.str(op.child().as_str())?;
+    enc.str("parent")?;
+    enc.str(op.parent().as_str())?;
+    enc.str("dot")?;
+    encode_wire_dot(enc, &op.dot)?;
+    Ok(())
+}
+
+fn decode_wire_parent_add(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireParentAddV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
+    let mut child = None;
+    let mut parent = None;
+    let mut dot = None;
+
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
+        match key {
+            "child" => {
+                let raw = decode_text(dec, limits)?;
+                child = Some(parse_bead_id(raw)?);
+            }
+            "parent" => {
+                let raw = decode_text(dec, limits)?;
+                parent = Some(parse_bead_id(raw)?);
+            }
+            "dot" => {
+                dot = Some(decode_wire_dot(dec, limits, depth + 1)?);
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "parent_add",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    let edge = ParentEdge::new(
+        child.ok_or(DecodeError::MissingField("child"))?,
+        parent.ok_or(DecodeError::MissingField("parent"))?,
+    )
+    .map_err(|err| DecodeError::InvalidField {
+        field: "parent_add",
+        reason: err.to_string(),
+    })?;
+
+    Ok(WireParentAddV1 {
+        edge,
+        dot: dot.ok_or(DecodeError::MissingField("dot"))?,
+    })
+}
+
+fn encode_wire_parent_remove(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    op: &WireParentRemoveV1,
+) -> Result<(), EncodeError> {
+    enc.map(3)?;
+    enc.str("child")?;
+    enc.str(op.child().as_str())?;
+    enc.str("parent")?;
+    enc.str(op.parent().as_str())?;
+    enc.str("ctx")?;
+    encode_wire_dvv(enc, &op.ctx)?;
+    Ok(())
+}
+
+fn decode_wire_parent_remove(
+    dec: &mut Decoder,
+    limits: &Limits,
+    depth: usize,
+) -> Result<WireParentRemoveV1, DecodeError> {
+    let map_len = decode_map_len(dec, limits, depth)?;
+    let mut seen_keys = BTreeSet::new();
+    let mut child = None;
+    let mut parent = None;
+    let mut ctx = None;
+
+    for _ in 0..map_len {
+        let key = decode_text(dec, limits)?;
+        ensure_unique_key(&mut seen_keys, key)?;
+        match key {
+            "child" => {
+                let raw = decode_text(dec, limits)?;
+                child = Some(parse_bead_id(raw)?);
+            }
+            "parent" => {
+                let raw = decode_text(dec, limits)?;
+                parent = Some(parse_bead_id(raw)?);
+            }
+            "ctx" => {
+                ctx = Some(decode_wire_dvv(dec, limits, depth + 1)?);
+            }
+            other => {
+                return Err(DecodeError::InvalidField {
+                    field: "parent_remove",
+                    reason: format!("unknown key {other}"),
+                });
+            }
+        }
+    }
+
+    let edge = ParentEdge::new(
+        child.ok_or(DecodeError::MissingField("child"))?,
+        parent.ok_or(DecodeError::MissingField("parent"))?,
+    )
+    .map_err(|err| DecodeError::InvalidField {
+        field: "parent_remove",
+        reason: err.to_string(),
+    })?;
+
+    Ok(WireParentRemoveV1 {
+        edge,
+        ctx: ctx.ok_or(DecodeError::MissingField("ctx"))?,
+    })
+}
+
 fn encode_wire_stamp(
     enc: &mut Encoder<&mut Vec<u8>>,
     stamp: &WireStamp,
@@ -2690,6 +2894,8 @@ fn validate_event_body_limits(
             TxnOpV1::LabelRemove(_) => {}
             TxnOpV1::DepAdd(_) => {}
             TxnOpV1::DepRemove(_) => {}
+            TxnOpV1::ParentAdd(_) => {}
+            TxnOpV1::ParentRemove(_) => {}
             TxnOpV1::NoteAppend(append) => {
                 note_appends += 1;
                 let bytes = append.note.content.len();
@@ -2840,6 +3046,11 @@ impl TryFrom<WireDepAddV1> for ValidatedDepAdd {
     type Error = EventValidationError;
 
     fn try_from(dep: WireDepAddV1) -> Result<Self, Self::Error> {
+        if dep.kind() == DepKind::Parent {
+            return Err(EventValidationError::InvalidDependency {
+                reason: "parent edges must use parent-specific operations".to_string(),
+            });
+        }
         Ok(Self { inner: dep })
     }
 }
@@ -2877,7 +3088,110 @@ impl TryFrom<WireDepRemoveV1> for ValidatedDepRemove {
     type Error = EventValidationError;
 
     fn try_from(dep: WireDepRemoveV1) -> Result<Self, Self::Error> {
+        if dep.kind() == DepKind::Parent {
+            return Err(EventValidationError::InvalidDependency {
+                reason: "parent edges must use parent-specific operations".to_string(),
+            });
+        }
         Ok(Self { inner: dep })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedParentAdd {
+    inner: WireParentAddV1,
+}
+
+impl ValidatedParentAdd {
+    pub fn as_inner(&self) -> &WireParentAddV1 {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> WireParentAddV1 {
+        self.inner
+    }
+}
+
+impl std::ops::Deref for ValidatedParentAdd {
+    type Target = WireParentAddV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<WireParentAddV1> for ValidatedParentAdd {
+    fn as_ref(&self) -> &WireParentAddV1 {
+        &self.inner
+    }
+}
+
+impl TryFrom<WireParentAddV1> for ValidatedParentAdd {
+    type Error = EventValidationError;
+
+    fn try_from(op: WireParentAddV1) -> Result<Self, Self::Error> {
+        Ok(Self { inner: op })
+    }
+}
+
+impl TryFrom<WireDepAddV1> for ValidatedParentAdd {
+    type Error = EventValidationError;
+
+    fn try_from(dep: WireDepAddV1) -> Result<Self, Self::Error> {
+        let edge = ParentEdge::try_from(dep.key)
+            .map_err(|err| EventValidationError::InvalidDependency { reason: err.reason })?;
+        Ok(Self {
+            inner: WireParentAddV1 { edge, dot: dep.dot },
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedParentRemove {
+    inner: WireParentRemoveV1,
+}
+
+impl ValidatedParentRemove {
+    pub fn as_inner(&self) -> &WireParentRemoveV1 {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> WireParentRemoveV1 {
+        self.inner
+    }
+}
+
+impl std::ops::Deref for ValidatedParentRemove {
+    type Target = WireParentRemoveV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<WireParentRemoveV1> for ValidatedParentRemove {
+    fn as_ref(&self) -> &WireParentRemoveV1 {
+        &self.inner
+    }
+}
+
+impl TryFrom<WireParentRemoveV1> for ValidatedParentRemove {
+    type Error = EventValidationError;
+
+    fn try_from(op: WireParentRemoveV1) -> Result<Self, Self::Error> {
+        Ok(Self { inner: op })
+    }
+}
+
+impl TryFrom<WireDepRemoveV1> for ValidatedParentRemove {
+    type Error = EventValidationError;
+
+    fn try_from(dep: WireDepRemoveV1) -> Result<Self, Self::Error> {
+        let edge = ParentEdge::try_from(dep.key)
+            .map_err(|err| EventValidationError::InvalidDependency { reason: err.reason })?;
+        Ok(Self {
+            inner: WireParentRemoveV1 { edge, ctx: dep.ctx },
+        })
     }
 }
 

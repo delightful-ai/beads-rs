@@ -184,14 +184,12 @@ impl Daemon {
 
             // Build children set if parent filter is specified.
             // Parent deps: from=child, to=parent, kind=Parent.
-            let children_of_parent: Option<std::collections::HashSet<&BeadId>> =
+            let children_of_parent: Option<std::collections::HashSet<BeadId>> =
                 filters.parent.as_ref().map(|parent_id| {
                     state
-                        .dep_indexes()
-                        .in_edges(parent_id)
-                        .iter()
-                        .filter(|(_, kind)| *kind == DepKind::Parent)
-                        .map(|(from, _)| from)
+                        .parent_edges_to(parent_id)
+                        .into_iter()
+                        .map(|edge| edge.child().clone())
                         .collect()
                 });
 
@@ -1013,14 +1011,11 @@ fn compute_epic_statuses(
     // Build epic -> children mapping from parent edges.
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
-    for key in state.dep_store().values() {
-        if key.kind() != DepKind::Parent {
-            continue;
-        }
+    for edge in state.parent_edges() {
         children
-            .entry(key.to().clone())
+            .entry(edge.parent().clone())
             .or_default()
-            .push(key.from().clone());
+            .push(edge.child().clone());
     }
 
     let mut out = Vec::new();

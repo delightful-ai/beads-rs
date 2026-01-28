@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::bead::{Bead, BeadView, SameLineageBead};
 use super::collections::{Label, Labels};
 use super::composite::Note;
-use super::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof};
+use super::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, ParentEdge};
 use super::domain::DepKind;
 use super::error::{CoreError, InvalidDependency};
 use super::event::sha256_bytes;
@@ -1454,6 +1454,35 @@ impl CanonicalState {
             .collect()
     }
 
+    /// Get parent edges outgoing from a bead (child -> parent).
+    pub fn parent_edges_from(&self, child: &BeadId) -> Vec<ParentEdge> {
+        self.deps_from(child)
+            .into_iter()
+            .filter_map(|key| ParentEdge::try_from(key).ok())
+            .collect()
+    }
+
+    /// Get parent edges incoming to a bead (child -> parent).
+    pub fn parent_edges_to(&self, parent: &BeadId) -> Vec<ParentEdge> {
+        if self.get_live(parent).is_none() {
+            return Vec::new();
+        }
+        self.dep_indexes
+            .in_edges(parent)
+            .iter()
+            .filter(|(from, kind)| *kind == DepKind::Parent && self.get_live(from).is_some())
+            .filter_map(|(from, _)| ParentEdge::new(from.clone(), parent.clone()).ok())
+            .collect()
+    }
+
+    /// Get all parent edges in the state.
+    pub fn parent_edges(&self) -> Vec<ParentEdge> {
+        self.dep_store
+            .values()
+            .filter_map(|key| ParentEdge::try_from(key.clone()).ok())
+            .collect()
+    }
+
     /// Rebuild the derived dep indexes from scratch.
     ///
     /// Call this after deserializing state or after `join()`.
@@ -1656,7 +1685,7 @@ mod tests {
     use super::*;
     use crate::collections::Label;
     use crate::composite::Note;
-    use crate::dep::{AcyclicDepKey, DepAddKey, NoCycleProof};
+    use crate::dep::{AcyclicDepKey, DepAddKey, NoCycleProof, ParentEdge};
     use crate::identity::{ActorId, NoteId, ReplicaId};
     use crate::orset::Dot;
     use crate::time::{Stamp, WriteStamp};
@@ -2522,7 +2551,9 @@ mod tests {
 
         // Add two deps from the same source
         let key1 = DepKey::new(from.clone(), to1.clone(), DepKind::Blocks).unwrap();
-        let key2 = DepKey::new(from.clone(), to2.clone(), DepKind::Parent).unwrap();
+        let key2 = ParentEdge::new(from.clone(), to2.clone())
+            .unwrap()
+            .to_dep_key();
         add_dep(&mut state, key1.clone(), &stamp, 1);
         add_dep(&mut state, key2.clone(), &stamp, 2);
 

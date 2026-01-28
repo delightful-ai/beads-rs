@@ -6,6 +6,7 @@
 use serde::Serialize;
 
 use crate::core::BeadView;
+use crate::core::ParentEdge;
 use crate::core::Stamp;
 use crate::core::composite::{Claim, Note, Workflow};
 use crate::core::dep::DepKey;
@@ -128,7 +129,13 @@ impl GoIssue {
         let dep_stamp = dep_stamp.unwrap_or_else(|| view.updated_stamp());
         let dependencies: Vec<GoDependency> = deps
             .iter()
-            .map(|key| GoDependency::from_key(key, bead.core.id.as_str(), dep_stamp))
+            .map(|key| {
+                if let Ok(edge) = ParentEdge::try_from(key.clone()) {
+                    GoDependency::from_parent_edge(&edge, bead.core.id.as_str(), dep_stamp)
+                } else {
+                    GoDependency::from_key(key, bead.core.id.as_str(), dep_stamp)
+                }
+            })
             .collect();
 
         let comments: Vec<GoComment> = view
@@ -207,10 +214,24 @@ impl GoIssue {
 
 impl GoDependency {
     fn from_key(key: &DepKey, issue_id: &str, stamp: &Stamp) -> Self {
+        debug_assert!(
+            key.kind() != DepKind::Parent,
+            "parent edges must use from_parent_edge"
+        );
         GoDependency {
             issue_id: issue_id.to_string(),
             depends_on_id: key.to().as_str().to_string(),
             dep_type: dep_kind_to_go_type(key.kind()),
+            created_at: stamp_to_rfc3339(stamp),
+            created_by: stamp.by.as_str().to_string(),
+        }
+    }
+
+    fn from_parent_edge(edge: &ParentEdge, issue_id: &str, stamp: &Stamp) -> Self {
+        GoDependency {
+            issue_id: issue_id.to_string(),
+            depends_on_id: edge.parent().as_str().to_string(),
+            dep_type: "parent-child".to_string(),
             created_at: stamp_to_rfc3339(stamp),
             created_by: stamp.by.as_str().to_string(),
         }
