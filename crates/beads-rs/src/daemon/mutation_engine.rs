@@ -21,7 +21,7 @@ use crate::daemon::ipc::{
     IdPayload, LabelsPayload, LeasePayload, ParentPayload, UpdatePayload,
 };
 use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
-use beads_surface::ops::{BeadPatch, Patch};
+use beads_surface::ops::{BeadPatch, OpenInProgress, Patch};
 
 #[derive(Clone, Debug)]
 pub struct MutationContext {
@@ -97,7 +97,7 @@ pub struct ParsedBeadPatch {
     pub external_ref: Patch<String>,
     pub source_repo: Patch<String>,
     pub estimated_minutes: Patch<u32>,
-    pub status: Patch<WorkflowStatus>,
+    pub status: Patch<OpenInProgress>,
 }
 
 impl ParsedBeadPatch {
@@ -1543,7 +1543,7 @@ struct CanonicalBeadPatch {
     #[serde(skip_serializing_if = "Patch::is_keep")]
     estimated_minutes: Patch<u32>,
     #[serde(skip_serializing_if = "Patch::is_keep")]
-    status: Patch<WorkflowStatus>,
+    status: Patch<OpenInProgress>,
 }
 
 fn request_sha256(ctx: &MutationContext, op: &CanonicalMutationOp) -> Result<[u8; 32], OpError> {
@@ -1705,7 +1705,7 @@ fn normalize_patch(
     wire.estimated_minutes = patch_to_wire_u32(&patch.estimated_minutes);
 
     if let Patch::Set(status) = &patch.status {
-        wire.status = Some(*status);
+        wire.status = Some((*status).into());
         wire.closed_reason = WirePatch::Clear;
         wire.closed_on_branch = WirePatch::Clear;
     }

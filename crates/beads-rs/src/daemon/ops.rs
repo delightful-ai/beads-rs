@@ -12,7 +12,7 @@ use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     ActorId, Applied, BeadFields, BeadId, CliErrorCode, ClientRequestId, DurabilityClass,
     DurabilityReceipt, ErrorCode, InvalidId, Lww, NamespaceId, ProtocolErrorCode, ReplicaId, Stamp,
-    WallClock, Watermarks,
+    WallClock, Watermarks, WorkflowStatus,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_lock::StoreLockError;
@@ -701,7 +701,8 @@ impl BeadPatchDaemonExt for BeadPatch {
             Patch::Keep => {}
         }
         if let Patch::Set(status) = &self.status {
-            fields.workflow = Lww::new(status.into_workflow(None, None), stamp.clone());
+            let workflow_status: WorkflowStatus = (*status).into();
+            fields.workflow = Lww::new(workflow_status.into_workflow(None, None), stamp.clone());
         }
 
         Ok(())
