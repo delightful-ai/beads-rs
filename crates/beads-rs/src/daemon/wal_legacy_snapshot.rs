@@ -14,8 +14,8 @@ use thiserror::Error;
 
 use super::remote::RemoteUrl;
 use crate::core::{
-    Bead, BeadId, CanonicalState, DepKey, DepStore, Dot, Dvv, LabelStore, Limits, NoteStore, OrSet,
-    OrSetValue, Stamp, Tombstone, TombstoneKey,
+    Bead, BeadId, BeadSlug, CanonicalState, DepKey, DepStore, Dot, Dvv, LabelStore, Limits,
+    NoteStore, OrSet, OrSetValue, Stamp, Tombstone, TombstoneKey,
 };
 
 /// WAL format version.
@@ -32,7 +32,7 @@ pub struct WalEntry {
     #[serde(with = "wal_state")]
     pub state: CanonicalState,
     /// Root slug for bead IDs.
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
     /// Monotonic sequence number.
     pub sequence: u64,
 }
@@ -377,7 +377,7 @@ impl WalEntry {
     /// Create a new WAL entry.
     pub fn new(
         state: CanonicalState,
-        root_slug: Option<String>,
+        root_slug: Option<BeadSlug>,
         sequence: u64,
         wall_ms: u64,
     ) -> Self {
@@ -674,7 +674,7 @@ mod tests {
 
         let entry = WalEntry::new(
             CanonicalState::new(),
-            Some("test-slug".into()),
+            Some(BeadSlug::parse("test-slug").unwrap()),
             42,
             1234567890,
         );
@@ -683,7 +683,10 @@ mod tests {
 
         let loaded = wal.read(&remote).unwrap().unwrap();
         assert_eq!(loaded.version, WAL_VERSION);
-        assert_eq!(loaded.root_slug, Some("test-slug".into()));
+        assert_eq!(
+            loaded.root_slug,
+            Some(BeadSlug::parse("test-slug").unwrap())
+        );
         assert_eq!(loaded.sequence, 42);
         assert_eq!(loaded.written_at_ms, 1234567890);
     }
@@ -916,8 +919,18 @@ mod tests {
         let remote1 = RemoteUrl("git@github.com:user/repo1.git".into());
         let remote2 = RemoteUrl("git@github.com:user/repo2.git".into());
 
-        let entry1 = WalEntry::new(CanonicalState::new(), Some("slug1".into()), 1, 0);
-        let entry2 = WalEntry::new(CanonicalState::new(), Some("slug2".into()), 2, 0);
+        let entry1 = WalEntry::new(
+            CanonicalState::new(),
+            Some(BeadSlug::parse("slug1").unwrap()),
+            1,
+            0,
+        );
+        let entry2 = WalEntry::new(
+            CanonicalState::new(),
+            Some(BeadSlug::parse("slug2").unwrap()),
+            2,
+            0,
+        );
 
         wal.write(&remote1, &entry1).unwrap();
         wal.write(&remote2, &entry2).unwrap();
@@ -925,8 +938,8 @@ mod tests {
         let loaded1 = wal.read(&remote1).unwrap().unwrap();
         let loaded2 = wal.read(&remote2).unwrap().unwrap();
 
-        assert_eq!(loaded1.root_slug, Some("slug1".into()));
-        assert_eq!(loaded2.root_slug, Some("slug2".into()));
+        assert_eq!(loaded1.root_slug, Some(BeadSlug::parse("slug1").unwrap()));
+        assert_eq!(loaded2.root_slug, Some(BeadSlug::parse("slug2").unwrap()));
     }
 
     #[test]
