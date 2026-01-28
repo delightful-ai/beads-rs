@@ -520,11 +520,16 @@ mod tests {
     fn contiguous_event(seq: u64) -> VerifiedEventAny {
         let body = sample_body(seq);
         let bytes = event_bytes(&body);
+        let prev = if seq > 1 {
+            Some(crate::core::Sha256([seq.saturating_sub(1) as u8; 32]))
+        } else {
+            None
+        };
         VerifiedEventAny::Contiguous(VerifiedEvent {
             body,
             bytes,
             sha256: crate::core::Sha256([seq as u8; 32]),
-            prev: crate::core::PrevVerified { prev: None },
+            prev: crate::core::PrevVerified { prev },
         })
     }
 
