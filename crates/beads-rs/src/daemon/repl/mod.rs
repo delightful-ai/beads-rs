@@ -1,5 +1,6 @@
 //! Replication protocol modules.
 
+pub mod contiguous_batch;
 pub mod error;
 pub mod frame;
 pub mod gap_buffer;
@@ -14,6 +15,7 @@ pub mod session;
 pub mod store;
 mod want;
 
+pub use contiguous_batch::{ContiguousBatch, ContiguousBatchError};
 pub use error::{ReplError, ReplErrorDetails};
 pub use frame::{FrameError, FrameReader, FrameWriter};
 pub use gap_buffer::{GapBufferByNsOrigin, IngestDecision, OriginStreamState};
