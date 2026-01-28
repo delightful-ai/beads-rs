@@ -37,7 +37,7 @@ pub trait DotAllocator {
 
 #[derive(Clone, Debug)]
 pub struct IdContext {
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
     pub remote_url: RemoteUrl,
 }
 
@@ -751,7 +751,7 @@ impl MutationEngine {
             (None, None) => (
                 generate_unique_id(
                     state,
-                    id_ctx.root_slug.as_deref(),
+                    id_ctx.root_slug.as_ref(),
                     &title,
                     &description,
                     &stamp.by,
@@ -1765,7 +1765,7 @@ fn txn_id_for_stamp(store: &StoreIdentity, stamp: &crate::core::Stamp) -> TxnId 
 
 fn generate_unique_id(
     state: &CanonicalState,
-    root_slug: Option<&str>,
+    root_slug: Option<&BeadSlug>,
     title: &str,
     description: &str,
     actor: &ActorId,
@@ -1773,10 +1773,7 @@ fn generate_unique_id(
     remote: &RemoteUrl,
 ) -> Result<BeadId, OpError> {
     let slug = match root_slug {
-        Some(raw) => BeadSlug::parse(raw).map_err(|e| OpError::ValidationFailed {
-            field: "root_slug".into(),
-            reason: e.to_string(),
-        })?,
+        Some(slug) => slug.clone(),
         None => infer_bead_slug(state)?,
     };
     let num_top_level = state

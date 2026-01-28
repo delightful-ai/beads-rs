@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::core::WriteStamp;
+use crate::core::{BeadSlug, WriteStamp};
 
 const DEFAULT_BACKOFF_BASE_MS: u64 = 500;
 const TEST_FAST_BACKOFF_BASE_MS: u64 = 50;
@@ -60,7 +60,7 @@ pub struct ClockSkewRecord {
 pub struct GitLaneState {
     /// Root slug for bead IDs (from meta.json).
     /// When set, new bead IDs will use this slug (e.g., "myproject-xxx").
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
 
     /// All known clone paths for this remote.
     pub known_paths: HashSet<PathBuf>,
@@ -128,7 +128,7 @@ impl GitLaneState {
     }
 
     /// Create a new GitLaneState with root slug and initial clone path.
-    pub fn with_path(root_slug: Option<String>, path: PathBuf) -> Self {
+    pub fn with_path(root_slug: Option<BeadSlug>, path: PathBuf) -> Self {
         let mut s = Self::new();
         s.root_slug = root_slug;
         s.known_paths.insert(path);

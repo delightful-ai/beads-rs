@@ -11,7 +11,7 @@ use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
 use super::remote::RemoteUrl;
-use crate::core::{ActorId, CanonicalState, StoreId, WriteStamp};
+use crate::core::{ActorId, BeadSlug, CanonicalState, StoreId, WriteStamp};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::git::checkpoint::{
@@ -30,7 +30,7 @@ pub type CheckpointResult = Result<CheckpointPublishOutcome, CheckpointPublishEr
 #[derive(Clone)]
 pub struct LoadResult {
     pub state: CanonicalState,
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
     /// True if local state has changes that need to be pushed to remote.
     /// This happens when local durable commits exist that haven't been synced.
     pub needs_sync: bool,
@@ -164,7 +164,11 @@ impl GitWorker {
         let (local_state, local_slug, local_meta_stamp) =
             if let Ok(local_oid) = repo.refname_to_id("refs/heads/beads/store") {
                 let loaded = read_state_at_oid(repo, local_oid)?;
-                (loaded.state, loaded.root_slug, loaded.last_write_stamp)
+                (
+                    loaded.state,
+                    loaded.meta.root_slug().cloned(),
+                    loaded.meta.last_write_stamp().cloned(),
+                )
             } else {
                 (CanonicalState::new(), None, None)
             };
@@ -209,7 +213,11 @@ impl GitWorker {
         let (local_state, local_slug, local_meta_stamp) = match local_oid_opt {
             Some(oid) => {
                 let loaded = read_state_at_oid(repo, oid)?;
-                (loaded.state, loaded.root_slug, loaded.last_write_stamp)
+                (
+                    loaded.state,
+                    loaded.meta.root_slug().cloned(),
+                    loaded.meta.last_write_stamp().cloned(),
+                )
             }
             None => (CanonicalState::new(), None, None),
         };
@@ -217,7 +225,11 @@ impl GitWorker {
         let (remote_state, remote_slug, remote_meta_stamp) = match remote_oid_opt {
             Some(oid) => {
                 let loaded = read_state_at_oid(repo, oid)?;
-                (loaded.state, loaded.root_slug, loaded.last_write_stamp)
+                (
+                    loaded.state,
+                    loaded.meta.root_slug().cloned(),
+                    loaded.meta.last_write_stamp().cloned(),
+                )
             }
             None => {
                 if local_oid_opt.is_some() {
@@ -447,10 +459,10 @@ fn is_previous_mismatch(err: &CheckpointExportError) -> bool {
 
 struct LoadResultInputs {
     local_state: CanonicalState,
-    local_slug: Option<String>,
+    local_slug: Option<BeadSlug>,
     local_meta_stamp: Option<WriteStamp>,
     remote_state: CanonicalState,
-    remote_slug: Option<String>,
+    remote_slug: Option<BeadSlug>,
     remote_meta_stamp: Option<WriteStamp>,
     fetch_error: Option<String>,
     divergence: Option<DivergenceInfo>,

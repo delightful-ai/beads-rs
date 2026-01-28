@@ -2724,13 +2724,13 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        ContentHash, Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId,
-        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaDurabilityRole,
-        ReplicaEntry, ReplicaId, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
-        StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
-        VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
-        WriteStamp, encode_event_body_canonical, hash_event_body,
+        ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState,
+        Claim, ContentHash, Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww,
+        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority,
+        ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRoster, SegmentId, Seq0, Seq1,
+        Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
+        TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
+        WireNoteV1, WireStamp, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
@@ -3267,7 +3267,7 @@ mod tests {
         let fresh_state = CanonicalState::new();
         let result = Ok(LoadResult {
             state: fresh_state.clone(),
-            root_slug: Some("fresh-slug".to_string()),
+            root_slug: Some(BeadSlug::parse("fresh-slug").unwrap()),
             needs_sync: false,
             last_seen_stamp: None,
             fetch_error: None,
@@ -3277,7 +3277,10 @@ mod tests {
         daemon.complete_refresh(&remote, result);
 
         let repo_state = daemon.git_lanes.get(&store_id).unwrap();
-        assert_eq!(repo_state.root_slug, Some("fresh-slug".to_string()));
+        assert_eq!(
+            repo_state.root_slug,
+            Some(BeadSlug::parse("fresh-slug").unwrap())
+        );
     }
 
     #[test]
@@ -3290,13 +3293,13 @@ mod tests {
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = true; // Dirty - mutations happened during refresh
-        repo_state.root_slug = Some("original-slug".to_string());
+        repo_state.root_slug = Some(BeadSlug::parse("original-slug").unwrap());
         daemon.git_lanes.insert(store_id, repo_state);
 
         // Try to apply refresh
         let result = Ok(LoadResult {
             state: CanonicalState::new(),
-            root_slug: Some("new-slug".to_string()),
+            root_slug: Some(BeadSlug::parse("new-slug").unwrap()),
             needs_sync: false,
             last_seen_stamp: None,
             fetch_error: None,
@@ -3307,7 +3310,10 @@ mod tests {
 
         let repo_state = daemon.git_lanes.get(&store_id).unwrap();
         // Should keep original slug since dirty
-        assert_eq!(repo_state.root_slug, Some("original-slug".to_string()));
+        assert_eq!(
+            repo_state.root_slug,
+            Some(BeadSlug::parse("original-slug").unwrap())
+        );
         // But last_refresh should still be updated
         assert!(repo_state.last_refresh.is_some());
     }
