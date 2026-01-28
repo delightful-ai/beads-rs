@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::ops::{MapLiveError, OpError, ValidatedSurfaceBeadPatch};
 use super::remote::RemoteUrl;
+use crate::core::limits::LimitViolation;
 use crate::core::{
     ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
     ClientRequestId, DepAddKey, DepKey, DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1,
@@ -621,42 +622,10 @@ impl MutationEngine {
     }
 
     fn enforce_delta_limits(&self, delta: &TxnDeltaV1) -> Result<(), OpError> {
-        let total_ops = delta.total_ops();
-        if total_ops > self.limits.max_ops_per_txn {
-            return Err(OpError::OpsTooMany {
-                max_ops: self.limits.max_ops_per_txn,
-                got_ops: total_ops,
-            });
-        }
-
-        let mut note_appends = 0usize;
-        for op in delta.iter() {
-            match op {
-                TxnOpV1::BeadUpsert(_) => {}
-                TxnOpV1::BeadDelete(_) => {}
-                TxnOpV1::LabelAdd(_) => {}
-                TxnOpV1::LabelRemove(_) => {}
-                TxnOpV1::DepAdd(_) => {}
-                TxnOpV1::DepRemove(_) => {}
-                TxnOpV1::ParentAdd(_) => {}
-                TxnOpV1::ParentRemove(_) => {}
-                TxnOpV1::NoteAppend(append) => {
-                    note_appends += 1;
-                    enforce_note_limit(&append.note.content, &self.limits)?;
-                }
-            }
-        }
-
-        if note_appends > self.limits.max_note_appends_per_txn {
-            return Err(OpError::InvalidRequest {
-                field: Some("note_appends".into()),
-                reason: format!(
-                    "note_appends {note_appends} exceeds max {}",
-                    self.limits.max_note_appends_per_txn
-                ),
-            });
-        }
-
+        self.limits
+            .policy()
+            .txn_delta(delta)
+            .map_err(map_txn_limit_violation)?;
         Ok(())
     }
 
@@ -665,24 +634,15 @@ impl MutationEngine {
         event_bytes: &EventBytes<crate::core::Canonical>,
         client_request_id: Option<ClientRequestId>,
     ) -> Result<(), OpError> {
-        let max_payload = self
-            .limits
-            .max_wal_record_bytes
-            .min(self.limits.max_frame_bytes);
-        if event_bytes.len() > max_payload {
-            return Err(OpError::WalRecordTooLarge {
-                max_wal_record_bytes: max_payload,
-                estimated_bytes: event_bytes.len(),
-            });
-        }
-
+        self.limits
+            .policy()
+            .wal_record_payload(event_bytes.len())
+            .map_err(map_wal_payload_violation)?;
         let estimated = estimated_record_bytes(event_bytes.len(), client_request_id.is_some());
-        if estimated > self.limits.max_wal_record_bytes {
-            return Err(OpError::WalRecordTooLarge {
-                max_wal_record_bytes: self.limits.max_wal_record_bytes,
-                estimated_bytes: estimated,
-            });
-        }
+        self.limits
+            .policy()
+            .wal_record_len(estimated)
+            .map_err(map_wal_record_violation)?;
 
         Ok(())
     }
@@ -1715,25 +1675,102 @@ fn enforce_label_limit(
     limits: &Limits,
     bead_id: Option<BeadId>,
 ) -> Result<(), OpError> {
-    if labels.len() > limits.max_labels_per_bead {
-        return Err(OpError::LabelsTooMany {
-            max_labels: limits.max_labels_per_bead,
-            got_labels: labels.len(),
-            bead_id,
-        });
-    }
-    Ok(())
+    limits
+        .policy()
+        .labels(labels)
+        .map(|_| ())
+        .map_err(|err| map_label_limit_violation(err, bead_id))
 }
 
 fn enforce_note_limit(content: &str, limits: &Limits) -> Result<(), OpError> {
-    let got_bytes = content.len();
-    if got_bytes > limits.max_note_bytes {
-        return Err(OpError::NoteTooLarge {
-            max_bytes: limits.max_note_bytes,
+    limits
+        .policy()
+        .note_content(content)
+        .map(|_| ())
+        .map_err(map_note_limit_violation)
+}
+
+fn map_txn_limit_violation(err: LimitViolation) -> OpError {
+    match err {
+        LimitViolation::OpsTooMany { max_ops, got_ops } => OpError::OpsTooMany { max_ops, got_ops },
+        LimitViolation::NoteTooLarge {
+            max_bytes,
             got_bytes,
-        });
+        } => OpError::NoteTooLarge {
+            max_bytes,
+            got_bytes,
+        },
+        LimitViolation::NoteAppendsTooMany { max, got } => OpError::InvalidRequest {
+            field: Some("note_appends".into()),
+            reason: format!("note_appends {got} exceeds max {max}"),
+        },
+        other => OpError::ValidationFailed {
+            field: "delta_limits".into(),
+            reason: other.to_string(),
+        },
     }
-    Ok(())
+}
+
+fn map_label_limit_violation(err: LimitViolation, bead_id: Option<BeadId>) -> OpError {
+    match err {
+        LimitViolation::LabelsTooMany { max, got } => OpError::LabelsTooMany {
+            max_labels: max,
+            got_labels: got,
+            bead_id,
+        },
+        other => OpError::ValidationFailed {
+            field: "labels".into(),
+            reason: other.to_string(),
+        },
+    }
+}
+
+fn map_note_limit_violation(err: LimitViolation) -> OpError {
+    match err {
+        LimitViolation::NoteTooLarge {
+            max_bytes,
+            got_bytes,
+        } => OpError::NoteTooLarge {
+            max_bytes,
+            got_bytes,
+        },
+        other => OpError::ValidationFailed {
+            field: "note".into(),
+            reason: other.to_string(),
+        },
+    }
+}
+
+fn map_wal_payload_violation(err: LimitViolation) -> OpError {
+    match err {
+        LimitViolation::WalRecordPayloadTooLarge {
+            max_bytes,
+            got_bytes,
+        } => OpError::WalRecordTooLarge {
+            max_wal_record_bytes: max_bytes,
+            estimated_bytes: got_bytes,
+        },
+        other => OpError::ValidationFailed {
+            field: "wal_record_payload".into(),
+            reason: other.to_string(),
+        },
+    }
+}
+
+fn map_wal_record_violation(err: LimitViolation) -> OpError {
+    match err {
+        LimitViolation::WalRecordTooLarge {
+            max_bytes,
+            got_bytes,
+        } => OpError::WalRecordTooLarge {
+            max_wal_record_bytes: max_bytes,
+            estimated_bytes: got_bytes,
+        },
+        other => OpError::ValidationFailed {
+            field: "wal_record".into(),
+            reason: other.to_string(),
+        },
+    }
 }
 
 fn validate_bead_patch(patch: BeadPatchWireV1) -> Result<BeadPatchWireV1, OpError> {
