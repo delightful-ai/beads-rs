@@ -21,8 +21,13 @@ pub struct DepSpec {
 
 impl DepSpec {
     /// Create a new dependency spec.
-    pub fn new(kind: DepKind, id: BeadId) -> Self {
-        Self { kind, id }
+    pub fn new(kind: DepKind, id: BeadId) -> Result<Self, InvalidDependency> {
+        if kind == DepKind::Parent {
+            return Err(InvalidDependency {
+                reason: "parent edges must use parent-specific operations".to_string(),
+            });
+        }
+        Ok(Self { kind, id })
     }
 
     /// Parse a single dependency spec (`kind:id` or `id`).
@@ -34,7 +39,7 @@ impl DepSpec {
             (DepKind::Blocks, trimmed)
         };
         let id = BeadId::parse(id_raw)?;
-        Ok(Self::new(kind, id))
+        Ok(Self::new(kind, id)?)
     }
 
     /// Parse a list of dependency specs, allowing comma-separated lists.
@@ -69,6 +74,80 @@ impl DepSpec {
         } else {
             format!("{}:{}", self.kind.as_str(), self.id.as_str())
         }
+    }
+}
+
+/// Parent-child edge (child -> parent).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParentEdge {
+    child: BeadId,
+    parent: BeadId,
+}
+
+impl ParentEdge {
+    /// Create a new parent edge.
+    ///
+    /// Returns an error if `child == parent`.
+    pub fn new(child: BeadId, parent: BeadId) -> Result<Self, InvalidDependency> {
+        if child == parent {
+            return Err(InvalidDependency {
+                reason: format!("cannot create self-parent edge on {}", child),
+            });
+        }
+        Ok(Self { child, parent })
+    }
+
+    /// Get the child bead ID.
+    pub fn child(&self) -> &BeadId {
+        &self.child
+    }
+
+    /// Get the parent bead ID.
+    pub fn parent(&self) -> &BeadId {
+        &self.parent
+    }
+
+    /// Convert to a dependency key with kind `Parent`.
+    pub fn to_dep_key(&self) -> DepKey {
+        DepKey::new(self.child.clone(), self.parent.clone(), DepKind::Parent)
+            .expect("parent edge should be valid")
+    }
+}
+
+impl TryFrom<DepKey> for ParentEdge {
+    type Error = InvalidDependency;
+
+    fn try_from(key: DepKey) -> Result<Self, Self::Error> {
+        if key.kind() != DepKind::Parent {
+            return Err(InvalidDependency {
+                reason: format!("expected parent dependency, got {}", key.kind().as_str()),
+            });
+        }
+        ParentEdge::new(key.from.clone(), key.to.clone())
+    }
+}
+
+/// Serde proxy for ParentEdge that validates on deserialization.
+#[derive(Serialize, Deserialize)]
+struct ParentEdgeProxy {
+    child: BeadId,
+    parent: BeadId,
+}
+
+impl Serialize for ParentEdge {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ParentEdgeProxy {
+            child: self.child.clone(),
+            parent: self.parent.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ParentEdge {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let proxy = ParentEdgeProxy::deserialize(deserializer)?;
+        ParentEdge::new(proxy.child, proxy.parent).map_err(serde::de::Error::custom)
     }
 }
 
@@ -318,10 +397,9 @@ mod tests {
     fn accessors_work() {
         let from = BeadId::parse("bd-abc").unwrap();
         let to = BeadId::parse("bd-xyz").unwrap();
-        let key = DepKey::new(from.clone(), to.clone(), DepKind::Parent).unwrap();
-        assert_eq!(key.from(), &from);
-        assert_eq!(key.to(), &to);
-        assert_eq!(key.kind(), DepKind::Parent);
+        let edge = ParentEdge::new(from.clone(), to.clone()).unwrap();
+        assert_eq!(edge.child(), &from);
+        assert_eq!(edge.parent(), &to);
     }
 
     #[test]
@@ -359,11 +437,28 @@ mod tests {
     #[test]
     fn dep_spec_to_spec_string_omits_default_kind() {
         let id = BeadId::parse("bd-abc").unwrap();
-        let spec = DepSpec::new(DepKind::Blocks, id);
+        let spec = DepSpec::new(DepKind::Blocks, id).unwrap();
         assert_eq!(spec.to_spec_string(), "bd-abc");
 
         let id = BeadId::parse("bd-rel").unwrap();
-        let spec = DepSpec::new(DepKind::Related, id);
+        let spec = DepSpec::new(DepKind::Related, id).unwrap();
         assert_eq!(spec.to_spec_string(), "related:bd-rel");
+    }
+
+    #[test]
+    fn dep_spec_rejects_parent_kind() {
+        let id = BeadId::parse("bd-abc").unwrap();
+        let err = DepSpec::new(DepKind::Parent, id).unwrap_err();
+        assert!(
+            err.reason
+                .contains("parent edges must use parent-specific operations")
+        );
+    }
+
+    #[test]
+    fn parent_edge_rejects_self_parent() {
+        let id = BeadId::parse("bd-abc").unwrap();
+        let err = ParentEdge::new(id.clone(), id).unwrap_err();
+        assert!(err.reason.contains("self-parent"));
     }
 }

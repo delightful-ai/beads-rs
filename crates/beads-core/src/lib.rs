@@ -51,7 +51,7 @@ pub use bead::{Bead, BeadCore, BeadFields, BeadView};
 pub use collections::{Label, Labels};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
-pub use dep::{AcyclicDepKey, DepAddKey, DepKey, DepSpec, FreeDepKey, NoCycleProof};
+pub use dep::{AcyclicDepKey, DepAddKey, DepKey, DepSpec, FreeDepKey, NoCycleProof, ParentEdge};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
     DurabilityClass, DurabilityOutcome, DurabilityParseError, DurabilityProofV1, DurabilityReceipt,
