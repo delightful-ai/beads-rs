@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -851,11 +851,39 @@ fn write_store_meta(path: &Path, meta: &StoreMeta) -> Result<(), StoreRuntimeErr
         path: Box::new(path.to_path_buf()),
         source,
     })?;
-    fs::write(path, bytes).map_err(|source| StoreRuntimeError::MetaWrite {
+
+    let dir = path.parent().ok_or_else(|| StoreRuntimeError::MetaWrite {
         path: Box::new(path.to_path_buf()),
-        source,
+        source: io::Error::other("store meta path missing parent"),
     })?;
+    let mut temp =
+        tempfile::NamedTempFile::new_in(dir).map_err(|source| StoreRuntimeError::MetaWrite {
+            path: Box::new(path.to_path_buf()),
+            source,
+        })?;
+    temp.write_all(&bytes)
+        .map_err(|source| StoreRuntimeError::MetaWrite {
+            path: Box::new(path.to_path_buf()),
+            source,
+        })?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|source| StoreRuntimeError::MetaWrite {
+            path: Box::new(path.to_path_buf()),
+            source,
+        })?;
+    temp.persist(path)
+        .map_err(|err| StoreRuntimeError::MetaWrite {
+            path: Box::new(path.to_path_buf()),
+            source: err.error,
+        })?;
     ensure_file_permissions(path)?;
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
 
