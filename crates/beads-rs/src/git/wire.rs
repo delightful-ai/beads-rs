@@ -818,6 +818,59 @@ mod tests {
     }
 
     #[test]
+    fn serialize_state_omits_sparse_v_when_stamps_match() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let bead = make_bead(&bead_id("bd-sparse"), &stamp);
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let lines = jsonl_lines(&bytes);
+        assert_eq!(lines.len(), 1);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("state.jsonl should deserialize");
+        let obj = value.as_object().expect("state json object");
+        assert!(!obj.contains_key("_v"), "expected sparse _v to be omitted");
+    }
+
+    #[test]
+    fn serialize_state_includes_sparse_v_for_overrides() {
+        let base = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let newer = Stamp::new(WriteStamp::new(2, 0), actor_id("bob"));
+        let core = BeadCore::new(bead_id("bd-sparse-v"), base.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), base.clone()),
+            description: Lww::new(String::new(), newer.clone()),
+            design: Lww::new(None, base.clone()),
+            acceptance_criteria: Lww::new(None, base.clone()),
+            priority: Lww::new(Priority::default(), base.clone()),
+            bead_type: Lww::new(BeadType::Task, base.clone()),
+            external_ref: Lww::new(None, base.clone()),
+            source_repo: Lww::new(None, base.clone()),
+            estimated_minutes: Lww::new(None, base.clone()),
+            workflow: Lww::new(Workflow::default(), base.clone()),
+            claim: Lww::new(Claim::default(), base.clone()),
+        };
+        let mut state = CanonicalState::new();
+        state.insert(Bead::new(core, fields)).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let lines = jsonl_lines(&bytes);
+        assert_eq!(lines.len(), 1);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("state.jsonl should deserialize");
+        let obj = value.as_object().expect("state json object");
+        let v_map = obj
+            .get("_v")
+            .and_then(|value| value.as_object())
+            .expect("expected sparse _v map");
+        assert!(v_map.contains_key("title"));
+        assert!(!v_map.contains_key("description"));
+    }
+
+    #[test]
     fn roundtrip_orset_metadata_and_notes() {
         let stamp = Stamp::new(WriteStamp::new(5, 0), actor_id("alice"));
         let mut state = CanonicalState::new();
