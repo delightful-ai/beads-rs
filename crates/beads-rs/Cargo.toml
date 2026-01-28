@@ -69,3 +69,6 @@ assert_cmd = "2"
 pathdiff = "0.2.3"
 predicates = "3"
 proptest = "1"
+
+[lints]
+workspace = true

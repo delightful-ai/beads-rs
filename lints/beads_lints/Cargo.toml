@@ -1,0 +1,21 @@
+[package]
+name = "beads_lints"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "5"
+serde = { version = "1.0", features = ["derive"] }
+# clippy_utils vendored from rust-clippy rev 21e84b5da (nightly-2026-01-22)
+clippy_utils = { path = "../clippy_utils" }
+rustc-hash = "1"
+
+[dev-dependencies]
+dylint_testing = "5"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
