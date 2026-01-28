@@ -651,8 +651,8 @@ impl SupportedStoreMeta {
     }
 }
 
-/// Parse meta.json bytes.
-pub fn parse_meta(bytes: &[u8]) -> Result<SupportedStoreMeta, WireError> {
+/// Parse meta.json bytes into a supported meta type.
+pub fn parse_supported_meta(bytes: &[u8]) -> Result<SupportedStoreMeta, WireError> {
     SupportedStoreMeta::parse(bytes)
 }
 
@@ -1673,7 +1673,8 @@ mod tests {
             let checksums = StoreChecksums::from_bytes(&[], &[], &[], Some(&[]));
             let bytes = serialize_meta(root.as_deref(), write_stamp.as_ref(), &checksums)
                 .unwrap_or_else(|e| panic!("serialize_meta failed: {e}"));
-            let parsed = parse_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
+            let parsed =
+                parse_supported_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
             let expected_root = root
                 .as_ref()
                 .map(|raw| BeadSlug::parse(raw).expect("slug parse"));
@@ -1909,19 +1910,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_meta_rejects_unsupported_version() {
+    fn parse_supported_meta_rejects_unsupported_version() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         value["format_version"] = serde_json::Value::from(2);
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let err = parse_meta(&mutated).expect_err("unsupported version should fail");
+        let err = parse_supported_meta(&mutated).expect_err("unsupported version should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
 
+
     #[test]
-    fn parse_meta_accepts_missing_notes_checksum_for_legacy_v1() {
+    fn parse_supported_meta_accepts_missing_notes_checksum_for_legacy_v1() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -1931,13 +1933,13 @@ mod tests {
             .remove("notes_sha256");
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let parsed = parse_meta(&mutated).expect("legacy v1 notes checksum is optional");
+        let parsed = parse_supported_meta(&mutated).expect("legacy v1 notes checksum is optional");
         let parsed_checksums = parsed.checksums().expect("checksums");
         assert_eq!(parsed_checksums.notes, None);
     }
 
     #[test]
-    fn parse_meta_rejects_missing_required_checksums() {
+    fn parse_supported_meta_rejects_missing_required_checksums() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -1947,27 +1949,30 @@ mod tests {
             .remove("state_sha256");
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let err = parse_meta(&mutated).expect_err("missing required checksums should fail");
+        let err =
+            parse_supported_meta(&mutated).expect_err("missing required checksums should fail");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
 
     #[test]
-    fn parse_meta_rejects_invalid_root_slug() {
+    fn parse_supported_meta_rejects_invalid_root_slug() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         value["root_slug"] = serde_json::Value::from("bad slug");
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let err = parse_meta(&mutated).expect_err("invalid slug should fail");
+        let err = parse_supported_meta(&mutated).expect_err("invalid slug should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
 
     #[test]
-    fn parse_meta_accepts_v1_with_checksums() {
+    fn parse_supported_meta_accepts_v1_with_checksums() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
-        let parsed = parse_meta(&bytes).expect("parse meta");
+        let parsed = parse_supported_meta(&bytes).expect("parse meta");
         match parsed.meta() {
             StoreMeta::V1 {
                 root_slug,
