@@ -187,6 +187,15 @@ impl ValidatedEventBody {
         self.raw
     }
 
+    pub fn try_from_validated(
+        body: EventBody,
+        kind: ValidatedEventKindV1,
+        limits: &Limits,
+    ) -> Result<Self, EventValidationError> {
+        validate_event_body_limits(&body, limits)?;
+        Ok(Self { raw: body, kind })
+    }
+
     pub fn try_from_raw(body: EventBody, limits: &Limits) -> Result<Self, EventValidationError> {
         validate_event_body_limits(&body, limits)?;
         let kind = ValidatedEventKindV1::try_from_raw(&body.kind)?;
@@ -291,6 +300,34 @@ impl ValidatedTxnDeltaV1 {
 
     pub fn total_ops(&self) -> usize {
         self.ops.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedMutationCommand {
+    raw: TxnDeltaV1,
+    validated: ValidatedTxnDeltaV1,
+}
+
+impl ValidatedMutationCommand {
+    pub fn try_from_delta(delta: TxnDeltaV1) -> Result<Self, EventValidationError> {
+        let validated = ValidatedTxnDeltaV1::try_from_raw(&delta)?;
+        Ok(Self {
+            raw: delta,
+            validated,
+        })
+    }
+
+    pub fn raw_delta(&self) -> &TxnDeltaV1 {
+        &self.raw
+    }
+
+    pub fn validated_delta(&self) -> &ValidatedTxnDeltaV1 {
+        &self.validated
+    }
+
+    pub fn into_parts(self) -> (TxnDeltaV1, ValidatedTxnDeltaV1) {
+        (self.raw, self.validated)
     }
 }
 
