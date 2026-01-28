@@ -297,6 +297,14 @@ pub struct EventFrameV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedEventFrame {
+    pub eid: EventId,
+    pub sha256: Sha256,
+    pub prev_sha256: Option<Sha256>,
+    pub bytes: EventBytes<Canonical>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrevVerified {
     pub prev: Option<Sha256>,
 }
@@ -348,6 +356,47 @@ impl VerifiedEventAny {
 
     pub fn is_deferred(&self) -> bool {
         matches!(self, VerifiedEventAny::Deferred(_))
+    }
+}
+
+impl VerifiedEventFrame {
+    pub fn new(eid: EventId, prev_sha256: Option<Sha256>, bytes: EventBytes<Canonical>) -> Self {
+        let sha256 = hash_event_body(&bytes);
+        Self {
+            eid,
+            sha256,
+            prev_sha256,
+            bytes,
+        }
+    }
+
+    fn from_parts(
+        eid: EventId,
+        prev_sha256: Option<Sha256>,
+        bytes: EventBytes<Canonical>,
+        sha256: Sha256,
+    ) -> Self {
+        Self {
+            eid,
+            sha256,
+            prev_sha256,
+            bytes,
+        }
+    }
+}
+
+impl From<&VerifiedEvent<PrevVerified>> for VerifiedEventFrame {
+    fn from(event: &VerifiedEvent<PrevVerified>) -> Self {
+        VerifiedEventFrame::from_parts(
+            EventId::new(
+                event.body.origin_replica_id,
+                event.body.namespace.clone(),
+                event.body.origin_seq,
+            ),
+            event.prev.prev,
+            event.bytes.clone(),
+            event.sha256,
+        )
     }
 }
 
@@ -420,6 +469,40 @@ pub enum EventFrameError {
     Lookup(#[from] EventShaLookupError),
     #[error("equivocation detected")]
     Equivocation,
+}
+
+impl VerifiedEventFrame {
+    pub fn try_from_frame(frame: EventFrameV1, limits: &Limits) -> Result<Self, EventFrameError> {
+        let (_, body) =
+            decode_event_body(frame.bytes.as_ref(), limits).map_err(|err| match err {
+                DecodeError::Validation(source) => EventFrameError::Validation(source),
+                other => EventFrameError::Decode(other),
+            })?;
+
+        if body.origin_replica_id != frame.eid.origin_replica_id
+            || body.namespace != frame.eid.namespace
+            || body.origin_seq != frame.eid.origin_seq
+        {
+            return Err(EventFrameError::FrameMismatch);
+        }
+
+        let canonical = encode_event_body_canonical(body.as_ref())?;
+        if canonical.as_ref() != frame.bytes.as_ref() {
+            return Err(EventFrameError::NonCanonical);
+        }
+
+        let computed = hash_event_body(&canonical);
+        if computed != frame.sha256 {
+            return Err(EventFrameError::HashMismatch);
+        }
+
+        Ok(VerifiedEventFrame::from_parts(
+            frame.eid,
+            frame.prev_sha256,
+            canonical,
+            computed,
+        ))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -4092,6 +4175,53 @@ mod tests {
 
         let err = verify_event_frame(&frame, &limits, body.store, None, &lookup).unwrap_err();
         assert!(matches!(err, EventFrameError::NonCanonical));
+    }
+
+    #[test]
+    fn verified_event_frame_accepts_canonical_frame() {
+        let limits = Limits::default();
+        let body = sample_body_with_seq(1);
+        let frame = sample_frame(&body, None);
+
+        let verified = VerifiedEventFrame::try_from_frame(frame, &limits).unwrap();
+        let canonical = encode_event_body_canonical(&body).unwrap();
+        assert_eq!(verified.bytes.as_ref(), canonical.as_ref());
+        assert_eq!(verified.sha256, hash_event_body(&canonical));
+    }
+
+    #[test]
+    fn verified_event_frame_rejects_non_canonical_bytes() {
+        let limits = Limits::default();
+        let body = sample_body_with_seq(1);
+        let noncanonical = encode_event_body_noncanonical(&body);
+        let canonical = encode_event_body_canonical(&body).unwrap();
+        assert_ne!(canonical.as_ref(), noncanonical.as_slice());
+
+        let bytes = EventBytes::<Opaque>::new(Bytes::from(noncanonical));
+        let frame = EventFrameV1 {
+            eid: EventId::new(
+                body.origin_replica_id,
+                body.namespace.clone(),
+                body.origin_seq,
+            ),
+            sha256: hash_event_body(&bytes),
+            prev_sha256: None,
+            bytes,
+        };
+
+        let err = VerifiedEventFrame::try_from_frame(frame, &limits).unwrap_err();
+        assert!(matches!(err, EventFrameError::NonCanonical));
+    }
+
+    #[test]
+    fn verified_event_frame_rejects_hash_mismatch() {
+        let limits = Limits::default();
+        let body = sample_body_with_seq(1);
+        let mut frame = sample_frame(&body, None);
+        frame.sha256 = Sha256([7u8; 32]);
+
+        let err = VerifiedEventFrame::try_from_frame(frame, &limits).unwrap_err();
+        assert!(matches!(err, EventFrameError::HashMismatch));
     }
 
     #[test]

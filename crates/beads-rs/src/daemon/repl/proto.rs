@@ -15,7 +15,7 @@ use crate::core::error::details::{
 use crate::core::{
     Applied, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, HeadStatus,
     Limits, NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch,
-    StoreId, Watermark,
+    StoreId, VerifiedEventFrame, Watermark,
 };
 
 pub const PROTOCOL_VERSION_V1: u32 = crate::core::StoreMetaVersions::REPLICATION_PROTOCOL_VERSION;
@@ -31,10 +31,28 @@ pub struct ReplEnvelope {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct WireReplEnvelope {
+    pub version: u32,
+    pub message: WireReplMessage,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ReplMessage {
     Hello(Hello),
     Welcome(Welcome),
     Events(Events),
+    Ack(Ack),
+    Want(Want),
+    Ping(Ping),
+    Pong(Pong),
+    Error(ErrorPayload),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WireReplMessage {
+    Hello(Hello),
+    Welcome(Welcome),
+    Events(WireEvents),
     Ack(Ack),
     Want(Want),
     Ping(Ping),
@@ -231,6 +249,11 @@ impl TryFrom<WireWelcome> for Welcome {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Events {
+    pub events: Vec<VerifiedEventFrame>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WireEvents {
     pub events: Vec<EventFrameV1>,
 }
 
@@ -344,6 +367,21 @@ impl ReplMessage {
             ReplMessage::Ping(_) => MessageType::Ping,
             ReplMessage::Pong(_) => MessageType::Pong,
             ReplMessage::Error(_) => MessageType::Error,
+        }
+    }
+}
+
+impl WireReplMessage {
+    fn message_type(&self) -> MessageType {
+        match self {
+            WireReplMessage::Hello(_) => MessageType::Hello,
+            WireReplMessage::Welcome(_) => MessageType::Welcome,
+            WireReplMessage::Events(_) => MessageType::Events,
+            WireReplMessage::Ack(_) => MessageType::Ack,
+            WireReplMessage::Want(_) => MessageType::Want,
+            WireReplMessage::Ping(_) => MessageType::Ping,
+            WireReplMessage::Pong(_) => MessageType::Pong,
+            WireReplMessage::Error(_) => MessageType::Error,
         }
     }
 }
@@ -468,7 +506,10 @@ pub fn encode_envelope(envelope: &ReplEnvelope) -> Result<Vec<u8>, ProtoEncodeEr
     Ok(buf)
 }
 
-pub fn decode_envelope(bytes: &[u8], limits: &Limits) -> Result<ReplEnvelope, ProtoDecodeError> {
+pub fn decode_envelope(
+    bytes: &[u8],
+    limits: &Limits,
+) -> Result<WireReplEnvelope, ProtoDecodeError> {
     let mut dec = Decoder::new(bytes);
     let map_len = decode_map_len(&mut dec, limits, 0)?;
 
@@ -513,7 +554,7 @@ pub fn decode_envelope(bytes: &[u8], limits: &Limits) -> Result<ReplEnvelope, Pr
 
     let message = decode_message_body(version, message_type, body_bytes, limits)?;
 
-    Ok(ReplEnvelope { version, message })
+    Ok(WireReplEnvelope { version, message })
 }
 
 fn encode_message_body(
@@ -553,17 +594,17 @@ fn decode_message_body(
     message_type: MessageType,
     bytes: &[u8],
     limits: &Limits,
-) -> Result<ReplMessage, ProtoDecodeError> {
+) -> Result<WireReplMessage, ProtoDecodeError> {
     let mut dec = Decoder::new(bytes);
     let message = match message_type {
-        MessageType::Hello => ReplMessage::Hello(decode_hello(&mut dec, limits)?),
-        MessageType::Welcome => ReplMessage::Welcome(decode_welcome(&mut dec, limits)?),
-        MessageType::Events => ReplMessage::Events(decode_events(&mut dec, limits)?),
-        MessageType::Ack => ReplMessage::Ack(decode_ack(&mut dec, limits)?),
-        MessageType::Want => ReplMessage::Want(decode_want(&mut dec, limits)?),
-        MessageType::Ping => ReplMessage::Ping(decode_ping(&mut dec, limits)?),
-        MessageType::Pong => ReplMessage::Pong(decode_pong(&mut dec, limits)?),
-        MessageType::Error => ReplMessage::Error(decode_error_payload(&mut dec, limits)?),
+        MessageType::Hello => WireReplMessage::Hello(decode_hello(&mut dec, limits)?),
+        MessageType::Welcome => WireReplMessage::Welcome(decode_welcome(&mut dec, limits)?),
+        MessageType::Events => WireReplMessage::Events(decode_events(&mut dec, limits)?),
+        MessageType::Ack => WireReplMessage::Ack(decode_ack(&mut dec, limits)?),
+        MessageType::Want => WireReplMessage::Want(decode_want(&mut dec, limits)?),
+        MessageType::Ping => WireReplMessage::Ping(decode_ping(&mut dec, limits)?),
+        MessageType::Pong => WireReplMessage::Pong(decode_pong(&mut dec, limits)?),
+        MessageType::Error => WireReplMessage::Error(decode_error_payload(&mut dec, limits)?),
     };
 
     if dec.datatype().is_ok() {
@@ -571,7 +612,7 @@ fn decode_message_body(
     }
 
     match &message {
-        ReplMessage::Hello(msg) if msg.protocol_version != version => {
+        WireReplMessage::Hello(msg) if msg.protocol_version != version => {
             Err(ProtoDecodeError::InvalidField {
                 field: "protocol_version",
                 reason: format!(
@@ -580,7 +621,7 @@ fn decode_message_body(
                 ),
             })
         }
-        ReplMessage::Welcome(msg) if msg.protocol_version != version => {
+        WireReplMessage::Welcome(msg) if msg.protocol_version != version => {
             Err(ProtoDecodeError::InvalidField {
                 field: "protocol_version",
                 reason: format!(
@@ -864,7 +905,7 @@ fn encode_events(enc: &mut Encoder<&mut Vec<u8>>, events: &Events) -> Result<(),
     Ok(())
 }
 
-fn decode_events(dec: &mut Decoder, limits: &Limits) -> Result<Events, ProtoDecodeError> {
+fn decode_events(dec: &mut Decoder, limits: &Limits) -> Result<WireEvents, ProtoDecodeError> {
     let map_len = decode_map_len(dec, limits, 0)?;
 
     let mut events: Option<Vec<EventFrameV1>> = None;
@@ -911,7 +952,7 @@ fn decode_events(dec: &mut Decoder, limits: &Limits) -> Result<Events, ProtoDeco
         }
     }
 
-    Ok(Events {
+    Ok(WireEvents {
         events: events.ok_or(ProtoDecodeError::MissingField("events"))?,
     })
 }
@@ -1111,7 +1152,7 @@ fn decode_capabilities(
 
 fn encode_event_frame(
     enc: &mut Encoder<&mut Vec<u8>>,
-    frame: &EventFrameV1,
+    frame: &VerifiedEventFrame,
 ) -> Result<(), ProtoEncodeError> {
     let mut len = 3;
     if frame.prev_sha256.is_some() {
@@ -1784,7 +1825,7 @@ mod tests {
     use crate::core::{
         ActorId, BeadId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId,
         NoteAppendV1, ReplicaId, StoreIdentity, TraceId, TxnDeltaV1, TxnId, TxnV1, WireBeadPatch,
-        WireNoteV1, WireStamp, encode_event_body_canonical, hash_event_body,
+        WireNoteV1, WireStamp, encode_event_body_canonical,
     };
     use std::collections::BTreeMap;
     use uuid::Uuid;
@@ -1842,15 +1883,23 @@ mod tests {
         }
     }
 
-    fn sample_event_frame(seq: u64, prev: Option<Sha256>) -> EventFrameV1 {
+    fn sample_event_frame(seq: u64, prev: Option<Sha256>) -> VerifiedEventFrame {
         let body = sample_event_body(seq);
         let bytes = encode_event_body_canonical(&body).unwrap();
-        let sha256 = hash_event_body(&bytes);
+        VerifiedEventFrame::new(
+            EventId::new(body.origin_replica_id, body.namespace, body.origin_seq),
+            prev,
+            bytes,
+        )
+    }
+
+    fn sample_wire_event_frame(seq: u64, prev: Option<Sha256>) -> EventFrameV1 {
+        let frame = sample_event_frame(seq, prev);
         EventFrameV1 {
-            eid: EventId::new(body.origin_replica_id, body.namespace, body.origin_seq),
-            sha256,
-            prev_sha256: prev,
-            bytes: bytes.into(),
+            eid: frame.eid.clone(),
+            sha256: frame.sha256,
+            prev_sha256: frame.prev_sha256,
+            bytes: EventBytes::<Opaque>::from(frame.bytes.clone()),
         }
     }
 
@@ -2022,7 +2071,13 @@ mod tests {
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
-        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded,
+            WireReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: WireReplMessage::Hello(sample_hello()),
+            }
+        );
     }
 
     #[test]
@@ -2273,7 +2328,13 @@ mod tests {
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
-        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded,
+            WireReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: WireReplMessage::Welcome(sample_welcome()),
+            }
+        );
     }
 
     #[test]
@@ -2288,7 +2349,18 @@ mod tests {
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
-        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded,
+            WireReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: WireReplMessage::Events(WireEvents {
+                    events: vec![
+                        sample_wire_event_frame(1, None),
+                        sample_wire_event_frame(2, Some(sample_event_frame(1, None).sha256)),
+                    ],
+                }),
+            }
+        );
     }
 
     #[test]
@@ -2302,7 +2374,16 @@ mod tests {
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
-        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded,
+            WireReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: WireReplMessage::Ack(Ack {
+                    durable: BTreeMap::new(),
+                    applied: None,
+                }),
+            }
+        );
     }
 
     #[test]
@@ -2315,7 +2396,15 @@ mod tests {
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
-        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded,
+            WireReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: WireReplMessage::Want(Want {
+                    want: WatermarkMap::new(),
+                }),
+            }
+        );
     }
 
     #[test]
@@ -2326,7 +2415,13 @@ mod tests {
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
-        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded,
+            WireReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: WireReplMessage::Ping(Ping { nonce: 7 }),
+            }
+        );
     }
 
     #[test]
@@ -2337,7 +2432,13 @@ mod tests {
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
-        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded,
+            WireReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: WireReplMessage::Pong(Pong { nonce: 9 }),
+            }
+        );
     }
 
     #[test]
@@ -2355,7 +2456,21 @@ mod tests {
         };
         let bytes = encode_envelope(&envelope).unwrap();
         let decoded = decode_envelope(&bytes, &Limits::default()).unwrap();
-        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded,
+            WireReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: WireReplMessage::Error(
+                    ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), "busy", true)
+                        .with_details(crate::core::error::details::OverloadedDetails {
+                            subsystem: None,
+                            retry_after_ms: Some(10),
+                            queue_bytes: Some(5),
+                            queue_events: Some(1),
+                        })
+                ),
+            }
+        );
     }
 
     #[test]

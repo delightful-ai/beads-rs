@@ -23,8 +23,8 @@ use super::ContiguousBatch;
 use super::error::{ReplError, ReplErrorDetails};
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
-    Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want,
-    WatermarkMap, WatermarkState,
+    Ack, Capabilities, Hello, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want, WatermarkMap,
+    WatermarkState, WireEvents, WireReplMessage,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -905,12 +905,12 @@ where
 
 pub fn handle_outbound_message(
     session: SessionState<Outbound>,
-    msg: ReplMessage,
+    msg: WireReplMessage,
     store: &mut impl SessionStore,
     now_ms: u64,
 ) -> (SessionState<Outbound>, Vec<SessionAction>) {
     match msg {
-        ReplMessage::Hello(_) => match session {
+        WireReplMessage::Hello(_) => match session {
             SessionState::Connecting(session) => session.invalid_request("unexpected HELLO"),
             SessionState::Handshaking(session) => session.invalid_request("unexpected HELLO"),
             SessionState::StreamingLive(session) => session.invalid_request("unexpected HELLO"),
@@ -918,7 +918,7 @@ pub fn handle_outbound_message(
             SessionState::Draining(session) => session.invalid_request("unexpected HELLO"),
             SessionState::Closed(session) => session.invalid_request("unexpected HELLO"),
         },
-        ReplMessage::Welcome(msg) => match session {
+        WireReplMessage::Welcome(msg) => match session {
             SessionState::Handshaking(session) => session.handle_welcome(msg, store, now_ms),
             SessionState::StreamingLive(session) => session.handle_welcome_replay(msg),
             SessionState::StreamingSnapshot(session) => session.handle_welcome_replay(msg),
@@ -926,7 +926,7 @@ pub fn handle_outbound_message(
             SessionState::Draining(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Closed(session) => session.invalid_request("unexpected WELCOME"),
         },
-        ReplMessage::Events(msg) => match session {
+        WireReplMessage::Events(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_events(msg, store, now_ms),
             SessionState::StreamingSnapshot(session) => session.handle_events(msg, store, now_ms),
             SessionState::Draining(session) => session.handle_events(msg, store, now_ms),
@@ -936,7 +936,7 @@ pub fn handle_outbound_message(
             }
             SessionState::Closed(session) => session.invalid_request("EVENTS before handshake"),
         },
-        ReplMessage::Ack(msg) => match session {
+        WireReplMessage::Ack(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_ack(msg),
             SessionState::StreamingSnapshot(session) => session.handle_ack(msg),
             SessionState::Draining(session) => session.handle_ack(msg),
@@ -944,7 +944,7 @@ pub fn handle_outbound_message(
             SessionState::Handshaking(session) => session.invalid_request("ACK before handshake"),
             SessionState::Closed(session) => session.invalid_request("ACK before handshake"),
         },
-        ReplMessage::Want(msg) => match session {
+        WireReplMessage::Want(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_want(msg),
             SessionState::StreamingSnapshot(session) => session.handle_want(msg),
             SessionState::Draining(session) => session.handle_want(msg),
@@ -952,7 +952,7 @@ pub fn handle_outbound_message(
             SessionState::Handshaking(session) => session.invalid_request("WANT before handshake"),
             SessionState::Closed(session) => session.invalid_request("WANT before handshake"),
         },
-        ReplMessage::Ping(msg) => match session {
+        WireReplMessage::Ping(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_ping(msg),
             SessionState::StreamingSnapshot(session) => session.handle_ping(msg),
             SessionState::Draining(session) => session.handle_ping(msg),
@@ -960,7 +960,7 @@ pub fn handle_outbound_message(
             SessionState::Handshaking(session) => session.invalid_request("PING before handshake"),
             SessionState::Closed(session) => session.invalid_request("PING before handshake"),
         },
-        ReplMessage::Pong(msg) => match session {
+        WireReplMessage::Pong(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_pong(msg),
             SessionState::StreamingSnapshot(session) => session.handle_pong(msg),
             SessionState::Draining(session) => session.handle_pong(msg),
@@ -968,7 +968,7 @@ pub fn handle_outbound_message(
             SessionState::Handshaking(session) => session.invalid_request("PONG before handshake"),
             SessionState::Closed(session) => session.invalid_request("PONG before handshake"),
         },
-        ReplMessage::Error(msg) => match session {
+        WireReplMessage::Error(msg) => match session {
             SessionState::Connecting(session) => session.handle_peer_error(msg),
             SessionState::Handshaking(session) => session.handle_peer_error(msg),
             SessionState::StreamingLive(session) => session.handle_peer_error(msg),
@@ -981,12 +981,12 @@ pub fn handle_outbound_message(
 
 pub fn handle_inbound_message(
     session: SessionState<Inbound>,
-    msg: ReplMessage,
+    msg: WireReplMessage,
     store: &mut impl SessionStore,
     now_ms: u64,
 ) -> (SessionState<Inbound>, Vec<SessionAction>) {
     match msg {
-        ReplMessage::Hello(msg) => match session {
+        WireReplMessage::Hello(msg) => match session {
             SessionState::Connecting(session) => session.handle_hello(msg, store, now_ms),
             SessionState::StreamingLive(session) => session.handle_hello_replay(msg, store),
             SessionState::StreamingSnapshot(session) => session.handle_hello_replay(msg, store),
@@ -994,7 +994,7 @@ pub fn handle_inbound_message(
             SessionState::Handshaking(session) => session.invalid_request("unexpected HELLO"),
             SessionState::Closed(session) => session.invalid_request("unexpected HELLO"),
         },
-        ReplMessage::Welcome(_) => match session {
+        WireReplMessage::Welcome(_) => match session {
             SessionState::Connecting(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Handshaking(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::StreamingLive(session) => session.invalid_request("unexpected WELCOME"),
@@ -1004,7 +1004,7 @@ pub fn handle_inbound_message(
             SessionState::Draining(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Closed(session) => session.invalid_request("unexpected WELCOME"),
         },
-        ReplMessage::Events(msg) => match session {
+        WireReplMessage::Events(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_events(msg, store, now_ms),
             SessionState::StreamingSnapshot(session) => session.handle_events(msg, store, now_ms),
             SessionState::Draining(session) => session.handle_events(msg, store, now_ms),
@@ -1014,7 +1014,7 @@ pub fn handle_inbound_message(
             }
             SessionState::Closed(session) => session.invalid_request("EVENTS before handshake"),
         },
-        ReplMessage::Ack(msg) => match session {
+        WireReplMessage::Ack(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_ack(msg),
             SessionState::StreamingSnapshot(session) => session.handle_ack(msg),
             SessionState::Draining(session) => session.handle_ack(msg),
@@ -1022,7 +1022,7 @@ pub fn handle_inbound_message(
             SessionState::Handshaking(session) => session.invalid_request("ACK before handshake"),
             SessionState::Closed(session) => session.invalid_request("ACK before handshake"),
         },
-        ReplMessage::Want(msg) => match session {
+        WireReplMessage::Want(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_want(msg),
             SessionState::StreamingSnapshot(session) => session.handle_want(msg),
             SessionState::Draining(session) => session.handle_want(msg),
@@ -1030,7 +1030,7 @@ pub fn handle_inbound_message(
             SessionState::Handshaking(session) => session.invalid_request("WANT before handshake"),
             SessionState::Closed(session) => session.invalid_request("WANT before handshake"),
         },
-        ReplMessage::Ping(msg) => match session {
+        WireReplMessage::Ping(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_ping(msg),
             SessionState::StreamingSnapshot(session) => session.handle_ping(msg),
             SessionState::Draining(session) => session.handle_ping(msg),
@@ -1038,7 +1038,7 @@ pub fn handle_inbound_message(
             SessionState::Handshaking(session) => session.invalid_request("PING before handshake"),
             SessionState::Closed(session) => session.invalid_request("PING before handshake"),
         },
-        ReplMessage::Pong(msg) => match session {
+        WireReplMessage::Pong(msg) => match session {
             SessionState::StreamingLive(session) => session.handle_pong(msg),
             SessionState::StreamingSnapshot(session) => session.handle_pong(msg),
             SessionState::Draining(session) => session.handle_pong(msg),
@@ -1046,7 +1046,7 @@ pub fn handle_inbound_message(
             SessionState::Handshaking(session) => session.invalid_request("PONG before handshake"),
             SessionState::Closed(session) => session.invalid_request("PONG before handshake"),
         },
-        ReplMessage::Error(msg) => match session {
+        WireReplMessage::Error(msg) => match session {
             SessionState::Connecting(session) => session.handle_peer_error(msg),
             SessionState::Handshaking(session) => session.handle_peer_error(msg),
             SessionState::StreamingLive(session) => session.handle_peer_error(msg),
@@ -1061,7 +1061,7 @@ pub fn handle_inbound_message(
 impl<R, P: PhaseWrap> Session<R, P> {
     fn handle_events(
         mut self,
-        events: Events,
+        events: WireEvents,
         store: &mut impl SessionStore,
         now_ms: u64,
     ) -> (SessionState<R>, Vec<SessionAction>) {
@@ -1856,7 +1856,7 @@ mod tests {
     ) -> (SessionState<Inbound>, Vec<SessionAction>) {
         handle_inbound_message(
             SessionState::Connecting(session),
-            ReplMessage::Hello(hello),
+            WireReplMessage::Hello(hello),
             store,
             0,
         )
@@ -2092,7 +2092,7 @@ mod tests {
         };
 
         let (_session, actions) =
-            handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, 0);
+            handle_outbound_message(session, WireReplMessage::Welcome(welcome), &mut store, 0);
         let want = actions
             .iter()
             .find_map(|action| match action {
@@ -2173,7 +2173,7 @@ mod tests {
         };
 
         let (session, _actions) =
-            handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, 0);
+            handle_outbound_message(session, WireReplMessage::Welcome(welcome), &mut store, 0);
         let SessionState::StreamingLive(session) = session else {
             panic!("expected streaming session");
         };
@@ -2208,7 +2208,7 @@ mod tests {
         };
 
         let (session, _actions) =
-            handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, 0);
+            handle_outbound_message(session, WireReplMessage::Welcome(welcome), &mut store, 0);
         assert!(matches!(session, SessionState::StreamingSnapshot(_)));
     }
 
@@ -2220,7 +2220,7 @@ mod tests {
         let ack = ack_for(namespace.clone(), origin, 5, false);
 
         let (session, actions) =
-            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+            handle_inbound_message(session, WireReplMessage::Ack(ack), &mut store, 0);
 
         assert!(matches!(session, SessionState::StreamingLive(_)));
         let ack = actions
@@ -2243,7 +2243,7 @@ mod tests {
         let ack = ack_for(disallowed.clone(), origin, 2, false);
 
         let (session, actions) =
-            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+            handle_inbound_message(session, WireReplMessage::Ack(ack), &mut store, 0);
 
         assert!(matches!(session, SessionState::Draining(_)));
         let error = actions
@@ -2274,7 +2274,7 @@ mod tests {
             .insert(origin, other);
 
         let (session, actions) =
-            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+            handle_inbound_message(session, WireReplMessage::Ack(ack), &mut store, 0);
 
         assert!(matches!(session, SessionState::Draining(_)));
         let error = actions
@@ -2328,7 +2328,7 @@ mod tests {
 
         let (_session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
-            ReplMessage::Events(Events {
+            WireReplMessage::Events(WireEvents {
                 events: vec![e1, e2],
             }),
             &mut store,
@@ -2397,7 +2397,7 @@ mod tests {
 
         let (_session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
-            ReplMessage::Events(Events { events: vec![e3] }),
+            WireReplMessage::Events(WireEvents { events: vec![e3] }),
             &mut store,
             10,
         );
@@ -2478,7 +2478,7 @@ mod tests {
 
         let (session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
-            ReplMessage::Events(Events { events: vec![e2] }),
+            WireReplMessage::Events(WireEvents { events: vec![e2] }),
             &mut store,
             10,
         );
@@ -2491,7 +2491,7 @@ mod tests {
         let session = expect_inbound_streaming(session);
         let (_session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
-            ReplMessage::Events(Events { events: vec![e1] }),
+            WireReplMessage::Events(WireEvents { events: vec![e1] }),
             &mut store,
             11,
         );
@@ -2557,7 +2557,7 @@ mod tests {
 
         let (session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
-            ReplMessage::Events(Events { events: vec![e1] }),
+            WireReplMessage::Events(WireEvents { events: vec![e1] }),
             &mut store,
             10,
         );
@@ -2615,7 +2615,7 @@ mod tests {
 
         let (_session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
-            ReplMessage::Events(Events { events: vec![e1] }),
+            WireReplMessage::Events(WireEvents { events: vec![e1] }),
             &mut store,
             10,
         );

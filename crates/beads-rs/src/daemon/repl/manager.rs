@@ -15,8 +15,9 @@ use std::sync::OnceLock;
 
 use crate::core::error::details::{BootstrapRequiredDetails, SnapshotRangeReason};
 use crate::core::{
-    Durable, ErrorPayload, EventFrameV1, NamespaceId, NamespacePolicy, ProtocolErrorCode,
-    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    Durable, ErrorPayload, EventFrameError, EventFrameV1, NamespaceId, NamespacePolicy,
+    ProtocolErrorCode, ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    VerifiedEventFrame,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
@@ -36,8 +37,8 @@ use crate::daemon::repl::session::{
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, SessionAction, SessionConfig,
-    SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader, decode_envelope,
-    encode_envelope,
+    SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader, WireReplMessage,
+    decode_envelope, encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
 
@@ -361,13 +362,15 @@ enum PeerError {
     Frame(#[from] FrameError),
     #[error("encode error: {0}")]
     Encode(#[from] crate::daemon::repl::proto::ProtoEncodeError),
+    #[error("event frame error: {0}")]
+    EventFrame(#[from] EventFrameError),
     #[error("broadcast error: {0}")]
     Broadcast(#[from] BroadcastError),
 }
 
 #[derive(Clone, Debug)]
 enum InboundMessage {
-    Message(ReplMessage),
+    Message(WireReplMessage),
     Terminated { payload: Option<ErrorPayload> },
 }
 
@@ -564,7 +567,10 @@ where
                 {
                     continue;
                 }
-                let frame = broadcast_to_frame(event);
+                let frame = VerifiedEventFrame::try_from_frame(
+                    broadcast_to_frame(event),
+                    &limits,
+                )?;
                 send_events(
                     &mut writer,
                     streaming_session,
@@ -624,6 +630,7 @@ where
                     .filter(|event| peer.accepted_namespaces.contains(&event.namespace))
                     .map(broadcast_to_frame)
                     .collect::<Vec<_>>();
+                let frames = verify_frames(frames, &limits)?;
                 send_events(
                     &mut writer,
                     streaming_session,
@@ -739,7 +746,7 @@ fn run_reader_loop(
         match reader.read_next() {
             Ok(Some(bytes)) => match decode_envelope(&bytes, &limits) {
                 Ok(envelope) => {
-                    if let ReplMessage::Events(events) = &envelope.message {
+                    if let WireReplMessage::Events(events) = &envelope.message {
                         let total_bytes = events
                             .events
                             .iter()
@@ -837,7 +844,7 @@ fn send_payload<S: SessionWire>(
 fn send_events(
     writer: &mut FrameWriter<TcpStream>,
     session: &Session<Outbound, StreamingLive>,
-    frames: Vec<EventFrameV1>,
+    frames: Vec<VerifiedEventFrame>,
     limits: &crate::core::Limits,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<(), PeerError> {
@@ -909,7 +916,7 @@ fn send_events(
 fn send_want_frames<M>(
     writer: &mut FrameWriter<TcpStream>,
     session: &Session<Outbound, Streaming<M>>,
-    frames: Vec<EventFrameV1>,
+    frames: Vec<VerifiedEventFrame>,
     limits: &crate::core::Limits,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<(), PeerError> {
@@ -980,7 +987,7 @@ fn send_want_frames<M>(
 
 fn events_envelope_len<M>(
     session: &Session<Outbound, Streaming<M>>,
-    batch: &[EventFrameV1],
+    batch: &[VerifiedEventFrame],
 ) -> Result<usize, PeerError> {
     let version = session.peer().protocol_version;
     let envelope = ReplEnvelope {
@@ -991,6 +998,16 @@ fn events_envelope_len<M>(
     };
     let bytes = encode_envelope(&envelope)?;
     Ok(bytes.len())
+}
+
+fn verify_frames(
+    frames: Vec<EventFrameV1>,
+    limits: &crate::core::Limits,
+) -> Result<Vec<VerifiedEventFrame>, EventFrameError> {
+    frames
+        .into_iter()
+        .map(|frame| VerifiedEventFrame::try_from_frame(frame, limits))
+        .collect()
 }
 
 fn send_hot_cache(
@@ -1007,6 +1024,7 @@ fn send_hot_cache(
         .filter(|event| allowed_set.contains(&event.namespace))
         .map(broadcast_to_frame)
         .collect::<Vec<_>>();
+    let frames = verify_frames(frames, limits)?;
     send_events(writer, session, frames, limits, keepalive)
 }
 
@@ -1074,6 +1092,7 @@ fn handle_want<M>(want: &Want, ctx: &mut WantContext<'_, M>) -> Result<(), PeerE
 
     match outcome {
         WantFramesOutcome::Frames(frames) => {
+            let frames = verify_frames(frames, ctx.limits)?;
             send_want_frames(ctx.writer, ctx.session, frames, ctx.limits, ctx.keepalive)
         }
         WantFramesOutcome::BootstrapRequired { namespaces } => {
@@ -1144,9 +1163,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Durable, EventBytes, EventFrameV1, EventId, HeadStatus, NamespaceId,
-        NamespacePolicy, Opaque, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
-        Watermark,
+        ActorId, Applied, BeadId, Durable, EventBody, EventBytes, EventId, EventKindV1, HlcMax,
+        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, Opaque, ReplicaId, Seq0, Seq1, Sha256,
+        StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnOpV1, TxnV1, VerifiedEventFrame,
+        Watermark, WireNoteV1, WireStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::repl::keepalive::KeepaliveTracker;
     use crate::daemon::repl::proto::Welcome;
@@ -1226,7 +1246,7 @@ mod tests {
         respond_with_welcome: bool,
         accepted_override: Option<Vec<NamespaceId>>,
         live_stream_enabled_override: Option<bool>,
-    ) -> (std::net::SocketAddr, Receiver<ReplMessage>) {
+    ) -> (std::net::SocketAddr, Receiver<WireReplMessage>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (tx, rx) = crossbeam::channel::unbounded();
@@ -1251,7 +1271,7 @@ mod tests {
 
                     if respond_with_welcome
                         && !welcome_sent
-                        && let ReplMessage::Hello(hello) = envelope.message
+                        && let WireReplMessage::Hello(hello) = envelope.message
                     {
                         let mut config = SessionConfig::new(
                             peer_store,
@@ -1269,7 +1289,7 @@ mod tests {
                         let (_session, actions) =
                             crate::daemon::repl::session::handle_inbound_message(
                                 SessionState::Connecting(session),
-                                ReplMessage::Hello(hello),
+                                WireReplMessage::Hello(hello),
                                 &mut store,
                                 now_ms(),
                             );
@@ -1352,7 +1372,7 @@ mod tests {
         let handle = manager.start();
         let msg = rx.recv_timeout(Duration::from_secs(1)).expect("hello");
         match msg {
-            ReplMessage::Hello(hello) => {
+            WireReplMessage::Hello(hello) => {
                 assert_eq!(hello.sender_replica_id, local_replica);
                 assert_eq!(hello.store_id, local_store.store_id);
             }
@@ -1407,22 +1427,9 @@ mod tests {
         let handle = manager.start();
         rx.recv_timeout(Duration::from_secs(1)).expect("hello");
 
-        let core_event = BroadcastEvent::new(
-            EventId::new(
-                local_replica,
-                NamespaceId::core(),
-                Seq1::from_u64(1).unwrap(),
-            ),
-            Sha256([1u8; 32]),
-            None,
-            EventBytes::<Opaque>::new(Bytes::from_static(b"core")),
-        );
-        let tmp_event = BroadcastEvent::new(
-            EventId::new(local_replica, tmp.clone(), Seq1::from_u64(2).unwrap()),
-            Sha256([2u8; 32]),
-            None,
-            EventBytes::<Opaque>::new(Bytes::from_static(b"tmp")),
-        );
+        let core_event =
+            make_broadcast_event(local_store, NamespaceId::core(), local_replica, 1, None, 4);
+        let tmp_event = make_broadcast_event(local_store, tmp.clone(), local_replica, 2, None, 4);
 
         broadcaster.publish(core_event).unwrap();
         broadcaster.publish(tmp_event).unwrap();
@@ -1432,7 +1439,7 @@ mod tests {
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let received = rx.recv_timeout(remaining).expect("message");
-            if let ReplMessage::Events(events) = received {
+            if let WireReplMessage::Events(events) = received {
                 received_events = Some(events);
                 break;
             }
@@ -1482,23 +1489,15 @@ mod tests {
         let handle = manager.start();
         rx.recv_timeout(Duration::from_secs(1)).expect("hello");
 
-        let core_event = BroadcastEvent::new(
-            EventId::new(
-                local_replica,
-                NamespaceId::core(),
-                Seq1::from_u64(1).unwrap(),
-            ),
-            Sha256([3u8; 32]),
-            None,
-            EventBytes::<Opaque>::new(Bytes::from_static(b"core")),
-        );
+        let core_event =
+            make_broadcast_event(local_store, NamespaceId::core(), local_replica, 1, None, 4);
         broadcaster.publish(core_event).unwrap();
 
         let deadline = Instant::now() + Duration::from_millis(200);
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if let Ok(msg) = rx.recv_timeout(remaining) {
-                if matches!(msg, ReplMessage::Events(_)) {
+                if matches!(msg, WireReplMessage::Events(_)) {
                     panic!("unexpected live events in snapshot-only session");
                 }
             }
@@ -1535,8 +1534,12 @@ mod tests {
             live_stream_enabled: true,
             max_frame_bytes: 200,
         };
-        let (session, _actions) =
-            handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, now_ms());
+        let (session, _actions) = handle_outbound_message(
+            session,
+            WireReplMessage::Welcome(welcome),
+            &mut store,
+            now_ms(),
+        );
         let SessionState::StreamingLive(session) = session else {
             panic!("expected streaming session");
         };
@@ -1552,7 +1555,7 @@ mod tests {
             while let Ok(Some(frame)) = reader.read_next() {
                 let envelope =
                     decode_envelope(&frame, &crate::core::Limits::default()).expect("decode");
-                if let ReplMessage::Events(events) = envelope.message {
+                if let WireReplMessage::Events(events) = envelope.message {
                     counts.push(events.events.len());
                     if counts.len() == 2 {
                         break;
@@ -1570,8 +1573,15 @@ mod tests {
         let max_frame = session.negotiated_max_frame_bytes();
         let mut payload_len = 10usize;
         let (frame1, frame2) = loop {
-            let f1 = make_frame(namespace.clone(), origin, 1, payload_len);
-            let f2 = make_frame(namespace.clone(), origin, 2, payload_len);
+            let f1 = make_frame(local_store, namespace.clone(), origin, 1, None, payload_len);
+            let f2 = make_frame(
+                local_store,
+                namespace.clone(),
+                origin,
+                2,
+                Some(f1.sha256),
+                payload_len,
+            );
             let len_single = events_envelope_len(&session, std::slice::from_ref(&f1)).expect("len");
             let len_double = events_envelope_len(&session, &[f1.clone(), f2.clone()]).expect("len");
             if len_single < max_frame && len_double > max_frame {
@@ -1597,19 +1607,84 @@ mod tests {
         assert_eq!(counts, vec![1, 1]);
     }
 
-    fn make_frame(
+    fn make_event_body(
+        store: StoreIdentity,
         namespace: NamespaceId,
         origin: ReplicaId,
         seq: u64,
         payload_len: usize,
-    ) -> EventFrameV1 {
-        let bytes = EventBytes::<Opaque>::new(Bytes::from(vec![0u8; payload_len.max(1)]));
-        EventFrameV1 {
-            eid: EventId::new(origin, namespace, Seq1::from_u64(seq).unwrap()),
-            sha256: Sha256([seq as u8; 32]),
-            prev_sha256: None,
-            bytes,
+    ) -> EventBody {
+        let note = WireNoteV1 {
+            id: NoteId::new(format!("note-{seq}")).expect("note id"),
+            content: "x".repeat(payload_len.max(1)),
+            author: ActorId::new("alice".to_string()).expect("actor"),
+            at: WireStamp(10, 0),
+        };
+        let append = NoteAppendV1 {
+            bead_id: BeadId::parse("bd-test1").expect("bead id"),
+            note,
+            lineage: None,
+        };
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::NoteAppend(append))
+            .expect("note append");
+
+        EventBody {
+            envelope_v: 1,
+            store,
+            namespace,
+            origin_replica_id: origin,
+            origin_seq: Seq1::from_u64(seq).expect("seq"),
+            event_time_ms: 10,
+            txn_id: crate::core::TxnId::new(Uuid::from_bytes([seq as u8; 16])),
+            client_request_id: None,
+            trace_id: None,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta,
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice".to_string()).expect("actor"),
+                    physical_ms: 10,
+                    logical: 0,
+                },
+            }),
         }
+    }
+
+    fn make_broadcast_event(
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        prev: Option<Sha256>,
+        payload_len: usize,
+    ) -> BroadcastEvent {
+        let body = make_event_body(store, namespace.clone(), origin, seq, payload_len);
+        let bytes = encode_event_body_canonical(&body).expect("encode");
+        let sha256 = hash_event_body(&bytes);
+        BroadcastEvent::new(
+            EventId::new(origin, namespace, body.origin_seq),
+            sha256,
+            prev,
+            EventBytes::<Opaque>::from(bytes),
+        )
+    }
+
+    fn make_frame(
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        prev: Option<Sha256>,
+        payload_len: usize,
+    ) -> VerifiedEventFrame {
+        let body = make_event_body(store, namespace.clone(), origin, seq, payload_len);
+        let bytes = encode_event_body_canonical(&body).expect("encode");
+        VerifiedEventFrame::new(
+            EventId::new(origin, namespace, body.origin_seq),
+            prev,
+            bytes,
+        )
     }
 
     #[test]
@@ -1658,22 +1733,9 @@ mod tests {
         let handle = manager.start();
         rx.recv_timeout(Duration::from_secs(1)).expect("hello");
 
-        let core_event = BroadcastEvent::new(
-            EventId::new(
-                local_replica,
-                NamespaceId::core(),
-                Seq1::from_u64(1).unwrap(),
-            ),
-            Sha256([10u8; 32]),
-            None,
-            EventBytes::<Opaque>::new(Bytes::from_static(b"core")),
-        );
-        let tmp_event = BroadcastEvent::new(
-            EventId::new(local_replica, tmp.clone(), Seq1::from_u64(2).unwrap()),
-            Sha256([20u8; 32]),
-            None,
-            EventBytes::<Opaque>::new(Bytes::from_static(b"tmp")),
-        );
+        let core_event =
+            make_broadcast_event(local_store, NamespaceId::core(), local_replica, 1, None, 4);
+        let tmp_event = make_broadcast_event(local_store, tmp.clone(), local_replica, 2, None, 4);
 
         broadcaster.publish(core_event).unwrap();
         broadcaster.publish(tmp_event).unwrap();
@@ -1683,7 +1745,7 @@ mod tests {
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let received = rx.recv_timeout(remaining).expect("message");
-            if let ReplMessage::Events(events) = received {
+            if let WireReplMessage::Events(events) = received {
                 received_events = Some(events);
                 break;
             }
