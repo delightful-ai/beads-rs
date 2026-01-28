@@ -505,11 +505,11 @@ impl SupportedStoreMeta {
             meta.deps_sha256,
             meta.notes_sha256,
         ) {
-            (Some(state), Some(tombstones), Some(deps), Some(notes)) => StoreChecksums {
+            (Some(state), Some(tombstones), Some(deps), notes) => StoreChecksums {
                 state,
                 tombstones,
                 deps,
-                notes: Some(notes),
+                notes,
             },
             _ => {
                 return Err(WireError::InvalidValue(
@@ -1647,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_meta_rejects_missing_checksums() {
+    fn parse_meta_accepts_missing_notes_checksum_for_legacy_v1() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -1657,7 +1657,23 @@ mod tests {
             .remove("notes_sha256");
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let err = parse_meta(&mutated).expect_err("missing checksums should fail");
+        let parsed = parse_meta(&mutated).expect("legacy v1 notes checksum is optional");
+        let parsed_checksums = parsed.checksums().expect("checksums");
+        assert_eq!(parsed_checksums.notes, None);
+    }
+
+    #[test]
+    fn parse_meta_rejects_missing_required_checksums() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("state_sha256");
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let err = parse_meta(&mutated).expect_err("missing required checksums should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
 

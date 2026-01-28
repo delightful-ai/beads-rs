@@ -576,17 +576,6 @@ impl VerifiedEventFrame {
     }
 }
 
-fn validate_frame_prev_seq(eid: &EventId, prev_sha256: Option<Sha256>) -> Result<(), EventFrameError> {
-    let seq = eid.origin_seq.get();
-    match (seq, prev_sha256) {
-        (1, None) => Ok(()),
-        (1, Some(_)) => Err(EventFrameError::PrevMismatch),
-        (s, Some(_)) if s > 1 => Ok(()),
-        (s, None) if s > 1 => Err(EventFrameError::PrevMismatch),
-        _ => Err(EventFrameError::PrevMismatch),
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum EncodeError {
     #[error("cbor encode: {0}")]

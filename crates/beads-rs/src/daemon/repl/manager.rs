@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_wan
 use crate::daemon::repl::{
     FrameError, FrameLimitState, FrameReader, FrameWriter, ReplEnvelope, ReplMessage,
     SessionAction, SessionConfig, SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader,
-    WireReplMessage, decode_envelope, encode_envelope,
+    WireReplMessage, decode_envelope, decode_envelope_with_version, encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
 
@@ -399,10 +399,12 @@ where
     let reader_limit_state = FrameLimitState::unnegotiated(limits.max_frame_bytes);
     let mut reader = FrameReader::new(reader_stream, reader_limit_state.clone());
     let mut writer = FrameWriter::new(writer_stream, limits.max_frame_bytes);
+    let expected_version = Arc::new(AtomicU32::new(0));
 
     let (inbound_tx, inbound_rx) = crossbeam::channel::unbounded::<InboundMessage>();
     let reader_shutdown = shutdown.clone();
     let reader_decode_limits = limits.clone();
+    let reader_expected_version = expected_version.clone();
     let reader_span = tracing::Span::current();
     let reader_handle = thread::spawn(move || {
         reader_span.in_scope(|| {
@@ -411,6 +413,7 @@ where
                 inbound_tx,
                 reader_shutdown,
                 reader_decode_limits,
+                reader_expected_version,
             );
         });
     });
@@ -592,6 +595,7 @@ where
             if handshake_at_ms.is_none() {
                 reader_limit_state
                     .apply_negotiated_limit(streaming_session.negotiated_frame_limit());
+                expected_version.store(streaming_session.peer().protocol_version, Ordering::SeqCst);
                 let now_ms = now_ms();
                 handshake_at_ms = Some(now_ms);
                 last_hello_at_ms = None;
@@ -663,6 +667,7 @@ where
             && handshake_at_ms.is_none()
         {
             reader_limit_state.apply_negotiated_limit(streaming_session.negotiated_frame_limit());
+            expected_version.store(streaming_session.peer().protocol_version, Ordering::SeqCst);
             let now_ms = now_ms();
             handshake_at_ms = Some(now_ms);
             last_hello_at_ms = None;
@@ -744,6 +749,7 @@ fn run_reader_loop(
     inbound_tx: Sender<InboundMessage>,
     shutdown: Arc<AtomicBool>,
     limits: crate::core::Limits,
+    expected_version: Arc<AtomicU32>,
 ) {
     let mut ingest_budget = TokenBucket::new(limits.max_repl_ingest_bytes_per_sec as u64);
     loop {
@@ -753,29 +759,37 @@ fn run_reader_loop(
         }
 
         match reader.read_next() {
-            Ok(Some(bytes)) => match decode_envelope(&bytes, &limits) {
-                Ok(envelope) => {
-                    if let WireReplMessage::Events(events) = &envelope.message {
-                        let total_bytes = events
-                            .events
-                            .iter()
-                            .map(|frame| frame.bytes().len() as u64)
-                            .sum();
-                        if total_bytes > 0 {
-                            let wait = ingest_budget.throttle(total_bytes);
-                            if !wait.is_zero() {
-                                metrics::repl_ingest_throttle(wait, total_bytes);
+            Ok(Some(bytes)) => {
+                let expected = expected_version.load(Ordering::Relaxed);
+                let decoded = if expected == 0 {
+                    decode_envelope(&bytes, &limits)
+                } else {
+                    decode_envelope_with_version(&bytes, &limits, expected)
+                };
+                match decoded {
+                    Ok(envelope) => {
+                        if let WireReplMessage::Events(events) = &envelope.message {
+                            let total_bytes = events
+                                .events
+                                .iter()
+                                .map(|frame| frame.bytes().len() as u64)
+                                .sum();
+                            if total_bytes > 0 {
+                                let wait = ingest_budget.throttle(total_bytes);
+                                if !wait.is_zero() {
+                                    metrics::repl_ingest_throttle(wait, total_bytes);
+                                }
                             }
                         }
+                        let _ = inbound_tx.send(InboundMessage::Message(envelope.message));
                     }
-                    let _ = inbound_tx.send(InboundMessage::Message(envelope.message));
+                    Err(err) => {
+                        let payload = err.as_error_payload();
+                        let _ = inbound_tx.send(InboundMessage::Terminated { payload });
+                        break;
+                    }
                 }
-                Err(err) => {
-                    let payload = err.as_error_payload();
-                    let _ = inbound_tx.send(InboundMessage::Terminated { payload });
-                    break;
-                }
-            },
+            }
             Ok(None) => {
                 let _ = inbound_tx.send(InboundMessage::Terminated { payload: None });
                 break;
