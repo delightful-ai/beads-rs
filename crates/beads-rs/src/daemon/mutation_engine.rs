@@ -8,13 +8,13 @@ use super::ops::{MapLiveError, OpError};
 use super::remote::RemoteUrl;
 use crate::core::event::ValidatedBeadPatch;
 use crate::core::{
-    ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKey,
-    DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
-    NamespaceId, NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId,
-    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedEventBody, WallClock, WireDepAddV1,
-    WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
-    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
-    sha256_bytes, to_canon_json_bytes,
+    ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
+    ClientRequestId, DepKey, DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax,
+    Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp,
+    StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedEventBody,
+    WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1,
+    WireLabelRemoveV1, WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
+    encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
 };
 use crate::daemon::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
@@ -180,7 +180,7 @@ pub enum ParsedMutationRequest {
     Close {
         id: BeadId,
         reason: Option<String>,
-        on_branch: Option<String>,
+        on_branch: Option<BranchName>,
     },
     Reopen {
         id: BeadId,
@@ -296,7 +296,7 @@ impl ParsedMutationRequest {
         Ok(ParsedMutationRequest::Close {
             id,
             reason,
-            on_branch: on_branch.map(String::from),
+            on_branch,
         })
     }
 
@@ -1014,7 +1014,7 @@ impl MutationEngine {
         state: &CanonicalState,
         id: BeadId,
         reason: Option<String>,
-        on_branch: Option<String>,
+        on_branch: Option<BranchName>,
     ) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
         if bead.fields.workflow.value.is_closed() {
@@ -1480,7 +1480,7 @@ enum CanonicalMutationOp {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        on_branch: Option<String>,
+        on_branch: Option<BranchName>,
     },
     Reopen {
         id: BeadId,

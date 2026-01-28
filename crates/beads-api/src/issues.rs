@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::deps::DepEdge;
 use beads_core::{
-    BeadView, Claim, NamespaceId, SegmentId, Tombstone as CoreTombstone, WallClock, Workflow,
-    WriteStamp,
+    BeadView, BranchName, Claim, NamespaceId, SegmentId, Tombstone as CoreTombstone, WallClock,
+    Workflow, WriteStamp,
 };
 
 // =============================================================================
@@ -223,7 +223,7 @@ pub struct Issue {
 
     pub created_at: WriteStamp,
     pub created_by: String,
-    pub created_on_branch: Option<String>,
+    pub created_on_branch: Option<BranchName>,
 
     pub updated_at: WriteStamp,
     pub updated_by: String,
@@ -231,7 +231,7 @@ pub struct Issue {
     pub closed_at: Option<WriteStamp>,
     pub closed_by: Option<String>,
     pub closed_reason: Option<String>,
-    pub closed_on_branch: Option<String>,
+    pub closed_on_branch: Option<BranchName>,
 
     pub external_ref: Option<String>,
     pub source_repo: Option<String>,
@@ -329,7 +329,7 @@ impl Issue {
             assignee_expires,
             created_at: bead.core.created().at.clone(),
             created_by: bead.core.created().by.as_str().to_string(),
-            created_on_branch: bead.core.created_on_branch().map(|s| s.to_string()),
+            created_on_branch: bead.core.created_on_branch().cloned(),
             updated_at: updated.at.clone(),
             updated_by: updated.by.as_str().to_string(),
             closed_at,
