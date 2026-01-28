@@ -971,7 +971,10 @@ fn load_event_body(
 ) -> Result<ValidatedEventBody, OpError> {
     let reader = wal_index.reader();
     let from_seq_excl = event_id.origin_seq.prev_seq0();
-    let max_bytes = limits.max_wal_record_bytes.saturating_add(FRAME_HEADER_LEN);
+    let max_bytes = limits
+        .policy()
+        .max_wal_record_bytes()
+        .saturating_add(FRAME_HEADER_LEN);
     let items = reader
         .iter_from(
             &event_id.namespace,
@@ -1010,7 +1013,7 @@ fn load_event_body(
             })
         })?;
 
-    let mut reader = FrameReader::new(reader, limits.max_wal_record_bytes);
+    let mut reader = FrameReader::new(reader, limits.policy().max_wal_record_bytes());
     let record = reader
         .read_next()
         .map_err(|err| event_wal_error_with_path(err, &path))?

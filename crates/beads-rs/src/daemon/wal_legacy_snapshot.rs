@@ -542,9 +542,9 @@ impl Wal {
 
         // Serialize to JSON
         let data = serde_json::to_vec(entry)?;
-        if data.len() > limits.max_wal_record_bytes {
+        if data.len() > limits.policy().max_wal_record_bytes() {
             return Err(WalError::TooLarge {
-                max_bytes: limits.max_wal_record_bytes,
+                max_bytes: limits.policy().max_wal_record_bytes(),
                 got_bytes: data.len(),
             });
         }

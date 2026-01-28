@@ -2484,7 +2484,7 @@ fn load_event_body_at(
         }))
     })?;
 
-    let mut reader = FrameReader::new(reader, limits.max_wal_record_bytes);
+    let mut reader = FrameReader::new(reader, limits.policy().max_wal_record_bytes());
     let record = reader
         .read_next()
         .map_err(|source| {
@@ -3772,7 +3772,7 @@ mod tests {
         .len() as u64;
 
         let mut limits = Limits::default();
-        let frame_len = encode_frame(&record1, limits.max_wal_record_bytes)
+        let frame_len = encode_frame(&record1, limits.policy().max_wal_record_bytes())
             .unwrap()
             .len() as u64;
         limits.wal_segment_max_bytes = (header_len + frame_len + 1) as usize;

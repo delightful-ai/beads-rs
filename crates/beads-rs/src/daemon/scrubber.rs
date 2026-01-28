@@ -412,7 +412,7 @@ fn scan_segment_records(
         return 0;
     }
 
-    let max_record_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+    let max_record_bytes = limits.policy().max_wal_record_bytes();
     let mut offset = segment.header_len;
     let mut checked = 0usize;
 
@@ -733,7 +733,7 @@ fn scrub_index_offsets(
     }
 
     let mut remaining = max_records;
-    let max_record_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+    let max_record_bytes = limits.policy().max_wal_record_bytes();
     let mut handles: HashMap<SegmentId, SegmentHandle> = HashMap::new();
 
     for (origin, _) in store.watermarks_applied.origins(namespace) {

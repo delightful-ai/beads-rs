@@ -230,7 +230,7 @@ impl WalRangeReader {
             let record = read_record_at(
                 segment_path,
                 item.offset,
-                self.limits.max_wal_record_bytes,
+                self.limits.policy().max_wal_record_bytes(),
                 &self.limits,
             )
             .map_err(|err| WalRangeError::Corrupt {

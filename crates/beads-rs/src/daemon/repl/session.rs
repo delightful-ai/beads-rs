@@ -1750,7 +1750,7 @@ fn decode_error_payload(err: &DecodeError, limits: &Limits, frame_bytes: usize) 
                 false,
             )
             .with_details(ReplErrorDetails::FrameTooLarge(FrameTooLargeDetails {
-                max_frame_bytes: limits.max_frame_bytes.min(limits.max_wal_record_bytes) as u64,
+                max_frame_bytes: limits.policy().max_wal_record_payload_bytes() as u64,
                 got_bytes: frame_bytes as u64,
             }))
         }

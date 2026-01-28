@@ -1267,7 +1267,7 @@ fn decode_event_frame(
             "prev_sha256" => prev_sha256 = Some(decode_sha256(dec, limits, "prev_sha256")?),
             "bytes" => {
                 let raw = decode_bytes(dec, limits, "bytes")?;
-                let max_payload = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+                let max_payload = limits.policy().max_wal_record_payload_bytes();
                 if raw.len() > max_payload {
                     return Err(ProtoDecodeError::DecodeLimit("max_wal_record_bytes"));
                 }
