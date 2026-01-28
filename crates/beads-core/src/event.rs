@@ -290,10 +290,64 @@ pub enum ValidatedTxnOpV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventFrameV1 {
-    pub eid: EventId,
-    pub sha256: Sha256,
-    pub prev_sha256: Option<Sha256>,
-    pub bytes: EventBytes<Opaque>,
+    eid: EventId,
+    sha256: Sha256,
+    prev_sha256: Option<Sha256>,
+    bytes: EventBytes<Opaque>,
+}
+
+impl EventFrameV1 {
+    pub fn try_from_parts(
+        eid: EventId,
+        sha256: Sha256,
+        prev_sha256: Option<Sha256>,
+        bytes: EventBytes<Opaque>,
+    ) -> Result<Self, EventFrameError> {
+        validate_frame_prev_seq(&eid, prev_sha256)?;
+        Ok(Self {
+            eid,
+            sha256,
+            prev_sha256,
+            bytes,
+        })
+    }
+
+    pub fn new_genesis(
+        eid: EventId,
+        sha256: Sha256,
+        bytes: EventBytes<Opaque>,
+    ) -> Result<Self, EventFrameError> {
+        Self::try_from_parts(eid, sha256, None, bytes)
+    }
+
+    pub fn new_with_prev(
+        eid: EventId,
+        sha256: Sha256,
+        prev_sha256: Sha256,
+        bytes: EventBytes<Opaque>,
+    ) -> Result<Self, EventFrameError> {
+        Self::try_from_parts(eid, sha256, Some(prev_sha256), bytes)
+    }
+
+    pub fn eid(&self) -> &EventId {
+        &self.eid
+    }
+
+    pub fn sha256(&self) -> Sha256 {
+        self.sha256
+    }
+
+    pub fn prev_sha256(&self) -> Option<Sha256> {
+        self.prev_sha256
+    }
+
+    pub fn bytes(&self) -> &EventBytes<Opaque> {
+        &self.bytes
+    }
+
+    pub fn into_parts(self) -> (EventId, Sha256, Option<Sha256>, EventBytes<Opaque>) {
+        (self.eid, self.sha256, self.prev_sha256, self.bytes)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -471,36 +525,50 @@ pub enum EventFrameError {
     Equivocation,
 }
 
+fn validate_frame_prev_seq(
+    eid: &EventId,
+    prev_sha256: Option<Sha256>,
+) -> Result<(), EventFrameError> {
+    let seq = eid.origin_seq.get();
+    match (seq, prev_sha256.is_some()) {
+        (1, false) => Ok(()),
+        (1, true) => Err(EventFrameError::PrevMismatch),
+        (s, true) if s > 1 => Ok(()),
+        (s, false) if s > 1 => Err(EventFrameError::PrevMismatch),
+        _ => Err(EventFrameError::PrevMismatch),
+    }
+}
+
 impl VerifiedEventFrame {
     pub fn try_from_frame(frame: EventFrameV1, limits: &Limits) -> Result<Self, EventFrameError> {
         validate_frame_prev_seq(&frame.eid, frame.prev_sha256)?;
 
         let (_, body) =
-            decode_event_body(frame.bytes.as_ref(), limits).map_err(|err| match err {
+            decode_event_body(frame.bytes().as_ref(), limits).map_err(|err| match err {
                 DecodeError::Validation(source) => EventFrameError::Validation(source),
                 other => EventFrameError::Decode(other),
             })?;
 
-        if body.origin_replica_id != frame.eid.origin_replica_id
-            || body.namespace != frame.eid.namespace
-            || body.origin_seq != frame.eid.origin_seq
+        if body.origin_replica_id != frame.eid().origin_replica_id
+            || body.namespace != frame.eid().namespace
+            || body.origin_seq != frame.eid().origin_seq
         {
             return Err(EventFrameError::FrameMismatch);
         }
 
         let canonical = encode_event_body_canonical(body.as_ref())?;
-        if canonical.as_ref() != frame.bytes.as_ref() {
+        if canonical.as_ref() != frame.bytes().as_ref() {
             return Err(EventFrameError::NonCanonical);
         }
 
         let computed = hash_event_body(&canonical);
-        if computed != frame.sha256 {
+        if computed != frame.sha256() {
             return Err(EventFrameError::HashMismatch);
         }
 
         Ok(VerifiedEventFrame::from_parts(
-            frame.eid,
-            frame.prev_sha256,
+            frame.eid().clone(),
+            frame.prev_sha256(),
             canonical,
             computed,
         ))
@@ -2854,7 +2922,7 @@ pub fn verify_event_frame(
     expected_prev_head: Option<Sha256>,
     lookup: &dyn EventShaLookup,
 ) -> Result<VerifiedEventAny, EventFrameError> {
-    let (_, body) = decode_event_body(frame.bytes.as_ref(), limits).map_err(|err| match err {
+    let (_, body) = decode_event_body(frame.bytes().as_ref(), limits).map_err(|err| match err {
         DecodeError::Validation(source) => EventFrameError::Validation(source),
         other => EventFrameError::Decode(other),
     })?;
@@ -2867,47 +2935,49 @@ pub fn verify_event_frame(
         });
     }
 
-    if body.origin_replica_id != frame.eid.origin_replica_id
-        || body.namespace != frame.eid.namespace
-        || body.origin_seq != frame.eid.origin_seq
+    if body.origin_replica_id != frame.eid().origin_replica_id
+        || body.namespace != frame.eid().namespace
+        || body.origin_seq != frame.eid().origin_seq
     {
         return Err(EventFrameError::FrameMismatch);
     }
 
-    if canonical.as_ref() != frame.bytes.as_ref() {
+    if canonical.as_ref() != frame.bytes().as_ref() {
         return Err(EventFrameError::NonCanonical);
     }
 
     let computed = hash_event_body(&canonical);
-    if computed != frame.sha256 {
+    if computed != frame.sha256() {
         return Err(EventFrameError::HashMismatch);
     }
 
-    match lookup.lookup_event_sha(&frame.eid)? {
+    match lookup.lookup_event_sha(frame.eid())? {
         None => {}
-        Some(existing) if existing == frame.sha256 => {}
+        Some(existing) if existing == frame.sha256() => {}
         Some(_) => return Err(EventFrameError::Equivocation),
     }
 
     let seq = body.origin_seq.get();
-    match (seq, frame.prev_sha256, expected_prev_head) {
-        (1, None, _) => Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
+    if seq == 1 {
+        return Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
             body,
             bytes: canonical.clone(),
-            sha256: frame.sha256,
+            sha256: frame.sha256(),
             prev: PrevVerified { prev: None },
+        }));
+    }
+
+    let prev = frame
+        .prev_sha256()
+        .expect("non-genesis frame must have prev");
+    match expected_prev_head {
+        Some(head) if head == prev => Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
+            body,
+            bytes: canonical.clone(),
+            sha256: frame.sha256(),
+            prev: PrevVerified { prev: Some(prev) },
         })),
-        (1, Some(_), _) => Err(EventFrameError::PrevMismatch),
-        (s, None, _) if s > 1 => Err(EventFrameError::PrevMismatch),
-        (s, Some(prev), Some(head)) if s > 1 && prev == head => {
-            Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
-                body,
-                bytes: canonical.clone(),
-                sha256: frame.sha256,
-                prev: PrevVerified { prev: Some(prev) },
-            }))
-        }
-        (s, Some(prev), None) if s > 1 => {
+        None => {
             let expected_prev_seq = body
                 .origin_seq
                 .prev()
@@ -2915,7 +2985,7 @@ pub fn verify_event_frame(
             Ok(VerifiedEventAny::Deferred(VerifiedEvent {
                 body,
                 bytes: canonical.clone(),
-                sha256: frame.sha256,
+                sha256: frame.sha256(),
                 prev: PrevDeferred {
                     prev,
                     expected_prev_seq,
