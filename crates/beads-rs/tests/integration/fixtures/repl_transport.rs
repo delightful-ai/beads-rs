@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam::channel::{Receiver, Sender, unbounded};
 
 use beads_rs::Limits;
-use beads_rs::daemon::repl::proto::{ReplEnvelope, ReplMessage};
+use beads_rs::daemon::repl::proto::{ReplMessage, WireReplEnvelope};
 
 use super::repl_frames;
 
@@ -200,7 +200,7 @@ impl ChannelEndpoint {
         self.sender.send(frame);
     }
 
-    pub fn try_recv_message(&self) -> Option<ReplEnvelope> {
+    pub fn try_recv_message(&self) -> Option<WireReplEnvelope> {
         let frame = self.receiver.try_recv().ok()?;
         Some(repl_frames::decode_message_frame(
             &frame,
@@ -208,7 +208,7 @@ impl ChannelEndpoint {
         ))
     }
 
-    pub fn drain_messages(&self) -> Vec<ReplEnvelope> {
+    pub fn drain_messages(&self) -> Vec<WireReplEnvelope> {
         let mut out = Vec::new();
         while let Ok(frame) = self.receiver.try_recv() {
             out.push(repl_frames::decode_message_frame(
@@ -275,13 +275,17 @@ mod tests {
         let transport = ChannelTransport::with_limits(&limits);
         let store = identity::store_identity_with_epoch(1, 1);
         let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
-        let hello = ReplMessage::Hello(repl_frames::hello(store, replica));
+        let hello = repl_frames::hello(store, replica);
+        let message = ReplMessage::Hello(hello.clone());
 
-        transport.a.send_message(&hello);
+        transport.a.send_message(&message);
         transport.network.flush();
 
         let received = transport.b.try_recv_message().expect("message");
-        assert_eq!(received.message, hello);
+        assert_eq!(
+            received.message,
+            beads_rs::daemon::repl::proto::WireReplMessage::Hello(hello)
+        );
     }
 
     #[test]
@@ -290,10 +294,11 @@ mod tests {
         let transport = ChannelTransport::with_limits(&limits);
         let store = identity::store_identity_with_epoch(3, 1);
         let replica = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
-        let hello = ReplMessage::Hello(repl_frames::hello(store, replica));
+        let hello = repl_frames::hello(store, replica);
+        let message = ReplMessage::Hello(hello);
 
         transport.network.delay_next(Direction::AtoB, 5);
-        transport.a.send_message(&hello);
+        transport.a.send_message(&message);
         transport.network.flush();
         assert!(transport.b.try_recv_message().is_none());
 
@@ -301,7 +306,7 @@ mod tests {
         assert!(transport.b.try_recv_message().is_some());
 
         transport.network.drop_next(Direction::AtoB);
-        transport.a.send_message(&hello);
+        transport.a.send_message(&message);
         transport.network.flush();
         assert!(transport.b.try_recv_message().is_none());
     }

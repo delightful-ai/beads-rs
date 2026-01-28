@@ -6,7 +6,9 @@ use beads_rs::daemon::admission::AdmissionController;
 use beads_rs::daemon::repl::session::{
     Inbound, InboundConnecting, SessionState, handle_inbound_message,
 };
-use beads_rs::daemon::repl::{Events, ReplMessage, SessionAction, SessionConfig};
+use beads_rs::daemon::repl::{
+    ReplMessage, SessionAction, SessionConfig, WireEvents, WireReplMessage,
+};
 use beads_rs::{Limits, NamespaceId, ProtocolErrorCode, ReplicaId, StoreIdentity};
 
 use crate::fixtures::identity;
@@ -29,7 +31,7 @@ fn inbound_session_with_limits(
     let hello = repl_frames::hello(identity, peer_replica);
     let (session, _) = handle_inbound_message(
         SessionState::Connecting(session),
-        ReplMessage::Hello(hello),
+        WireReplMessage::Hello(hello),
         &mut store,
         0,
     );
@@ -53,7 +55,7 @@ fn repl_backpressure_overload_emits_error() {
     let event = repl_frames::event_frame(identity, namespace, origin, 1, None);
     let (session, actions) = handle_inbound_message(
         session,
-        ReplMessage::Events(Events {
+        WireReplMessage::Events(WireEvents {
             events: vec![event],
         }),
         &mut store,

@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use beads_rs::Limits;
 use beads_rs::core::{
-    Applied, Durable, EventFrameV1, EventId, EventShaLookupError, HeadStatus, NamespaceId,
-    ReplicaId, Seq0, Seq1, Sha256, StoreIdentity, Watermark,
+    Applied, Durable, EventId, EventShaLookupError, HeadStatus, NamespaceId, ReplicaId, Seq0, Seq1,
+    Sha256, StoreIdentity, VerifiedEventFrame, Watermark,
 };
 use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
 use beads_rs::daemon::repl::proto::WatermarkState;
@@ -171,7 +171,7 @@ impl<R> MockPeer<R> {
         &self.store
     }
 
-    pub fn send_events(&self, events: Vec<EventFrameV1>) {
+    pub fn send_events(&self, events: Vec<VerifiedEventFrame>) {
         let message = beads_rs::daemon::repl::ReplMessage::Events(Events { events });
         self.endpoint.send_message(&message);
     }
@@ -278,8 +278,13 @@ mod tests {
         assert_eq!(outbound.phase(), SessionPhase::Streaming);
         assert_eq!(inbound.phase(), SessionPhase::Streaming);
 
-        let event =
-            repl_frames::event_frame(identity, NamespaceId::core(), outbound_replica, 1, None);
+        let event = repl_frames::verified_event_frame(
+            identity,
+            NamespaceId::core(),
+            outbound_replica,
+            1,
+            None,
+        );
         outbound.send_events(vec![event]);
         transport.network.flush();
         inbound.drain();

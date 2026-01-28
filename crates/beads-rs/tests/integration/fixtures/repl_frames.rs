@@ -10,12 +10,13 @@ use beads_rs::Limits;
 use beads_rs::core::{
     ActorId, Durable, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax,
     NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
-    encode_event_body_canonical, hash_event_body,
+    VerifiedEventFrame, encode_event_body_canonical, hash_event_body,
 };
 use beads_rs::daemon::repl::frame::{FrameReader, encode_frame};
 use beads_rs::daemon::repl::proto::{
     Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplEnvelope, ReplMessage, Want,
-    WatermarkMap, WatermarkState, Welcome, decode_envelope, encode_envelope,
+    WatermarkMap, WatermarkState, Welcome, WireReplEnvelope, WireReplMessage, decode_envelope,
+    encode_envelope,
 };
 
 use super::identity;
@@ -78,7 +79,7 @@ pub fn welcome_with_namespaces(
     }
 }
 
-pub fn events(frames: Vec<EventFrameV1>) -> Events {
+pub fn events(frames: Vec<VerifiedEventFrame>) -> Events {
     Events { events: frames }
 }
 
@@ -109,7 +110,7 @@ pub fn encode_message_frame(message: ReplMessage, max_frame_bytes: usize) -> Vec
     encode_frame(&payload, max_frame_bytes).expect("encode frame")
 }
 
-pub fn decode_message_frame(frame: &[u8], max_frame_bytes: usize) -> ReplEnvelope {
+pub fn decode_message_frame(frame: &[u8], max_frame_bytes: usize) -> WireReplEnvelope {
     let mut reader = FrameReader::new(Cursor::new(frame), max_frame_bytes);
     let payload = reader
         .read_next()
@@ -156,6 +157,41 @@ pub fn event_frame(
     }
 }
 
+pub fn verified_event_frame(
+    store: StoreIdentity,
+    namespace: NamespaceId,
+    origin: ReplicaId,
+    seq: u64,
+    prev: Option<Sha256>,
+) -> VerifiedEventFrame {
+    let body = EventBody {
+        envelope_v: 1,
+        store,
+        namespace: namespace.clone(),
+        origin_replica_id: origin,
+        origin_seq: Seq1::from_u64(seq).expect("valid seq"),
+        event_time_ms: 1_700_000_000_000 + seq,
+        txn_id: TxnId::new(Uuid::from_bytes([seq as u8; 16])),
+        client_request_id: None,
+        trace_id: None,
+        kind: EventKindV1::TxnV1(TxnV1 {
+            delta: TxnDeltaV1::new(),
+            hlc_max: HlcMax {
+                actor_id: ActorId::new("fixture").expect("actor"),
+                physical_ms: 1_700_000_000_000 + seq,
+                logical: 0,
+            },
+        }),
+    };
+
+    let canonical = encode_event_body_canonical(&body).expect("encode event body");
+    VerifiedEventFrame::new(
+        EventId::new(origin, namespace, body.origin_seq),
+        prev,
+        canonical,
+    )
+}
+
 pub fn single_event(store: StoreIdentity, origin: ReplicaId) -> EventFrameV1 {
     event_frame(store, NamespaceId::core(), origin, 1, None)
 }
@@ -168,9 +204,12 @@ mod tests {
     fn fixtures_repl_frames_roundtrip() {
         let store = identity::store_identity_with_epoch(1, 1);
         let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
-        let hello = ReplMessage::Hello(hello(store, replica));
-        let frame = encode_message_frame(hello.clone(), Limits::default().max_frame_bytes);
+        let hello = hello(store, replica);
+        let frame = encode_message_frame(
+            ReplMessage::Hello(hello.clone()),
+            Limits::default().max_frame_bytes,
+        );
         let decoded = decode_message_frame(&frame, Limits::default().max_frame_bytes);
-        assert_eq!(decoded.message, hello);
+        assert_eq!(decoded.message, WireReplMessage::Hello(hello));
     }
 }
