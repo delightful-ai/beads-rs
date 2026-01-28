@@ -116,10 +116,10 @@ impl ReplRig {
         };
         let mut resolved_store_id = store_id_override;
         let issue_min_seen = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut nodes = Vec::with_capacity(node_count);
+        let mut seeds = Vec::with_capacity(node_count);
         for idx in 0..node_count {
             let seed = build_node(&root_path, idx, &remote_dir);
-            // Write user config before init, since init autostarts the daemon.
+            // Write user config before init so the daemon boots with WAL limits.
             write_replication_user_config(
                 &seed.config_dir,
                 &seed.listen_addr,
@@ -129,6 +129,11 @@ impl ReplRig {
                 options.wal_segment_max_bytes,
             )
             .expect("write initial user replication config");
+            seeds.push(seed);
+        }
+
+        let mut nodes = Vec::with_capacity(node_count);
+        for seed in seeds {
             let (store_id, replica_id) = bootstrap_replica(&seed, store_id_override);
             if let Some(existing) = resolved_store_id {
                 assert_eq!(
