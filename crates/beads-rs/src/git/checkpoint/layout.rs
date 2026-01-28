@@ -1,5 +1,7 @@
 //! Checkpoint path layout helpers.
 
+use std::fmt;
+
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -57,6 +59,12 @@ impl Serialize for CheckpointShardPath {
         S: Serializer,
     {
         serializer.serialize_str(&self.to_path())
+    }
+}
+
+impl fmt::Display for CheckpointShardPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_path())
     }
 }
 
@@ -153,4 +161,35 @@ pub fn parse_shard_path(path: &str) -> Option<CheckpointShardPath> {
         kind,
         shard,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shard_name_parse_rejects_invalid() {
+        assert!(ShardName::parse("zz.jsonl").is_none());
+        assert!(ShardName::parse("0.jsonl").is_none());
+        assert!(ShardName::parse("00.json").is_none());
+    }
+
+    #[test]
+    fn checkpoint_shard_path_round_trips_via_serde() {
+        let path = CheckpointShardPath::new(
+            NamespaceId::core(),
+            CheckpointFileKind::State,
+            shard_name(10),
+        );
+        let json = serde_json::to_string(&path).unwrap();
+        let parsed: CheckpointShardPath = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, path);
+    }
+
+    #[test]
+    fn checkpoint_shard_path_rejects_invalid_path() {
+        let err = serde_json::from_str::<CheckpointShardPath>("\"namespaces/core/state/zz.jsonl\"")
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid checkpoint shard path"));
+    }
 }

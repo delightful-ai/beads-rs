@@ -176,7 +176,7 @@ impl CheckpointCache {
         };
         let mut files = BTreeMap::new();
         for (path, manifest_entry) in &entry.manifest.files {
-            let file_path = entry.dir.join(path);
+            let file_path = entry.dir.join(path.to_path());
             let bytes = fs::read(&file_path).map_err(|source| io_err(&file_path, source))?;
             if bytes.len() as u64 != manifest_entry.bytes {
                 return Err(CheckpointCacheError::InvalidEntry {
@@ -246,7 +246,7 @@ fn write_checkpoint_tree(
     write_bytes(&dir.join(MANIFEST_FILE), &manifest_bytes)?;
 
     for (path, payload) in &export.files {
-        let file_path = dir.join(path);
+        let file_path = dir.join(path.to_path());
         maybe_throttle(throttle, payload.bytes.len());
         write_bytes(&file_path, payload.bytes.as_ref())?;
     }

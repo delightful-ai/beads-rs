@@ -396,19 +396,26 @@ impl StoreRuntime {
             .checkpoint_dirty_shards
             .entry(namespace.clone())
             .or_default();
+        let Some(state) = self.state.get(namespace) else {
+            return;
+        };
         for bead_id in &outcome.changed_beads {
-            let shard = shard_for_bead(bead_id);
-            dirty.insert(CheckpointShardPath::new(
-                namespace.clone(),
-                CheckpointFileKind::State,
-                shard,
-            ));
-            let tombstone_shard = shard_for_tombstone(bead_id);
-            dirty.insert(CheckpointShardPath::new(
-                namespace.clone(),
-                CheckpointFileKind::Tombstones,
-                tombstone_shard,
-            ));
+            if state.bead_view(bead_id).is_some() {
+                let shard = shard_for_bead(bead_id);
+                dirty.insert(CheckpointShardPath::new(
+                    namespace.clone(),
+                    CheckpointFileKind::State,
+                    shard,
+                ));
+            }
+            if state.get_tombstone(bead_id).is_some() || state.has_collision_tombstone(bead_id) {
+                let tombstone_shard = shard_for_tombstone(bead_id);
+                dirty.insert(CheckpointShardPath::new(
+                    namespace.clone(),
+                    CheckpointFileKind::Tombstones,
+                    tombstone_shard,
+                ));
+            }
         }
         for dep_key in &outcome.changed_deps {
             let shard = shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind());
@@ -419,18 +426,24 @@ impl StoreRuntime {
             ));
         }
         for note_key in &outcome.changed_notes {
-            let shard = shard_for_bead(&note_key.bead_id);
-            dirty.insert(CheckpointShardPath::new(
-                namespace.clone(),
-                CheckpointFileKind::State,
-                shard,
-            ));
-            let tombstone_shard = shard_for_tombstone(&note_key.bead_id);
-            dirty.insert(CheckpointShardPath::new(
-                namespace.clone(),
-                CheckpointFileKind::Tombstones,
-                tombstone_shard,
-            ));
+            if state.bead_view(&note_key.bead_id).is_some() {
+                let shard = shard_for_bead(&note_key.bead_id);
+                dirty.insert(CheckpointShardPath::new(
+                    namespace.clone(),
+                    CheckpointFileKind::State,
+                    shard,
+                ));
+            }
+            if state.get_tombstone(&note_key.bead_id).is_some()
+                || state.has_collision_tombstone(&note_key.bead_id)
+            {
+                let tombstone_shard = shard_for_tombstone(&note_key.bead_id);
+                dirty.insert(CheckpointShardPath::new(
+                    namespace.clone(),
+                    CheckpointFileKind::Tombstones,
+                    tombstone_shard,
+                ));
+            }
         }
     }
 
@@ -1310,11 +1323,6 @@ mod tests {
             CheckpointFileKind::State,
             shard_for_bead(&bead_id),
         );
-        let tomb_path = CheckpointShardPath::new(
-            namespace.clone(),
-            CheckpointFileKind::Tombstones,
-            shard_for_tombstone(&bead_id),
-        );
         let dep_path = CheckpointShardPath::new(
             namespace.clone(),
             CheckpointFileKind::Deps,
@@ -1322,12 +1330,8 @@ mod tests {
         );
         let mut expected_paths = BTreeSet::new();
         expected_paths.insert(state_path);
-        expected_paths.insert(tomb_path);
         expected_paths.insert(dep_path);
-        let expected_dirty: BTreeSet<String> =
-            expected_paths.iter().map(|path| path.to_path()).collect();
-
-        assert_eq!(snapshot.dirty_shards, expected_dirty);
+        assert_eq!(snapshot.dirty_shards, expected_paths);
         assert!(!runtime.checkpoint_dirty_shards.contains_key(&namespace));
 
         runtime.rollback_checkpoint_dirty_shards("core");

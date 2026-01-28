@@ -66,6 +66,7 @@ impl CheckpointManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::checkpoint::{CheckpointFileKind, shard_name};
     use uuid::Uuid;
 
     #[test]
@@ -73,7 +74,11 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_u128(1));
         let mut files = BTreeMap::new();
         files.insert(
-            "namespaces/core/state/00.jsonl".to_string(),
+            CheckpointShardPath::new(
+                NamespaceId::core(),
+                CheckpointFileKind::State,
+                shard_name(0),
+            ),
             ManifestFile {
                 sha256: ContentHash::from_bytes([2u8; 32]),
                 bytes: 12,

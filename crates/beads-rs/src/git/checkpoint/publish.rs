@@ -294,7 +294,8 @@ fn build_checkpoint_tree(
     insert_path(&mut root, MANIFEST_FILE, manifest_oid)?;
     for (path, payload) in &export.files {
         let oid = repo.blob(payload.bytes.as_ref())?;
-        insert_path(&mut root, path, oid)?;
+        let full_path = path.to_path();
+        insert_path(&mut root, &full_path, oid)?;
     }
 
     build_tree(repo, &root)
@@ -770,7 +771,8 @@ fn read_checkpoint_export_at_oid(
 
     let mut files = BTreeMap::new();
     for path in manifest.files.keys() {
-        let bytes = read_blob_bytes(repo, &tree, path)?;
+        let full_path = path.to_path();
+        let bytes = read_blob_bytes(repo, &tree, &full_path)?;
         files.insert(
             path.clone(),
             super::types::CheckpointShardPayload {

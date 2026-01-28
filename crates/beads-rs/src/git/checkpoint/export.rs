@@ -546,8 +546,8 @@ mod tests {
         crate::core::Bead::new(core, fields)
     }
 
-    fn find_two_ids_same_shard() -> (BeadId, BeadId, String) {
-        let mut seen: BTreeMap<String, BeadId> = BTreeMap::new();
+    fn find_two_ids_same_shard() -> (BeadId, BeadId, ShardName) {
+        let mut seen: BTreeMap<ShardName, BeadId> = BTreeMap::new();
         for i in 0..10_000 {
             let id = BeadId::parse(&format!("beads-rs-{:04}", i)).expect("bead id");
             let shard = shard_for_bead(&id);
@@ -559,7 +559,7 @@ mod tests {
     }
 
     fn find_two_ids_different_shards() -> (BeadId, BeadId) {
-        let mut first: Option<(BeadId, String)> = None;
+        let mut first: Option<(BeadId, ShardName)> = None;
         for i in 0..10_000 {
             let id = BeadId::parse(&format!("beads-rs-{:04}", i)).expect("bead id");
             let shard = shard_for_bead(&id);
@@ -700,10 +700,10 @@ mod tests {
             Some(&2)
         );
 
-        let state_path = shard_path(
-            &namespace,
+        let state_path = CheckpointShardPath::new(
+            namespace.clone(),
             CheckpointFileKind::State,
-            &shard_for_bead(&bead_id),
+            shard_for_bead(&bead_id),
         );
         let state_payload = snapshot.shards.get(&state_path).expect("state shard");
         let view = core_state.bead_view(&bead_id).expect("bead view");
@@ -715,20 +715,20 @@ mod tests {
         expected.push(b'\n');
         assert_eq!(state_payload.bytes.as_ref(), expected);
 
-        let tomb_path = shard_path(
-            &namespace,
+        let tomb_path = CheckpointShardPath::new(
+            namespace.clone(),
             CheckpointFileKind::Tombstones,
-            &shard_for_tombstone(&bead_id),
+            shard_for_tombstone(&bead_id),
         );
         let tomb_payload = snapshot.shards.get(&tomb_path).expect("tombstone shard");
         let mut expected = to_canon_json_bytes(&wire_tombstone(&tombstone)).unwrap();
         expected.push(b'\n');
         assert_eq!(tomb_payload.bytes.as_ref(), expected);
 
-        let dep_path = shard_path(
-            &namespace,
+        let dep_path = CheckpointShardPath::new(
+            namespace.clone(),
             CheckpointFileKind::Deps,
-            &shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind()),
+            shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind()),
         );
         let dep_payload = snapshot.shards.get(&dep_path).expect("dep shard");
         let mut expected = to_canon_json_bytes(&WireDepStoreV1 {
@@ -794,9 +794,41 @@ mod tests {
         })
         .expect("snapshot");
 
-        let expected_dirty: BTreeSet<String> =
-            expected_paths.iter().map(|path| path.to_path()).collect();
-        assert_eq!(custom.dirty_shards, expected_dirty);
+        assert_eq!(custom.dirty_shards, expected_paths);
+    }
+
+    #[test]
+    fn snapshot_rejects_unknown_dirty_shard() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
+        let watermarks = Watermarks::<Durable>::new();
+        let state = StoreState::new();
+        let mut dirty = BTreeSet::new();
+        dirty.insert(CheckpointShardPath::new(
+            namespace.clone(),
+            CheckpointFileKind::State,
+            shard_name(0),
+        ));
+
+        let err = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![namespace.clone()],
+            store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
+            store_epoch: StoreEpoch::new(0),
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: ContentHash::from_bytes([9u8; 32]),
+            roster_hash: None,
+            dirty_shards: Some(dirty),
+            state: &state,
+            watermarks_durable: &watermarks,
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            CheckpointSnapshotError::DirtyShardUnknown { .. }
+        ));
     }
 
     #[test]
@@ -820,10 +852,10 @@ mod tests {
         })
         .expect("export");
 
-        let state_path = shard_path(
-            &namespace,
+        let state_path = CheckpointShardPath::new(
+            namespace.clone(),
             CheckpointFileKind::State,
-            &shard_for_bead(&bead_id),
+            shard_for_bead(&bead_id),
         );
         let file = export.files.get(&state_path).expect("state file");
         let manifest_entry = export
@@ -878,15 +910,15 @@ mod tests {
         .expect("export");
 
         let mut next_snapshot = snapshot.clone();
-        let dirty_path = shard_path(
-            &namespace,
+        let dirty_path = CheckpointShardPath::new(
+            namespace.clone(),
             CheckpointFileKind::State,
-            &shard_for_bead(&id_dirty),
+            shard_for_bead(&id_dirty),
         );
-        let clean_path = shard_path(
-            &namespace,
+        let clean_path = CheckpointShardPath::new(
+            namespace.clone(),
             CheckpointFileKind::State,
-            &shard_for_bead(&id_clean),
+            shard_for_bead(&id_clean),
         );
 
         next_snapshot.dirty_shards = [dirty_path.clone()].into_iter().collect();
@@ -940,7 +972,7 @@ mod tests {
         })
         .expect("export");
 
-        let path = shard_path(&namespace, CheckpointFileKind::State, &shard);
+        let path = CheckpointShardPath::new(namespace.clone(), CheckpointFileKind::State, shard);
         let payload = export.files.get(&path).expect("state shard");
 
         let mut ids = vec![id_a.clone(), id_b.clone()];

@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use beads_rs::core::{ContentHash, Dot};
 use beads_rs::git::checkpoint::{
     CheckpointExport, CheckpointExportInput, CheckpointFileKind, CheckpointManifest,
-    CheckpointMeta, CheckpointShardPayload, CheckpointSnapshot, CheckpointSnapshotInput,
-    SHARD_COUNT, export_checkpoint, shard_name, shard_path,
+    CheckpointMeta, CheckpointShardPath, CheckpointShardPayload, CheckpointSnapshot,
+    CheckpointSnapshotInput, SHARD_COUNT, export_checkpoint, shard_name,
 };
 use beads_rs::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, Durable,
@@ -135,23 +135,26 @@ pub fn fixture_multi_namespace() -> CheckpointFixture {
     ))
 }
 
-pub fn state_shard_paths(namespace: &NamespaceId) -> Vec<String> {
+pub fn state_shard_paths(namespace: &NamespaceId) -> Vec<CheckpointShardPath> {
     shard_paths(namespace, CheckpointFileKind::State)
 }
 
-pub fn tombstone_shard_paths(namespace: &NamespaceId) -> Vec<String> {
+pub fn tombstone_shard_paths(namespace: &NamespaceId) -> Vec<CheckpointShardPath> {
     shard_paths(namespace, CheckpointFileKind::Tombstones)
 }
 
-pub fn dep_shard_paths(namespace: &NamespaceId) -> Vec<String> {
+pub fn dep_shard_paths(namespace: &NamespaceId) -> Vec<CheckpointShardPath> {
     shard_paths(namespace, CheckpointFileKind::Deps)
 }
 
-pub fn shard_paths(namespace: &NamespaceId, kind: CheckpointFileKind) -> Vec<String> {
+pub fn shard_paths(namespace: &NamespaceId, kind: CheckpointFileKind) -> Vec<CheckpointShardPath> {
     let mut paths = Vec::with_capacity(SHARD_COUNT);
     for i in 0..SHARD_COUNT {
-        let shard = shard_name(i as u8);
-        paths.push(shard_path(namespace, kind, &shard));
+        paths.push(CheckpointShardPath::new(
+            namespace.clone(),
+            kind,
+            shard_name(i as u8),
+        ));
     }
     paths
 }
@@ -161,7 +164,7 @@ pub fn build_manifest_from_files(
     store_id: beads_rs::StoreId,
     store_epoch: beads_rs::StoreEpoch,
     namespaces: Vec<NamespaceId>,
-    files: &BTreeMap<String, CheckpointShardPayload>,
+    files: &BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
 ) -> CheckpointManifest {
     let mut manifest_files = BTreeMap::new();
     for (path, payload) in files {
@@ -185,7 +188,7 @@ pub fn build_manifest_from_files(
 
 pub fn assert_manifest_files(
     manifest: &CheckpointManifest,
-    files: &BTreeMap<String, CheckpointShardPayload>,
+    files: &BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
 ) {
     let mut errors = Vec::new();
     for (path, entry) in &manifest.files {
