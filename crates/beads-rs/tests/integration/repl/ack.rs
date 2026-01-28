@@ -295,6 +295,6 @@ fn repl_want_reads_from_wal() {
         .expect("read wal range");
 
     assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0].eid.origin_seq.get(), 1);
-    assert_eq!(frames[1].eid.origin_seq.get(), 2);
+    assert_eq!(frames[0].eid().origin_seq.get(), 1);
+    assert_eq!(frames[1].eid().origin_seq.get(), 2);
 }

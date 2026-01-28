@@ -70,8 +70,8 @@ fn wal_range_reader_returns_contiguous_frames() {
         .read_range(&namespace, &origin, Seq0::ZERO, limits.max_frame_bytes)
         .expect("read range");
     assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0].eid.origin_seq, record1.header().origin_seq);
-    assert_eq!(frames[1].eid.origin_seq, record2.header().origin_seq);
+    assert_eq!(frames[0].eid().origin_seq, record1.header().origin_seq);
+    assert_eq!(frames[1].eid().origin_seq, record2.header().origin_seq);
 }
 
 #[test]
