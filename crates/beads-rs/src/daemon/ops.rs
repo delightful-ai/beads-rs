@@ -644,22 +644,47 @@ pub trait BeadPatchDaemonExt {
     fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError>;
 }
 
+#[derive(Clone, Debug)]
+pub struct ValidatedSurfaceBeadPatch {
+    inner: BeadPatch,
+}
+
+impl ValidatedSurfaceBeadPatch {
+    pub fn as_inner(&self) -> &BeadPatch {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> BeadPatch {
+        self.inner
+    }
+}
+
+impl std::ops::Deref for ValidatedSurfaceBeadPatch {
+    type Target = BeadPatch;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<BeadPatch> for ValidatedSurfaceBeadPatch {
+    fn as_ref(&self) -> &BeadPatch {
+        &self.inner
+    }
+}
+
+impl TryFrom<BeadPatch> for ValidatedSurfaceBeadPatch {
+    type Error = OpError;
+
+    fn try_from(patch: BeadPatch) -> Result<Self, Self::Error> {
+        validate_surface_patch(&patch)?;
+        Ok(Self { inner: patch })
+    }
+}
+
 impl BeadPatchDaemonExt for BeadPatch {
     fn validate_for_daemon(&self) -> Result<(), OpError> {
-        if matches!(self.title, Patch::Clear) {
-            return Err(OpError::ValidationFailed {
-                field: "title".into(),
-                reason: "cannot clear required field".into(),
-            });
-        }
-        if matches!(self.description, Patch::Clear) {
-            return Err(OpError::ValidationFailed {
-                field: "description".into(),
-                reason: "cannot clear required field".into(),
-            });
-        }
-
-        Ok(())
+        validate_surface_patch(self)
     }
 
     fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError> {
@@ -707,6 +732,23 @@ impl BeadPatchDaemonExt for BeadPatch {
 
         Ok(())
     }
+}
+
+fn validate_surface_patch(patch: &BeadPatch) -> Result<(), OpError> {
+    if matches!(patch.title, Patch::Clear) {
+        return Err(OpError::ValidationFailed {
+            field: "title".into(),
+            reason: "cannot clear required field".into(),
+        });
+    }
+    if matches!(patch.description, Patch::Clear) {
+        return Err(OpError::ValidationFailed {
+            field: "description".into(),
+            reason: "cannot clear required field".into(),
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

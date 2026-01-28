@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
-use super::ops::{MapLiveError, OpError};
+use super::ops::{MapLiveError, OpError, ValidatedSurfaceBeadPatch};
 use super::remote::RemoteUrl;
 use crate::core::{
     ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
@@ -22,7 +22,7 @@ use crate::daemon::ipc::{
     IdPayload, LabelsPayload, LeasePayload, ParentPayload, UpdatePayload,
 };
 use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
-use beads_surface::ops::{BeadPatch, OpenInProgress, Patch};
+use beads_surface::ops::{OpenInProgress, Patch};
 
 #[derive(Clone, Debug)]
 pub struct MutationContext {
@@ -88,63 +88,6 @@ pub struct SequencedEvent {
 }
 
 #[derive(Clone, Debug)]
-pub struct ParsedBeadPatch {
-    pub title: Patch<String>,
-    pub description: Patch<String>,
-    pub design: Patch<String>,
-    pub acceptance_criteria: Patch<String>,
-    pub priority: Patch<Priority>,
-    pub bead_type: Patch<BeadType>,
-    pub external_ref: Patch<String>,
-    pub source_repo: Patch<String>,
-    pub estimated_minutes: Patch<u32>,
-    pub status: Patch<OpenInProgress>,
-}
-
-impl ParsedBeadPatch {
-    fn parse(raw: BeadPatch) -> Result<Self, OpError> {
-        let BeadPatch {
-            title,
-            description,
-            design,
-            acceptance_criteria,
-            priority,
-            bead_type,
-            external_ref,
-            source_repo,
-            estimated_minutes,
-            status,
-        } = raw;
-
-        if matches!(title, Patch::Clear) {
-            return Err(OpError::ValidationFailed {
-                field: "title".into(),
-                reason: "cannot clear required field".into(),
-            });
-        }
-        if matches!(description, Patch::Clear) {
-            return Err(OpError::ValidationFailed {
-                field: "description".into(),
-                reason: "cannot clear required field".into(),
-            });
-        }
-
-        Ok(Self {
-            title,
-            description,
-            design,
-            acceptance_criteria,
-            priority,
-            bead_type,
-            external_ref,
-            source_repo,
-            estimated_minutes,
-            status,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
 pub enum ParsedMutationRequest {
     Create {
         id: Option<BeadId>,
@@ -163,7 +106,7 @@ pub enum ParsedMutationRequest {
     },
     Update {
         id: BeadId,
-        patch: ParsedBeadPatch,
+        patch: ValidatedSurfaceBeadPatch,
         cas: Option<String>,
     },
     AddLabels {
@@ -267,7 +210,7 @@ impl ParsedMutationRequest {
 
     pub fn parse_update(payload: UpdatePayload) -> Result<Self, OpError> {
         let UpdatePayload { id, patch, cas } = payload;
-        let patch = ParsedBeadPatch::parse(patch)?;
+        let patch = ValidatedSurfaceBeadPatch::try_from(patch)?;
         Ok(ParsedMutationRequest::Update { id, patch, cas })
     }
 
@@ -943,7 +886,7 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         id: BeadId,
-        patch: ParsedBeadPatch,
+        patch: ValidatedSurfaceBeadPatch,
         cas: Option<String>,
     ) -> Result<PlannedDelta, OpError> {
         state.require_live(&id).map_live_err(&id)?;
@@ -1706,7 +1649,7 @@ fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpEr
 
 fn normalize_patch(
     id: &BeadId,
-    patch: &ParsedBeadPatch,
+    patch: &ValidatedSurfaceBeadPatch,
 ) -> Result<(BeadPatchWireV1, CanonicalBeadPatch), OpError> {
     let mut wire = BeadPatchWireV1::new(id.clone());
 
@@ -1987,6 +1930,7 @@ mod tests {
         Bead, BeadCore, BeadFields, Claim, Dot, Lww, ReplicaId, Stamp, StoreId, Workflow,
         WriteStamp,
     };
+    use beads_surface::ops::BeadPatch;
 
     fn actor_id(actor: &str) -> ActorId {
         ActorId::new(actor).unwrap()
@@ -2209,6 +2153,37 @@ mod tests {
         assert!(matches!(
             err,
             OpError::ValidationFailed { field, .. } if field == "bead_patch"
+        ));
+    }
+
+    #[test]
+    fn update_rejects_clearing_required_fields() {
+        let mut patch = BeadPatch::default();
+        patch.title = Patch::Clear;
+
+        let err = ParsedMutationRequest::parse_update(UpdatePayload {
+            id: BeadId::parse("bd-required").unwrap(),
+            patch,
+            cas: None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "title"
+        ));
+
+        let mut patch = BeadPatch::default();
+        patch.description = Patch::Clear;
+
+        let err = ParsedMutationRequest::parse_update(UpdatePayload {
+            id: BeadId::parse("bd-required").unwrap(),
+            patch,
+            cas: None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "description"
         ));
     }
 
