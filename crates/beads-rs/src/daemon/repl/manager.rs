@@ -1455,7 +1455,7 @@ mod tests {
         }
         let events = received_events.expect("events");
         assert_eq!(events.events.len(), 1);
-        assert_eq!(events.events[0].eid.namespace, NamespaceId::core());
+        assert_eq!(events.events[0].eid().namespace, NamespaceId::core());
 
         handle.shutdown();
     }
@@ -1783,7 +1783,7 @@ mod tests {
         }
         let events = received_events.expect("events");
         assert_eq!(events.events.len(), 1);
-        assert_eq!(events.events[0].eid.namespace, NamespaceId::core());
+        assert_eq!(events.events[0].eid().namespace, NamespaceId::core());
 
         handle.shutdown();
     }

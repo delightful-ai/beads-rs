@@ -2330,8 +2330,8 @@ mod tests {
 
         let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
-        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
-        let e2_sha = e2.sha256;
+        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256()));
+        let e2_sha = e2.sha256();
 
         let (_session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
@@ -2400,7 +2400,7 @@ mod tests {
 
         let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
-        let e3 = make_event(identity, NamespaceId::core(), origin, 3, Some(e1.sha256));
+        let e3 = make_event(identity, NamespaceId::core(), origin, 3, Some(e1.sha256()));
 
         let (_session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
@@ -2481,7 +2481,7 @@ mod tests {
 
         let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
-        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
+        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256()));
 
         let (session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
