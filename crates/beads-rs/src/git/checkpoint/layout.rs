@@ -1,5 +1,8 @@
 //! Checkpoint path layout helpers.
 
+use serde::de;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 use crate::core::{BeadId, DepKind, NamespaceId, sha256_bytes};
 
 pub const META_FILE: &str = "meta.json";
@@ -31,11 +34,11 @@ impl CheckpointFileKind {
 pub struct CheckpointShardPath {
     pub namespace: NamespaceId,
     pub kind: CheckpointFileKind,
-    pub shard: String,
+    pub shard: ShardName,
 }
 
 impl CheckpointShardPath {
-    pub fn new(namespace: NamespaceId, kind: CheckpointFileKind, shard: String) -> Self {
+    pub fn new(namespace: NamespaceId, kind: CheckpointFileKind, shard: ShardName) -> Self {
         Self {
             namespace,
             kind,
@@ -48,19 +51,59 @@ impl CheckpointShardPath {
     }
 }
 
-pub fn shard_name(byte: u8) -> String {
-    format!("{:02x}.jsonl", byte)
+impl Serialize for CheckpointShardPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_path())
+    }
 }
 
-pub fn shard_for_bead(id: &BeadId) -> String {
+impl<'de> Deserialize<'de> for CheckpointShardPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        parse_shard_path(&raw)
+            .ok_or_else(|| de::Error::custom(format!("invalid checkpoint shard path: {}", raw)))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ShardName(String);
+
+impl ShardName {
+    pub fn parse(raw: &str) -> Option<Self> {
+        if !raw.ends_with(".jsonl") {
+            return None;
+        }
+        let stem = raw.trim_end_matches(".jsonl");
+        if stem.len() != 2 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(Self(raw.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub fn shard_name(byte: u8) -> ShardName {
+    ShardName(format!("{:02x}.jsonl", byte))
+}
+
+pub fn shard_for_bead(id: &BeadId) -> ShardName {
     shard_for_key(id.as_str().as_bytes())
 }
 
-pub fn shard_for_tombstone(id: &BeadId) -> String {
+pub fn shard_for_tombstone(id: &BeadId) -> ShardName {
     shard_for_key(id.as_str().as_bytes())
 }
 
-pub fn shard_for_dep(from: &BeadId, to: &BeadId, kind: DepKind) -> String {
+pub fn shard_for_dep(from: &BeadId, to: &BeadId, kind: DepKind) -> ShardName {
     let mut buf =
         Vec::with_capacity(from.as_str().len() + to.as_str().len() + kind.as_str().len() + 2);
     buf.extend_from_slice(from.as_str().as_bytes());
@@ -71,18 +114,18 @@ pub fn shard_for_dep(from: &BeadId, to: &BeadId, kind: DepKind) -> String {
     shard_for_key(&buf)
 }
 
-fn shard_for_key(key: &[u8]) -> String {
+fn shard_for_key(key: &[u8]) -> ShardName {
     let hash = sha256_bytes(key);
     shard_name(hash.as_bytes()[0])
 }
 
-pub fn shard_path(namespace: &NamespaceId, kind: CheckpointFileKind, shard: &str) -> String {
+pub fn shard_path(namespace: &NamespaceId, kind: CheckpointFileKind, shard: &ShardName) -> String {
     format!(
         "{}/{}/{}/{}",
         NAMESPACES_DIR,
         namespace.as_str(),
         kind.dir_name(),
-        shard
+        shard.as_str()
     )
 }
 
@@ -104,16 +147,10 @@ pub fn parse_shard_path(path: &str) -> Option<CheckpointShardPath> {
         DEPS_DIR => CheckpointFileKind::Deps,
         _ => return None,
     };
-    if !file.ends_with(".jsonl") {
-        return None;
-    }
-    let stem = file.trim_end_matches(".jsonl");
-    if stem.len() != 2 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
+    let shard = ShardName::parse(file)?;
     Some(CheckpointShardPath {
         namespace,
         kind,
-        shard: file.to_string(),
+        shard,
     })
 }

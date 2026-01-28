@@ -27,8 +27,8 @@ pub use import::{
 };
 pub use layout::{
     CheckpointFileKind, CheckpointShardPath, DEPS_DIR, MANIFEST_FILE, META_FILE, NAMESPACES_DIR,
-    SHARD_COUNT, STATE_DIR, TOMBSTONES_DIR, parse_shard_path, shard_for_bead, shard_for_dep,
-    shard_for_tombstone, shard_name, shard_path,
+    SHARD_COUNT, STATE_DIR, ShardName, TOMBSTONES_DIR, parse_shard_path, shard_for_bead,
+    shard_for_dep, shard_for_tombstone, shard_name, shard_path,
 };
 pub use manifest::{CheckpointManifest, ManifestFile, ParsedCheckpointManifest};
 pub use meta::{

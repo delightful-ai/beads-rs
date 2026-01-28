@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
+use super::layout::CheckpointShardPath;
 use crate::core::{ContentHash, NamespaceId, StoreEpoch, StoreId, sha256_bytes};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,7 +35,7 @@ pub struct CheckpointManifest {
     pub store_id: StoreId,
     pub store_epoch: StoreEpoch,
     pub namespaces: Vec<NamespaceId>,
-    pub files: BTreeMap<String, ManifestFile>,
+    pub files: BTreeMap<CheckpointShardPath, ManifestFile>,
 }
 
 impl CheckpointManifest {

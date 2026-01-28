@@ -202,27 +202,16 @@ pub fn import_checkpoint(
         manifest.manifest().namespaces.iter().cloned().collect();
 
     for (rel_path, entry) in &manifest.manifest().files {
-        validate_rel_path(rel_path)?;
-        if rel_path == META_FILE || rel_path == MANIFEST_FILE {
-            return Err(CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
-            });
-        }
-
-        let full_path = dir.join(rel_path);
+        let full_path = dir.join(rel_path.to_path());
         if !full_path.exists() {
             return Err(CheckpointImportError::MissingFile {
                 path: full_path.clone(),
             });
         }
 
-        let shard =
-            parse_shard_path(rel_path).ok_or_else(|| CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
-            })?;
-        if !allowed_namespaces.contains(&shard.namespace) {
+        if !allowed_namespaces.contains(&rel_path.namespace) {
             return Err(CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
+                path: rel_path.to_path(),
             });
         }
 
@@ -234,12 +223,22 @@ pub fn import_checkpoint(
             });
         }
 
-        let stats = match shard.kind {
+        let mut prev_bead: Option<BeadId> = None;
+        let mut prev_tombstone: Option<crate::core::TombstoneKey> = None;
+        let stats = match rel_path.kind {
             CheckpointFileKind::State => parse_jsonl_file::<WireBeadFull, _>(
                 &full_path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    ensure_strictly_increasing(
+                        &mut prev_bead,
+                        wire.id.clone(),
+                        &full_path,
+                        line.line_no,
+                        "state",
+                    )?;
+                    ensure_notes_sorted(&full_path, line.line_no, &wire.notes)?;
                     let ns = line.namespace.clone();
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
@@ -273,9 +272,17 @@ pub fn import_checkpoint(
             )?,
             CheckpointFileKind::Tombstones => parse_jsonl_file::<WireTombstoneV1, _>(
                 &full_path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    let key = tombstone_key_from_wire(wire, &full_path, line.line_no)?;
+                    ensure_strictly_increasing(
+                        &mut prev_tombstone,
+                        key,
+                        &full_path,
+                        line.line_no,
+                        "tombstones",
+                    )?;
                     let ns = line.namespace.clone();
                     let tomb = tombstone_from_wire(&wire, &full_path, line)?;
                     state_for_namespace(&mut state, &ns).insert_tombstone(tomb);
@@ -284,9 +291,10 @@ pub fn import_checkpoint(
             )?,
             CheckpointFileKind::Deps => parse_jsonl_file::<WireDepStoreV1, _>(
                 &full_path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    ensure_dep_entry_order(&wire, &full_path, line.line_no)?;
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &full_path, line)?;
                     let entry = dep_stores.entry(ns.clone()).or_default();

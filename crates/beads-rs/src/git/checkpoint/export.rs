@@ -9,8 +9,8 @@ use thiserror::Error;
 use super::CHECKPOINT_FORMAT_VERSION;
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{
-    CheckpointFileKind, CheckpointShardPath, shard_for_bead, shard_for_dep, shard_for_tombstone,
-    shard_name, shard_path,
+    CheckpointFileKind, CheckpointShardPath, ShardName, shard_for_bead, shard_for_dep,
+    shard_for_tombstone, shard_name,
 };
 use super::manifest::{CheckpointManifest, ManifestFile};
 use super::meta::{CheckpointMeta, IncludedHeads, IncludedWatermarks};
@@ -27,6 +27,8 @@ use crate::core::{
 pub enum CheckpointSnapshotError {
     #[error("checkpoint snapshot unsupported namespace {namespace}")]
     NamespaceUnsupported { namespace: NamespaceId },
+    #[error("checkpoint snapshot dirty shard not in snapshot: {path}")]
+    DirtyShardUnknown { path: CheckpointShardPath },
     #[error(transparent)]
     CanonJson(#[from] CanonJsonError),
 }
@@ -35,7 +37,7 @@ pub enum CheckpointSnapshotError {
 pub struct CheckpointExport {
     pub manifest: CheckpointManifest,
     pub meta: CheckpointMeta,
-    pub files: BTreeMap<String, CheckpointShardPayload>,
+    pub files: BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
 }
 
 #[derive(Debug, Error)]
@@ -140,14 +142,14 @@ pub fn build_snapshot_from_state(
     namespaces.sort();
     namespaces.dedup();
 
-    let mut shards: BTreeMap<String, CheckpointShardPayload> = BTreeMap::new();
+    let mut shards: BTreeMap<CheckpointShardPath, CheckpointShardPayload> = BTreeMap::new();
     for namespace in &namespaces {
         let ns_shards = build_namespace_shards(namespace, state)?;
         shards.extend(ns_shards);
     }
 
     let dirty_shards = match dirty_shards {
-        Some(paths) => paths.into_iter().map(|path| path.to_path()).collect(),
+        Some(paths) => ensure_dirty_shards(&shards, paths)?,
         None => shards.keys().cloned().collect(),
     };
 
@@ -186,7 +188,7 @@ pub fn build_snapshot(
     namespaces.sort();
     namespaces.dedup();
 
-    let mut shards: BTreeMap<String, CheckpointShardPayload> = BTreeMap::new();
+    let mut shards: BTreeMap<CheckpointShardPath, CheckpointShardPayload> = BTreeMap::new();
     for namespace in &namespaces {
         let ns_shards = build_namespace_shards(namespace, state)?;
         shards.extend(ns_shards);
@@ -195,7 +197,7 @@ pub fn build_snapshot(
     let included = included_watermarks(watermarks_durable, &namespaces);
     let included_heads = included_heads(watermarks_durable, &namespaces);
     let dirty_shards = match dirty_shards {
-        Some(paths) => paths.into_iter().map(|path| path.to_path()).collect(),
+        Some(paths) => ensure_dirty_shards(&shards, paths)?,
         None => shards.keys().cloned().collect(),
     };
 
@@ -300,7 +302,7 @@ fn normalize_namespaces(namespaces: &[NamespaceId]) -> Vec<NamespaceId> {
 fn assemble_export_files(
     snapshot: &CheckpointSnapshot,
     previous: Option<&CheckpointExport>,
-) -> BTreeMap<String, CheckpointShardPayload> {
+) -> BTreeMap<CheckpointShardPath, CheckpointShardPayload> {
     let mut files = BTreeMap::new();
 
     if let Some(previous) = previous {
@@ -331,7 +333,7 @@ fn assemble_export_files(
 
 fn build_manifest(
     snapshot: &CheckpointSnapshot,
-    files: &BTreeMap<String, CheckpointShardPayload>,
+    files: &BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
 ) -> CheckpointManifest {
     let mut manifest_files = BTreeMap::new();
     for (path, payload) in files {
@@ -388,15 +390,15 @@ fn included_heads(
 fn build_namespace_shards(
     namespace: &NamespaceId,
     state: &StoreState,
-) -> Result<BTreeMap<String, CheckpointShardPayload>, CheckpointSnapshotError> {
+) -> Result<BTreeMap<CheckpointShardPath, CheckpointShardPayload>, CheckpointSnapshotError> {
     let Some(state) = state.get(namespace) else {
         return Ok(BTreeMap::new());
     };
-    let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut payloads: BTreeMap<CheckpointShardPath, Vec<u8>> = BTreeMap::new();
 
     for (id, _) in state.iter_live() {
         let shard = shard_for_bead(id);
-        let path = shard_path(namespace, CheckpointFileKind::State, &shard);
+        let path = CheckpointShardPath::new(namespace.clone(), CheckpointFileKind::State, shard);
         let Some(view) = state.bead_view(id) else {
             continue;
         };
@@ -408,13 +410,14 @@ fn build_namespace_shards(
     for (key, tombstone) in state.iter_tombstones() {
         let TombstoneKey { id, .. } = key;
         let shard = shard_for_tombstone(&id);
-        let path = shard_path(namespace, CheckpointFileKind::Tombstones, &shard);
+        let path =
+            CheckpointShardPath::new(namespace.clone(), CheckpointFileKind::Tombstones, shard);
         let wire = wire_tombstone(tombstone);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
     let dep_store = state.dep_store();
-    let mut dep_entries_by_shard: BTreeMap<String, Vec<WireDepEntryV1>> = BTreeMap::new();
+    let mut dep_entries_by_shard: BTreeMap<ShardName, Vec<WireDepEntryV1>> = BTreeMap::new();
     for key in dep_store.values() {
         let mut dots: Vec<Dot> = dep_store
             .dots_for(key)
@@ -444,7 +447,7 @@ fn build_namespace_shards(
                 .stamp()
                 .map(|stamp| (WireStamp::from(&stamp.at), stamp.by.clone())),
         };
-        let path = shard_path(namespace, CheckpointFileKind::Deps, &shard);
+        let path = CheckpointShardPath::new(namespace.clone(), CheckpointFileKind::Deps, shard);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
@@ -465,8 +468,8 @@ fn build_namespace_shards(
 }
 
 fn push_jsonl_line<T: Serialize>(
-    payloads: &mut BTreeMap<String, Vec<u8>>,
-    path: String,
+    payloads: &mut BTreeMap<CheckpointShardPath, Vec<u8>>,
+    path: CheckpointShardPath,
     value: &T,
 ) -> Result<(), CheckpointSnapshotError> {
     let mut line = to_canon_json_bytes(value)?;
@@ -474,6 +477,20 @@ fn push_jsonl_line<T: Serialize>(
     let entry = payloads.entry(path).or_default();
     entry.extend_from_slice(&line);
     Ok(())
+}
+
+fn ensure_dirty_shards(
+    shards: &BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
+    dirty: BTreeSet<CheckpointShardPath>,
+) -> Result<BTreeSet<CheckpointShardPath>, CheckpointSnapshotError> {
+    for shard in &dirty {
+        if !shards.contains_key(shard) {
+            return Err(CheckpointSnapshotError::DirtyShardUnknown {
+                path: shard.clone(),
+            });
+        }
+    }
+    Ok(dirty)
 }
 
 fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
