@@ -1,9 +1,9 @@
 //! Helpers to construct production EventBody/EventFrameV1 instances for models.
 
 use crate::core::{
-    ActorId, ClientRequestId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax,
-    NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TraceId, TxnDeltaV1, TxnId, TxnV1,
-    encode_event_body_canonical, hash_event_body,
+    ActorId, ClientRequestId, EventBody, EventBytes, EventFrameError, EventFrameV1, EventId,
+    EventKindV1, HlcMax, NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TraceId,
+    TxnDeltaV1, TxnId, TxnV1, encode_event_body_canonical, hash_event_body,
 };
 
 pub struct EventFactory {
@@ -62,7 +62,7 @@ impl EventFactory {
 pub fn encode_frame(
     body: &EventBody,
     prev_sha256: Option<Sha256>,
-) -> Result<EventFrameV1, crate::core::EncodeError> {
+) -> Result<EventFrameV1, EventFrameError> {
     let bytes = encode_event_body_canonical(body)?;
     let sha256 = hash_event_body(&bytes);
     let eid = EventId::new(
@@ -70,10 +70,5 @@ pub fn encode_frame(
         body.namespace.clone(),
         body.origin_seq,
     );
-    Ok(EventFrameV1 {
-        eid,
-        sha256,
-        prev_sha256,
-        bytes: EventBytes::<Opaque>::from(bytes),
-    })
+    EventFrameV1::try_from_parts(eid, sha256, prev_sha256, EventBytes::<Opaque>::from(bytes))
 }

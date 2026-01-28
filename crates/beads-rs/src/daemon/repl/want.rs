@@ -31,12 +31,8 @@ impl WantState {
 }
 
 pub(crate) fn broadcast_to_frame(event: BroadcastEvent) -> EventFrameV1 {
-    EventFrameV1 {
-        eid: event.event_id,
-        sha256: event.sha256,
-        prev_sha256: event.prev_sha256,
-        bytes: event.bytes,
-    }
+    EventFrameV1::try_from_parts(event.event_id, event.sha256, event.prev_sha256, event.bytes)
+        .expect("broadcast frame invariants")
 }
 
 pub(crate) fn build_want_frames(
@@ -149,10 +145,15 @@ mod tests {
         let seq1 = Seq1::from_u64(seq).expect("seq1");
         let event_id = EventId::new(origin, namespace, seq1);
         let sha = Sha256([seq as u8; 32]);
+        let prev_sha256 = if seq == 1 {
+            None
+        } else {
+            Some(Sha256([(seq - 1) as u8; 32]))
+        };
         BroadcastEvent::new(
             event_id,
             sha,
-            None,
+            prev_sha256,
             EventBytes::<Opaque>::new(Bytes::from_static(b"x")),
         )
     }
@@ -196,9 +197,9 @@ mod tests {
             .iter()
             .map(|frame| {
                 (
-                    frame.eid.namespace.clone(),
-                    frame.eid.origin_replica_id,
-                    frame.eid.origin_seq.get(),
+                    frame.eid().namespace.clone(),
+                    frame.eid().origin_replica_id,
+                    frame.eid().origin_seq.get(),
                 )
             })
             .collect::<Vec<_>>();
@@ -238,9 +239,9 @@ mod tests {
             .iter()
             .map(|frame| {
                 (
-                    frame.eid.namespace.clone(),
-                    frame.eid.origin_replica_id,
-                    frame.eid.origin_seq.get(),
+                    frame.eid().namespace.clone(),
+                    frame.eid().origin_replica_id,
+                    frame.eid().origin_seq.get(),
                 )
             })
             .collect::<Vec<_>>();

@@ -905,7 +905,7 @@ fn decode_events(dec: &mut Decoder, limits: &Limits) -> Result<WireEvents, Proto
                 let over_count = arr_len > limits.max_event_batch_events;
                 for _ in 0..arr_len {
                     let frame = decode_event_frame(dec, limits, 2)?;
-                    total_bytes = total_bytes.saturating_add(frame.bytes.len());
+                    total_bytes = total_bytes.saturating_add(frame.bytes().len());
                     if total_bytes > limits.max_event_batch_bytes {
                         return Err(ProtoDecodeError::BatchTooLarge {
                             max_events: limits.max_event_batch_events,
@@ -1191,11 +1191,14 @@ fn decode_event_frame(
         }
     }
 
-    Ok(EventFrameV1 {
-        eid: eid.ok_or(ProtoDecodeError::MissingField("eid"))?,
-        sha256: sha256.ok_or(ProtoDecodeError::MissingField("sha256"))?,
-        prev_sha256,
-        bytes: bytes.ok_or(ProtoDecodeError::MissingField("bytes"))?,
+    let eid = eid.ok_or(ProtoDecodeError::MissingField("eid"))?;
+    let sha256 = sha256.ok_or(ProtoDecodeError::MissingField("sha256"))?;
+    let bytes = bytes.ok_or(ProtoDecodeError::MissingField("bytes"))?;
+    EventFrameV1::try_from_parts(eid, sha256, prev_sha256, bytes).map_err(|err| {
+        ProtoDecodeError::InvalidField {
+            field: "prev_sha256",
+            reason: err.to_string(),
+        }
     })
 }
 
@@ -1880,12 +1883,13 @@ mod tests {
 
     fn sample_wire_event_frame(seq: u64, prev: Option<Sha256>) -> EventFrameV1 {
         let frame = sample_event_frame(seq, prev);
-        EventFrameV1 {
-            eid: frame.eid.clone(),
-            sha256: frame.sha256,
-            prev_sha256: frame.prev_sha256,
-            bytes: EventBytes::<Opaque>::from(frame.bytes.clone()),
-        }
+        EventFrameV1::try_from_parts(
+            frame.eid.clone(),
+            frame.sha256,
+            frame.prev_sha256,
+            EventBytes::<Opaque>::from(frame.bytes.clone()),
+        )
+        .expect("sample wire frame")
     }
 
     fn sample_hello() -> Hello {

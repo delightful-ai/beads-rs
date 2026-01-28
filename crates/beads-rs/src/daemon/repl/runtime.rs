@@ -321,12 +321,19 @@ impl ContiguousFrames {
             });
         }
 
-        self.frames.push(EventFrameV1 {
-            eid: item.event_id.clone(),
-            sha256: Sha256(item.sha),
-            prev_sha256: item.prev_sha.map(Sha256),
-            bytes: EventBytes::<Opaque>::new(Bytes::copy_from_slice(record.payload_bytes())),
-        });
+        let frame = EventFrameV1::try_from_parts(
+            item.event_id.clone(),
+            Sha256(item.sha),
+            item.prev_sha.map(Sha256),
+            EventBytes::<Opaque>::new(Bytes::copy_from_slice(record.payload_bytes())),
+        )
+        .map_err(|err| WalRangeError::Corrupt {
+            namespace: namespace.clone(),
+            segment_id: Some(item.segment_id),
+            offset: Some(item.offset),
+            reason: format!("wal frame invariant failed: {err}"),
+        })?;
+        self.frames.push(frame);
         self.prev_sha = Some(item.sha);
         self.expected_seq = self.expected_seq.next();
         Ok(())
