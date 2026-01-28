@@ -759,7 +759,7 @@ fn run_reader_loop(
                         let total_bytes = events
                             .events
                             .iter()
-                            .map(|frame| frame.bytes.len() as u64)
+                            .map(|frame| frame.bytes().len() as u64)
                             .sum();
                         if total_bytes > 0 {
                             let wait = ingest_budget.throttle(total_bytes);

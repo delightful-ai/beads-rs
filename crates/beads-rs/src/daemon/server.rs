@@ -1057,10 +1057,10 @@ fn send_stream_frame(writer: &mut UnixStream, frame: EventFrameV1, limits: &Limi
 
 fn stream_frame_response(frame: &EventFrameV1, limits: &Limits) -> Response {
     stream_event_response_from_parts(
-        frame.eid.clone(),
-        frame.sha256,
-        frame.prev_sha256,
-        frame.bytes.as_ref(),
+        frame.eid().clone(),
+        frame.sha256(),
+        frame.prev_sha256(),
+        frame.bytes().as_ref(),
         limits,
     )
 }
