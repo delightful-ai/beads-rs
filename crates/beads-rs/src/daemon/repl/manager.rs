@@ -1162,9 +1162,9 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, Applied, BeadId, Durable, EventBody, EventBytes, EventId, EventKindV1, HlcMax,
-        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, Opaque, ReplicaId, Seq0, Seq1, Sha256,
-        StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnOpV1, TxnV1, VerifiedEventFrame,
+        ActorId, Applied, BeadId, Durable, EventBody, EventBytes, EventId, EventKindV1, HeadStatus,
+        HlcMax, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, Opaque, ReplicaId, Seq0, Seq1,
+        Sha256, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnOpV1, TxnV1, VerifiedEventFrame,
         Watermark, WireNoteV1, WireStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::repl::keepalive::KeepaliveTracker;
