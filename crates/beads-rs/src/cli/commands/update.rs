@@ -1,8 +1,8 @@
 use clap::Args;
 
 use super::super::{
-    Ctx, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, print_ok,
-    resolve_description, send,
+    Ctx, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, print_line,
+    print_ok, resolve_description, send,
 };
 use crate::api::QueryResult;
 use crate::cli::parse::{parse_bead_type, parse_priority, parse_status as parse_status_arg};
@@ -288,7 +288,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         let issue = fetch_issue(ctx, &id)?;
         print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
     } else {
-        println!("{}", render_updated(&id_str));
+        print_line(&render_updated(&id_str))?;
     }
     Ok(())
 }

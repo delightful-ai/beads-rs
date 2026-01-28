@@ -1,7 +1,7 @@
 use clap::Args;
 use serde::Serialize;
 
-use super::super::{Ctx, normalize_bead_ids, print_json, send};
+use super::super::{Ctx, normalize_bead_ids, print_json, print_line, send};
 use crate::Result;
 use crate::daemon::ipc::{DeletePayload, Request};
 
@@ -48,7 +48,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
     }
 
     for r in results {
-        println!("✓ Deleted {}", r.issue_id);
+        print_line(&render_deleted_op(&r.issue_id))?;
     }
     Ok(())
 }
