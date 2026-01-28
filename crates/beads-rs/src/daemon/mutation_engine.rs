@@ -2233,6 +2233,60 @@ mod tests {
     }
 
     #[test]
+    fn set_parent_rejects_cycle() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let bead_a = BeadId::parse("bd-a").unwrap();
+        let bead_b = BeadId::parse("bd-b").unwrap();
+
+        let mut state = CanonicalState::new();
+        state.insert(make_bead(bead_a.as_str(), &actor)).unwrap();
+        state.insert(make_bead(bead_b.as_str(), &actor)).unwrap();
+
+        let stamp = make_stamp(10, &actor);
+        let dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let edge = ParentEdge::new(bead_a.clone(), bead_b.clone()).unwrap();
+        let key = state
+            .check_dep_add_key(edge.to_dep_key())
+            .expect("parent key");
+        state.apply_dep_add(key, dot, stamp.clone());
+
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let stamped = make_stamped_context(ctx, stamp.clone());
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
+        let req = ParsedMutationRequest::SetParent {
+            id: bead_b.clone(),
+            parent: Some(bead_a.clone()),
+        };
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let err = engine
+            .plan(
+                &state,
+                stamp.at.wall_ms,
+                stamped,
+                store,
+                None,
+                req,
+                &mut dots,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "parent"
+        ));
+    }
+
+    #[test]
     fn set_parent_replaces_existing_parent_with_parent_ops() {
         let engine = MutationEngine::new(Limits::default());
         let actor = actor_id("alice");
