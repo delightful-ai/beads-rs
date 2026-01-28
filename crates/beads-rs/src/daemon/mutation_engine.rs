@@ -9,10 +9,10 @@ use super::remote::RemoteUrl;
 use crate::core::event::ValidatedBeadPatch;
 use crate::core::{
     ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
-    ClientRequestId, DepKey, DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax,
-    Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge, Priority, ReplicaId,
-    Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
-    ValidatedEventBody, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
+    ClientRequestId, DepAddKey, DepKey, DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1,
+    HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge, Priority,
+    ReplicaId, Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1,
+    TxnV1, ValidatedEventBody, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
     WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1, WirePatch,
     WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical, sha256_bytes,
     to_canon_json_bytes,
@@ -891,14 +891,15 @@ impl MutationEngine {
         }
 
         for spec in parsed_deps {
+            let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
+                state,
+                id.clone(),
+                spec.id().clone(),
+                spec.kind(),
+            )?);
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    key: DepKey::new(id.clone(), spec.id().clone(), spec.kind()).map_err(|e| {
-                        OpError::ValidationFailed {
-                            field: "dependency".into(),
-                            reason: e.reason,
-                        }
-                    })?,
+                    key,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -1129,6 +1130,38 @@ impl MutationEngine {
         Ok(PlannedDelta { delta, canonical })
     }
 
+    fn checked_dep_add_key(
+        &self,
+        state: &CanonicalState,
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+    ) -> Result<DepAddKey, OpError> {
+        if kind == DepKind::Parent {
+            return Err(OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: "parent edges must use set-parent".into(),
+            });
+        }
+        let key = DepKey::new(from, to, kind).map_err(|e| OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: e.reason,
+        })?;
+        state
+            .check_dep_add_key(key)
+            .map_err(|err| OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: err.reason,
+            })
+    }
+
+    fn dep_add_key_into_inner(key: DepAddKey) -> DepKey {
+        match key {
+            DepAddKey::Acyclic(key) => key.into_inner(),
+            DepAddKey::Free(key) => key.into_inner(),
+        }
+    }
+
     fn plan_add_dep(
         &self,
         state: &CanonicalState,
@@ -1138,32 +1171,18 @@ impl MutationEngine {
         kind: DepKind,
         dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedDelta, OpError> {
-        if kind == DepKind::Parent {
-            return Err(OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: "parent edges must use set-parent".into(),
-            });
-        }
-        let key =
-            DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: e.reason,
-            })?;
-
         if state.get_live(&from).is_none() {
             return Err(OpError::NotFound(from));
         }
         if state.get_live(&to).is_none() {
             return Err(OpError::NotFound(to));
         }
-        if kind.requires_dag()
-            && let Err(err) = state.check_no_cycle(&from, &to, kind)
-        {
-            return Err(OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: err.reason,
-            });
-        }
+        let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
+            state,
+            from.clone(),
+            to.clone(),
+            kind,
+        )?);
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -2101,6 +2120,116 @@ mod tests {
             err,
             OpError::ValidationFailed { field, .. } if field == "dependency"
         ));
+    }
+
+    #[test]
+    fn add_dep_rejects_blocks_cycle() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let bead_a = BeadId::parse("bd-a").unwrap();
+        let bead_b = BeadId::parse("bd-b").unwrap();
+
+        let mut state = CanonicalState::new();
+        state.insert(make_bead(bead_a.as_str(), &actor)).unwrap();
+        state.insert(make_bead(bead_b.as_str(), &actor)).unwrap();
+
+        let stamp = make_stamp(10, &actor);
+        let dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let key = DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks).unwrap();
+        let key = state.check_dep_add_key(key).expect("acyclic key");
+        state.apply_dep_add(key, dot, stamp.clone());
+
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let stamped = make_stamped_context(ctx, stamp.clone());
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
+        let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from: bead_b.clone(),
+            to: bead_a.clone(),
+            kind: DepKind::Blocks,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let err = engine
+            .plan(
+                &state,
+                stamp.at.wall_ms,
+                stamped,
+                store,
+                None,
+                req,
+                &mut dots,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "dependency"
+        ));
+    }
+
+    #[test]
+    fn add_dep_allows_related_cycle() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let bead_a = BeadId::parse("bd-a").unwrap();
+        let bead_b = BeadId::parse("bd-b").unwrap();
+
+        let mut state = CanonicalState::new();
+        state.insert(make_bead(bead_a.as_str(), &actor)).unwrap();
+        state.insert(make_bead(bead_b.as_str(), &actor)).unwrap();
+
+        let stamp = make_stamp(10, &actor);
+        let dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let key = DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Related).unwrap();
+        let key = state.check_dep_add_key(key).expect("free key");
+        state.apply_dep_add(key, dot, stamp.clone());
+
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let stamped = make_stamped_context(ctx, stamp.clone());
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
+        let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from: bead_b.clone(),
+            to: bead_a.clone(),
+            kind: DepKind::Related,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let draft = engine
+            .plan(
+                &state,
+                stamp.at.wall_ms,
+                stamped,
+                store,
+                None,
+                req,
+                &mut dots,
+            )
+            .expect("plan related dep");
+
+        assert!(
+            draft
+                .delta
+                .iter()
+                .any(|op| matches!(op, TxnOpV1::DepAdd(_)))
+        );
     }
 
     #[test]
