@@ -18,6 +18,6 @@ pub use crate::daemon::repl::gap_buffer::{
     HeadSnapshot, OriginStreamSnapshot, WatermarkSnapshot,
 };
 pub use crate::daemon::repl::{
-    GapBufferByNsOrigin, IngestDecision, OriginStreamState, PeerAckTable,
+    ContiguousBatch, GapBufferByNsOrigin, IngestDecision, OriginStreamState, PeerAckTable,
 };
 pub use crate::daemon::wal::{MemoryWalIndex, MemoryWalIndexSnapshot};

@@ -14,8 +14,8 @@ use beads_rs::daemon::repl::session::{
     handle_outbound_message,
 };
 use beads_rs::daemon::repl::{
-    Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionPhase, SessionStore,
-    ValidatedAck, Want, WatermarkSnapshot,
+    ContiguousBatch, Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionPhase,
+    SessionStore, ValidatedAck, Want, WatermarkSnapshot,
 };
 use beads_rs::daemon::wal::ReplicaDurabilityRole;
 
@@ -63,12 +63,12 @@ impl SessionStore for MockStore {
 
     fn ingest_remote_batch(
         &mut self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        batch: &[beads_rs::core::VerifiedEvent<beads_rs::core::PrevVerified>],
+        batch: &ContiguousBatch,
         _now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
-        for ev in batch {
+        let namespace = batch.namespace();
+        let origin = batch.origin();
+        for ev in batch.events() {
             let eid = EventId::new(
                 ev.body.origin_replica_id,
                 ev.body.namespace.clone(),
@@ -77,18 +77,18 @@ impl SessionStore for MockStore {
             self.lookup.insert(eid, ev.sha256);
         }
 
-        let last = batch.last().expect("batch not empty");
+        let last = batch.last_event();
         let head = HeadStatus::Known(last.sha256.0);
         let durable = Watermark::new(Seq0::new(last.seq().get()), head).expect("durable");
         let applied = Watermark::new(Seq0::new(last.seq().get()), head).expect("applied");
         self.durable
             .entry(namespace.clone())
             .or_default()
-            .insert(*origin, durable);
+            .insert(origin, durable);
         self.applied
             .entry(namespace.clone())
             .or_default()
-            .insert(*origin, applied);
+            .insert(origin, applied);
 
         Ok(IngestOutcome { durable, applied })
     }
