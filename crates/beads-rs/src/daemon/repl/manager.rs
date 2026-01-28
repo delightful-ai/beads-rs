@@ -1521,6 +1521,42 @@ mod tests {
         let mut store = TestStore;
         let (session, _action) = session.begin_handshake(&store, now_ms());
         let session = SessionState::Handshaking(session);
+        let origin = ReplicaId::new(Uuid::from_bytes([23u8; 16]));
+        let namespace = NamespaceId::core();
+        let mut payload_len = 10usize;
+        let (frame1, frame2, target_max_frame) = loop {
+            let f1 = make_frame(local_store, namespace.clone(), origin, 1, None, payload_len);
+            let f2 = make_frame(
+                local_store,
+                namespace.clone(),
+                origin,
+                2,
+                Some(f1.sha256),
+                payload_len,
+            );
+            let single = ReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: ReplMessage::Events(Events {
+                    events: vec![f1.clone()],
+                }),
+            };
+            let double = ReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: ReplMessage::Events(Events {
+                    events: vec![f1.clone(), f2.clone()],
+                }),
+            };
+            let len_single = encode_envelope(&single).expect("encode").len();
+            let len_double = encode_envelope(&double).expect("encode").len();
+            if len_double > len_single + 1 {
+                break (f1, f2, len_single + 1);
+            }
+            payload_len = payload_len.saturating_add(10);
+            if payload_len > 10_000 {
+                panic!("unable to craft frame sizes");
+            }
+        };
+
         let welcome = Welcome {
             protocol_version: PROTOCOL_VERSION_V1,
             store_id: local_store.store_id,
@@ -1531,7 +1567,7 @@ mod tests {
             receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
             live_stream_enabled: true,
-            max_frame_bytes: 200,
+            max_frame_bytes: target_max_frame.try_into().expect("max frame fits u32"),
         };
         let (session, _actions) = handle_outbound_message(
             session,
@@ -1567,30 +1603,8 @@ mod tests {
         let stream = TcpStream::connect(addr).expect("connect");
         let mut writer = FrameWriter::new(stream, limits.max_frame_bytes);
 
-        let origin = ReplicaId::new(Uuid::from_bytes([23u8; 16]));
-        let namespace = NamespaceId::core();
         let max_frame = session.negotiated_max_frame_bytes();
-        let mut payload_len = 10usize;
-        let (frame1, frame2) = loop {
-            let f1 = make_frame(local_store, namespace.clone(), origin, 1, None, payload_len);
-            let f2 = make_frame(
-                local_store,
-                namespace.clone(),
-                origin,
-                2,
-                Some(f1.sha256),
-                payload_len,
-            );
-            let len_single = events_envelope_len(&session, std::slice::from_ref(&f1)).expect("len");
-            let len_double = events_envelope_len(&session, &[f1.clone(), f2.clone()]).expect("len");
-            if len_single < max_frame && len_double > max_frame {
-                break (f1, f2);
-            }
-            payload_len = payload_len.saturating_add(10);
-            if payload_len > 10_000 {
-                panic!("unable to craft frame sizes");
-            }
-        };
+        assert_eq!(max_frame, target_max_frame);
 
         let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
         send_events(
