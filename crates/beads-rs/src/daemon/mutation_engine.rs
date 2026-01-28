@@ -6,15 +6,15 @@ use uuid::Uuid;
 
 use super::ops::{MapLiveError, OpError};
 use super::remote::RemoteUrl;
-use crate::core::event::ValidatedBeadPatch;
 use crate::core::{
     ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
     ClientRequestId, DepAddKey, DepKey, DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1,
     HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge, Priority,
     ReplicaId, Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1,
-    TxnV1, ValidatedEventBody, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
-    WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1, WirePatch,
-    WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical, sha256_bytes,
+    TxnV1, ValidatedEventBody, ValidatedEventKindV1, ValidatedMutationCommand, ValidatedTxnV1,
+    WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1,
+    WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1, WirePatch, WireStamp,
+    WireTombstoneV1, WorkflowStatus, encode_event_body_canonical, sha256_bytes,
     to_canon_json_bytes,
 };
 use crate::daemon::ipc::{
@@ -70,7 +70,7 @@ pub struct IdContext {
 
 #[derive(Clone, Debug)]
 pub struct EventDraft {
-    pub delta: TxnDeltaV1,
+    pub command: ValidatedMutationCommand,
     pub hlc_max: HlcMax,
     pub event_time_ms: u64,
     pub txn_id: TxnId,
@@ -460,9 +460,16 @@ impl MutationEngine {
             }
         };
 
-        self.enforce_delta_limits(&planned.delta)?;
+        let PlannedDelta { delta, canonical } = planned;
+        self.enforce_delta_limits(&delta)?;
+        let command = ValidatedMutationCommand::try_from_delta(delta).map_err(|err| {
+            OpError::ValidationFailed {
+                field: "event".into(),
+                reason: err.to_string(),
+            }
+        })?;
 
-        let request_sha256 = request_sha256(&ctx, &planned.canonical)?;
+        let request_sha256 = request_sha256(&ctx, &canonical)?;
         let MutationContext {
             actor_id,
             client_request_id,
@@ -471,7 +478,7 @@ impl MutationEngine {
         } = ctx;
 
         Ok(EventDraft {
-            delta: planned.delta,
+            command,
             hlc_max: HlcMax {
                 actor_id,
                 physical_ms: write_stamp.wall_ms,
@@ -493,25 +500,38 @@ impl MutationEngine {
         origin_replica_id: ReplicaId,
         origin_seq: Seq1,
     ) -> Result<SequencedEvent, OpError> {
+        let EventDraft {
+            command,
+            hlc_max,
+            event_time_ms,
+            txn_id,
+            request_sha256,
+            client_request_id,
+            trace_id,
+        } = draft;
+        let (delta, validated_delta) = command.into_parts();
         let event_body = EventBody {
             envelope_v: 1,
             store,
             namespace,
             origin_replica_id,
             origin_seq,
-            event_time_ms: draft.event_time_ms,
-            txn_id: draft.txn_id,
-            client_request_id: draft.client_request_id,
-            trace_id: Some(draft.trace_id),
+            event_time_ms,
+            txn_id,
+            client_request_id: client_request_id.clone(),
+            trace_id: Some(trace_id),
             kind: EventKindV1::TxnV1(TxnV1 {
-                delta: draft.delta,
-                hlc_max: draft.hlc_max,
+                delta,
+                hlc_max: hlc_max.clone(),
             }),
         };
 
+        let validated_kind = ValidatedEventKindV1::TxnV1(ValidatedTxnV1 {
+            hlc_max,
+            delta: validated_delta,
+        });
         let event_body =
-            event_body
-                .into_validated(&self.limits)
+            ValidatedEventBody::try_from_validated(event_body, validated_kind, &self.limits)
                 .map_err(|err| OpError::ValidationFailed {
                     field: "event".into(),
                     reason: err.to_string(),
@@ -519,13 +539,13 @@ impl MutationEngine {
 
         let event_bytes = encode_event_body_canonical(&event_body)
             .map_err(|_| OpError::Internal("event_body encode failed"))?;
-        self.enforce_record_size(&event_bytes, draft.client_request_id)?;
+        self.enforce_record_size(&event_bytes, client_request_id)?;
 
         Ok(SequencedEvent {
             event_body,
             event_bytes,
-            request_sha256: draft.request_sha256,
-            client_request_id: draft.client_request_id,
+            request_sha256,
+            client_request_id,
         })
     }
 
@@ -853,12 +873,6 @@ impl MutationEngine {
             patch.assignee_expires = WirePatch::Set(expires);
         }
 
-        let patch = ValidatedBeadPatch::try_from(patch)
-            .map_err(|err| OpError::ValidationFailed {
-                field: "bead_patch".into(),
-                reason: err.to_string(),
-            })?
-            .into_inner();
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1051,12 +1065,6 @@ impl MutationEngine {
             patch.closed_on_branch = WirePatch::Set(branch);
         }
 
-        let patch = ValidatedBeadPatch::try_from(patch)
-            .map_err(|err| OpError::ValidationFailed {
-                field: "bead_patch".into(),
-                reason: err.to_string(),
-            })?
-            .into_inner();
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1086,12 +1094,6 @@ impl MutationEngine {
         patch.closed_reason = WirePatch::Clear;
         patch.closed_on_branch = WirePatch::Clear;
 
-        let patch = ValidatedBeadPatch::try_from(patch)
-            .map_err(|err| OpError::ValidationFailed {
-                field: "bead_patch".into(),
-                reason: err.to_string(),
-            })?
-            .into_inner();
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1754,12 +1756,6 @@ fn normalize_patch(
         status: patch.status.clone(),
     };
 
-    let wire = ValidatedBeadPatch::try_from(wire)
-        .map_err(|err| OpError::ValidationFailed {
-            field: "bead_patch".into(),
-            reason: err.to_string(),
-        })?
-        .into_inner();
     Ok((wire, canonical))
 }
 
