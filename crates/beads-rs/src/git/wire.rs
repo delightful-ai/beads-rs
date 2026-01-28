@@ -568,8 +568,8 @@ fn wire_to_parts(wire: BeadSnapshotWireV1) -> Result<ParsedWireBead, WireError> 
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Lww, Priority, ReplicaId,
-        Workflow,
+        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Label, Lww, NoteId, Priority,
+        ReplicaId, Workflow,
     };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
