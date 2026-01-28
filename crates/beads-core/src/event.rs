@@ -4767,4 +4767,52 @@ mod tests {
             other => panic!("expected contiguous, got {other:?}"),
         }
     }
+
+    #[test]
+    fn validated_mutation_command_rejects_invalid_workflow_patch() {
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.status = Some(WorkflowStatus::Closed);
+
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+
+        let err = ValidatedMutationCommand::try_from_delta(delta).unwrap_err();
+        assert!(matches!(
+            err,
+            EventValidationError::InvalidWorkflowPatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validated_mutation_command_builds_event_body() {
+        let body = sample_body();
+        let txn = txn(&body);
+        let command = ValidatedMutationCommand::try_from_delta(txn.delta.clone()).unwrap();
+        let (delta, validated_delta) = command.into_parts();
+        let hlc_max = txn.hlc_max.clone();
+        let raw_body = EventBody {
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta,
+                hlc_max: hlc_max.clone(),
+            }),
+            ..body
+        };
+        let validated_kind = ValidatedEventKindV1::TxnV1(ValidatedTxnV1 {
+            hlc_max,
+            delta: validated_delta,
+        });
+        let validated_body = ValidatedEventBody::try_from_validated(
+            raw_body.clone(),
+            validated_kind,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(validated_body.raw(), &raw_body);
+        let raw_ops = match &raw_body.kind {
+            EventKindV1::TxnV1(txn) => txn.delta.total_ops(),
+        };
+        match validated_body.kind() {
+            ValidatedEventKindV1::TxnV1(txn) => assert_eq!(txn.delta.total_ops(), raw_ops),
+        }
+    }
 }

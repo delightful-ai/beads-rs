@@ -518,7 +518,7 @@ impl MutationEngine {
             origin_seq,
             event_time_ms,
             txn_id,
-            client_request_id: client_request_id.clone(),
+            client_request_id,
             trace_id: Some(trace_id),
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta,
@@ -2083,7 +2083,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(draft_a.request_sha256, draft_b.request_sha256);
-        assert_eq!(draft_a.delta, draft_b.delta);
+        assert_eq!(draft_a.command.raw_delta(), draft_b.command.raw_delta());
     }
 
     #[test]
@@ -2222,7 +2222,8 @@ mod tests {
 
         assert!(
             draft
-                .delta
+                .command
+                .raw_delta()
                 .iter()
                 .any(|op| matches!(op, TxnOpV1::DepAdd(_)))
         );
@@ -2332,7 +2333,7 @@ mod tests {
             )
             .expect("plan set parent");
 
-        let ops: Vec<_> = draft.delta.iter().collect();
+        let ops: Vec<_> = draft.command.raw_delta().iter().collect();
         assert!(ops.iter().any(|op| matches!(op, TxnOpV1::ParentRemove(_))));
         assert!(ops.iter().any(|op| matches!(op, TxnOpV1::ParentAdd(_))));
         assert!(
