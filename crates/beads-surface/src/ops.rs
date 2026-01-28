@@ -70,6 +70,26 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
 }
 
 // =============================================================================
+// OpenInProgress - Workflow states allowed in update patches
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenInProgress {
+    Open,
+    InProgress,
+}
+
+impl From<OpenInProgress> for WorkflowStatus {
+    fn from(status: OpenInProgress) -> Self {
+        match status {
+            OpenInProgress::Open => WorkflowStatus::Open,
+            OpenInProgress::InProgress => WorkflowStatus::InProgress,
+        }
+    }
+}
+
+// =============================================================================
 // BeadPatch - Partial update for bead fields
 // =============================================================================
 
@@ -108,7 +128,7 @@ pub struct BeadPatch {
     pub estimated_minutes: Patch<u32>,
 
     #[serde(default, skip_serializing_if = "Patch::is_keep")]
-    pub status: Patch<WorkflowStatus>,
+    pub status: Patch<OpenInProgress>,
 }
 
 impl BeadPatch {
