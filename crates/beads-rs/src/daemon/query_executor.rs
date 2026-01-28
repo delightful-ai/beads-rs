@@ -56,9 +56,7 @@ impl Daemon {
         let read = loaded.normalize_read_consistency(read)?;
         loaded.check_read_gate(&read)?;
         let store = loaded.runtime();
-
-        let empty_state = CanonicalState::new();
-        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
+        let state = Self::namespace_state(&loaded, read.namespace());
         let repo_state = want_repo_state.then(|| loaded.lane());
         let remote = loaded.remote().clone();
 
