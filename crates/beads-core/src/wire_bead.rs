@@ -1266,6 +1266,39 @@ mod tests {
     }
 
     #[test]
+    fn wire_bead_full_json_roundtrip_preserves_sparse_v() {
+        let base = Stamp::new(WriteStamp::new(10, 0), actor_id("alice"));
+        let newer = Stamp::new(WriteStamp::new(12, 0), actor_id("bob"));
+        let core = BeadCore::new(bead_id("bd-json1"), base.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("t".to_string(), newer),
+            description: Lww::new("d".to_string(), base.clone()),
+            design: Lww::new(None, base.clone()),
+            acceptance_criteria: Lww::new(None, base.clone()),
+            priority: Lww::new(Priority::default(), base.clone()),
+            bead_type: Lww::new(BeadType::Task, base.clone()),
+            external_ref: Lww::new(None, base.clone()),
+            source_repo: Lww::new(None, base.clone()),
+            estimated_minutes: Lww::new(None, base.clone()),
+            workflow: Lww::new(Workflow::Open, base.clone()),
+            claim: Lww::new(Claim::Unclaimed, base.clone()),
+        };
+        let bead = Bead::new(core, fields);
+        let view = BeadView::new(bead, Labels::new(), Vec::new(), None);
+        let wire = WireBeadFull::from_view(&view, None);
+
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(json.contains("\"_v\""));
+
+        let parsed: WireBeadFull = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, wire);
+
+        let roundtrip = serde_json::to_value(&parsed).unwrap();
+        let original = serde_json::to_value(&wire).unwrap();
+        assert_eq!(roundtrip, original);
+    }
+
+    #[test]
     fn wire_bead_patch_roundtrip() {
         let mut patch = WireBeadPatch::new(bead_id("bd-xyz987"));
         patch.created_at = Some(WireStamp(10, 1));
