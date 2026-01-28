@@ -495,6 +495,43 @@ pub fn decode_envelope(
     bytes: &[u8],
     limits: &Limits,
 ) -> Result<WireReplEnvelope, ProtoDecodeError> {
+    let parts = decode_envelope_parts(bytes, limits)?;
+    let message = decode_message_body(parts.version, parts.message_type, parts.body_bytes, limits)?;
+    Ok(WireReplEnvelope {
+        version: parts.version,
+        message,
+    })
+}
+
+pub fn decode_envelope_with_version(
+    bytes: &[u8],
+    limits: &Limits,
+    expected: u32,
+) -> Result<WireReplEnvelope, ProtoDecodeError> {
+    let parts = decode_envelope_parts(bytes, limits)?;
+    if parts.version != expected {
+        return Err(ProtoDecodeError::InvalidField {
+            field: "v",
+            reason: format!("expected {expected} got {}", parts.version),
+        });
+    }
+    let message = decode_message_body(parts.version, parts.message_type, parts.body_bytes, limits)?;
+    Ok(WireReplEnvelope {
+        version: parts.version,
+        message,
+    })
+}
+
+struct EnvelopeParts<'a> {
+    version: u32,
+    message_type: MessageType,
+    body_bytes: &'a [u8],
+}
+
+fn decode_envelope_parts<'a>(
+    bytes: &'a [u8],
+    limits: &Limits,
+) -> Result<EnvelopeParts<'a>, ProtoDecodeError> {
     let mut dec = Decoder::new(bytes);
     let map_len = decode_map_len(&mut dec, limits, 0)?;
 
@@ -537,9 +574,11 @@ pub fn decode_envelope(
     let (start, end) = body_span.ok_or(ProtoDecodeError::MissingField("body"))?;
     let body_bytes = &bytes[start..end];
 
-    let message = decode_message_body(version, message_type, body_bytes, limits)?;
-
-    Ok(WireReplEnvelope { version, message })
+    Ok(EnvelopeParts {
+        version,
+        message_type,
+        body_bytes,
+    })
 }
 
 fn encode_message_body(
@@ -2394,6 +2433,38 @@ mod tests {
                 }),
             }
         );
+    }
+
+    #[test]
+    fn repl_message_rejects_version_mismatch_for_events_ack_want() {
+        let expected = PROTOCOL_VERSION_V1 + 1;
+        let frame = sample_event_frame(1, None);
+        let cases = vec![
+            ReplMessage::Events(Events {
+                events: vec![frame],
+            }),
+            ReplMessage::Ack(Ack {
+                durable: BTreeMap::new(),
+                applied: None,
+            }),
+            ReplMessage::Want(Want {
+                want: WatermarkMap::new(),
+            }),
+        ];
+
+        for message in cases {
+            let envelope = ReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message,
+            };
+            let bytes = encode_envelope(&envelope).unwrap();
+            let err =
+                decode_envelope_with_version(&bytes, &Limits::default(), expected).unwrap_err();
+            assert!(matches!(
+                err,
+                ProtoDecodeError::InvalidField { field: "v", .. }
+            ));
+        }
     }
 
     #[test]
