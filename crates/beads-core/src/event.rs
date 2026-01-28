@@ -9,6 +9,7 @@ use minicbor::{Decoder, Encoder};
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
 
+use super::dep::DepKey;
 use super::domain::DepKind;
 use super::identity::{
     ActorId, BeadId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TraceId, TxnId,
@@ -157,6 +158,136 @@ pub struct EventBody {
     pub kind: EventKindV1,
 }
 
+impl EventBody {
+    pub fn into_validated(
+        self,
+        limits: &Limits,
+    ) -> Result<ValidatedEventBody, EventValidationError> {
+        ValidatedEventBody::try_from_raw(self, limits)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedEventBody {
+    raw: EventBody,
+    kind: ValidatedEventKindV1,
+}
+
+impl ValidatedEventBody {
+    pub fn raw(&self) -> &EventBody {
+        &self.raw
+    }
+
+    pub fn kind(&self) -> &ValidatedEventKindV1 {
+        &self.kind
+    }
+
+    pub fn into_raw(self) -> EventBody {
+        self.raw
+    }
+
+    pub fn try_from_raw(body: EventBody, limits: &Limits) -> Result<Self, EventValidationError> {
+        validate_event_body_limits(&body, limits)?;
+        let kind = ValidatedEventKindV1::try_from_raw(&body.kind)?;
+        Ok(Self { raw: body, kind })
+    }
+}
+
+impl std::ops::Deref for ValidatedEventBody {
+    type Target = EventBody;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+impl AsRef<EventBody> for ValidatedEventBody {
+    fn as_ref(&self) -> &EventBody {
+        &self.raw
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidatedEventKindV1 {
+    TxnV1(ValidatedTxnV1),
+}
+
+impl ValidatedEventKindV1 {
+    fn try_from_raw(kind: &EventKindV1) -> Result<Self, EventValidationError> {
+        match kind {
+            EventKindV1::TxnV1(txn) => Ok(ValidatedEventKindV1::TxnV1(
+                ValidatedTxnV1::try_from_raw(txn)?,
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedTxnV1 {
+    pub hlc_max: HlcMax,
+    pub delta: ValidatedTxnDeltaV1,
+}
+
+impl ValidatedTxnV1 {
+    fn try_from_raw(txn: &TxnV1) -> Result<Self, EventValidationError> {
+        Ok(Self {
+            hlc_max: txn.hlc_max.clone(),
+            delta: ValidatedTxnDeltaV1::try_from_raw(&txn.delta)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedTxnDeltaV1 {
+    ops: Vec<ValidatedTxnOpV1>,
+}
+
+impl ValidatedTxnDeltaV1 {
+    fn try_from_raw(delta: &TxnDeltaV1) -> Result<Self, EventValidationError> {
+        let mut ops = Vec::with_capacity(delta.total_ops());
+        for op in delta.iter() {
+            let validated = match op {
+                TxnOpV1::BeadUpsert(patch) => {
+                    ValidatedTxnOpV1::BeadUpsert(ValidatedBeadPatch::try_from((**patch).clone())?)
+                }
+                TxnOpV1::BeadDelete(delete) => {
+                    ValidatedTxnOpV1::BeadDelete(ValidatedTombstone::try_from(delete.clone())?)
+                }
+                TxnOpV1::LabelAdd(op) => ValidatedTxnOpV1::LabelAdd(op.clone()),
+                TxnOpV1::LabelRemove(op) => ValidatedTxnOpV1::LabelRemove(op.clone()),
+                TxnOpV1::DepAdd(dep) => {
+                    ValidatedTxnOpV1::DepAdd(ValidatedDepAdd::try_from(dep.clone())?)
+                }
+                TxnOpV1::DepRemove(dep) => {
+                    ValidatedTxnOpV1::DepRemove(ValidatedDepRemove::try_from(dep.clone())?)
+                }
+                TxnOpV1::NoteAppend(append) => ValidatedTxnOpV1::NoteAppend(append.clone()),
+            };
+            ops.push(validated);
+        }
+        Ok(Self { ops })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ValidatedTxnOpV1> {
+        self.ops.iter()
+    }
+
+    pub fn total_ops(&self) -> usize {
+        self.ops.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidatedTxnOpV1 {
+    BeadUpsert(ValidatedBeadPatch),
+    BeadDelete(ValidatedTombstone),
+    LabelAdd(WireLabelAddV1),
+    LabelRemove(WireLabelRemoveV1),
+    DepAdd(ValidatedDepAdd),
+    DepRemove(ValidatedDepRemove),
+    NoteAppend(NoteAppendV1),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventFrameV1 {
     pub eid: EventId,
@@ -178,7 +309,7 @@ pub struct PrevDeferred {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedEvent<P> {
-    pub body: EventBody,
+    pub body: ValidatedEventBody,
     pub bytes: EventBytes<Opaque>,
     pub sha256: Sha256,
     pub prev: P,
@@ -313,6 +444,8 @@ pub enum DecodeError {
     DuplicateKey(String),
     #[error("trailing bytes after event body")]
     TrailingBytes,
+    #[error("event validation failed: {0}")]
+    Validation(#[from] EventValidationError),
     #[error("cbor decode: {0}")]
     Cbor(#[from] minicbor::decode::Error),
 }
@@ -325,6 +458,15 @@ pub fn encode_event_body_canonical(body: &EventBody) -> Result<EventBytes<Canoni
 }
 
 pub fn decode_event_body(
+    bytes: &[u8],
+    limits: &Limits,
+) -> Result<(EventBytes<Opaque>, ValidatedEventBody), DecodeError> {
+    let (opaque, body) = decode_event_body_raw(bytes, limits)?;
+    let validated = ValidatedEventBody::try_from_raw(body, limits)?;
+    Ok((opaque, validated))
+}
+
+fn decode_event_body_raw(
     bytes: &[u8],
     limits: &Limits,
 ) -> Result<(EventBytes<Opaque>, EventBody), DecodeError> {
@@ -1673,11 +1815,11 @@ fn encode_wire_dep_add(
 ) -> Result<(), EncodeError> {
     enc.map(4)?;
     enc.str("from")?;
-    enc.str(dep.from.as_str())?;
+    enc.str(dep.from().as_str())?;
     enc.str("to")?;
-    enc.str(dep.to.as_str())?;
+    enc.str(dep.to().as_str())?;
     enc.str("kind")?;
-    enc.str(dep.kind.as_str())?;
+    enc.str(dep.kind().as_str())?;
     enc.str("dot")?;
     encode_wire_dot(enc, &dep.dot)?;
     Ok(())
@@ -1723,10 +1865,18 @@ fn decode_wire_dep_add(
         }
     }
 
+    let key = DepKey::new(
+        from.ok_or(DecodeError::MissingField("from"))?,
+        to.ok_or(DecodeError::MissingField("to"))?,
+        kind.ok_or(DecodeError::MissingField("kind"))?,
+    )
+    .map_err(|err| DecodeError::InvalidField {
+        field: "dep_add",
+        reason: err.to_string(),
+    })?;
+
     Ok(WireDepAddV1 {
-        from: from.ok_or(DecodeError::MissingField("from"))?,
-        to: to.ok_or(DecodeError::MissingField("to"))?,
-        kind: kind.ok_or(DecodeError::MissingField("kind"))?,
+        key,
         dot: dot.ok_or(DecodeError::MissingField("dot"))?,
     })
 }
@@ -1737,11 +1887,11 @@ fn encode_wire_dep_remove(
 ) -> Result<(), EncodeError> {
     enc.map(4)?;
     enc.str("from")?;
-    enc.str(dep.from.as_str())?;
+    enc.str(dep.from().as_str())?;
     enc.str("to")?;
-    enc.str(dep.to.as_str())?;
+    enc.str(dep.to().as_str())?;
     enc.str("kind")?;
-    enc.str(dep.kind.as_str())?;
+    enc.str(dep.kind().as_str())?;
     enc.str("ctx")?;
     encode_wire_dvv(enc, &dep.ctx)?;
     Ok(())
@@ -1787,10 +1937,18 @@ fn decode_wire_dep_remove(
         }
     }
 
+    let key = DepKey::new(
+        from.ok_or(DecodeError::MissingField("from"))?,
+        to.ok_or(DecodeError::MissingField("to"))?,
+        kind.ok_or(DecodeError::MissingField("kind"))?,
+    )
+    .map_err(|err| DecodeError::InvalidField {
+        field: "dep_remove",
+        reason: err.to_string(),
+    })?;
+
     Ok(WireDepRemoveV1 {
-        from: from.ok_or(DecodeError::MissingField("from"))?,
-        to: to.ok_or(DecodeError::MissingField("to"))?,
-        kind: kind.ok_or(DecodeError::MissingField("kind"))?,
+        key,
         ctx: ctx.ok_or(DecodeError::MissingField("ctx"))?,
     })
 }
@@ -2303,7 +2461,7 @@ fn bead_id_placeholder() -> super::identity::BeadId {
     super::identity::BeadId::parse("bd-placeholder").unwrap()
 }
 
-pub fn validate_event_body_limits(
+fn validate_event_body_limits(
     body: &EventBody,
     limits: &Limits,
 ) -> Result<(), EventValidationError> {
@@ -2350,50 +2508,6 @@ pub fn validate_event_body_limits(
     Ok(())
 }
 
-pub fn validate_event_body_semantics(body: &EventBody) -> Result<(), EventValidationError> {
-    let delta = match &body.kind {
-        EventKindV1::TxnV1(txn) => &txn.delta,
-    };
-
-    for op in delta.iter() {
-        if let TxnOpV1::BeadUpsert(patch) = op {
-            validate_bead_patch_semantics(patch)?;
-        }
-        if let TxnOpV1::BeadDelete(delete) = op
-            && let Some(lineage) = delete.lineage.as_ref()
-            && lineage.by.as_str().is_empty()
-        {
-            return Err(EventValidationError::InvalidTombstoneLineage {
-                id: delete.id.clone(),
-                reason: "lineage_created_by must be set".to_string(),
-            });
-        }
-        // Reject self-dependencies
-        if let TxnOpV1::DepAdd(dep) = op
-            && dep.from == dep.to
-        {
-            return Err(EventValidationError::InvalidDependency {
-                reason: format!("self-dependency on {}", dep.from),
-            });
-        }
-        if let TxnOpV1::DepRemove(dep) = op
-            && dep.from == dep.to
-        {
-            return Err(EventValidationError::InvalidDependency {
-                reason: format!("self-dependency on {}", dep.from),
-            });
-        }
-    }
-
-    Ok(())
-}
-
-pub fn validate_event_body(body: &EventBody, limits: &Limits) -> Result<(), EventValidationError> {
-    validate_event_body_limits(body, limits)?;
-    validate_event_body_semantics(body)?;
-    Ok(())
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WorkflowPatch {
     NoChange,
@@ -2420,8 +2534,145 @@ pub struct ValidatedBeadPatch {
 }
 
 impl ValidatedBeadPatch {
+    pub fn as_inner(&self) -> &WireBeadPatch {
+        &self.inner
+    }
+
     pub fn into_inner(self) -> WireBeadPatch {
         self.inner
+    }
+}
+
+impl std::ops::Deref for ValidatedBeadPatch {
+    type Target = WireBeadPatch;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<WireBeadPatch> for ValidatedBeadPatch {
+    fn as_ref(&self) -> &WireBeadPatch {
+        &self.inner
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedTombstone {
+    inner: WireTombstoneV1,
+}
+
+impl ValidatedTombstone {
+    pub fn as_inner(&self) -> &WireTombstoneV1 {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> WireTombstoneV1 {
+        self.inner
+    }
+}
+
+impl std::ops::Deref for ValidatedTombstone {
+    type Target = WireTombstoneV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<WireTombstoneV1> for ValidatedTombstone {
+    fn as_ref(&self) -> &WireTombstoneV1 {
+        &self.inner
+    }
+}
+
+impl TryFrom<WireTombstoneV1> for ValidatedTombstone {
+    type Error = EventValidationError;
+
+    fn try_from(tombstone: WireTombstoneV1) -> Result<Self, Self::Error> {
+        if let Some(lineage) = tombstone.lineage.as_ref()
+            && lineage.by.as_str().is_empty()
+        {
+            return Err(EventValidationError::InvalidTombstoneLineage {
+                id: tombstone.id.clone(),
+                reason: "lineage_created_by must be set".to_string(),
+            });
+        }
+        Ok(Self { inner: tombstone })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedDepAdd {
+    inner: WireDepAddV1,
+}
+
+impl ValidatedDepAdd {
+    pub fn as_inner(&self) -> &WireDepAddV1 {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> WireDepAddV1 {
+        self.inner
+    }
+}
+
+impl std::ops::Deref for ValidatedDepAdd {
+    type Target = WireDepAddV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<WireDepAddV1> for ValidatedDepAdd {
+    fn as_ref(&self) -> &WireDepAddV1 {
+        &self.inner
+    }
+}
+
+impl TryFrom<WireDepAddV1> for ValidatedDepAdd {
+    type Error = EventValidationError;
+
+    fn try_from(dep: WireDepAddV1) -> Result<Self, Self::Error> {
+        Ok(Self { inner: dep })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedDepRemove {
+    inner: WireDepRemoveV1,
+}
+
+impl ValidatedDepRemove {
+    pub fn as_inner(&self) -> &WireDepRemoveV1 {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> WireDepRemoveV1 {
+        self.inner
+    }
+}
+
+impl std::ops::Deref for ValidatedDepRemove {
+    type Target = WireDepRemoveV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<WireDepRemoveV1> for ValidatedDepRemove {
+    fn as_ref(&self) -> &WireDepRemoveV1 {
+        &self.inner
+    }
+}
+
+impl TryFrom<WireDepRemoveV1> for ValidatedDepRemove {
+    type Error = EventValidationError;
+
+    fn try_from(dep: WireDepRemoveV1) -> Result<Self, Self::Error> {
+        Ok(Self { inner: dep })
     }
 }
 
@@ -2429,8 +2680,7 @@ impl TryFrom<WireBeadPatch> for ValidatedBeadPatch {
     type Error = EventValidationError;
 
     fn try_from(patch: WireBeadPatch) -> Result<Self, Self::Error> {
-        workflow_patch_from_wire(&patch)?;
-        claim_patch_from_wire(&patch)?;
+        validate_bead_patch_semantics(&patch)?;
         Ok(Self { inner: patch })
     }
 }
@@ -2504,7 +2754,10 @@ pub fn verify_event_frame(
     expected_prev_head: Option<Sha256>,
     lookup: &dyn EventShaLookup,
 ) -> Result<VerifiedEventAny, EventFrameError> {
-    let (_, body) = decode_event_body(frame.bytes.as_ref(), limits)?;
+    let (_, body) = decode_event_body(frame.bytes.as_ref(), limits).map_err(|err| match err {
+        DecodeError::Validation(source) => EventFrameError::Validation(source),
+        other => EventFrameError::Decode(other),
+    })?;
 
     if body.store != expected_store {
         return Err(EventFrameError::WrongStore {
@@ -2524,8 +2777,6 @@ pub fn verify_event_frame(
     if computed != frame.sha256 {
         return Err(EventFrameError::HashMismatch);
     }
-
-    validate_event_body(&body, limits)?;
 
     match lookup.lookup_event_sha(&frame.eid)? {
         None => {}
@@ -2650,9 +2901,12 @@ mod tests {
         let dep_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         txn.delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: BeadId::parse("bd-test1").unwrap(),
-                to: BeadId::parse("bd-dep").unwrap(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(
+                    BeadId::parse("bd-test1").unwrap(),
+                    BeadId::parse("bd-dep").unwrap(),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
                 dot: WireDotV1 {
                     replica: dep_replica,
                     counter: 1,
@@ -2661,9 +2915,12 @@ mod tests {
             .unwrap();
         txn.delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                from: BeadId::parse("bd-test1").unwrap(),
-                to: BeadId::parse("bd-dep2").unwrap(),
-                kind: DepKind::Related,
+                key: DepKey::new(
+                    BeadId::parse("bd-test1").unwrap(),
+                    BeadId::parse("bd-dep2").unwrap(),
+                    DepKind::Related,
+                )
+                .unwrap(),
                 ctx: WireDvvV1 {
                     max: BTreeMap::from([(dep_replica, 2)]),
                     dots: Vec::new(),
@@ -2999,7 +3256,7 @@ mod tests {
         let body = sample_body();
         let encoded = encode_event_body_canonical(&body).unwrap();
         let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
-        assert_eq!(body, decoded);
+        assert_eq!(decoded.raw(), &body);
     }
 
     #[test]
@@ -3007,7 +3264,7 @@ mod tests {
         let body = sample_body_with_ops();
         let encoded = encode_event_body_canonical(&body).unwrap();
         let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
-        assert_eq!(body, decoded);
+        assert_eq!(decoded.raw(), &body);
     }
 
     #[test]
@@ -3121,7 +3378,7 @@ mod tests {
         let reencoded = encode_event_body_canonical(&decoded).unwrap();
 
         assert_eq!(encoded.as_ref(), reencoded.as_ref());
-        assert_eq!(body, decoded);
+        assert_eq!(decoded.raw(), &body);
         let label_adds = txn(&decoded)
             .delta
             .iter()
@@ -3148,9 +3405,12 @@ mod tests {
         txn_ref
             .delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: BeadId::parse("bd-test1").unwrap(),
-                to: BeadId::parse("bd-dep").unwrap(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(
+                    BeadId::parse("bd-test1").unwrap(),
+                    BeadId::parse("bd-dep").unwrap(),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
                 dot: WireDotV1 {
                     replica,
                     counter: 1,
@@ -3160,9 +3420,12 @@ mod tests {
         txn_ref
             .delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                from: BeadId::parse("bd-test1").unwrap(),
-                to: BeadId::parse("bd-dep").unwrap(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(
+                    BeadId::parse("bd-test1").unwrap(),
+                    BeadId::parse("bd-dep").unwrap(),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
                 ctx: WireDvvV1 {
                     max: BTreeMap::from([(replica, 1)]),
                     dots: vec![WireDotV1 {
@@ -3178,7 +3441,7 @@ mod tests {
         let reencoded = encode_event_body_canonical(&decoded).unwrap();
 
         assert_eq!(encoded.as_ref(), reencoded.as_ref());
-        assert_eq!(body, decoded);
+        assert_eq!(decoded.raw(), &body);
     }
 
     #[test]
@@ -3190,10 +3453,27 @@ mod tests {
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
 
-        let err = validate_event_body_semantics(&body).unwrap_err();
+        let err = body.into_validated(&Limits::default()).unwrap_err();
         assert!(matches!(
             err,
             EventValidationError::InvalidWorkflowPatch { .. }
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_workflow_patch() {
+        let mut body = sample_body();
+        let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
+        patch.status = Some(WorkflowStatus::Closed);
+        let mut delta = TxnDeltaV1::new();
+        delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+        txn_mut(&mut body).delta = delta;
+
+        let encoded = encode_event_body_canonical(&body).unwrap();
+        let err = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::Validation(EventValidationError::InvalidWorkflowPatch { .. })
         ));
     }
 
@@ -3207,7 +3487,7 @@ mod tests {
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
 
-        let err = validate_event_body_semantics(&body).unwrap_err();
+        let err = body.into_validated(&Limits::default()).unwrap_err();
         assert!(matches!(
             err,
             EventValidationError::InvalidClaimPatch { .. }
@@ -3224,7 +3504,7 @@ mod tests {
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
 
-        let err = validate_event_body_semantics(&body).unwrap_err();
+        let err = body.into_validated(&Limits::default()).unwrap_err();
         assert!(matches!(
             err,
             EventValidationError::InvalidClaimPatch { .. }
@@ -3241,7 +3521,8 @@ mod tests {
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
 
-        validate_event_body_semantics(&body).expect("clear claim should be valid");
+        body.into_validated(&Limits::default())
+            .expect("clear claim should be valid");
     }
 
     #[test]
@@ -3254,7 +3535,8 @@ mod tests {
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
 
-        validate_event_body_semantics(&body).expect("set claim should be valid");
+        body.into_validated(&Limits::default())
+            .expect("set claim should be valid");
     }
 
     #[test]
@@ -3275,7 +3557,7 @@ mod tests {
         delta.insert(TxnOpV1::BeadDelete(tombstone)).unwrap();
         txn_mut(&mut body).delta = delta;
 
-        let err = validate_event_body_semantics(&body).unwrap_err();
+        let err = body.into_validated(&Limits::default()).unwrap_err();
         assert!(matches!(
             err,
             EventValidationError::InvalidTombstoneLineage { .. }
@@ -3294,7 +3576,7 @@ mod tests {
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
 
-        let err = validate_event_body_semantics(&body).unwrap_err();
+        let err = body.into_validated(&Limits::default()).unwrap_err();
         assert!(matches!(err, EventValidationError::InvalidBeadPatch { .. }));
     }
 
@@ -3310,61 +3592,8 @@ mod tests {
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
 
-        let err = validate_event_body_semantics(&body).unwrap_err();
+        let err = body.into_validated(&Limits::default()).unwrap_err();
         assert!(matches!(err, EventValidationError::InvalidBeadPatch { .. }));
-    }
-
-    #[test]
-    fn validate_rejects_self_dep_add() {
-        let mut body = sample_body();
-        let bead_id = BeadId::parse("bd-selfdep").unwrap();
-        let replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
-
-        let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: bead_id.clone(),
-                to: bead_id.clone(), // Self-dependency
-                kind: DepKind::Blocks,
-                dot: WireDotV1 {
-                    replica,
-                    counter: 1,
-                },
-            }))
-            .unwrap();
-        txn_mut(&mut body).delta = delta;
-
-        let err = validate_event_body_semantics(&body).unwrap_err();
-        assert!(matches!(
-            err,
-            EventValidationError::InvalidDependency { .. }
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_self_dep_remove() {
-        let mut body = sample_body();
-        let bead_id = BeadId::parse("bd-selfdep").unwrap();
-
-        let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                from: bead_id.clone(),
-                to: bead_id.clone(), // Self-dependency
-                kind: DepKind::Blocks,
-                ctx: WireDvvV1 {
-                    max: BTreeMap::new(),
-                    dots: Vec::new(),
-                },
-            }))
-            .unwrap();
-        txn_mut(&mut body).delta = delta;
-
-        let err = validate_event_body_semantics(&body).unwrap_err();
-        assert!(matches!(
-            err,
-            EventValidationError::InvalidDependency { .. }
-        ));
     }
 
     #[test]
@@ -3372,7 +3601,7 @@ mod tests {
         let body = sample_body();
         let encoded = encode_body_with_unknown_fields(&body);
         let (_, decoded) = decode_event_body(encoded.as_ref(), &Limits::default()).unwrap();
-        assert_eq!(body, decoded);
+        assert_eq!(decoded.raw(), &body);
     }
 
     #[test]

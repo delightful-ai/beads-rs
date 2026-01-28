@@ -1349,7 +1349,7 @@ fn stream_event_response_from_parts(
         event_id,
         sha256: hex::encode(sha256.as_bytes()),
         prev_sha256: prev_sha256.map(|prev| hex::encode(prev.as_bytes())),
-        body: crate::api::EventBody::from(&body),
+        body: crate::api::EventBody::from(body.as_ref()),
         body_bytes_hex: Some(hex::encode(bytes)),
     };
 

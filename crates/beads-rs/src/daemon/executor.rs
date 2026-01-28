@@ -37,8 +37,8 @@ use super::wal::{
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     ActorId, Applied, BeadId, CanonicalState, Dot, DurabilityClass, DurabilityReceipt, Durable,
-    EventBody, EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId,
-    ReplicaId, Seq1, Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, WallClock, Watermark,
+    EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId, ReplicaId, Seq1,
+    Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WallClock, Watermark,
     WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
     hash_event_body,
 };
@@ -989,7 +989,7 @@ fn load_event_body(
     wal_index: &dyn WalIndex,
     event_id: &EventId,
     limits: &Limits,
-) -> Result<EventBody, OpError> {
+) -> Result<ValidatedEventBody, OpError> {
     let reader = wal_index.reader();
     let from_seq_excl = event_id.origin_seq.prev_seq0();
     let max_bytes = limits.max_wal_record_bytes.saturating_add(FRAME_HEADER_LEN);
