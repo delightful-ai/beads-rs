@@ -334,6 +334,14 @@ pub fn import_checkpoint(
 ///
 /// This is the same verification + parsing as `import_checkpoint(dir, limits)`, but without filesystem I/O.
 pub fn import_checkpoint_export(
+    export: &CheckpointExport,
+    limits: &Limits,
+) -> Result<CheckpointImport, CheckpointImportError> {
+    let parsed = parse_checkpoint_export(export)?;
+    import_checkpoint_export_parsed(&parsed, limits)
+}
+
+fn import_checkpoint_export_parsed(
     export: &ParsedCheckpointExport,
     limits: &Limits,
 ) -> Result<CheckpointImport, CheckpointImportError> {
@@ -1165,9 +1173,29 @@ mod tests {
             files: BTreeMap::new(),
         };
 
-        let parsed = parse_checkpoint_export(&export).unwrap();
-        let imported = import_checkpoint_export(&parsed, &Limits::default()).unwrap();
+        let _parsed = parse_checkpoint_export(&export).unwrap();
+        let imported = import_checkpoint_export(&export, &Limits::default()).unwrap();
         assert_eq!(imported.checkpoint_group, "core");
+    }
+
+    #[test]
+    fn import_export_rejects_store_id_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (manifest, mut meta) = minimal_manifest_and_meta(dir);
+        meta.store_id = StoreId::new(Uuid::from_bytes([9u8; 16]));
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::new(),
+        };
+
+        let err = import_checkpoint_export(&export, &Limits::default()).unwrap_err();
+        assert!(matches!(err, CheckpointImportError::StoreIdMismatch { .. }));
     }
 
     #[test]
