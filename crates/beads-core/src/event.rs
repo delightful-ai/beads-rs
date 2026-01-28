@@ -3397,16 +3397,12 @@ mod tests {
     fn sample_frame(body: &EventBody, prev_sha256: Option<Sha256>) -> EventFrameV1 {
         let bytes = encode_event_body_canonical(body).unwrap();
         let sha256 = hash_event_body(&bytes);
-        EventFrameV1 {
-            eid: EventId::new(
-                body.origin_replica_id,
-                body.namespace.clone(),
-                body.origin_seq,
-            ),
-            sha256,
-            prev_sha256,
-            bytes: bytes.into(),
-        }
+        let eid = EventId::new(
+            body.origin_replica_id,
+            body.namespace.clone(),
+            body.origin_seq,
+        );
+        EventFrameV1::try_from_parts(eid, sha256, prev_sha256, bytes.into()).expect("sample frame")
     }
 
     fn encode_event_body_noncanonical(body: &EventBody) -> Vec<u8> {
@@ -4188,12 +4184,44 @@ mod tests {
     }
 
     #[test]
+    fn event_frame_rejects_prev_seq_mismatch() {
+        let first = sample_body_with_seq(1);
+        let first_bytes = encode_event_body_canonical(&first).unwrap();
+        let first_sha = hash_event_body(&first_bytes);
+        let first_eid = EventId::new(
+            first.origin_replica_id,
+            first.namespace.clone(),
+            first.origin_seq,
+        );
+        let err = EventFrameV1::try_from_parts(
+            first_eid,
+            first_sha,
+            Some(Sha256([9u8; 32])),
+            first_bytes.into(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, EventFrameError::PrevMismatch));
+
+        let second = sample_body_with_seq(2);
+        let second_bytes = encode_event_body_canonical(&second).unwrap();
+        let second_sha = hash_event_body(&second_bytes);
+        let second_eid = EventId::new(
+            second.origin_replica_id,
+            second.namespace.clone(),
+            second.origin_seq,
+        );
+        let err = EventFrameV1::try_from_parts(second_eid, second_sha, None, second_bytes.into())
+            .unwrap_err();
+        assert!(matches!(err, EventFrameError::PrevMismatch));
+    }
+
+    #[test]
     fn verify_event_frame_defers_prev_when_head_unknown() {
         let limits = Limits::default();
         let first = sample_body_with_seq(1);
         let first_frame = sample_frame(&first, None);
         let second = sample_body_with_seq(2);
-        let second_frame = sample_frame(&second, Some(first_frame.sha256));
+        let second_frame = sample_frame(&second, Some(first_frame.sha256()));
         let lookup = MapLookup(std::collections::BTreeMap::new());
 
         let verified =
@@ -4201,7 +4229,7 @@ mod tests {
 
         match verified {
             VerifiedEventAny::Deferred(ev) => {
-                assert_eq!(ev.prev.prev, first_frame.sha256);
+                assert_eq!(ev.prev.prev, first_frame.sha256());
                 assert_eq!(ev.prev.expected_prev_seq, Seq1::from_u64(1).unwrap());
             }
             other => panic!("expected deferred, got {other:?}"),
@@ -4214,21 +4242,21 @@ mod tests {
         let first = sample_body_with_seq(1);
         let first_frame = sample_frame(&first, None);
         let second = sample_body_with_seq(2);
-        let second_frame = sample_frame(&second, Some(first_frame.sha256));
+        let second_frame = sample_frame(&second, Some(first_frame.sha256()));
         let lookup = MapLookup(std::collections::BTreeMap::new());
 
         let verified = verify_event_frame(
             &second_frame,
             &limits,
             second.store,
-            Some(first_frame.sha256),
+            Some(first_frame.sha256()),
             &lookup,
         )
         .unwrap();
 
         match verified {
             VerifiedEventAny::Contiguous(ev) => {
-                assert_eq!(ev.prev.prev, Some(first_frame.sha256));
+                assert_eq!(ev.prev.prev, Some(first_frame.sha256()));
                 assert_eq!(ev.seq(), Seq1::from_u64(2).unwrap());
             }
             other => panic!("expected contiguous, got {other:?}"),
@@ -4244,16 +4272,13 @@ mod tests {
         assert_ne!(canonical.as_ref(), noncanonical.as_slice());
 
         let bytes = EventBytes::<Opaque>::new(Bytes::from(noncanonical.clone()));
-        let frame = EventFrameV1 {
-            eid: EventId::new(
-                body.origin_replica_id,
-                body.namespace.clone(),
-                body.origin_seq,
-            ),
-            sha256: hash_event_body(&bytes),
-            prev_sha256: None,
-            bytes,
-        };
+        let eid = EventId::new(
+            body.origin_replica_id,
+            body.namespace.clone(),
+            body.origin_seq,
+        );
+        let frame =
+            EventFrameV1::try_from_parts(eid, hash_event_body(&bytes), None, bytes).expect("frame");
         let lookup = MapLookup(std::collections::BTreeMap::new());
 
         let err = verify_event_frame(&frame, &limits, body.store, None, &lookup).unwrap_err();
@@ -4281,16 +4306,13 @@ mod tests {
         assert_ne!(canonical.as_ref(), noncanonical.as_slice());
 
         let bytes = EventBytes::<Opaque>::new(Bytes::from(noncanonical));
-        let frame = EventFrameV1 {
-            eid: EventId::new(
-                body.origin_replica_id,
-                body.namespace.clone(),
-                body.origin_seq,
-            ),
-            sha256: hash_event_body(&bytes),
-            prev_sha256: None,
-            bytes,
-        };
+        let eid = EventId::new(
+            body.origin_replica_id,
+            body.namespace.clone(),
+            body.origin_seq,
+        );
+        let frame =
+            EventFrameV1::try_from_parts(eid, hash_event_body(&bytes), None, bytes).expect("frame");
 
         let err = VerifiedEventFrame::try_from_frame(frame, &limits).unwrap_err();
         assert!(matches!(err, EventFrameError::NonCanonical));
@@ -4300,8 +4322,10 @@ mod tests {
     fn verified_event_frame_rejects_hash_mismatch() {
         let limits = Limits::default();
         let body = sample_body_with_seq(1);
-        let mut frame = sample_frame(&body, None);
-        frame.sha256 = Sha256([7u8; 32]);
+        let frame = sample_frame(&body, None);
+        let (eid, _sha256, prev_sha256, bytes) = frame.into_parts();
+        let frame = EventFrameV1::try_from_parts(eid, Sha256([7u8; 32]), prev_sha256, bytes)
+            .expect("frame");
 
         let err = VerifiedEventFrame::try_from_frame(frame, &limits).unwrap_err();
         assert!(matches!(err, EventFrameError::HashMismatch));
