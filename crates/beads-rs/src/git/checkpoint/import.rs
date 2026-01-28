@@ -13,7 +13,11 @@ use thiserror::Error;
 use super::export::CheckpointExport;
 use super::json_canon::CanonJsonError;
 use super::layout::{CheckpointFileKind, MANIFEST_FILE, META_FILE, parse_shard_path};
-use super::{CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks};
+use super::types::CheckpointShardPayload;
+use super::{
+    CheckpointFormatVersion, CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks,
+    ParsedCheckpointManifest, ParsedCheckpointMeta,
+};
 use crate::core::error::CoreError;
 use crate::core::state::LabelState;
 use crate::core::wire_bead::{
@@ -67,6 +71,13 @@ pub enum CheckpointImportError {
         meta: Vec<NamespaceId>,
         manifest: Vec<NamespaceId>,
     },
+    #[error("checkpoint namespaces not normalized for {which}: {namespaces:?}")]
+    NamespacesNotNormalized {
+        which: &'static str,
+        namespaces: Vec<NamespaceId>,
+    },
+    #[error("checkpoint format version unsupported: {got}")]
+    UnsupportedFormatVersion { got: u32 },
     #[error("checkpoint file missing at {path:?}")]
     MissingFile { path: PathBuf },
     #[error("checkpoint file size mismatch for {path:?}: expected {expected}, got {got}")]
@@ -182,60 +193,15 @@ pub fn import_checkpoint(
             source,
         })?;
 
-    if meta.store_id != manifest.store_id {
-        return Err(CheckpointImportError::StoreIdMismatch {
-            meta: meta.store_id,
-            manifest: manifest.store_id,
-        });
-    }
-    if meta.store_epoch != manifest.store_epoch {
-        return Err(CheckpointImportError::StoreEpochMismatch {
-            meta: meta.store_epoch,
-            manifest: manifest.store_epoch,
-        });
-    }
-    if meta.checkpoint_group != manifest.checkpoint_group {
-        return Err(CheckpointImportError::GroupMismatch {
-            meta: meta.checkpoint_group.clone(),
-            manifest: manifest.checkpoint_group.clone(),
-        });
-    }
-
-    let mut meta_namespaces = meta.namespaces.clone();
-    meta_namespaces.sort();
-    meta_namespaces.dedup();
-    let mut manifest_namespaces = manifest.namespaces.clone();
-    manifest_namespaces.sort();
-    manifest_namespaces.dedup();
-    if meta_namespaces != manifest_namespaces {
-        return Err(CheckpointImportError::NamespacesMismatch {
-            meta: meta_namespaces,
-            manifest: manifest_namespaces,
-        });
-    }
-
-    let manifest_hash = ContentHash::from_bytes(sha256_bytes(&manifest_bytes).0);
-    if manifest_hash != meta.manifest_hash {
-        return Err(CheckpointImportError::ManifestHashMismatch {
-            expected: meta.manifest_hash,
-            got: manifest_hash,
-        });
-    }
-
-    let content_hash = meta.compute_content_hash()?;
-    if content_hash != meta.content_hash {
-        return Err(CheckpointImportError::ContentHashMismatch {
-            expected: meta.content_hash,
-            got: content_hash,
-        });
-    }
+    let (meta, manifest) = validate_meta_and_manifest(meta, manifest)?;
 
     let mut state = StoreState::new();
     let mut label_stores: BTreeMap<NamespaceId, LabelStore> = BTreeMap::new();
     let mut dep_stores: BTreeMap<NamespaceId, DepStore> = BTreeMap::new();
-    let allowed_namespaces: BTreeSet<NamespaceId> = manifest_namespaces.iter().cloned().collect();
+    let allowed_namespaces: BTreeSet<NamespaceId> =
+        manifest.manifest().namespaces.iter().cloned().collect();
 
-    for (rel_path, entry) in &manifest.files {
+    for (rel_path, entry) in &manifest.manifest().files {
         validate_rel_path(rel_path)?;
         if rel_path == META_FILE || rel_path == MANIFEST_FILE {
             return Err(CheckpointImportError::UnexpectedFile {
@@ -340,6 +306,7 @@ pub fn import_checkpoint(
         state_for_namespace(&mut state, &ns).set_dep_store(deps);
     }
 
+    let meta = meta.meta();
     Ok(CheckpointImport {
         checkpoint_group: meta.checkpoint_group.clone(),
         policy_hash: meta.policy_hash,
@@ -354,64 +321,16 @@ pub fn import_checkpoint(
 ///
 /// This is the same verification + parsing as `import_checkpoint(dir, limits)`, but without filesystem I/O.
 pub fn import_checkpoint_export(
-    export: &CheckpointExport,
+    export: &ParsedCheckpointExport,
     limits: &Limits,
 ) -> Result<CheckpointImport, CheckpointImportError> {
-    let meta = &export.meta;
-    let manifest = &export.manifest;
-
-    if meta.store_id != manifest.store_id {
-        return Err(CheckpointImportError::StoreIdMismatch {
-            meta: meta.store_id,
-            manifest: manifest.store_id,
-        });
-    }
-    if meta.store_epoch != manifest.store_epoch {
-        return Err(CheckpointImportError::StoreEpochMismatch {
-            meta: meta.store_epoch,
-            manifest: manifest.store_epoch,
-        });
-    }
-    if meta.checkpoint_group != manifest.checkpoint_group {
-        return Err(CheckpointImportError::GroupMismatch {
-            meta: meta.checkpoint_group.clone(),
-            manifest: manifest.checkpoint_group.clone(),
-        });
-    }
-
-    let mut meta_namespaces = meta.namespaces.clone();
-    meta_namespaces.sort();
-    meta_namespaces.dedup();
-    let mut manifest_namespaces = manifest.namespaces.clone();
-    manifest_namespaces.sort();
-    manifest_namespaces.dedup();
-    if meta_namespaces != manifest_namespaces {
-        return Err(CheckpointImportError::NamespacesMismatch {
-            meta: meta_namespaces,
-            manifest: manifest_namespaces,
-        });
-    }
-
-    // Verify manifest hash and meta content hash using canonical encoding.
-    let manifest_hash = manifest.manifest_hash()?;
-    if manifest_hash != meta.manifest_hash {
-        return Err(CheckpointImportError::ManifestHashMismatch {
-            expected: meta.manifest_hash,
-            got: manifest_hash,
-        });
-    }
-    let content_hash = meta.compute_content_hash()?;
-    if content_hash != meta.content_hash {
-        return Err(CheckpointImportError::ContentHashMismatch {
-            expected: meta.content_hash,
-            got: content_hash,
-        });
-    }
+    let meta = export.meta.meta();
+    let manifest = export.manifest.manifest();
 
     let mut state = StoreState::new();
     let mut label_stores: BTreeMap<NamespaceId, LabelStore> = BTreeMap::new();
     let mut dep_stores: BTreeMap<NamespaceId, DepStore> = BTreeMap::new();
-    let allowed_namespaces: BTreeSet<NamespaceId> = manifest_namespaces.iter().cloned().collect();
+    let allowed_namespaces: BTreeSet<NamespaceId> = manifest.namespaces.iter().cloned().collect();
 
     for (rel_path, entry) in &manifest.files {
         validate_rel_path(rel_path)?;
@@ -547,6 +466,98 @@ pub fn import_checkpoint_export(
         included: meta.included.clone(),
         included_heads: meta.included_heads.clone(),
     })
+}
+
+#[derive(Clone, Debug)]
+pub struct ParsedCheckpointExport {
+    pub meta: ParsedCheckpointMeta,
+    pub manifest: ParsedCheckpointManifest,
+    pub files: BTreeMap<String, CheckpointShardPayload>,
+}
+
+pub fn parse_checkpoint_export(
+    export: &CheckpointExport,
+) -> Result<ParsedCheckpointExport, CheckpointImportError> {
+    let (meta, manifest) =
+        validate_meta_and_manifest(export.meta.clone(), export.manifest.clone())?;
+    Ok(ParsedCheckpointExport {
+        meta,
+        manifest,
+        files: export.files.clone(),
+    })
+}
+
+fn validate_meta_and_manifest(
+    meta: CheckpointMeta,
+    manifest: CheckpointManifest,
+) -> Result<(ParsedCheckpointMeta, ParsedCheckpointManifest), CheckpointImportError> {
+    let version = CheckpointFormatVersion::parse(meta.checkpoint_format_version).ok_or(
+        CheckpointImportError::UnsupportedFormatVersion {
+            got: meta.checkpoint_format_version,
+        },
+    )?;
+
+    let meta_namespaces = meta.namespaces_normalized();
+    if meta_namespaces != meta.namespaces {
+        return Err(CheckpointImportError::NamespacesNotNormalized {
+            which: "meta",
+            namespaces: meta.namespaces.clone(),
+        });
+    }
+
+    let manifest_namespaces = manifest.namespaces_normalized();
+    if manifest_namespaces != manifest.namespaces {
+        return Err(CheckpointImportError::NamespacesNotNormalized {
+            which: "manifest",
+            namespaces: manifest.namespaces.clone(),
+        });
+    }
+
+    if meta.store_id != manifest.store_id {
+        return Err(CheckpointImportError::StoreIdMismatch {
+            meta: meta.store_id,
+            manifest: manifest.store_id,
+        });
+    }
+    if meta.store_epoch != manifest.store_epoch {
+        return Err(CheckpointImportError::StoreEpochMismatch {
+            meta: meta.store_epoch,
+            manifest: manifest.store_epoch,
+        });
+    }
+    if meta.checkpoint_group != manifest.checkpoint_group {
+        return Err(CheckpointImportError::GroupMismatch {
+            meta: meta.checkpoint_group.clone(),
+            manifest: manifest.checkpoint_group.clone(),
+        });
+    }
+    if meta.namespaces != manifest.namespaces {
+        return Err(CheckpointImportError::NamespacesMismatch {
+            meta: meta.namespaces.clone(),
+            manifest: manifest.namespaces.clone(),
+        });
+    }
+
+    let manifest_hash = manifest.manifest_hash()?;
+    if manifest_hash != meta.manifest_hash {
+        return Err(CheckpointImportError::ManifestHashMismatch {
+            expected: meta.manifest_hash,
+            got: manifest_hash,
+        });
+    }
+
+    let content_hash = meta.compute_content_hash()?;
+    if content_hash != meta.content_hash {
+        return Err(CheckpointImportError::ContentHashMismatch {
+            expected: meta.content_hash,
+            got: content_hash,
+        });
+    }
+
+    Ok((
+        ParsedCheckpointMeta::new(meta, version),
+        ParsedCheckpointManifest::new(manifest),
+    ))
 }
 
 pub fn merge_store_states(
@@ -1006,6 +1017,75 @@ mod tests {
         let tomb_bytes = serialize_tombstones(state).expect("serialize tombstones");
         let deps_bytes = serialize_deps(state).expect("serialize deps");
         (state_bytes, tomb_bytes, deps_bytes)
+    }
+
+    #[test]
+    fn import_rejects_unsupported_version() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (manifest, mut meta) = minimal_manifest_and_meta(dir);
+        meta.checkpoint_format_version = 99;
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
+        write_file(
+            &dir.join(MANIFEST_FILE),
+            manifest.canon_bytes().unwrap().as_slice(),
+        );
+
+        let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::UnsupportedFormatVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_export_rejects_namespace_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
+        let extra = NamespaceId::parse("extra").unwrap();
+        manifest.namespaces = vec![NamespaceId::core(), extra];
+        manifest.namespaces.sort();
+        manifest.namespaces.dedup();
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::new(),
+        };
+
+        let err = parse_checkpoint_export(&export).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::NamespacesMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn import_export_accepts_v1() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (manifest, mut meta) = minimal_manifest_and_meta(dir);
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::new(),
+        };
+
+        let parsed = parse_checkpoint_export(&export).unwrap();
+        let imported = import_checkpoint_export(&parsed, &Limits::default()).unwrap();
+        assert_eq!(imported.checkpoint_group, "core");
     }
 
     #[test]
