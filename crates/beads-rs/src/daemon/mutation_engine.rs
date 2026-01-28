@@ -2188,6 +2188,51 @@ mod tests {
     }
 
     #[test]
+    fn update_trims_required_fields() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let bead_id = BeadId::parse("bd-trim").unwrap();
+        let state = make_state_with_bead(bead_id.as_str(), &actor);
+        let stamp = make_stamp(10, &actor);
+        let stamped = make_stamped_context(
+            MutationContext {
+                namespace: NamespaceId::core(),
+                actor_id: actor.clone(),
+                client_request_id: None,
+                trace_id: TraceId::new(Uuid::from_bytes([5u8; 16])),
+            },
+            stamp,
+        );
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
+        let mut patch = BeadPatch::default();
+        patch.title = Patch::Set("  title  ".into());
+        patch.description = Patch::Set("  desc  ".into());
+        let req = ParsedMutationRequest::parse_update(UpdatePayload {
+            id: bead_id.clone(),
+            patch,
+            cas: None,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([7u8; 16])));
+
+        let draft = engine
+            .plan(&state, 10, stamped, store, None, req, &mut dots)
+            .unwrap();
+        let patch = draft
+            .command
+            .raw_delta()
+            .iter()
+            .find_map(|op| match op {
+                TxnOpV1::BeadUpsert(patch) => Some(patch.as_ref()),
+                _ => None,
+            })
+            .expect("bead upsert");
+
+        assert_eq!(patch.title.as_deref(), Some("title"));
+        assert_eq!(patch.description.as_deref(), Some("desc"));
+    }
+
+    #[test]
     fn stamped_context_rejects_mismatched_actor() {
         let ctx = MutationContext {
             namespace: NamespaceId::core(),
