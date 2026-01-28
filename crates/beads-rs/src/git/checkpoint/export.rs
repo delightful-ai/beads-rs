@@ -18,9 +18,9 @@ use super::types::{CheckpointShardPayload, CheckpointSnapshot};
 use crate::core::tombstone::TombstoneKey;
 use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1};
 use crate::core::{
-    ContentHash, Dot, Durable, HeadStatus, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRoster,
-    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WireBeadFull, WireLineageStamp,
-    WireStamp, WireTombstoneV1, sha256_bytes,
+    BeadSnapshotWireV1, ContentHash, Dot, Durable, HeadStatus, NamespaceId, NamespacePolicy,
+    ReplicaId, ReplicaRoster, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks,
+    WireLineageStamp, WireStamp, WireTombstoneV1, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -403,7 +403,7 @@ fn build_namespace_shards(
             continue;
         };
         let label_state = state.label_store().state(id, view.bead.core.created());
-        let wire = WireBeadFull::from_view(&view, label_state);
+        let wire = BeadSnapshotWireV1::from_view(&view, label_state);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
@@ -711,7 +711,7 @@ mod tests {
             .label_store()
             .state(&bead_id, view.bead.core.created());
         let mut expected =
-            to_canon_json_bytes(&WireBeadFull::from_view(&view, label_state)).unwrap();
+            to_canon_json_bytes(&BeadSnapshotWireV1::from_view(&view, label_state)).unwrap();
         expected.push(b'\n');
         assert_eq!(state_payload.bytes.as_ref(), expected);
 
@@ -985,7 +985,7 @@ mod tests {
                 .label_store()
                 .state(&id, view.bead.core.created());
             let mut line =
-                to_canon_json_bytes(&WireBeadFull::from_view(&view, label_state)).unwrap();
+                to_canon_json_bytes(&BeadSnapshotWireV1::from_view(&view, label_state)).unwrap();
             line.push(b'\n');
             expected.extend_from_slice(&line);
         }

@@ -21,11 +21,12 @@ use super::{
 use crate::core::error::CoreError;
 use crate::core::state::LabelState;
 use crate::core::wire_bead::{
-    WireBeadFull, WireDepStoreV1, WireLabelStateV1, WireNoteV1, WireStamp, WireTombstoneV1,
+    WireDepStoreV1, WireLabelStateV1, WireNoteV1, WireStamp, WireTombstoneV1,
 };
 use crate::core::{
-    BeadId, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore, Limits, NamespaceId,
-    NoteId, OrSet, Stamp, StoreState, Tombstone, TombstoneKey, WriteStamp, sha256_bytes,
+    BeadId, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore,
+    Limits, NamespaceId, NoteId, OrSet, Stamp, StoreState, Tombstone, TombstoneKey, WriteStamp,
+    sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -230,7 +231,7 @@ pub fn import_checkpoint(
         let mut prev_bead: Option<BeadId> = None;
         let mut prev_tombstone: Option<TombstoneKey> = None;
         let stats = match rel_path.kind {
-            CheckpointFileKind::State => parse_jsonl_file::<WireBeadFull, _>(
+            CheckpointFileKind::State => parse_jsonl_file::<BeadSnapshotWireV1, _>(
                 &full_path,
                 &rel_path.namespace,
                 limits,
@@ -389,7 +390,7 @@ pub fn import_checkpoint_export(
         let mut prev_bead: Option<BeadId> = None;
         let mut prev_tombstone: Option<TombstoneKey> = None;
         match rel_path.kind {
-            CheckpointFileKind::State => parse_jsonl_bytes::<WireBeadFull, _>(
+            CheckpointFileKind::State => parse_jsonl_bytes::<BeadSnapshotWireV1, _>(
                 bytes,
                 &path,
                 &rel_path.namespace,
@@ -1042,8 +1043,8 @@ mod tests {
         (manifest, meta)
     }
 
-    fn sample_wire_bead_full(id: &str) -> WireBeadFull {
-        WireBeadFull {
+    fn sample_wire_bead_full(id: &str) -> BeadSnapshotWireV1 {
+        BeadSnapshotWireV1 {
             id: BeadId::parse(id).unwrap(),
             created_at: WireStamp(1, 0),
             created_by: ActorId::new("me").unwrap(),
