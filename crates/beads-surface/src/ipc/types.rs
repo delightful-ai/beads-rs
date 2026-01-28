@@ -13,7 +13,7 @@ use super::{ctx::*, payload::*};
 
 use crate::ops::OpResult;
 
-pub const IPC_PROTOCOL_VERSION: u32 = 2;
+pub const IPC_PROTOCOL_VERSION: u32 = 3;
 
 // =============================================================================
 // Request - All IPC requests
@@ -77,6 +77,103 @@ pub struct ReadConsistency {
     pub require_min_seen: Option<Watermarks<Applied>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_timeout_ms: Option<u64>,
+}
+
+/// Admin operations grouped under Request::Admin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "admin_op", rename_all = "snake_case")]
+pub enum AdminOp {
+    /// Admin status snapshot.
+    Status {
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
+    /// Admin metrics snapshot.
+    Metrics {
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
+    /// Admin doctor report.
+    Doctor {
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: AdminDoctorPayload,
+    },
+    /// Admin scrub now.
+    Scrub {
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: AdminScrubPayload,
+    },
+    /// Admin flush WAL namespace.
+    Flush {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: AdminFlushPayload,
+    },
+    /// Admin checkpoint wait (force checkpoint and block until complete).
+    CheckpointWait {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: AdminCheckpointWaitPayload,
+    },
+    /// Admin fingerprint report.
+    Fingerprint {
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: AdminFingerprintPayload,
+    },
+    /// Admin reload namespace policies.
+    ReloadPolicies {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
+    /// Admin reload limits.
+    ReloadLimits {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
+    /// Admin reload replication runtime.
+    ReloadReplication {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
+    /// Admin rotate replica id.
+    RotateReplicaId {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
+    /// Admin maintenance mode toggle.
+    MaintenanceMode {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: AdminMaintenanceModePayload,
+    },
+    /// Rebuild WAL index from segments.
+    RebuildIndex {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
 }
 
 /// IPC request (mutation or query).
@@ -343,109 +440,8 @@ pub enum Request {
         payload: EmptyPayload,
     },
 
-    /// Admin status snapshot.
-    AdminStatus {
-        #[serde(flatten)]
-        ctx: ReadCtx,
-        #[serde(flatten)]
-        payload: EmptyPayload,
-    },
-
-    /// Admin metrics snapshot.
-    AdminMetrics {
-        #[serde(flatten)]
-        ctx: ReadCtx,
-        #[serde(flatten)]
-        payload: EmptyPayload,
-    },
-
-    /// Admin doctor report.
-    AdminDoctor {
-        #[serde(flatten)]
-        ctx: ReadCtx,
-        #[serde(flatten)]
-        payload: AdminDoctorPayload,
-    },
-
-    /// Admin scrub now.
-    AdminScrub {
-        #[serde(flatten)]
-        ctx: ReadCtx,
-        #[serde(flatten)]
-        payload: AdminScrubPayload,
-    },
-
-    /// Admin flush WAL namespace.
-    AdminFlush {
-        #[serde(flatten)]
-        ctx: RepoCtx,
-        #[serde(flatten)]
-        payload: AdminFlushPayload,
-    },
-
-    /// Admin checkpoint wait (force checkpoint and block until complete).
-    AdminCheckpointWait {
-        #[serde(flatten)]
-        ctx: RepoCtx,
-        #[serde(flatten)]
-        payload: AdminCheckpointWaitPayload,
-    },
-
-    /// Admin fingerprint report.
-    AdminFingerprint {
-        #[serde(flatten)]
-        ctx: ReadCtx,
-        #[serde(flatten)]
-        payload: AdminFingerprintPayload,
-    },
-
-    /// Admin reload namespace policies.
-    AdminReloadPolicies {
-        #[serde(flatten)]
-        ctx: RepoCtx,
-        #[serde(flatten)]
-        payload: EmptyPayload,
-    },
-
-    /// Admin reload limits.
-    AdminReloadLimits {
-        #[serde(flatten)]
-        ctx: RepoCtx,
-        #[serde(flatten)]
-        payload: EmptyPayload,
-    },
-
-    /// Admin reload replication runtime.
-    AdminReloadReplication {
-        #[serde(flatten)]
-        ctx: RepoCtx,
-        #[serde(flatten)]
-        payload: EmptyPayload,
-    },
-
-    /// Admin rotate replica id.
-    AdminRotateReplicaId {
-        #[serde(flatten)]
-        ctx: RepoCtx,
-        #[serde(flatten)]
-        payload: EmptyPayload,
-    },
-
-    /// Admin maintenance mode toggle.
-    AdminMaintenanceMode {
-        #[serde(flatten)]
-        ctx: RepoCtx,
-        #[serde(flatten)]
-        payload: AdminMaintenanceModePayload,
-    },
-
-    /// Rebuild WAL index from segments.
-    AdminRebuildIndex {
-        #[serde(flatten)]
-        ctx: RepoCtx,
-        #[serde(flatten)]
-        payload: EmptyPayload,
-    },
+    /// Admin operations (status, metrics, doctor, etc).
+    Admin(AdminOp),
 
     /// Validate state.
     Validate {
@@ -515,31 +511,31 @@ impl Request {
             Request::SyncWait { ctx, .. } => info_from_repo("sync_wait", ctx),
             Request::Init { ctx, .. } => info_from_repo("init", ctx),
             Request::Status { ctx, .. } => info_from_read("status", ctx),
-            Request::AdminStatus { ctx, .. } => info_from_read("admin_status", ctx),
-            Request::AdminMetrics { ctx, .. } => info_from_read("admin_metrics", ctx),
-            Request::AdminDoctor { ctx, .. } => info_from_read("admin_doctor", ctx),
-            Request::AdminScrub { ctx, .. } => info_from_read("admin_scrub", ctx),
-            Request::AdminFlush { ctx, payload, .. } => {
-                info_from_namespace("admin_flush", ctx, payload.namespace.as_ref())
-            }
-            Request::AdminCheckpointWait { ctx, payload, .. } => {
-                info_from_namespace("admin_checkpoint_wait", ctx, payload.namespace.as_ref())
-            }
-            Request::AdminFingerprint { ctx, .. } => info_from_read("admin_fingerprint", ctx),
-            Request::AdminReloadPolicies { ctx, .. } => {
-                info_from_repo("admin_reload_policies", ctx)
-            }
-            Request::AdminReloadLimits { ctx, .. } => info_from_repo("admin_reload_limits", ctx),
-            Request::AdminReloadReplication { ctx, .. } => {
-                info_from_repo("admin_reload_replication", ctx)
-            }
-            Request::AdminRotateReplicaId { ctx, .. } => {
-                info_from_repo("admin_rotate_replica_id", ctx)
-            }
-            Request::AdminMaintenanceMode { ctx, .. } => {
-                info_from_repo("admin_maintenance_mode", ctx)
-            }
-            Request::AdminRebuildIndex { ctx, .. } => info_from_repo("admin_rebuild_index", ctx),
+            Request::Admin(op) => match op {
+                AdminOp::Status { ctx, .. } => info_from_read("admin_status", ctx),
+                AdminOp::Metrics { ctx, .. } => info_from_read("admin_metrics", ctx),
+                AdminOp::Doctor { ctx, .. } => info_from_read("admin_doctor", ctx),
+                AdminOp::Scrub { ctx, .. } => info_from_read("admin_scrub", ctx),
+                AdminOp::Flush { ctx, payload, .. } => {
+                    info_from_namespace("admin_flush", ctx, payload.namespace.as_ref())
+                }
+                AdminOp::CheckpointWait { ctx, payload, .. } => {
+                    info_from_namespace("admin_checkpoint_wait", ctx, payload.namespace.as_ref())
+                }
+                AdminOp::Fingerprint { ctx, .. } => info_from_read("admin_fingerprint", ctx),
+                AdminOp::ReloadPolicies { ctx, .. } => info_from_repo("admin_reload_policies", ctx),
+                AdminOp::ReloadLimits { ctx, .. } => info_from_repo("admin_reload_limits", ctx),
+                AdminOp::ReloadReplication { ctx, .. } => {
+                    info_from_repo("admin_reload_replication", ctx)
+                }
+                AdminOp::RotateReplicaId { ctx, .. } => {
+                    info_from_repo("admin_rotate_replica_id", ctx)
+                }
+                AdminOp::MaintenanceMode { ctx, .. } => {
+                    info_from_repo("admin_maintenance_mode", ctx)
+                }
+                AdminOp::RebuildIndex { ctx, .. } => info_from_repo("admin_rebuild_index", ctx),
+            },
             Request::Validate { ctx, .. } => info_from_read("validate", ctx),
             Request::Subscribe { ctx, .. } => info_from_read("subscribe", ctx),
             Request::Ping => RequestInfo {

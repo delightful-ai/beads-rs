@@ -22,7 +22,7 @@ use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::executor::DurabilityWait;
 use super::git_worker::{GitOp, GitResult};
 use super::ipc::{
-    ReadConsistency, Request, RequestInfo, Response, ResponseExt, ResponsePayload,
+    AdminOp, ReadConsistency, Request, RequestInfo, Response, ResponseExt, ResponsePayload,
     decode_request_with_limits, encode_response, send_response,
 };
 use super::ops::OpError;
@@ -484,7 +484,7 @@ fn process_request_message(
         return RequestOutcome::Continue;
     }
 
-    if let Request::AdminCheckpointWait { ctx, payload } = request {
+    if let Request::Admin(AdminOp::CheckpointWait { ctx, payload }) = request {
         let proof = match daemon.ensure_repo_loaded_strict(&ctx.path, git_tx) {
             Ok(proof) => proof,
             Err(err) => {

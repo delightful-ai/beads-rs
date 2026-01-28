@@ -12,7 +12,8 @@ use super::core::{
 };
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
-    ErrorPayload, MutationMeta, ReadConsistency, Request, Response, ResponseExt, ResponsePayload,
+    AdminOp, ErrorPayload, MutationMeta, ReadConsistency, Request, Response, ResponseExt,
+    ResponsePayload,
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
@@ -543,82 +544,72 @@ impl Daemon {
                 self.query_status(&repo, read, git_tx).into()
             }
 
-            Request::AdminStatus { ctx, .. } => {
-                let repo = ctx.repo.path;
-                let read = ctx.read;
-                self.admin_status(&repo, read, git_tx).into()
-            }
-
-            Request::AdminMetrics { ctx, .. } => {
-                let repo = ctx.repo.path;
-                let read = ctx.read;
-                self.admin_metrics(&repo, read, git_tx).into()
-            }
-
-            Request::AdminDoctor { ctx, payload } => {
-                let repo = ctx.repo.path;
-                let read = ctx.read;
-                self.admin_doctor(
-                    &repo,
-                    read,
-                    payload.max_records_per_namespace,
-                    payload.verify_checkpoint_cache,
-                    git_tx,
-                )
-                .into()
-            }
-
-            Request::AdminScrub { ctx, payload } => {
-                let repo = ctx.repo.path;
-                let read = ctx.read;
-                self.admin_scrub_now(
-                    &repo,
-                    read,
-                    payload.max_records_per_namespace,
-                    payload.verify_checkpoint_cache,
-                    git_tx,
-                )
-                .into()
-            }
-
-            Request::AdminFlush { ctx, payload } => self
-                .admin_flush(&ctx.path, payload.namespace, payload.checkpoint_now, git_tx)
-                .into(),
-
-            Request::AdminCheckpointWait { .. } => {
-                unreachable!("AdminCheckpointWait is handled by the daemon state loop")
-            }
-
-            Request::AdminFingerprint { ctx, payload } => {
-                let repo = ctx.repo.path;
-                let read = ctx.read;
-                self.admin_fingerprint(&repo, read, payload.mode, payload.sample, git_tx)
+            Request::Admin(op) => match op {
+                AdminOp::Status { ctx, .. } => {
+                    let repo = ctx.repo.path;
+                    let read = ctx.read;
+                    self.admin_status(&repo, read, git_tx).into()
+                }
+                AdminOp::Metrics { ctx, .. } => {
+                    let repo = ctx.repo.path;
+                    let read = ctx.read;
+                    self.admin_metrics(&repo, read, git_tx).into()
+                }
+                AdminOp::Doctor { ctx, payload } => {
+                    let repo = ctx.repo.path;
+                    let read = ctx.read;
+                    self.admin_doctor(
+                        &repo,
+                        read,
+                        payload.max_records_per_namespace,
+                        payload.verify_checkpoint_cache,
+                        git_tx,
+                    )
                     .into()
-            }
-
-            Request::AdminReloadPolicies { ctx, .. } => {
-                self.admin_reload_policies(&ctx.path, git_tx).into()
-            }
-
-            Request::AdminReloadLimits { ctx, .. } => {
-                self.admin_reload_limits(&ctx.path, git_tx).into()
-            }
-
-            Request::AdminReloadReplication { ctx, .. } => {
-                self.admin_reload_replication(&ctx.path, git_tx).into()
-            }
-
-            Request::AdminRotateReplicaId { ctx, .. } => {
-                self.admin_rotate_replica_id(&ctx.path, git_tx).into()
-            }
-
-            Request::AdminMaintenanceMode { ctx, payload } => self
-                .admin_maintenance_mode(&ctx.path, payload.enabled, git_tx)
-                .into(),
-
-            Request::AdminRebuildIndex { ctx, .. } => {
-                self.admin_rebuild_index(&ctx.path, git_tx).into()
-            }
+                }
+                AdminOp::Scrub { ctx, payload } => {
+                    let repo = ctx.repo.path;
+                    let read = ctx.read;
+                    self.admin_scrub_now(
+                        &repo,
+                        read,
+                        payload.max_records_per_namespace,
+                        payload.verify_checkpoint_cache,
+                        git_tx,
+                    )
+                    .into()
+                }
+                AdminOp::Flush { ctx, payload } => self
+                    .admin_flush(&ctx.path, payload.namespace, payload.checkpoint_now, git_tx)
+                    .into(),
+                AdminOp::CheckpointWait { .. } => {
+                    unreachable!("AdminCheckpointWait is handled by the daemon state loop")
+                }
+                AdminOp::Fingerprint { ctx, payload } => {
+                    let repo = ctx.repo.path;
+                    let read = ctx.read;
+                    self.admin_fingerprint(&repo, read, payload.mode, payload.sample, git_tx)
+                        .into()
+                }
+                AdminOp::ReloadPolicies { ctx, .. } => {
+                    self.admin_reload_policies(&ctx.path, git_tx).into()
+                }
+                AdminOp::ReloadLimits { ctx, .. } => {
+                    self.admin_reload_limits(&ctx.path, git_tx).into()
+                }
+                AdminOp::ReloadReplication { ctx, .. } => {
+                    self.admin_reload_replication(&ctx.path, git_tx).into()
+                }
+                AdminOp::RotateReplicaId { ctx, .. } => {
+                    self.admin_rotate_replica_id(&ctx.path, git_tx).into()
+                }
+                AdminOp::MaintenanceMode { ctx, payload } => self
+                    .admin_maintenance_mode(&ctx.path, payload.enabled, git_tx)
+                    .into(),
+                AdminOp::RebuildIndex { ctx, .. } => {
+                    self.admin_rebuild_index(&ctx.path, git_tx).into()
+                }
+            },
 
             Request::Validate { ctx, .. } => {
                 let repo = ctx.repo.path;
