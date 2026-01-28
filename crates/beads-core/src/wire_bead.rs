@@ -462,6 +462,9 @@ pub struct WireBeadFull {
     pub v: Option<BTreeMap<String, WireFieldStamp>>,
 }
 
+/// Canonical bead snapshot wire format (v1).
+pub type BeadSnapshotWireV1 = WireBeadFull;
+
 fn label_state_to_wire(state: Option<&LabelState>) -> WireLabelStateV1 {
     let mut entries: BTreeMap<Label, BTreeSet<Dot>> = BTreeMap::new();
     let cc = state.map(|state| state.cc().clone()).unwrap_or_default();
@@ -643,6 +646,9 @@ pub struct WireBeadPatch {
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
     pub assignee_expires: WirePatch<WallClock>,
 }
+
+/// Canonical bead patch wire format (v1).
+pub type BeadPatchWireV1 = WireBeadPatch;
 
 impl WireBeadPatch {
     pub fn new(id: BeadId) -> Self {
