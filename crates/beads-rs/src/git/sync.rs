@@ -710,7 +710,7 @@ impl SyncProcess<Committed> {
 /// Data loaded from a beads store commit.
 pub struct LoadedStore {
     pub state: CanonicalState,
-    pub meta: wire::StoreMeta,
+    pub meta: wire::SupportedStoreMeta,
 }
 
 /// Read state from a commit oid.
@@ -759,7 +759,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
             .peel_to_blob()?;
         wire::parse_meta(meta_blob.content())?
     } else {
-        wire::StoreMeta::Legacy
+        wire::SupportedStoreMeta::legacy()
     };
     let checksums = meta.checksums();
 
@@ -1572,7 +1572,7 @@ mod tests {
         let oid = write_store_commit_without_meta(&repo, None, "no-meta");
 
         let loaded = read_state_at_oid(&repo, oid).unwrap();
-        assert!(matches!(loaded.meta, wire::StoreMeta::Legacy));
+        assert!(loaded.meta.is_legacy());
     }
 
     #[test]

@@ -182,7 +182,7 @@ fn read_current_format_version(repo: &git2::Repository) -> Result<u32> {
         .map_err(|_| crate::git::SyncError::NotABlob("meta.json"))?;
     let parsed =
         crate::git::wire::parse_meta(meta_blob.content()).map_err(crate::git::SyncError::from)?;
-    match parsed {
+    match parsed.meta() {
         crate::git::wire::StoreMeta::V1 { .. } => Ok(1),
         crate::git::wire::StoreMeta::Legacy => Ok(0),
     }

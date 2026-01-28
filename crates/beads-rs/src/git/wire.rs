@@ -565,45 +565,84 @@ impl StoreMeta {
     }
 }
 
-/// Parse meta.json bytes.
-pub fn parse_meta(bytes: &[u8]) -> Result<StoreMeta, WireError> {
-    let content = parse_utf8(bytes)?;
-    let meta: WireMeta = serde_json::from_str(content)?;
-    if meta.format_version != 1 {
-        return Err(WireError::InvalidValue(format!(
-            "unsupported meta format_version {}",
-            meta.format_version
-        )));
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SupportedStoreMeta {
+    meta: StoreMeta,
+}
+
+impl SupportedStoreMeta {
+    pub fn legacy() -> Self {
+        Self {
+            meta: StoreMeta::Legacy,
+        }
     }
-    let checksums = match (
-        meta.state_sha256,
-        meta.tombstones_sha256,
-        meta.deps_sha256,
-        meta.notes_sha256,
-    ) {
-        (Some(state), Some(tombstones), Some(deps), Some(notes)) => StoreChecksums {
-            state,
-            tombstones,
-            deps,
-            notes: Some(notes),
-        },
-        _ => {
-            return Err(WireError::InvalidValue(
-                "meta.json missing checksum fields".into(),
-            ));
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, WireError> {
+        let content = parse_utf8(bytes)?;
+        let meta: WireMeta = serde_json::from_str(content)?;
+        if meta.format_version != 1 {
+            return Err(WireError::InvalidValue(format!(
+                "unsupported meta format_version {}",
+                meta.format_version
+            )));
         }
-    };
-    let root_slug = match meta.root_slug {
-        Some(raw) => {
-            Some(BeadSlug::parse(&raw).map_err(|e| WireError::InvalidValue(e.to_string()))?)
-        }
-        None => None,
-    };
-    Ok(StoreMeta::V1 {
-        root_slug,
-        last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
-        checksums,
-    })
+        let checksums = match (
+            meta.state_sha256,
+            meta.tombstones_sha256,
+            meta.deps_sha256,
+            meta.notes_sha256,
+        ) {
+            (Some(state), Some(tombstones), Some(deps), Some(notes)) => StoreChecksums {
+                state,
+                tombstones,
+                deps,
+                notes: Some(notes),
+            },
+            _ => {
+                return Err(WireError::InvalidValue(
+                    "meta.json missing checksum fields".into(),
+                ));
+            }
+        };
+        let root_slug = match meta.root_slug {
+            Some(raw) => {
+                Some(BeadSlug::parse(&raw).map_err(|e| WireError::InvalidValue(e.to_string()))?)
+            }
+            None => None,
+        };
+        Ok(Self {
+            meta: StoreMeta::V1 {
+                root_slug,
+                last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
+                checksums,
+            },
+        })
+    }
+
+    pub fn meta(&self) -> &StoreMeta {
+        &self.meta
+    }
+
+    pub fn root_slug(&self) -> Option<&BeadSlug> {
+        self.meta.root_slug()
+    }
+
+    pub fn last_write_stamp(&self) -> Option<&WriteStamp> {
+        self.meta.last_write_stamp()
+    }
+
+    pub fn checksums(&self) -> Option<&StoreChecksums> {
+        self.meta.checksums()
+    }
+
+    pub fn is_legacy(&self) -> bool {
+        matches!(self.meta, StoreMeta::Legacy)
+    }
+}
+
+/// Parse meta.json bytes.
+pub fn parse_meta(bytes: &[u8]) -> Result<SupportedStoreMeta, WireError> {
+    SupportedStoreMeta::parse(bytes)
 }
 
 pub fn verify_store_checksums(
@@ -1584,15 +1623,15 @@ mod tests {
             let expected_root = root
                 .as_ref()
                 .map(|raw| BeadSlug::parse(raw).expect("slug parse"));
-            match parsed {
+            match parsed.meta() {
                 StoreMeta::V1 {
                     root_slug,
                     last_write_stamp,
                     checksums: parsed_checksums,
                 } => {
-                    prop_assert_eq!(root_slug, expected_root);
-                    prop_assert_eq!(last_write_stamp, write_stamp);
-                    prop_assert_eq!(parsed_checksums, checksums);
+                    prop_assert_eq!(root_slug, &expected_root);
+                    prop_assert_eq!(last_write_stamp, &write_stamp);
+                    prop_assert_eq!(parsed_checksums, &checksums);
                 }
                 StoreMeta::Legacy => {
                     prop_assert!(false, "expected v1 meta");
@@ -1660,7 +1699,7 @@ mod tests {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let parsed = parse_meta(&bytes).expect("parse meta");
-        match parsed {
+        match parsed.meta() {
             StoreMeta::V1 {
                 root_slug,
                 last_write_stamp,
@@ -1668,10 +1707,10 @@ mod tests {
             } => {
                 assert_eq!(
                     root_slug,
-                    Some(BeadSlug::parse("valid-slug").expect("slug"))
+                    &Some(BeadSlug::parse("valid-slug").expect("slug"))
                 );
-                assert_eq!(last_write_stamp, None);
-                assert_eq!(parsed_checksums, checksums);
+                assert_eq!(last_write_stamp, &None);
+                assert_eq!(parsed_checksums, &checksums);
             }
             StoreMeta::Legacy => panic!("expected v1 meta"),
         }
