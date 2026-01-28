@@ -1534,10 +1534,16 @@ mod tests {
                 Some(f1.sha256),
                 payload_len,
             );
-            let single = ReplEnvelope {
+            let single_one = ReplEnvelope {
                 version: PROTOCOL_VERSION_V1,
                 message: ReplMessage::Events(Events {
                     events: vec![f1.clone()],
+                }),
+            };
+            let single_two = ReplEnvelope {
+                version: PROTOCOL_VERSION_V1,
+                message: ReplMessage::Events(Events {
+                    events: vec![f2.clone()],
                 }),
             };
             let double = ReplEnvelope {
@@ -1546,10 +1552,12 @@ mod tests {
                     events: vec![f1.clone(), f2.clone()],
                 }),
             };
-            let len_single = encode_envelope(&single).expect("encode").len();
+            let len_single_one = encode_envelope(&single_one).expect("encode").len();
+            let len_single_two = encode_envelope(&single_two).expect("encode").len();
             let len_double = encode_envelope(&double).expect("encode").len();
-            if len_double > len_single + 1 {
-                break (f1, f2, len_single + 1);
+            let min_split = len_single_one.max(len_single_two);
+            if len_double > min_split + 1 {
+                break (f1, f2, min_split + 1);
             }
             payload_len = payload_len.saturating_add(10);
             if payload_len > 10_000 {
