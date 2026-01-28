@@ -1595,7 +1595,7 @@ mod tests {
             store_epoch: local_store.store_epoch,
             receiver_replica_id: peer_replica,
             welcome_nonce: 1,
-            accepted_namespaces: vec![NamespaceId::core()],
+            accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
             live_stream_enabled: true,

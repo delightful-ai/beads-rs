@@ -24,6 +24,64 @@ pub type WatermarkMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Seq0>>;
 pub type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
 type WatermarkHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Sha256>>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespaceSet(Vec<NamespaceId>);
+
+impl NamespaceSet {
+    pub fn new(mut namespaces: Vec<NamespaceId>) -> Self {
+        canonicalize_namespaces(&mut namespaces);
+        Self(namespaces)
+    }
+
+    pub fn as_slice(&self) -> &[NamespaceId] {
+        &self.0
+    }
+
+    pub fn into_vec(self) -> Vec<NamespaceId> {
+        self.0
+    }
+}
+
+impl Default for NamespaceSet {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl From<Vec<NamespaceId>> for NamespaceSet {
+    fn from(namespaces: Vec<NamespaceId>) -> Self {
+        Self::new(namespaces)
+    }
+}
+
+impl From<NamespaceSet> for Vec<NamespaceId> {
+    fn from(namespaces: NamespaceSet) -> Self {
+        namespaces.0
+    }
+}
+
+impl AsRef<[NamespaceId]> for NamespaceSet {
+    fn as_ref(&self) -> &[NamespaceId] {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for NamespaceSet {
+    type Target = [NamespaceId];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+fn canonicalize_namespaces(namespaces: &mut Vec<NamespaceId>) {
+    if namespaces.len() <= 1 {
+        return;
+    }
+    namespaces.sort();
+    namespaces.dedup();
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplEnvelope {
     pub version: u32,
@@ -76,8 +134,8 @@ pub struct Hello {
     pub sender_replica_id: ReplicaId,
     pub hello_nonce: u64,
     pub max_frame_bytes: u32,
-    pub requested_namespaces: Vec<NamespaceId>,
-    pub offered_namespaces: Vec<NamespaceId>,
+    pub requested_namespaces: NamespaceSet,
+    pub offered_namespaces: NamespaceSet,
     pub seen_durable: WatermarkState<Durable>,
     pub seen_applied: Option<WatermarkState<Applied>>,
     pub capabilities: Capabilities,
@@ -92,8 +150,8 @@ struct WireHello {
     sender_replica_id: ReplicaId,
     hello_nonce: u64,
     max_frame_bytes: u32,
-    requested_namespaces: Vec<NamespaceId>,
-    offered_namespaces: Vec<NamespaceId>,
+    requested_namespaces: NamespaceSet,
+    offered_namespaces: NamespaceSet,
     seen_durable: WatermarkMap,
     seen_durable_heads: Option<WatermarkHeads>,
     seen_applied: Option<WatermarkMap>,
@@ -167,7 +225,7 @@ pub struct Welcome {
     pub store_epoch: StoreEpoch,
     pub receiver_replica_id: ReplicaId,
     pub welcome_nonce: u64,
-    pub accepted_namespaces: Vec<NamespaceId>,
+    pub accepted_namespaces: NamespaceSet,
     pub receiver_seen_durable: WatermarkState<Durable>,
     pub receiver_seen_applied: Option<WatermarkState<Applied>>,
     pub live_stream_enabled: bool,
@@ -181,7 +239,7 @@ struct WireWelcome {
     store_epoch: StoreEpoch,
     receiver_replica_id: ReplicaId,
     welcome_nonce: u64,
-    accepted_namespaces: Vec<NamespaceId>,
+    accepted_namespaces: NamespaceSet,
     receiver_seen_durable: WatermarkMap,
     receiver_seen_durable_heads: Option<WatermarkHeads>,
     receiver_seen_applied: Option<WatermarkMap>,
@@ -1300,10 +1358,10 @@ fn decode_event_id(
 
 fn encode_namespace_list(
     enc: &mut Encoder<&mut Vec<u8>>,
-    namespaces: &[NamespaceId],
+    namespaces: &NamespaceSet,
 ) -> Result<(), ProtoEncodeError> {
-    enc.array(namespaces.len() as u64)?;
-    for ns in namespaces {
+    enc.array(namespaces.as_slice().len() as u64)?;
+    for ns in namespaces.as_slice() {
         enc.str(ns.as_str())?;
     }
     Ok(())
@@ -1313,14 +1371,14 @@ fn decode_namespace_list(
     dec: &mut Decoder,
     limits: &Limits,
     depth: usize,
-) -> Result<Vec<NamespaceId>, ProtoDecodeError> {
+) -> Result<NamespaceSet, ProtoDecodeError> {
     let arr_len = decode_array_len(dec, limits, depth)?;
     let mut out = Vec::with_capacity(arr_len);
     for _ in 0..arr_len {
         let raw = decode_text(dec, limits)?;
         out.push(parse_namespace(raw)?);
     }
-    Ok(out)
+    Ok(NamespaceSet::from(out))
 }
 
 fn encode_watermark_map(
@@ -1940,8 +1998,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
             hello_nonce: 42,
             max_frame_bytes: 1_024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -1959,7 +2017,7 @@ mod tests {
             store_epoch: StoreEpoch::new(5),
             receiver_replica_id: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
             welcome_nonce: 24,
-            accepted_namespaces: vec![NamespaceId::core()],
+            accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
             live_stream_enabled: true,
@@ -2043,6 +2101,35 @@ mod tests {
         enc.str("max_frame_bytes").unwrap();
         enc.u32(welcome.max_frame_bytes).unwrap();
         buf
+    }
+
+    #[test]
+    fn decode_namespace_list_canonicalizes_order_and_dedups() {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(3).unwrap();
+        enc.str("beta").unwrap();
+        enc.str("alpha").unwrap();
+        enc.str("beta").unwrap();
+
+        let mut dec = Decoder::new(&buf[..]);
+        let set = decode_namespace_list(&mut dec, &Limits::default(), 0).unwrap();
+        let alpha = NamespaceId::parse("alpha").unwrap();
+        let beta = NamespaceId::parse("beta").unwrap();
+
+        assert_eq!(set.as_slice(), &[alpha, beta]);
+    }
+
+    #[test]
+    fn decode_namespace_list_accepts_empty() {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(0).unwrap();
+
+        let mut dec = Decoder::new(&buf[..]);
+        let set = decode_namespace_list(&mut dec, &Limits::default(), 0).unwrap();
+
+        assert!(set.as_slice().is_empty());
     }
 
     fn encode_custom_ack_body(
