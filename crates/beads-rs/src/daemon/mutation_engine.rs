@@ -8,10 +8,10 @@ use super::ops::{MapLiveError, OpError};
 use super::remote::RemoteUrl;
 use crate::core::event::ValidatedBeadPatch;
 use crate::core::{
-    ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKey, DepKind, DepSpec,
-    Dot, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId,
-    NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError,
-    TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedEventBody, WallClock, WireBeadPatch, WireDepAddV1,
+    ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, CanonicalState, ClientRequestId, DepKey,
+    DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
+    NamespaceId, NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId,
+    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedEventBody, WallClock, WireDepAddV1,
     WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
     WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
     sha256_bytes, to_canon_json_bytes,
@@ -812,7 +812,7 @@ impl MutationEngine {
             source_repo_value = Some(sr.clone());
         }
 
-        let mut patch = WireBeadPatch::new(id.clone());
+        let mut patch = BeadPatchWireV1::new(id.clone());
         patch.title = Some(title.clone());
         patch.description = Some(description.clone());
         if let Some(design) = design.clone() {
@@ -838,7 +838,12 @@ impl MutationEngine {
             patch.assignee_expires = WirePatch::Set(expires);
         }
 
-        let patch = validate_wire_patch(patch)?;
+        let patch = ValidatedBeadPatch::try_from(patch)
+            .map_err(|err| OpError::ValidationFailed {
+                field: "bead_patch".into(),
+                reason: err.to_string(),
+            })?
+            .into_inner();
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1019,7 +1024,7 @@ impl MutationEngine {
             });
         }
 
-        let mut patch = WireBeadPatch::new(id.clone());
+        let mut patch = BeadPatchWireV1::new(id.clone());
         patch.status = Some(WorkflowStatus::Closed);
         patch.closed_reason = WirePatch::Clear;
         patch.closed_on_branch = WirePatch::Clear;
@@ -1030,7 +1035,12 @@ impl MutationEngine {
             patch.closed_on_branch = WirePatch::Set(branch);
         }
 
-        let patch = validate_wire_patch(patch)?;
+        let patch = ValidatedBeadPatch::try_from(patch)
+            .map_err(|err| OpError::ValidationFailed {
+                field: "bead_patch".into(),
+                reason: err.to_string(),
+            })?
+            .into_inner();
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1055,12 +1065,17 @@ impl MutationEngine {
             });
         }
 
-        let mut patch = WireBeadPatch::new(id.clone());
+        let mut patch = BeadPatchWireV1::new(id.clone());
         patch.status = Some(WorkflowStatus::Open);
         patch.closed_reason = WirePatch::Clear;
         patch.closed_on_branch = WirePatch::Clear;
 
-        let patch = validate_wire_patch(patch)?;
+        let patch = ValidatedBeadPatch::try_from(patch)
+            .map_err(|err| OpError::ValidationFailed {
+                field: "bead_patch".into(),
+                reason: err.to_string(),
+            })?
+            .into_inner();
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
@@ -1313,7 +1328,7 @@ impl MutationEngine {
                 .saturating_add(lease_secs.saturating_mul(1000)),
         );
 
-        let mut patch = WireBeadPatch::new(id.clone());
+        let mut patch = BeadPatchWireV1::new(id.clone());
         patch.assignee = WirePatch::Set(stamp.by.clone());
         patch.assignee_expires = WirePatch::Set(expires);
         patch.status = Some(WorkflowStatus::InProgress);
@@ -1346,7 +1361,7 @@ impl MutationEngine {
             return Err(OpError::NotClaimedByYou);
         }
 
-        let mut patch = WireBeadPatch::new(id.clone());
+        let mut patch = BeadPatchWireV1::new(id.clone());
         patch.assignee = WirePatch::Clear;
         patch.assignee_expires = WirePatch::Clear;
         patch.status = Some(WorkflowStatus::Open);
@@ -1391,7 +1406,7 @@ impl MutationEngine {
                 .saturating_add(lease_secs.saturating_mul(1000)),
         );
 
-        let mut patch = WireBeadPatch::new(id.clone());
+        let mut patch = BeadPatchWireV1::new(id.clone());
         patch.assignee = WirePatch::Set(assignee);
         patch.assignee_expires = WirePatch::Set(expires);
 
@@ -1612,15 +1627,6 @@ fn canonical_deps(deps: &[DepSpec]) -> Vec<String> {
         .collect()
 }
 
-fn validate_wire_patch(patch: WireBeadPatch) -> Result<WireBeadPatch, OpError> {
-    ValidatedBeadPatch::try_from(patch)
-        .map(ValidatedBeadPatch::into_inner)
-        .map_err(|err| OpError::ValidationFailed {
-            field: "bead_patch".into(),
-            reason: err.to_string(),
-        })
-}
-
 fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
     if state.get_live(parent).is_none() {
         return Err(OpError::NotFound(parent.clone()));
@@ -1676,8 +1682,8 @@ fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpEr
 fn normalize_patch(
     id: &BeadId,
     patch: &ParsedBeadPatch,
-) -> Result<(WireBeadPatch, CanonicalBeadPatch), OpError> {
-    let mut wire = WireBeadPatch::new(id.clone());
+) -> Result<(BeadPatchWireV1, CanonicalBeadPatch), OpError> {
+    let mut wire = BeadPatchWireV1::new(id.clone());
 
     if let Patch::Set(title) = &patch.title {
         wire.title = Some(title.clone());
@@ -1717,7 +1723,12 @@ fn normalize_patch(
         status: patch.status.clone(),
     };
 
-    let wire = validate_wire_patch(wire)?;
+    let wire = ValidatedBeadPatch::try_from(wire)
+        .map_err(|err| OpError::ValidationFailed {
+            field: "bead_patch".into(),
+            reason: err.to_string(),
+        })?
+        .into_inner();
     Ok((wire, canonical))
 }
 
