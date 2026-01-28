@@ -17,8 +17,8 @@ use beads_rs::core::{
     ReplicaDurabilityRole, ReplicaEntry, ReplicaRole, Seq0,
 };
 use beads_rs::daemon::ipc::{
-    AdminCheckpointWaitPayload, CreatePayload, IdPayload, IpcClient, MutationCtx, MutationMeta,
-    ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
+    AdminCheckpointWaitPayload, AdminOp, CreatePayload, IdPayload, IpcClient, MutationCtx,
+    MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_rs::daemon::ops::OpResult;
 use tempfile::TempDir;
@@ -82,12 +82,12 @@ fn wait_for_checkpoint(rig: &ReplRig, idx: usize, namespace: &NamespaceId, timeo
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let client = IpcClient::for_runtime_dir(&runtime_dir).with_autostart(false);
-        let request = Request::AdminCheckpointWait {
+        let request = Request::Admin(AdminOp::CheckpointWait {
             ctx: RepoCtx::new(repo_dir),
             payload: AdminCheckpointWaitPayload {
                 namespace: Some(request_namespace),
             },
-        };
+        });
         let response = client.send_request_no_autostart(&request);
         let _ = tx.send(response);
     });

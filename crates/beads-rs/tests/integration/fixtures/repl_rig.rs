@@ -24,8 +24,8 @@ use beads_rs::core::{
     StoreMeta, Watermarks,
 };
 use beads_rs::daemon::ipc::{
-    CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta,
-    ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
+    AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, MutationCtx,
+    MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_rs::daemon::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 
@@ -650,10 +650,10 @@ impl Node {
     }
 
     pub fn reload_replication(&self) {
-        let request = Request::AdminReloadReplication {
+        let request = Request::Admin(AdminOp::ReloadReplication {
             ctx: RepoCtx::new(self.repo_dir.clone()),
             payload: EmptyPayload {},
-        };
+        });
         let response = self
             .send_admin_request(&request)
             .expect("admin reload replication");
@@ -674,10 +674,10 @@ impl Node {
         &self,
         read: ReadConsistency,
     ) -> Result<AdminStatusOutput, ErrorPayload> {
-        let request = Request::AdminStatus {
+        let request = Request::Admin(AdminOp::Status {
             ctx: ReadCtx::new(self.repo_dir.clone(), read),
             payload: EmptyPayload {},
-        };
+        });
         let response = self
             .send_admin_request(&request)
             .map_err(|e| beads_rs::daemon::ipc::IntoErrorPayload::into_error_payload(e))?;
