@@ -371,6 +371,7 @@
 {"from":"bd-8ezy","to":"bd-8yac","kind":"blocks","created_at":[1769573467981,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-8joz","to":"bd-ebhh.5","kind":"discovered_from","created_at":[1769484585015,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-8rn","to":"bd-3m5","kind":"blocks","created_at":[1768182703533,1],"created_by":"darin@darinsmacstudio.lan"}
+{"from":"bd-8s8j","to":"bd-7m9a","kind":"blocks","created_at":[1769580500466,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-8y9","to":"bd-3m5","kind":"parent","created_at":[1768449376333,1],"created_by":"darin@book"}
 {"from":"bd-907g","to":"bd-fn5l","kind":"blocks","created_at":[1769573467461,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-9nf","to":"bd-3m5","kind":"blocks","created_at":[1768182703428,1],"created_by":"darin@darinsmacstudio.lan"}
@@ -474,6 +475,7 @@
 {"from":"bd-t835","to":"bd-8yac","kind":"blocks","created_at":[1769573468087,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-uakj","to":"bd-t9xz","kind":"blocks","created_at":[1769573468401,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-ufv1","to":"bd-907g","kind":"blocks","created_at":[1769573468502,1],"created_by":"darin@darins-Mac-Studio-2.local"}
+{"from":"bd-uzos","to":"bd-y06u","kind":"blocks","created_at":[1769580500568,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-v1xr","to":"bd-8yac","kind":"blocks","created_at":[1769573467878,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-w9og","to":"bd-6k70","kind":"discovered_from","created_at":[1768704221218,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-xmr","to":"bd-roy","kind":"blocks","created_at":[1765744658975,0],"created_by":"darin@book"}
