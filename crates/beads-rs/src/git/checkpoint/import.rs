@@ -16,7 +16,7 @@ use super::layout::{CheckpointFileKind, CheckpointShardPath, MANIFEST_FILE, META
 use super::types::CheckpointShardPayload;
 use super::{
     CheckpointFormatVersion, CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks,
-    ParsedCheckpointManifest, ParsedCheckpointMeta,
+    ParsedCheckpointManifest, SupportedCheckpointMeta,
 };
 use crate::core::error::CoreError;
 use crate::core::state::LabelState;
@@ -490,7 +490,7 @@ pub fn import_checkpoint_export(
 
 #[derive(Clone, Debug)]
 pub struct ParsedCheckpointExport {
-    pub meta: ParsedCheckpointMeta,
+    pub meta: SupportedCheckpointMeta,
     pub manifest: ParsedCheckpointManifest,
     pub files: BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
 }
@@ -510,7 +510,7 @@ pub fn parse_checkpoint_export(
 fn validate_meta_and_manifest(
     meta: CheckpointMeta,
     manifest: CheckpointManifest,
-) -> Result<(ParsedCheckpointMeta, ParsedCheckpointManifest), CheckpointImportError> {
+) -> Result<(SupportedCheckpointMeta, ParsedCheckpointManifest), CheckpointImportError> {
     let version = CheckpointFormatVersion::parse(meta.checkpoint_format_version).ok_or(
         CheckpointImportError::UnsupportedFormatVersion {
             got: meta.checkpoint_format_version,
@@ -575,7 +575,7 @@ fn validate_meta_and_manifest(
     }
 
     Ok((
-        ParsedCheckpointMeta::new(meta, version),
+        SupportedCheckpointMeta::new(meta, version),
         ParsedCheckpointManifest::new(manifest),
     ))
 }
@@ -1094,6 +1094,29 @@ mod tests {
         );
 
         let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::UnsupportedFormatVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_export_rejects_unsupported_version() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (manifest, mut meta) = minimal_manifest_and_meta(dir);
+        meta.checkpoint_format_version = 99;
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::new(),
+        };
+
+        let err = parse_checkpoint_export(&export).unwrap_err();
         assert!(matches!(
             err,
             CheckpointImportError::UnsupportedFormatVersion { .. }

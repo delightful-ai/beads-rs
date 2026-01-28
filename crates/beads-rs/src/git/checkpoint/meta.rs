@@ -33,12 +33,12 @@ impl CheckpointFormatVersion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ParsedCheckpointMeta {
+pub struct SupportedCheckpointMeta {
     version: CheckpointFormatVersion,
     meta: CheckpointMeta,
 }
 
-impl ParsedCheckpointMeta {
+impl SupportedCheckpointMeta {
     pub(crate) fn new(meta: CheckpointMeta, version: CheckpointFormatVersion) -> Self {
         Self { version, meta }
     }

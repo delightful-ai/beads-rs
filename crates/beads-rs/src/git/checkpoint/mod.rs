@@ -33,7 +33,7 @@ pub use layout::{
 pub use manifest::{CheckpointManifest, ManifestFile, ParsedCheckpointManifest};
 pub use meta::{
     CheckpointFormatVersion, CheckpointMeta, CheckpointMetaPreimage, IncludedHeads,
-    IncludedWatermarks, ParsedCheckpointMeta,
+    IncludedWatermarks, SupportedCheckpointMeta,
 };
 pub use publish::{
     CheckpointPublishError, CheckpointPublishOutcome, CheckpointStoreMeta, STORE_META_REF,
