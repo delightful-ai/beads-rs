@@ -12,7 +12,7 @@ use beads_rs::core::{
     NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
     VerifiedEventFrame, encode_event_body_canonical, hash_event_body,
 };
-use beads_rs::daemon::repl::frame::{FrameReader, encode_frame};
+use beads_rs::daemon::repl::frame::{FrameLimitState, FrameReader, encode_frame};
 use beads_rs::daemon::repl::proto::{
     Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplEnvelope, ReplMessage, Want,
     WatermarkMap, WatermarkState, Welcome, WireReplEnvelope, WireReplMessage, decode_envelope,
@@ -111,7 +111,10 @@ pub fn encode_message_frame(message: ReplMessage, max_frame_bytes: usize) -> Vec
 }
 
 pub fn decode_message_frame(frame: &[u8], max_frame_bytes: usize) -> WireReplEnvelope {
-    let mut reader = FrameReader::new(Cursor::new(frame), max_frame_bytes);
+    let mut reader = FrameReader::new(
+        Cursor::new(frame),
+        FrameLimitState::unnegotiated(max_frame_bytes),
+    );
     let payload = reader
         .read_next()
         .expect("frame read")

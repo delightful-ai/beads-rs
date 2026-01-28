@@ -2,6 +2,8 @@
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crc32c::crc32c;
 use thiserror::Error;
@@ -10,6 +12,43 @@ use crate::core::error::details::FrameTooLargeDetails;
 use crate::core::{ErrorPayload, ProtocolErrorCode};
 
 pub const FRAME_HEADER_LEN: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NegotiatedFrameLimit {
+    max_frame_bytes: usize,
+}
+
+impl NegotiatedFrameLimit {
+    pub(crate) fn new(max_frame_bytes: usize) -> Self {
+        Self { max_frame_bytes }
+    }
+
+    pub fn max_frame_bytes(self) -> usize {
+        self.max_frame_bytes
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FrameLimitState {
+    max_frame_bytes: Arc<AtomicUsize>,
+}
+
+impl FrameLimitState {
+    pub fn unnegotiated(max_frame_bytes: usize) -> Self {
+        Self {
+            max_frame_bytes: Arc::new(AtomicUsize::new(max_frame_bytes)),
+        }
+    }
+
+    pub fn apply_negotiated_limit(&self, limit: NegotiatedFrameLimit) {
+        self.max_frame_bytes
+            .store(limit.max_frame_bytes(), Ordering::SeqCst);
+    }
+
+    fn max_frame_bytes(&self) -> usize {
+        self.max_frame_bytes.load(Ordering::SeqCst)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum FrameError {
@@ -50,15 +89,12 @@ impl FrameError {
 
 pub struct FrameReader<R> {
     reader: R,
-    max_frame_bytes: usize,
+    limits: FrameLimitState,
 }
 
 impl<R: Read> FrameReader<R> {
-    pub fn new(reader: R, max_frame_bytes: usize) -> Self {
-        Self {
-            reader,
-            max_frame_bytes,
-        }
+    pub fn new(reader: R, limits: FrameLimitState) -> Self {
+        Self { reader, limits }
     }
 
     pub fn read_next(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
@@ -85,9 +121,10 @@ impl<R: Read> FrameReader<R> {
                 reason: "frame length cannot be zero".to_string(),
             });
         }
-        if length > self.max_frame_bytes {
+        let max_frame_bytes = self.limits.max_frame_bytes();
+        if length > max_frame_bytes {
             return Err(FrameError::FrameTooLarge {
-                max_frame_bytes: self.max_frame_bytes,
+                max_frame_bytes,
                 got_bytes: length,
             });
         }
@@ -184,7 +221,7 @@ mod tests {
         let payload = b"hello";
         let frame = encode_frame(payload, 1024).unwrap();
 
-        let mut reader = FrameReader::new(Cursor::new(frame), 1024);
+        let mut reader = FrameReader::new(Cursor::new(frame), FrameLimitState::unnegotiated(1024));
         let decoded = reader.read_next().unwrap().unwrap();
         assert_eq!(decoded, payload);
     }
@@ -207,7 +244,19 @@ mod tests {
         let payload = vec![0u8; 10];
         let frame = encode_frame(&payload, 1024).unwrap();
 
-        let mut reader = FrameReader::new(Cursor::new(frame), 5);
+        let mut reader = FrameReader::new(Cursor::new(frame), FrameLimitState::unnegotiated(5));
+        let err = reader.read_next().unwrap_err();
+        assert!(matches!(err, FrameError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn frame_reader_enforces_negotiated_limit() {
+        let payload = vec![1u8; 10];
+        let frame = encode_frame(&payload, 100).unwrap();
+        let limits = FrameLimitState::unnegotiated(100);
+        limits.apply_negotiated_limit(NegotiatedFrameLimit::new(5));
+
+        let mut reader = FrameReader::new(Cursor::new(frame), limits);
         let err = reader.read_next().unwrap_err();
         assert!(matches!(err, FrameError::FrameTooLarge { .. }));
     }

@@ -36,9 +36,9 @@ use crate::daemon::repl::session::{
 };
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
-    FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, SessionAction, SessionConfig,
-    SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader, WireReplMessage,
-    decode_envelope, encode_envelope,
+    FrameError, FrameLimitState, FrameReader, FrameWriter, ReplEnvelope, ReplMessage,
+    SessionAction, SessionConfig, SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader,
+    WireReplMessage, decode_envelope, encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
 
@@ -396,16 +396,22 @@ where
 
     let reader_stream = shutdown_stream.try_clone()?;
     let writer_stream = shutdown_stream.try_clone()?;
-    let mut reader = FrameReader::new(reader_stream, limits.max_frame_bytes);
+    let reader_limit_state = FrameLimitState::unnegotiated(limits.max_frame_bytes);
+    let mut reader = FrameReader::new(reader_stream, reader_limit_state.clone());
     let mut writer = FrameWriter::new(writer_stream, limits.max_frame_bytes);
 
     let (inbound_tx, inbound_rx) = crossbeam::channel::unbounded::<InboundMessage>();
     let reader_shutdown = shutdown.clone();
-    let reader_limits = limits.clone();
+    let reader_decode_limits = limits.clone();
     let reader_span = tracing::Span::current();
     let reader_handle = thread::spawn(move || {
         reader_span.in_scope(|| {
-            run_reader_loop(&mut reader, inbound_tx, reader_shutdown, reader_limits);
+            run_reader_loop(
+                &mut reader,
+                inbound_tx,
+                reader_shutdown,
+                reader_decode_limits,
+            );
         });
     });
 
@@ -584,6 +590,8 @@ where
 
         if let SessionState::StreamingLive(streaming_session) = &session {
             if handshake_at_ms.is_none() {
+                reader_limit_state
+                    .apply_negotiated_limit(streaming_session.negotiated_frame_limit());
                 let now_ms = now_ms();
                 handshake_at_ms = Some(now_ms);
                 last_hello_at_ms = None;
@@ -654,6 +662,7 @@ where
         } else if let SessionState::StreamingSnapshot(streaming_session) = &session
             && handshake_at_ms.is_none()
         {
+            reader_limit_state.apply_negotiated_limit(streaming_session.negotiated_frame_limit());
             let now_ms = now_ms();
             handshake_at_ms = Some(now_ms);
             last_hello_at_ms = None;
@@ -1253,7 +1262,8 @@ mod tests {
         thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {
                 let reader_stream = stream.try_clone().expect("clone");
-                let mut reader = FrameReader::new(reader_stream, 1024 * 1024);
+                let mut reader =
+                    FrameReader::new(reader_stream, FrameLimitState::unnegotiated(1024 * 1024));
                 let mut writer = FrameWriter::new(stream, 1024 * 1024);
                 let mut welcome_sent = false;
                 loop {
@@ -1593,7 +1603,7 @@ mod tests {
 
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            let mut reader = FrameReader::new(stream, 1024 * 1024);
+            let mut reader = FrameReader::new(stream, FrameLimitState::unnegotiated(1024 * 1024));
             let mut counts = Vec::new();
             while let Ok(Some(frame)) = reader.read_next() {
                 let envelope =
@@ -1819,7 +1829,8 @@ mod tests {
             for _ in 0..2 {
                 let (stream, _) = listener.accept().expect("accept");
                 let reader_stream = stream.try_clone().expect("clone");
-                let mut reader = FrameReader::new(reader_stream, 1024 * 1024);
+                let mut reader =
+                    FrameReader::new(reader_stream, FrameLimitState::unnegotiated(1024 * 1024));
                 let mut writer = FrameWriter::new(stream, 1024 * 1024);
                 let _ = reader.read_next();
                 let payload =

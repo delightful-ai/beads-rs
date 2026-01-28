@@ -473,6 +473,8 @@ pub enum EventFrameError {
 
 impl VerifiedEventFrame {
     pub fn try_from_frame(frame: EventFrameV1, limits: &Limits) -> Result<Self, EventFrameError> {
+        validate_frame_prev_seq(&frame.eid, frame.prev_sha256)?;
+
         let (_, body) =
             decode_event_body(frame.bytes.as_ref(), limits).map_err(|err| match err {
                 DecodeError::Validation(source) => EventFrameError::Validation(source),
@@ -502,6 +504,17 @@ impl VerifiedEventFrame {
             canonical,
             computed,
         ))
+    }
+}
+
+fn validate_frame_prev_seq(eid: &EventId, prev_sha256: Option<Sha256>) -> Result<(), EventFrameError> {
+    let seq = eid.origin_seq.get();
+    match (seq, prev_sha256) {
+        (1, None) => Ok(()),
+        (1, Some(_)) => Err(EventFrameError::PrevMismatch),
+        (s, Some(_)) if s > 1 => Ok(()),
+        (s, None) if s > 1 => Err(EventFrameError::PrevMismatch),
+        _ => Err(EventFrameError::PrevMismatch),
     }
 }
 
@@ -4222,6 +4235,21 @@ mod tests {
 
         let err = VerifiedEventFrame::try_from_frame(frame, &limits).unwrap_err();
         assert!(matches!(err, EventFrameError::HashMismatch));
+    }
+
+    #[test]
+    fn verified_event_frame_rejects_prev_seq_mismatch() {
+        let limits = Limits::default();
+
+        let mut seq1 = sample_frame(&sample_body_with_seq(1), None);
+        seq1.prev_sha256 = Some(Sha256([9u8; 32]));
+        let err = VerifiedEventFrame::try_from_frame(seq1, &limits).unwrap_err();
+        assert!(matches!(err, EventFrameError::PrevMismatch));
+
+        let mut seq2 = sample_frame(&sample_body_with_seq(2), Some(Sha256([7u8; 32])));
+        seq2.prev_sha256 = None;
+        let err = VerifiedEventFrame::try_from_frame(seq2, &limits).unwrap_err();
+        assert!(matches!(err, EventFrameError::PrevMismatch));
     }
 
     #[test]

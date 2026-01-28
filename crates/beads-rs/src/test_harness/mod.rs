@@ -27,7 +27,7 @@ use crate::daemon::ipc::{
 };
 use crate::daemon::ops::OpError;
 use crate::daemon::remote::RemoteUrl;
-use crate::daemon::repl::frame::{FrameReader, encode_frame};
+use crate::daemon::repl::frame::{FrameLimitState, FrameReader, encode_frame};
 use crate::daemon::repl::proto::{
     PROTOCOL_VERSION_V1, ReplEnvelope, WireReplEnvelope, decode_envelope, encode_envelope,
 };
@@ -1636,7 +1636,10 @@ fn encode_message_frame(
 }
 
 fn decode_message_frame(frame: &[u8], max_frame_bytes: usize) -> WireReplEnvelope {
-    let mut reader = FrameReader::new(Cursor::new(frame), max_frame_bytes);
+    let mut reader = FrameReader::new(
+        Cursor::new(frame),
+        FrameLimitState::unnegotiated(max_frame_bytes),
+    );
     let payload = reader
         .read_next()
         .expect("decode repl frame")

@@ -21,6 +21,7 @@ use crate::daemon::wal::{ReplicaDurabilityRole, WalIndexError};
 
 use super::ContiguousBatch;
 use super::error::{ReplError, ReplErrorDetails};
+use super::frame::NegotiatedFrameLimit;
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
     Ack, Capabilities, Hello, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want, WatermarkMap,
@@ -552,6 +553,10 @@ impl<R, P: PhasePeer> Session<R, P> {
 
     pub fn negotiated_max_frame_bytes(&self) -> usize {
         self.peer().max_frame_bytes as usize
+    }
+
+    pub fn negotiated_frame_limit(&self) -> NegotiatedFrameLimit {
+        NegotiatedFrameLimit::new(self.peer().max_frame_bytes as usize)
     }
 }
 

@@ -17,7 +17,7 @@ mod want;
 
 pub use contiguous_batch::{ContiguousBatch, ContiguousBatchError};
 pub use error::{ReplError, ReplErrorDetails};
-pub use frame::{FrameError, FrameReader, FrameWriter};
+pub use frame::{FrameError, FrameLimitState, FrameReader, FrameWriter, NegotiatedFrameLimit};
 pub use gap_buffer::{GapBufferByNsOrigin, IngestDecision, OriginStreamState};
 pub use manager::{
     BackoffPolicy, PeerConfig, ReplicationManager, ReplicationManagerConfig,
