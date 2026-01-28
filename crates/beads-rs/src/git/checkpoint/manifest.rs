@@ -7,6 +7,21 @@ use serde::{Deserialize, Serialize};
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use crate::core::{ContentHash, NamespaceId, StoreEpoch, StoreId, sha256_bytes};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedCheckpointManifest {
+    manifest: CheckpointManifest,
+}
+
+impl ParsedCheckpointManifest {
+    pub(crate) fn new(manifest: CheckpointManifest) -> Self {
+        Self { manifest }
+    }
+
+    pub fn manifest(&self) -> &CheckpointManifest {
+        &self.manifest
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestFile {
     pub sha256: ContentHash,
@@ -37,6 +52,13 @@ impl CheckpointManifest {
         cloned.namespaces.sort();
         cloned.namespaces.dedup();
         cloned
+    }
+
+    pub(crate) fn namespaces_normalized(&self) -> Vec<NamespaceId> {
+        let mut namespaces = self.namespaces.clone();
+        namespaces.sort();
+        namespaces.dedup();
+        namespaces
     }
 }
 

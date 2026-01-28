@@ -4,11 +4,53 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::CHECKPOINT_FORMAT_VERSION;
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use crate::core::{ContentHash, NamespaceId, ReplicaId, StoreEpoch, StoreId, sha256_bytes};
 
 pub type IncludedWatermarks = BTreeMap<NamespaceId, BTreeMap<ReplicaId, u64>>;
 pub type IncludedHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, ContentHash>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointFormatVersion {
+    V1,
+}
+
+impl CheckpointFormatVersion {
+    pub fn as_u32(self) -> u32 {
+        match self {
+            CheckpointFormatVersion::V1 => CHECKPOINT_FORMAT_VERSION,
+        }
+    }
+
+    pub fn parse(raw: u32) -> Option<Self> {
+        if raw == CHECKPOINT_FORMAT_VERSION {
+            Some(CheckpointFormatVersion::V1)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedCheckpointMeta {
+    version: CheckpointFormatVersion,
+    meta: CheckpointMeta,
+}
+
+impl ParsedCheckpointMeta {
+    pub(crate) fn new(meta: CheckpointMeta, version: CheckpointFormatVersion) -> Self {
+        Self { version, meta }
+    }
+
+    pub fn meta(&self) -> &CheckpointMeta {
+        &self.meta
+    }
+
+    pub fn version(&self) -> CheckpointFormatVersion {
+        self.version
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointMeta {
@@ -85,6 +127,13 @@ impl CheckpointMeta {
         let mut cloned = self.clone();
         cloned.namespaces = namespaces;
         cloned
+    }
+
+    pub(crate) fn namespaces_normalized(&self) -> Vec<NamespaceId> {
+        let mut namespaces = self.namespaces.clone();
+        namespaces.sort();
+        namespaces.dedup();
+        namespaces
     }
 }
 
