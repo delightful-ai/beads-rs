@@ -30,6 +30,7 @@
 {"from":"bd-1nxv","to":"bd-5xvc","kind":"discovered_from","created_at":[1768689822716,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-1u2","to":"bd-dqe","kind":"discovered_from","created_at":[1765835915424,0],"created_by":"darin@dusk"}
 {"from":"bd-23h","to":"bd-3m5","kind":"parent","created_at":[1768449376545,1],"created_by":"darin@book"}
+{"from":"bd-29jx","to":"bd-fn5l","kind":"blocks","created_at":[1769573467774,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-2us","to":"bd-3m5","kind":"blocks","created_at":[1768182696346,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-2ys","to":"bd-3m5","kind":"blocks","created_at":[1768182703638,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-3fsg","to":"bd-0863","kind":"blocks","created_at":[1768680821791,1],"created_by":"darin@book"}
@@ -311,6 +312,7 @@
 {"from":"bd-3m5.97","to":"bd-3m5","kind":"parent","created_at":[1768444731915,1],"created_by":"darin@book"}
 {"from":"bd-3m5.98","to":"bd-3m5","kind":"parent","created_at":[1768448635632,1],"created_by":"darin@book"}
 {"from":"bd-3m5.99","to":"bd-3m5","kind":"parent","created_at":[1768448649899,1],"created_by":"darin@book"}
+{"from":"bd-3uw0","to":"bd-fn5l","kind":"blocks","created_at":[1769573467564,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-3zoj.1","to":"bd-3zoj","kind":"parent","created_at":[1768894650782,1],"created_by":"darin@book"}
 {"from":"bd-3zoj.10","to":"bd-3zoj","kind":"parent","created_at":[1768894652641,1],"created_by":"darin@book"}
 {"from":"bd-3zoj.10","to":"bd-3zoj.3","kind":"blocks","created_at":[1768894704352,1],"created_by":"darin@book"}
@@ -358,6 +360,7 @@
 {"from":"bd-3zoj.9","to":"bd-3zoj.4","kind":"blocks","created_at":[1768894704248,1],"created_by":"darin@book"}
 {"from":"bd-43i","to":"bd-3m5","kind":"blocks","created_at":[1768182696449,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-4v16","to":"bd-doms","kind":"blocks","created_at":[1768508738284,1],"created_by":"darin@book"}
+{"from":"bd-5mi4","to":"bd-t9xz","kind":"blocks","created_at":[1769573468296,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-5xvc","to":"bd-cfqx","kind":"blocks","created_at":[1768680821583,1],"created_by":"darin@book"}
 {"from":"bd-6b7","to":"bd-3m5","kind":"blocks","created_at":[1768182703741,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-6lv","to":"bd-3m5","kind":"parent","created_at":[1768449376745,1],"created_by":"darin@book"}
@@ -365,9 +368,11 @@
 {"from":"bd-70v.2","to":"bd-70v","kind":"parent","created_at":[1766127054411,0],"created_by":"darin@book"}
 {"from":"bd-7ic","to":"bd-3m5","kind":"blocks","created_at":[1768182696658,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-7zf","to":"bd-omw","kind":"parent","created_at":[1767916452945,1],"created_by":"darin@darinsmacstudio.lan"}
+{"from":"bd-8ezy","to":"bd-8yac","kind":"blocks","created_at":[1769573467981,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-8joz","to":"bd-ebhh.5","kind":"discovered_from","created_at":[1769484585015,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-8rn","to":"bd-3m5","kind":"blocks","created_at":[1768182703533,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-8y9","to":"bd-3m5","kind":"parent","created_at":[1768449376333,1],"created_by":"darin@book"}
+{"from":"bd-907g","to":"bd-fn5l","kind":"blocks","created_at":[1769573467461,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-9nf","to":"bd-3m5","kind":"blocks","created_at":[1768182703428,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-a6k","to":"bd-3m5","kind":"blocks","created_at":[1768182703950,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-ayl","to":"bd-3m5","kind":"parent","created_at":[1768449375900,1],"created_by":"darin@book"}
@@ -397,6 +402,7 @@
 {"from":"bd-ebhh.5","to":"bd-ebhh.4","kind":"blocks","created_at":[1769480338384,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-enq","to":"bd-3m5","kind":"parent","created_at":[1768449376962,1],"created_by":"darin@book"}
 {"from":"bd-fkg","to":"bd-3m5","kind":"blocks","created_at":[1768182703847,1],"created_by":"darin@darinsmacstudio.lan"}
+{"from":"bd-fn5l","to":"bd-8yac","kind":"blocks","created_at":[1769573467359,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-gkz","to":"bd-3m5","kind":"parent","created_at":[1768449377180,1],"created_by":"darin@book"}
 {"from":"bd-hjm.1","to":"bd-hjm","kind":"parent","created_at":[1767985279630,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-hjm.10","to":"bd-hjm","kind":"parent","created_at":[1767985369638,1],"created_by":"darin@darinsmacstudio.lan"}
@@ -463,7 +469,12 @@
 {"from":"bd-qz97.8","to":"bd-qz97","kind":"parent","created_at":[1769209800798,1],"created_by":"darin@book"}
 {"from":"bd-qz97.9","to":"bd-qz97","kind":"parent","created_at":[1769209801009,1],"created_by":"darin@book"}
 {"from":"bd-r0rk","to":"bd-m26t","kind":"discovered_from","created_at":[1769516758309,1],"created_by":"darin@darins-Mac-Studio-2.local"}
+{"from":"bd-stdu","to":"bd-8yac","kind":"blocks","created_at":[1769573468192,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-sz4","to":"bd-3m5","kind":"blocks","created_at":[1768182696555,1],"created_by":"darin@darinsmacstudio.lan"}
+{"from":"bd-t835","to":"bd-8yac","kind":"blocks","created_at":[1769573468087,1],"created_by":"darin@darins-Mac-Studio-2.local"}
+{"from":"bd-uakj","to":"bd-t9xz","kind":"blocks","created_at":[1769573468401,1],"created_by":"darin@darins-Mac-Studio-2.local"}
+{"from":"bd-ufv1","to":"bd-907g","kind":"blocks","created_at":[1769573468502,1],"created_by":"darin@darins-Mac-Studio-2.local"}
+{"from":"bd-v1xr","to":"bd-8yac","kind":"blocks","created_at":[1769573467878,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-w9og","to":"bd-6k70","kind":"discovered_from","created_at":[1768704221218,1],"created_by":"darin@darinsmacstudio.lan"}
 {"from":"bd-xmr","to":"bd-roy","kind":"blocks","created_at":[1765744658975,0],"created_by":"darin@book"}
 {"from":"bd-xo3o","to":"bd-ebhh","kind":"blocks","created_at":[1769481342229,1],"created_by":"darin@darins-Mac-Studio-2.local"}
@@ -521,3 +532,4 @@
 {"from":"bd-ze0x.7","to":"bd-ze0x","kind":"parent","created_at":[1768622404673,1],"created_by":"darin@book"}
 {"from":"bd-ze0x.8","to":"bd-ze0x","kind":"parent","created_at":[1768622410584,1],"created_by":"darin@book"}
 {"from":"bd-ze0x.9","to":"bd-ze0x","kind":"parent","created_at":[1768622413176,1],"created_by":"darin@book"}
+{"from":"bd-znle","to":"bd-907g","kind":"blocks","created_at":[1769573467669,1],"created_by":"darin@darins-Mac-Studio-2.local"}
