@@ -15,7 +15,7 @@ use super::identity::{
     ActorId, BeadId, BranchName, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity,
     TraceId, TxnId,
 };
-use super::limits::Limits;
+use super::limits::{LimitViolation, Limits};
 use super::namespace::NamespaceId;
 use super::time::WallClock;
 use super::watermark::Seq1;
@@ -530,6 +530,8 @@ pub enum EventValidationError {
     InvalidBeadPatch { id: BeadId, reason: String },
     #[error("invalid dependency: {reason}")]
     InvalidDependency { reason: String },
+    #[error("limit violation: {reason}")]
+    LimitViolation { reason: String },
 }
 
 #[derive(Debug, Error)]
@@ -683,7 +685,7 @@ fn decode_event_body_raw(
     bytes: &[u8],
     limits: &Limits,
 ) -> Result<(EventBytes<Opaque>, EventBody), DecodeError> {
-    let max_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+    let max_bytes = limits.policy().max_wal_record_payload_bytes();
     if bytes.len() > max_bytes {
         return Err(DecodeError::DecodeLimit("max_wal_record_bytes"));
     }
@@ -700,7 +702,7 @@ fn decode_event_body_raw(
 }
 
 pub fn decode_event_hlc_max(bytes: &[u8], limits: &Limits) -> Result<Option<HlcMax>, DecodeError> {
-    let max_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+    let max_bytes = limits.policy().max_wal_record_payload_bytes();
     if bytes.len() > max_bytes {
         return Err(DecodeError::DecodeLimit("max_wal_record_bytes"));
     }
@@ -2914,46 +2916,42 @@ fn validate_event_body_limits(
     let delta = match &body.kind {
         EventKindV1::TxnV1(txn) => &txn.delta,
     };
-    let ops = delta.total_ops();
-    if ops > limits.max_ops_per_txn {
-        return Err(EventValidationError::TooManyOps {
-            ops,
-            max: limits.max_ops_per_txn,
-        });
-    }
-
-    let mut note_appends = 0usize;
-    for op in delta.iter() {
-        match op {
-            TxnOpV1::BeadUpsert(_) => {}
-            TxnOpV1::BeadDelete(_) => {}
-            TxnOpV1::LabelAdd(_) => {}
-            TxnOpV1::LabelRemove(_) => {}
-            TxnOpV1::DepAdd(_) => {}
-            TxnOpV1::DepRemove(_) => {}
-            TxnOpV1::ParentAdd(_) => {}
-            TxnOpV1::ParentRemove(_) => {}
-            TxnOpV1::NoteAppend(append) => {
-                note_appends += 1;
-                let bytes = append.note.content.len();
-                if bytes > limits.max_note_bytes {
-                    return Err(EventValidationError::NoteTooLarge {
-                        bytes,
-                        max: limits.max_note_bytes,
-                    });
-                }
-            }
-        }
-    }
-
-    if note_appends > limits.max_note_appends_per_txn {
-        return Err(EventValidationError::TooManyNoteAppends {
-            count: note_appends,
-            max: limits.max_note_appends_per_txn,
-        });
-    }
+    limits
+        .policy()
+        .txn_delta(delta)
+        .map_err(map_limit_violation_to_event)?;
 
     Ok(())
+}
+
+fn map_limit_violation_to_event(err: LimitViolation) -> EventValidationError {
+    match err {
+        LimitViolation::OpsTooMany { max_ops, got_ops } => EventValidationError::TooManyOps {
+            ops: got_ops,
+            max: max_ops,
+        },
+        LimitViolation::NoteTooLarge {
+            max_bytes,
+            got_bytes,
+        } => EventValidationError::NoteTooLarge {
+            bytes: got_bytes,
+            max: max_bytes,
+        },
+        LimitViolation::NoteAppendsTooMany { max, got } => {
+            EventValidationError::TooManyNoteAppends { count: got, max }
+        }
+        LimitViolation::LabelsTooMany { max, got } => {
+            EventValidationError::TooManyLabels { count: got, max }
+        }
+        LimitViolation::WalRecordPayloadTooLarge { .. }
+        | LimitViolation::WalRecordTooLarge { .. }
+        | LimitViolation::JsonlShardTooLarge { .. }
+        | LimitViolation::JsonlLineTooLarge { .. }
+        | LimitViolation::SnapshotEntriesTooMany { .. }
+        | LimitViolation::JsonDepthExceeded { .. } => EventValidationError::LimitViolation {
+            reason: err.to_string(),
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3525,6 +3523,18 @@ mod tests {
             }))
             .unwrap();
         body
+    }
+
+    #[test]
+    fn event_validation_rejects_too_many_ops() {
+        let body = sample_body();
+        let limits = Limits {
+            max_ops_per_txn: 0,
+            ..Limits::default()
+        };
+
+        let err = ValidatedEventBody::try_from_raw(body, &limits).unwrap_err();
+        assert!(matches!(err, EventValidationError::TooManyOps { .. }));
     }
 
     fn encode_body_with_unknown_fields(body: &EventBody) -> Vec<u8> {
