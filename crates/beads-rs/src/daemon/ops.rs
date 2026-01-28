@@ -676,8 +676,8 @@ impl AsRef<BeadPatch> for ValidatedSurfaceBeadPatch {
 impl TryFrom<BeadPatch> for ValidatedSurfaceBeadPatch {
     type Error = OpError;
 
-    fn try_from(patch: BeadPatch) -> Result<Self, Self::Error> {
-        validate_surface_patch(&patch)?;
+    fn try_from(mut patch: BeadPatch) -> Result<Self, Self::Error> {
+        normalize_required_patch(&mut patch)?;
         Ok(Self { inner: patch })
     }
 }
@@ -735,20 +735,52 @@ impl BeadPatchDaemonExt for BeadPatch {
 }
 
 fn validate_surface_patch(patch: &BeadPatch) -> Result<(), OpError> {
-    if matches!(patch.title, Patch::Clear) {
-        return Err(OpError::ValidationFailed {
-            field: "title".into(),
-            reason: "cannot clear required field".into(),
-        });
-    }
-    if matches!(patch.description, Patch::Clear) {
-        return Err(OpError::ValidationFailed {
-            field: "description".into(),
-            reason: "cannot clear required field".into(),
-        });
-    }
-
+    validate_required_patch_field("title", &patch.title)?;
+    validate_required_patch_field("description", &patch.description)?;
     Ok(())
+}
+
+fn normalize_required_patch(patch: &mut BeadPatch) -> Result<(), OpError> {
+    normalize_required_patch_field("title", &mut patch.title)?;
+    normalize_required_patch_field("description", &mut patch.description)?;
+    Ok(())
+}
+
+fn validate_required_patch_field(field: &str, patch: &Patch<String>) -> Result<(), OpError> {
+    match patch {
+        Patch::Clear => Err(OpError::ValidationFailed {
+            field: field.to_string(),
+            reason: "cannot clear required field".into(),
+        }),
+        Patch::Set(value) if value.trim().is_empty() => Err(OpError::ValidationFailed {
+            field: field.to_string(),
+            reason: "cannot set required field to empty".into(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn normalize_required_patch_field(field: &str, patch: &mut Patch<String>) -> Result<(), OpError> {
+    match patch {
+        Patch::Set(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(OpError::ValidationFailed {
+                    field: field.to_string(),
+                    reason: "cannot set required field to empty".into(),
+                });
+            }
+            if trimmed.len() != value.len() {
+                *value = trimmed.to_string();
+            }
+            Ok(())
+        }
+        Patch::Clear => Err(OpError::ValidationFailed {
+            field: field.to_string(),
+            reason: "cannot clear required field".into(),
+        }),
+        Patch::Keep => Ok(()),
+    }
 }
 
 #[cfg(test)]
