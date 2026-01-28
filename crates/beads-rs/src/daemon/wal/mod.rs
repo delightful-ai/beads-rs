@@ -27,7 +27,7 @@ pub use memory_index::MemoryWalIndex;
 #[cfg(feature = "model-testing")]
 pub use memory_index::MemoryWalIndexSnapshot;
 pub use record::{
-    Record, RecordFlags, RecordHeader, RecordHeaderMismatch, RecordRequest, RecordVerifyError,
+    Record, RecordFlags, RecordHeader, RecordHeaderMismatch, RecordVerifyError, RequestProof,
     Unverified, UnverifiedRecord, Verified, VerifiedRecord,
 };
 pub use replay::{
