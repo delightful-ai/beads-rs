@@ -598,7 +598,7 @@ mod tests {
             origin_seq: crate::core::Seq1::from_u64(1).unwrap(),
             event_time_ms: 1_700_000_000_100,
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
-            request: None,
+            request_proof: crate::daemon::wal::RequestProof::None,
             sha256: [0u8; 32],
             prev_sha256: None,
         };

@@ -42,7 +42,7 @@ use super::store::StoreCaches;
 use super::store::discovery::ResolvedStore;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, RecordHeader, RecordRequest, SegmentRow, VerifiedRecord,
+    EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,
     WalIndex, WalIndexError, WalReplayError, open_segment_reader,
 };
 
@@ -1580,13 +1580,11 @@ impl Daemon {
                     origin_seq: event.body.origin_seq,
                     event_time_ms: event.body.event_time_ms,
                     txn_id: event.body.txn_id,
-                    request: event
+                    request_proof: event
                         .body
                         .client_request_id
-                        .map(|client_request_id| RecordRequest {
-                            client_request_id,
-                            request_sha256: None,
-                        }),
+                        .map(|client_request_id| RequestProof::ClientNoHash { client_request_id })
+                        .unwrap_or(RequestProof::None),
                     sha256: sha,
                     prev_sha256: event.prev.prev.map(|sha| sha.0),
                 },
@@ -2737,7 +2735,7 @@ mod tests {
     use crate::daemon::store_lock::read_lock_meta;
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
-    use crate::daemon::wal::{HlcRow, RecordHeader, RecordRequest, SegmentHeader, VerifiedRecord};
+    use crate::daemon::wal::{HlcRow, RecordHeader, RequestProof, SegmentHeader, VerifiedRecord};
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointImport,
         CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks, build_snapshot,
@@ -3075,13 +3073,11 @@ mod tests {
                 origin_seq: event.body.origin_seq,
                 event_time_ms: event.body.event_time_ms,
                 txn_id: event.body.txn_id,
-                request: event
+                request_proof: event
                     .body
                     .client_request_id
-                    .map(|client_request_id| RecordRequest {
-                        client_request_id,
-                        request_sha256: None,
-                    }),
+                    .map(|client_request_id| RequestProof::ClientNoHash { client_request_id })
+                    .unwrap_or(RequestProof::None),
                 sha256: sha256,
                 prev_sha256: event.prev.prev.map(|sha| sha.0),
             },

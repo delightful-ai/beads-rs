@@ -15,7 +15,7 @@ use beads_rs::core::{
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
     EventWalError, EventWalResult, FRAME_HEADER_LEN, IndexDurabilityMode, RecordHeader,
-    RecordRequest, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentWriter,
+    RequestProof, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentWriter,
     SqliteWalIndex, VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError,
 };
 
@@ -198,7 +198,7 @@ pub fn record_for_seq(
         origin_seq: Seq1::from_u64(seq).expect("seq1"),
         event_time_ms,
         txn_id,
-        request: None,
+        request_proof: RequestProof::None,
         sha256: sha,
         prev_sha256: prev_sha,
     };
@@ -229,10 +229,12 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
         origin_seq: Seq1::from_u64(origin_seq).expect("seq1"),
         event_time_ms,
         txn_id,
-        request: client_request_id.map(|client_request_id| RecordRequest {
-            client_request_id,
-            request_sha256: Some([seed.wrapping_add(3); 32]),
-        }),
+        request_proof: client_request_id
+            .map(|client_request_id| RequestProof::Client {
+                client_request_id,
+                request_sha256: [seed.wrapping_add(3); 32],
+            })
+            .unwrap_or(RequestProof::None),
         sha256: sha,
         prev_sha256: None,
     };
@@ -260,7 +262,7 @@ pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
         origin_seq: Seq1::from_u64(origin_seq).expect("seq1"),
         event_time_ms,
         txn_id,
-        request: None,
+        request_proof: RequestProof::None,
         sha256: sha,
         prev_sha256: None,
     };

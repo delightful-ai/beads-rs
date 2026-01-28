@@ -30,7 +30,7 @@ use super::mutation_engine::{
 use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RecordRequest,
+    ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
     SegmentRow, VerifiedRecord, WalIndex, WalIndexError, WalIndexTxn, WalReplayError,
     open_segment_reader,
 };
@@ -279,12 +279,13 @@ impl Daemon {
 
         let sha = hash_event_body(&sequenced.event_bytes);
         let sha_bytes = sha.0;
-        let request = sequenced
+        let request_proof = sequenced
             .client_request_id
-            .map(|client_request_id| RecordRequest {
+            .map(|client_request_id| RequestProof::Client {
                 client_request_id,
-                request_sha256: Some(sequenced.request_sha256),
-            });
+                request_sha256: sequenced.request_sha256,
+            })
+            .unwrap_or(RequestProof::None);
 
         let record = VerifiedRecord::new(
             RecordHeader {
@@ -292,7 +293,7 @@ impl Daemon {
                 origin_seq,
                 event_time_ms: sequenced.event_body.event_time_ms,
                 txn_id: sequenced.event_body.txn_id,
-                request,
+                request_proof,
                 sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
@@ -1600,19 +1601,21 @@ mod tests {
             .unwrap();
 
         let sha = hash_event_body(&sequenced.event_bytes).0;
+        let request_proof = sequenced
+            .event_body
+            .client_request_id
+            .map(|client_request_id| RequestProof::Client {
+                client_request_id,
+                request_sha256: sequenced.request_sha256,
+            })
+            .unwrap_or(RequestProof::None);
         let record = VerifiedRecord::new(
             RecordHeader {
                 origin_replica_id: replica_id,
                 origin_seq,
                 event_time_ms: sequenced.event_body.event_time_ms,
                 txn_id: sequenced.event_body.txn_id,
-                request: sequenced
-                    .event_body
-                    .client_request_id
-                    .map(|client_request_id| RecordRequest {
-                        client_request_id,
-                        request_sha256: Some(sequenced.request_sha256),
-                    }),
+                request_proof,
                 sha256: sha,
                 prev_sha256: None,
             },
