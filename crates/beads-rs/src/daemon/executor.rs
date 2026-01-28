@@ -193,12 +193,7 @@ impl Daemon {
                 wait_timeout,
             )?
         {
-            let empty_state = CanonicalState::new();
-            let state = proof
-                .runtime()
-                .state
-                .get(&namespace)
-                .unwrap_or(&empty_state);
+            let state = Self::namespace_state(&proof, &namespace);
             attach_issue_if_created(&namespace, state, outcome.response_mut());
             return Ok(outcome);
         }
@@ -400,31 +395,23 @@ impl Daemon {
         txn.commit().map_err(wal_index_to_op)?;
 
         let (durable_watermarks, applied_watermarks, applied, durable) = {
-            let (store_runtime, repo_state) = proof.split_mut();
             let apply_start = Instant::now();
-            let apply_result = {
-                let state = if namespace.is_core() {
-                    store_runtime.state.core_mut()
-                } else {
-                    let non_core = namespace
-                        .clone()
-                        .try_non_core()
-                        .expect("non-core namespace");
-                    store_runtime.state.ensure_namespace(non_core)
-                };
-                apply_event(state, &sequenced.event_body)
-            };
-            let outcome = match apply_result {
-                Ok(outcome) => {
-                    metrics::apply_ok(apply_start.elapsed());
-                    outcome
-                }
-                Err(err) => {
-                    metrics::apply_err(apply_start.elapsed());
-                    tracing::error!(error = ?err, "apply_event failed");
-                    return Err(OpError::Internal("apply_event failed"));
+            let outcome = {
+                let state = Self::namespace_state_mut(&mut proof, namespace.clone());
+                match apply_event(state, &sequenced.event_body) {
+                    Ok(outcome) => {
+                        metrics::apply_ok(apply_start.elapsed());
+                        outcome
+                    }
+                    Err(err) => {
+                        metrics::apply_err(apply_start.elapsed());
+                        tracing::error!(error = ?err, "apply_event failed");
+                        return Err(OpError::Internal("apply_event failed"));
+                    }
                 }
             };
+
+            let (store_runtime, repo_state) = proof.split_mut();
             store_runtime.record_checkpoint_dirty_shards(&namespace, &outcome);
             let write_stamp = WriteStamp::new(hlc_max.physical_ms, hlc_max.logical);
             let now_wall_ms = WallClock::now().0;
@@ -539,12 +526,7 @@ impl Daemon {
         };
 
         tracing::info!("mutation committed");
-        let empty_state = CanonicalState::new();
-        let state = proof
-            .runtime()
-            .state
-            .get(&namespace)
-            .unwrap_or(&empty_state);
+        let state = Self::namespace_state(&proof, &namespace);
         attach_issue_if_created(&namespace, state, outcome.response_mut());
         drop(proof);
         self.mark_checkpoint_dirty(store_id, &namespace, 1);
