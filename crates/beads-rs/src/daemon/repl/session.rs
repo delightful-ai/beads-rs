@@ -26,8 +26,8 @@ use super::error::{ReplError, ReplErrorDetails};
 use super::frame::NegotiatedFrameLimit;
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
-    Ack, Capabilities, Hello, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want, WatermarkMap,
-    WatermarkState, WireEvents, WireReplMessage,
+    Ack, Capabilities, Hello, NamespaceSet, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want,
+    WatermarkMap, WatermarkState, WireEvents, WireReplMessage,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,8 +157,8 @@ pub struct SessionPeer {
     pub store_epoch: StoreEpoch,
     pub protocol_version: u32,
     pub max_frame_bytes: u32,
-    pub incoming_namespaces: Vec<NamespaceId>,
-    pub accepted_namespaces: Vec<NamespaceId>,
+    pub incoming_namespaces: NamespaceSet,
+    pub accepted_namespaces: NamespaceSet,
     pub live_stream_enabled: bool,
 }
 
@@ -1204,8 +1204,8 @@ impl<R, P> Session<R, P> {
             sender_replica_id: self.config.local_replica_id,
             hello_nonce: self.next_nonce(),
             max_frame_bytes: self.config.max_frame_bytes,
-            requested_namespaces: self.config.requested_namespaces.clone(),
-            offered_namespaces: self.config.offered_namespaces.clone(),
+            requested_namespaces: NamespaceSet::from(self.config.requested_namespaces.clone()),
+            offered_namespaces: NamespaceSet::from(self.config.offered_namespaces.clone()),
             seen_durable: snapshot.durable,
             seen_applied: Some(snapshot.applied),
             capabilities: self.config.capabilities.clone(),
@@ -1217,7 +1217,7 @@ impl<R, P> Session<R, P> {
         protocol_version: u32,
         hello: &Hello,
         snapshot: WatermarkSnapshot,
-        accepted_namespaces: Vec<NamespaceId>,
+        accepted_namespaces: NamespaceSet,
     ) -> super::proto::Welcome {
         let live_stream_enabled = self.config.capabilities.supports_live_stream
             && hello.capabilities.supports_live_stream;
@@ -1433,19 +1433,17 @@ fn normalize_namespaces(namespaces: &mut Vec<NamespaceId>) {
     if namespaces.is_empty() {
         return;
     }
-    let mut set = BTreeSet::new();
-    set.extend(namespaces.drain(..));
-    namespaces.extend(set);
+    let canonical = NamespaceSet::from(std::mem::take(namespaces));
+    namespaces.extend(canonical.into_vec());
 }
 
-fn intersect_namespaces(a: &[NamespaceId], b: &[NamespaceId]) -> Vec<NamespaceId> {
+fn intersect_namespaces(a: &[NamespaceId], b: &[NamespaceId]) -> NamespaceSet {
     if a.is_empty() || b.is_empty() {
-        return Vec::new();
+        return NamespaceSet::default();
     }
     let bset: BTreeSet<_> = b.iter().cloned().collect();
-    let mut out: Vec<_> = a.iter().filter(|ns| bset.contains(*ns)).cloned().collect();
-    out.sort();
-    out
+    let out: Vec<_> = a.iter().filter(|ns| bset.contains(*ns)).cloned().collect();
+    NamespaceSet::from(out)
 }
 
 fn insert_want(want: &mut WatermarkMap, namespace: NamespaceId, origin: ReplicaId, from: Seq0) {
@@ -1793,6 +1791,7 @@ mod tests {
         encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::repl::proto;
+    use crate::daemon::repl::proto::NamespaceSet;
 
     #[derive(Clone, Debug)]
     struct TestStore {
@@ -1937,8 +1936,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([3u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: namespaces.clone(),
-            offered_namespaces: namespaces,
+            requested_namespaces: namespaces.clone().into(),
+            offered_namespaces: namespaces.into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -2035,8 +2034,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([3u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -2057,7 +2056,10 @@ mod tests {
             panic!("expected welcome");
         };
         assert_eq!(welcome.protocol_version, PROTOCOL_VERSION_V1);
-        assert_eq!(welcome.accepted_namespaces, vec![NamespaceId::core()]);
+        assert_eq!(
+            welcome.accepted_namespaces,
+            NamespaceSet::from(vec![NamespaceId::core()])
+        );
     }
 
     #[test]
@@ -2080,8 +2082,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([7u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -2097,6 +2099,63 @@ mod tests {
             panic!("expected welcome");
         };
         assert!(!welcome.live_stream_enabled);
+    }
+
+    #[test]
+    fn hello_replay_accepts_reordered_namespaces() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        let alpha = NamespaceId::parse("alpha").unwrap();
+        let beta = NamespaceId::parse("beta").unwrap();
+        config.requested_namespaces = vec![alpha.clone(), beta.clone()];
+        config.offered_namespaces = vec![alpha.clone(), beta.clone()];
+
+        let session = InboundConnecting::new(config, limits, admission);
+
+        let peer_store = StoreIdentity::new(identity.store_id, identity.store_epoch);
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: peer_store.store_id,
+            store_epoch: peer_store.store_epoch,
+            sender_replica_id: ReplicaId::new(Uuid::from_bytes([11u8; 16])),
+            hello_nonce: 10,
+            max_frame_bytes: 1024,
+            requested_namespaces: vec![alpha.clone(), beta.clone()].into(),
+            offered_namespaces: vec![alpha.clone(), beta.clone()].into(),
+            seen_durable: BTreeMap::new(),
+            seen_applied: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        };
+
+        let (session, _actions) = apply_inbound_hello(session, hello.clone(), &mut store);
+        let session = expect_inbound_streaming(session);
+
+        let hello_replay = Hello {
+            requested_namespaces: vec![beta.clone(), alpha.clone(), beta.clone()].into(),
+            offered_namespaces: vec![beta.clone(), alpha.clone()].into(),
+            ..hello
+        };
+
+        let (session, actions) = handle_inbound_message(
+            SessionState::StreamingLive(session),
+            WireReplMessage::Hello(hello_replay),
+            &mut store,
+            0,
+        );
+
+        assert!(matches!(session, SessionState::StreamingLive(_)));
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, SessionAction::Send(ReplMessage::Welcome(_))))
+        );
     }
 
     #[test]
@@ -2128,7 +2187,7 @@ mod tests {
             store_epoch: identity.store_epoch,
             receiver_replica_id: peer_replica,
             welcome_nonce: 10,
-            accepted_namespaces: vec![NamespaceId::core()],
+            accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: receiver_seen,
             receiver_seen_applied: None,
             live_stream_enabled: true,
@@ -2171,8 +2230,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([9u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -2209,7 +2268,7 @@ mod tests {
             store_epoch: identity.store_epoch,
             receiver_replica_id: ReplicaId::new(Uuid::from_bytes([12u8; 16])),
             welcome_nonce: 10,
-            accepted_namespaces: vec![NamespaceId::core()],
+            accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
             live_stream_enabled: true,
@@ -2244,7 +2303,7 @@ mod tests {
             store_epoch: identity.store_epoch,
             receiver_replica_id: ReplicaId::new(Uuid::from_bytes([13u8; 16])),
             welcome_nonce: 10,
-            accepted_namespaces: vec![NamespaceId::core()],
+            accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
             live_stream_enabled: false,
@@ -2352,8 +2411,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([4u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -2422,8 +2481,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([6u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -2503,8 +2562,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -2582,8 +2641,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([10u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
@@ -2637,8 +2696,8 @@ mod tests {
             sender_replica_id: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
             hello_nonce: 10,
             max_frame_bytes: 1024,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: None,
             capabilities: Capabilities {
