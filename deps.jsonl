@@ -423,6 +423,8 @@
 {"from":"bd-ir5j","to":"bd-pdje","kind":"blocks","created_at":[1768714180296,1],"created_by":"darin@book"}
 {"from":"bd-j9l","to":"bd-3m5","kind":"parent","created_at":[1768411873785,1],"created_by":"darin@book"}
 {"from":"bd-km0","to":"bd-3m5","kind":"parent","created_at":[1768449375684,1],"created_by":"darin@book"}
+{"from":"bd-lk0x","to":"bd-1v5w","kind":"blocks","created_at":[1769580772677,1],"created_by":"darin@darins-Mac-Studio-2.local"}
+{"from":"bd-lk0x","to":"bd-8yac","kind":"blocks","created_at":[1769580772587,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-m5r","to":"bd-6b7","kind":"discovered_from","created_at":[1768426480808,1],"created_by":"darin@book"}
 {"from":"bd-m7v0","to":"bd-ebhh","kind":"blocks","created_at":[1769481321583,1],"created_by":"darin@darins-Mac-Studio-2.local"}
 {"from":"bd-np77","to":"bd-0863","kind":"blocks","created_at":[1768680821685,1],"created_by":"darin@book"}
