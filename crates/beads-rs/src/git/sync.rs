@@ -19,7 +19,7 @@ use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 
 use super::error::SyncError;
 use super::wire;
-use crate::core::{BeadId, CanonicalState, WallClock, WriteStamp};
+use crate::core::{BeadId, BeadSlug, CanonicalState, WallClock, WriteStamp};
 
 // =============================================================================
 // Phase markers (zero-sized types for typestate)
@@ -43,7 +43,7 @@ pub struct Fetched {
     /// Parsed remote state (for CRDT merge).
     pub remote_state: CanonicalState,
     /// Root slug from meta.json (if any).
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
     /// Max write stamp stored in meta.json (if any).
     pub parent_meta_stamp: Option<WriteStamp>,
     /// Fetch error from best-effort mode (if any).
@@ -63,7 +63,7 @@ pub struct Merged {
     /// Diff summary for commit message.
     pub diff: SyncDiff,
     /// Root slug from meta.json (if any).
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
     /// Max write stamp from parent meta.json (if any).
     pub parent_meta_stamp: Option<WriteStamp>,
 }
@@ -363,7 +363,12 @@ impl SyncProcess<Idle> {
         let (remote_oid, remote_state, root_slug, parent_meta_stamp) = match remote_oid_opt {
             Some(oid) => {
                 let loaded = read_state_at_oid(repo, oid)?;
-                (oid, loaded.state, loaded.root_slug, loaded.last_write_stamp)
+                (
+                    oid,
+                    loaded.state,
+                    loaded.meta.root_slug().cloned(),
+                    loaded.meta.last_write_stamp().cloned(),
+                )
             }
             None => match local_oid_opt {
                 Some(local_oid) => {
@@ -371,8 +376,8 @@ impl SyncProcess<Idle> {
                     (
                         local_oid,
                         loaded.state,
-                        loaded.root_slug,
-                        loaded.last_write_stamp,
+                        loaded.meta.root_slug().cloned(),
+                        loaded.meta.last_write_stamp().cloned(),
                     )
                 }
                 None => (Oid::zero(), CanonicalState::new(), None, None),
@@ -551,8 +556,11 @@ impl SyncProcess<Merged> {
             &deps_bytes,
             Some(&notes_bytes),
         );
-        let meta_bytes =
-            wire::serialize_meta(root_slug.as_deref(), meta_last_stamp.as_ref(), &checksums)?;
+        let meta_bytes = wire::serialize_meta(
+            root_slug.as_ref().map(BeadSlug::as_str),
+            meta_last_stamp.as_ref(),
+            &checksums,
+        )?;
 
         // Write blobs to ODB
         let state_oid = repo.blob(&state_bytes)?;
@@ -702,8 +710,7 @@ impl SyncProcess<Committed> {
 /// Data loaded from a beads store commit.
 pub struct LoadedStore {
     pub state: CanonicalState,
-    pub root_slug: Option<String>,
-    pub last_write_stamp: Option<WriteStamp>,
+    pub meta: wire::StoreMeta,
 }
 
 /// Read state from a commit oid.
@@ -746,20 +753,17 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
     };
 
     // Read meta.json for root_slug + last_write_stamp + checksums
-    let mut root_slug = None;
-    let mut last_write_stamp = None;
-    let mut checksums = None;
-    if let Some(meta_entry) = tree.get_name("meta.json") {
+    let meta = if let Some(meta_entry) = tree.get_name("meta.json") {
         let meta_blob = repo
             .find_object(meta_entry.id(), Some(ObjectType::Blob))?
             .peel_to_blob()?;
-        let meta = wire::parse_meta(meta_blob.content())?;
-        root_slug = meta.root_slug;
-        last_write_stamp = meta.last_write_stamp;
-        checksums = meta.checksums;
-    }
+        wire::parse_meta(meta_blob.content())?
+    } else {
+        wire::StoreMeta::Legacy
+    };
+    let checksums = meta.checksums();
 
-    if let Some(expected) = checksums.as_ref() {
+    if let Some(expected) = checksums {
         wire::verify_store_checksums(
             expected,
             state_blob.content(),
@@ -776,11 +780,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         &notes_bytes,
     )?;
 
-    Ok(LoadedStore {
-        state,
-        root_slug,
-        last_write_stamp,
-    })
+    Ok(LoadedStore { state, meta })
 }
 
 /// Compute diff between two states for commit message.
@@ -979,7 +979,7 @@ pub fn sync_with_retry(
 /// 3. Fallback to "bd"
 ///
 /// The slug is sanitized to be valid for bead IDs (lowercase alphanumeric + hyphens).
-fn derive_root_slug(repo: &Repository) -> String {
+fn derive_root_slug(repo: &Repository) -> BeadSlug {
     // Try remote URL first
     if let Ok(remote) = repo.find_remote("origin")
         && let Some(url) = remote.url()
@@ -993,17 +993,19 @@ fn derive_root_slug(repo: &Repository) -> String {
         && let Some(name) = workdir.file_name().and_then(|n| n.to_str())
     {
         let sanitized = sanitize_slug(name);
-        if !sanitized.is_empty() {
-            return sanitized;
+        if !sanitized.is_empty()
+            && let Ok(slug) = BeadSlug::parse(&sanitized)
+        {
+            return slug;
         }
     }
 
     // Fallback
-    "bd".to_string()
+    BeadSlug::parse("bd").expect("default slug must be valid")
 }
 
 /// Extract a slug from a git remote URL.
-fn extract_slug_from_url(url: &str) -> Option<String> {
+fn extract_slug_from_url(url: &str) -> Option<BeadSlug> {
     // Handle various URL formats:
     // - git@github.com:user/repo.git
     // - https://github.com/user/repo.git
@@ -1026,10 +1028,9 @@ fn extract_slug_from_url(url: &str) -> Option<String> {
 
     let sanitized = sanitize_slug(name);
     if sanitized.is_empty() {
-        None
-    } else {
-        Some(sanitized)
+        return None;
     }
+    BeadSlug::parse(&sanitized).ok()
 }
 
 /// Sanitize a string into a valid bead ID slug.
@@ -1156,7 +1157,7 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
             &deps_bytes,
             Some(&notes_bytes),
         );
-        let meta_bytes = wire::serialize_meta(Some(&root_slug), None, &checksums)?;
+        let meta_bytes = wire::serialize_meta(Some(root_slug.as_str()), None, &checksums)?;
 
         // Write blobs
         let state_oid = repo.blob(&state_bytes)?;
@@ -1511,7 +1512,11 @@ mod tests {
         let oid = write_store_commit_with_meta(&repo, None, "meta", Some(stamp.clone()));
 
         let loaded = read_state_at_oid(&repo, oid).unwrap();
-        assert_eq!(loaded.last_write_stamp, Some(stamp));
+        assert_eq!(
+            loaded.meta.last_write_stamp(),
+            Some(&stamp),
+            "expected meta last_write_stamp"
+        );
     }
 
     #[test]
@@ -1567,7 +1572,7 @@ mod tests {
         let oid = write_store_commit_without_meta(&repo, None, "no-meta");
 
         let loaded = read_state_at_oid(&repo, oid).unwrap();
-        assert_eq!(loaded.last_write_stamp, None);
+        assert!(matches!(loaded.meta, wire::StoreMeta::Legacy));
     }
 
     #[test]

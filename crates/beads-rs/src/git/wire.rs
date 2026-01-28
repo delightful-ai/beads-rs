@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use super::error::WireError;
 use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, BeadView, CanonicalState, Claim,
-    Closure, ContentHash, DepKey, DepStore, Dot, Dvv, Label, LabelStore, Lww, Note, NoteId,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, BeadView, CanonicalState,
+    Claim, Closure, ContentHash, DepKey, DepStore, Dot, Dvv, Label, LabelStore, Lww, Note, NoteId,
     NoteStore, OrSet, Priority, Stamp, Tombstone, WallClock, Workflow, WriteStamp, sha256_bytes,
 };
 
@@ -353,6 +353,9 @@ pub fn serialize_meta(
     last_write_stamp: Option<&WriteStamp>,
     checksums: &StoreChecksums,
 ) -> Result<Vec<u8>, WireError> {
+    let notes = checksums
+        .notes
+        .ok_or_else(|| WireError::InvalidValue("meta.json missing checksum fields".into()))?;
     let meta = WireMeta {
         format_version: 1,
         root_slug: root_slug.map(|s| s.to_string()),
@@ -360,7 +363,7 @@ pub fn serialize_meta(
         state_sha256: Some(checksums.state),
         tombstones_sha256: Some(checksums.tombstones),
         deps_sha256: Some(checksums.deps),
-        notes_sha256: checksums.notes,
+        notes_sha256: Some(notes),
     };
     let json = serde_json::to_string_pretty(&meta)?;
     Ok(json.into_bytes())
@@ -527,40 +530,77 @@ pub fn parse_legacy_state(
     Ok(state)
 }
 
-/// Parsed metadata from meta.json.
-pub struct ParsedMeta {
-    pub format_version: u32,
-    pub root_slug: Option<String>,
-    pub last_write_stamp: Option<WriteStamp>,
-    pub checksums: Option<StoreChecksums>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreMeta {
+    Legacy,
+    V1 {
+        root_slug: Option<BeadSlug>,
+        last_write_stamp: Option<WriteStamp>,
+        checksums: StoreChecksums,
+    },
+}
+
+impl StoreMeta {
+    pub fn root_slug(&self) -> Option<&BeadSlug> {
+        match self {
+            StoreMeta::Legacy => None,
+            StoreMeta::V1 { root_slug, .. } => root_slug.as_ref(),
+        }
+    }
+
+    pub fn last_write_stamp(&self) -> Option<&WriteStamp> {
+        match self {
+            StoreMeta::Legacy => None,
+            StoreMeta::V1 {
+                last_write_stamp, ..
+            } => last_write_stamp.as_ref(),
+        }
+    }
+
+    pub fn checksums(&self) -> Option<&StoreChecksums> {
+        match self {
+            StoreMeta::Legacy => None,
+            StoreMeta::V1 { checksums, .. } => Some(checksums),
+        }
+    }
 }
 
 /// Parse meta.json bytes.
-pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
+pub fn parse_meta(bytes: &[u8]) -> Result<StoreMeta, WireError> {
     let content = parse_utf8(bytes)?;
     let meta: WireMeta = serde_json::from_str(content)?;
+    if meta.format_version != 1 {
+        return Err(WireError::InvalidValue(format!(
+            "unsupported meta format_version {}",
+            meta.format_version
+        )));
+    }
     let checksums = match (
         meta.state_sha256,
         meta.tombstones_sha256,
         meta.deps_sha256,
         meta.notes_sha256,
     ) {
-        (None, None, None, None) => None,
-        (Some(state), Some(tombstones), Some(deps), notes) => Some(StoreChecksums {
+        (Some(state), Some(tombstones), Some(deps), Some(notes)) => StoreChecksums {
             state,
             tombstones,
             deps,
-            notes,
-        }),
+            notes: Some(notes),
+        },
         _ => {
             return Err(WireError::InvalidValue(
                 "meta.json missing checksum fields".into(),
             ));
         }
     };
-    Ok(ParsedMeta {
-        format_version: meta.format_version,
-        root_slug: meta.root_slug,
+    let root_slug = match meta.root_slug {
+        Some(raw) => {
+            Some(BeadSlug::parse(&raw).map_err(|e| WireError::InvalidValue(e.to_string()))?)
+        }
+        None => None,
+    };
+    Ok(StoreMeta::V1 {
+        root_slug,
         last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
         checksums,
     })
@@ -1541,9 +1581,23 @@ mod tests {
             let bytes = serialize_meta(root.as_deref(), write_stamp.as_ref(), &checksums)
                 .unwrap_or_else(|e| panic!("serialize_meta failed: {e}"));
             let parsed = parse_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
-            prop_assert_eq!(parsed.root_slug, root);
-            prop_assert_eq!(parsed.last_write_stamp, write_stamp);
-            prop_assert_eq!(parsed.checksums, Some(checksums));
+            let expected_root = root
+                .as_ref()
+                .map(|raw| BeadSlug::parse(raw).expect("slug parse"));
+            match parsed {
+                StoreMeta::V1 {
+                    root_slug,
+                    last_write_stamp,
+                    checksums: parsed_checksums,
+                } => {
+                    prop_assert_eq!(root_slug, expected_root);
+                    prop_assert_eq!(last_write_stamp, write_stamp);
+                    prop_assert_eq!(parsed_checksums, checksums);
+                }
+                StoreMeta::Legacy => {
+                    prop_assert!(false, "expected v1 meta");
+                }
+            }
         }
     }
 
@@ -1559,6 +1613,67 @@ mod tests {
                 assert_eq!(blob, "state.jsonl");
             }
             other => panic!("expected checksum mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_meta_rejects_unsupported_version() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["format_version"] = serde_json::Value::from(2);
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let err = parse_meta(&mutated).expect_err("unsupported version should fail");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn parse_meta_rejects_missing_checksums() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("notes_sha256");
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let err = parse_meta(&mutated).expect_err("missing checksums should fail");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn parse_meta_rejects_invalid_root_slug() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["root_slug"] = serde_json::Value::from("bad slug");
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let err = parse_meta(&mutated).expect_err("invalid slug should fail");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn parse_meta_accepts_v1_with_checksums() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let parsed = parse_meta(&bytes).expect("parse meta");
+        match parsed {
+            StoreMeta::V1 {
+                root_slug,
+                last_write_stamp,
+                checksums: parsed_checksums,
+            } => {
+                assert_eq!(
+                    root_slug,
+                    Some(BeadSlug::parse("valid-slug").expect("slug"))
+                );
+                assert_eq!(last_write_stamp, None);
+                assert_eq!(parsed_checksums, checksums);
+            }
+            StoreMeta::Legacy => panic!("expected v1 meta"),
         }
     }
 }
