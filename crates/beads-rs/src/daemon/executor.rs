@@ -25,7 +25,7 @@ use super::ipc::{
 };
 use super::mutation_engine::{
     DotAllocator, EventDraft, IdContext, MutationContext, MutationEngine, ParsedMutationRequest,
-    SequencedEvent,
+    SequencedEvent, StampedContext,
 };
 use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
@@ -224,6 +224,7 @@ impl Daemon {
             let write_stamp = clock.tick();
             (now_ms, Stamp::new(write_stamp, ctx.actor_id.clone()))
         };
+        let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone())?;
         let mut proof = self.loaded_store(store_id, remote.clone());
         let draft = {
             let store_runtime = proof.runtime_mut();
@@ -236,10 +237,9 @@ impl Daemon {
             engine.plan(
                 &state_snapshot,
                 now_ms,
-                stamp,
+                stamped_ctx,
                 store,
                 id_ctx.as_ref(),
-                ctx.clone(),
                 parsed_request.clone(),
                 &mut dot_alloc,
             )
@@ -1582,15 +1582,15 @@ mod tests {
         let mut clock = fixed_clock(1_700_000_000_000);
         let now_ms = clock.wall_ms();
         let stamp = Stamp::new(clock.tick(), actor.clone());
+        let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone()).unwrap();
         let mut dots = TestDotAllocator::new(replica_id);
         let draft = engine
             .plan(
                 &state,
                 now_ms,
-                stamp,
+                stamped_ctx,
                 store,
                 None,
-                ctx.clone(),
                 request.clone(),
                 &mut dots,
             )

@@ -31,6 +31,32 @@ pub struct MutationContext {
     pub trace_id: TraceId,
 }
 
+#[derive(Clone, Debug)]
+pub struct StampedContext {
+    ctx: MutationContext,
+    stamp: Stamp,
+}
+
+impl StampedContext {
+    pub fn new(ctx: MutationContext, stamp: Stamp) -> Result<Self, OpError> {
+        if stamp.by != ctx.actor_id {
+            return Err(OpError::ValidationFailed {
+                field: "stamp".into(),
+                reason: format!(
+                    "stamp actor {} does not match context actor {}",
+                    stamp.by, ctx.actor_id
+                ),
+            });
+        }
+
+        Ok(Self { ctx, stamp })
+    }
+
+    pub fn into_parts(self) -> (MutationContext, Stamp) {
+        (self.ctx, self.stamp)
+    }
+}
+
 pub trait DotAllocator {
     fn next_dot(&mut self) -> Result<Dot, OpError>;
 }
@@ -339,13 +365,13 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         now_ms: u64,
-        stamp: Stamp,
+        stamped: StampedContext,
         store: StoreIdentity,
         id_ctx: Option<&IdContext>,
-        ctx: MutationContext,
         req: ParsedMutationRequest,
         dot_alloc: &mut dyn DotAllocator,
     ) -> Result<EventDraft, OpError> {
+        let (ctx, stamp) = stamped.into_parts();
         let write_stamp = stamp.at.clone();
 
         let planned = match req {
@@ -1946,6 +1972,10 @@ mod tests {
         Stamp::new(WriteStamp::new(now_ms, 0), actor.clone())
     }
 
+    fn make_stamped_context(ctx: MutationContext, stamp: Stamp) -> StampedContext {
+        StampedContext::new(ctx, stamp).unwrap()
+    }
+
     struct TestDotAllocator {
         replica_id: ReplicaId,
         counter: u64,
@@ -1997,37 +2027,38 @@ mod tests {
         let now_ms = 1_000;
         let stamp_a = make_stamp(now_ms, &actor);
         let stamp_b = make_stamp(now_ms, &actor);
+        let stamped_a = make_stamped_context(ctx.clone(), stamp_a);
+        let stamped_b = make_stamped_context(ctx, stamp_b);
         let replica_id = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
         let mut dots_a = TestDotAllocator::new(replica_id);
         let mut dots_b = TestDotAllocator::new(replica_id);
 
         let draft_a = engine
-            .plan(
-                &state,
-                now_ms,
-                stamp_a,
-                store,
-                None,
-                ctx.clone(),
-                req_a,
-                &mut dots_a,
-            )
+            .plan(&state, now_ms, stamped_a, store, None, req_a, &mut dots_a)
             .unwrap();
         let draft_b = engine
-            .plan(
-                &state,
-                now_ms,
-                stamp_b,
-                store,
-                None,
-                ctx,
-                req_b,
-                &mut dots_b,
-            )
+            .plan(&state, now_ms, stamped_b, store, None, req_b, &mut dots_b)
             .unwrap();
 
         assert_eq!(draft_a.request_sha256, draft_b.request_sha256);
         assert_eq!(draft_a.delta, draft_b.delta);
+    }
+
+    #[test]
+    fn stamped_context_rejects_mismatched_actor() {
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor_id("alice"),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let stamp = Stamp::new(WriteStamp::new(10, 0), actor_id("bob"));
+        let err = StampedContext::new(ctx, stamp).unwrap_err();
+
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "stamp"
+        ));
     }
 
     #[test]
@@ -2055,9 +2086,10 @@ mod tests {
 
         let now_ms = 1_000;
         let stamp = make_stamp(now_ms, &actor);
+        let stamped = make_stamped_context(ctx, stamp);
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([2u8; 16])));
         let err = engine
-            .plan(&state, now_ms, stamp, store, None, ctx, req, &mut dots)
+            .plan(&state, now_ms, stamped, store, None, req, &mut dots)
             .unwrap_err();
 
         assert!(matches!(err, OpError::NoteTooLarge { .. }));
@@ -2088,9 +2120,10 @@ mod tests {
 
         let now_ms = 1_000;
         let stamp = make_stamp(now_ms, &actor);
+        let stamped = make_stamped_context(ctx, stamp);
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
         let err = engine
-            .plan(&state, now_ms, stamp, store, None, ctx, req, &mut dots)
+            .plan(&state, now_ms, stamped, store, None, req, &mut dots)
             .unwrap_err();
 
         assert!(matches!(err, OpError::OpsTooMany { .. }));
@@ -2118,9 +2151,10 @@ mod tests {
 
         let now_ms = 1_000;
         let stamp = make_stamp(now_ms, &actor);
+        let stamped = make_stamped_context(ctx, stamp);
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([4u8; 16])));
         let _ = engine
-            .plan(&state, now_ms, stamp, store, None, ctx, req, &mut dots)
+            .plan(&state, now_ms, stamped, store, None, req, &mut dots)
             .unwrap();
 
         let after = serde_json::to_string(&state).unwrap();
