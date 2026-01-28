@@ -1156,7 +1156,6 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use crossbeam::channel::Receiver;
     use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};

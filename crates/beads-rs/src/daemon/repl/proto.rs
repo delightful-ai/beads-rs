@@ -371,21 +371,6 @@ impl ReplMessage {
     }
 }
 
-impl WireReplMessage {
-    fn message_type(&self) -> MessageType {
-        match self {
-            WireReplMessage::Hello(_) => MessageType::Hello,
-            WireReplMessage::Welcome(_) => MessageType::Welcome,
-            WireReplMessage::Events(_) => MessageType::Events,
-            WireReplMessage::Ack(_) => MessageType::Ack,
-            WireReplMessage::Want(_) => MessageType::Want,
-            WireReplMessage::Ping(_) => MessageType::Ping,
-            WireReplMessage::Pong(_) => MessageType::Pong,
-            WireReplMessage::Error(_) => MessageType::Error,
-        }
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum ProtoEncodeError {
     #[error("cbor encode: {0}")]
