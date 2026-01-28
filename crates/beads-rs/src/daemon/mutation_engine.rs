@@ -11,8 +11,8 @@ use crate::core::{
     ClientRequestId, DepAddKey, DepKey, DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1,
     HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge, Priority,
     ReplicaId, Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1,
-    TxnV1, ValidatedEventBody, ValidatedEventKindV1, ValidatedMutationCommand, ValidatedTxnV1,
-    WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1,
+    TxnV1, ValidatedBeadPatch, ValidatedEventBody, ValidatedEventKindV1, ValidatedMutationCommand,
+    ValidatedTxnV1, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1,
     WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1, WirePatch, WireStamp,
     WireTombstoneV1, WorkflowStatus, encode_event_body_canonical, sha256_bytes,
     to_canon_json_bytes,
@@ -877,9 +877,7 @@ impl MutationEngine {
         }
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .map_err(delta_error_to_op)?;
+        insert_bead_upsert(&mut delta, patch)?;
 
         for label in labels.iter() {
             let dot = dot_alloc.next_dot()?;
@@ -964,9 +962,7 @@ impl MutationEngine {
         let (wire_patch, canonical_patch) = normalize_patch(&id, &patch)?;
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(wire_patch)))
-            .map_err(delta_error_to_op)?;
+        insert_bead_upsert(&mut delta, wire_patch)?;
 
         let canonical = CanonicalMutationOp::Update {
             id,
@@ -1069,9 +1065,7 @@ impl MutationEngine {
         }
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .map_err(delta_error_to_op)?;
+        insert_bead_upsert(&mut delta, patch)?;
 
         let canonical = CanonicalMutationOp::Close {
             id,
@@ -1098,9 +1092,7 @@ impl MutationEngine {
         patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .map_err(delta_error_to_op)?;
+        insert_bead_upsert(&mut delta, patch)?;
 
         let canonical = CanonicalMutationOp::Reopen { id };
 
@@ -1372,9 +1364,7 @@ impl MutationEngine {
         patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .map_err(delta_error_to_op)?;
+        insert_bead_upsert(&mut delta, patch)?;
 
         let canonical = CanonicalMutationOp::Claim { id, lease_secs };
 
@@ -1405,9 +1395,7 @@ impl MutationEngine {
         patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .map_err(delta_error_to_op)?;
+        insert_bead_upsert(&mut delta, patch)?;
 
         let canonical = CanonicalMutationOp::Unclaim { id };
 
@@ -1450,9 +1438,7 @@ impl MutationEngine {
         patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
-        delta
-            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
-            .map_err(delta_error_to_op)?;
+        insert_bead_upsert(&mut delta, patch)?;
 
         let canonical = CanonicalMutationOp::ExtendClaim { id, lease_secs };
 
@@ -1805,6 +1791,22 @@ fn enforce_note_limit(content: &str, limits: &Limits) -> Result<(), OpError> {
         });
     }
     Ok(())
+}
+
+fn validate_bead_patch(patch: BeadPatchWireV1) -> Result<BeadPatchWireV1, OpError> {
+    ValidatedBeadPatch::try_from(patch)
+        .map(|patch| patch.into_inner())
+        .map_err(|err| OpError::ValidationFailed {
+            field: "bead_patch".into(),
+            reason: err.to_string(),
+        })
+}
+
+fn insert_bead_upsert(delta: &mut TxnDeltaV1, patch: BeadPatchWireV1) -> Result<(), OpError> {
+    let patch = validate_bead_patch(patch)?;
+    delta
+        .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
+        .map_err(delta_error_to_op)
 }
 
 fn delta_error_to_op(err: TxnDeltaError) -> OpError {
@@ -2196,6 +2198,18 @@ mod tests {
         assert!(matches!(patch.assignee, WirePatch::Set(_)));
         assert!(matches!(patch.closed_reason, WirePatch::Clear));
         assert!(matches!(patch.closed_on_branch, WirePatch::Clear));
+    }
+
+    #[test]
+    fn invalid_workflow_patch_rejected_in_planning() {
+        let mut patch = BeadPatchWireV1::new(BeadId::parse("bd-invalid").unwrap());
+        patch.status = Some(WorkflowStatus::Closed);
+
+        let err = validate_bead_patch(patch).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "bead_patch"
+        ));
     }
 
     #[test]
