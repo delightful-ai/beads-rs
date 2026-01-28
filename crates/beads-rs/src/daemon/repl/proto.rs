@@ -24,7 +24,7 @@ pub type WatermarkMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Seq0>>;
 pub type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
 type WatermarkHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Sha256>>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct NamespaceSet(Vec<NamespaceId>);
 
 impl NamespaceSet {
@@ -39,12 +39,6 @@ impl NamespaceSet {
 
     pub fn into_vec(self) -> Vec<NamespaceId> {
         self.0
-    }
-}
-
-impl Default for NamespaceSet {
-    fn default() -> Self {
-        Self(Vec::new())
     }
 }
 

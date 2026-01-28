@@ -1301,8 +1301,8 @@ mod tests {
                             peer_replica,
                             &crate::core::Limits::default(),
                         );
-                        config.offered_namespaces = hello.requested_namespaces.clone();
-                        config.requested_namespaces = hello.offered_namespaces.clone();
+                        config.offered_namespaces = hello.requested_namespaces.clone().into_vec();
+                        config.requested_namespaces = hello.offered_namespaces.clone().into_vec();
                         let session = crate::daemon::repl::session::InboundConnecting::new(
                             config,
                             crate::core::Limits::default(),
@@ -1322,7 +1322,7 @@ mod tests {
                                 if let Some(override_namespaces) = accepted_override.clone()
                                     && let ReplMessage::Welcome(ref mut welcome) = message
                                 {
-                                    welcome.accepted_namespaces = override_namespaces;
+                                    welcome.accepted_namespaces = override_namespaces.into();
                                 }
                                 if let Some(live_stream_enabled) = live_stream_enabled_override
                                     && let ReplMessage::Welcome(ref mut welcome) = message
