@@ -1423,7 +1423,7 @@ mod tests {
         assert!(!captured.is_empty(), "expected mutation span fields");
         let fields = captured
             .iter()
-            .find(|fields| fields.contains_key("store_id"))
+            .find(|fields| fields.contains_key(schema::STORE_ID))
             .cloned()
             .unwrap_or_default();
 
