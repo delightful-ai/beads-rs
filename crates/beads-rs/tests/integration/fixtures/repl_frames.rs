@@ -152,12 +152,8 @@ pub fn event_frame(
     let canonical = encode_event_body_canonical(&body).expect("encode event body");
     let sha = hash_event_body(&canonical);
     let bytes = EventBytes::<Opaque>::new(Bytes::copy_from_slice(canonical.as_ref()));
-    EventFrameV1 {
-        eid: EventId::new(origin, namespace, body.origin_seq),
-        sha256: sha,
-        prev_sha256: prev,
-        bytes,
-    }
+    let eid = EventId::new(origin, namespace, body.origin_seq);
+    EventFrameV1::try_from_parts(eid, sha, prev, bytes).expect("event frame")
 }
 
 pub fn verified_event_frame(
