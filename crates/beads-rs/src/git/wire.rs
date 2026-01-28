@@ -5,6 +5,7 @@
 //! - `_v` object maps field names to stamps only when they differ from bead-level
 //! - If all fields share bead-level stamp, `_v` is omitted
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use super::error::WireError;
 use crate::core::state::LabelState;
 use crate::core::{
     Bead, BeadId, BeadSlug, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot,
-    LabelStore, Note, NoteAppendV1, NoteStore, OrSet, Stamp, Tombstone, WireDepEntryV1,
+    LabelStore, Note, NoteAppendV1, NoteId, NoteStore, OrSet, Stamp, Tombstone, WireDepEntryV1,
     WireDepStoreV1, WireFieldStamp, WireLineageStamp, WireNoteV1, WireStamp, WireTombstoneV1,
     WriteStamp, sha256_bytes,
 };
@@ -247,16 +248,49 @@ pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
         .collect())
 }
 
+fn ensure_strictly_increasing<T: Ord + std::fmt::Debug>(
+    prev: Option<&T>,
+    current: &T,
+    file: &str,
+    line: usize,
+    label: &str,
+) -> Result<(), WireError> {
+    if let Some(prev) = prev {
+        match current.cmp(prev) {
+            Ordering::Greater => Ok(()),
+            Ordering::Equal => Err(WireError::InvalidValue(format!(
+                "{file} line {line}: duplicate {label} {current:?}"
+            ))),
+            Ordering::Less => Err(WireError::InvalidValue(format!(
+                "{file} line {line}: {label} out of order (prev={prev:?}, got={current:?})"
+            ))),
+        }
+    } else {
+        Ok(())
+    }
+}
+
 fn parse_state_full(bytes: &[u8]) -> Result<Vec<ParsedWireBead>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut beads = Vec::new();
+    let mut prev_id: Option<BeadId> = None;
 
-    for line in content.lines() {
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
         if line.trim().is_empty() {
             continue;
         }
         let wire: BeadSnapshotWireV1 = serde_json::from_str(line)?;
         let parsed = wire_to_parts(wire)?;
+        let bead_id = parsed.bead.id().clone();
+        ensure_strictly_increasing(
+            prev_id.as_ref(),
+            &bead_id,
+            "state.jsonl",
+            line_no,
+            "bead id",
+        )?;
+        prev_id = Some(bead_id);
         beads.push(parsed);
     }
 
@@ -267,8 +301,10 @@ fn parse_state_full(bytes: &[u8]) -> Result<Vec<ParsedWireBead>, WireError> {
 pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut tombs = Vec::new();
+    let mut prev_key = None;
 
-    for line in content.lines() {
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
         if line.trim().is_empty() {
             continue;
         }
@@ -280,6 +316,15 @@ pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
         } else {
             Tombstone::new(wire.id.clone(), deleted, wire.reason)
         };
+        let key = tomb.key();
+        ensure_strictly_increasing(
+            prev_key.as_ref(),
+            &key,
+            "tombstones.jsonl",
+            line_no,
+            "tombstone key",
+        )?;
+        prev_key = Some(key);
         tombs.push(tomb);
     }
 
@@ -295,6 +340,28 @@ fn parse_deps(bytes: &[u8]) -> Result<DepStore, WireError> {
     }
 
     let wire: WireDepStoreV1 = serde_json::from_str(trimmed)?;
+    let mut prev_key: Option<DepKey> = None;
+    for (idx, entry) in wire.entries.iter().enumerate() {
+        let entry_no = idx + 1;
+        if let Some(prev) = prev_key.as_ref() {
+            match entry.key.cmp(prev) {
+                Ordering::Greater => {}
+                Ordering::Equal => {
+                    return Err(WireError::InvalidValue(format!(
+                        "deps.jsonl entry {entry_no}: duplicate dep key {key:?}",
+                        key = entry.key
+                    )));
+                }
+                Ordering::Less => {
+                    return Err(WireError::InvalidValue(format!(
+                        "deps.jsonl entry {entry_no}: dep key out of order (prev={prev:?}, got={key:?})",
+                        key = entry.key
+                    )));
+                }
+            }
+        }
+        prev_key = Some(entry.key.clone());
+    }
     wire_dep_store_to_state(wire)
 }
 
@@ -302,8 +369,11 @@ fn parse_deps(bytes: &[u8]) -> Result<DepStore, WireError> {
 pub fn parse_notes(bytes: &[u8]) -> Result<Vec<(BeadId, Option<Stamp>, Note)>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut notes = Vec::new();
+    let mut prev_key: Option<(BeadId, Option<Stamp>, WriteStamp, NoteId)> = None;
+    let mut seen_note_ids: BTreeSet<(BeadId, Option<Stamp>, NoteId)> = BTreeSet::new();
 
-    for line in content.lines() {
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
         if line.trim().is_empty() {
             continue;
         }
@@ -311,6 +381,27 @@ pub fn parse_notes(bytes: &[u8]) -> Result<Vec<(BeadId, Option<Stamp>, Note)>, W
         let lineage = wire.lineage_stamp();
         let bead_id = wire.bead_id;
         let note = Note::from(wire.note);
+        let order_key = (
+            bead_id.clone(),
+            lineage.clone(),
+            note.at.clone(),
+            note.id.clone(),
+        );
+        ensure_strictly_increasing(
+            prev_key.as_ref(),
+            &order_key,
+            "notes.jsonl",
+            line_no,
+            "note entry",
+        )?;
+        let note_id = note.id.clone();
+        let id_key = (bead_id.clone(), lineage.clone(), note_id.clone());
+        if !seen_note_ids.insert(id_key) {
+            return Err(WireError::InvalidValue(format!(
+                "notes.jsonl line {line_no}: duplicate note id {note_id} for bead {bead_id} lineage {lineage:?}"
+            )));
+        }
+        prev_key = Some(order_key);
         notes.push((bead_id, lineage, note));
     }
 
@@ -657,6 +748,22 @@ mod tests {
                     .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
                 (key, dot, stamp)
             })
+    }
+
+    fn jsonl_lines(bytes: &[u8]) -> Vec<String> {
+        String::from_utf8(bytes.to_vec())
+            .expect("utf-8")
+            .lines()
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    fn join_jsonl(lines: &[String]) -> Vec<u8> {
+        let mut output = lines.join("\n");
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.into_bytes()
     }
 
     #[test]
@@ -1257,6 +1364,205 @@ mod tests {
                     prop_assert!(false, "expected v1 meta");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn parse_state_rejects_out_of_order() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        state.insert_live(make_bead(&bead_id("bd-a"), &stamp));
+        state.insert_live(make_bead(&bead_id("bd-b"), &stamp));
+        let bytes = serialize_state(&state).expect("serialize_state");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.swap(0, 1);
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_state(&bytes).expect_err("out-of-order state should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("state.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_state_rejects_duplicate() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        state.insert_live(make_bead(&bead_id("bd-a"), &stamp));
+        state.insert_live(make_bead(&bead_id("bd-b"), &stamp));
+        let bytes = serialize_state(&state).expect("serialize_state");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.insert(1, lines[0].clone());
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_state(&bytes).expect_err("duplicate state should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("state.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tombstones_rejects_out_of_order() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        state.delete(Tombstone::new(bead_id("bd-a"), stamp.clone(), None));
+        state.delete(Tombstone::new(bead_id("bd-b"), stamp.clone(), None));
+        let bytes = serialize_tombstones(&state).expect("serialize_tombstones");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.swap(0, 1);
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_tombstones(&bytes).expect_err("out-of-order tombstones should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("tombstones.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tombstones_rejects_duplicate() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        state.delete(Tombstone::new(bead_id("bd-a"), stamp.clone(), None));
+        state.delete(Tombstone::new(bead_id("bd-b"), stamp.clone(), None));
+        let bytes = serialize_tombstones(&state).expect("serialize_tombstones");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.insert(1, lines[0].clone());
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_tombstones(&bytes).expect_err("duplicate tombstones should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("tombstones.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_deps_rejects_out_of_order() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let key_a =
+            DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).expect("dep key a");
+        let key_b =
+            DepKey::new(bead_id("bd-a"), bead_id("bd-c"), DepKind::Blocks).expect("dep key b");
+        apply_dep_add_checked(&mut state, key_a, dot(1, 1), stamp.clone());
+        apply_dep_add_checked(&mut state, key_b, dot(2, 2), stamp.clone());
+        let bytes = serialize_deps(&state).expect("serialize_deps");
+
+        let mut wire: WireDepStoreV1 = serde_json::from_slice(&bytes).expect("deps json");
+        wire.entries.swap(0, 1);
+        let mut bytes = serde_json::to_vec(&wire).expect("deps json");
+        bytes.push(b'\n');
+
+        let err = parse_deps(&bytes).expect_err("out-of-order deps should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("deps.jsonl entry 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_deps_rejects_duplicate() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let key_a =
+            DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).expect("dep key a");
+        let key_b =
+            DepKey::new(bead_id("bd-a"), bead_id("bd-c"), DepKind::Blocks).expect("dep key b");
+        apply_dep_add_checked(&mut state, key_a, dot(1, 1), stamp.clone());
+        apply_dep_add_checked(&mut state, key_b, dot(2, 2), stamp.clone());
+        let bytes = serialize_deps(&state).expect("serialize_deps");
+
+        let mut wire: WireDepStoreV1 = serde_json::from_slice(&bytes).expect("deps json");
+        let entry = wire.entries[0].clone();
+        wire.entries.insert(1, entry);
+        let mut bytes = serde_json::to_vec(&wire).expect("deps json");
+        bytes.push(b'\n');
+
+        let err = parse_deps(&bytes).expect_err("duplicate deps should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("deps.jsonl entry 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_notes_rejects_out_of_order() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let note_a = Note::new(
+            NoteId::new("note-a").unwrap(),
+            "note a".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(1, 0),
+        );
+        let note_b = Note::new(
+            NoteId::new("note-b").unwrap(),
+            "note b".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(2, 0),
+        );
+        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note_a);
+        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note_b);
+        let bytes = serialize_notes(&state).expect("serialize_notes");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.swap(0, 1);
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_notes(&bytes).expect_err("out-of-order notes should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("notes.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_notes_rejects_duplicate_note_id() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let note = Note::new(
+            NoteId::new("note-a").unwrap(),
+            "note a".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(1, 0),
+        );
+        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note);
+        let bytes = serialize_notes(&state).expect("serialize_notes");
+
+        let mut lines = jsonl_lines(&bytes);
+        let mut wire: NoteAppendV1 = serde_json::from_str(&lines[0]).expect("note json");
+        wire.note.at = WireStamp(9, 0);
+        let dup_line = serde_json::to_string(&wire).expect("note json");
+        let bytes = join_jsonl(&vec![lines[0].clone(), dup_line]);
+
+        let err = parse_notes(&bytes).expect_err("duplicate note id should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("notes.jsonl line 2"), "{msg}");
+                assert!(msg.contains("duplicate note id"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
         }
     }
 
