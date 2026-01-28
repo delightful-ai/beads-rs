@@ -526,7 +526,7 @@ pub fn parse_legacy_state(
         let bead_id = bead.core.id.clone();
         let lineage = bead.core.created().clone();
         state.insert_live(bead);
-        label_store.insert_state(bead_id.clone(), lineage, parsed.label_state);
+        insert_label_state(&mut label_store, bead_id, lineage, parsed.label_state);
     }
     for (bead_id, lineage, note) in notes {
         note_store.insert(bead_id, lineage, note);
@@ -750,6 +750,16 @@ fn wire_dep_store_to_state(wire: WireDepStoreV1) -> Result<DepStore, WireError> 
     Ok(DepStore::from_parts(set, stamp))
 }
 
+fn insert_label_state(
+    label_store: &mut LabelStore,
+    bead_id: BeadId,
+    lineage: Stamp,
+    state: LabelState,
+) {
+    let entry = label_store.state_mut(&bead_id, &lineage);
+    *entry = LabelState::join(entry, &state);
+}
+
 fn wire_to_parts(wire: BeadSnapshotWireV1) -> Result<ParsedWireBead, WireError> {
     let label_stamp = wire.label_stamp();
     let labels = wire.labels.clone();
@@ -767,8 +777,8 @@ fn wire_to_parts(wire: BeadSnapshotWireV1) -> Result<ParsedWireBead, WireError> 
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Label, Lww, NoteId, Priority,
-        ReplicaId, Workflow,
+        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Label, Lww, NoteId, OrSet,
+        Priority, ReplicaId, Workflow,
     };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -941,6 +951,35 @@ mod tests {
         assert_eq!(serialize_tombstones(&parsed).unwrap(), tomb_bytes);
         assert_eq!(serialize_deps(&parsed).unwrap(), deps_bytes);
         assert_eq!(serialize_notes(&parsed).unwrap(), notes_bytes);
+    }
+
+    #[test]
+    fn insert_label_state_merges_existing_entry() {
+        let mut label_store = LabelStore::new();
+        let bead_id = bead_id("bd-label-merge");
+        let lineage = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let label_a = Label::parse("urgent").unwrap();
+        let label_b = Label::parse("backend").unwrap();
+        let stamp_a = Stamp::new(WriteStamp::new(2, 0), actor_id("bob"));
+        let stamp_b = Stamp::new(WriteStamp::new(3, 0), actor_id("carol"));
+
+        let mut set_a = OrSet::new();
+        set_a.apply_add(dot(1, 1), label_a.clone());
+        let state_a = LabelState::from_parts(set_a, Some(stamp_a.clone()));
+
+        let mut set_b = OrSet::new();
+        set_b.apply_add(dot(2, 2), label_b.clone());
+        let state_b = LabelState::from_parts(set_b, Some(stamp_b.clone()));
+
+        insert_label_state(&mut label_store, bead_id.clone(), lineage.clone(), state_a);
+        insert_label_state(&mut label_store, bead_id.clone(), lineage.clone(), state_b);
+
+        let merged = label_store
+            .state(&bead_id, &lineage)
+            .expect("label state missing");
+        assert!(merged.dots_for(&label_a).is_some());
+        assert!(merged.dots_for(&label_b).is_some());
+        assert_eq!(merged.stamp(), Some(&stamp_b));
     }
 
     #[test]
