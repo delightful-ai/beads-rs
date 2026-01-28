@@ -331,6 +331,13 @@ pub(super) fn normalize_bead_id(id: &str) -> Result<BeadId> {
     normalize_bead_id_for("id", id)
 }
 
+pub(crate) fn validation_error(field: impl Into<String>, reason: impl Into<String>) -> Error {
+    Error::Op(crate::daemon::OpError::ValidationFailed {
+        field: field.into(),
+        reason: reason.into(),
+    })
+}
+
 pub(super) fn normalize_bead_id_for(field: &str, id: &str) -> Result<BeadId> {
     BeadId::parse(id).map_err(|e| {
         Error::Op(crate::daemon::OpError::ValidationFailed {

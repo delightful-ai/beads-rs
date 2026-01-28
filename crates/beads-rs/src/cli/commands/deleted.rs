@@ -1,10 +1,10 @@
 use clap::Args;
 
-use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send, validation_error};
 use super::fmt_wall_ms;
+use crate::Result;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{DeletedPayload, Request, ResponsePayload};
-use crate::{Error, Result};
 
 #[derive(Args, Debug)]
 pub struct DeletedArgs {
@@ -146,57 +146,42 @@ fn parse_since_ms(s: &str) -> Result<u64> {
 
     // days: "7d"
     if let Some(raw) = s.strip_suffix('d') {
-        let days: u64 = raw.parse().map_err(|_| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "since".into(),
-                reason: format!("invalid days format: {s}"),
-            })
-        })?;
+        let days: u64 = raw
+            .parse()
+            .map_err(|_| validation_error("since", format!("invalid days format: {s}")))?;
         return Ok(days * 24 * 60 * 60 * 1000);
     }
 
     // weeks: "2w"
     if let Some(raw) = s.strip_suffix('w') {
-        let weeks: u64 = raw.parse().map_err(|_| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "since".into(),
-                reason: format!("invalid weeks format: {s}"),
-            })
-        })?;
+        let weeks: u64 = raw
+            .parse()
+            .map_err(|_| validation_error("since", format!("invalid weeks format: {s}")))?;
         return Ok(weeks * 7 * 24 * 60 * 60 * 1000);
     }
 
     // hours/minutes/seconds: "12h", "30m", "45s"
     if let Some(raw) = s.strip_suffix('h') {
-        let hours: u64 = raw.parse().map_err(|_| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "since".into(),
-                reason: format!("invalid hours format: {s}"),
-            })
-        })?;
+        let hours: u64 = raw
+            .parse()
+            .map_err(|_| validation_error("since", format!("invalid hours format: {s}")))?;
         return Ok(hours * 60 * 60 * 1000);
     }
     if let Some(raw) = s.strip_suffix('m') {
-        let minutes: u64 = raw.parse().map_err(|_| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "since".into(),
-                reason: format!("invalid minutes format: {s}"),
-            })
-        })?;
+        let minutes: u64 = raw
+            .parse()
+            .map_err(|_| validation_error("since", format!("invalid minutes format: {s}")))?;
         return Ok(minutes * 60 * 1000);
     }
     if let Some(raw) = s.strip_suffix('s') {
-        let seconds: u64 = raw.parse().map_err(|_| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "since".into(),
-                reason: format!("invalid seconds format: {s}"),
-            })
-        })?;
+        let seconds: u64 = raw
+            .parse()
+            .map_err(|_| validation_error("since", format!("invalid seconds format: {s}")))?;
         return Ok(seconds * 1000);
     }
 
-    Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-        field: "since".into(),
-        reason: format!("invalid --since value {s:?} (try 7d, 30d, 2w)"),
-    }))
+    Err(validation_error(
+        "since",
+        format!("invalid --since value {s:?} (try 7d, 30d, 2w)"),
+    ))
 }

@@ -1,9 +1,11 @@
 use clap::Args;
 
-use super::super::{CommonFilterArgs, Ctx, normalize_bead_id_for, print_ok, send};
+use super::super::{
+    CommonFilterArgs, Ctx, normalize_bead_id_for, print_ok, send, validation_error,
+};
+use crate::Result;
 use crate::daemon::ipc::{CountPayload, Request};
 use crate::daemon::query::Filters;
-use crate::{Error, Result};
 
 #[derive(Args, Debug)]
 pub struct CountArgs {
@@ -102,10 +104,10 @@ fn resolve_group_by(args: &CountArgs) -> Result<Option<String>> {
             continue;
         }
         if group_by.is_some() {
-            return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "by-*".into(),
-                reason: "only one --by-* flag can be specified".into(),
-            }));
+            return Err(validation_error(
+                "by-*",
+                "only one --by-* flag can be specified",
+            ));
         }
         group_by = Some(name);
     }

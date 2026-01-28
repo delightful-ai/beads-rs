@@ -1,12 +1,14 @@
 use clap::Args;
 
-use super::super::{CommonFilterArgs, Ctx, normalize_bead_id_for, print_line, print_ok, send};
+use super::super::{
+    CommonFilterArgs, Ctx, normalize_bead_id_for, print_line, print_ok, send, validation_error,
+};
 use super::{fmt_issue_ref, fmt_labels};
+use crate::Result;
 use crate::api::QueryResult;
 use crate::cli::parse::{parse_sort, parse_status};
 use crate::daemon::ipc::{ListPayload, Request, ResponsePayload};
 use crate::daemon::query::Filters;
-use crate::{Error, Result};
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
@@ -48,24 +50,14 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     let mut filters = Filters::default();
     args.common.apply(&mut filters)?;
     if let Some(status) = args.common.status.as_deref() {
-        let status = parse_status(status).map_err(|msg| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "status".into(),
-                reason: msg,
-            })
-        })?;
+        let status = parse_status(status).map_err(|msg| validation_error("status", msg))?;
         filters.status = Some(status);
     }
     filters.limit = args.limit;
     filters.search = search;
     filters.parent = parent;
     if let Some(sort) = args.sort {
-        let (field, ascending) = parse_sort(&sort).map_err(|msg| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "sort".into(),
-                reason: msg,
-            })
-        })?;
+        let (field, ascending) = parse_sort(&sort).map_err(|msg| validation_error("sort", msg))?;
         filters.sort_by = Some(field);
         filters.ascending = ascending;
     }

@@ -1,12 +1,14 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::{Ctx, fetch_issue, normalize_bead_id, print_json, print_line, send};
+use super::super::{
+    Ctx, fetch_issue, normalize_bead_id, print_json, print_line, send, validation_error,
+};
+use crate::Result;
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::ipc::{LabelsPayload, ListPayload, Request, ResponsePayload};
 use crate::daemon::query::Filters;
-use crate::{Error, Result};
 
 #[derive(Subcommand, Debug)]
 pub enum LabelCmd {
@@ -184,26 +186,15 @@ fn render_label_removed(label: &str, issue_id: &str) -> String {
 
 fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {
     if batch.args.len() < 2 {
-        return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "label".into(),
-            reason: "expected: <issue-id...> <label>".into(),
-        }));
+        return Err(validation_error("label", "expected: <issue-id...> <label>"));
     }
     let mut parts = batch.args;
-    let label = parts.pop().ok_or_else(|| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "label".into(),
-            reason: "expected: <issue-id...> <label>".into(),
-        })
-    })?;
+    let label = parts
+        .pop()
+        .ok_or_else(|| validation_error("label", "expected: <issue-id...> <label>"))?;
     let mut ids = Vec::with_capacity(parts.len());
     for raw in parts {
-        let parsed = BeadId::parse(&raw).map_err(|e| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "id".into(),
-                reason: e.to_string(),
-            })
-        })?;
+        let parsed = BeadId::parse(&raw).map_err(|e| validation_error("id", e.to_string()))?;
         ids.push(parsed);
     }
     Ok((ids, label))
@@ -212,6 +203,7 @@ fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
 
     #[test]
     fn split_label_batch_requires_label() {
