@@ -14,9 +14,9 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Closure, DepKey,
-    DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId, Stamp, Tombstone,
-    Workflow, WriteStamp,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState, Claim,
+    Closure, DepKey, DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId,
+    Stamp, Tombstone, Workflow, WriteStamp,
 };
 use crate::daemon::IpcError;
 use crate::daemon::OpError;
@@ -103,7 +103,7 @@ struct GoComment {
 pub fn import_go_export(
     path: &Path,
     actor: &ActorId,
-    root_slug: Option<String>,
+    root_slug: Option<BeadSlug>,
 ) -> Result<(CanonicalState, GoImportReport)> {
     let file = File::open(path).map_err(IpcError::from)?;
     let reader = BufReader::new(file);
@@ -112,21 +112,8 @@ pub fn import_go_export(
     let mut deps_to_insert: Vec<(DepKey, Dot, Stamp)> = Vec::new();
     let mut report = GoImportReport::default();
 
-    let mut chosen_slug: Option<String> = root_slug
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            BeadId::parse(&format!("{s}-abc"))
-                .map(|id| id.slug().to_string())
-                .map_err(|e| {
-                    Error::Op(OpError::ValidationFailed {
-                        field: "root_slug".into(),
-                        reason: e.to_string(),
-                    })
-                })
-        })
-        .transpose()?;
+    let default_slug = BeadSlug::parse("bd").expect("default slug must be valid");
+    let mut chosen_slug: Option<BeadSlug> = root_slug;
     let mut slug_mismatch_count: usize = 0;
 
     for (line_no, line_res) in reader.lines().enumerate() {
@@ -141,13 +128,13 @@ pub fn import_go_export(
         // Parse ids and times
         let id_in = BeadId::parse(&issue.id)?;
         if chosen_slug.is_none() {
-            chosen_slug = Some(id_in.slug().to_string());
+            chosen_slug = Some(id_in.slug_value());
         }
-        let slug = chosen_slug.as_deref().unwrap_or("bd");
-        if id_in.slug() != slug {
+        let slug = chosen_slug.as_ref().unwrap_or(&default_slug);
+        if id_in.slug() != slug.as_str() {
             slug_mismatch_count += 1;
         }
-        let id = id_in.with_slug(slug)?;
+        let id = id_in.with_slug(slug.as_str())?;
         let created_ms = parse_rfc3339_ms(&issue.created_at)?;
         let updated_ms = parse_rfc3339_ms(&issue.updated_at)?;
         let created_stamp = Stamp::new(WriteStamp::new(created_ms, 0), actor.clone());
@@ -286,7 +273,8 @@ pub fn import_go_export(
             for c in comments {
                 let c_issue_id = c.issue_id.trim();
                 if !c_issue_id.is_empty()
-                    && let Ok(cid) = BeadId::parse(c_issue_id).and_then(|cid| cid.with_slug(slug))
+                    && let Ok(cid) =
+                        BeadId::parse(c_issue_id).and_then(|cid| cid.with_slug(slug.as_str()))
                     && cid.as_str() != id.as_str()
                 {
                     report.warnings.push(format!(
@@ -346,7 +334,8 @@ pub fn import_go_export(
         }
     }
 
-    report.root_slug = chosen_slug.unwrap_or_else(|| "bd".to_string());
+    let final_slug = chosen_slug.as_ref().unwrap_or(&default_slug);
+    report.root_slug = final_slug.as_str().to_string();
     if slug_mismatch_count > 0 {
         report.warnings.push(format!(
             "some imported IDs had a different slug and were rewritten (count={slug_mismatch_count})"
@@ -359,10 +348,10 @@ pub fn import_go_export(
 fn dep_to_add(
     dep: &GoDependency,
     actor: &ActorId,
-    root_slug: &str,
+    root_slug: &BeadSlug,
 ) -> Result<(DepKey, Dot, Stamp)> {
-    let from = BeadId::parse(&dep.issue_id)?.with_slug(root_slug)?;
-    let to = BeadId::parse(&dep.depends_on_id)?.with_slug(root_slug)?;
+    let from = BeadId::parse(&dep.issue_id)?.with_slug(root_slug.as_str())?;
+    let to = BeadId::parse(&dep.depends_on_id)?.with_slug(root_slug.as_str())?;
     let kind = parse_dep_kind(&dep.dep_type)?;
     let created_ms = parse_rfc3339_ms(&dep.created_at)?;
     let created_by_raw = dep

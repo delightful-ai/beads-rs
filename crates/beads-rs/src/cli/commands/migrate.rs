@@ -91,8 +91,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 .root_slug
                 .as_deref()
                 .map(|slug| normalize_bead_slug_for("root_slug", slug))
-                .transpose()?
-                .map(|slug| slug.as_str().to_string());
+                .transpose()?;
             let (imported, report) =
                 crate::migrate::import_go_export(&args.input, &actor, root_slug)?;
 
