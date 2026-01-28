@@ -195,3 +195,36 @@ pub struct AdminFingerprintPayload {
 pub struct AdminMaintenanceModePayload {
     pub enabled: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn update_payload_rejects_closed_status() {
+        let payload = json!({
+            "id": "bd-xyz123",
+            "patch": { "status": "closed" }
+        });
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let err = serde_json::from_str::<UpdatePayload>(&encoded).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("closed") || msg.contains("unknown variant"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn close_payload_decodes_with_reason() {
+        let payload = json!({
+            "id": "bd-xyz123",
+            "reason": "done"
+        });
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let decoded: ClosePayload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.reason.as_deref(), Some("done"));
+        assert!(decoded.on_branch.is_none());
+    }
+}
