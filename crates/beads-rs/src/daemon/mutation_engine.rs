@@ -2093,6 +2093,112 @@ mod tests {
     }
 
     #[test]
+    fn create_with_assignee_sets_in_progress() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([7u8; 16])),
+        };
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), 0.into());
+        let state = CanonicalState::new();
+        let stamp = make_stamp(1_000, &actor);
+        let stamped = make_stamped_context(ctx, stamp);
+        let id_ctx = IdContext {
+            root_slug: None,
+            remote_url: RemoteUrl("github.com/example/beads".to_string()),
+        };
+        let req = ParsedMutationRequest::parse_create(
+            CreatePayload {
+                id: Some(BeadId::parse("bd-claim").unwrap()),
+                parent: None,
+                title: "t".into(),
+                bead_type: BeadType::Task,
+                priority: Priority::default(),
+                description: Some("d".into()),
+                design: None,
+                acceptance_criteria: None,
+                assignee: Some(actor.as_str().to_string()),
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
+            &actor,
+        )
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let draft = engine
+            .plan(&state, 1_000, stamped, store, Some(&id_ctx), req, &mut dots)
+            .unwrap();
+        let patch = draft
+            .command
+            .raw_delta()
+            .iter()
+            .find_map(|op| match op {
+                TxnOpV1::BeadUpsert(patch) => Some(patch.as_ref()),
+                _ => None,
+            })
+            .expect("bead upsert");
+
+        assert_eq!(patch.status, Some(WorkflowStatus::InProgress));
+        assert!(matches!(patch.assignee, WirePatch::Set(_)));
+        assert!(matches!(patch.closed_reason, WirePatch::Clear));
+        assert!(matches!(patch.closed_on_branch, WirePatch::Clear));
+    }
+
+    #[test]
+    fn extend_claim_sets_in_progress() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let bead_id = BeadId::parse("bd-claim").unwrap();
+        let stamp = make_stamp(10, &actor);
+        let mut bead = make_bead(bead_id.as_str(), &actor);
+        bead.fields.claim = Lww::new(
+            Claim::claimed(actor.clone(), Some(WallClock(20))),
+            stamp.clone(),
+        );
+        bead.fields.workflow = Lww::new(Workflow::Open, stamp.clone());
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let stamped = make_stamped_context(ctx, stamp);
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
+        let req = ParsedMutationRequest::ExtendClaim {
+            id: bead_id,
+            lease_secs: 30,
+        };
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([4u8; 16])));
+
+        let draft = engine
+            .plan(&state, 10, stamped, store, None, req, &mut dots)
+            .unwrap();
+        let patch = draft
+            .command
+            .raw_delta()
+            .iter()
+            .find_map(|op| match op {
+                TxnOpV1::BeadUpsert(patch) => Some(patch.as_ref()),
+                _ => None,
+            })
+            .expect("bead upsert");
+
+        assert_eq!(patch.status, Some(WorkflowStatus::InProgress));
+        assert!(matches!(patch.assignee, WirePatch::Set(_)));
+        assert!(matches!(patch.closed_reason, WirePatch::Clear));
+        assert!(matches!(patch.closed_on_branch, WirePatch::Clear));
+    }
+
+    #[test]
     fn stamped_context_rejects_mismatched_actor() {
         let ctx = MutationContext {
             namespace: NamespaceId::core(),
