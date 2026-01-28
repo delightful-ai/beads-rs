@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::Sender;
@@ -639,6 +639,34 @@ impl Daemon {
         store_id: StoreId,
     ) -> Option<&mut StoreRuntime> {
         self.stores.get_mut(&store_id)
+    }
+
+    pub(crate) fn namespace_state<'a>(
+        loaded: &'a LoadedStore<'_>,
+        namespace: &NamespaceId,
+    ) -> &'a CanonicalState {
+        if namespace.is_core() {
+            return loaded.runtime().state.core();
+        }
+
+        static EMPTY_STATE: OnceLock<CanonicalState> = OnceLock::new();
+        loaded
+            .runtime()
+            .state
+            .get(namespace)
+            .unwrap_or_else(|| EMPTY_STATE.get_or_init(CanonicalState::new))
+    }
+
+    pub(crate) fn namespace_state_mut<'a>(
+        loaded: &'a mut LoadedStore<'_>,
+        namespace: NamespaceId,
+    ) -> &'a mut CanonicalState {
+        let store = loaded.runtime_mut();
+        if let Some(non_core) = namespace.try_non_core() {
+            store.state.ensure_namespace(non_core)
+        } else {
+            store.state.core_mut()
+        }
     }
 
     pub(crate) fn store_id_for_remote(&self, remote: &RemoteUrl) -> Option<StoreId> {
