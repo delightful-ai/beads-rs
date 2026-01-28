@@ -105,6 +105,10 @@ impl ContiguousBatch {
         self.events.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
     pub fn events(&self) -> &[VerifiedEvent<PrevVerified>] {
         &self.events
     }

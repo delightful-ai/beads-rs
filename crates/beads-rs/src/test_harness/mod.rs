@@ -587,20 +587,11 @@ impl SessionStore for TestSessionStore {
 
     fn ingest_remote_batch(
         &mut self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        batch: &[crate::core::VerifiedEvent<crate::core::PrevVerified>],
+        batch: &crate::daemon::repl::ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
-        let events = batch.to_vec();
         self.node.with_daemon_mut(|daemon, _git_tx| {
-            daemon.ingest_remote_batch_for_tests(
-                self.store_id,
-                namespace.clone(),
-                *origin,
-                events,
-                now_ms,
-            )
+            daemon.ingest_remote_batch_for_tests(self.store_id, batch.clone(), now_ms)
         })
     }
 

@@ -11,14 +11,15 @@ use crate::core::error::details::{
 };
 use crate::core::{
     Applied, DecodeError, Durable, ErrorPayload, EventFrameError, EventFrameV1, EventId,
-    EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, PrevVerified,
-    ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
-    VerifiedEvent, Watermark, hash_event_body, verify_event_frame,
+    EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, ProtocolErrorCode,
+    ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark, hash_event_body,
+    verify_event_frame,
 };
 use crate::daemon::admission::{AdmissionController, AdmissionRejection};
 use crate::daemon::metrics;
 use crate::daemon::wal::{ReplicaDurabilityRole, WalIndexError};
 
+use super::ContiguousBatch;
 use super::error::{ReplError, ReplErrorDetails};
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
 use super::proto::{
@@ -430,9 +431,7 @@ pub trait SessionStore {
 
     fn ingest_remote_batch(
         &mut self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        batch: &[VerifiedEvent<PrevVerified>],
+        batch: &ContiguousBatch,
         _now_ms: u64,
     ) -> SessionResult<IngestOutcome>;
 
@@ -1126,14 +1125,9 @@ impl<R, P: PhaseWrap> Session<R, P> {
                 .ingest(namespace.clone(), origin, durable, verified, now_ms)
             {
                 IngestDecision::ForwardContiguousBatch(batch) => {
-                    if let Err(error) = self.ingest_contiguous_batch(
-                        store,
-                        &namespace,
-                        &origin,
-                        &batch,
-                        now_ms,
-                        &mut updates,
-                    ) {
+                    if let Err(error) =
+                        self.ingest_contiguous_batch(store, &batch, now_ms, &mut updates)
+                    {
                         return self.fail(error);
                     }
                     if let Err(error) =
@@ -1148,6 +1142,9 @@ impl<R, P: PhaseWrap> Session<R, P> {
                 IngestDecision::DuplicateNoop => {}
                 IngestDecision::Reject { reason } => {
                     return self.fail(repl_lagged_error(reason, &limits));
+                }
+                IngestDecision::InvalidBatch(err) => {
+                    return self.fail(internal_error(format!("contiguous batch invalid: {err}")));
                 }
             }
         }
@@ -1252,28 +1249,26 @@ impl<R, P> Session<R, P> {
     fn ingest_contiguous_batch(
         &mut self,
         store: &mut impl SessionStore,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        batch: &[VerifiedEvent<PrevVerified>],
+        batch: &ContiguousBatch,
         now_ms: u64,
         updates: &mut IngestUpdates<'_>,
     ) -> SessionResult<()> {
-        let outcome = store.ingest_remote_batch(namespace, origin, batch, now_ms)?;
+        let outcome = store.ingest_remote_batch(batch, now_ms)?;
 
-        if let Err(err) = self
-            .gap_buffer
-            .advance_durable_batch(namespace, origin, batch)
-        {
+        if let Err(err) = self.gap_buffer.advance_durable_batch(batch) {
             return Err(internal_error(format!(
                 "gap buffer watermark advance failed: {err}"
             )));
         }
 
-        update_watermark(&mut self.durable, namespace, origin, outcome.durable);
-        update_watermark(&mut self.applied, namespace, origin, outcome.applied);
+        let namespace = batch.namespace();
+        let origin = batch.origin();
 
-        update_watermark(updates.ack_updates, namespace, origin, outcome.durable);
-        update_watermark(updates.applied_updates, namespace, origin, outcome.applied);
+        update_watermark(&mut self.durable, namespace, &origin, outcome.durable);
+        update_watermark(&mut self.applied, namespace, &origin, outcome.applied);
+
+        update_watermark(updates.ack_updates, namespace, &origin, outcome.durable);
+        update_watermark(updates.applied_updates, namespace, &origin, outcome.applied);
 
         Ok(())
     }
@@ -1294,7 +1289,7 @@ impl<R, P> Session<R, P> {
             let Some(batch) = batch else {
                 return Ok(());
             };
-            self.ingest_contiguous_batch(store, namespace, origin, &batch, now_ms, updates)?;
+            self.ingest_contiguous_batch(store, &batch, now_ms, updates)?;
         }
     }
 
@@ -1711,6 +1706,9 @@ fn drain_error_payload(err: DrainError) -> ReplError {
             got_prev_sha256: sha256_hex_or_zero(got),
             head_seq,
         })),
+        DrainError::InvalidBatch(err) => {
+            internal_error(format!("contiguous batch invalid during drain: {err}"))
+        }
     }
 }
 
@@ -1811,12 +1809,12 @@ mod tests {
 
         fn ingest_remote_batch(
             &mut self,
-            namespace: &NamespaceId,
-            origin: &ReplicaId,
-            batch: &[VerifiedEvent<PrevVerified>],
+            batch: &ContiguousBatch,
             _now_ms: u64,
         ) -> SessionResult<IngestOutcome> {
-            for ev in batch {
+            let namespace = batch.namespace();
+            let origin = batch.origin();
+            for ev in batch.events() {
                 let eid = EventId::new(
                     ev.body.origin_replica_id,
                     ev.body.namespace.clone(),
@@ -1824,18 +1822,18 @@ mod tests {
                 );
                 self.lookup.insert(eid, ev.sha256);
             }
-            let last = batch.last().expect("batch not empty");
+            let last = batch.last_event();
             let head = HeadStatus::Known(last.sha256.0);
             let durable = Watermark::new(Seq0::new(last.seq().get()), head).expect("durable");
             let applied = Watermark::new(Seq0::new(last.seq().get()), head).expect("applied");
             self.durable
                 .entry(namespace.clone())
                 .or_default()
-                .insert(*origin, durable);
+                .insert(origin, durable);
             self.applied
                 .entry(namespace.clone())
                 .or_default()
-                .insert(*origin, applied);
+                .insert(origin, applied);
 
             Ok(IngestOutcome { durable, applied })
         }

@@ -32,10 +32,10 @@ use super::metrics;
 use super::ops::OpError;
 use super::remote::RemoteUrl;
 use super::repl::{
-    BackoffPolicy, IngestOutcome, PeerConfig, ReplError, ReplErrorDetails, ReplIngestRequest,
-    ReplSessionStore, ReplicationManager, ReplicationManagerConfig, ReplicationManagerHandle,
-    ReplicationServer, ReplicationServerConfig, ReplicationServerHandle, SharedSessionStore,
-    WalRangeReader,
+    BackoffPolicy, ContiguousBatch, IngestOutcome, PeerConfig, ReplError, ReplErrorDetails,
+    ReplIngestRequest, ReplSessionStore, ReplicationManager, ReplicationManagerConfig,
+    ReplicationManagerHandle, ReplicationServer, ReplicationServerConfig, ReplicationServerHandle,
+    SharedSessionStore, WalRangeReader,
 };
 use super::scheduler::SyncScheduler;
 use super::store::StoreCaches;
@@ -124,10 +124,10 @@ enum CheckpointTreeError {
 use crate::core::{
     ActorId, Applied, ApplyError, CanonicalState, CliErrorCode, ClientRequestId, ContentHash,
     DurabilityClass, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NamespacePolicy,
-    PrevVerified, ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1, Sha256,
-    StoreId, StoreIdentity, StoreState, TraceId, ValidatedEventBody, VerifiedEvent, WallClock,
-    Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
-    encode_event_body_canonical, hash_event_body,
+    ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1, Sha256, StoreId,
+    StoreIdentity, StoreState, TraceId, ValidatedEventBody, WallClock, Watermark, WatermarkError,
+    Watermarks, WriteStamp, apply_event, decode_event_body, encode_event_body_canonical,
+    hash_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
@@ -1364,23 +1364,20 @@ impl Daemon {
                 )
             })
             .unwrap_or((None, None));
-        let origin_seq = request
-            .batch
-            .first()
-            .map(|event| event.body.origin_seq.get());
-        let txn_id = request.batch.first().map(|event| event.body.txn_id);
-        let client_request_id = request
-            .batch
-            .first()
-            .and_then(|event| event.body.client_request_id);
-        let trace_id = request.batch.first().and_then(|event| event.body.trace_id);
+        let first_event = request.batch.first_event();
+        let origin_seq = Some(first_event.body.origin_seq.get());
+        let txn_id = Some(first_event.body.txn_id);
+        let client_request_id = first_event.body.client_request_id;
+        let trace_id = first_event.body.trace_id;
+        let namespace = request.batch.namespace();
+        let origin = request.batch.origin();
         let span = tracing::info_span!(
             "repl_ingest_request",
             store_id = %request.store_id,
             store_epoch = ?store_epoch.map(|epoch| epoch.get()),
             replica_id = ?local_replica_id,
-            namespace = %request.namespace,
-            origin_replica_id = %request.origin,
+            namespace = %namespace,
+            origin_replica_id = %origin,
             origin_seq = ?origin_seq,
             txn_id = ?txn_id,
             client_request_id = ?client_request_id,
@@ -1413,7 +1410,7 @@ impl Daemon {
                         },
                     )),
                 )
-            } else if let Some(policy) = store.policies.get(&request.namespace) {
+            } else if let Some(policy) = store.policies.get(namespace) {
                 if policy.replicate_mode == ReplicateMode::None {
                     Some(
                         ReplError::new(
@@ -1424,7 +1421,7 @@ impl Daemon {
                         .with_details(
                             ReplErrorDetails::NamespacePolicyViolation(
                                 error_details::NamespacePolicyViolationDetails {
-                                    namespace: request.namespace.clone(),
+                                    namespace: namespace.clone(),
                                     rule: "replicate_mode".to_string(),
                                     reason: Some("replicate_mode=none".to_string()),
                                 },
@@ -1443,7 +1440,7 @@ impl Daemon {
                     )
                     .with_details(ReplErrorDetails::NamespaceUnknown(
                         error_details::NamespaceUnknownDetails {
-                            namespace: request.namespace.clone(),
+                            namespace: namespace.clone(),
                         },
                     )),
                 )
@@ -1452,13 +1449,7 @@ impl Daemon {
             let _ = request.respond.send(Err(error));
             return;
         }
-        let outcome = self.ingest_remote_batch(
-            request.store_id,
-            request.namespace,
-            request.origin,
-            request.batch,
-            request.now_ms,
-        );
+        let outcome = self.ingest_remote_batch(request.store_id, request.batch, request.now_ms);
         let _ = request.respond.send(outcome);
     }
 
@@ -1525,12 +1516,13 @@ impl Daemon {
     fn ingest_remote_batch(
         &mut self,
         store_id: StoreId,
-        namespace: NamespaceId,
-        origin: ReplicaId,
-        batch: Vec<VerifiedEvent<PrevVerified>>,
+        batch: ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
+        let namespace = batch.namespace().clone();
+        let origin = batch.origin();
         let actor_stamps: Vec<(ActorId, WriteStamp)> = batch
+            .events()
             .iter()
             .map(|event| {
                 let EventKindV1::TxnV1(txn) = &event.body.kind;
@@ -1548,30 +1540,9 @@ impl Daemon {
             ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
         })?;
 
-        if batch.is_empty() {
-            let durable = store
-                .watermarks_durable
-                .get(&namespace, &origin)
-                .copied()
-                .unwrap_or_else(Watermark::genesis);
-            let applied = store
-                .watermarks_applied
-                .get(&namespace, &origin)
-                .copied()
-                .unwrap_or_else(Watermark::genesis);
-            return Ok(IngestOutcome { durable, applied });
-        }
-
         let store_identity = store.meta.identity;
-        let (origin_seq_first, origin_seq_last) =
-            batch
-                .iter()
-                .fold((None::<u64>, None::<u64>), |(min_seq, max_seq), event| {
-                    let seq = event.body.origin_seq.get();
-                    let min_seq = Some(min_seq.map_or(seq, |min| min.min(seq)));
-                    let max_seq = Some(max_seq.map_or(seq, |max| max.max(seq)));
-                    (min_seq, max_seq)
-                });
+        let origin_seq_first = Some(batch.first().get());
+        let origin_seq_last = Some(batch.last().get());
         let span = tracing::info_span!(
             "repl_ingest",
             store_id = %store_identity.store_id,
@@ -1584,16 +1555,6 @@ impl Daemon {
         );
         let _guard = span.enter();
 
-        for event in &batch {
-            if event.body.namespace != namespace || event.body.origin_replica_id != origin {
-                return Err(ReplError::new(
-                    CliErrorCode::Internal.into(),
-                    "replication batch has mismatched origin",
-                    false,
-                ));
-            }
-        }
-
         let store_dir = paths::store_dir(store_id);
 
         let wal_index = Arc::clone(&store.wal_index);
@@ -1603,7 +1564,7 @@ impl Daemon {
             .map_err(|err| wal_index_error_payload(&err))?;
 
         let mut canonical_shas = Vec::with_capacity(batch.len());
-        for event in &batch {
+        for event in batch.events() {
             let payload = encode_event_body_canonical(event.body.as_ref()).map_err(|_| {
                 ReplError::new(
                     CliErrorCode::Internal.into(),
@@ -1717,7 +1678,7 @@ impl Daemon {
 
         let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
-            for (event, canonical_sha) in batch.iter().zip(canonical_shas.iter().copied()) {
+            for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied()) {
                 let apply_start = Instant::now();
                 let apply_result = {
                     let state = if namespace.is_core() {
@@ -1820,12 +1781,10 @@ impl Daemon {
     pub(crate) fn ingest_remote_batch_for_tests(
         &mut self,
         store_id: StoreId,
-        namespace: NamespaceId,
-        origin: ReplicaId,
-        batch: Vec<VerifiedEvent<PrevVerified>>,
+        batch: ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
-        self.ingest_remote_batch(store_id, namespace, origin, batch, now_ms)
+        self.ingest_remote_batch(store_id, batch, now_ms)
     }
 
     pub fn complete_checkpoint(
@@ -3707,11 +3666,10 @@ mod tests {
         }
 
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+        let batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
         daemon.handle_repl_ingest(ReplIngestRequest {
             store_id,
-            namespace: namespace.clone(),
-            origin,
-            batch: vec![event],
+            batch,
             now_ms,
             respond: respond_tx,
         });
@@ -3824,14 +3782,9 @@ mod tests {
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
 
         let event2 = verified_event_for_seq(store, &namespace, origin, 2, Some(event1.sha256));
+        let batch = ContiguousBatch::try_new(vec![event1, event2]).expect("contiguous batch");
         daemon
-            .ingest_remote_batch(
-                store_id,
-                namespace.clone(),
-                origin,
-                vec![event1, event2],
-                now_ms,
-            )
+            .ingest_remote_batch(store_id, batch, now_ms)
             .expect("ingest");
 
         let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
@@ -3872,8 +3825,9 @@ mod tests {
         std::fs::create_dir_all(&repo_path).unwrap();
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
 
+        let batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
         daemon
-            .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event], now_ms)
+            .ingest_remote_batch(store_id, batch, now_ms)
             .expect("ingest");
 
         let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
@@ -3928,8 +3882,9 @@ mod tests {
         std::fs::create_dir_all(&repo_path).unwrap();
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
 
+        let batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
         let _outcome = daemon
-            .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event], now_ms)
+            .ingest_remote_batch(store_id, batch, now_ms)
             .expect("ingest should accept orphan note");
 
         let store_runtime = daemon.stores.get(&store_id).expect("store runtime");

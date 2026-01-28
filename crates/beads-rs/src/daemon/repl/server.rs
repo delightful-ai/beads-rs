@@ -1235,7 +1235,7 @@ mod tests {
     };
     use crate::daemon::broadcast::BroadcasterLimits;
     use crate::daemon::repl::proto::{Capabilities, Hello};
-    use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
+    use crate::daemon::repl::{ContiguousBatch, IngestOutcome, ReplError, WatermarkSnapshot};
 
     #[derive(Default)]
     struct TestStore;
@@ -1257,16 +1257,10 @@ mod tests {
 
         fn ingest_remote_batch(
             &mut self,
-            _namespace: &NamespaceId,
-            _origin: &ReplicaId,
-            batch: &[crate::core::VerifiedEvent<crate::core::PrevVerified>],
+            batch: &ContiguousBatch,
             _now_ms: u64,
         ) -> Result<IngestOutcome, ReplError> {
-            let Some(last) = batch.last() else {
-                let durable = Watermark::<Durable>::genesis();
-                let applied = Watermark::<Applied>::genesis();
-                return Ok(IngestOutcome { durable, applied });
-            };
+            let last = batch.last_event();
             let seq = Seq0::new(last.seq().get());
             let head = HeadStatus::Known(last.sha256.0);
             let watermark = Watermark::<Durable>::new(seq, head).expect("watermark");
