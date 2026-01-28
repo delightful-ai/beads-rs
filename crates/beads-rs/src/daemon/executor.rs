@@ -1168,7 +1168,7 @@ mod tests {
     };
     use crate::daemon::Clock;
     use crate::daemon::Daemon;
-    use crate::daemon::core::insert_store_for_tests;
+    use crate::daemon::core::{HandleOutcome, insert_store_for_tests};
     use crate::daemon::ipc::{MutationMeta, Request};
     use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{
@@ -1397,9 +1397,13 @@ mod tests {
             },
         };
 
-        tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
-            let _ = daemon.handle_request(request, &git_tx);
-        });
+        let outcome =
+            tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+                daemon.handle_request(request, &git_tx)
+            });
+        if let HandleOutcome::Response(crate::daemon::ipc::Response::Err { err }) = &outcome {
+            panic!("mutation failed: {err:?}");
+        }
 
         let captured = spans.lock().expect("span capture");
         assert!(!captured.is_empty(), "expected mutation span fields");
