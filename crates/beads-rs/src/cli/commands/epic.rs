@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::{Ctx, normalize_bead_id, print_json, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_json, print_line, print_ok, send};
 use super::fmt_issue_ref;
 use crate::Result;
 use crate::api::QueryResult;
@@ -51,8 +51,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
             }
             match ok {
                 ResponsePayload::Query(QueryResult::EpicStatus(statuses)) => {
-                    println!("{}", render_epic_statuses(&statuses));
-                    Ok(())
+                    print_line(&render_epic_statuses(&statuses))
                 }
                 other => print_ok(&other, false),
             }
@@ -79,9 +78,9 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
 
             if statuses.is_empty() {
                 if ctx.json {
-                    println!("[]");
+                    print_line("[]")?;
                 } else {
-                    println!("No epics eligible for closure");
+                    print_line("No epics eligible for closure")?;
                 }
                 return Ok(());
             }
@@ -94,7 +93,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
                         true,
                     )?;
                 } else {
-                    println!("{}", render_epic_close_dry_run(&statuses));
+                    print_line(&render_epic_close_dry_run(&statuses))?;
                 }
                 return Ok(());
             }
@@ -121,7 +120,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
                 };
                 print_json(&out)?;
             } else {
-                println!("{}", render_epic_close_result(&closed));
+                print_line(&render_epic_close_result(&closed))?;
             }
             Ok(())
         }

@@ -3,7 +3,7 @@ use std::io::{BufRead, Write};
 use clap::Args;
 
 use super::super::{
-    Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_json, print_ok,
+    Ctx, fetch_issue, normalize_bead_id_for, normalize_dep_specs, print_json, print_line, print_ok,
     resolve_description, send, send_raw,
 };
 use crate::api::QueryResult;
@@ -181,7 +181,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     if ctx.json {
         print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
     } else {
-        println!("{}", render_create(&issue));
+        print_line(&render_create(&issue))?;
     }
     Ok(())
 }
@@ -197,6 +197,24 @@ fn render_create(issue: &crate::api::Issue) -> String {
     out.push_str(&format!("  Priority: P{}\n", issue.priority));
     out.push_str(&format!("  Status: {}", issue.status));
     out
+}
+
+fn render_created_from_markdown(created_summaries: &[CreatedSummary], file_label: &str) -> String {
+    let mut out = format!(
+        "✓ Created {} issues from {}:\n",
+        created_summaries.len(),
+        file_label
+    );
+    for issue in created_summaries {
+        out.push_str(&format!(
+            "  {}: {} [P{}, {}]\n",
+            issue.id,
+            issue.title,
+            issue.priority.value(),
+            issue.bead_type.as_str()
+        ));
+    }
+    out.trim_end().into()
 }
 
 fn resolve_title(positional: Option<String>, flag: Option<String>) -> Result<String> {
@@ -327,21 +345,10 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     }
 
     let file_label = path.display();
-    println!(
-        "✓ Created {} issues from {}:",
-        created_summaries.len(),
-        file_label
-    );
-    for issue in &created_summaries {
-        println!(
-            "  {}: {} [P{}, {}]",
-            issue.id,
-            issue.title,
-            issue.priority.value(),
-            issue.bead_type.as_str()
-        );
-    }
-    Ok(())
+    print_line(&render_created_from_markdown(
+        &created_summaries,
+        &file_label.to_string(),
+    ))
 }
 
 #[derive(Debug, Clone)]
