@@ -2188,6 +2188,37 @@ mod tests {
     }
 
     #[test]
+    fn update_rejects_empty_required_fields() {
+        let mut patch = BeadPatch::default();
+        patch.title = Patch::Set("   ".into());
+
+        let err = ParsedMutationRequest::parse_update(UpdatePayload {
+            id: BeadId::parse("bd-required").unwrap(),
+            patch,
+            cas: None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "title"
+        ));
+
+        let mut patch = BeadPatch::default();
+        patch.description = Patch::Set("".into());
+
+        let err = ParsedMutationRequest::parse_update(UpdatePayload {
+            id: BeadId::parse("bd-required").unwrap(),
+            patch,
+            cas: None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "description"
+        ));
+    }
+
+    #[test]
     fn update_trims_required_fields() {
         let engine = MutationEngine::new(Limits::default());
         let actor = actor_id("alice");
