@@ -127,8 +127,8 @@ pub struct SessionConfig {
     pub local_store: StoreIdentity,
     pub local_replica_id: ReplicaId,
     pub protocol: ProtocolRange,
-    pub requested_namespaces: Vec<NamespaceId>,
-    pub offered_namespaces: Vec<NamespaceId>,
+    pub requested_namespaces: NamespaceSet,
+    pub offered_namespaces: NamespaceSet,
     pub capabilities: Capabilities,
     pub max_frame_bytes: u32,
 }
@@ -139,8 +139,8 @@ impl SessionConfig {
             local_store,
             local_replica_id,
             protocol: ProtocolRange::exact(PROTOCOL_VERSION_V1),
-            requested_namespaces: Vec::new(),
-            offered_namespaces: Vec::new(),
+            requested_namespaces: NamespaceSet::default(),
+            offered_namespaces: NamespaceSet::default(),
             capabilities: Capabilities {
                 supports_snapshots: false,
                 supports_live_stream: true,
@@ -499,9 +499,7 @@ pub struct Session<R, P> {
 }
 
 impl<R> Session<R, Connecting> {
-    pub fn new(mut config: SessionConfig, limits: Limits, admission: AdmissionController) -> Self {
-        normalize_namespaces(&mut config.requested_namespaces);
-        normalize_namespaces(&mut config.offered_namespaces);
+    pub fn new(config: SessionConfig, limits: Limits, admission: AdmissionController) -> Self {
         Self {
             role: PhantomData,
             phase: Connecting,
@@ -1204,8 +1202,8 @@ impl<R, P> Session<R, P> {
             sender_replica_id: self.config.local_replica_id,
             hello_nonce: self.next_nonce(),
             max_frame_bytes: self.config.max_frame_bytes,
-            requested_namespaces: NamespaceSet::from(self.config.requested_namespaces.clone()),
-            offered_namespaces: NamespaceSet::from(self.config.offered_namespaces.clone()),
+            requested_namespaces: self.config.requested_namespaces.clone(),
+            offered_namespaces: self.config.offered_namespaces.clone(),
             seen_durable: snapshot.durable,
             seen_applied: Some(snapshot.applied),
             capabilities: self.config.capabilities.clone(),
@@ -1427,14 +1425,6 @@ fn negotiate_version(
             peer_max,
         })
     }
-}
-
-fn normalize_namespaces(namespaces: &mut Vec<NamespaceId>) {
-    if namespaces.is_empty() {
-        return;
-    }
-    let canonical = NamespaceSet::from(std::mem::take(namespaces));
-    namespaces.extend(canonical.into_vec());
 }
 
 fn intersect_namespaces(a: &[NamespaceId], b: &[NamespaceId]) -> NamespaceSet {
@@ -1924,8 +1914,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = namespaces.clone();
-        config.offered_namespaces = namespaces.clone();
+        config.requested_namespaces = namespaces.clone().into();
+        config.offered_namespaces = namespaces.clone().into();
 
         let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
@@ -2020,8 +2010,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
 
@@ -2068,8 +2058,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
 
@@ -2109,8 +2099,8 @@ mod tests {
         let mut config = SessionConfig::new(identity, replica, &limits);
         let alpha = NamespaceId::parse("alpha").unwrap();
         let beta = NamespaceId::parse("beta").unwrap();
-        config.requested_namespaces = vec![alpha.clone(), beta.clone()];
-        config.offered_namespaces = vec![alpha.clone(), beta.clone()];
+        config.requested_namespaces = vec![alpha.clone(), beta.clone()].into();
+        config.offered_namespaces = vec![alpha.clone(), beta.clone()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
 
@@ -2164,8 +2154,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = OutboundConnecting::new(config, limits, admission);
         let (session, _action) = session.begin_handshake(&store, 0);
@@ -2218,8 +2208,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
@@ -2255,8 +2245,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = OutboundConnecting::new(config, limits, admission);
         let (session, _action) = session.begin_handshake(&store, 0);
@@ -2290,8 +2280,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = OutboundConnecting::new(config, limits, admission);
         let (session, _action) = session.begin_handshake(&store, 0);
@@ -2399,8 +2389,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
@@ -2469,8 +2459,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
@@ -2550,8 +2540,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
@@ -2629,8 +2619,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {
@@ -2684,8 +2674,8 @@ mod tests {
         let limits = Limits::default();
         let admission = AdmissionController::new(&limits);
         let mut config = SessionConfig::new(identity, replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = InboundConnecting::new(config, limits, admission);
         let hello = Hello {

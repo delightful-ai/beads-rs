@@ -422,8 +422,8 @@ where
     let mut event_handle: Option<JoinHandle<()>> = None;
 
     let mut config = SessionConfig::new(local_store, local_replica_id, &limits);
-    config.requested_namespaces = plan.requested_namespaces.clone();
-    config.offered_namespaces = plan.offered_namespaces.clone();
+    config.requested_namespaces = plan.requested_namespaces.clone().into();
+    config.offered_namespaces = plan.offered_namespaces.clone().into();
 
     let session = OutboundConnecting::new(config, limits.clone(), admission);
     let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
@@ -1301,8 +1301,8 @@ mod tests {
                             peer_replica,
                             &crate::core::Limits::default(),
                         );
-                        config.offered_namespaces = hello.requested_namespaces.clone().into_vec();
-                        config.requested_namespaces = hello.offered_namespaces.clone().into_vec();
+                        config.offered_namespaces = hello.requested_namespaces.clone();
+                        config.requested_namespaces = hello.offered_namespaces.clone();
                         let session = crate::daemon::repl::session::InboundConnecting::new(
                             config,
                             crate::core::Limits::default(),
@@ -1538,8 +1538,8 @@ mod tests {
         let peer_replica = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
 
         let mut config = SessionConfig::new(local_store, local_replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
         let session =
             OutboundConnecting::new(config, limits.clone(), AdmissionController::new(&limits));
         let mut store = TestStore;

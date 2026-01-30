@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::core::error::details::{
     BatchTooLargeDetails, InvalidRequestDetails, MalformedPayloadDetails, ParserKind,
 };
+pub use crate::core::NamespaceSet;
 use crate::core::{
     Applied, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, HeadStatus,
     Limits, NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch,
@@ -23,58 +24,6 @@ pub const PROTOCOL_VERSION_V1: u32 = crate::core::StoreMetaVersions::REPLICATION
 pub type WatermarkMap = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Seq0>>;
 pub type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
 type WatermarkHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Sha256>>;
-
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct NamespaceSet(Vec<NamespaceId>);
-
-impl NamespaceSet {
-    pub fn new(mut namespaces: Vec<NamespaceId>) -> Self {
-        canonicalize_namespaces(&mut namespaces);
-        Self(namespaces)
-    }
-
-    pub fn as_slice(&self) -> &[NamespaceId] {
-        &self.0
-    }
-
-    pub fn into_vec(self) -> Vec<NamespaceId> {
-        self.0
-    }
-}
-
-impl From<Vec<NamespaceId>> for NamespaceSet {
-    fn from(namespaces: Vec<NamespaceId>) -> Self {
-        Self::new(namespaces)
-    }
-}
-
-impl From<NamespaceSet> for Vec<NamespaceId> {
-    fn from(namespaces: NamespaceSet) -> Self {
-        namespaces.0
-    }
-}
-
-impl AsRef<[NamespaceId]> for NamespaceSet {
-    fn as_ref(&self) -> &[NamespaceId] {
-        &self.0
-    }
-}
-
-impl std::ops::Deref for NamespaceSet {
-    type Target = [NamespaceId];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-fn canonicalize_namespaces(namespaces: &mut Vec<NamespaceId>) {
-    if namespaces.len() <= 1 {
-        return;
-    }
-    namespaces.sort();
-    namespaces.dedup();
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplEnvelope {

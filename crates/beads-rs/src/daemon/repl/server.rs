@@ -411,8 +411,8 @@ where
     let eligible = eligible_namespaces(&runtime.policies, role, allowed_namespaces.as_ref());
 
     let mut config = SessionConfig::new(runtime.local_store, runtime.local_replica_id, &limits);
-    config.requested_namespaces = eligible.clone();
-    config.offered_namespaces = eligible;
+    config.requested_namespaces = eligible.clone().into();
+    config.offered_namespaces = eligible.into();
 
     let peer_replica_id = hello.sender_replica_id;
     tracing::Span::current().record("peer_replica_id", tracing::field::display(peer_replica_id));
