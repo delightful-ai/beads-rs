@@ -3,6 +3,7 @@
 //! DepKey: identity tuple (from, to, kind)
 //! Dependency edges are represented as OR-Set membership of `DepKey`.
 
+use std::cmp::Ordering;
 use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -14,7 +15,8 @@ use super::orset::{OrSetValue, sealed::Sealed};
 use super::validated::{ValidatedBeadId, ValidatedDepKind};
 
 /// Parsed dependency spec from CLI/IPC input.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct DepSpec {
     kind: DepKind,
     id: BeadId,
@@ -44,7 +46,7 @@ impl DepSpec {
     }
 
     /// Parse a list of dependency specs, allowing comma-separated lists.
-    pub fn parse_list(raw: &[String]) -> Result<Vec<Self>, CoreError> {
+    pub fn parse_list(raw: &[String]) -> Result<DepSpecSet, CoreError> {
         let mut out = Vec::new();
         for spec in raw {
             for part in spec.split(',') {
@@ -55,7 +57,7 @@ impl DepSpec {
                 out.push(Self::parse(p)?);
             }
         }
-        Ok(out)
+        Ok(DepSpecSet::new(out))
     }
 
     /// Get the dependency kind.
@@ -76,6 +78,109 @@ impl DepSpec {
             format!("{}:{}", self.kind.as_str(), self.id.as_str())
         }
     }
+}
+
+impl Ord for DepSpec {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.kind
+            .cmp(&other.kind)
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for DepSpec {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl TryFrom<String> for DepSpec {
+    type Error = CoreError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        DepSpec::parse(&raw)
+    }
+}
+
+impl From<DepSpec> for String {
+    fn from(spec: DepSpec) -> String {
+        spec.to_spec_string()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "Vec<DepSpec>", into = "Vec<DepSpec>")]
+pub struct DepSpecSet(Vec<DepSpec>);
+
+impl DepSpecSet {
+    pub fn new(mut specs: Vec<DepSpec>) -> Self {
+        canonicalize_dep_specs(&mut specs);
+        Self(specs)
+    }
+
+    pub fn as_slice(&self) -> &[DepSpec] {
+        &self.0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &DepSpec> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn into_vec(self) -> Vec<DepSpec> {
+        self.0
+    }
+
+    pub(crate) fn from_vec_unchecked(specs: Vec<DepSpec>) -> Self {
+        Self(specs)
+    }
+}
+
+impl From<Vec<DepSpec>> for DepSpecSet {
+    fn from(specs: Vec<DepSpec>) -> Self {
+        Self::new(specs)
+    }
+}
+
+impl From<DepSpecSet> for Vec<DepSpec> {
+    fn from(specs: DepSpecSet) -> Self {
+        specs.0
+    }
+}
+
+impl AsRef<[DepSpec]> for DepSpecSet {
+    fn as_ref(&self) -> &[DepSpec] {
+        &self.0
+    }
+}
+
+impl Deref for DepSpecSet {
+    type Target = [DepSpec];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl FromIterator<DepSpec> for DepSpecSet {
+    fn from_iter<T: IntoIterator<Item = DepSpec>>(iter: T) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+fn canonicalize_dep_specs(specs: &mut Vec<DepSpec>) {
+    if specs.len() <= 1 {
+        return;
+    }
+    specs.sort();
+    specs.dedup();
 }
 
 /// Parent-child edge (child -> parent).
@@ -427,12 +532,12 @@ mod tests {
         ];
         let parsed = DepSpec::parse_list(&specs).unwrap();
         assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0].kind(), DepKind::Blocks);
-        assert_eq!(parsed[0].id().as_str(), "bd-abc");
-        assert_eq!(parsed[1].kind(), DepKind::Blocks);
-        assert_eq!(parsed[1].id().as_str(), "bd-xyz");
-        assert_eq!(parsed[2].kind(), DepKind::Related);
-        assert_eq!(parsed[2].id().as_str(), "bd-rel");
+        assert_eq!(parsed.as_slice()[0].kind(), DepKind::Blocks);
+        assert_eq!(parsed.as_slice()[0].id().as_str(), "bd-abc");
+        assert_eq!(parsed.as_slice()[1].kind(), DepKind::Blocks);
+        assert_eq!(parsed.as_slice()[1].id().as_str(), "bd-xyz");
+        assert_eq!(parsed.as_slice()[2].kind(), DepKind::Related);
+        assert_eq!(parsed.as_slice()[2].id().as_str(), "bd-rel");
     }
 
     #[test]
@@ -454,6 +559,27 @@ mod tests {
             err.reason
                 .contains("parent edges must use parent-specific operations")
         );
+    }
+
+    #[test]
+    fn dep_spec_set_sorts_and_dedups() {
+        let a = DepSpec::parse("related:bd-aaa").unwrap();
+        let b = DepSpec::parse("blocks:bd-bbb").unwrap();
+        let set = DepSpecSet::from(vec![a.clone(), b.clone(), a]);
+        assert_eq!(set.len(), 2);
+        assert_eq!(set.as_slice()[0], b);
+        assert_eq!(set.as_slice()[1], a);
+    }
+
+    #[test]
+    fn dep_spec_set_json_roundtrip() {
+        let set = DepSpecSet::from(vec![
+            DepSpec::parse("bd-abc").unwrap(),
+            DepSpec::parse("related:bd-xyz").unwrap(),
+        ]);
+        let json = serde_json::to_string(&set).unwrap();
+        let parsed: DepSpecSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, set);
     }
 
     #[test]

@@ -52,7 +52,9 @@ pub use bead::{Bead, BeadCore, BeadFields, BeadView};
 pub use collections::{Label, Labels};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
-pub use dep::{AcyclicDepKey, DepAddKey, DepKey, DepSpec, FreeDepKey, NoCycleProof, ParentEdge};
+pub use dep::{
+    AcyclicDepKey, DepAddKey, DepKey, DepSpec, DepSpecSet, FreeDepKey, NoCycleProof, ParentEdge,
+};
 pub use domain::{BeadType, DepKind, Priority};
 pub use durability::{
     DurabilityClass, DurabilityOutcome, DurabilityParseError, DurabilityProofV1, DurabilityReceipt,
@@ -81,7 +83,7 @@ pub use json_canon::{CanonJsonError, to_canon_json_bytes};
 pub use limits::Limits;
 pub use meta::{FormatVersion, Meta};
 pub use namespace::{
-    CheckpointGroup, GcAuthority, NamespaceId, NamespacePolicy, NamespaceVisibility,
+    CheckpointGroup, GcAuthority, NamespaceId, NamespacePolicy, NamespaceSet, NamespaceVisibility,
     NonCoreNamespaceId, ReplicateMode, RetentionPolicy, TtlBasis,
 };
 pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
