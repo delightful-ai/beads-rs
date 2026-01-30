@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, normalize_bead_slug_for, print_json, validation_error};
+use super::super::{Ctx, print_json};
+use super::super::validation::{normalize_bead_slug_for, validation_error};
 use crate::Result;
 use crate::core::FormatVersion;
 use crate::daemon::ipc::{EmptyPayload, Request, send_request};

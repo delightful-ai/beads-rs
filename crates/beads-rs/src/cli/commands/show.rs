@@ -1,6 +1,7 @@
 use clap::Args;
 
-use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send};
+use super::super::{Ctx, print_line, print_ok, send};
+use super::super::validation::normalize_bead_id;
 use super::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
 use crate::Result;
 use crate::api::IssueSummary;

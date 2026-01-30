@@ -1,8 +1,8 @@
 use clap::Args;
 
-use super::super::{
-    Ctx, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, print_line,
-    print_ok, resolve_description, send, validation_error,
+use super::super::{Ctx, fetch_issue, print_line, print_ok, resolve_description, send};
+use super::super::validation::{
+    normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
 };
 use crate::Result;
 use crate::api::QueryResult;

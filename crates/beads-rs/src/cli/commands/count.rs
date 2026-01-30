@@ -1,8 +1,7 @@
 use clap::Args;
 
-use super::super::{
-    CommonFilterArgs, Ctx, normalize_bead_id_for, print_ok, send, validation_error,
-};
+use super::super::{CommonFilterArgs, Ctx, print_ok, send};
+use super::super::validation::{normalize_bead_id_for, validation_error};
 use crate::Result;
 use crate::daemon::ipc::{CountPayload, Request};
 use crate::daemon::query::Filters;

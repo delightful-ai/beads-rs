@@ -1,6 +1,7 @@
 use clap::Args;
 
-use super::super::{Ctx, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, print_ok, send};
+use super::super::validation::normalize_bead_id;
 use crate::Result;
 use crate::daemon::ipc::{IdPayload, Request};
 
