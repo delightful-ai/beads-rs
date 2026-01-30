@@ -21,13 +21,11 @@ use super::{
 use crate::core::error::CoreError;
 use crate::core::limits::LimitViolation;
 use crate::core::state::LabelState;
-use crate::core::wire_bead::{
-    WireDepStoreV1, WireLabelStateV1, WireNoteV1, WireStamp, WireTombstoneV1,
-};
+use crate::core::wire_bead::{WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1};
 use crate::core::{
     BeadId, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore,
-    Limits, NamespaceId, NamespaceSet, NoteId, OrSet, Stamp, StoreState, Tombstone, TombstoneKey,
-    WriteStamp, sha256_bytes,
+    Limits, NamespaceId, NamespaceSet, OrSet, SnapshotCodec, SnapshotSection, Stamp, StoreState,
+    Tombstone, TombstoneKey, WriteStamp, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -239,9 +237,15 @@ pub fn import_checkpoint(
                         wire.id.clone(),
                         &full_path,
                         line.line_no,
-                        "state",
+                        SnapshotSection::Beads,
                     )?;
-                    ensure_notes_sorted(&full_path, line.line_no, &wire.notes)?;
+                    SnapshotCodec::validate_bead_notes(&wire.id, &wire.notes).map_err(|err| {
+                        CheckpointImportError::OutOfOrder {
+                            path: full_path.clone(),
+                            line: line.line_no,
+                            reason: err.to_string(),
+                        }
+                    })?;
                     let ns = line.namespace.clone();
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
@@ -284,7 +288,7 @@ pub fn import_checkpoint(
                         key,
                         &full_path,
                         line.line_no,
-                        "tombstones",
+                        SnapshotSection::Tombstones,
                     )?;
                     let ns = line.namespace.clone();
                     let tomb = tombstone_from_wire(&wire, &full_path, line)?;
@@ -403,9 +407,15 @@ fn import_checkpoint_export_parsed(
                         wire.id.clone(),
                         &path,
                         line.line_no,
-                        "state",
+                        SnapshotSection::Beads,
                     )?;
-                    ensure_notes_sorted(&path, line.line_no, &wire.notes)?;
+                    SnapshotCodec::validate_bead_notes(&wire.id, &wire.notes).map_err(|err| {
+                        CheckpointImportError::OutOfOrder {
+                            path: path.clone(),
+                            line: line.line_no,
+                            reason: err.to_string(),
+                        }
+                    })?;
                     let ns = line.namespace.clone();
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
@@ -449,7 +459,7 @@ fn import_checkpoint_export_parsed(
                         key,
                         &path,
                         line.line_no,
-                        "tombstones",
+                        SnapshotSection::Tombstones,
                     )?;
                     let ns = line.namespace.clone();
                     let tomb = tombstone_from_wire(&wire, &path, line)?;
@@ -866,34 +876,15 @@ fn ensure_strictly_increasing<T: Ord + std::fmt::Debug>(
     next: T,
     path: &Path,
     line: u64,
-    label: &str,
+    section: SnapshotSection,
 ) -> Result<(), CheckpointImportError> {
-    if let Some(prev) = prev.as_ref()
-        && next <= *prev
-    {
-        return Err(CheckpointImportError::OutOfOrder {
+    SnapshotCodec::ensure_strictly_increasing(prev, next, section, line as usize).map_err(
+        |err| CheckpointImportError::OutOfOrder {
             path: path.to_path_buf(),
             line,
-            reason: format!(
-                "{label} entries out of order (prev: {:?}, next: {:?})",
-                prev, next
-            ),
-        });
-    }
-    *prev = Some(next);
-    Ok(())
-}
-
-fn ensure_notes_sorted(
-    path: &Path,
-    line: u64,
-    notes: &[WireNoteV1],
-) -> Result<(), CheckpointImportError> {
-    let mut prev: Option<NoteId> = None;
-    for note in notes {
-        ensure_strictly_increasing(&mut prev, note.id.clone(), path, line, "notes")?;
-    }
-    Ok(())
+            reason: err.to_string(),
+        },
+    )
 }
 
 fn tombstone_key_from_wire(
@@ -915,7 +906,13 @@ fn ensure_dep_entry_order(
 ) -> Result<(), CheckpointImportError> {
     let mut prev: Option<DepKey> = None;
     for entry in &wire.entries {
-        ensure_strictly_increasing(&mut prev, entry.key.clone(), path, line, "deps")?;
+        ensure_strictly_increasing(
+            &mut prev,
+            entry.key.clone(),
+            path,
+            line,
+            SnapshotSection::Deps,
+        )?;
     }
     Ok(())
 }
