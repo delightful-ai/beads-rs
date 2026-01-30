@@ -3,6 +3,7 @@
 //! Notes rule: bead_upsert deltas should omit notes; if notes are present they
 //! mean set-union only (never truncation).
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -17,9 +18,12 @@ use super::crdt::Lww;
 use super::dep::{DepKey, ParentEdge};
 use super::domain::{BeadType, DepKind, Priority};
 use super::identity::{ActorId, BeadId, BranchName, NoteId, ReplicaId};
-use super::orset::{Dot, Dvv};
-use super::state::LabelState;
+use super::orset::{Dot, Dvv, OrSet, OrSetError};
+use super::state::{
+    CanonicalState, DepStore, LabelState, LabelStore, NoteStore, legacy_fallback_lineage,
+};
 use super::time::{Stamp, WallClock, WriteStamp};
+use super::tombstone::{Tombstone, TombstoneKey};
 use super::{Bead, BeadView};
 
 /// Wire stamp encoded as [wall_ms, counter].
@@ -405,7 +409,7 @@ pub struct WireDepEntryV1 {
 }
 
 /// OR-Set dep store snapshot for checkpoints.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireDepStoreV1 {
     pub cc: Dvv,
     pub entries: Vec<WireDepEntryV1>,
@@ -464,6 +468,486 @@ pub struct WireBeadFull {
 
 /// Canonical bead snapshot wire format (v1).
 pub type BeadSnapshotWireV1 = WireBeadFull;
+
+/// Canonical full snapshot wire format (v1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotWireV1 {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub beads: Vec<BeadSnapshotWireV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tombstones: Vec<WireTombstoneV1>,
+    #[serde(default)]
+    pub deps: WireDepStoreV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<NoteAppendV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotSection {
+    Beads,
+    Tombstones,
+    Notes,
+    Deps,
+}
+
+impl SnapshotSection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SnapshotSection::Beads => "bead",
+            SnapshotSection::Tombstones => "tombstone",
+            SnapshotSection::Notes => "note",
+            SnapshotSection::Deps => "dep",
+        }
+    }
+}
+
+impl fmt::Display for SnapshotSection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SnapshotCodecError {
+    #[error("{section} entries out of order at line {line}: prev={prev}, next={next}")]
+    OutOfOrder {
+        section: SnapshotSection,
+        line: usize,
+        prev: String,
+        next: String,
+    },
+    #[error("{section} entries contain duplicate key at line {line}: {key}")]
+    Duplicate {
+        section: SnapshotSection,
+        line: usize,
+        key: String,
+    },
+    #[error(
+        "note entries contain duplicate id at line {line} for bead {bead_id} lineage {lineage:?}: {note_id}"
+    )]
+    NoteDuplicate {
+        line: usize,
+        bead_id: BeadId,
+        lineage: Option<Stamp>,
+        note_id: NoteId,
+    },
+    #[error(
+        "bead {bead_id} notes out of order at index {index}: prev={prev}, next={next}"
+    )]
+    BeadNotesOutOfOrder {
+        bead_id: BeadId,
+        index: usize,
+        prev: String,
+        next: String,
+    },
+    #[error("bead {bead_id} notes contain duplicate id {note_id}")]
+    BeadNoteDuplicate { bead_id: BeadId, note_id: NoteId },
+    #[error("dep entry dots out of order for key {key:?}: prev={prev:?}, next={next:?}")]
+    DepDotsOutOfOrder { key: DepKey, prev: Dot, next: Dot },
+    #[error("dep entry has duplicate dot for key {key:?}: {dot:?}")]
+    DepDotDuplicate { key: DepKey, dot: Dot },
+    #[error("label orset invalid: {0}")]
+    LabelOrSet(OrSetError),
+    #[error("dep orset invalid: {0}")]
+    DepOrSet(OrSetError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NoteOrderKey {
+    bead_id: BeadId,
+    lineage: Option<Stamp>,
+    at: WriteStamp,
+    note_id: NoteId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BeadNoteOrderKey {
+    at: WriteStamp,
+    note_id: NoteId,
+}
+
+pub struct SnapshotCodec;
+
+impl SnapshotCodec {
+    pub fn from_state(state: &CanonicalState) -> SnapshotWireV1 {
+        let mut beads = Vec::new();
+        for (id, _) in state.iter_live() {
+            let Some(view) = state.bead_view(id) else {
+                continue;
+            };
+            let label_state = state
+                .label_store()
+                .state(id, view.bead.core.created())
+                .cloned();
+            let wire = BeadSnapshotWireV1::from_view(&view, label_state.as_ref());
+            beads.push(wire);
+        }
+
+        let mut tombstones: Vec<(TombstoneKey, WireTombstoneV1)> = Vec::new();
+        for (key, tomb) in state.iter_tombstones() {
+            let wire = WireTombstoneV1 {
+                id: tomb.id.clone(),
+                deleted_at: WireStamp::from(&tomb.deleted.at),
+                deleted_by: tomb.deleted.by.clone(),
+                reason: tomb.reason.clone(),
+                lineage: tomb.lineage.as_ref().map(WireLineageStamp::from),
+            };
+            tombstones.push((key, wire));
+        }
+        tombstones.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let tombstones = tombstones.into_iter().map(|(_, wire)| wire).collect();
+
+        let dep_store = state.dep_store();
+        let mut entries = Vec::new();
+        for key in dep_store.values() {
+            let mut dots: Vec<Dot> = dep_store
+                .dots_for(key)
+                .map(|dots| dots.iter().copied().collect())
+                .unwrap_or_default();
+            dots.sort();
+            entries.push(WireDepEntryV1 {
+                key: key.clone(),
+                dots,
+            });
+        }
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        let deps = WireDepStoreV1 {
+            cc: dep_store.cc().clone(),
+            entries,
+            stamp: dep_store
+                .stamp()
+                .map(|stamp| (WireStamp::from(&stamp.at), stamp.by.clone())),
+        };
+
+        let mut notes: Vec<NoteAppendV1> = Vec::new();
+        for (bead_id, lineage, note_map) in state.note_store().iter_lineages() {
+            for note in note_map.values() {
+                notes.push(NoteAppendV1 {
+                    bead_id: bead_id.clone(),
+                    note: WireNoteV1::from(note),
+                    lineage: Some(WireLineageStamp::from(lineage.clone())),
+                });
+            }
+        }
+        notes.sort_by_key(note_order_key);
+
+        SnapshotWireV1 {
+            beads,
+            tombstones,
+            deps,
+            notes,
+        }
+    }
+
+    pub fn validate(snapshot: &SnapshotWireV1) -> Result<(), SnapshotCodecError> {
+        Self::validate_beads(&snapshot.beads)?;
+        Self::validate_tombstones(&snapshot.tombstones)?;
+        Self::validate_dep_store(&snapshot.deps)?;
+        Self::validate_notes(&snapshot.notes)?;
+        Ok(())
+    }
+
+    pub fn validate_beads(beads: &[BeadSnapshotWireV1]) -> Result<(), SnapshotCodecError> {
+        let mut prev: Option<BeadId> = None;
+        for (idx, bead) in beads.iter().enumerate() {
+            let line = idx + 1;
+            Self::ensure_strictly_increasing(
+                &mut prev,
+                bead.id.clone(),
+                SnapshotSection::Beads,
+                line,
+            )?;
+            Self::validate_bead_notes(&bead.id, &bead.notes)?;
+            let label_stamp = bead.label_stamp();
+            Self::label_state_from_wire(bead.labels.clone(), label_stamp)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_tombstones(
+        tombstones: &[WireTombstoneV1],
+    ) -> Result<(), SnapshotCodecError> {
+        let mut prev: Option<TombstoneKey> = None;
+        for (idx, tomb) in tombstones.iter().enumerate() {
+            let line = idx + 1;
+            let key = tombstone_key(tomb);
+            Self::ensure_strictly_increasing(
+                &mut prev,
+                key,
+                SnapshotSection::Tombstones,
+                line,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_notes(notes: &[NoteAppendV1]) -> Result<(), SnapshotCodecError> {
+        let mut prev: Option<NoteOrderKey> = None;
+        let mut seen: BTreeSet<(BeadId, Option<Stamp>, NoteId)> = BTreeSet::new();
+        for (idx, note) in notes.iter().enumerate() {
+            let line = idx + 1;
+            let key = note_order_key(note);
+            Self::ensure_strictly_increasing(
+                &mut prev,
+                key.clone(),
+                SnapshotSection::Notes,
+                line,
+            )?;
+            let lineage = note.lineage_stamp();
+            let id_key = (note.bead_id.clone(), lineage.clone(), note.note.id.clone());
+            if !seen.insert(id_key) {
+                return Err(SnapshotCodecError::NoteDuplicate {
+                    line,
+                    bead_id: note.bead_id.clone(),
+                    lineage,
+                    note_id: note.note.id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_dep_store(store: &WireDepStoreV1) -> Result<(), SnapshotCodecError> {
+        let mut prev: Option<DepKey> = None;
+        for (idx, entry) in store.entries.iter().enumerate() {
+            let line = idx + 1;
+            Self::ensure_strictly_increasing(
+                &mut prev,
+                entry.key.clone(),
+                SnapshotSection::Deps,
+                line,
+            )?;
+            validate_dep_dots(&entry.key, &entry.dots)?;
+        }
+        let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
+        for entry in &store.entries {
+            let dots: BTreeSet<Dot> = entry.dots.iter().copied().collect();
+            map.insert(entry.key.clone(), dots);
+        }
+        let _ = OrSet::try_from_parts(map, store.cc.clone())
+            .map_err(SnapshotCodecError::DepOrSet)?;
+        Ok(())
+    }
+
+    pub fn validate_bead_notes(
+        bead_id: &BeadId,
+        notes: &[WireNoteV1],
+    ) -> Result<(), SnapshotCodecError> {
+        let mut prev: Option<BeadNoteOrderKey> = None;
+        let mut seen: BTreeSet<NoteId> = BTreeSet::new();
+        for (idx, note) in notes.iter().enumerate() {
+            if !seen.insert(note.id.clone()) {
+                return Err(SnapshotCodecError::BeadNoteDuplicate {
+                    bead_id: bead_id.clone(),
+                    note_id: note.id.clone(),
+                });
+            }
+            let key = bead_note_order_key(note);
+            if let Some(prev_key) = prev.as_ref()
+                && key <= *prev_key
+            {
+                return Err(SnapshotCodecError::BeadNotesOutOfOrder {
+                    bead_id: bead_id.clone(),
+                    index: idx + 1,
+                    prev: format!("{prev_key:?}"),
+                    next: format!("{key:?}"),
+                });
+            }
+            prev = Some(key);
+        }
+        Ok(())
+    }
+
+    pub fn into_state(snapshot: SnapshotWireV1) -> Result<CanonicalState, SnapshotCodecError> {
+        Self::validate(&snapshot)?;
+
+        let SnapshotWireV1 {
+            beads,
+            tombstones,
+            deps,
+            notes,
+        } = snapshot;
+
+        let notes = if notes.is_empty() {
+            notes_from_beads(&beads)
+        } else {
+            notes
+        };
+
+        let mut state = CanonicalState::new();
+        let mut label_store = LabelStore::new();
+        let mut note_store = NoteStore::new();
+
+        for bead in beads {
+            let bead_id = bead.id.clone();
+            let lineage = Stamp::new(WriteStamp::from(bead.created_at), bead.created_by.clone());
+            let label_stamp = bead.label_stamp();
+            let labels = Self::label_state_from_wire(bead.labels.clone(), label_stamp)?;
+            let entry = label_store.state_mut(&bead_id, &lineage);
+            *entry = LabelState::join(entry, &labels);
+            state.insert_live(Bead::from(bead));
+        }
+
+        for wire in tombstones {
+            let deleted = wire.deleted_stamp();
+            let lineage = wire.lineage_stamp();
+            let tombstone = match lineage {
+                Some(stamp) => Tombstone::new_collision(
+                    wire.id.clone(),
+                    deleted,
+                    stamp,
+                    wire.reason.clone(),
+                ),
+                None => Tombstone::new(wire.id.clone(), deleted, wire.reason.clone()),
+            };
+            state.insert_tombstone(tombstone);
+        }
+
+        let dep_store = Self::dep_store_from_wire(deps)?;
+        state.set_dep_store(dep_store);
+        state.set_label_store(label_store);
+
+        for note_append in notes {
+            let bead_id = note_append.bead_id.clone();
+            let lineage = note_append.lineage_stamp().unwrap_or_else(|| {
+                if state.has_collision_tombstone(&bead_id) {
+                    legacy_fallback_lineage()
+                } else if let Some(bead) = state.get_live(&bead_id) {
+                    bead.core.created().clone()
+                } else {
+                    legacy_fallback_lineage()
+                }
+            });
+            let note = Note::from(note_append.note);
+            note_store.insert(bead_id, lineage, note);
+        }
+        state.set_note_store(note_store);
+        state.rebuild_dep_indexes();
+        Ok(state)
+    }
+
+    pub fn label_state_from_wire(
+        wire: WireLabelStateV1,
+        stamp: Stamp,
+    ) -> Result<LabelState, SnapshotCodecError> {
+        let set = OrSet::try_from_parts(wire.entries, wire.cc)
+            .map_err(SnapshotCodecError::LabelOrSet)?;
+        Ok(LabelState::from_parts(set, Some(stamp)))
+    }
+
+    pub fn dep_store_from_wire(wire: WireDepStoreV1) -> Result<DepStore, SnapshotCodecError> {
+        Self::validate_dep_store(&wire)?;
+        let mut entries: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
+        for entry in wire.entries {
+            let dots: BTreeSet<Dot> = entry.dots.into_iter().collect();
+            entries.insert(entry.key, dots);
+        }
+        let set =
+            OrSet::try_from_parts(entries, wire.cc).map_err(SnapshotCodecError::DepOrSet)?;
+        let stamp = wire.stamp.map(|(at, by)| Stamp::new(WriteStamp::from(at), by));
+        Ok(DepStore::from_parts(set, stamp))
+    }
+
+    pub fn ensure_strictly_increasing<T: Ord + fmt::Debug>(
+        prev: &mut Option<T>,
+        next: T,
+        section: SnapshotSection,
+        line: usize,
+    ) -> Result<(), SnapshotCodecError> {
+        if let Some(prev_value) = prev.as_ref() {
+            match next.cmp(prev_value) {
+                Ordering::Greater => {}
+                Ordering::Equal => {
+                    return Err(SnapshotCodecError::Duplicate {
+                        section,
+                        line,
+                        key: format!("{next:?}"),
+                    });
+                }
+                Ordering::Less => {
+                    return Err(SnapshotCodecError::OutOfOrder {
+                        section,
+                        line,
+                        prev: format!("{prev_value:?}"),
+                        next: format!("{next:?}"),
+                    });
+                }
+            }
+        }
+        *prev = Some(next);
+        Ok(())
+    }
+}
+
+fn note_order_key(note: &NoteAppendV1) -> NoteOrderKey {
+    let lineage = note.lineage_stamp();
+    NoteOrderKey {
+        bead_id: note.bead_id.clone(),
+        lineage,
+        at: WriteStamp::from(note.note.at),
+        note_id: note.note.id.clone(),
+    }
+}
+
+fn bead_note_order_key(note: &WireNoteV1) -> BeadNoteOrderKey {
+    BeadNoteOrderKey {
+        at: WriteStamp::from(note.at),
+        note_id: note.id.clone(),
+    }
+}
+
+fn validate_dep_dots(key: &DepKey, dots: &[Dot]) -> Result<(), SnapshotCodecError> {
+    let mut prev: Option<Dot> = None;
+    for dot in dots {
+        if let Some(prev_dot) = prev {
+            match dot.cmp(&prev_dot) {
+                Ordering::Greater => {}
+                Ordering::Equal => {
+                    return Err(SnapshotCodecError::DepDotDuplicate {
+                        key: key.clone(),
+                        dot: *dot,
+                    });
+                }
+                Ordering::Less => {
+                    return Err(SnapshotCodecError::DepDotsOutOfOrder {
+                        key: key.clone(),
+                        prev: prev_dot,
+                        next: *dot,
+                    });
+                }
+            }
+        }
+        prev = Some(*dot);
+    }
+    Ok(())
+}
+
+fn notes_from_beads(beads: &[BeadSnapshotWireV1]) -> Vec<NoteAppendV1> {
+    let mut notes: Vec<NoteAppendV1> = Vec::new();
+    for bead in beads {
+        if bead.notes.is_empty() {
+            continue;
+        }
+        let lineage = Stamp::new(WriteStamp::from(bead.created_at), bead.created_by.clone());
+        for note in &bead.notes {
+            notes.push(NoteAppendV1 {
+                bead_id: bead.id.clone(),
+                note: note.clone(),
+                lineage: Some(WireLineageStamp::from(lineage.clone())),
+            });
+        }
+    }
+    notes.sort_by_key(note_order_key);
+    notes
+}
+
+fn tombstone_key(wire: &WireTombstoneV1) -> TombstoneKey {
+    let lineage = wire.lineage_stamp();
+    match lineage {
+        Some(stamp) => TombstoneKey::lineage(wire.id.clone(), stamp),
+        None => TombstoneKey::global(wire.id.clone()),
+    }
+}
 
 fn label_state_to_wire(state: Option<&LabelState>) -> WireLabelStateV1 {
     let mut entries: BTreeMap<Label, BTreeSet<Dot>> = BTreeMap::new();
@@ -1201,6 +1685,28 @@ mod tests {
         NoteId::new(id).unwrap_or_else(|e| panic!("invalid note id {id}: {e}"))
     }
 
+    fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
+        Stamp::new(WriteStamp::new(wall_ms, counter), actor_id(actor))
+    }
+
+    fn make_bead(id: &str, stamp: &Stamp) -> Bead {
+        let core = BeadCore::new(bead_id(id), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), stamp.clone()),
+            description: Lww::new("desc".to_string(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
     #[test]
     fn wire_note_roundtrip() {
         let note = WireNoteV1 {
@@ -1563,5 +2069,68 @@ mod tests {
         let json = serde_json::to_string(&delta).unwrap();
         let back: TxnDeltaV1 = serde_json::from_str(&json).unwrap();
         assert_eq!(delta, back);
+    }
+
+    #[test]
+    fn snapshot_codec_roundtrip() {
+        let base = make_stamp(10, 0, "alice");
+        let note_stamp = WriteStamp::new(12, 0);
+        let dep_stamp = make_stamp(15, 0, "alice");
+
+        let mut state = CanonicalState::new();
+        let bead_a = make_bead("bd-a", &base);
+        let bead_b = make_bead("bd-b", &base);
+        state.insert_live(bead_a.clone());
+        state.insert_live(bead_b.clone());
+
+        let label = Label::parse("triage".to_string()).expect("label");
+        let dot = Dot {
+            replica: ReplicaId::from(uuid::Uuid::from_bytes([2u8; 16])),
+            counter: 1,
+        };
+        state.apply_label_add(bead_id("bd-a"), label, dot, base.clone(), base.clone());
+
+        let note = Note::new(
+            note_id("note-rt"),
+            "hello".to_string(),
+            actor_id("alice"),
+            note_stamp,
+        );
+        state.insert_note(bead_id("bd-a"), base.clone(), note);
+
+        let dep_key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let dep_add = state.check_dep_add_key(dep_key).unwrap();
+        let dep_dot = Dot {
+            replica: ReplicaId::from(uuid::Uuid::from_bytes([3u8; 16])),
+            counter: 7,
+        };
+        state.apply_dep_add(dep_add, dep_dot, dep_stamp.clone());
+
+        let tombstone = Tombstone::new(bead_id("bd-tomb"), base.clone(), Some("gone".into()));
+        state.insert_tombstone(tombstone);
+
+        let snapshot = SnapshotCodec::from_state(&state);
+        let rebuilt = SnapshotCodec::into_state(snapshot.clone()).unwrap();
+        let roundtrip = SnapshotCodec::from_state(&rebuilt);
+        assert_eq!(snapshot, roundtrip);
+    }
+
+    #[test]
+    fn snapshot_codec_rejects_out_of_order_beads() {
+        let base = make_stamp(5, 0, "alice");
+        let mut state = CanonicalState::new();
+        state.insert_live(make_bead("bd-a", &base));
+        state.insert_live(make_bead("bd-b", &base));
+
+        let mut snapshot = SnapshotCodec::from_state(&state);
+        snapshot.beads.reverse();
+        let err = SnapshotCodec::validate(&snapshot).expect_err("out-of-order snapshot");
+        assert!(matches!(
+            err,
+            SnapshotCodecError::OutOfOrder {
+                section: SnapshotSection::Beads,
+                ..
+            }
+        ));
     }
 }

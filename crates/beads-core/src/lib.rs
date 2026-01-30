@@ -110,10 +110,10 @@ pub use watermark::{
     Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, Watermarks,
 };
 pub use wire_bead::{
-    BeadPatchWireV1, BeadSnapshotWireV1, NoteAppendV1, TxnDeltaError, TxnDeltaV1, TxnOpKey,
-    TxnOpV1, WireBeadFull, WireBeadPatch, WireClaimSnapshot, WireDepAddV1, WireDepEntryV1,
-    WireDepRemoveV1, WireDepStoreV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1,
-    WireLabelRemoveV1, WireLabelStateV1, WireLineageStamp, WireNoteV1, WireParentAddV1,
-    WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1, WireWorkflowSnapshot,
-    WorkflowStatus,
+    BeadPatchWireV1, BeadSnapshotWireV1, NoteAppendV1, SnapshotCodec, SnapshotCodecError,
+    SnapshotSection, SnapshotWireV1, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull,
+    WireBeadPatch, WireClaimSnapshot, WireDepAddV1, WireDepEntryV1, WireDepRemoveV1,
+    WireDepStoreV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1, WireLabelRemoveV1,
+    WireLabelStateV1, WireLineageStamp, WireNoteV1, WireParentAddV1, WireParentRemoveV1,
+    WirePatch, WireStamp, WireTombstoneV1, WireWorkflowSnapshot, WorkflowStatus,
 };
