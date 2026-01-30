@@ -14,6 +14,7 @@ use super::domain::{BeadType, Priority};
 use super::error::{CollisionError, CoreError};
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
 use super::time::{Stamp, WallClock, WriteStamp};
+use super::wire_bead::WorkflowStatus;
 
 /// Immutable creation provenance.
 ///
@@ -241,6 +242,8 @@ impl BeadView {
 #[derive(Clone, Debug)]
 pub struct BeadProjection {
     pub bead: Bead,
+    pub status: WorkflowStatus,
+    pub issue_type: BeadType,
     pub labels: Labels,
     pub notes: Vec<Note>,
     pub label_stamp: Option<Stamp>,
@@ -261,7 +264,15 @@ impl BeadProjection {
     }
 
     pub fn status(&self) -> &'static str {
-        self.bead.fields.workflow.value.status()
+        self.status.as_str()
+    }
+
+    pub fn workflow_status(&self) -> WorkflowStatus {
+        self.status
+    }
+
+    pub fn issue_type(&self) -> BeadType {
+        self.issue_type
     }
 
     pub fn note_count(&self) -> usize {
@@ -292,6 +303,8 @@ impl BeadProjection {
 impl From<&BeadView> for BeadProjection {
     fn from(view: &BeadView) -> Self {
         let bead = view.bead.clone();
+        let status = WorkflowStatus::from_workflow(&bead.fields.workflow.value);
+        let issue_type = bead.fields.bead_type.value;
         let updated_stamp = view.updated_stamp().clone();
 
         let (assignee, assignee_at, assignee_expires) = match &bead.fields.claim.value {
@@ -316,6 +329,8 @@ impl From<&BeadView> for BeadProjection {
 
         Self {
             bead,
+            status,
+            issue_type,
             labels: view.labels.clone(),
             notes: view.notes.clone(),
             label_stamp: view.label_stamp.clone(),
@@ -338,6 +353,7 @@ mod tests {
     use crate::collections::Label;
     use crate::composite::Closure;
     use crate::identity::ActorId;
+    use crate::wire_bead::WorkflowStatus;
     use crate::time::WriteStamp;
 
     fn stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
@@ -426,7 +442,8 @@ mod tests {
         let view = BeadView::new(bead, Labels::new(), Vec::new(), None);
         let projection = BeadProjection::from_view(&view);
 
-        assert_eq!(projection.status(), "closed");
+        assert_eq!(projection.status, WorkflowStatus::Closed);
+        assert_eq!(projection.issue_type, BeadType::Task);
         assert_eq!(projection.assignee.as_ref(), Some(&assignee));
         assert_eq!(projection.assignee_at, Some(claim_stamp.at.clone()));
         assert_eq!(projection.assignee_expires, Some(WallClock(9_999)));
