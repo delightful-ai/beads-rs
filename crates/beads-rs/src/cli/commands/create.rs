@@ -8,7 +8,7 @@ use super::super::{
 };
 use crate::Result;
 use crate::api::QueryResult;
-use crate::cli::parse::{parse_bead_type, parse_priority};
+use crate::cli::parsers::{parse_bead_type, parse_priority};
 use crate::core::{BeadType, Priority};
 use crate::daemon::ipc::{CreatePayload, Request, Response, ResponsePayload};
 use crate::daemon::ops::OpResult;

@@ -6,7 +6,7 @@ use super::super::{
 use super::{fmt_issue_ref, fmt_labels};
 use crate::Result;
 use crate::api::QueryResult;
-use crate::cli::parse::{parse_sort, parse_status};
+use crate::cli::parsers::{parse_sort, parse_status};
 use crate::daemon::ipc::{ListPayload, Request, ResponsePayload};
 use crate::daemon::query::Filters;
 

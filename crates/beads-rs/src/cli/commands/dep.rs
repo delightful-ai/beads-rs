@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use super::super::{Ctx, normalize_bead_id, print_ok, send, validation_error};
 use crate::Result;
-use crate::cli::parse::{parse_dep_edge, parse_dep_kind};
+use crate::cli::parsers::{parse_dep_edge, parse_dep_kind};
 use crate::core::DepKind;
 use crate::daemon::ipc::{DepPayload, EmptyPayload, IdPayload, Request};
 

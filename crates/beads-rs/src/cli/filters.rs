@@ -1,7 +1,7 @@
 use clap::Args;
 
 use crate::Result;
-use crate::cli::parse::{parse_bead_type, parse_priority, parse_time_ms_opt};
+use crate::cli::parsers::{parse_bead_type, parse_priority, parse_time_ms_opt};
 use crate::core::{ActorId, BeadType, Priority};
 use crate::daemon::query::Filters;
 

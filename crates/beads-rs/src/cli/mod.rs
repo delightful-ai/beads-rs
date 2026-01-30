@@ -29,7 +29,7 @@ pub(super) use filters::CommonFilterArgs;
 
 mod commands;
 mod filters;
-mod parse;
+mod parsers;
 
 thread_local! {
     static COMMAND_CONNECTION: RefCell<Option<IpcConnection>> = const { RefCell::new(None) };
