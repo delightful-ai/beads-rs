@@ -15,9 +15,8 @@ use crate::core::{
     WallClock, Watermarks, WorkflowStatus,
 };
 use crate::daemon::admission::AdmissionRejection;
-use crate::daemon::store_lock::StoreLockError;
 use crate::daemon::store_runtime::StoreRuntimeError;
-use crate::daemon::wal::{EventWalError, WalIndexError, WalReplayError};
+use crate::daemon::wal::EventWalError;
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
 
@@ -214,8 +213,8 @@ impl OpError {
             OpError::NotAGitRepo(_) => CliErrorCode::NotAGitRepo.into(),
             OpError::NoRemote(_) => CliErrorCode::NoRemote.into(),
             OpError::RepoNotInitialized(_) => CliErrorCode::RepoNotInitialized.into(),
-            OpError::StoreRuntime(err) => store_runtime_error_code(err.as_ref()),
-            OpError::Sync(_) => CliErrorCode::SyncFailed.into(),
+            OpError::StoreRuntime(err) => err.code(),
+            OpError::Sync(err) => err.code(),
             OpError::BeadDeleted(_) => CliErrorCode::BeadDeleted.into(),
             OpError::NoteTooLarge { .. } => ProtocolErrorCode::NoteTooLarge.into(),
             OpError::OpsTooMany { .. } => ProtocolErrorCode::OpsTooMany.into(),
@@ -239,7 +238,7 @@ impl OpError {
                 ProtocolErrorCode::CrossNamespaceDependency.into()
             }
             OpError::WalRecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
-            OpError::EventWal(err) => event_wal_error_code(err.as_ref()),
+            OpError::EventWal(err) => err.code(),
             OpError::NotClaimedByYou => CliErrorCode::NotClaimedByYou.into(),
             OpError::DepNotFound => CliErrorCode::DepNotFound.into(),
             OpError::LoadTimeout { .. } => CliErrorCode::LoadTimeout.into(),
@@ -275,7 +274,7 @@ impl OpError {
             | OpError::DepNotFound
             | OpError::NamespacePolicyViolation { .. }
             | OpError::CrossNamespaceDependency { .. } => Transience::Permanent,
-            OpError::StoreRuntime(err) => store_runtime_transience(err.as_ref()),
+            OpError::StoreRuntime(err) => err.transience(),
             OpError::DurabilityTimeout { .. } => Transience::Retryable,
             OpError::DurabilityUnavailable { .. } => Transience::Permanent,
             OpError::RequireMinSeenTimeout { .. } => Transience::Retryable,
@@ -285,7 +284,7 @@ impl OpError {
             }
             OpError::LoadTimeout { .. } => Transience::Retryable,
             OpError::Internal(_) => Transience::Retryable,
-            OpError::EventWal(err) => event_wal_transience(err.as_ref()),
+            OpError::EventWal(err) => err.transience(),
         }
     }
 
@@ -327,293 +326,6 @@ impl From<AdmissionRejection> for OpError {
             queue_bytes: rejection.queue_bytes,
             queue_events: rejection.queue_events,
         }
-    }
-}
-
-fn event_wal_error_code(err: &EventWalError) -> ErrorCode {
-    match err {
-        EventWalError::RecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
-        EventWalError::SegmentHeaderUnsupportedVersion { .. } => wal_segment_header_error_code(err),
-        EventWalError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
-        EventWalError::Io { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                CliErrorCode::IoError.into()
-            }
-        }
-        _ => ProtocolErrorCode::WalCorrupt.into(),
-    }
-}
-
-fn event_wal_transience(err: &EventWalError) -> Transience {
-    match err {
-        EventWalError::Symlink { .. } => Transience::Permanent,
-        EventWalError::Io { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                Transience::Permanent
-            } else {
-                Transience::Retryable
-            }
-        }
-        _ => Transience::Permanent,
-    }
-}
-
-fn store_runtime_error_code(err: &StoreRuntimeError) -> ErrorCode {
-    match err {
-        StoreRuntimeError::Lock(lock_err) => store_lock_error_code(lock_err),
-        StoreRuntimeError::MetaSymlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
-        StoreRuntimeError::MetaRead { source, .. }
-        | StoreRuntimeError::MetaWrite { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                ProtocolErrorCode::InternalError.into()
-            }
-        }
-        StoreRuntimeError::MetaParse { .. } => ProtocolErrorCode::Corruption.into(),
-        StoreRuntimeError::MetaMismatch { .. } => ProtocolErrorCode::WrongStore.into(),
-        StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => {
-            ProtocolErrorCode::VersionIncompatible.into()
-        }
-        StoreRuntimeError::NamespacePoliciesSymlink { .. }
-        | StoreRuntimeError::ReplicaRosterSymlink { .. } => {
-            ProtocolErrorCode::PathSymlinkRejected.into()
-        }
-        StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                CliErrorCode::ValidationFailed.into()
-            }
-        }
-        StoreRuntimeError::NamespacePoliciesParse { .. } => CliErrorCode::ValidationFailed.into(),
-        StoreRuntimeError::ReplicaRosterRead { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                CliErrorCode::ValidationFailed.into()
-            }
-        }
-        StoreRuntimeError::ReplicaRosterParse { .. } => CliErrorCode::ValidationFailed.into(),
-        StoreRuntimeError::StoreConfigSymlink { .. } => {
-            ProtocolErrorCode::PathSymlinkRejected.into()
-        }
-        StoreRuntimeError::StoreConfigRead { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                CliErrorCode::ValidationFailed.into()
-            }
-        }
-        StoreRuntimeError::StoreConfigParse { .. } => CliErrorCode::ValidationFailed.into(),
-        StoreRuntimeError::StoreConfigSerialize { .. } => ProtocolErrorCode::InternalError.into(),
-        StoreRuntimeError::StoreConfigWrite { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                ProtocolErrorCode::InternalError.into()
-            }
-        }
-        StoreRuntimeError::WalIndex(err) => wal_index_error_code(err),
-        StoreRuntimeError::WalReplay(err) => wal_replay_error_code(err),
-        StoreRuntimeError::WatermarkInvalid { .. } => ProtocolErrorCode::IndexCorrupt.into(),
-    }
-}
-
-fn store_lock_error_code(err: &StoreLockError) -> ErrorCode {
-    match err {
-        StoreLockError::Held { .. } => ProtocolErrorCode::LockHeld.into(),
-        StoreLockError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
-        StoreLockError::MetadataCorrupt { .. } => ProtocolErrorCode::Corruption.into(),
-        StoreLockError::Io { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                ProtocolErrorCode::InternalError.into()
-            }
-        }
-    }
-}
-
-fn store_runtime_transience(err: &StoreRuntimeError) -> Transience {
-    match err {
-        StoreRuntimeError::Lock(lock_err) => match lock_err {
-            StoreLockError::Held { .. } => Transience::Permanent,
-            StoreLockError::Symlink { .. } | StoreLockError::MetadataCorrupt { .. } => {
-                Transience::Permanent
-            }
-            StoreLockError::Io { source, .. } => {
-                if source.kind() == std::io::ErrorKind::PermissionDenied {
-                    Transience::Permanent
-                } else {
-                    Transience::Retryable
-                }
-            }
-        },
-        StoreRuntimeError::MetaSymlink { .. } => Transience::Permanent,
-        StoreRuntimeError::MetaParse { .. }
-        | StoreRuntimeError::MetaMismatch { .. }
-        | StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => Transience::Permanent,
-        StoreRuntimeError::MetaRead { source, .. }
-        | StoreRuntimeError::MetaWrite { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                Transience::Permanent
-            } else {
-                Transience::Retryable
-            }
-        }
-        StoreRuntimeError::NamespacePoliciesSymlink { .. }
-        | StoreRuntimeError::ReplicaRosterSymlink { .. } => Transience::Permanent,
-        StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                Transience::Permanent
-            } else {
-                Transience::Retryable
-            }
-        }
-        StoreRuntimeError::NamespacePoliciesParse { .. } => Transience::Permanent,
-        StoreRuntimeError::ReplicaRosterRead { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                Transience::Permanent
-            } else {
-                Transience::Retryable
-            }
-        }
-        StoreRuntimeError::ReplicaRosterParse { .. } => Transience::Permanent,
-        StoreRuntimeError::StoreConfigSymlink { .. }
-        | StoreRuntimeError::StoreConfigParse { .. }
-        | StoreRuntimeError::StoreConfigSerialize { .. } => Transience::Permanent,
-        StoreRuntimeError::StoreConfigRead { source, .. }
-        | StoreRuntimeError::StoreConfigWrite { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                Transience::Permanent
-            } else {
-                Transience::Retryable
-            }
-        }
-        StoreRuntimeError::WalIndex(err) => wal_index_transience(err),
-        StoreRuntimeError::WalReplay(err) => wal_replay_transience(err),
-        StoreRuntimeError::WatermarkInvalid { .. } => Transience::Permanent,
-    }
-}
-
-fn wal_index_error_code(err: &WalIndexError) -> ErrorCode {
-    match err {
-        WalIndexError::SchemaVersionMismatch { .. } => {
-            ProtocolErrorCode::IndexRebuildRequired.into()
-        }
-        WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
-        WalIndexError::ClientRequestIdReuseMismatch { .. } => {
-            ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
-        }
-        WalIndexError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
-        WalIndexError::MetaMismatch { key, .. } => match *key {
-            "store_id" => ProtocolErrorCode::WrongStore.into(),
-            "store_epoch" => ProtocolErrorCode::StoreEpochMismatch.into(),
-            _ => ProtocolErrorCode::IndexCorrupt.into(),
-        },
-        WalIndexError::MetaMissing { .. }
-        | WalIndexError::EventIdDecode(_)
-        | WalIndexError::ClientRequestEventIds(_)
-        | WalIndexError::HlcRowDecode(_)
-        | WalIndexError::SegmentRowDecode(_)
-        | WalIndexError::WatermarkRowDecode(_)
-        | WalIndexError::ReplicaLivenessRowDecode(_)
-        | WalIndexError::CborDecode(_)
-        | WalIndexError::CborEncode(_)
-        | WalIndexError::ConcurrentWrite { .. }
-        | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
-        WalIndexError::Sqlite(_) => ProtocolErrorCode::IndexCorrupt.into(),
-        WalIndexError::Io { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                CliErrorCode::IoError.into()
-            }
-        }
-    }
-}
-
-fn wal_replay_error_code(err: &WalReplayError) -> ErrorCode {
-    match err {
-        WalReplayError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
-        WalReplayError::Io { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                ProtocolErrorCode::PermissionDenied.into()
-            } else {
-                CliErrorCode::IoError.into()
-            }
-        }
-        WalReplayError::SegmentHeader { source, .. } => wal_segment_header_error_code(source),
-        WalReplayError::SegmentHeaderMismatch { .. } => {
-            ProtocolErrorCode::SegmentHeaderMismatch.into()
-        }
-        WalReplayError::RecordShaMismatch(_) | WalReplayError::RecordPayloadMismatch(_) => {
-            ProtocolErrorCode::HashMismatch.into()
-        }
-        WalReplayError::RecordDecode { .. }
-        | WalReplayError::EventBodyDecode { .. }
-        | WalReplayError::RecordHeaderMismatch { .. }
-        | WalReplayError::RecordCanonicalEncode { .. }
-        | WalReplayError::MissingHead { .. }
-        | WalReplayError::UnexpectedHead { .. }
-        | WalReplayError::SealedSegmentLenMismatch { .. }
-        | WalReplayError::MidFileCorruption { .. } => ProtocolErrorCode::WalCorrupt.into(),
-        WalReplayError::NonContiguousSeq { .. } => ProtocolErrorCode::GapDetected.into(),
-        WalReplayError::PrevShaMismatch { .. } => ProtocolErrorCode::PrevShaMismatch.into(),
-        WalReplayError::IndexOffsetInvalid { .. } | WalReplayError::OriginSeqOverflow { .. } => {
-            ProtocolErrorCode::IndexCorrupt.into()
-        }
-        WalReplayError::Index(err) => wal_index_error_code(err),
-    }
-}
-
-fn wal_segment_header_error_code(source: &EventWalError) -> ErrorCode {
-    match source {
-        EventWalError::SegmentHeaderUnsupportedVersion { .. } => {
-            ProtocolErrorCode::WalFormatUnsupported.into()
-        }
-        _ => ProtocolErrorCode::WalCorrupt.into(),
-    }
-}
-
-fn wal_index_transience(err: &WalIndexError) -> Transience {
-    match err {
-        WalIndexError::Symlink { .. } => Transience::Permanent,
-        WalIndexError::SchemaVersionMismatch { .. } => Transience::Retryable,
-        WalIndexError::Io { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                Transience::Permanent
-            } else {
-                Transience::Retryable
-            }
-        }
-        WalIndexError::MetaMismatch {
-            key: "store_id" | "store_epoch",
-            ..
-        } => Transience::Permanent,
-        WalIndexError::MetaMismatch { .. } => Transience::Retryable,
-        WalIndexError::Equivocation { .. } | WalIndexError::ClientRequestIdReuseMismatch { .. } => {
-            Transience::Permanent
-        }
-        WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
-        _ => Transience::Retryable,
-    }
-}
-
-fn wal_replay_transience(err: &WalReplayError) -> Transience {
-    match err {
-        WalReplayError::Symlink { .. } => Transience::Permanent,
-        WalReplayError::Io { source, .. } => {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                Transience::Permanent
-            } else {
-                Transience::Retryable
-            }
-        }
-        _ => Transience::Permanent,
     }
 }
 

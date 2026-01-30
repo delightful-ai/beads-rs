@@ -13,11 +13,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::error::details::WalTailTruncatedDetails;
+use crate::core::error::details as error_details;
 use crate::core::{
-    ActorId, Applied, ApplyOutcome, ContentHash, Durable, ErrorPayload, HeadStatus, Limits,
-    NamespaceId, NamespacePolicies, NamespacePolicy, ProtocolErrorCode, ReplicaId, ReplicaRoster,
-    ReplicaRosterError, SegmentId, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
-    StoreMetaVersions, StoreState, WatermarkError, Watermarks, WriteStamp,
+    ActorId, Applied, ApplyOutcome, CliErrorCode, ContentHash, Durable, ErrorCode, ErrorPayload,
+    HeadStatus, IntoErrorPayload, Limits, NamespaceId, NamespacePolicies, NamespacePolicy,
+    ProtocolErrorCode, ReplicaId, ReplicaRoster, ReplicaRosterError, SegmentId, StoreEpoch,
+    StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Transience, WatermarkError,
+    Watermarks, WriteStamp,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
@@ -619,6 +621,299 @@ pub enum StoreRuntimeError {
 impl From<WalReplayError> for StoreRuntimeError {
     fn from(err: WalReplayError) -> Self {
         StoreRuntimeError::WalReplay(Box::new(err))
+    }
+}
+
+impl StoreRuntimeError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            StoreRuntimeError::Lock(lock_err) => lock_err.code(),
+            StoreRuntimeError::MetaSymlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            StoreRuntimeError::MetaRead { source, .. }
+            | StoreRuntimeError::MetaWrite { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    ProtocolErrorCode::InternalError.into()
+                }
+            }
+            StoreRuntimeError::MetaParse { .. } => ProtocolErrorCode::Corruption.into(),
+            StoreRuntimeError::MetaMismatch { .. } => ProtocolErrorCode::WrongStore.into(),
+            StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => {
+                ProtocolErrorCode::VersionIncompatible.into()
+            }
+            StoreRuntimeError::NamespacePoliciesSymlink { .. }
+            | StoreRuntimeError::ReplicaRosterSymlink { .. } => {
+                ProtocolErrorCode::PathSymlinkRejected.into()
+            }
+            StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    CliErrorCode::ValidationFailed.into()
+                }
+            }
+            StoreRuntimeError::NamespacePoliciesParse { .. } => {
+                CliErrorCode::ValidationFailed.into()
+            }
+            StoreRuntimeError::ReplicaRosterRead { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    CliErrorCode::ValidationFailed.into()
+                }
+            }
+            StoreRuntimeError::ReplicaRosterParse { .. } => CliErrorCode::ValidationFailed.into(),
+            StoreRuntimeError::StoreConfigSymlink { .. } => {
+                ProtocolErrorCode::PathSymlinkRejected.into()
+            }
+            StoreRuntimeError::StoreConfigRead { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    CliErrorCode::ValidationFailed.into()
+                }
+            }
+            StoreRuntimeError::StoreConfigParse { .. } => CliErrorCode::ValidationFailed.into(),
+            StoreRuntimeError::StoreConfigSerialize { .. } => {
+                ProtocolErrorCode::InternalError.into()
+            }
+            StoreRuntimeError::StoreConfigWrite { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    ProtocolErrorCode::InternalError.into()
+                }
+            }
+            StoreRuntimeError::WalIndex(err) => err.code(),
+            StoreRuntimeError::WalReplay(err) => err.code(),
+            StoreRuntimeError::WatermarkInvalid { .. } => ProtocolErrorCode::IndexCorrupt.into(),
+        }
+    }
+
+    pub fn transience(&self) -> Transience {
+        match self {
+            StoreRuntimeError::Lock(lock_err) => lock_err.transience(),
+            StoreRuntimeError::MetaSymlink { .. } => Transience::Permanent,
+            StoreRuntimeError::MetaParse { .. }
+            | StoreRuntimeError::MetaMismatch { .. }
+            | StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => Transience::Permanent,
+            StoreRuntimeError::MetaRead { source, .. }
+            | StoreRuntimeError::MetaWrite { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+            StoreRuntimeError::NamespacePoliciesSymlink { .. }
+            | StoreRuntimeError::ReplicaRosterSymlink { .. } => Transience::Permanent,
+            StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+            StoreRuntimeError::NamespacePoliciesParse { .. } => Transience::Permanent,
+            StoreRuntimeError::ReplicaRosterRead { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+            StoreRuntimeError::ReplicaRosterParse { .. } => Transience::Permanent,
+            StoreRuntimeError::StoreConfigSymlink { .. }
+            | StoreRuntimeError::StoreConfigParse { .. }
+            | StoreRuntimeError::StoreConfigSerialize { .. } => Transience::Permanent,
+            StoreRuntimeError::StoreConfigRead { source, .. }
+            | StoreRuntimeError::StoreConfigWrite { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+            StoreRuntimeError::WalIndex(err) => err.transience(),
+            StoreRuntimeError::WalReplay(err) => err.transience(),
+            StoreRuntimeError::WatermarkInvalid { .. } => Transience::Permanent,
+        }
+    }
+}
+
+impl IntoErrorPayload for StoreRuntimeError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        match self {
+            StoreRuntimeError::Lock(err) => err.into_error_payload(),
+            StoreRuntimeError::MetaSymlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            StoreRuntimeError::MetaRead { path, source } => match source.kind() {
+                io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                    ProtocolErrorCode::PermissionDenied.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PermissionDeniedDetails {
+                    path: path.display().to_string(),
+                    operation: error_details::PermissionOperation::Read,
+                }),
+                _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
+            },
+            StoreRuntimeError::MetaParse { source, .. } => {
+                ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable)
+                    .with_details(error_details::CorruptionDetails {
+                        reason: source.to_string(),
+                    })
+            }
+            StoreRuntimeError::MetaMismatch { expected, got } => ErrorPayload::new(
+                ProtocolErrorCode::WrongStore.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::WrongStoreDetails {
+                expected_store_id: expected,
+                got_store_id: got,
+            }),
+            StoreRuntimeError::UnsupportedStoreMetaVersion { expected, got } => ErrorPayload::new(
+                ProtocolErrorCode::VersionIncompatible.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::StoreMetaVersionMismatchDetails { expected, got }),
+            StoreRuntimeError::MetaWrite { path, source } => match source.kind() {
+                io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                    ProtocolErrorCode::PermissionDenied.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PermissionDeniedDetails {
+                    path: path.display().to_string(),
+                    operation: error_details::PermissionOperation::Write,
+                }),
+                _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
+            },
+            StoreRuntimeError::NamespacePoliciesSymlink { path }
+            | StoreRuntimeError::ReplicaRosterSymlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            StoreRuntimeError::NamespacePoliciesRead { path, source } => match source.kind() {
+                io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                    ProtocolErrorCode::PermissionDenied.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PermissionDeniedDetails {
+                    path: path.display().to_string(),
+                    operation: error_details::PermissionOperation::Read,
+                }),
+                _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                    .with_details(error_details::ValidationFailedDetails {
+                        field: "namespaces".to_string(),
+                        reason: format!("failed to read {}: {source}", path.display()),
+                    }),
+            },
+            StoreRuntimeError::NamespacePoliciesParse { source, .. } => {
+                ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                    .with_details(error_details::ValidationFailedDetails {
+                        field: "namespaces".to_string(),
+                        reason: source.to_string(),
+                    })
+            }
+            StoreRuntimeError::ReplicaRosterRead { path, source } => match source.kind() {
+                io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                    ProtocolErrorCode::PermissionDenied.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PermissionDeniedDetails {
+                    path: path.display().to_string(),
+                    operation: error_details::PermissionOperation::Read,
+                }),
+                _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                    .with_details(error_details::ValidationFailedDetails {
+                        field: "replicas".to_string(),
+                        reason: format!("failed to read {}: {source}", path.display()),
+                    }),
+            },
+            StoreRuntimeError::ReplicaRosterParse { source, .. } => {
+                ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                    .with_details(error_details::ValidationFailedDetails {
+                        field: "replicas".to_string(),
+                        reason: source.to_string(),
+                    })
+            }
+            StoreRuntimeError::StoreConfigSymlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            StoreRuntimeError::StoreConfigRead { path, source } => match source.kind() {
+                io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                    ProtocolErrorCode::PermissionDenied.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PermissionDeniedDetails {
+                    path: path.display().to_string(),
+                    operation: error_details::PermissionOperation::Read,
+                }),
+                _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                    .with_details(error_details::ValidationFailedDetails {
+                        field: "store_config".to_string(),
+                        reason: format!("failed to read {}: {source}", path.display()),
+                    }),
+            },
+            StoreRuntimeError::StoreConfigParse { source, .. } => {
+                ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                    .with_details(error_details::ValidationFailedDetails {
+                        field: "store_config".to_string(),
+                        reason: source.to_string(),
+                    })
+            }
+            StoreRuntimeError::StoreConfigSerialize { .. } => {
+                ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable)
+            }
+            StoreRuntimeError::StoreConfigWrite { path, source } => match source.kind() {
+                io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                    ProtocolErrorCode::PermissionDenied.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PermissionDeniedDetails {
+                    path: path.display().to_string(),
+                    operation: error_details::PermissionOperation::Write,
+                }),
+                _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
+            },
+            StoreRuntimeError::WatermarkInvalid {
+                kind,
+                namespace,
+                origin,
+                source,
+            } => ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                .with_details(error_details::IndexCorruptDetails {
+                    reason: format!("{kind} watermark for {namespace} {origin}: {source}"),
+                }),
+            StoreRuntimeError::WalIndex(err) => err.into_payload_with_context(message, retryable),
+            StoreRuntimeError::WalReplay(err) => (*err).into_error_payload(),
+        }
     }
 }
 

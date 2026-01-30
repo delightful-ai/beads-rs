@@ -4,7 +4,11 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::core::{ContentHash, CoreError};
+use crate::core::error::details as error_details;
+use crate::core::{
+    CliErrorCode, ContentHash, CoreError, ErrorCode, ErrorPayload, IntoErrorPayload,
+    ProtocolErrorCode,
+};
 use crate::error::{Effect, Transience};
 
 /// Errors that can occur during git sync operations.
@@ -70,6 +74,15 @@ pub enum SyncError {
 }
 
 impl SyncError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            SyncError::Wire(WireError::ChecksumMismatch { .. }) => {
+                ProtocolErrorCode::Corruption.into()
+            }
+            _ => CliErrorCode::SyncFailed.into(),
+        }
+    }
+
     /// Whether retrying this sync may succeed.
     pub fn transience(&self) -> Transience {
         match self {
@@ -111,6 +124,26 @@ impl SyncError {
 
             // Everything else fails before committing.
             _ => Effect::None,
+        }
+    }
+}
+
+impl IntoErrorPayload for SyncError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        match self {
+            SyncError::Wire(WireError::ChecksumMismatch {
+                blob,
+                expected,
+                actual,
+            }) => ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable)
+                .with_details(error_details::StoreChecksumMismatchDetails {
+                    blob: blob.to_string(),
+                    expected_sha256: expected.to_hex(),
+                    got_sha256: actual.to_hex(),
+                }),
+            _ => ErrorPayload::new(CliErrorCode::SyncFailed.into(), message, retryable),
         }
     }
 }
