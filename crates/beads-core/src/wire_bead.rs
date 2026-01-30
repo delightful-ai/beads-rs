@@ -542,10 +542,6 @@ pub enum SnapshotCodecError {
     },
     #[error("bead {bead_id} notes contain duplicate id {note_id}")]
     BeadNoteDuplicate { bead_id: BeadId, note_id: NoteId },
-    #[error("dep entry dots out of order for key {key:?}: prev={prev:?}, next={next:?}")]
-    DepDotsOutOfOrder { key: DepKey, prev: Dot, next: Dot },
-    #[error("dep entry has duplicate dot for key {key:?}: {dot:?}")]
-    DepDotDuplicate { key: DepKey, dot: Dot },
     #[error("label orset invalid: {0}")]
     LabelOrSet(OrSetError),
     #[error("dep orset invalid: {0}")]
@@ -717,7 +713,6 @@ impl SnapshotCodec {
                 SnapshotSection::Deps,
                 line,
             )?;
-            validate_dep_dots(&entry.key, &entry.dots)?;
         }
         let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
         for entry in &store.entries {
@@ -894,32 +889,6 @@ fn bead_note_order_key(note: &WireNoteV1) -> BeadNoteOrderKey {
         at: WriteStamp::from(note.at),
         note_id: note.id.clone(),
     }
-}
-
-fn validate_dep_dots(key: &DepKey, dots: &[Dot]) -> Result<(), SnapshotCodecError> {
-    let mut prev: Option<Dot> = None;
-    for dot in dots {
-        if let Some(prev_dot) = prev {
-            match dot.cmp(&prev_dot) {
-                Ordering::Greater => {}
-                Ordering::Equal => {
-                    return Err(SnapshotCodecError::DepDotDuplicate {
-                        key: key.clone(),
-                        dot: *dot,
-                    });
-                }
-                Ordering::Less => {
-                    return Err(SnapshotCodecError::DepDotsOutOfOrder {
-                        key: key.clone(),
-                        prev: prev_dot,
-                        next: *dot,
-                    });
-                }
-            }
-        }
-        prev = Some(*dot);
-    }
-    Ok(())
 }
 
 fn notes_from_beads(beads: &[BeadSnapshotWireV1]) -> Vec<NoteAppendV1> {
