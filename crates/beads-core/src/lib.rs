@@ -95,7 +95,7 @@ pub use replica_roster::{
     ReplicaRosterError,
 };
 pub use state::{CanonicalState, DepIndexes, DepStore, LabelStore, LiveLookupError, NoteStore};
-pub use store_meta::{StoreMeta, StoreMetaVersions};
+pub use store_meta::{LEGACY_SNAPSHOT_FORMAT_VERSION, StoreMeta, StoreMetaVersions};
 pub mod store_state {
     pub use super::namespaced_state::*;
 }

@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{ReplicaId, StoreEpoch, StoreId, StoreIdentity};
 
+/// Legacy snapshot format version (pre-store metadata).
+pub const LEGACY_SNAPSHOT_FORMAT_VERSION: u32 = 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreMetaVersions {
     pub store_format_version: u32,
