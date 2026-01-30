@@ -1060,6 +1060,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_canon::to_canon_json_bytes;
     use serde::de::DeserializeOwned;
 
     fn roundtrip<T>(value: &T)
@@ -1258,5 +1259,43 @@ mod tests {
     fn segment_id_serde_roundtrip() {
         let id = SegmentId::new(Uuid::from_bytes([7u8; 16]));
         roundtrip(&id);
+    }
+
+    #[test]
+    fn state_jsonl_digest_is_stable() {
+        let digest = StateJsonlSha256::from_jsonl_bytes(b"state.jsonl\n");
+        assert_eq!(
+            digest.to_hex(),
+            "14a69ad0a1e52c12f352264102871a7f75ced4fe94dea34a3b85dc7dde437706"
+        );
+    }
+
+    #[test]
+    fn state_canonical_json_digest_is_stable() {
+        let digest = StateCanonicalJsonSha256::from_canonical_json_bytes(b"{\"state\":{}}");
+        assert_eq!(
+            digest.to_hex(),
+            "f5ff958086348e8a6780cce4a1daf3d2a4037c95bb6e0bb5bb2eda93ccc9e5a1"
+        );
+    }
+
+    #[test]
+    fn checkpoint_content_digest_is_stable() {
+        let digest =
+            CheckpointContentSha256::from_checkpoint_preimage_bytes(b"{\"checkpoint\":\"meta\"}");
+        assert_eq!(
+            digest.to_hex(),
+            "0b5009d2e29a22aee5ac1913547fd5525ff45127dd687f65d27e529397df78c2"
+        );
+    }
+
+    #[test]
+    fn canonical_state_digest_matches_canon_bytes() {
+        let state = CanonicalState::new();
+        let bytes = to_canon_json_bytes(&state).expect("canonical json bytes");
+        let via_state =
+            StateCanonicalJsonSha256::from_canonical_state(&state).expect("state digest");
+        let via_bytes = StateCanonicalJsonSha256::from_canonical_json_bytes(&bytes);
+        assert_eq!(via_state, via_bytes);
     }
 }
