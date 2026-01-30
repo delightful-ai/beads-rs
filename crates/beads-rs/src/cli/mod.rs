@@ -620,11 +620,11 @@ fn canonical_flag(flag: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::validation::{
         normalize_bead_id, normalize_bead_slug_for, normalize_optional_client_request_id,
         normalize_optional_namespace,
     };
+    use super::*;
     use crate::config::DefaultsConfig;
     use crate::core::{DurabilityClass, HeadStatus, ReplicaId, Seq0};
     use crate::daemon::OpError;

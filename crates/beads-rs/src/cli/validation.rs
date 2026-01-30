@@ -80,8 +80,5 @@ pub(crate) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
         })
     })?;
 
-    Ok(parsed
-        .iter()
-        .map(|spec| spec.to_spec_string())
-        .collect())
+    Ok(parsed.iter().map(|spec| spec.to_spec_string()).collect())
 }

@@ -133,11 +133,15 @@ impl IntoErrorPayload for EventWalError {
             EventWalError::RecordTooLarge {
                 max_bytes,
                 got_bytes,
-            } => ErrorPayload::new(ProtocolErrorCode::WalRecordTooLarge.into(), message, retryable)
-                .with_details(error_details::WalRecordTooLargeDetails {
-                    max_wal_record_bytes: max_bytes as u64,
-                    estimated_bytes: got_bytes as u64,
-                }),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::WalRecordTooLarge.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::WalRecordTooLargeDetails {
+                max_wal_record_bytes: max_bytes as u64,
+                estimated_bytes: got_bytes as u64,
+            }),
             EventWalError::Symlink { path } => ErrorPayload::new(
                 ProtocolErrorCode::PathSymlinkRejected.into(),
                 message,
@@ -146,11 +150,8 @@ impl IntoErrorPayload for EventWalError {
             .with_details(error_details::PathSymlinkRejectedDetails {
                 path: path.display().to_string(),
             }),
-            _ => ErrorPayload::new(code, message.clone(), retryable).with_details(
-                error_details::WalErrorDetails {
-                    message,
-                },
-            ),
+            _ => ErrorPayload::new(code, message.clone(), retryable)
+                .with_details(error_details::WalErrorDetails { message }),
         }
     }
 }

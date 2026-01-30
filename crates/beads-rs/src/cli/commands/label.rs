@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::{Ctx, fetch_issue, print_json, print_line, send};
 use super::super::validation::{normalize_bead_id, validation_error};
+use super::super::{Ctx, fetch_issue, print_json, print_line, send};
 use crate::Result;
 use crate::api::QueryResult;
 use crate::core::BeadId;

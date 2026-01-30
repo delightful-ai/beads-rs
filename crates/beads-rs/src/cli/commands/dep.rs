@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, print_ok, send};
 use super::super::validation::{normalize_bead_id, validation_error};
+use super::super::{Ctx, print_ok, send};
 use crate::Result;
 use crate::cli::parsers::{parse_dep_edge, parse_dep_kind};
 use crate::core::DepKind;

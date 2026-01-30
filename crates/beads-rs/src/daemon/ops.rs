@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::core::error::details::OverloadedSubsystem;
 use crate::core::error::details as error_details;
+use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     ActorId, Applied, BeadFields, BeadId, CliErrorCode, ClientRequestId, DurabilityClass,
     DurabilityReceipt, ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId, Lww, NamespaceId,
@@ -405,10 +405,13 @@ impl IntoErrorPayload for OpError {
                         path: path.display().to_string(),
                     })
             }
-            OpError::NoRemote(path) => ErrorPayload::new(CliErrorCode::NoRemote.into(), message, retryable)
-                .with_details(error_details::PathDetails {
-                    path: path.display().to_string(),
-                }),
+            OpError::NoRemote(path) => {
+                ErrorPayload::new(CliErrorCode::NoRemote.into(), message, retryable).with_details(
+                    error_details::PathDetails {
+                        path: path.display().to_string(),
+                    },
+                )
+            }
             OpError::RepoNotInitialized(path) => {
                 ErrorPayload::new(CliErrorCode::RepoNotInitialized.into(), message, retryable)
                     .with_details(error_details::PathDetails {

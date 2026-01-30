@@ -870,13 +870,13 @@ fn ensure_strictly_increasing<T: Ord + std::fmt::Debug>(
     line: u64,
     section: SnapshotSection,
 ) -> Result<(), CheckpointImportError> {
-    SnapshotCodec::ensure_strictly_increasing(prev, next, section, line as usize).map_err(
-        |err| CheckpointImportError::OutOfOrder {
+    SnapshotCodec::ensure_strictly_increasing(prev, next, section, line as usize).map_err(|err| {
+        CheckpointImportError::OutOfOrder {
             path: path.to_path_buf(),
             line,
             reason: err.to_string(),
-        },
-    )
+        }
+    })
 }
 
 fn tombstone_key_from_wire(

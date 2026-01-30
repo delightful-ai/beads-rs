@@ -476,8 +476,8 @@ mod tests {
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
-        ActorId, BeadSnapshotWireV1, CanonicalState, Dot, ReplicaDurabilityRole, ReplicaEntry, Seq0,
-        Tombstone, WireLineageStamp, WireStamp, WireTombstoneV1,
+        ActorId, BeadSnapshotWireV1, CanonicalState, Dot, ReplicaDurabilityRole, ReplicaEntry,
+        Seq0, Tombstone, WireLineageStamp, WireStamp, WireTombstoneV1,
     };
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {

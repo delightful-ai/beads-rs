@@ -22,6 +22,7 @@ pub mod git_lane;
 pub mod git_worker;
 pub(crate) mod io_budget;
 pub mod ipc;
+mod legacy_snapshot;
 pub mod metrics;
 pub mod migration;
 pub mod mutation_engine;
@@ -40,7 +41,6 @@ pub mod store_runtime;
 pub mod subscription;
 pub(crate) mod test_hooks;
 pub mod wal;
-mod wal_legacy_snapshot;
 
 pub use core::{Daemon, LoadedStore};
 

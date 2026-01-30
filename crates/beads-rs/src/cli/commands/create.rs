@@ -2,10 +2,10 @@ use std::io::{BufRead, Write};
 
 use clap::Args;
 
+use super::super::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
 use super::super::{
     Ctx, fetch_issue, print_json, print_line, print_ok, resolve_description, send, send_raw,
 };
-use super::super::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
 use crate::Result;
 use crate::api::QueryResult;
 use crate::cli::parsers::{parse_bead_type, parse_priority};

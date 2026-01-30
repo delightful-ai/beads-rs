@@ -1,8 +1,8 @@
 use clap::Args;
 use serde::Serialize;
 
-use super::super::{Ctx, print_json, print_line, send};
 use super::super::validation::normalize_bead_ids;
+use super::super::{Ctx, print_json, print_line, send};
 use crate::Result;
 use crate::daemon::ipc::{DeletePayload, Request};
 

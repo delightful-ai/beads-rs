@@ -531,9 +531,7 @@ pub enum SnapshotCodecError {
         lineage: Option<Stamp>,
         note_id: NoteId,
     },
-    #[error(
-        "bead {bead_id} notes out of order at index {index}: prev={prev}, next={next}"
-    )]
+    #[error("bead {bead_id} notes out of order at index {index}: prev={prev}, next={next}")]
     BeadNotesOutOfOrder {
         bead_id: BeadId,
         index: usize,
@@ -660,19 +658,12 @@ impl SnapshotCodec {
         Ok(())
     }
 
-    pub fn validate_tombstones(
-        tombstones: &[WireTombstoneV1],
-    ) -> Result<(), SnapshotCodecError> {
+    pub fn validate_tombstones(tombstones: &[WireTombstoneV1]) -> Result<(), SnapshotCodecError> {
         let mut prev: Option<TombstoneKey> = None;
         for (idx, tomb) in tombstones.iter().enumerate() {
             let line = idx + 1;
             let key = tombstone_key(tomb);
-            Self::ensure_strictly_increasing(
-                &mut prev,
-                key,
-                SnapshotSection::Tombstones,
-                line,
-            )?;
+            Self::ensure_strictly_increasing(&mut prev, key, SnapshotSection::Tombstones, line)?;
         }
         Ok(())
     }
@@ -683,12 +674,7 @@ impl SnapshotCodec {
         for (idx, note) in notes.iter().enumerate() {
             let line = idx + 1;
             let key = note_order_key(note);
-            Self::ensure_strictly_increasing(
-                &mut prev,
-                key.clone(),
-                SnapshotSection::Notes,
-                line,
-            )?;
+            Self::ensure_strictly_increasing(&mut prev, key.clone(), SnapshotSection::Notes, line)?;
             let lineage = note.lineage_stamp();
             let id_key = (note.bead_id.clone(), lineage.clone(), note.note.id.clone());
             if !seen.insert(id_key) {
@@ -719,8 +705,8 @@ impl SnapshotCodec {
             let dots: BTreeSet<Dot> = entry.dots.iter().copied().collect();
             map.insert(entry.key.clone(), dots);
         }
-        let _ = OrSet::try_from_parts(map, store.cc.clone())
-            .map_err(SnapshotCodecError::DepOrSet)?;
+        let _ =
+            OrSet::try_from_parts(map, store.cc.clone()).map_err(SnapshotCodecError::DepOrSet)?;
         Ok(())
     }
 
@@ -787,12 +773,9 @@ impl SnapshotCodec {
             let deleted = wire.deleted_stamp();
             let lineage = wire.lineage_stamp();
             let tombstone = match lineage {
-                Some(stamp) => Tombstone::new_collision(
-                    wire.id.clone(),
-                    deleted,
-                    stamp,
-                    wire.reason.clone(),
-                ),
+                Some(stamp) => {
+                    Tombstone::new_collision(wire.id.clone(), deleted, stamp, wire.reason.clone())
+                }
                 None => Tombstone::new(wire.id.clone(), deleted, wire.reason.clone()),
             };
             state.insert_tombstone(tombstone);
@@ -834,8 +817,8 @@ impl SnapshotCodec {
         wire: WireLabelStateV1,
         stamp: Stamp,
     ) -> Result<LabelState, SnapshotCodecError> {
-        let set = OrSet::try_from_parts(wire.entries, wire.cc)
-            .map_err(SnapshotCodecError::LabelOrSet)?;
+        let set =
+            OrSet::try_from_parts(wire.entries, wire.cc).map_err(SnapshotCodecError::LabelOrSet)?;
         Ok(LabelState::from_parts(set, Some(stamp)))
     }
 
@@ -846,9 +829,10 @@ impl SnapshotCodec {
             let dots: BTreeSet<Dot> = entry.dots.into_iter().collect();
             entries.insert(entry.key, dots);
         }
-        let set =
-            OrSet::try_from_parts(entries, wire.cc).map_err(SnapshotCodecError::DepOrSet)?;
-        let stamp = wire.stamp.map(|(at, by)| Stamp::new(WriteStamp::from(at), by));
+        let set = OrSet::try_from_parts(entries, wire.cc).map_err(SnapshotCodecError::DepOrSet)?;
+        let stamp = wire
+            .stamp
+            .map(|(at, by)| Stamp::new(WriteStamp::from(at), by));
         Ok(DepStore::from_parts(set, stamp))
     }
 

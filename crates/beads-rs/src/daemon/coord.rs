@@ -724,7 +724,10 @@ impl LoadedStore<'_> {
         })
     }
 
-    pub(crate) fn read_scope(&self, read: super::ipc::ReadConsistency) -> Result<ReadScope, OpError> {
+    pub(crate) fn read_scope(
+        &self,
+        read: super::ipc::ReadConsistency,
+    ) -> Result<ReadScope, OpError> {
         ReadScope::new(read, &self.runtime().policies)
     }
 

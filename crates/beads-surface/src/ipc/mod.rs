@@ -7,8 +7,8 @@ pub mod types;
 use beads_api::DaemonInfo;
 use beads_core::error::details as error_details;
 use beads_core::{
-    CliErrorCode, Effect, ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId,
-    ProtocolErrorCode, Transience,
+    CliErrorCode, Effect, ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId, ProtocolErrorCode,
+    Transience,
 };
 use thiserror::Error;
 

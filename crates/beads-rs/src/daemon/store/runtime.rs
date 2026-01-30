@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::error::details as error_details;
+use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
     ActorId, Applied, ApplyOutcome, CliErrorCode, ContentHash, Durable, ErrorCode, ErrorPayload,
     HeadStatus, IntoErrorPayload, Limits, NamespaceId, NamespacePolicies, NamespacePolicy,
@@ -774,15 +774,13 @@ impl IntoErrorPayload for StoreRuntimeError {
                         reason: source.to_string(),
                     })
             }
-            StoreRuntimeError::MetaMismatch { expected, got } => ErrorPayload::new(
-                ProtocolErrorCode::WrongStore.into(),
-                message,
-                retryable,
-            )
-            .with_details(error_details::WrongStoreDetails {
-                expected_store_id: expected,
-                got_store_id: got,
-            }),
+            StoreRuntimeError::MetaMismatch { expected, got } => {
+                ErrorPayload::new(ProtocolErrorCode::WrongStore.into(), message, retryable)
+                    .with_details(error_details::WrongStoreDetails {
+                        expected_store_id: expected,
+                        got_store_id: got,
+                    })
+            }
             StoreRuntimeError::UnsupportedStoreMetaVersion { expected, got } => ErrorPayload::new(
                 ProtocolErrorCode::VersionIncompatible.into(),
                 message,

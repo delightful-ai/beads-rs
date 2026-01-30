@@ -1,7 +1,7 @@
 use clap::Args;
 
-use super::super::{CommonFilterArgs, Ctx, print_line, print_ok, send};
 use super::super::validation::{normalize_bead_id_for, validation_error};
+use super::super::{CommonFilterArgs, Ctx, print_line, print_ok, send};
 use super::{fmt_issue_ref, fmt_labels};
 use crate::Result;
 use crate::api::QueryResult;

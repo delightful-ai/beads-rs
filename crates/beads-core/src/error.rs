@@ -490,7 +490,11 @@ impl IntoErrorPayload for ErrorPayload {
     }
 }
 
-fn validation_payload(message: String, field: impl Into<String>, reason: impl Into<String>) -> ErrorPayload {
+fn validation_payload(
+    message: String,
+    field: impl Into<String>,
+    reason: impl Into<String>,
+) -> ErrorPayload {
     ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, false).with_details(
         details::ValidationFailedDetails {
             field: field.into(),

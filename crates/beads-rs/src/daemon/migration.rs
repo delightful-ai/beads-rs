@@ -4,8 +4,10 @@ use git2::{ErrorCode, Oid, Repository};
 use thiserror::Error;
 
 use crate::core::{BeadSlug, StoreState, WriteStamp};
+use crate::daemon::legacy_snapshot::{
+    LegacySnapshotEntry, LegacySnapshotError, LegacySnapshotStore,
+};
 use crate::daemon::remote::RemoteUrl;
-use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError};
 use crate::git::checkpoint::store_state_from_legacy;
 use crate::git::error::SyncError;
 use crate::git::sync::read_state_at_oid;
@@ -20,7 +22,7 @@ pub struct LegacyGitImport {
 }
 
 #[derive(Debug, Clone)]
-pub struct LegacyWalImport {
+pub struct LegacySnapshotImport {
     pub state: StoreState,
     pub root_slug: Option<BeadSlug>,
     pub sequence: u64,
@@ -29,7 +31,7 @@ pub struct LegacyWalImport {
 #[derive(Debug, Error)]
 pub enum MigrationError {
     #[error(transparent)]
-    WalSnapshot(#[from] WalError),
+    LegacySnapshot(#[from] LegacySnapshotError),
     #[error(transparent)]
     Sync(#[from] SyncError),
 }
@@ -47,21 +49,21 @@ pub fn import_legacy_git_ref(repo: &Repository) -> Result<Option<LegacyGitImport
     }))
 }
 
-/// Read legacy snapshot WAL (if present) into the core namespace.
-pub fn import_legacy_snapshot_wal(
-    wal: &Wal,
+/// Read legacy snapshots (if present) into the core namespace.
+pub fn import_legacy_snapshot(
+    snapshots: &LegacySnapshotStore,
     remote: &RemoteUrl,
-) -> Result<Option<LegacyWalImport>, MigrationError> {
-    let Some(entry) = wal.read(remote)? else {
+) -> Result<Option<LegacySnapshotImport>, MigrationError> {
+    let Some(entry) = snapshots.read(remote)? else {
         return Ok(None);
     };
-    let WalEntry {
+    let LegacySnapshotEntry {
         state,
         root_slug,
         sequence,
         ..
     } = entry;
-    Ok(Some(LegacyWalImport {
+    Ok(Some(LegacySnapshotImport {
         state: store_state_from_legacy(state),
         root_slug,
         sequence,
@@ -182,30 +184,42 @@ mod tests {
     }
 
     #[test]
-    fn import_legacy_snapshot_wal_reads_core_state() {
+    fn import_legacy_snapshot_reads_core_state() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshots = LegacySnapshotStore::new(tmp.path()).unwrap();
         let remote = test_remote();
 
         let mut state = crate::core::CanonicalState::new();
-        state.insert(make_bead("bd-legacy-wal")).unwrap();
-        let entry = WalEntry::new(state, Some(BeadSlug::parse("wal-root").unwrap()), 7, 123);
-        wal.write(&remote, &entry).unwrap();
+        state.insert(make_bead("bd-legacy-snapshot")).unwrap();
+        let entry = LegacySnapshotEntry::new(
+            state,
+            Some(BeadSlug::parse("snapshot-root").unwrap()),
+            7,
+            123,
+        );
+        snapshots.write(&remote, &entry).unwrap();
 
-        let import = import_legacy_snapshot_wal(&wal, &remote)
+        let import = import_legacy_snapshot(&snapshots, &remote)
             .unwrap()
-            .expect("legacy wal import");
+            .expect("legacy snapshot import");
         let core_state = import.state.core();
         assert_eq!(core_state.live_count(), 1);
-        assert_eq!(import.root_slug, Some(BeadSlug::parse("wal-root").unwrap()));
+        assert_eq!(
+            import.root_slug,
+            Some(BeadSlug::parse("snapshot-root").unwrap())
+        );
         assert_eq!(import.sequence, 7);
     }
 
     #[test]
-    fn import_legacy_snapshot_wal_none_when_missing() {
+    fn import_legacy_snapshot_none_when_missing() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshots = LegacySnapshotStore::new(tmp.path()).unwrap();
         let remote = test_remote();
-        assert!(import_legacy_snapshot_wal(&wal, &remote).unwrap().is_none());
+        assert!(
+            import_legacy_snapshot(&snapshots, &remote)
+                .unwrap()
+                .is_none()
+        );
     }
 }
