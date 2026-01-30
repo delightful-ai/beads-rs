@@ -363,7 +363,7 @@ mod tests {
     fn namespace_set_sorts_and_dedups() {
         let alpha = NamespaceId::parse("alpha").unwrap();
         let beta = NamespaceId::parse("beta").unwrap();
-        let set = NamespaceSet::from(vec![beta.clone(), alpha.clone(), beta]);
+        let set = NamespaceSet::from(vec![beta.clone(), alpha.clone(), beta.clone()]);
         assert_eq!(set.as_slice(), &[alpha, beta]);
     }
 

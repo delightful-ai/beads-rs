@@ -561,7 +561,7 @@ mod tests {
     fn dep_spec_set_sorts_and_dedups() {
         let a = DepSpec::parse("related:bd-aaa").unwrap();
         let b = DepSpec::parse("blocks:bd-bbb").unwrap();
-        let set = DepSpecSet::from(vec![a.clone(), b.clone(), a]);
+        let set = DepSpecSet::from(vec![a.clone(), b.clone(), a.clone()]);
         assert_eq!(set.len(), 2);
         assert_eq!(set.as_slice()[0], b);
         assert_eq!(set.as_slice()[1], a);
