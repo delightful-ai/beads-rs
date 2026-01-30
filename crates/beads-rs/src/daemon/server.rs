@@ -17,7 +17,7 @@ use tracing::Span;
 
 use super::QueryResult;
 use super::broadcast::{BroadcastEvent, DropReason};
-use super::core::{Daemon, HandleOutcome, NormalizedReadConsistency, ReadGateStatus};
+use super::core::{Daemon, HandleOutcome, ReadGateStatus, ReadScope};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::executor::DurabilityWait;
 use super::git_worker::{GitOp, GitResult};
@@ -109,7 +109,7 @@ struct ReadGateWaiter {
     request: Request,
     respond: Sender<ServerReply>,
     repo: PathBuf,
-    read: NormalizedReadConsistency,
+    read: ReadScope,
     span: Span,
     started_at: Instant,
     deadline: Instant,
@@ -221,7 +221,7 @@ pub fn run_state_loop(
                                     continue;
                                 }
                             };
-                            let read = match loaded.normalize_read_consistency(read) {
+                            let read = match loaded.read_scope(read) {
                                 Ok(read) => read,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
@@ -1445,7 +1445,7 @@ mod tests {
             ctx: crate::daemon::ipc::ReadCtx::new(env.repo_path.clone(), read.clone()),
             payload: crate::daemon::ipc::EmptyPayload {},
         };
-        let normalized = loaded.normalize_read_consistency(read).unwrap();
+        let normalized = loaded.read_scope(read).unwrap();
         drop(loaded);
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let started_at = Instant::now();
@@ -1529,7 +1529,7 @@ mod tests {
             ctx: crate::daemon::ipc::ReadCtx::new(env.repo_path.clone(), read.clone()),
             payload: crate::daemon::ipc::EmptyPayload {},
         };
-        let normalized = loaded.normalize_read_consistency(read).unwrap();
+        let normalized = loaded.read_scope(read).unwrap();
         drop(loaded);
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let started_at = Instant::now() - Duration::from_millis(20);

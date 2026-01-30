@@ -46,7 +46,7 @@ impl Daemon {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match proof.normalize_read_consistency(read) {
+        let read = match proof.read_scope(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
@@ -98,7 +98,7 @@ impl Daemon {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match proof.normalize_read_consistency(read) {
+        let read = match proof.read_scope(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
@@ -143,7 +143,7 @@ impl Daemon {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match proof.normalize_read_consistency(read) {
+        let read = match proof.read_scope(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
@@ -210,7 +210,7 @@ impl Daemon {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match proof.normalize_read_consistency(read) {
+        let read = match proof.read_scope(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };
@@ -313,7 +313,7 @@ impl Daemon {
             Ok(proof) => proof,
             Err(e) => return Response::err_from(e),
         };
-        let read = match proof.normalize_read_consistency(read) {
+        let read = match proof.read_scope(read) {
             Ok(read) => read,
             Err(e) => return Response::err_from(e),
         };

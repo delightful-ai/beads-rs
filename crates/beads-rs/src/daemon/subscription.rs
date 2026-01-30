@@ -39,7 +39,7 @@ pub fn prepare_subscription(
         .ensure_repo_fresh(repo, git_tx)
         .map_err(|err| box_error(err.into_error_payload()))?;
     let read = loaded
-        .normalize_read_consistency(read)
+        .read_scope(read)
         .map_err(|err| box_error(err.into_error_payload()))?;
     loaded
         .check_read_gate(&read)

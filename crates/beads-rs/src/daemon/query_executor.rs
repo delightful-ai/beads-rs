@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crossbeam::channel::Sender;
 
-use super::core::{Daemon, NormalizedReadConsistency};
+use super::core::{Daemon, ReadScope};
 use super::git_lane::GitLaneState;
 use super::git_worker::GitOp;
 use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
@@ -24,7 +24,7 @@ use beads_api::{
 
 struct ReadCtx<'a> {
     remote: RemoteUrl,
-    read: NormalizedReadConsistency,
+    read: ReadScope,
     store: &'a StoreRuntime,
     state: &'a CanonicalState,
     repo_state: Option<&'a GitLaneState>,
@@ -53,7 +53,7 @@ impl Daemon {
         F: for<'a> FnOnce(ReadCtx<'a>) -> Result<T, OpError>,
     {
         let loaded = self.ensure_repo_fresh(repo, git_tx)?;
-        let read = loaded.normalize_read_consistency(read)?;
+        let read = loaded.read_scope(read)?;
         loaded.check_read_gate(&read)?;
         let store = loaded.runtime();
         let state = Self::namespace_state(&loaded, read.namespace());

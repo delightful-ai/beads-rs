@@ -7,13 +7,12 @@ use crossbeam::channel::Sender;
 use uuid::Uuid;
 
 use super::core::{
-    Daemon, HandleOutcome, LoadedStore, NormalizedReadConsistency, ParsedMutationMeta,
-    ReadGateStatus, detect_clock_skew, max_write_stamp,
+    Daemon, HandleOutcome, LoadedStore, ParsedMutationMeta, ReadGateStatus, ReadScope,
+    detect_clock_skew, max_write_stamp,
 };
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
-    AdminOp, ErrorPayload, MutationMeta, ReadConsistency, Request, Response, ResponseExt,
-    ResponsePayload,
+    AdminOp, ErrorPayload, MutationMeta, Request, Response, ResponseExt, ResponsePayload,
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
@@ -725,19 +724,11 @@ impl LoadedStore<'_> {
         })
     }
 
-    pub(crate) fn normalize_read_consistency(
-        &self,
-        read: ReadConsistency,
-    ) -> Result<NormalizedReadConsistency, OpError> {
-        let namespace = self.normalize_namespace(read.namespace)?;
-        Ok(NormalizedReadConsistency::new(
-            namespace,
-            read.require_min_seen,
-            read.wait_timeout_ms.unwrap_or(0),
-        ))
+    pub(crate) fn read_scope(&self, read: super::ipc::ReadConsistency) -> Result<ReadScope, OpError> {
+        ReadScope::new(read, &self.runtime().policies)
     }
 
-    pub(crate) fn check_read_gate(&self, read: &NormalizedReadConsistency) -> Result<(), OpError> {
+    pub(crate) fn check_read_gate(&self, read: &ReadScope) -> Result<(), OpError> {
         match self.read_gate_status(read)? {
             ReadGateStatus::Satisfied => Ok(()),
             ReadGateStatus::Unsatisfied {
@@ -759,10 +750,7 @@ impl LoadedStore<'_> {
         }
     }
 
-    pub(crate) fn read_gate_status(
-        &self,
-        read: &NormalizedReadConsistency,
-    ) -> Result<ReadGateStatus, OpError> {
+    pub(crate) fn read_gate_status(&self, read: &ReadScope) -> Result<ReadGateStatus, OpError> {
         let Some(required) = read.require_min_seen() else {
             return Ok(ReadGateStatus::Satisfied);
         };
@@ -780,12 +768,7 @@ impl LoadedStore<'_> {
         &self,
         raw: Option<NamespaceId>,
     ) -> Result<NamespaceId, OpError> {
-        let namespace = raw.unwrap_or_else(NamespaceId::core);
-        if self.runtime().policies.contains_key(&namespace) {
-            Ok(namespace)
-        } else {
-            Err(OpError::NamespaceUnknown { namespace })
-        }
+        ReadScope::normalize_namespace(raw, &self.runtime().policies)
     }
 
     pub(crate) fn maybe_start_sync(
