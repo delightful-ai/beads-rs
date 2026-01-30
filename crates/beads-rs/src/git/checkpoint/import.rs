@@ -267,7 +267,7 @@ pub fn import_checkpoint(
 
                     for note in notes {
                         let note = crate::core::Note::from(note);
-                        state.insert_note(bead_id.clone(), Some(lineage.clone()), note);
+                        state.insert_note(bead_id.clone(), lineage.clone(), note);
                     }
 
                     Ok(())
@@ -431,7 +431,7 @@ fn import_checkpoint_export_parsed(
 
                     for note in notes {
                         let note = crate::core::Note::from(note);
-                        state.insert_note(bead_id.clone(), Some(lineage.clone()), note);
+                        state.insert_note(bead_id.clone(), lineage.clone(), note);
                     }
 
                     Ok(())
