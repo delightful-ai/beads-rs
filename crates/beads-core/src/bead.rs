@@ -320,7 +320,7 @@ impl From<&BeadView> for BeadProjection {
             notes: view.notes.clone(),
             label_stamp: view.label_stamp.clone(),
             updated_stamp,
-            content_hash: view.content_hash().clone(),
+            content_hash: *view.content_hash(),
             assignee,
             assignee_at,
             assignee_expires,
