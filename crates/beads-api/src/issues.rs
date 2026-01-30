@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::deps::DepEdge;
 use beads_core::{
-    BeadProjection, BeadView, BranchName, Claim, NamespaceId, SegmentId,
-    Tombstone as CoreTombstone, WallClock, Workflow, WriteStamp,
+    BeadProjection, BeadView, BranchName, NamespaceId, SegmentId, Tombstone as CoreTombstone,
+    WallClock, WriteStamp,
 };
 
 // =============================================================================
