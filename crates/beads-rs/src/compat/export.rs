@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::go_schema::{GoIssue, is_bead_blocked};
-use crate::core::state::CanonicalState;
+use crate::core::{BeadProjection, state::CanonicalState};
 
 /// Context for Go-compatible exports.
 ///
@@ -119,7 +119,13 @@ pub fn export_jsonl(
         let deps: Vec<_> = state.deps_from(id);
         let is_blocked = is_bead_blocked(id, state);
         let dep_stamp = state.dep_store().stamp();
-        issues.push(GoIssue::from_view(&view, &deps, is_blocked, dep_stamp));
+        let projection = BeadProjection::from_view(&view);
+        issues.push(GoIssue::from_projection(
+            &projection,
+            &deps,
+            is_blocked,
+            dep_stamp,
+        ));
     }
 
     // Sort by ID for stable diffs

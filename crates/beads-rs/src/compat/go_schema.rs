@@ -5,14 +5,14 @@
 
 use serde::Serialize;
 
-use crate::core::BeadView;
 use crate::core::ParentEdge;
 use crate::core::Stamp;
-use crate::core::composite::{Claim, Note, Workflow};
+use crate::core::composite::{Note, Workflow};
 use crate::core::dep::DepKey;
 use crate::core::domain::DepKind;
 use crate::core::state::CanonicalState;
 use crate::core::tombstone::Tombstone;
+use crate::core::{BeadProjection, BeadView};
 
 /// Go-compatible issue representation.
 ///
@@ -101,32 +101,31 @@ impl GoIssue {
     /// Convert a Rust Bead to a Go-compatible issue.
     ///
     /// `is_blocked` should be true if the bead has unfinished blocking dependencies.
-    pub fn from_view(
-        view: &BeadView,
+    pub fn from_projection(
+        projection: &BeadProjection,
         deps: &[DepKey],
         is_blocked: bool,
         dep_stamp: Option<&Stamp>,
     ) -> Self {
-        let bead = &view.bead;
+        let bead = &projection.bead;
         let status = derive_status(&bead.fields.workflow.value, is_blocked);
 
-        let (closed_at, close_reason) = match bead.fields.workflow.value.closure() {
-            Some(closure) => (
-                Some(stamp_to_rfc3339(&bead.fields.workflow.stamp)),
-                closure.reason.clone(),
-            ),
-            None => (None, None),
-        };
+        let closed_at = projection.closed_at.as_ref().map(write_stamp_to_rfc3339);
+        let close_reason = projection.closed_reason.clone();
 
-        let assignee = match &bead.fields.claim.value {
-            Claim::Claimed { assignee, .. } => Some(assignee.as_str().to_string()),
-            Claim::Unclaimed => None,
-        };
+        let assignee = projection
+            .assignee
+            .as_ref()
+            .map(|assignee| assignee.as_str().to_string());
 
-        let labels: Vec<String> = view.labels.iter().map(|l| l.as_str().to_string()).collect();
+        let labels: Vec<String> = projection
+            .labels
+            .iter()
+            .map(|l| l.as_str().to_string())
+            .collect();
 
         // Go export requires per-dependency stamps; OR-Set deps only track a global stamp.
-        let dep_stamp = dep_stamp.unwrap_or_else(|| view.updated_stamp());
+        let dep_stamp = dep_stamp.unwrap_or(&projection.updated_stamp);
         let dependencies: Vec<GoDependency> = deps
             .iter()
             .map(|key| {
@@ -138,7 +137,7 @@ impl GoIssue {
             })
             .collect();
 
-        let comments: Vec<GoComment> = view
+        let comments: Vec<GoComment> = projection
             .notes
             .iter()
             .enumerate()
@@ -146,7 +145,7 @@ impl GoIssue {
             .collect();
 
         // Concatenate notes text for the legacy "notes" field (optional)
-        let notes_text: String = view
+        let notes_text: String = projection
             .notes
             .iter()
             .map(|n| n.content.as_str())
@@ -169,8 +168,8 @@ impl GoIssue {
             issue_type: bead.fields.bead_type.value.as_str().to_string(),
             assignee,
             estimated_minutes: bead.fields.estimated_minutes.value,
-            created_at: stamp_to_rfc3339(bead.core.created()),
-            updated_at: stamp_to_rfc3339(view.updated_stamp()),
+            created_at: write_stamp_to_rfc3339(projection.created_at()),
+            updated_at: write_stamp_to_rfc3339(projection.updated_at()),
             closed_at,
             close_reason,
             external_ref: bead.fields.external_ref.value.clone(),
@@ -181,6 +180,16 @@ impl GoIssue {
             deleted_by: None,
             delete_reason: None,
         }
+    }
+
+    pub fn from_view(
+        view: &BeadView,
+        deps: &[DepKey],
+        is_blocked: bool,
+        dep_stamp: Option<&Stamp>,
+    ) -> Self {
+        let projection = BeadProjection::from_view(view);
+        Self::from_projection(&projection, deps, is_blocked, dep_stamp)
     }
 
     /// Convert a tombstone to a Go-compatible issue with status="tombstone".
