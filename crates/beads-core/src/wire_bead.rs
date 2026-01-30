@@ -24,7 +24,7 @@ use super::state::{
 };
 use super::time::{Stamp, WallClock, WriteStamp};
 use super::tombstone::{Tombstone, TombstoneKey};
-use super::{Bead, BeadView};
+use super::{Bead, BeadProjection, BeadView};
 
 /// Wire stamp encoded as [wall_ms, counter].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -569,11 +569,12 @@ impl SnapshotCodec {
             let Some(view) = state.bead_view(id) else {
                 continue;
             };
+            let projection = BeadProjection::from_view(&view);
             let label_state = state
                 .label_store()
                 .state(id, view.bead.core.created())
                 .cloned();
-            let wire = BeadSnapshotWireV1::from_view(&view, label_state.as_ref());
+            let wire = BeadSnapshotWireV1::from_projection(&projection, label_state.as_ref());
             beads.push(wire);
         }
 
@@ -927,9 +928,9 @@ fn label_state_to_wire(state: Option<&LabelState>) -> WireLabelStateV1 {
 }
 
 impl WireBeadFull {
-    pub fn from_view(view: &BeadView, label_state: Option<&LabelState>) -> Self {
-        let bead = &view.bead;
-        let bead_stamp = view.updated_stamp().clone();
+    pub fn from_projection(projection: &BeadProjection, label_state: Option<&LabelState>) -> Self {
+        let bead = &projection.bead;
+        let bead_stamp = projection.updated_stamp.clone();
 
         let mut v_map: BTreeMap<String, WireFieldStamp> = BTreeMap::new();
         macro_rules! check_field {
@@ -949,7 +950,7 @@ impl WireBeadFull {
         check_field!(bead.fields.acceptance_criteria, "acceptance_criteria");
         check_field!(bead.fields.priority, "priority");
         check_field!(bead.fields.bead_type, "type");
-        if let Some(label_stamp) = view.label_stamp.as_ref()
+        if let Some(label_stamp) = projection.label_stamp.as_ref()
             && label_stamp != &bead_stamp
         {
             v_map.insert(
@@ -966,7 +967,7 @@ impl WireBeadFull {
         let workflow = WireWorkflowSnapshot::from_workflow(&bead.fields.workflow.value);
         let claim = WireClaimSnapshot::from_claim(&bead.fields.claim.value);
 
-        let mut notes = view.notes.clone();
+        let mut notes = projection.notes.clone();
         notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
         let notes = notes.into_iter().map(WireNoteV1::from).collect();
 
@@ -994,6 +995,11 @@ impl WireBeadFull {
             by: bead_stamp.by.clone(),
             v: if v_map.is_empty() { None } else { Some(v_map) },
         }
+    }
+
+    pub fn from_view(view: &BeadView, label_state: Option<&LabelState>) -> Self {
+        let projection = BeadProjection::from_view(view);
+        Self::from_projection(&projection, label_state)
     }
 }
 
