@@ -147,10 +147,6 @@ impl NamespaceSet {
     pub fn into_vec(self) -> Vec<NamespaceId> {
         self.0
     }
-
-    pub(crate) fn from_vec_unchecked(namespaces: Vec<NamespaceId>) -> Self {
-        Self(namespaces)
-    }
 }
 
 impl From<Vec<NamespaceId>> for NamespaceSet {
@@ -176,6 +172,24 @@ impl Deref for NamespaceSet {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a NamespaceSet {
+    type Item = &'a NamespaceId;
+    type IntoIter = std::slice::Iter<'a, NamespaceId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for NamespaceSet {
+    type Item = NamespaceId;
+    type IntoIter = std::vec::IntoIter<NamespaceId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 

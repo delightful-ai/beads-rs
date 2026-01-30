@@ -137,10 +137,6 @@ impl DepSpecSet {
     pub fn into_vec(self) -> Vec<DepSpec> {
         self.0
     }
-
-    pub(crate) fn from_vec_unchecked(specs: Vec<DepSpec>) -> Self {
-        Self(specs)
-    }
 }
 
 impl From<Vec<DepSpec>> for DepSpecSet {
