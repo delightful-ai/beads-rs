@@ -17,7 +17,6 @@ impl ResponseExt for Response {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::core::error::details as error_details;
     use crate::core::{
         BeadId, CliErrorCode, DurabilityClass, DurabilityReceipt, IntoErrorPayload, Limits,
