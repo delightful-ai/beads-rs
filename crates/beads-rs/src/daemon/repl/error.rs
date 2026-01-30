@@ -9,7 +9,7 @@ use crate::core::error::details::{
     StoreEpochMismatchDetails, SubscriberLaggedDetails, VersionIncompatibleDetails,
     WalCorruptDetails, WrongStoreDetails,
 };
-use crate::core::{ErrorCode, ErrorPayload};
+use crate::core::{ErrorCode, ErrorPayload, IntoErrorPayload};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplError {
@@ -35,6 +35,12 @@ impl ReplError {
     }
 
     pub fn to_payload(&self) -> ErrorPayload {
+        self.clone().into_error_payload()
+    }
+}
+
+impl IntoErrorPayload for ReplError {
+    fn into_error_payload(self) -> ErrorPayload {
         let payload = ErrorPayload::new(self.code.clone(), self.message.clone(), self.retryable);
         match self.details.as_deref() {
             None => payload,
@@ -108,13 +114,13 @@ pub enum ReplErrorDetails {
 mod tests {
     use super::{ReplError, ReplErrorDetails};
     use crate::core::error::details::WrongStoreDetails;
-    use crate::core::{CliErrorCode, ProtocolErrorCode, StoreId};
+    use crate::core::{CliErrorCode, IntoErrorPayload, ProtocolErrorCode, StoreId};
     use uuid::Uuid;
 
     #[test]
     fn to_payload_preserves_basic_fields() {
         let error = ReplError::new(CliErrorCode::Internal.into(), "boom", false);
-        let payload = error.to_payload();
+        let payload = error.into_error_payload();
         assert_eq!(payload.code, CliErrorCode::Internal.into());
         assert_eq!(payload.message, "boom");
         assert!(!payload.retryable);
@@ -130,7 +136,7 @@ mod tests {
                 expected_store_id: expected,
                 got_store_id: got,
             }));
-        let payload = error.to_payload();
+        let payload = error.into_error_payload();
         assert_eq!(payload.code, ProtocolErrorCode::WrongStore.into());
         let details = payload
             .details_as::<WrongStoreDetails>()

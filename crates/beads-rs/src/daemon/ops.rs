@@ -9,10 +9,11 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::core::error::details::OverloadedSubsystem;
+use crate::core::error::details as error_details;
 use crate::core::{
     ActorId, Applied, BeadFields, BeadId, CliErrorCode, ClientRequestId, DurabilityClass,
-    DurabilityReceipt, ErrorCode, InvalidId, Lww, NamespaceId, ProtocolErrorCode, ReplicaId, Stamp,
-    WallClock, Watermarks, WorkflowStatus,
+    DurabilityReceipt, ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId, Lww, NamespaceId,
+    ProtocolErrorCode, ReplicaId, Stamp, WallClock, Watermarks, WorkflowStatus,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_runtime::StoreRuntimeError;
@@ -296,6 +297,269 @@ impl OpError {
             OpError::DurabilityTimeout { .. } => Effect::Some,
             OpError::StoreRuntime(_) => Effect::None,
             _ => Effect::None,
+        }
+    }
+}
+
+impl IntoErrorPayload for OpError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        match self {
+            OpError::NotFound(id) => {
+                ErrorPayload::new(CliErrorCode::NotFound.into(), message, retryable)
+                    .with_details(error_details::NotFoundDetails { id })
+            }
+            OpError::AlreadyExists(id) => {
+                ErrorPayload::new(CliErrorCode::AlreadyExists.into(), message, retryable)
+                    .with_details(error_details::AlreadyExistsDetails { id })
+            }
+            OpError::AlreadyClaimed { by, expires } => {
+                let expires_at_ms = expires.map(|value| value.0);
+                ErrorPayload::new(CliErrorCode::AlreadyClaimed.into(), message, retryable)
+                    .with_details(error_details::AlreadyClaimedDetails { by, expires_at_ms })
+            }
+            OpError::CasMismatch { expected, actual } => {
+                ErrorPayload::new(CliErrorCode::CasMismatch.into(), message, retryable)
+                    .with_details(error_details::CasMismatchDetails { expected, actual })
+            }
+            OpError::InvalidTransition { from, to } => {
+                ErrorPayload::new(CliErrorCode::InvalidTransition.into(), message, retryable)
+                    .with_details(error_details::InvalidTransitionDetails { from, to })
+            }
+            OpError::ValidationFailed { field, reason } => {
+                ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                    .with_details(error_details::ValidationFailedDetails { field, reason })
+            }
+            OpError::InvalidRequest { field, reason } => {
+                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable)
+                    .with_details(error_details::InvalidRequestDetails {
+                        field,
+                        reason: Some(reason),
+                    })
+            }
+            OpError::InvalidId(err) => err.into_error_payload(),
+            OpError::Overloaded {
+                subsystem,
+                retry_after_ms,
+                queue_bytes,
+                queue_events,
+            } => ErrorPayload::new(ProtocolErrorCode::Overloaded.into(), message, retryable)
+                .with_details(error_details::OverloadedDetails {
+                    subsystem: Some(subsystem),
+                    retry_after_ms,
+                    queue_bytes,
+                    queue_events,
+                }),
+            OpError::RateLimited {
+                retry_after_ms,
+                limit_bytes_per_sec,
+            } => ErrorPayload::new(ProtocolErrorCode::RateLimited.into(), message, retryable)
+                .with_details(error_details::RateLimitedDetails {
+                    retry_after_ms,
+                    limit_bytes_per_sec,
+                }),
+            OpError::MaintenanceMode { reason } => ErrorPayload::new(
+                ProtocolErrorCode::MaintenanceMode.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::MaintenanceModeDetails {
+                reason,
+                until_ms: None,
+            }),
+            OpError::ClientRequestIdReuseMismatch {
+                namespace,
+                client_request_id,
+                expected_request_sha256,
+                got_request_sha256,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::ClientRequestIdReuseMismatchDetails {
+                namespace,
+                client_request_id,
+                expected_request_sha256: hex::encode(expected_request_sha256.as_ref()),
+                got_request_sha256: hex::encode(got_request_sha256.as_ref()),
+            }),
+            OpError::NotAGitRepo(path) => {
+                ErrorPayload::new(CliErrorCode::NotAGitRepo.into(), message, retryable)
+                    .with_details(error_details::PathDetails {
+                        path: path.display().to_string(),
+                    })
+            }
+            OpError::NoRemote(path) => ErrorPayload::new(CliErrorCode::NoRemote.into(), message, retryable)
+                .with_details(error_details::PathDetails {
+                    path: path.display().to_string(),
+                }),
+            OpError::RepoNotInitialized(path) => {
+                ErrorPayload::new(CliErrorCode::RepoNotInitialized.into(), message, retryable)
+                    .with_details(error_details::PathDetails {
+                        path: path.display().to_string(),
+                    })
+            }
+            OpError::StoreRuntime(err) => err.into_error_payload(),
+            OpError::Sync(err) => err.into_error_payload(),
+            OpError::BeadDeleted(id) => {
+                ErrorPayload::new(CliErrorCode::BeadDeleted.into(), message, retryable)
+                    .with_details(error_details::BeadDeletedDetails { id })
+            }
+            OpError::NoteTooLarge {
+                max_bytes,
+                got_bytes,
+            } => ErrorPayload::new(ProtocolErrorCode::NoteTooLarge.into(), message, retryable)
+                .with_details(error_details::NoteTooLargeDetails {
+                    max_note_bytes: max_bytes as u64,
+                    got_bytes: got_bytes as u64,
+                }),
+            OpError::OpsTooMany { max_ops, got_ops } => {
+                ErrorPayload::new(ProtocolErrorCode::OpsTooMany.into(), message, retryable)
+                    .with_details(error_details::OpsTooManyDetails {
+                        max_ops_per_txn: max_ops as u64,
+                        got_ops: got_ops as u64,
+                    })
+            }
+            OpError::LabelsTooMany {
+                max_labels,
+                got_labels,
+                bead_id,
+            } => ErrorPayload::new(ProtocolErrorCode::LabelsTooMany.into(), message, retryable)
+                .with_details(error_details::LabelsTooManyDetails {
+                    max_labels_per_bead: max_labels as u64,
+                    got_labels: got_labels as u64,
+                    bead_id: bead_id.as_ref().map(|id| id.as_str().to_string()),
+                }),
+            OpError::WalRecordTooLarge {
+                max_wal_record_bytes,
+                estimated_bytes,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::WalRecordTooLarge.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::WalRecordTooLargeDetails {
+                max_wal_record_bytes: max_wal_record_bytes as u64,
+                estimated_bytes: estimated_bytes as u64,
+            }),
+            OpError::DurabilityUnavailable {
+                requested,
+                eligible_total,
+                eligible_replica_ids,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::DurabilityUnavailable.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::DurabilityUnavailableDetails {
+                requested,
+                eligible_total,
+                eligible_replica_ids,
+            }),
+            OpError::DurabilityTimeout {
+                requested,
+                waited_ms,
+                pending_replica_ids,
+                receipt,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::DurabilityTimeout.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::DurabilityTimeoutDetails {
+                requested,
+                waited_ms,
+                pending_replica_ids,
+            })
+            .with_receipt(receipt),
+            OpError::RequireMinSeenTimeout {
+                waited_ms,
+                required,
+                current_applied,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::RequireMinSeenTimeout.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::RequireMinSeenTimeoutDetails {
+                waited_ms,
+                required: required.as_ref().clone(),
+                current_applied: current_applied.as_ref().clone(),
+            }),
+            OpError::RequireMinSeenUnsatisfied {
+                required,
+                current_applied,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::RequireMinSeenUnsatisfied.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::RequireMinSeenUnsatisfiedDetails {
+                required: required.as_ref().clone(),
+                current_applied: current_applied.as_ref().clone(),
+            }),
+            OpError::NamespaceInvalid { namespace, .. } => ErrorPayload::new(
+                ProtocolErrorCode::NamespaceInvalid.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::NamespaceInvalidDetails {
+                namespace,
+                pattern: "[a-z][a-z0-9_]{0,31}".to_string(),
+            }),
+            OpError::NamespaceUnknown { namespace } => ErrorPayload::new(
+                ProtocolErrorCode::NamespaceUnknown.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::NamespaceUnknownDetails { namespace }),
+            OpError::NamespacePolicyViolation {
+                namespace,
+                rule,
+                reason,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::NamespacePolicyViolation.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::NamespacePolicyViolationDetails {
+                namespace,
+                rule,
+                reason,
+            }),
+            OpError::CrossNamespaceDependency {
+                from_namespace,
+                to_namespace,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::CrossNamespaceDependency.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::CrossNamespaceDependencyDetails {
+                from_namespace,
+                to_namespace,
+            }),
+            OpError::EventWal(err) => err.into_error_payload(),
+            OpError::NotClaimedByYou => {
+                ErrorPayload::new(CliErrorCode::NotClaimedByYou.into(), message, retryable)
+            }
+            OpError::DepNotFound => {
+                ErrorPayload::new(CliErrorCode::DepNotFound.into(), message, retryable)
+            }
+            OpError::LoadTimeout {
+                repo,
+                timeout_secs,
+                remote,
+            } => ErrorPayload::new(CliErrorCode::LoadTimeout.into(), message, retryable)
+                .with_details(error_details::LoadTimeoutDetails {
+                    repo: repo.display().to_string(),
+                    timeout_secs,
+                    remote,
+                }),
+            OpError::Internal(_) => {
+                ErrorPayload::new(CliErrorCode::Internal.into(), message, retryable)
+            }
         }
     }
 }
