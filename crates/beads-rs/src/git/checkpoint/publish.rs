@@ -15,7 +15,7 @@ use super::export::{
 use super::import::{CheckpointImportError, import_checkpoint_export, merge_store_states};
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{MANIFEST_FILE, META_FILE};
-use crate::core::{ContentHash, Limits, StoreEpoch, StoreId};
+use crate::core::{CheckpointContentSha256, ContentHash, Limits, StoreEpoch, StoreId};
 use crate::git::error::SyncError;
 
 pub const STORE_META_REF: &str = "refs/beads/meta";
@@ -53,7 +53,7 @@ impl CheckpointStoreMeta {
 
 #[derive(Clone, Debug)]
 pub struct CheckpointPublishOutcome {
-    pub checkpoint_id: ContentHash,
+    pub checkpoint_id: CheckpointContentSha256,
     pub checkpoint_commit: Oid,
     pub store_meta_commit: Oid,
 }

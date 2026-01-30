@@ -834,6 +834,10 @@ impl<'de> serde::Deserialize<'de> for ContentHash {
 pub struct StateJsonlSha256(ContentHash);
 
 impl StateJsonlSha256 {
+    pub fn from_hex(s: &str) -> Result<Self, CoreError> {
+        ContentHash::from_hex(s).map(Self)
+    }
+
     pub fn from_jsonl_bytes(bytes: &[u8]) -> Self {
         Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
     }
@@ -865,6 +869,10 @@ impl fmt::Display for StateJsonlSha256 {
 pub struct StateCanonicalJsonSha256(ContentHash);
 
 impl StateCanonicalJsonSha256 {
+    pub fn from_hex(s: &str) -> Result<Self, CoreError> {
+        ContentHash::from_hex(s).map(Self)
+    }
+
     pub fn from_canonical_json_bytes(bytes: &[u8]) -> Self {
         Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
     }
@@ -901,6 +909,10 @@ impl fmt::Display for StateCanonicalJsonSha256 {
 pub struct CheckpointContentSha256(ContentHash);
 
 impl CheckpointContentSha256 {
+    pub fn from_hex(s: &str) -> Result<Self, CoreError> {
+        ContentHash::from_hex(s).map(Self)
+    }
+
     pub fn from_checkpoint_preimage_bytes(bytes: &[u8]) -> Self {
         Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
     }

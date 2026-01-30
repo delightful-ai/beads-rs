@@ -17,8 +17,9 @@ use super::meta::{CheckpointMeta, IncludedHeads, IncludedWatermarks};
 use super::types::{CheckpointShardPayload, CheckpointSnapshot};
 use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1};
 use crate::core::{
-    ContentHash, Durable, HeadStatus, NamespaceId, NamespacePolicy, NamespaceSet, ReplicaId,
-    ReplicaRoster, SnapshotCodec, StoreEpoch, StoreId, StoreState, Watermarks, sha256_bytes,
+    CheckpointContentSha256, ContentHash, Durable, HeadStatus, NamespaceId, NamespacePolicy,
+    NamespaceSet, ReplicaId, ReplicaRoster, SnapshotCodec, StoreEpoch, StoreId, StoreState,
+    Watermarks, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -237,7 +238,7 @@ pub fn export_checkpoint(
         roster_hash: snapshot.roster_hash,
         included: snapshot.included.clone(),
         included_heads: snapshot.included_heads.clone(),
-        content_hash: ContentHash::from_bytes([0u8; 32]),
+        content_hash: CheckpointContentSha256::from_checkpoint_preimage_bytes(&[0u8; 32]),
         manifest_hash,
     };
     let content_hash = meta.compute_content_hash()?;

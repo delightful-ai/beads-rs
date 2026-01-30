@@ -12,7 +12,7 @@ use thiserror::Error;
 use super::json_canon::CanonJsonError;
 use super::layout::{MANIFEST_FILE, META_FILE};
 use super::{CheckpointExport, CheckpointManifest, CheckpointMeta, CheckpointShardPayload};
-use crate::core::{ContentHash, StoreId, sha256_bytes};
+use crate::core::{CheckpointContentSha256, ContentHash, StoreId, sha256_bytes};
 use crate::paths;
 
 pub const DEFAULT_CHECKPOINT_CACHE_KEEP: usize = 3;
@@ -21,7 +21,7 @@ const TMP_DIR: &str = ".tmp";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointCacheEntry {
-    pub checkpoint_id: ContentHash,
+    pub checkpoint_id: CheckpointContentSha256,
     pub dir: PathBuf,
     pub meta: CheckpointMeta,
     pub manifest: CheckpointManifest,
@@ -121,7 +121,7 @@ impl CheckpointCache {
                 reason: "CURRENT is empty".to_string(),
             });
         }
-        let checkpoint_id = ContentHash::from_hex(current_id).map_err(|err| {
+        let checkpoint_id = CheckpointContentSha256::from_hex(current_id).map_err(|err| {
             CheckpointCacheError::InvalidEntry {
                 path: current_path,
                 reason: format!("invalid checkpoint id: {err}"),

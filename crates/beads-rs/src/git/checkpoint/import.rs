@@ -23,9 +23,9 @@ use crate::core::limits::LimitViolation;
 use crate::core::state::LabelState;
 use crate::core::wire_bead::{WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1};
 use crate::core::{
-    BeadId, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore,
-    Limits, NamespaceId, NamespaceSet, OrSet, SnapshotCodec, SnapshotSection, Stamp, StoreState,
-    Tombstone, TombstoneKey, WriteStamp, sha256_bytes,
+    BeadId, BeadSnapshotWireV1, CanonicalState, CheckpointContentSha256, ContentHash, DepKey,
+    DepStore, Dot, LabelStore, Limits, NamespaceId, NamespaceSet, OrSet, SnapshotCodec,
+    SnapshotSection, Stamp, StoreState, Tombstone, TombstoneKey, WriteStamp, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -51,8 +51,8 @@ pub enum CheckpointImportError {
     },
     #[error("checkpoint content hash mismatch (expected {expected}, got {got})")]
     ContentHashMismatch {
-        expected: ContentHash,
-        got: ContentHash,
+        expected: CheckpointContentSha256,
+        got: CheckpointContentSha256,
     },
     #[error("checkpoint store id mismatch (meta {meta}, manifest {manifest})")]
     StoreIdMismatch {
@@ -1040,8 +1040,8 @@ mod tests {
 
     use crate::core::wire_bead::{WireClaimSnapshot, WireWorkflowSnapshot};
     use crate::core::{
-        ActorId, BeadId, BeadType, CanonicalState, Dvv, NamespaceId, Priority, ReplicaId,
-        StoreEpoch, StoreId,
+        ActorId, BeadId, BeadType, CanonicalState, CheckpointContentSha256, Dvv, NamespaceId,
+        Priority, ReplicaId, StoreEpoch, StoreId,
     };
     use crate::git::checkpoint::{
         CheckpointFileKind, CheckpointShardPath, ManifestFile, shard_name,
@@ -1076,7 +1076,7 @@ mod tests {
             roster_hash: None,
             included: IncludedWatermarks::new(),
             included_heads: None,
-            content_hash: ContentHash::from_bytes([0u8; 32]),
+            content_hash: CheckpointContentSha256::from_checkpoint_preimage_bytes(&[0u8; 32]),
             manifest_hash,
         };
         (manifest, meta)
