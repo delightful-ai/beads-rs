@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use crate::core::error::details as error_details;
 use crate::core::{
-    CliErrorCode, ContentHash, CoreError, ErrorCode, ErrorPayload, IntoErrorPayload,
-    ProtocolErrorCode,
+    CliErrorCode, CoreError, ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode,
+    StateJsonlSha256,
 };
 use crate::error::{Effect, Transience};
 
@@ -166,8 +166,8 @@ pub enum WireError {
     #[error("checksum mismatch for {blob}: expected {expected}, got {actual}")]
     ChecksumMismatch {
         blob: &'static str,
-        expected: ContentHash,
-        actual: ContentHash,
+        expected: StateJsonlSha256,
+        actual: StateJsonlSha256,
     },
 }
 

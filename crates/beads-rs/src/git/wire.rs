@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use super::error::WireError;
 use crate::core::{
-    ActorId, Bead, BeadSlug, BeadSnapshotWireV1, CanonicalState, ContentHash, NoteAppendV1,
-    SnapshotCodec, SnapshotWireV1, Stamp, WireDepStoreV1, WireStamp, WireTombstoneV1, WriteStamp,
-    sha256_bytes,
+    ActorId, Bead, BeadSlug, BeadSnapshotWireV1, CanonicalState, NoteAppendV1, SnapshotCodec,
+    SnapshotWireV1, Stamp, StateJsonlSha256, WireDepStoreV1, WireStamp, WireTombstoneV1,
+    WriteStamp,
 };
 
 // =============================================================================
@@ -119,21 +119,21 @@ struct WireMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_write_stamp: Option<WireStamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    state_sha256: Option<ContentHash>,
+    state_sha256: Option<StateJsonlSha256>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tombstones_sha256: Option<ContentHash>,
+    tombstones_sha256: Option<StateJsonlSha256>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    deps_sha256: Option<ContentHash>,
+    deps_sha256: Option<StateJsonlSha256>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    notes_sha256: Option<ContentHash>,
+    notes_sha256: Option<StateJsonlSha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreChecksums {
-    pub state: ContentHash,
-    pub tombstones: ContentHash,
-    pub deps: ContentHash,
-    pub notes: Option<ContentHash>,
+    pub state: StateJsonlSha256,
+    pub tombstones: StateJsonlSha256,
+    pub deps: StateJsonlSha256,
+    pub notes: Option<StateJsonlSha256>,
 }
 
 impl StoreChecksums {
@@ -144,10 +144,10 @@ impl StoreChecksums {
         notes_bytes: Option<&[u8]>,
     ) -> Self {
         Self {
-            state: ContentHash::from_bytes(sha256_bytes(state_bytes).0),
-            tombstones: ContentHash::from_bytes(sha256_bytes(tombs_bytes).0),
-            deps: ContentHash::from_bytes(sha256_bytes(deps_bytes).0),
-            notes: notes_bytes.map(|bytes| ContentHash::from_bytes(sha256_bytes(bytes).0)),
+            state: StateJsonlSha256::from_jsonl_bytes(state_bytes),
+            tombstones: StateJsonlSha256::from_jsonl_bytes(tombs_bytes),
+            deps: StateJsonlSha256::from_jsonl_bytes(deps_bytes),
+            notes: notes_bytes.map(StateJsonlSha256::from_jsonl_bytes),
         }
     }
 }
