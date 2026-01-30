@@ -18,8 +18,8 @@ use super::identity::{
 use super::limits::{LimitViolation, Limits};
 use super::namespace::NamespaceId;
 use super::time::WallClock;
-use super::watermark::Seq1;
 use super::validated::{ValidatedActorId, ValidatedBeadId, ValidatedDepKind, ValidatedNamespaceId};
+use super::watermark::Seq1;
 use super::wire_bead::{
     NoteAppendV1, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1,
     WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WireParentAddV1,
@@ -2868,18 +2868,18 @@ fn parse_namespace(raw: &str) -> Result<NamespaceId, DecodeError> {
     ValidatedNamespaceId::parse(raw)
         .map(Into::into)
         .map_err(|e| DecodeError::InvalidField {
-        field: "namespace",
-        reason: e.to_string(),
-    })
+            field: "namespace",
+            reason: e.to_string(),
+        })
 }
 
 fn parse_actor_id(raw: &str, field: &'static str) -> Result<ActorId, DecodeError> {
     ValidatedActorId::parse(raw)
         .map(Into::into)
         .map_err(|e| DecodeError::InvalidField {
-        field,
-        reason: e.to_string(),
-    })
+            field,
+            reason: e.to_string(),
+        })
 }
 
 fn parse_branch_name(raw: &str, field: &'static str) -> Result<BranchName, DecodeError> {
@@ -2893,18 +2893,18 @@ fn parse_bead_id(raw: &str) -> Result<super::identity::BeadId, DecodeError> {
     ValidatedBeadId::parse(raw)
         .map(Into::into)
         .map_err(|e| DecodeError::InvalidField {
-        field: "bead_id",
-        reason: e.to_string(),
-    })
+            field: "bead_id",
+            reason: e.to_string(),
+        })
 }
 
 fn parse_dep_kind(raw: &str) -> Result<DepKind, DecodeError> {
     ValidatedDepKind::parse(raw)
         .map(Into::into)
         .map_err(|e| DecodeError::InvalidField {
-        field: "kind",
-        reason: e.to_string(),
-    })
+            field: "kind",
+            reason: e.to_string(),
+        })
 }
 
 fn parse_note_id(raw: &str) -> Result<super::identity::NoteId, DecodeError> {

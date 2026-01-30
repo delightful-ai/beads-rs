@@ -2128,6 +2128,22 @@ mod tests {
         assert!(set.as_slice().is_empty());
     }
 
+    #[test]
+    fn decode_namespace_list_rejects_invalid_namespace() {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(1).unwrap();
+        enc.str("core name").unwrap();
+
+        let mut dec = Decoder::new(&buf[..]);
+        let err = decode_namespace_list(&mut dec, &Limits::default(), 0).unwrap_err();
+
+        match err {
+            ProtoDecodeError::InvalidField { field, .. } => assert_eq!(field, "namespace"),
+            other => panic!("expected invalid field, got {other:?}"),
+        }
+    }
+
     fn encode_custom_ack_body(
         durable: WatermarkMap,
         durable_heads: Option<WatermarkHeads>,

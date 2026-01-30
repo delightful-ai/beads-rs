@@ -1,9 +1,7 @@
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
 
-use crate::core::{
-    BeadId, BeadType, DepKind, Priority, ValidatedBeadId, ValidatedDepKind,
-};
+use crate::core::{BeadId, BeadType, DepKind, Priority, ValidatedBeadId, ValidatedDepKind};
 use crate::daemon::query::SortField;
 use crate::{Error, Result};
 

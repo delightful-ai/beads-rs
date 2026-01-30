@@ -43,9 +43,9 @@ pub mod state;
 pub mod store_meta;
 pub mod time;
 pub mod tombstone;
+pub mod validated;
 pub mod watermark;
 pub mod wire_bead;
-pub mod validated;
 
 pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
 pub use bead::{Bead, BeadCore, BeadFields, BeadView};

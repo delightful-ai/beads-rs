@@ -340,14 +340,12 @@ pub(crate) fn validation_error(field: impl Into<String>, reason: impl Into<Strin
 }
 
 pub(super) fn normalize_bead_id_for(field: &str, id: &str) -> Result<BeadId> {
-    ValidatedBeadId::parse(id)
-        .map(Into::into)
-        .map_err(|e| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: field.into(),
-                reason: e.to_string(),
-            })
+    ValidatedBeadId::parse(id).map(Into::into).map_err(|e| {
+        Error::Op(crate::daemon::OpError::ValidationFailed {
+            field: field.into(),
+            reason: e.to_string(),
         })
+    })
 }
 
 pub(super) fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<BeadId>> {
@@ -747,6 +745,12 @@ mod tests {
     fn normalize_optional_namespace_accepts_core() {
         let ns = normalize_optional_namespace(Some("core")).expect("valid namespace");
         assert_eq!(ns.unwrap().as_str(), "core");
+    }
+
+    #[test]
+    fn normalize_optional_namespace_rejects_invalid_chars() {
+        let err = normalize_optional_namespace(Some("core name")).unwrap_err();
+        assert_validation_failed(err, "namespace");
     }
 
     #[test]
