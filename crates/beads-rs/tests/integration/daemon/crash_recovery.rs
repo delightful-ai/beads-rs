@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::fixtures::realtime::RealtimeFixture;
 use crate::fixtures::store_lock::unlock_store;
 use beads_rs::api::QueryResult;
-use beads_rs::core::{BeadType, NamespaceId, Priority, StoreId, StoreMeta};
+use beads_rs::core::{BeadId, BeadType, NamespaceId, Priority, StoreId, StoreMeta};
 use beads_rs::daemon::ipc::{
     CreatePayload, IpcClient, MutationCtx, MutationMeta, Request, Response, ResponsePayload,
 };
@@ -132,7 +132,7 @@ fn create_request(repo: &Path, id: &str, title: &str) -> Request {
     Request::Create {
         ctx: MutationCtx::new(repo.to_path_buf(), MutationMeta::default()),
         payload: CreatePayload {
-            id: Some(id.to_string()),
+            id: Some(BeadId::parse(id).expect("valid bead id")),
             parent: None,
             title: title.to_string(),
             bead_type: BeadType::Task,
@@ -217,7 +217,7 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
             ok: ResponsePayload::Op(op),
         } => op
             .receipt
-            .event_ids
+            .event_ids()
             .first()
             .expect("event id")
             .origin_seq

@@ -353,8 +353,8 @@ mod tests {
     use crate::collections::Label;
     use crate::composite::Closure;
     use crate::identity::ActorId;
-    use crate::wire_bead::WorkflowStatus;
     use crate::time::WriteStamp;
+    use crate::wire_bead::WorkflowStatus;
 
     fn stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(

@@ -1684,7 +1684,8 @@ impl Daemon {
 
         let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
-            for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied()) {
+            for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied())
+            {
                 let apply_start = Instant::now();
                 let apply_result = {
                     let state = store.state.ensure_namespace(namespace.clone());

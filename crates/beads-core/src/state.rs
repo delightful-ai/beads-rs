@@ -1770,10 +1770,7 @@ mod tests {
         let notes = merged.notes_for(&id);
         assert!(notes.iter().any(|note| note.content == "note-b"));
         assert!(!notes.iter().any(|note| note.content == "note-a"));
-        assert!(merged
-            .label_store()
-            .state(&id, &stamp_a)
-            .is_none());
+        assert!(merged.label_store().state(&id, &stamp_a).is_none());
         assert!(merged.note_store().notes_for(&id, &stamp_a).is_empty());
     }
 

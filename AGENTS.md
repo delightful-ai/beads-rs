@@ -37,6 +37,7 @@ cargo check                      # typecheck (run compulsively)
 cargo fmt --all                  # format
 cargo clippy -- -D warnings      # lint (CI treats warnings as errors)
 cargo test                       # unit tests
+cargo test --features slow-tests # slow tests (CI runs these separately)
 ```
 
 Logging: `LOG=debug` or `LOG=beads_rs=trace`, or `-v/-vv` on `bd`.

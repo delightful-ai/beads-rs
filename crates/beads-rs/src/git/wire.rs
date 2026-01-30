@@ -1757,7 +1757,6 @@ mod tests {
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
 
-
     #[test]
     fn parse_supported_meta_accepts_missing_notes_checksum_for_legacy_v1() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
