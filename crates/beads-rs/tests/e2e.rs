@@ -48,6 +48,7 @@ fn e2e_replication_converges_with_network_faults() {
 
     rig.set_network_profile_all(NetworkProfile::tailnet(), 42);
     rig.pump(10);
+    rig.assert_replication_ready(200);
 
     if let Some(net) = rig.link_network(0, 1) {
         net.delay_next(Direction::AtoB, 10);
@@ -97,6 +98,7 @@ fn e2e_replication_converges_under_tailnet_profile() {
     let mut rig = ReplicationRig::new(3, 1_700_000_000_300);
     rig.set_network_profile_all(NetworkProfile::tailnet(), 7);
     rig.pump(10);
+    rig.assert_replication_ready(300);
 
     let ids = [
         rig.node(0).create_issue("tailnet-0"),
