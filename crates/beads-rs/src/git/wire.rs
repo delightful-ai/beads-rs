@@ -540,9 +540,10 @@ mod tests {
     use super::*;
     use crate::core::{
         ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Dvv, Label,
-        LabelState, LabelStore, Lww, Note, NoteId, OrSet, ParentEdge, Priority, ReplicaId,
-        Tombstone, WireDepEntryV1, WireFieldStamp, WireNoteV1, Workflow,
+        LabelStore, Lww, Note, NoteId, OrSet, ParentEdge, Priority, ReplicaId, Tombstone,
+        WireDepEntryV1, WireFieldStamp, WireNoteV1, Workflow,
     };
+    use crate::core::state::LabelState;
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;

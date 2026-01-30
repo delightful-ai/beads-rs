@@ -41,11 +41,13 @@ mod wal_state {
     use super::*;
     use crate::core::state::{LabelState, legacy_fallback_lineage, note_collision_cmp};
     use crate::core::wire_bead::{
-        WireDepEntryV1, WireDepStoreV1, WireFieldStamp, WireLineageStamp, WireStamp,
+        SnapshotCodec, SnapshotWireV1, WireDepEntryV1, WireDepStoreV1, WireFieldStamp,
+        WireLineageStamp,
     };
     use crate::core::{Note, NoteId};
     use serde::de::Error as DeError;
     use serde::{Deserializer, Serializer};
+    use serde_json::Value;
     use std::cmp::Ordering;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -76,27 +78,6 @@ mod wal_state {
     }
 
     impl WalDepStore {
-        fn from_dep_store(store: &DepStore) -> Self {
-            let mut entries = Vec::new();
-            for key in store.values() {
-                let mut dots: Vec<Dot> = store
-                    .dots_for(key)
-                    .map(|dots| dots.iter().copied().collect())
-                    .unwrap_or_default();
-                dots.sort();
-                entries.push(WireDepEntryV1 {
-                    key: key.clone(),
-                    dots,
-                });
-            }
-            entries.sort_by(|a, b| a.key.cmp(&b.key));
-            Self(WireDepStoreV1 {
-                cc: store.cc().clone(),
-                entries,
-                stamp: store.stamp().map(wire_field_stamp_from_stamp),
-            })
-        }
-
         fn into_dep_store(self) -> DepStore {
             let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
             for entry in self.0.entries {
@@ -118,10 +99,6 @@ mod wal_state {
             let stamp = self.0.stamp.map(stamp_from_wire_field_stamp);
             DepStore::from_parts(set, stamp)
         }
-    }
-
-    fn wire_field_stamp_from_stamp(stamp: &Stamp) -> WireFieldStamp {
-        (WireStamp::from(&stamp.at), stamp.by.clone())
     }
 
     fn stamp_from_wire_field_stamp(stamp: WireFieldStamp) -> Stamp {
@@ -562,16 +539,7 @@ mod wal_state {
     where
         S: Serializer,
     {
-        let snapshot = WalStateV2 {
-            live: state.iter_live().map(|(_, bead)| bead.clone()).collect(),
-            tombstones: state
-                .iter_tombstones()
-                .map(|(_, tomb)| tomb.clone())
-                .collect(),
-            deps: WalDepStore::from_dep_store(state.dep_store()),
-            labels: WalLabelStore::from(state.label_store().clone()),
-            notes: WalNoteStore::from(state.note_store().clone()),
-        };
+        let snapshot = SnapshotCodec::from_state(state);
         snapshot.serialize(serializer)
     }
 
@@ -579,30 +547,43 @@ mod wal_state {
     where
         D: Deserializer<'de>,
     {
-        let (live, tombstones, deps, labels, notes) = match WalStateRepr::deserialize(deserializer)?
-        {
-            WalStateRepr::V2(snapshot) => (
-                snapshot.live,
-                snapshot.tombstones,
-                snapshot.deps.into_dep_store(),
-                snapshot.labels,
-                snapshot.notes,
-            ),
-            WalStateRepr::LegacyVecs(snapshot) => (
-                snapshot.live,
-                snapshot.tombstones,
-                dep_store_from_legacy(snapshot.deps.into_iter().map(|dep| dep.key)),
-                snapshot.labels,
-                snapshot.notes,
-            ),
-            WalStateRepr::LegacyMaps(snapshot) => (
-                snapshot.live.into_values().collect(),
-                snapshot.tombstones.into_values().collect(),
-                dep_store_from_legacy(snapshot.deps.into_keys()),
-                snapshot.labels,
-                snapshot.notes,
-            ),
-        };
+        let value = Value::deserialize(deserializer)?;
+        let is_object = value.is_object();
+        if !is_object {
+            return Err(DeError::custom("wal state must be a JSON object"));
+        }
+
+        let is_legacy = value.get("live").is_some();
+        if !is_legacy {
+            let snapshot: SnapshotWireV1 =
+                serde_json::from_value(value).map_err(DeError::custom)?;
+            return SnapshotCodec::into_state(snapshot).map_err(DeError::custom);
+        }
+
+        let (live, tombstones, deps, labels, notes) =
+            match serde_json::from_value::<WalStateRepr>(value).map_err(DeError::custom)? {
+                WalStateRepr::V2(snapshot) => (
+                    snapshot.live,
+                    snapshot.tombstones,
+                    snapshot.deps.into_dep_store(),
+                    snapshot.labels,
+                    snapshot.notes,
+                ),
+                WalStateRepr::LegacyVecs(snapshot) => (
+                    snapshot.live,
+                    snapshot.tombstones,
+                    dep_store_from_legacy(snapshot.deps.into_iter().map(|dep| dep.key)),
+                    snapshot.labels,
+                    snapshot.notes,
+                ),
+                WalStateRepr::LegacyMaps(snapshot) => (
+                    snapshot.live.into_values().collect(),
+                    snapshot.tombstones.into_values().collect(),
+                    dep_store_from_legacy(snapshot.deps.into_keys()),
+                    snapshot.labels,
+                    snapshot.notes,
+                ),
+            };
         let mut state = CanonicalState::new();
         for bead in live {
             state.insert(bead).map_err(DeError::custom)?;
