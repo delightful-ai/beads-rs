@@ -658,10 +658,6 @@ impl Daemon {
         loaded: &'a LoadedStore<'_>,
         namespace: &NamespaceId,
     ) -> &'a CanonicalState {
-        if namespace.is_core() {
-            return loaded.runtime().state.core();
-        }
-
         static EMPTY_STATE: OnceLock<CanonicalState> = OnceLock::new();
         loaded
             .runtime()
@@ -675,11 +671,7 @@ impl Daemon {
         namespace: NamespaceId,
     ) -> &'a mut CanonicalState {
         let store = loaded.runtime_mut();
-        if let Some(non_core) = namespace.try_non_core() {
-            store.state.ensure_namespace(non_core)
-        } else {
-            store.state.core_mut()
-        }
+        store.state.ensure_namespace(namespace)
     }
 
     pub(crate) fn store_id_for_remote(&self, remote: &RemoteUrl) -> Option<StoreId> {
@@ -1695,15 +1687,7 @@ impl Daemon {
             for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied()) {
                 let apply_start = Instant::now();
                 let apply_result = {
-                    let state = if namespace.is_core() {
-                        store.state.core_mut()
-                    } else {
-                        let non_core = namespace
-                            .clone()
-                            .try_non_core()
-                            .expect("non-core namespace");
-                        store.state.ensure_namespace(non_core)
-                    };
+                    let state = store.state.ensure_namespace(namespace.clone());
                     apply_event(state, &event.body)
                 };
                 let outcome = match apply_result {
@@ -2400,15 +2384,7 @@ pub(crate) fn replay_event_wal(
             ))
         })?;
 
-        let state_for_namespace = if namespace.is_core() {
-            state.core_mut()
-        } else {
-            let non_core = namespace
-                .clone()
-                .try_non_core()
-                .expect("non-core namespace");
-            state.ensure_namespace(non_core)
-        };
+        let state_for_namespace = state.ensure_namespace(namespace.clone());
         let mut from_seq_excl = Seq0::ZERO;
         while from_seq_excl.get() < row.applied.seq().get() {
             let items = wal_index.reader().iter_from(

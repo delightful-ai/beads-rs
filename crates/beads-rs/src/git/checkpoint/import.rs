@@ -165,15 +165,7 @@ fn state_for_namespace<'a>(
     state: &'a mut StoreState,
     namespace: &NamespaceId,
 ) -> &'a mut CanonicalState {
-    if namespace.is_core() {
-        state.core_mut()
-    } else {
-        let non_core = namespace
-            .clone()
-            .try_non_core()
-            .expect("non-core namespace");
-        state.ensure_namespace(non_core)
-    }
+    state.ensure_namespace(namespace.clone())
 }
 
 pub fn import_checkpoint(
