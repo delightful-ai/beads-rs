@@ -465,7 +465,7 @@ pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
     })?;
 
     Ok(parsed
-        .into_iter()
+        .iter()
         .map(|spec| spec.to_spec_string())
         .collect())
 }

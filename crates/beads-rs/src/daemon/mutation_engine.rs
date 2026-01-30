@@ -9,14 +9,14 @@ use super::remote::RemoteUrl;
 use crate::core::limits::LimitViolation;
 use crate::core::{
     ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
-    ClientRequestId, DepAddKey, DepKey, DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1,
-    HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge, Priority,
-    ReplicaId, Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1,
-    TxnV1, ValidatedBeadPatch, ValidatedEventBody, ValidatedEventKindV1, ValidatedMutationCommand,
-    ValidatedTxnV1, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1,
-    WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1, WirePatch, WireStamp,
-    WireTombstoneV1, WorkflowStatus, encode_event_body_canonical, sha256_bytes,
-    to_canon_json_bytes,
+    ClientRequestId, DepAddKey, DepKey, DepKind, DepSpec, DepSpecSet, Dot, EventBody, EventBytes,
+    EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge,
+    Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId,
+    TxnOpV1, TxnV1, ValidatedBeadPatch, ValidatedEventBody, ValidatedEventKindV1,
+    ValidatedMutationCommand, ValidatedTxnV1, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1,
+    WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1,
+    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
+    sha256_bytes, to_canon_json_bytes,
 };
 use crate::daemon::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
@@ -103,7 +103,7 @@ pub enum ParsedMutationRequest {
         external_ref: Option<String>,
         estimated_minutes: Option<u32>,
         labels: Labels,
-        dependencies: Vec<DepSpec>,
+        dependencies: DepSpecSet,
     },
     Update {
         id: BeadId,
@@ -666,7 +666,7 @@ impl MutationEngine {
         external_ref: Option<String>,
         estimated_minutes: Option<u32>,
         labels: Labels,
-        dependencies: Vec<DepSpec>,
+        dependencies: DepSpecSet,
     ) -> Result<PlannedDelta, OpError> {
         if id.is_some() && parent.is_some() {
             return Err(OpError::ValidationFailed {
@@ -688,9 +688,7 @@ impl MutationEngine {
 
         enforce_label_limit(&labels, &self.limits, None)?;
 
-        let mut parsed_deps = dependencies;
-        sort_dedup_dep_specs(&mut parsed_deps);
-        let canonical_deps = canonical_deps(&parsed_deps);
+        let canonical_deps = canonical_deps(&dependencies);
 
         let description = description.unwrap_or_default();
 
@@ -727,7 +725,7 @@ impl MutationEngine {
             (Some(_), Some(_)) => unreachable!("guarded above"),
         };
 
-        for spec in &parsed_deps {
+        for spec in dependencies.iter() {
             if state.get_live(spec.id()).is_none() {
                 return Err(OpError::NotFound(spec.id().clone()));
             }
@@ -740,7 +738,7 @@ impl MutationEngine {
         }
 
         let mut source_repo_value = None;
-        if let Some(spec) = parsed_deps
+        if let Some(spec) = dependencies
             .iter()
             .find(|spec| matches!(spec.kind(), DepKind::DiscoveredFrom))
             && let Some(parent_bead) = state.get_live(spec.id())
@@ -1522,7 +1520,7 @@ fn parse_labels(labels: Vec<String>) -> Result<Labels, OpError> {
     Ok(parsed)
 }
 
-fn parse_dep_specs(deps: &[String]) -> Result<Vec<DepSpec>, OpError> {
+fn parse_dep_specs(deps: &[String]) -> Result<DepSpecSet, OpError> {
     DepSpec::parse_list(deps).map_err(|e| OpError::ValidationFailed {
         field: "dependencies".into(),
         reason: e.to_string(),
@@ -1536,23 +1534,8 @@ fn canonical_labels(labels: &Labels) -> Vec<String> {
         .collect()
 }
 
-fn sort_dedup_dep_specs(specs: &mut Vec<DepSpec>) {
-    specs.sort_by(|a, b| {
-        a.kind()
-            .as_str()
-            .cmp(b.kind().as_str())
-            .then_with(|| a.id().as_str().cmp(b.id().as_str()))
-    });
-    specs.dedup_by(|a, b| a.kind() == b.kind() && a.id() == b.id());
-}
-
-fn canonical_deps(deps: &[DepSpec]) -> Vec<String> {
-    let mut parsed = deps.to_vec();
-    sort_dedup_dep_specs(&mut parsed);
-    parsed
-        .into_iter()
-        .map(|spec| spec.to_spec_string())
-        .collect()
+fn canonical_deps(deps: &DepSpecSet) -> Vec<String> {
+    deps.iter().map(|spec| spec.to_spec_string()).collect()
 }
 
 fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
