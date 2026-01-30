@@ -1456,7 +1456,7 @@ mod tests {
             external_ref: None,
             estimated_minutes: None,
             labels: Labels::new(),
-            dependencies: Vec::new(),
+            dependencies: Vec::new().into(),
         };
 
         let result = op_result_from_delta(&request, &delta).unwrap();
