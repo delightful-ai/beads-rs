@@ -38,8 +38,9 @@ use super::repl::{
     SharedSessionStore, WalRangeReader,
 };
 use super::scheduler::SyncScheduler;
-use super::store::StoreCaches;
-use super::store::discovery::ResolvedStore;
+use super::store::{ResolvedStore, StoreCaches};
+#[cfg(any(test, feature = "test-harness"))]
+use super::store::{StoreIdResolution, StoreIdSource};
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,
@@ -682,7 +683,10 @@ impl Daemon {
     }
 
     pub(crate) fn store_id_for_remote(&self, remote: &RemoteUrl) -> Option<StoreId> {
-        self.store_caches.remote_to_store_id.get(remote).copied()
+        self.store_caches
+            .remote_to_store
+            .get(remote)
+            .map(|resolution| resolution.store_id)
     }
 
     pub(crate) fn store_and_lane_by_id_mut(
@@ -738,9 +742,9 @@ impl Daemon {
     /// Returns None if not loaded.
     pub(crate) fn git_lane_state_by_url(&self, remote: &RemoteUrl) -> Option<&GitLaneState> {
         self.store_caches
-            .remote_to_store_id
+            .remote_to_store
             .get(remote)
-            .and_then(|store_id| self.git_lanes.get(store_id))
+            .and_then(|resolution| self.git_lanes.get(&resolution.store_id))
     }
 
     pub(crate) fn primary_remote_for_store(&self, store_id: &StoreId) -> Option<&RemoteUrl> {
@@ -756,7 +760,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore<'_>, OpError> {
         let resolved = self.store_caches.resolve_store(repo)?;
-        let store_id = resolved.store_id;
+        let store_id = resolved.store_id();
         let remote = resolved.remote;
         self.store_caches
             .path_to_remote
@@ -849,7 +853,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore<'_>, OpError> {
         let resolved = self.store_caches.resolve_store(repo)?;
-        let store_id = resolved.store_id;
+        let store_id = resolved.store_id();
         let remote = resolved.remote;
         self.store_caches
             .path_to_remote
@@ -2697,12 +2701,15 @@ pub(crate) fn insert_store_for_tests(
     );
     daemon
         .store_caches
-        .remote_to_store_id
-        .insert(remote.clone(), store_id);
+        .remote_to_store
+        .insert(remote.clone(), StoreIdResolution::verified(store_id, StoreIdSource::GitMeta));
     daemon
         .store_caches
-        .path_to_store_id
-        .insert(repo_path.to_owned(), store_id);
+        .path_to_store
+        .insert(
+            repo_path.to_owned(),
+            StoreIdResolution::verified(store_id, StoreIdSource::GitMeta),
+        );
     daemon
         .store_caches
         .path_to_remote
@@ -2840,8 +2847,11 @@ mod tests {
         daemon.seed_actor_clocks(&runtime).unwrap();
         daemon
             .store_caches
-            .remote_to_store_id
-            .insert(remote.clone(), store_id);
+            .remote_to_store
+            .insert(
+                remote.clone(),
+                StoreIdResolution::unverified(store_id, StoreIdSource::RemoteFallback),
+            );
         daemon.stores.insert(store_id, runtime);
         daemon.git_lanes.insert(store_id, GitLaneState::new());
         store_id

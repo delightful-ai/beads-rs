@@ -13,7 +13,7 @@ use crate::core::error::details as error_details;
 use crate::core::{
     ActorId, Applied, BeadFields, BeadId, CliErrorCode, ClientRequestId, DurabilityClass,
     DurabilityReceipt, ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId, Lww, NamespaceId,
-    ProtocolErrorCode, ReplicaId, Stamp, WallClock, Watermarks, WorkflowStatus,
+    ProtocolErrorCode, ReplicaId, Stamp, StoreId, WallClock, Watermarks, WorkflowStatus,
 };
 use crate::daemon::admission::AdmissionRejection;
 use crate::daemon::store_runtime::StoreRuntimeError;
@@ -57,6 +57,9 @@ pub enum OpError {
         field: Option<String>,
         reason: String,
     },
+
+    #[error("store id mismatch between git meta ({meta}) and git refs ({refs})")]
+    StoreIdMismatch { meta: StoreId, refs: StoreId },
 
     #[error(transparent)]
     InvalidId(#[from] InvalidId),
@@ -204,6 +207,7 @@ impl OpError {
             OpError::InvalidTransition { .. } => CliErrorCode::InvalidTransition.into(),
             OpError::ValidationFailed { .. } => CliErrorCode::ValidationFailed.into(),
             OpError::InvalidRequest { .. } => ProtocolErrorCode::InvalidRequest.into(),
+            OpError::StoreIdMismatch { .. } => ProtocolErrorCode::InvalidRequest.into(),
             OpError::InvalidId(_) => CliErrorCode::InvalidId.into(),
             OpError::Overloaded { .. } => ProtocolErrorCode::Overloaded.into(),
             OpError::RateLimited { .. } => ProtocolErrorCode::RateLimited.into(),
@@ -261,6 +265,7 @@ impl OpError {
             | OpError::InvalidTransition { .. }
             | OpError::ValidationFailed { .. }
             | OpError::InvalidRequest { .. }
+            | OpError::StoreIdMismatch { .. }
             | OpError::InvalidId(_)
             | OpError::ClientRequestIdReuseMismatch { .. }
             | OpError::NotAGitRepo(_)
@@ -336,6 +341,16 @@ impl IntoErrorPayload for OpError {
                     .with_details(error_details::InvalidRequestDetails {
                         field,
                         reason: Some(reason),
+                    })
+            }
+            OpError::StoreIdMismatch { meta, refs } => {
+                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable)
+                    .with_details(error_details::InvalidRequestDetails {
+                        field: Some("store_id".into()),
+                        reason: Some(format!(
+                            "git meta store id {} does not match git refs store id {}",
+                            meta, refs
+                        )),
                     })
             }
             OpError::InvalidId(err) => err.into_error_payload(),
