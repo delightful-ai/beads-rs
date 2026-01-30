@@ -11,6 +11,7 @@ use super::domain::DepKind;
 use super::error::{CoreError, InvalidDependency};
 use super::identity::BeadId;
 use super::orset::{OrSetValue, sealed::Sealed};
+use super::validated::{ValidatedBeadId, ValidatedDepKind};
 
 /// Parsed dependency spec from CLI/IPC input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,12 +35,12 @@ impl DepSpec {
     pub fn parse(raw: &str) -> Result<Self, CoreError> {
         let trimmed = raw.trim();
         let (kind, id_raw) = if let Some((k, id)) = trimmed.split_once(':') {
-            (DepKind::parse(k)?, id.trim())
+            (ValidatedDepKind::parse(k)?, id.trim())
         } else {
-            (DepKind::Blocks, trimmed)
+            (ValidatedDepKind::from(DepKind::Blocks), trimmed)
         };
-        let id = BeadId::parse(id_raw)?;
-        Ok(Self::new(kind, id)?)
+        let id = ValidatedBeadId::parse(id_raw)?.into_inner();
+        Ok(Self::new(kind.into_inner(), id)?)
     }
 
     /// Parse a list of dependency specs, allowing comma-separated lists.

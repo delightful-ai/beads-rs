@@ -1,7 +1,9 @@
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
 
-use crate::core::{BeadId, BeadType, DepKind, Priority};
+use crate::core::{
+    BeadId, BeadType, DepKind, Priority, ValidatedBeadId, ValidatedDepKind,
+};
 use crate::daemon::query::SortField;
 use crate::{Error, Result};
 
@@ -48,7 +50,9 @@ pub(crate) fn parse_status(raw: &str) -> std::result::Result<String, String> {
 }
 
 pub(crate) fn parse_dep_kind(raw: &str) -> std::result::Result<DepKind, String> {
-    DepKind::parse(raw).map_err(|e| e.to_string())
+    ValidatedDepKind::parse(raw)
+        .map(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn parse_sort(raw: &str) -> std::result::Result<(SortField, bool), String> {
@@ -131,9 +135,12 @@ pub(crate) fn parse_dep_edge(
         .or(kind_to)
         .unwrap_or(DepKind::Blocks);
 
-    let from =
-        BeadId::parse(&from_raw).map_err(|e| format!("invalid from id {from_raw:?}: {e}"))?;
-    let to = BeadId::parse(&to_raw).map_err(|e| format!("invalid to id {to_raw:?}: {e}"))?;
+    let from = ValidatedBeadId::parse(&from_raw)
+        .map(Into::into)
+        .map_err(|e| format!("invalid from id {from_raw:?}: {e}"))?;
+    let to = ValidatedBeadId::parse(&to_raw)
+        .map(Into::into)
+        .map_err(|e| format!("invalid to id {to_raw:?}: {e}"))?;
 
     Ok((kind, from, to))
 }

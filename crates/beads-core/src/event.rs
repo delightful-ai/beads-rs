@@ -19,6 +19,7 @@ use super::limits::{LimitViolation, Limits};
 use super::namespace::NamespaceId;
 use super::time::WallClock;
 use super::watermark::Seq1;
+use super::validated::{ValidatedActorId, ValidatedBeadId, ValidatedDepKind, ValidatedNamespaceId};
 use super::wire_bead::{
     NoteAppendV1, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1,
     WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WireParentAddV1,
@@ -2864,14 +2865,18 @@ where
 }
 
 fn parse_namespace(raw: &str) -> Result<NamespaceId, DecodeError> {
-    NamespaceId::parse(raw.to_string()).map_err(|e| DecodeError::InvalidField {
+    ValidatedNamespaceId::parse(raw)
+        .map(Into::into)
+        .map_err(|e| DecodeError::InvalidField {
         field: "namespace",
         reason: e.to_string(),
     })
 }
 
 fn parse_actor_id(raw: &str, field: &'static str) -> Result<ActorId, DecodeError> {
-    ActorId::new(raw.to_string()).map_err(|e| DecodeError::InvalidField {
+    ValidatedActorId::parse(raw)
+        .map(Into::into)
+        .map_err(|e| DecodeError::InvalidField {
         field,
         reason: e.to_string(),
     })
@@ -2885,14 +2890,18 @@ fn parse_branch_name(raw: &str, field: &'static str) -> Result<BranchName, Decod
 }
 
 fn parse_bead_id(raw: &str) -> Result<super::identity::BeadId, DecodeError> {
-    super::identity::BeadId::parse(raw).map_err(|e| DecodeError::InvalidField {
+    ValidatedBeadId::parse(raw)
+        .map(Into::into)
+        .map_err(|e| DecodeError::InvalidField {
         field: "bead_id",
         reason: e.to_string(),
     })
 }
 
 fn parse_dep_kind(raw: &str) -> Result<DepKind, DecodeError> {
-    DepKind::parse(raw).map_err(|e| DecodeError::InvalidField {
+    ValidatedDepKind::parse(raw)
+        .map(Into::into)
+        .map_err(|e| DecodeError::InvalidField {
         field: "kind",
         reason: e.to_string(),
     })

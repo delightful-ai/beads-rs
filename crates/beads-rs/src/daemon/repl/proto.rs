@@ -15,7 +15,7 @@ use crate::core::error::details::{
 use crate::core::{
     Applied, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, HeadStatus,
     Limits, NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch,
-    StoreId, VerifiedEventFrame, Watermark,
+    StoreId, ValidatedNamespaceId, VerifiedEventFrame, Watermark,
 };
 
 pub const PROTOCOL_VERSION_V1: u32 = crate::core::StoreMetaVersions::REPLICATION_PROTOCOL_VERSION;
@@ -1584,10 +1584,12 @@ fn decode_replica_id(
 }
 
 fn parse_namespace(raw: &str) -> Result<NamespaceId, ProtoDecodeError> {
-    NamespaceId::parse(raw.to_string()).map_err(|e| ProtoDecodeError::InvalidField {
-        field: "namespace",
-        reason: e.to_string(),
-    })
+    ValidatedNamespaceId::parse(raw)
+        .map(Into::into)
+        .map_err(|e| ProtoDecodeError::InvalidField {
+            field: "namespace",
+            reason: e.to_string(),
+        })
 }
 
 fn decode_sha256(

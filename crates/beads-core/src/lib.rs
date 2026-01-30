@@ -45,6 +45,7 @@ pub mod time;
 pub mod tombstone;
 pub mod watermark;
 pub mod wire_bead;
+pub mod validated;
 
 pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
 pub use bead::{Bead, BeadCore, BeadFields, BeadView};
@@ -102,6 +103,7 @@ pub mod stores {
 }
 pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};
+pub use validated::{ValidatedActorId, ValidatedBeadId, ValidatedDepKind, ValidatedNamespaceId};
 pub use watermark::{
     Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, Watermarks,
 };
