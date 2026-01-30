@@ -576,13 +576,7 @@ fn ensure_checkpoint_compatible(
         });
     }
 
-    let mut ln = l.namespaces.clone();
-    ln.sort();
-    ln.dedup();
-    let mut rn = r.namespaces.clone();
-    rn.sort();
-    rn.dedup();
-    if ln != rn {
+    if l.namespaces != r.namespaces {
         return Err(CheckpointPublishError::IncompatibleRemote {
             reason: "namespaces mismatch".to_string(),
         });
@@ -884,7 +878,7 @@ mod tests {
 
         let snapshot = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
-            namespaces: vec![namespace.clone()],
+            namespaces: vec![namespace.clone()].into(),
             store_id,
             store_epoch: StoreEpoch::new(0),
             created_at_ms,

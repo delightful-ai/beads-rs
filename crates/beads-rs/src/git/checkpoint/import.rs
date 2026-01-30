@@ -26,8 +26,8 @@ use crate::core::wire_bead::{
 };
 use crate::core::{
     BeadId, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore,
-    Limits, NamespaceId, NoteId, OrSet, Stamp, StoreState, Tombstone, TombstoneKey, WriteStamp,
-    sha256_bytes,
+    Limits, NamespaceId, NamespaceSet, NoteId, OrSet, Stamp, StoreState, Tombstone, TombstoneKey,
+    WriteStamp, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -70,13 +70,13 @@ pub enum CheckpointImportError {
     GroupMismatch { meta: String, manifest: String },
     #[error("checkpoint namespaces mismatch (meta {meta:?}, manifest {manifest:?})")]
     NamespacesMismatch {
-        meta: Vec<NamespaceId>,
-        manifest: Vec<NamespaceId>,
+        meta: NamespaceSet,
+        manifest: NamespaceSet,
     },
     #[error("checkpoint namespaces not normalized for {which}: {namespaces:?}")]
     NamespacesNotNormalized {
         which: &'static str,
-        namespaces: Vec<NamespaceId>,
+        namespaces: NamespaceSet,
     },
     #[error("checkpoint format version unsupported: {got}")]
     UnsupportedFormatVersion { got: u32 },
@@ -1071,7 +1071,7 @@ mod tests {
             checkpoint_group: "core".to_string(),
             store_id,
             store_epoch,
-            namespaces: vec![NamespaceId::core()],
+            namespaces: vec![NamespaceId::core()].into(),
             files: Default::default(),
         };
         let manifest_hash = manifest.manifest_hash().unwrap();
@@ -1080,7 +1080,7 @@ mod tests {
             store_id,
             store_epoch,
             checkpoint_group: "core".to_string(),
-            namespaces: vec![NamespaceId::core()],
+            namespaces: vec![NamespaceId::core()].into(),
             created_at_ms: 1,
             created_by_replica_id: ReplicaId::new(Uuid::from_u128(2)),
             policy_hash: ContentHash::from_bytes([3u8; 32]),
@@ -1181,9 +1181,7 @@ mod tests {
 
         let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
         let extra = NamespaceId::parse("extra").unwrap();
-        manifest.namespaces = vec![NamespaceId::core(), extra];
-        manifest.namespaces.sort();
-        manifest.namespaces.dedup();
+        manifest.namespaces = vec![NamespaceId::core(), extra].into();
         meta.manifest_hash = manifest.manifest_hash().unwrap();
         meta.content_hash = meta.compute_content_hash().unwrap();
 

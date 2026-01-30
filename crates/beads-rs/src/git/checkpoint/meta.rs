@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::CHECKPOINT_FORMAT_VERSION;
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
-use crate::core::{ContentHash, NamespaceId, ReplicaId, StoreEpoch, StoreId, sha256_bytes};
+use crate::core::{
+    ContentHash, NamespaceId, NamespaceSet, ReplicaId, StoreEpoch, StoreId, sha256_bytes,
+};
 
 pub type IncludedWatermarks = BTreeMap<NamespaceId, BTreeMap<ReplicaId, u64>>;
 pub type IncludedHeads = BTreeMap<NamespaceId, BTreeMap<ReplicaId, ContentHash>>;
@@ -58,7 +60,7 @@ pub struct CheckpointMeta {
     pub store_id: StoreId,
     pub store_epoch: StoreEpoch,
     pub checkpoint_group: String,
-    pub namespaces: Vec<NamespaceId>,
+    pub namespaces: NamespaceSet,
     pub created_at_ms: u64,
     pub created_by_replica_id: ReplicaId,
     pub policy_hash: ContentHash,
@@ -77,7 +79,7 @@ pub struct CheckpointMetaPreimage {
     pub store_id: StoreId,
     pub store_epoch: StoreEpoch,
     pub checkpoint_group: String,
-    pub namespaces: Vec<NamespaceId>,
+    pub namespaces: NamespaceSet,
     pub created_at_ms: u64,
     pub created_by_replica_id: ReplicaId,
     pub policy_hash: ContentHash,
@@ -101,15 +103,12 @@ impl CheckpointMeta {
     }
 
     pub fn preimage(&self) -> CheckpointMetaPreimage {
-        let mut namespaces = self.namespaces.clone();
-        namespaces.sort();
-        namespaces.dedup();
         CheckpointMetaPreimage {
             checkpoint_format_version: self.checkpoint_format_version,
             store_id: self.store_id,
             store_epoch: self.store_epoch,
             checkpoint_group: self.checkpoint_group.clone(),
-            namespaces,
+            namespaces: self.namespaces.clone(),
             created_at_ms: self.created_at_ms,
             created_by_replica_id: self.created_by_replica_id,
             policy_hash: self.policy_hash,
@@ -121,19 +120,13 @@ impl CheckpointMeta {
     }
 
     fn normalized(&self) -> Self {
-        let mut namespaces = self.namespaces.clone();
-        namespaces.sort();
-        namespaces.dedup();
         let mut cloned = self.clone();
-        cloned.namespaces = namespaces;
+        cloned.namespaces = NamespaceSet::from(cloned.namespaces.into_vec());
         cloned
     }
 
-    pub(crate) fn namespaces_normalized(&self) -> Vec<NamespaceId> {
-        let mut namespaces = self.namespaces.clone();
-        namespaces.sort();
-        namespaces.dedup();
-        namespaces
+    pub(crate) fn namespaces_normalized(&self) -> NamespaceSet {
+        NamespaceSet::from(self.namespaces.clone().into_vec())
     }
 }
 
@@ -157,7 +150,7 @@ mod tests {
             store_id,
             store_epoch: StoreEpoch::new(0),
             checkpoint_group: "core".to_string(),
-            namespaces: vec![NamespaceId::core()],
+            namespaces: vec![NamespaceId::core()].into(),
             created_at_ms: 1_700_000_000_000,
             created_by_replica_id: replica_id,
             policy_hash: ContentHash::from_bytes([3u8; 32]),

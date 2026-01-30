@@ -340,7 +340,7 @@ impl StoreRuntime {
         let roster_hash = self.checkpoint_roster_hash()?;
         build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: checkpoint_group.to_string(),
-            namespaces: namespaces.to_vec(),
+            namespaces: namespaces.to_vec().into(),
             store_id: self.meta.store_id(),
             store_epoch: self.meta.store_epoch(),
             created_at_ms,
@@ -364,7 +364,7 @@ impl StoreRuntime {
         let dirty_shards = self.begin_checkpoint_dirty_shards(checkpoint_group, namespaces);
         let snapshot = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: checkpoint_group.to_string(),
-            namespaces: namespaces.to_vec(),
+            namespaces: namespaces.to_vec().into(),
             store_id: self.meta.store_id(),
             store_epoch: self.meta.store_epoch(),
             created_at_ms,
