@@ -81,10 +81,9 @@ impl Daemon {
         F: for<'a> FnOnce(ReadCtx<'a>) -> Result<T, OpError>,
     {
         let loaded = self.ensure_repo_fresh(repo, git_tx)?;
-        let read = loaded.normalize_read_consistency(read)?;
+        let read = loaded.read_scope(read)?;
         let store = loaded.runtime();
-        let empty_state = CanonicalState::new();
-        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
+        let state = Self::namespace_state(&loaded, read.namespace());
         let repo_state = want_repo_state.then(|| loaded.lane());
         let remote = loaded.remote().clone();
 

@@ -1464,9 +1464,6 @@ impl CanonicalState {
 
     /// Get parent edges incoming to a bead (child -> parent).
     pub fn parent_edges_to(&self, parent: &BeadId) -> Vec<ParentEdge> {
-        if self.get_live(parent).is_none() {
-            return Vec::new();
-        }
         self.dep_indexes
             .in_edges(parent)
             .iter()
@@ -2592,6 +2589,32 @@ mod tests {
             deps.iter().map(|key| key.from().clone()).collect();
         assert!(from_ids.contains(&from1));
         assert!(from_ids.contains(&from2));
+    }
+
+    #[test]
+    fn parent_edges_to_keeps_children_visible_when_parent_tombstoned() {
+        let mut state = CanonicalState::new();
+        let stamp = make_stamp(1000, 0, "alice");
+        let child = BeadId::parse("bd-child").unwrap();
+        let parent = BeadId::parse("bd-parent").unwrap();
+        state.insert(make_bead(&child, &stamp)).unwrap();
+        state.insert(make_bead(&parent, &stamp)).unwrap();
+
+        let parent_edge = ParentEdge::new(child.clone(), parent.clone())
+            .expect("valid parent edge")
+            .to_dep_key();
+        add_dep(&mut state, parent_edge, &stamp, 1);
+
+        state.delete(Tombstone::new(
+            parent.clone(),
+            make_stamp(2000, 0, "bob"),
+            None,
+        ));
+
+        let edges = state.parent_edges_to(&parent);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].child(), &child);
+        assert_eq!(edges[0].parent(), &parent);
     }
 
     #[test]

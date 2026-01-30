@@ -74,22 +74,22 @@ impl WireBeadFullCompat {
             crate::core::WireWorkflowSnapshot::Closed { .. }
         );
         if workflow_closed {
-            let closed_at = self.closed_at.as_ref().ok_or_else(|| {
-                WireError::InvalidValue(
-                    "status=closed requires closed_at in wire format".to_string(),
-                )
-            })?;
-            let closed_by = self.closed_by.as_ref().ok_or_else(|| {
-                WireError::InvalidValue(
-                    "status=closed requires closed_by in wire format".to_string(),
-                )
-            })?;
-            let workflow_stamp = wire_field_stamp(&self.wire, "workflow");
-            let closed_stamp = Stamp::new(wire_to_stamp(*closed_at), closed_by.clone());
-            if closed_stamp != workflow_stamp {
-                return Err(WireError::InvalidValue(
-                    "closed_at/closed_by does not match workflow stamp".to_string(),
-                ));
+            match (self.closed_at.as_ref(), self.closed_by.as_ref()) {
+                (Some(closed_at), Some(closed_by)) => {
+                    let workflow_stamp = wire_field_stamp(&self.wire, "workflow");
+                    let closed_stamp = Stamp::new(wire_to_stamp(*closed_at), closed_by.clone());
+                    if closed_stamp != workflow_stamp {
+                        return Err(WireError::InvalidValue(
+                            "closed_at/closed_by does not match workflow stamp".to_string(),
+                        ));
+                    }
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(WireError::InvalidValue(
+                        "closed_at/closed_by must be provided together".to_string(),
+                    ));
+                }
             }
         } else if self.closed_at.is_some() || self.closed_by.is_some() {
             return Err(WireError::InvalidValue(
@@ -101,16 +101,13 @@ impl WireBeadFullCompat {
         let assignee_present = obj.get("assignee").is_some();
         let assignee_expires_present = obj.get("assignee_expires").is_some();
         if claim_claimed {
-            let assignee_at = self.assignee_at.as_ref().ok_or_else(|| {
-                WireError::InvalidValue(
-                    "assignee present requires assignee_at in wire format".to_string(),
-                )
-            })?;
-            let claim_stamp = wire_field_stamp(&self.wire, "claim");
-            if wire_to_stamp(*assignee_at) != claim_stamp.at {
-                return Err(WireError::InvalidValue(
-                    "assignee_at does not match claim stamp".to_string(),
-                ));
+            if let Some(assignee_at) = self.assignee_at.as_ref() {
+                let claim_stamp = wire_field_stamp(&self.wire, "claim");
+                if wire_to_stamp(*assignee_at) != claim_stamp.at {
+                    return Err(WireError::InvalidValue(
+                        "assignee_at does not match claim stamp".to_string(),
+                    ));
+                }
             }
         } else {
             if assignee_present || assignee_expires_present || self.assignee_at.is_some() {
@@ -1017,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_state_rejects_closed_without_closed_at_by() {
+    fn parse_state_accepts_legacy_closed_without_closed_at_by() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
         let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
         let bead = make_bead_with(&bead_id("bd-missing"), &stamp, workflow, Claim::default());
@@ -1032,12 +1029,13 @@ mod tests {
         obj.remove("closed_by");
         lines[0] = serde_json::to_string(&value).unwrap();
 
-        let err = parse_state(&join_jsonl(&lines)).expect_err("expected invalid closed data");
-        assert!(matches!(err, WireError::InvalidValue(_)));
+        let parsed = parse_state(&join_jsonl(&lines)).expect("legacy closed fields remain readable");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].fields.workflow.value.is_closed());
     }
 
     #[test]
-    fn parse_state_rejects_assignee_without_assignee_at() {
+    fn parse_state_accepts_legacy_assignee_without_assignee_at() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
         let claim = Claim::claimed(actor_id("bob"), None);
         let bead = make_bead_with(&bead_id("bd-claimed"), &stamp, Workflow::Open, claim);
@@ -1051,7 +1049,31 @@ mod tests {
         obj.remove("assignee_at");
         lines[0] = serde_json::to_string(&value).unwrap();
 
-        let err = parse_state(&join_jsonl(&lines)).expect_err("expected invalid claim data");
+        let parsed = parse_state(&join_jsonl(&lines)).expect("legacy claim fields remain readable");
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(
+            parsed[0].fields.claim.value,
+            Claim::Claimed { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_state_rejects_partial_closed_redundant_fields() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let bead = make_bead_with(&bead_id("bd-partial-closed"), &stamp, workflow, Claim::default());
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let mut lines = jsonl_lines(&bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.remove("closed_by");
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let err = parse_state(&join_jsonl(&lines))
+            .expect_err("partial closed_at/closed_by should remain invalid");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
 
@@ -1953,9 +1975,6 @@ mod tests {
             parse_supported_meta(&mutated).expect_err("missing required checksums should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
-        assert!(matches!(err, WireError::InvalidValue(_)));
-    }
-
     #[test]
     fn parse_supported_meta_rejects_invalid_root_slug() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));

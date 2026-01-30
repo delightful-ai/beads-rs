@@ -181,7 +181,7 @@ pub fn build_manifest_from_files(
         checkpoint_group: checkpoint_group.to_string(),
         store_id,
         store_epoch,
-        namespaces,
+        namespaces: namespaces.into(),
         files: manifest_files,
     }
 }
