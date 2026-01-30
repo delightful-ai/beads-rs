@@ -20,5 +20,12 @@ NEVER: add user-facing rendering here; return structured payloads and let `cli/`
 - `cargo test`
 - Manual smoke: `cargo run --bin bd -- status` (should auto-start daemon on Unix).
 
+## Don't copy this
+- Don't parse IDs in handlers; accept `ValidatedBeadId` etc from the request layer.
+- Don't branch on `namespace.is_core()` for state access; `StoreState` is a uniform map.
+- Don't normalize namespace/dep lists manually; use `NamespaceSet` / `DepSpecSet`.
+- Don't map errors to payloads in transport; errors implement `IntoErrorPayload` themselves.
+- Don't write snapshot serialization; use `SnapshotCodec` from core.
+
 ## Gotchas
 - IPC currently uses `std::os::unix`; Windows support will require a different transport.

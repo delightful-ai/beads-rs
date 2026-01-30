@@ -15,3 +15,5 @@ NEVER: create lossy “view” structs that silently drop information (use expli
 
 ## Don't copy this
 - Don't bypass these types by building ad-hoc JSON in the CLI or daemon.
+- Don't re-derive fields from `BeadView`; use `BeadProjection` from `beads-core::bead`.
+- Don't use `status: String` / `issue_type: String`; keep enums typed internally, serialize to string at boundary.
