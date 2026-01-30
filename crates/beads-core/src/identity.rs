@@ -9,6 +9,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::event::sha256_bytes;
+use crate::json_canon::{CanonJsonError, to_canon_json_bytes};
+use crate::state::CanonicalState;
+
 use super::error::{CoreError, InvalidId};
 use super::{NamespaceId, Seq1};
 
@@ -821,6 +825,153 @@ impl<'de> serde::Deserialize<'de> for ContentHash {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         ContentHash::from_hex(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// SHA256 of JSONL state representation (state/tombstones/deps/notes).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StateJsonlSha256(ContentHash);
+
+impl StateJsonlSha256 {
+    pub fn from_jsonl_bytes(bytes: &[u8]) -> Self {
+        Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
+    }
+
+    pub fn as_content_hash(&self) -> &ContentHash {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl fmt::Debug for StateJsonlSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StateJsonlSha256({})", self.to_hex())
+    }
+}
+
+impl fmt::Display for StateJsonlSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+/// SHA256 of canonical JSON representation of CanonicalState.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StateCanonicalJsonSha256(ContentHash);
+
+impl StateCanonicalJsonSha256 {
+    pub fn from_canonical_json_bytes(bytes: &[u8]) -> Self {
+        Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
+    }
+
+    pub fn from_canonical_state(state: &CanonicalState) -> Result<Self, CanonJsonError> {
+        let bytes = to_canon_json_bytes(state)?;
+        Ok(Self::from_canonical_json_bytes(&bytes))
+    }
+
+    pub fn as_content_hash(&self) -> &ContentHash {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl fmt::Debug for StateCanonicalJsonSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StateCanonicalJsonSha256({})", self.to_hex())
+    }
+}
+
+impl fmt::Display for StateCanonicalJsonSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+/// SHA256 of checkpoint meta preimage canonical JSON.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CheckpointContentSha256(ContentHash);
+
+impl CheckpointContentSha256 {
+    pub fn from_checkpoint_preimage_bytes(bytes: &[u8]) -> Self {
+        Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
+    }
+
+    pub fn as_content_hash(&self) -> &ContentHash {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl fmt::Debug for CheckpointContentSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CheckpointContentSha256({})", self.to_hex())
+    }
+}
+
+impl fmt::Display for CheckpointContentSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StateDigest {
+    JsonlSha256(StateJsonlSha256),
+    CanonicalJsonSha256(StateCanonicalJsonSha256),
+    CheckpointContentSha256(CheckpointContentSha256),
+}
+
+impl StateDigest {
+    pub fn jsonl_sha256(bytes: &[u8]) -> Self {
+        StateDigest::JsonlSha256(StateJsonlSha256::from_jsonl_bytes(bytes))
+    }
+
+    pub fn canonical_json_sha256(bytes: &[u8]) -> Self {
+        StateDigest::CanonicalJsonSha256(StateCanonicalJsonSha256::from_canonical_json_bytes(bytes))
+    }
+
+    pub fn checkpoint_content_sha256(bytes: &[u8]) -> Self {
+        StateDigest::CheckpointContentSha256(CheckpointContentSha256::from_checkpoint_preimage_bytes(
+            bytes,
+        ))
+    }
+
+    pub fn to_hex(&self) -> String {
+        match self {
+            StateDigest::JsonlSha256(digest) => digest.to_hex(),
+            StateDigest::CanonicalJsonSha256(digest) => digest.to_hex(),
+            StateDigest::CheckpointContentSha256(digest) => digest.to_hex(),
+        }
+    }
+}
+
+impl From<StateJsonlSha256> for StateDigest {
+    fn from(digest: StateJsonlSha256) -> Self {
+        StateDigest::JsonlSha256(digest)
+    }
+}
+
+impl From<StateCanonicalJsonSha256> for StateDigest {
+    fn from(digest: StateCanonicalJsonSha256) -> Self {
+        StateDigest::CanonicalJsonSha256(digest)
+    }
+}
+
+impl From<CheckpointContentSha256> for StateDigest {
+    fn from(digest: CheckpointContentSha256) -> Self {
+        StateDigest::CheckpointContentSha256(digest)
     }
 }
 

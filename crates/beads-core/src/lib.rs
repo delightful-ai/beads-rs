@@ -76,8 +76,9 @@ pub use event::{
     sha256_bytes, verify_event_frame,
 };
 pub use identity::{
-    ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, EventId, NoteId,
-    ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
+    ActorId, BeadId, BeadSlug, BranchName, CheckpointContentSha256, ClientRequestId, ContentHash,
+    EventId, NoteId, ReplicaId, SegmentId, StateCanonicalJsonSha256, StateDigest, StateJsonlSha256,
+    StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
 };
 pub use json_canon::{CanonJsonError, to_canon_json_bytes};
 pub use limits::Limits;
