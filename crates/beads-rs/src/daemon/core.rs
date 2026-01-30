@@ -27,7 +27,7 @@ use super::git_lane::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, GitLaneState,
 };
 use super::git_worker::{GitOp, LoadResult};
-use super::ipc::Response;
+use super::ipc::{ReadConsistency, Response};
 use super::metrics;
 use super::ops::OpError;
 use super::remote::RemoteUrl;
@@ -201,22 +201,34 @@ pub(crate) struct ParsedMutationMeta {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct NormalizedReadConsistency {
+pub(crate) struct ReadScope {
     namespace: NamespaceId,
     require_min_seen: Option<Watermarks<Applied>>,
     wait_timeout_ms: u64,
 }
 
-impl NormalizedReadConsistency {
+impl ReadScope {
     pub(crate) fn new(
-        namespace: NamespaceId,
-        require_min_seen: Option<Watermarks<Applied>>,
-        wait_timeout_ms: u64,
-    ) -> Self {
-        Self {
+        read: ReadConsistency,
+        policies: &BTreeMap<NamespaceId, NamespacePolicy>,
+    ) -> Result<Self, OpError> {
+        let namespace = Self::normalize_namespace(read.namespace, policies)?;
+        Ok(Self {
             namespace,
-            require_min_seen,
-            wait_timeout_ms,
+            require_min_seen: read.require_min_seen,
+            wait_timeout_ms: read.wait_timeout_ms.unwrap_or(0),
+        })
+    }
+
+    pub(crate) fn normalize_namespace(
+        raw: Option<NamespaceId>,
+        policies: &BTreeMap<NamespaceId, NamespacePolicy>,
+    ) -> Result<NamespaceId, OpError> {
+        let namespace = raw.unwrap_or_else(NamespaceId::core);
+        if policies.contains_key(&namespace) {
+            Ok(namespace)
+        } else {
+            Err(OpError::NamespaceUnknown { namespace })
         }
     }
 
@@ -3143,6 +3155,39 @@ mod tests {
     }
 
     #[test]
+    fn read_scope_defaults_namespace_and_timeout() {
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
+        let loaded = daemon.loaded_store(store_id, remote);
+
+        let scope = ReadScope::new(ReadConsistency::default(), &loaded.runtime().policies).unwrap();
+        assert_eq!(scope.namespace(), &NamespaceId::core());
+        assert_eq!(scope.wait_timeout_ms(), 0);
+        assert!(scope.require_min_seen().is_none());
+    }
+
+    #[test]
+    fn read_scope_rejects_unknown_namespace() {
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
+        let loaded = daemon.loaded_store(store_id, remote);
+
+        let unknown = NamespaceId::parse("unknown").unwrap();
+        assert!(!loaded.runtime().policies.contains_key(&unknown));
+
+        let read = ReadConsistency {
+            namespace: Some(unknown.clone()),
+            ..ReadConsistency::default()
+        };
+        let err = ReadScope::new(read, &loaded.runtime().policies).unwrap_err();
+        assert!(matches!(err, OpError::NamespaceUnknown { namespace } if namespace == unknown));
+    }
+
+    #[test]
     fn read_gate_requires_min_seen() {
         let _tmp = test_store_dir();
         let mut daemon = Daemon::new(test_actor());
@@ -3156,6 +3201,7 @@ mod tests {
             .meta
             .replica_id;
         let proof = daemon.loaded_store(store_id, remote.clone());
+        let policies = proof.runtime().policies.clone();
         let mut required = Watermarks::<Applied>::new();
         required
             .observe_at_least(
@@ -3166,11 +3212,15 @@ mod tests {
             )
             .expect("watermark");
 
-        let read = NormalizedReadConsistency {
-            namespace: namespace.clone(),
-            require_min_seen: Some(required.clone()),
-            wait_timeout_ms: 0,
-        };
+        let read = ReadScope::new(
+            ReadConsistency {
+                namespace: Some(namespace.clone()),
+                require_min_seen: Some(required.clone()),
+                wait_timeout_ms: None,
+            },
+            &policies,
+        )
+        .unwrap();
         let err = proof.check_read_gate(&read).unwrap_err();
         match err {
             OpError::RequireMinSeenUnsatisfied {
@@ -3188,11 +3238,15 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
 
-        let read = NormalizedReadConsistency {
-            namespace: namespace.clone(),
-            require_min_seen: Some(required.clone()),
-            wait_timeout_ms: 50,
-        };
+        let read = ReadScope::new(
+            ReadConsistency {
+                namespace: Some(namespace.clone()),
+                require_min_seen: Some(required.clone()),
+                wait_timeout_ms: Some(50),
+            },
+            &policies,
+        )
+        .unwrap();
         let err = proof.check_read_gate(&read).unwrap_err();
         match err {
             OpError::RequireMinSeenTimeout {
@@ -3217,11 +3271,15 @@ mod tests {
                 HeadStatus::Known([1u8; 32]),
             )
             .expect("watermark");
-        let read = NormalizedReadConsistency {
-            namespace,
-            require_min_seen: Some(required),
-            wait_timeout_ms: 0,
-        };
+        let read = ReadScope::new(
+            ReadConsistency {
+                namespace: Some(namespace),
+                require_min_seen: Some(required),
+                wait_timeout_ms: None,
+            },
+            &policies,
+        )
+        .unwrap();
         let proof = daemon.loaded_store(store_id, remote);
         assert!(proof.check_read_gate(&read).is_ok());
     }
