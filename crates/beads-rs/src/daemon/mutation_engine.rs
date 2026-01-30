@@ -806,7 +806,7 @@ impl MutationEngine {
                 .map_err(delta_error_to_op)?;
         }
 
-        for spec in parsed_deps {
+        for spec in dependencies.iter() {
             let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
                 state,
                 id.clone(),
