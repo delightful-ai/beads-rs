@@ -9,7 +9,7 @@ use crate::core::ParentEdge;
 use crate::core::Stamp;
 use crate::core::composite::{Note, Workflow};
 use crate::core::dep::DepKey;
-use crate::core::domain::DepKind;
+use crate::core::domain::{BeadType, DepKind};
 use crate::core::state::CanonicalState;
 use crate::core::tombstone::Tombstone;
 use crate::core::{BeadProjection, BeadView};
@@ -34,9 +34,9 @@ pub struct GoIssue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 
-    pub status: String,
+    pub status: GoIssueStatus,
     pub priority: u8,
-    pub issue_type: String,
+    pub issue_type: BeadType,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
@@ -74,6 +74,17 @@ pub struct GoIssue {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delete_reason: Option<String>,
+}
+
+/// Go-compatible issue status (matches legacy JSON values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoIssueStatus {
+    Open,
+    InProgress,
+    Closed,
+    Blocked,
+    Tombstone,
 }
 
 /// Go-compatible dependency representation.
@@ -165,7 +176,7 @@ impl GoIssue {
             },
             status,
             priority: bead.fields.priority.value.value(),
-            issue_type: bead.fields.bead_type.value.as_str().to_string(),
+            issue_type: projection.issue_type,
             assignee,
             estimated_minutes: bead.fields.estimated_minutes.value,
             created_at: write_stamp_to_rfc3339(projection.created_at()),
@@ -201,9 +212,9 @@ impl GoIssue {
             design: None,
             acceptance_criteria: None,
             notes: None,
-            status: "tombstone".to_string(),
+            status: GoIssueStatus::Tombstone,
             priority: 2, // default medium
-            issue_type: "task".to_string(),
+            issue_type: BeadType::Task,
             assignee: None,
             estimated_minutes: None,
             created_at: stamp_to_rfc3339(&tombstone.deleted),
@@ -260,15 +271,15 @@ impl GoComment {
 }
 
 /// Derive Go status from Rust workflow + blocked state.
-fn derive_status(workflow: &Workflow, is_blocked: bool) -> String {
+fn derive_status(workflow: &Workflow, is_blocked: bool) -> GoIssueStatus {
     match workflow {
-        Workflow::Closed(_) => "closed".to_string(),
-        Workflow::InProgress => "in_progress".to_string(),
+        Workflow::Closed(_) => GoIssueStatus::Closed,
+        Workflow::InProgress => GoIssueStatus::InProgress,
         Workflow::Open => {
             if is_blocked {
-                "blocked".to_string()
+                GoIssueStatus::Blocked
             } else {
-                "open".to_string()
+                GoIssueStatus::Open
             }
         }
     }
@@ -349,12 +360,21 @@ mod tests {
     fn test_derive_status() {
         use crate::core::composite::Closure;
 
-        assert_eq!(derive_status(&Workflow::Open, false), "open");
-        assert_eq!(derive_status(&Workflow::Open, true), "blocked");
-        assert_eq!(derive_status(&Workflow::InProgress, false), "in_progress");
-        assert_eq!(derive_status(&Workflow::InProgress, true), "in_progress");
+        assert_eq!(derive_status(&Workflow::Open, false), GoIssueStatus::Open);
+        assert_eq!(derive_status(&Workflow::Open, true), GoIssueStatus::Blocked);
+        assert_eq!(
+            derive_status(&Workflow::InProgress, false),
+            GoIssueStatus::InProgress
+        );
+        assert_eq!(
+            derive_status(&Workflow::InProgress, true),
+            GoIssueStatus::InProgress
+        );
 
         let closure = Closure::new(Some("done".into()), None);
-        assert_eq!(derive_status(&Workflow::Closed(closure), false), "closed");
+        assert_eq!(
+            derive_status(&Workflow::Closed(closure), false),
+            GoIssueStatus::Closed
+        );
     }
 }
