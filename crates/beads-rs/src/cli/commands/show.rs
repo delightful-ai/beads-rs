@@ -6,7 +6,7 @@ use super::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
 use crate::Result;
 use crate::api::IssueSummary;
 use crate::api::QueryResult;
-use crate::core::BeadId;
+use crate::core::{BeadId, BeadType, WorkflowStatus};
 use crate::daemon::Filters;
 use crate::daemon::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use std::collections::{BTreeSet, HashMap};
@@ -166,9 +166,9 @@ fn render_show(
         bead.title
     ));
     out.push_str(&format!("Namespace: {}\n", bead.namespace.as_str()));
-    out.push_str(&format!("Status: {}\n", bead.status));
+    out.push_str(&format!("Status: {}\n", bead.status.as_str()));
     out.push_str(&format!("Priority: P{}\n", bead.priority));
-    out.push_str(&format!("Type: {}\n", bead.issue_type));
+    out.push_str(&format!("Type: {}\n", bead.issue_type.as_str()));
     if let Some(a) = &bead.assignee
         && !a.is_empty()
     {
@@ -215,7 +215,7 @@ fn render_show(
 
     if !incoming.children.is_empty() {
         // For epics, show detailed progress with done/remaining breakdown
-        if bead.issue_type == "epic" {
+        if bead.issue_type == BeadType::Epic {
             render_epic_children(&mut out, &incoming.children);
         } else {
             out.push_str(&format!("\nChildren ({}):\n", incoming.children.len()));
@@ -288,9 +288,9 @@ pub(crate) fn render_issue_detail(v: &crate::api::Issue) -> String {
         v.title
     ));
     out.push_str(&format!("Namespace: {}\n", v.namespace.as_str()));
-    out.push_str(&format!("Status: {}\n", v.status));
+    out.push_str(&format!("Status: {}\n", v.status.as_str()));
     out.push_str(&format!("Priority: P{}\n", v.priority));
-    out.push_str(&format!("Type: {}\n", v.issue_type));
+    out.push_str(&format!("Type: {}\n", v.issue_type.as_str()));
     if let Some(a) = &v.assignee
         && !a.is_empty()
     {
@@ -336,7 +336,7 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     let mut remaining: Vec<&IssueSummary> = Vec::new();
 
     for child in children {
-        if child.status == "closed" {
+        if child.status == WorkflowStatus::Closed {
             done.push(child);
         } else {
             remaining.push(child);
@@ -347,7 +347,7 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     remaining.sort_by_key(|child| {
         (
             child.priority,
-            std::cmp::Reverse(child.status == "in_progress"),
+            std::cmp::Reverse(child.status == WorkflowStatus::InProgress),
         )
     });
 
@@ -369,7 +369,7 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     if !remaining.is_empty() {
         out.push_str(&format!("\nRemaining ({}):\n", remaining.len()));
         for child in &remaining {
-            let status_marker = if child.status == "in_progress" {
+            let status_marker = if child.status == WorkflowStatus::InProgress {
                 ">"
             } else {
                 " "
@@ -406,7 +406,7 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{NamespaceId, WriteStamp};
+    use crate::core::{BeadType, NamespaceId, WorkflowStatus, WriteStamp};
 
     fn sample_issue(namespace: &str, id: &str) -> crate::api::Issue {
         crate::api::Issue {
@@ -416,9 +416,9 @@ mod tests {
             description: String::new(),
             design: None,
             acceptance_criteria: None,
-            status: "open".to_string(),
+            status: WorkflowStatus::Open,
             priority: 1,
-            issue_type: "task".to_string(),
+            issue_type: BeadType::Task,
             labels: Vec::new(),
             assignee: None,
             assignee_at: None,

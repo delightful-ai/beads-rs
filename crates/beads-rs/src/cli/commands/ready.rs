@@ -75,7 +75,7 @@ pub(crate) fn render_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{NamespaceId, WriteStamp};
+    use crate::core::{BeadType, NamespaceId, WorkflowStatus, WriteStamp};
 
     fn sample_summary(namespace: &str, id: &str) -> crate::api::IssueSummary {
         crate::api::IssueSummary {
@@ -85,9 +85,9 @@ mod tests {
             description: String::new(),
             design: None,
             acceptance_criteria: None,
-            status: "open".to_string(),
+            status: WorkflowStatus::Open,
             priority: 1,
-            issue_type: "task".to_string(),
+            issue_type: BeadType::Task,
             labels: Vec::new(),
             assignee: None,
             assignee_expires: None,

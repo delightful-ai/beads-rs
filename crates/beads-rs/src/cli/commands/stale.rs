@@ -73,7 +73,8 @@ pub(crate) fn render_stale(issues: &[crate::api::IssueSummary], threshold_days: 
         ));
         out.push_str(&format!(
             "   Status: {}, Last updated: {} days ago\n",
-            issue.status, days_stale
+            issue.status.as_str(),
+            days_stale
         ));
         if let Some(a) = &issue.assignee
             && !a.is_empty()

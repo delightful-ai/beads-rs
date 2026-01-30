@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::deps::DepEdge;
 use beads_core::{
-    BeadProjection, BeadView, BranchName, NamespaceId, SegmentId, Tombstone as CoreTombstone,
-    WallClock, WriteStamp,
+    BeadProjection, BeadType, BeadView, BranchName, NamespaceId, SegmentId,
+    Tombstone as CoreTombstone, WallClock, WorkflowStatus, WriteStamp,
 };
 
 // =============================================================================
@@ -211,10 +211,10 @@ pub struct Issue {
     pub description: String,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub status: String,
+    pub status: WorkflowStatus,
     pub priority: u8,
     #[serde(rename = "type")]
-    pub issue_type: String,
+    pub issue_type: BeadType,
     pub labels: Vec<String>,
 
     pub assignee: Option<String>,
@@ -262,10 +262,10 @@ pub struct IssueSummary {
     pub description: String,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub status: String,
+    pub status: WorkflowStatus,
     pub priority: u8,
     #[serde(rename = "type")]
-    pub issue_type: String,
+    pub issue_type: BeadType,
     pub labels: Vec<String>,
 
     pub assignee: Option<String>,
@@ -298,9 +298,9 @@ impl Issue {
             description: bead.fields.description.value.clone(),
             design: bead.fields.design.value.clone(),
             acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
-            status: projection.status().to_string(),
+            status: projection.status,
             priority: bead.fields.priority.value.value(),
-            issue_type: bead.fields.bead_type.value.as_str().to_string(),
+            issue_type: projection.issue_type,
             labels: projection
                 .labels
                 .iter()
@@ -350,9 +350,9 @@ impl IssueSummary {
             description: bead.fields.description.value.clone(),
             design: bead.fields.design.value.clone(),
             acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
-            status: projection.status().to_string(),
+            status: projection.status,
             priority: bead.fields.priority.value.value(),
-            issue_type: bead.fields.bead_type.value.as_str().to_string(),
+            issue_type: projection.issue_type,
             labels: projection
                 .labels
                 .iter()
@@ -386,9 +386,9 @@ impl IssueSummary {
             description: issue.description.clone(),
             design: issue.design.clone(),
             acceptance_criteria: issue.acceptance_criteria.clone(),
-            status: issue.status.clone(),
+            status: issue.status,
             priority: issue.priority,
-            issue_type: issue.issue_type.clone(),
+            issue_type: issue.issue_type,
             labels: issue.labels.clone(),
             assignee: issue.assignee.clone(),
             assignee_expires: issue.assignee_expires,
@@ -409,8 +409,10 @@ mod tests {
     use beads_core::orset::Dot;
     use beads_core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Label, Lww,
-        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow, WriteStamp,
+        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow,
+        WorkflowStatus, WriteStamp,
     };
+    use serde_json::Value;
     use uuid::Uuid;
 
     fn actor_id(raw: &str) -> ActorId {
@@ -497,5 +499,35 @@ mod tests {
         let issue = Issue::from_view(&NamespaceId::core(), &view);
         assert_eq!(issue.updated_at, WriteStamp::new(3_000, 0));
         assert_eq!(issue.updated_by, note_author.as_str());
+    }
+
+    #[test]
+    fn issue_serializes_status_and_type_as_strings() {
+        let base_stamp = Stamp::new(WriteStamp::new(1_000, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-json");
+        state
+            .insert(make_bead(&id, &base_stamp))
+            .expect("insert bead");
+
+        let view = state.bead_view(&id).expect("bead view");
+        let issue = Issue::from_view(&NamespaceId::core(), &view);
+        assert_eq!(issue.status, WorkflowStatus::Open);
+        assert_eq!(issue.issue_type, BeadType::Task);
+
+        let value = serde_json::to_value(&issue).expect("serialize issue");
+        assert_eq!(value.get("status").and_then(Value::as_str), Some("open"));
+        assert_eq!(value.get("type").and_then(Value::as_str), Some("task"));
+
+        let summary = IssueSummary::from_view(&NamespaceId::core(), &view);
+        let summary_value = serde_json::to_value(&summary).expect("serialize summary");
+        assert_eq!(
+            summary_value.get("status").and_then(Value::as_str),
+            Some("open")
+        );
+        assert_eq!(
+            summary_value.get("type").and_then(Value::as_str),
+            Some("task")
+        );
     }
 }

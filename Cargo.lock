@@ -134,6 +134,7 @@ version = "0.2.0-alpha"
 dependencies = [
  "beads-core",
  "serde",
+ "serde_json",
  "uuid",
 ]
 

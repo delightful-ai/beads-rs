@@ -195,7 +195,7 @@ fn render_create(issue: &crate::api::Issue) -> String {
     out.push_str(&format!("✓ Created issue: {}\n", issue.id));
     out.push_str(&format!("  Title: {}\n", issue.title));
     out.push_str(&format!("  Priority: P{}\n", issue.priority));
-    out.push_str(&format!("  Status: {}", issue.status));
+    out.push_str(&format!("  Status: {}", issue.status.as_str()));
     out
 }
 

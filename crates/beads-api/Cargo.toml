@@ -12,4 +12,5 @@ beads-core = { path = "../beads-core" }
 serde = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 uuid = { workspace = true }
