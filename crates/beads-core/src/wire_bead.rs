@@ -817,6 +817,15 @@ impl SnapshotCodec {
             note_store.insert(bead_id, lineage, note);
         }
         state.set_note_store(note_store);
+        // Re-apply insert_live so legacy-lineage labels/notes loaded from snapshot note
+        // appends are absorbed into the concrete bead lineage in canonical state.
+        let live_beads: Vec<Bead> = state
+            .iter_live()
+            .map(|(_, bead)| bead.clone())
+            .collect();
+        for bead in live_beads {
+            state.insert_live(bead);
+        }
         state.rebuild_dep_indexes();
         Ok(state)
     }
@@ -2101,5 +2110,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn snapshot_codec_absorbs_legacy_note_lineage_into_live_lineage() {
+        let base = make_stamp(20, 0, "alice");
+        let bead = make_bead("bd-legacy-note", &base);
+        let bead_id = bead_id("bd-legacy-note");
+        let note_id = note_id("note-legacy");
+        let note = Note::new(
+            note_id.clone(),
+            "legacy note".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(21, 0),
+        );
+
+        let mut state = CanonicalState::new();
+        state.insert_live(bead);
+        state.insert_note(bead_id.clone(), base.clone(), note);
+
+        let mut snapshot = SnapshotCodec::from_state(&state);
+        let legacy_lineage = legacy_fallback_lineage();
+        snapshot.notes[0].lineage = Some(WireLineageStamp::from(legacy_lineage.clone()));
+
+        let rebuilt = SnapshotCodec::into_state(snapshot).expect("snapshot should import");
+        let notes = rebuilt.notes_for(&bead_id);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, note_id);
+        assert!(
+            rebuilt
+                .note_store()
+                .get(&bead_id, &legacy_lineage, &note_id)
+                .is_none(),
+            "legacy lineage note should be absorbed into bead lineage"
+        );
     }
 }
