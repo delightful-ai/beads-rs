@@ -5,7 +5,10 @@ use std::marker::PhantomData;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::core::{ClientRequestId, EventBody, ReplicaId, Seq1, TxnId, sha256_bytes};
+use crate::core::{
+    ClientRequestId, EncodeError, EventBody, EventBytes, ReplicaId, Seq1, TxnId,
+    ValidatedEventBody, encode_event_body_canonical, hash_event_body, sha256_bytes,
+};
 
 use super::{EventWalError, EventWalResult};
 
@@ -288,7 +291,12 @@ pub struct Record<State> {
 }
 
 pub type UnverifiedRecord = Record<Unverified>;
-pub type VerifiedRecord = Record<Verified>;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedRecord {
+    header: RecordHeader,
+    payload: EventBytes<crate::core::Canonical>,
+    _body: ValidatedEventBody,
+}
 
 impl<State> Record<State> {
     pub fn header(&self) -> &RecordHeader {
@@ -304,10 +312,16 @@ impl<State> Record<State> {
     }
 }
 
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum RecordVerifyError {
     #[error(transparent)]
     HeaderMismatch(#[from] RecordHeaderMismatch),
+    #[error(transparent)]
+    Encode(#[from] EncodeError),
+    #[error(
+        "record payload does not match canonical encoding (expected {expected:?}, got {got:?})"
+    )]
+    PayloadMismatch { expected: [u8; 32], got: [u8; 32] },
     #[error("record sha256 mismatch (expected {expected:?}, got {got:?})")]
     ShaMismatch { expected: [u8; 32], got: [u8; 32] },
 }
@@ -329,9 +343,16 @@ impl Record<Unverified> {
 
     pub fn verify_with_event_body(
         self,
-        body: &EventBody,
-    ) -> Result<Record<Verified>, RecordVerifyError> {
-        validate_header_matches_body(&self.header, body)?;
+        body: ValidatedEventBody,
+    ) -> Result<VerifiedRecord, RecordVerifyError> {
+        validate_header_matches_body(&self.header, body.as_ref())?;
+        let canonical = encode_event_body_canonical(body.as_ref())?;
+        if canonical.as_ref() != self.payload.as_ref() {
+            return Err(RecordVerifyError::PayloadMismatch {
+                expected: hash_event_body(&canonical).0,
+                got: sha256_bytes(self.payload.as_ref()).0,
+            });
+        }
         let expected = sha256_bytes(self.payload.as_ref()).0;
         if expected != self.header.sha256 {
             return Err(RecordVerifyError::ShaMismatch {
@@ -339,21 +360,34 @@ impl Record<Unverified> {
                 got: self.header.sha256,
             });
         }
-        Ok(Record {
+        Ok(VerifiedRecord {
             header: self.header,
-            payload: self.payload,
-            _state: PhantomData,
+            payload: canonical,
+            _body: body,
         })
     }
 }
 
-impl Record<Verified> {
-    pub(crate) fn new(
+impl VerifiedRecord {
+    pub fn new(
         header: RecordHeader,
-        payload: Bytes,
-        event_body: &EventBody,
+        payload: EventBytes<crate::core::Canonical>,
+        body: ValidatedEventBody,
     ) -> Result<Self, RecordVerifyError> {
-        Record::<Unverified>::new(header, payload).verify_with_event_body(event_body)
+        let raw_payload = Bytes::copy_from_slice(payload.as_ref());
+        Record::<Unverified>::new(header, raw_payload).verify_with_event_body(body)
+    }
+
+    pub fn header(&self) -> &RecordHeader {
+        &self.header
+    }
+
+    pub fn payload(&self) -> &EventBytes<crate::core::Canonical> {
+        &self.payload
+    }
+
+    pub fn payload_bytes(&self) -> &[u8] {
+        self.payload.as_ref()
     }
 
     pub fn encode_body(&self) -> EventWalResult<Vec<u8>> {
@@ -409,8 +443,8 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, EventKindV1, HlcMax, NamespaceId, StoreEpoch, StoreId, StoreIdentity, TraceId,
-        TxnDeltaV1, TxnV1,
+        ActorId, EventKindV1, HlcMax, Limits, NamespaceId, StoreEpoch, StoreId, StoreIdentity,
+        TraceId, TxnDeltaV1, TxnV1, hash_event_body,
     };
 
     fn event_body_for_header(header: &RecordHeader) -> EventBody {
@@ -437,8 +471,7 @@ mod tests {
 
     #[test]
     fn record_roundtrip_with_optional_fields() {
-        let payload = Bytes::from_static(b"hello");
-        let sha = sha256_bytes(payload.as_ref()).0;
+        let limits = Limits::default();
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: Seq1::from_u64(42).unwrap(),
@@ -446,17 +479,24 @@ mod tests {
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([3u8; 16]))),
             request_sha256: Some([4u8; 32]),
-            sha256: sha,
+            sha256: [0u8; 32],
             prev_sha256: Some([6u8; 32]),
         };
-        let event_body = event_body_for_header(&header);
-        let record = VerifiedRecord::new(header.clone(), payload.clone(), &event_body).unwrap();
+        let event_body = event_body_for_header(&header)
+            .into_validated(&limits)
+            .expect("validated");
+        let payload = encode_event_body_canonical(event_body.as_ref()).expect("payload");
+        let sha = hash_event_body(&payload).0;
+        let mut header = header;
+        header.sha256 = sha;
+        let verify_body = event_body.clone();
+        let record = VerifiedRecord::new(header.clone(), payload.clone(), event_body).unwrap();
 
         let body = record.encode_body().unwrap();
         let decoded = UnverifiedRecord::decode_body(&body).unwrap();
-        let verified = decoded.verify_with_event_body(&event_body).unwrap();
+        let verified = decoded.verify_with_event_body(verify_body).unwrap();
         assert_eq!(verified.header(), &header);
-        assert_eq!(verified.payload(), &payload);
+        assert_eq!(verified.payload().as_ref(), payload.as_ref());
     }
 
     #[test]
@@ -518,8 +558,7 @@ mod tests {
 
     #[test]
     fn record_verify_rejects_header_mismatch() {
-        let payload = Bytes::from_static(b"payload");
-        let sha = sha256_bytes(payload.as_ref()).0;
+        let limits = Limits::default();
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: Seq1::from_u64(1).unwrap(),
@@ -527,14 +566,51 @@ mod tests {
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,
             request_sha256: None,
-            sha256: sha,
+            sha256: [0u8; 32],
             prev_sha256: None,
         };
         let mut event_body = event_body_for_header(&header);
         event_body.txn_id = TxnId::new(Uuid::from_bytes([3u8; 16]));
+        let expected_body = event_body_for_header(&header)
+            .into_validated(&limits)
+            .expect("validated");
+        let payload = encode_event_body_canonical(expected_body.as_ref()).expect("payload");
+        let sha = hash_event_body(&payload).0;
+        let mut header = header;
+        header.sha256 = sha;
+
+        let record = UnverifiedRecord::new(header, Bytes::copy_from_slice(payload.as_ref()));
+        let err = record
+            .verify_with_event_body(event_body.into_validated(&limits).expect("validated"))
+            .unwrap_err();
+        assert!(matches!(err, RecordVerifyError::HeaderMismatch(_)));
+    }
+
+    #[test]
+    fn record_verify_rejects_noncanonical_payload() {
+        let limits = Limits::default();
+        let header = RecordHeader {
+            origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            origin_seq: Seq1::from_u64(1).unwrap(),
+            event_time_ms: 1_700_000_000_000,
+            txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
+            client_request_id: None,
+            request_sha256: None,
+            sha256: [0u8; 32],
+            prev_sha256: None,
+        };
+        let event_body = event_body_for_header(&header)
+            .into_validated(&limits)
+            .expect("validated");
+        let canonical = encode_event_body_canonical(event_body.as_ref()).expect("payload");
+        let mut payload_bytes = canonical.as_ref().to_vec();
+        payload_bytes[0] ^= 0b0001;
+        let payload = Bytes::from(payload_bytes);
+        let mut header = header;
+        header.sha256 = sha256_bytes(payload.as_ref()).0;
 
         let record = UnverifiedRecord::new(header, payload);
-        let err = record.verify_with_event_body(&event_body).unwrap_err();
-        assert!(matches!(err, RecordVerifyError::HeaderMismatch(_)));
+        let err = record.verify_with_event_body(event_body).unwrap_err();
+        assert!(matches!(err, RecordVerifyError::PayloadMismatch { .. }));
     }
 }

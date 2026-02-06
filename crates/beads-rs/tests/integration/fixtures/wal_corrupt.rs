@@ -91,6 +91,54 @@ pub fn corrupt_record_header_event_time(
     Ok(())
 }
 
+pub fn corrupt_record_header_sha(
+    segment: &SegmentFixture,
+    frame_index: usize,
+) -> EventWalResult<()> {
+    let frame_offset = segment.frame_offset(frame_index);
+    let body_offset = frame_offset + FRAME_HEADER_LEN as u64;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&segment.path)
+        .map_err(|source| io_err(&segment.path, source))?;
+    file.seek(SeekFrom::Start(frame_offset))
+        .map_err(|source| io_err(&segment.path, source))?;
+    let mut frame_header = [0u8; FRAME_HEADER_LEN];
+    file.read_exact(&mut frame_header)
+        .map_err(|source| io_err(&segment.path, source))?;
+    let length = u32::from_le_bytes([
+        frame_header[4],
+        frame_header[5],
+        frame_header[6],
+        frame_header[7],
+    ]) as usize;
+    file.seek(SeekFrom::Start(body_offset))
+        .map_err(|source| io_err(&segment.path, source))?;
+    let mut body = vec![0u8; length];
+    file.read_exact(&mut body)
+        .map_err(|source| io_err(&segment.path, source))?;
+    let (mut header, header_len) = RecordHeader::decode(&body)?;
+    header.sha256[0] ^= 0xFF;
+    let encoded = header.encode()?;
+    if encoded.len() != header_len {
+        return Err(EventWalError::RecordHeaderInvalid {
+            reason: "record header length changed during corruption".to_string(),
+        });
+    }
+    body[..header_len].copy_from_slice(&encoded);
+    file.seek(SeekFrom::Start(body_offset))
+        .map_err(|source| io_err(&segment.path, source))?;
+    file.write_all(&body)
+        .map_err(|source| io_err(&segment.path, source))?;
+    let crc = crc32c(&body);
+    file.seek(SeekFrom::Start(frame_offset + FRAME_CRC_OFFSET as u64))
+        .map_err(|source| io_err(&segment.path, source))?;
+    file.write_all(&crc.to_le_bytes())
+        .map_err(|source| io_err(&segment.path, source))?;
+    Ok(())
+}
+
 pub fn truncate_frame_mid_body(
     segment: &SegmentFixture,
     frame_index: usize,

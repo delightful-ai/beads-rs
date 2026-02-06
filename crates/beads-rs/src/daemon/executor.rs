@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use crossbeam::channel::Sender;
 
 use super::broadcast::BroadcastEvent;
@@ -299,8 +298,8 @@ impl Daemon {
                 sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
-            Bytes::copy_from_slice(sequenced.event_bytes.as_ref()),
-            &sequenced.event_body,
+            sequenced.event_bytes.clone(),
+            sequenced.event_body.clone(),
         )
         .map_err(|err| {
             tracing::error!(error = ?err, "record verification failed");
@@ -875,7 +874,6 @@ fn plan_local_append(
     let prev_sha = match durable_watermark.head() {
         HeadStatus::Genesis => None,
         HeadStatus::Known(sha) => Some(sha),
-        HeadStatus::Unknown => unreachable!("durable watermark head should be known"),
     };
     let sequenced = engine.build_event(draft, store, namespace, origin_replica_id, origin_seq)?;
 
@@ -1198,7 +1196,6 @@ mod tests {
         atomic::{AtomicU64, Ordering},
     };
 
-    use bytes::Bytes;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -1657,8 +1654,8 @@ mod tests {
                 sha256: sha,
                 prev_sha256: None,
             },
-            Bytes::copy_from_slice(sequenced.event_bytes.as_ref()),
-            &sequenced.event_body,
+            sequenced.event_bytes.clone(),
+            sequenced.event_body.clone(),
         )
         .unwrap();
 

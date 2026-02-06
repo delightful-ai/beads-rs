@@ -623,7 +623,7 @@ fn scan_segment_records(
             }
         };
 
-        match record.verify_with_event_body(&event_body) {
+        match record.verify_with_event_body(event_body) {
             Ok(_) => {}
             Err(RecordVerifyError::HeaderMismatch(err)) => {
                 builder.record_issue(
@@ -633,6 +633,25 @@ fn scan_segment_records(
                     AdminHealthEvidence {
                         code: AdminHealthEvidenceCode::RecordHeaderMismatch,
                         message: format!("wal record header mismatch: {err}"),
+                        path: Some(segment.path.display().to_string()),
+                        namespace: Some(segment.namespace.clone()),
+                        origin: Some(header.origin_replica_id),
+                        seq: Some(header.origin_seq.get()),
+                        offset: Some(offset),
+                        segment_id: Some(segment.segment_id),
+                    },
+                    Some("run `bd admin maintenance on` then `bd store fsck --repair` to quarantine corrupted segments"),
+                );
+                break;
+            }
+            Err(RecordVerifyError::PayloadMismatch { .. }) | Err(RecordVerifyError::Encode(_)) => {
+                builder.record_issue(
+                    AdminHealthCheckId::WalHashes,
+                    AdminHealthStatus::Fail,
+                    AdminHealthSeverity::High,
+                    AdminHealthEvidence {
+                        code: AdminHealthEvidenceCode::RecordShaMismatch,
+                        message: "wal record payload failed canonical verification".to_string(),
                         path: Some(segment.path.display().to_string()),
                         namespace: Some(segment.namespace.clone()),
                         origin: Some(header.origin_replica_id),

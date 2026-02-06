@@ -11,8 +11,8 @@ use crc32c::crc32c;
 use thiserror::Error;
 
 use crate::core::{
-    DecodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1, StoreMeta,
-    decode_event_body, decode_event_hlc_max,
+    DecodeError, EncodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1,
+    StoreMeta, decode_event_body, decode_event_hlc_max,
 };
 
 use super::EventWalError;
@@ -161,6 +161,15 @@ pub enum WalReplayError {
     },
     #[error("{0}")]
     RecordShaMismatch(Box<RecordShaMismatchInfo>),
+    #[error("{0}")]
+    RecordPayloadMismatch(Box<RecordShaMismatchInfo>),
+    #[error("record payload canonical encode failed at {path:?} offset {offset}: {source}")]
+    RecordCanonicalEncode {
+        path: PathBuf,
+        offset: u64,
+        #[source]
+        source: EncodeError,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -817,13 +826,24 @@ where
             })?;
         let header = record.header().clone();
         let record = record
-            .verify_with_event_body(&event_body)
+            .verify_with_event_body(event_body)
             .map_err(|err| match err {
                 RecordVerifyError::HeaderMismatch(source) => WalReplayError::RecordHeaderMismatch {
                     path: segment.path.clone(),
                     offset,
                     source,
                 },
+                RecordVerifyError::PayloadMismatch { expected, got } => {
+                    WalReplayError::RecordPayloadMismatch(Box::new(RecordShaMismatchInfo {
+                        namespace: segment.header.namespace.clone(),
+                        origin: header.origin_replica_id,
+                        seq: header.origin_seq,
+                        expected,
+                        got,
+                        path: segment.path.clone(),
+                        offset,
+                    }))
+                }
                 RecordVerifyError::ShaMismatch { expected, got } => {
                     WalReplayError::RecordShaMismatch(Box::new(RecordShaMismatchInfo {
                         namespace: segment.header.namespace.clone(),
@@ -835,6 +855,11 @@ where
                         offset,
                     }))
                 }
+                RecordVerifyError::Encode(source) => WalReplayError::RecordCanonicalEncode {
+                    path: segment.path.clone(),
+                    offset,
+                    source,
+                },
             })?;
         on_record(offset, &record, frame_len as u32)?;
 
@@ -936,7 +961,6 @@ fn read_segment_header(path: &Path) -> Result<(SegmentHeader, u64), WalReplayErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
@@ -1043,7 +1067,9 @@ mod tests {
             namespace.clone(),
             origin,
         );
-        let bytes = encode_event_body_canonical(&body).unwrap();
+        let body = body.into_validated(&limits).expect("validated");
+        let origin_seq = body.origin_seq;
+        let bytes = encode_event_body_canonical(body.as_ref()).unwrap();
         let expected_sha = sha256_bytes(bytes.as_ref()).0;
 
         let record = VerifiedRecord::new(
@@ -1057,8 +1083,8 @@ mod tests {
                 sha256: expected_sha,
                 prev_sha256: None,
             },
-            Bytes::copy_from_slice(bytes.as_ref()),
-            &body,
+            bytes,
+            body,
         )
         .unwrap();
         writer.append(&record, 10).unwrap();
@@ -1110,7 +1136,7 @@ mod tests {
                 let info = info.as_ref();
                 assert_eq!(info.namespace, namespace);
                 assert_eq!(info.origin, origin);
-                assert_eq!(info.seq, body.origin_seq);
+                assert_eq!(info.seq, origin_seq);
                 assert_eq!(info.expected, expected_sha);
                 assert_ne!(info.got, expected_sha);
             }

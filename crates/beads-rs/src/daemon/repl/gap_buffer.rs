@@ -36,7 +36,6 @@ impl GapBuffer {
 pub enum HeadSnapshot {
     Genesis,
     Known(Sha256),
-    Unknown,
 }
 
 #[cfg(feature = "model-testing")]
@@ -52,7 +51,6 @@ impl WatermarkSnapshot {
         let head = match wm.head() {
             HeadStatus::Genesis => HeadSnapshot::Genesis,
             HeadStatus::Known(bytes) => HeadSnapshot::Known(Sha256(bytes)),
-            HeadStatus::Unknown => HeadSnapshot::Unknown,
         };
         Self {
             seq: wm.seq(),
@@ -290,7 +288,6 @@ impl OriginStreamState {
         let mut head = match self.durable.head() {
             HeadStatus::Genesis => None,
             HeadStatus::Known(head) => Some(Sha256(head)),
-            HeadStatus::Unknown => unreachable!("unknown head should never reach gap buffer"),
         };
 
         let mut batch = Vec::new();

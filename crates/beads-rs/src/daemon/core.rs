@@ -12,7 +12,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use crossbeam::channel::Sender;
 use git2::{ErrorCode as GitErrorCode, ObjectType, Oid, Repository, TreeWalkMode, TreeWalkResult};
 use thiserror::Error;
@@ -128,6 +127,7 @@ use crate::core::{
     PrevVerified, ProtocolErrorCode, ReplicaId, ReplicateMode, SegmentId, Seq0, Seq1, Sha256,
     StoreId, StoreIdentity, StoreState, TraceId, ValidatedEventBody, VerifiedEvent, WallClock,
     Watermark, WatermarkError, Watermarks, WriteStamp, apply_event, decode_event_body,
+    encode_event_body_canonical, hash_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
@@ -1574,7 +1574,17 @@ impl Daemon {
             .begin_txn()
             .map_err(|err| wal_index_error_payload(&err))?;
 
+        let mut canonical_shas = Vec::with_capacity(batch.len());
         for event in &batch {
+            let payload = encode_event_body_canonical(event.body.as_ref()).map_err(|_| {
+                ReplError::new(
+                    CliErrorCode::Internal.into(),
+                    "event body canonical encode failed",
+                    false,
+                )
+            })?;
+            let sha = hash_event_body(&payload).0;
+            canonical_shas.push(sha);
             let record = VerifiedRecord::new(
                 RecordHeader {
                     origin_replica_id: origin,
@@ -1583,11 +1593,11 @@ impl Daemon {
                     txn_id: event.body.txn_id,
                     client_request_id: event.body.client_request_id,
                     request_sha256: None,
-                    sha256: event.sha256.0,
+                    sha256: sha,
                     prev_sha256: event.prev.prev.map(|sha| sha.0),
                 },
-                Bytes::copy_from_slice(event.bytes.as_ref()),
-                &event.body,
+                payload,
+                event.body.clone(),
             )
             .map_err(|err| {
                 tracing::error!(error = ?err, "record verification failed");
@@ -1653,7 +1663,7 @@ impl Daemon {
             txn.record_event(
                 &namespace,
                 &event_id_for(origin, namespace.clone(), event.body.origin_seq),
-                event.sha256.0,
+                sha,
                 event.prev.prev.map(|sha| sha.0),
                 append.segment_id,
                 append.offset,
@@ -1677,7 +1687,7 @@ impl Daemon {
 
         let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
-            for event in &batch {
+            for (event, canonical_sha) in batch.iter().zip(canonical_shas.iter().copied()) {
                 let apply_start = Instant::now();
                 let apply_result = {
                     let state = if namespace.is_core() {
@@ -1709,19 +1719,24 @@ impl Daemon {
 
                 let event_id = event_id_for(origin, namespace.clone(), event.body.origin_seq);
                 let prev_sha = event.prev.prev.map(|sha| Sha256(sha.0));
-                let broadcast =
-                    BroadcastEvent::new(event_id, event.sha256, prev_sha, event.bytes.clone());
+                let canonical_sha = Sha256(canonical_sha);
+                let broadcast = BroadcastEvent::new(
+                    event_id,
+                    canonical_sha,
+                    prev_sha,
+                    event.bytes.clone().into(),
+                );
                 if let Err(err) = store.broadcaster.publish(broadcast) {
                     tracing::warn!("event broadcast failed: {err}");
                 }
 
                 store
                     .watermarks_applied
-                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
+                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, canonical_sha.0)
                     .map_err(|err| watermark_error_payload(&namespace, &origin, err))?;
                 store
                     .watermarks_durable
-                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, event.sha256.0)
+                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, canonical_sha.0)
                     .map_err(|err| watermark_error_payload(&namespace, &origin, err))?;
             }
 
@@ -2756,7 +2771,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use bytes::Bytes;
     use git2::Repository;
     use tracing::{Dispatch, Level};
     use tracing_subscriber::fmt::MakeWriter;
@@ -3116,6 +3130,8 @@ mod tests {
     }
 
     fn record_for_event(event: &VerifiedEvent<PrevVerified>) -> VerifiedRecord {
+        let payload = encode_event_body_canonical(event.body.as_ref()).expect("payload");
+        let sha256 = hash_event_body(&payload).0;
         VerifiedRecord::new(
             RecordHeader {
                 origin_replica_id: event.body.origin_replica_id,
@@ -3124,11 +3140,11 @@ mod tests {
                 txn_id: event.body.txn_id,
                 client_request_id: event.body.client_request_id,
                 request_sha256: None,
-                sha256: event.sha256.0,
+                sha256: sha256,
                 prev_sha256: event.prev.prev.map(|sha| sha.0),
             },
-            Bytes::copy_from_slice(event.bytes.as_ref()),
-            &event.body,
+            payload,
+            event.body.clone(),
         )
         .expect("verified record")
     }
@@ -3922,6 +3938,50 @@ mod tests {
             .expect("sealed segment metadata")
             .len();
         assert_eq!(sealed.final_len, Some(sealed_len));
+    }
+
+    #[test]
+    fn ingest_uses_canonical_sha_for_index_and_watermarks() {
+        let tmp = TempStoreDir::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([21u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([22u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+
+        let mut event = verified_event_for_seq(store, &namespace, origin, 1, None);
+        let canonical_sha = hash_event_body(&event.bytes);
+        let mut wrong_sha = canonical_sha.0;
+        wrong_sha[0] ^= 0xFF;
+        event.sha256 = Sha256(wrong_sha);
+
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+
+        daemon
+            .ingest_remote_batch(store_id, namespace.clone(), origin, vec![event], now_ms)
+            .expect("ingest");
+
+        let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
+        let event_id = event_id_for(origin, namespace.clone(), Seq1::from_u64(1).unwrap());
+        let indexed_sha = store_runtime
+            .wal_index
+            .reader()
+            .lookup_event_sha(&namespace, &event_id)
+            .expect("lookup event sha")
+            .expect("event sha");
+        assert_eq!(indexed_sha, canonical_sha.0);
+        assert_eq!(
+            store_runtime.applied_head_sha(&namespace, &origin),
+            Some(canonical_sha.0)
+        );
+        assert_eq!(
+            store_runtime.durable_head_sha(&namespace, &origin),
+            Some(canonical_sha.0)
+        );
     }
 
     #[test]

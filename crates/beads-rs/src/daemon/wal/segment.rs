@@ -576,7 +576,6 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::TempDir;
@@ -592,8 +591,8 @@ mod tests {
         )
     }
 
-    fn test_record_with_payload(payload: Bytes) -> VerifiedRecord {
-        let sha = crate::core::sha256_bytes(payload.as_ref()).0;
+    fn test_record() -> VerifiedRecord {
+        let limits = crate::core::Limits::default();
         let header = crate::daemon::wal::record::RecordHeader {
             origin_replica_id: crate::core::ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: crate::core::Seq1::from_u64(1).unwrap(),
@@ -601,7 +600,7 @@ mod tests {
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
             client_request_id: None,
             request_sha256: None,
-            sha256: sha,
+            sha256: [0u8; 32],
             prev_sha256: None,
         };
         let body = crate::core::EventBody {
@@ -626,11 +625,12 @@ mod tests {
                 },
             }),
         };
-        VerifiedRecord::new(header, payload, &body).expect("verified record")
-    }
-
-    fn test_record() -> VerifiedRecord {
-        test_record_with_payload(Bytes::from_static(b"event"))
+        let body = body.into_validated(&limits).expect("validated");
+        let payload = crate::core::encode_event_body_canonical(body.as_ref()).expect("payload");
+        let sha = crate::core::hash_event_body(&payload).0;
+        let mut header = header;
+        header.sha256 = sha;
+        VerifiedRecord::new(header, payload, body).expect("verified record")
     }
 
     fn take_sync_mode() -> Option<SegmentSyncMode> {
@@ -717,16 +717,23 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
         let meta = test_meta(store_id, StoreEpoch::new(1));
         let namespace = NamespaceId::core();
+        let record = test_record();
+        let frame_len = encode_frame(&record, 1024).expect("frame").len() as u64;
+        let header_len =
+            SegmentHeader::new(&meta, namespace.clone(), 10, SegmentId::new(Uuid::nil()))
+                .encode()
+                .expect("header")
+                .len() as u64;
+        let max_segment_bytes = header_len + frame_len + 1;
         let mut writer = SegmentWriter::open(
             temp.path(),
             &meta,
             &namespace,
             10,
-            SegmentConfig::new(1024, 200, 60_000),
+            SegmentConfig::new(1024, max_segment_bytes, 60_000),
         )
         .unwrap();
 
-        let record = test_record();
         let first = writer.append(&record, 10).unwrap();
         assert!(!first.rotated);
         let first_name = writer
@@ -770,7 +777,8 @@ mod tests {
         )
         .unwrap();
 
-        let record = test_record_with_payload(Bytes::from_static(b"this is too large"));
+        let record = test_record();
+        assert!(record.payload_bytes().len() > 8);
 
         let err = writer.append(&record, 10).unwrap_err();
         assert!(matches!(err, EventWalError::RecordTooLarge { .. }));

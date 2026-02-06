@@ -562,7 +562,7 @@ fn scan_segment(
                 break;
             }
         };
-        let verify = record.verify_with_event_body(&event_body);
+        let verify = record.verify_with_event_body(event_body);
         match verify {
             Ok(_) => {}
             Err(RecordVerifyError::HeaderMismatch(err)) => {
@@ -593,6 +593,24 @@ fn scan_segment(
                 }
                 break;
             }
+            Err(RecordVerifyError::PayloadMismatch { .. }) | Err(RecordVerifyError::Encode(_)) => {
+                builder.record_issue(
+                    FsckCheckId::RecordHashes,
+                    FsckStatus::Fail,
+                    FsckSeverity::High,
+                    FsckEvidence {
+                        code: FsckEvidenceCode::RecordShaMismatch,
+                        message: "record payload failed canonical verification".to_string(),
+                        path: Some(segment.path.clone()),
+                        namespace: Some(segment.namespace.clone()),
+                        origin: Some(header.origin_replica_id),
+                        seq: Some(header.origin_seq.get()),
+                        offset: Some(offset),
+                    },
+                    Some("rebuild WAL from source of truth or restore from backup"),
+                );
+                break;
+            }
             Err(RecordVerifyError::ShaMismatch { .. }) => {
                 builder.record_issue(
                     FsckCheckId::RecordHashes,
@@ -609,6 +627,7 @@ fn scan_segment(
                     },
                     Some("rebuild WAL from source of truth or restore from backup"),
                 );
+                break;
             }
         }
 

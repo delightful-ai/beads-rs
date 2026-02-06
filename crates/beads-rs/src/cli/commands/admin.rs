@@ -638,7 +638,6 @@ fn head_status_str(head: HeadStatus) -> &'static str {
     match head {
         HeadStatus::Genesis => "genesis",
         HeadStatus::Known(_) => "known",
-        HeadStatus::Unknown => "unknown",
     }
 }
 

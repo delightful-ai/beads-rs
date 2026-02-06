@@ -4,20 +4,19 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use bytes::Bytes;
 use tempfile::TempDir;
 use uuid::Uuid;
 
 use beads_rs::core::{
-    ActorId, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId, ReplicaId, Seq1,
-    StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnDeltaV1, TxnId, TxnV1,
-    encode_event_body_canonical,
+    ActorId, Canonical, ClientRequestId, EventBody, EventBytes, EventKindV1, HlcMax, Limits,
+    NamespaceId, ReplicaId, Seq1, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnDeltaV1,
+    TxnId, TxnV1, ValidatedEventBody, encode_event_body_canonical,
 };
 use beads_rs::daemon::wal::frame::encode_frame;
 use beads_rs::daemon::wal::{
     EventWalError, EventWalResult, FRAME_HEADER_LEN, IndexDurabilityMode, RecordHeader,
     SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentWriter, SqliteWalIndex,
-    UnverifiedRecord, VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError,
+    VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError,
 };
 
 use super::identity;
@@ -147,8 +146,8 @@ fn event_body(
     event_time_ms: u64,
     txn_id: TxnId,
     client_request_id: Option<ClientRequestId>,
-) -> EventBody {
-    EventBody {
+) -> ValidatedEventBody {
+    let body = EventBody {
         envelope_v: 1,
         store: StoreIdentity::new(meta.store_id(), meta.store_epoch()),
         namespace: namespace.clone(),
@@ -166,19 +165,20 @@ fn event_body(
                 logical: 1,
             },
         }),
-    }
+    };
+    body.into_validated(&Limits::default()).expect("validated")
 }
 
-fn event_body_bytes(body: &EventBody) -> Bytes {
-    let bytes = encode_event_body_canonical(body).expect("encode event body");
-    Bytes::copy_from_slice(bytes.as_ref())
+fn event_body_bytes(body: &ValidatedEventBody) -> EventBytes<Canonical> {
+    encode_event_body_canonical(body.as_ref()).expect("encode event body")
 }
 
-fn verified_record(header: RecordHeader, payload: Bytes, body: &EventBody) -> VerifiedRecord {
-    let mut bytes = header.encode().expect("encode record header");
-    bytes.extend_from_slice(payload.as_ref());
-    let record = UnverifiedRecord::decode_body(&bytes).expect("decode record");
-    record.verify_with_event_body(body).expect("verify record")
+fn verified_record(
+    header: RecordHeader,
+    payload: EventBytes<Canonical>,
+    body: ValidatedEventBody,
+) -> VerifiedRecord {
+    VerifiedRecord::new(header, payload, body).expect("verify record")
 }
 
 pub fn record_for_seq(
@@ -192,7 +192,7 @@ pub fn record_for_seq(
     let txn_id = TxnId::new(Uuid::from_bytes([seq as u8; 16]));
     let body = event_body(meta, namespace, origin, seq, event_time_ms, txn_id, None);
     let payload = event_body_bytes(&body);
-    let sha = beads_rs::sha256_bytes(payload.as_ref()).0;
+    let sha = beads_rs::hash_event_body(&payload).0;
     let header = RecordHeader {
         origin_replica_id: origin,
         origin_seq: Seq1::from_u64(seq).expect("seq1"),
@@ -203,7 +203,7 @@ pub fn record_for_seq(
         sha256: sha,
         prev_sha256: prev_sha,
     };
-    verified_record(header, payload, &body)
+    verified_record(header, payload, body)
 }
 
 pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> VerifiedRecord {
@@ -235,7 +235,7 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
         sha256: sha,
         prev_sha256: None,
     };
-    verified_record(header, payload, &body)
+    verified_record(header, payload, body)
 }
 
 pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> VerifiedRecord {
@@ -264,7 +264,7 @@ pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
         sha256: sha,
         prev_sha256: None,
     };
-    verified_record(header, payload, &body)
+    verified_record(header, payload, body)
 }
 
 pub fn frame_bytes(record: &VerifiedRecord) -> EventWalResult<Vec<u8>> {
