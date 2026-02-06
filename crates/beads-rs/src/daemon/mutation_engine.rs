@@ -1124,13 +1124,12 @@ impl MutationEngine {
         if state.get_live(&to).is_none() {
             return Err(OpError::NotFound(to));
         }
-        if would_create_cycle(state, &from, &to, kind) {
+        if kind.requires_dag()
+            && let Err(err) = state.check_no_cycle(&from, &to, kind)
+        {
             return Err(OpError::ValidationFailed {
                 field: "dependency".into(),
-                reason: format!(
-                    "circular dependency: {} already depends on {} (directly or transitively)",
-                    to, from
-                ),
+                reason: err.reason,
             });
         }
 
@@ -1195,13 +1194,10 @@ impl MutationEngine {
                 if state.get_live(parent_id).is_none() {
                     return Err(OpError::NotFound(parent_id.clone()));
                 }
-                if would_create_cycle(state, &id, parent_id, DepKind::Parent) {
+                if let Err(err) = state.check_no_cycle(&id, parent_id, DepKind::Parent) {
                     return Err(OpError::ValidationFailed {
                         field: "parent".into(),
-                        reason: format!(
-                            "circular dependency: {} already depends on {} (directly or transitively)",
-                            parent_id, id
-                        ),
+                        reason: err.reason,
                     });
                 }
                 Some(parent_id.clone())
@@ -1697,33 +1693,6 @@ fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpEr
         }
         next += 1;
     }
-}
-
-fn would_create_cycle(state: &CanonicalState, from: &BeadId, to: &BeadId, kind: DepKind) -> bool {
-    use std::collections::HashSet;
-
-    if !kind.requires_dag() {
-        return false;
-    }
-
-    let mut visited = HashSet::new();
-    let mut queue = vec![to.clone()];
-
-    while let Some(current) = queue.pop() {
-        if &current == from {
-            return true;
-        }
-        if !visited.insert(current.clone()) {
-            continue;
-        }
-        for key in state.deps_from(&current) {
-            if key.kind().requires_dag() && !visited.contains(key.to()) {
-                queue.push(key.to().clone());
-            }
-        }
-    }
-
-    false
 }
 
 fn normalize_patch(

@@ -24,11 +24,21 @@ use thiserror::Error;
 
 use super::identity::ReplicaId;
 
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
 /// Values stored in an OR-Set must provide a deterministic byte encoding for
 /// collision hashing.
-pub trait OrSetValue: Ord + Clone {
+///
+/// This trait is sealed so only vetted, deterministic encodings can be used.
+/// To add a new value type, implement `sealed::Sealed` and `OrSetValue` inside
+/// this crate, ensuring `collision_bytes` is stable across runs and platforms.
+pub trait OrSetValue: sealed::Sealed + Ord + Clone {
     fn collision_bytes(&self) -> Vec<u8>;
 }
+
+impl sealed::Sealed for String {}
 
 impl OrSetValue for String {
     fn collision_bytes(&self) -> Vec<u8> {

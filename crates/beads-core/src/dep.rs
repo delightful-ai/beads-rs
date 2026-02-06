@@ -3,12 +3,14 @@
 //! DepKey: identity tuple (from, to, kind)
 //! Dependency edges are represented as OR-Set membership of `DepKey`.
 
+use std::ops::Deref;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::domain::DepKind;
 use super::error::{CoreError, InvalidDependency};
 use super::identity::BeadId;
-use super::orset::OrSetValue;
+use super::orset::{OrSetValue, sealed::Sealed};
 
 /// Parsed dependency spec from CLI/IPC input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +112,8 @@ impl DepKey {
     }
 }
 
+impl Sealed for DepKey {}
+
 impl OrSetValue for DepKey {
     fn collision_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -119,6 +123,146 @@ impl OrSetValue for DepKey {
         bytes.push(0);
         bytes.extend(self.kind.as_str().as_bytes());
         bytes
+    }
+}
+
+/// Proof token that a dependency edge does not introduce a DAG cycle.
+///
+/// Only constructible by core cycle checks.
+#[derive(Debug)]
+pub struct NoCycleProof {
+    _private: (),
+}
+
+impl NoCycleProof {
+    pub(crate) fn new() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// Dependency key for DAG-only kinds (`Blocks`, `Parent`).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AcyclicDepKey {
+    key: DepKey,
+}
+
+impl AcyclicDepKey {
+    pub fn new(
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+        _proof: NoCycleProof,
+    ) -> Result<Self, InvalidDependency> {
+        if !kind.requires_dag() {
+            return Err(InvalidDependency {
+                reason: format!(
+                    "dependency kind {} does not require DAG proof",
+                    kind.as_str()
+                ),
+            });
+        }
+        Ok(Self {
+            key: DepKey::new(from, to, kind)?,
+        })
+    }
+
+    pub fn from_dep_key(key: DepKey, _proof: NoCycleProof) -> Result<Self, InvalidDependency> {
+        if !key.kind().requires_dag() {
+            return Err(InvalidDependency {
+                reason: format!(
+                    "dependency kind {} does not require DAG proof",
+                    key.kind().as_str()
+                ),
+            });
+        }
+        Ok(Self { key })
+    }
+
+    pub fn into_inner(self) -> DepKey {
+        self.key
+    }
+}
+
+impl AsRef<DepKey> for AcyclicDepKey {
+    fn as_ref(&self) -> &DepKey {
+        &self.key
+    }
+}
+
+impl Deref for AcyclicDepKey {
+    type Target = DepKey;
+
+    fn deref(&self) -> &Self::Target {
+        &self.key
+    }
+}
+
+/// Dependency key for non-DAG kinds (`Related`, `DiscoveredFrom`).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FreeDepKey {
+    key: DepKey,
+}
+
+impl FreeDepKey {
+    pub fn new(from: BeadId, to: BeadId, kind: DepKind) -> Result<Self, InvalidDependency> {
+        if kind.requires_dag() {
+            return Err(InvalidDependency {
+                reason: format!("dependency kind {} requires DAG proof", kind.as_str()),
+            });
+        }
+        Ok(Self {
+            key: DepKey::new(from, to, kind)?,
+        })
+    }
+
+    pub fn from_dep_key(key: DepKey) -> Result<Self, InvalidDependency> {
+        if key.kind().requires_dag() {
+            return Err(InvalidDependency {
+                reason: format!("dependency kind {} requires DAG proof", key.kind().as_str()),
+            });
+        }
+        Ok(Self { key })
+    }
+
+    pub fn into_inner(self) -> DepKey {
+        self.key
+    }
+}
+
+impl AsRef<DepKey> for FreeDepKey {
+    fn as_ref(&self) -> &DepKey {
+        &self.key
+    }
+}
+
+impl Deref for FreeDepKey {
+    type Target = DepKey;
+
+    fn deref(&self) -> &Self::Target {
+        &self.key
+    }
+}
+
+/// Typed dependency key for dependency adds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DepAddKey {
+    Acyclic(AcyclicDepKey),
+    Free(FreeDepKey),
+}
+
+impl DepAddKey {
+    pub fn as_dep_key(&self) -> &DepKey {
+        match self {
+            Self::Acyclic(key) => key.as_ref(),
+            Self::Free(key) => key.as_ref(),
+        }
+    }
+
+    pub fn into_dep_key(self) -> DepKey {
+        match self {
+            Self::Acyclic(key) => key.into_inner(),
+            Self::Free(key) => key.into_inner(),
+        }
     }
 }
 

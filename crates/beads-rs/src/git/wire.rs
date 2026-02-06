@@ -909,6 +909,13 @@ mod tests {
         }
     }
 
+    fn apply_dep_add_checked(state: &mut CanonicalState, key: DepKey, dot: Dot, stamp: Stamp) {
+        let key = state
+            .check_dep_add_key(key)
+            .unwrap_or_else(|err| panic!("dep key invalid: {}", err.reason));
+        state.apply_dep_add(key, dot, stamp);
+    }
+
     fn base58_id_strategy() -> impl Strategy<Value = String> {
         proptest::string::string_regex("[1-9A-HJ-NP-Za-km-z]{5,8}")
             .unwrap_or_else(|e| panic!("regex failed: {e}"))
@@ -980,7 +987,7 @@ mod tests {
             DepKind::Blocks,
         )
         .unwrap();
-        state.apply_dep_add(dep_key, dot(2, 1), stamp.clone());
+        apply_dep_add_checked(&mut state, dep_key, dot(2, 1), stamp.clone());
 
         let note_id = NoteId::new("note-legacy").unwrap();
         let note = Note::new(
@@ -1031,7 +1038,7 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([2u8; 16])),
             counter: 2,
         };
-        state.apply_dep_add(dep_key.clone(), dep_dot, stamp.clone());
+        apply_dep_add_checked(&mut state, dep_key.clone(), dep_dot, stamp.clone());
         let dep_ctx = state.dep_dvv(&dep_key);
         state.apply_dep_remove(&dep_key, &dep_ctx, stamp.clone());
 
@@ -1090,8 +1097,8 @@ mod tests {
 
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-target-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-target-b"), DepKind::Related).unwrap();
-        state.apply_dep_add(dep_key_a.clone(), dot(3, 3), stamp.clone());
-        state.apply_dep_add(dep_key_b.clone(), dot(4, 4), stamp.clone());
+        apply_dep_add_checked(&mut state, dep_key_a.clone(), dot(3, 3), stamp.clone());
+        apply_dep_add_checked(&mut state, dep_key_b.clone(), dot(4, 4), stamp.clone());
         let dep_ctx = state.dep_dvv(&dep_key_b);
         state.apply_dep_remove(&dep_key_b, &dep_ctx, stamp.clone());
 
@@ -1178,8 +1185,18 @@ mod tests {
         );
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-order-b"), DepKind::Related).unwrap();
-        state_a.apply_dep_add(dep_key_a.clone(), dot(7, 3), dep_stamp_a.clone());
-        state_a.apply_dep_add(dep_key_b.clone(), dot(8, 4), dep_stamp_b.clone());
+        apply_dep_add_checked(
+            &mut state_a,
+            dep_key_a.clone(),
+            dot(7, 3),
+            dep_stamp_a.clone(),
+        );
+        apply_dep_add_checked(
+            &mut state_a,
+            dep_key_b.clone(),
+            dot(8, 4),
+            dep_stamp_b.clone(),
+        );
         let note_a = Note::new(
             NoteId::new("note-a").unwrap(),
             "first".to_string(),
@@ -1211,8 +1228,8 @@ mod tests {
             label_stamp_a,
             Some(stamp.clone()),
         );
-        state_b.apply_dep_add(dep_key_b, dot(8, 4), dep_stamp_b);
-        state_b.apply_dep_add(dep_key_a, dot(7, 3), dep_stamp_a);
+        apply_dep_add_checked(&mut state_b, dep_key_b, dot(8, 4), dep_stamp_b);
+        apply_dep_add_checked(&mut state_b, dep_key_a, dot(7, 3), dep_stamp_a);
         state_b.insert_note(
             id.clone(),
             Some(stamp.clone()),
@@ -1295,12 +1312,12 @@ mod tests {
             DepKey::new(bead_id("bd-dep-a"), bead_id("bd-dep-c"), DepKind::Related).unwrap();
 
         let mut state_a = CanonicalState::new();
-        state_a.apply_dep_add(key_a.clone(), dot(3, 1), stamp_a.clone());
-        state_a.apply_dep_add(key_b.clone(), dot(4, 1), stamp_b.clone());
+        apply_dep_add_checked(&mut state_a, key_a.clone(), dot(3, 1), stamp_a.clone());
+        apply_dep_add_checked(&mut state_a, key_b.clone(), dot(4, 1), stamp_b.clone());
 
         let mut state_b = CanonicalState::new();
-        state_b.apply_dep_add(key_b, dot(4, 1), stamp_b);
-        state_b.apply_dep_add(key_a, dot(3, 1), stamp_a);
+        apply_dep_add_checked(&mut state_b, key_b, dot(4, 1), stamp_b);
+        apply_dep_add_checked(&mut state_b, key_a, dot(3, 1), stamp_a);
 
         assert_eq!(
             serialize_deps(&state_a).unwrap(),
@@ -1324,10 +1341,10 @@ mod tests {
         let key_parent = DepKey::new(from.clone(), to.clone(), DepKind::Parent).unwrap();
         let key_related = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
 
-        state.apply_dep_add(key_related, dot(1, 4), stamp.clone());
-        state.apply_dep_add(key_parent, dot(1, 3), stamp.clone());
-        state.apply_dep_add(key_discovered, dot(1, 2), stamp.clone());
-        state.apply_dep_add(key_blocks, dot(1, 1), stamp.clone());
+        apply_dep_add_checked(&mut state, key_related, dot(1, 4), stamp.clone());
+        apply_dep_add_checked(&mut state, key_parent, dot(1, 3), stamp.clone());
+        apply_dep_add_checked(&mut state, key_discovered, dot(1, 2), stamp.clone());
+        apply_dep_add_checked(&mut state, key_blocks, dot(1, 1), stamp.clone());
 
         let bytes = serialize_deps(&state).unwrap();
         let wire: WireDepStore =
@@ -1507,7 +1524,7 @@ mod tests {
         fn roundtrip_deps(deps in prop::collection::vec(dep_strategy(), 0..12)) {
             let mut state = CanonicalState::new();
             for (key, dot, stamp) in deps {
-                state.apply_dep_add(key, dot, stamp);
+                apply_dep_add_checked(&mut state, key, dot, stamp);
             }
             let bytes = serialize_deps(&state).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
             let parsed = parse_deps(&bytes).unwrap_or_else(|e| panic!("parse_deps failed: {e}"));

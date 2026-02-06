@@ -269,6 +269,7 @@ fn build_state(
         state.insert_tombstone(tombstone);
     }
     for (key, dot, stamp) in deps {
+        let key = state.check_dep_add_key(key).expect("dep key valid");
         state.apply_dep_add(key, dot, stamp);
     }
     state

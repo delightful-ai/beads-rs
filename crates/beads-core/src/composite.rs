@@ -35,7 +35,7 @@ impl Note {
 /// Claim state - explicit Unclaimed vs Claimed.
 ///
 /// NOTE: No `at` field here - when wrapped in Lww<Claim>,
-/// the Lww.stamp IS the claim timestamp. Derive assignee_at from that.
+/// the Lww.stamp IS the claim timestamp. Wire snapshots use that stamp.
 ///
 /// Using an enum instead of Option<ClaimData> makes states explicit
 /// and prevents accidentally having empty/invalid claim states.
@@ -96,8 +96,7 @@ impl Claim {
 /// Closure info - only exists when bead is closed.
 ///
 /// NOTE: No `at`/`by` fields - when wrapped in `Lww<Workflow::Closed(Closure)>`,
-/// the Lww.stamp IS the closure timestamp. Derive closed_at/closed_by from that
-/// during wire serialization.
+/// the Lww.stamp IS the closure timestamp. Wire snapshots use that stamp.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Closure {
     pub reason: Option<String>,
