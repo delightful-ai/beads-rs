@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::api::QueryResult;
 use crate::core::StoreId;
-use crate::daemon::OpError;
+use crate::OpError;
 use crate::daemon::ipc::{Request, Response, ResponsePayload, send_request_no_autostart};
 use crate::daemon::store_lock::{StoreLockError, StoreLockMeta, read_lock_meta, remove_lock_file};
 use crate::daemon::store_runtime::StoreRuntimeError;

@@ -86,7 +86,7 @@ pub(crate) fn parse_time_ms_opt(s: Option<&str>) -> Result<Option<u64>> {
     }
 
     Ok(Some(parse_time_ms(s).map_err(|msg| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
+        Error::Op(crate::OpError::ValidationFailed {
             field: "date".into(),
             reason: msg,
         })

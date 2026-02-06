@@ -321,7 +321,7 @@ fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Result<Option
         return Ok(None);
     };
     let parsed = DurabilityClass::parse(&raw).map_err(|err| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
+        Error::Op(crate::OpError::ValidationFailed {
             field: "durability".into(),
             reason: err.to_string(),
         })
@@ -336,7 +336,7 @@ pub(super) fn resolve_description(
     match (description, body) {
         (Some(d), Some(b)) => {
             if d != b {
-                return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
+                return Err(Error::Op(crate::OpError::ValidationFailed {
                     field: "description".into(),
                     reason: format!(
                         "cannot specify both --description and --body with different values (--description={d:?}, --body={b:?})"
@@ -356,7 +356,7 @@ fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied
         return Ok(None);
     };
     serde_json::from_str(raw).map(Some).map_err(|err| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
+        Error::Op(crate::OpError::ValidationFailed {
             field: "require_min_seen".into(),
             reason: err.to_string(),
         })
@@ -365,7 +365,7 @@ fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied
 
 fn validate_actor_id(raw: &str) -> Result<ActorId> {
     ValidatedActorId::parse(raw).map(Into::into).map_err(|e| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
+        Error::Op(crate::OpError::ValidationFailed {
             field: "actor".into(),
             reason: e.to_string(),
         })
@@ -627,7 +627,7 @@ mod tests {
     use super::*;
     use crate::config::DefaultsConfig;
     use crate::core::{DurabilityClass, HeadStatus, ReplicaId, Seq0};
-    use crate::daemon::OpError;
+    use crate::OpError;
     use std::num::NonZeroU32;
     use std::path::PathBuf;
     use uuid::Uuid;

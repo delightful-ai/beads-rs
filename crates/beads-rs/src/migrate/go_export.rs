@@ -18,8 +18,8 @@ use crate::core::{
     Closure, DepKey, DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId,
     Stamp, Tombstone, Workflow, WriteStamp,
 };
+use crate::OpError;
 use crate::daemon::IpcError;
-use crate::daemon::OpError;
 use crate::{Error, Result};
 
 /// Summary of an import run.

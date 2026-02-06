@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{Config, load_or_init};
-use crate::daemon::OpError;
+use crate::OpError;
 use crate::daemon::ipc::{Request, send_request_no_autostart, socket_path, wait_for_daemon_ready};
 use crate::{Error, Result};
 
