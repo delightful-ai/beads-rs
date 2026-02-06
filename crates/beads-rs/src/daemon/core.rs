@@ -38,8 +38,9 @@ use super::repl::{
     SharedSessionStore, WalRangeReader,
 };
 use super::scheduler::SyncScheduler;
-use super::store::StoreCaches;
-use super::store::discovery::ResolvedStore;
+use super::store::{ResolvedStore, StoreCaches};
+#[cfg(any(test, feature = "test-harness"))]
+use super::store::{StoreIdResolution, StoreIdSource};
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,
@@ -657,10 +658,6 @@ impl Daemon {
         loaded: &'a LoadedStore<'_>,
         namespace: &NamespaceId,
     ) -> &'a CanonicalState {
-        if namespace.is_core() {
-            return loaded.runtime().state.core();
-        }
-
         static EMPTY_STATE: OnceLock<CanonicalState> = OnceLock::new();
         loaded
             .runtime()
@@ -674,15 +671,14 @@ impl Daemon {
         namespace: NamespaceId,
     ) -> &'a mut CanonicalState {
         let store = loaded.runtime_mut();
-        if let Some(non_core) = namespace.try_non_core() {
-            store.state.ensure_namespace(non_core)
-        } else {
-            store.state.core_mut()
-        }
+        store.state.ensure_namespace(namespace)
     }
 
     pub(crate) fn store_id_for_remote(&self, remote: &RemoteUrl) -> Option<StoreId> {
-        self.store_caches.remote_to_store_id.get(remote).copied()
+        self.store_caches
+            .remote_to_store
+            .get(remote)
+            .map(|resolution| resolution.store_id)
     }
 
     pub(crate) fn store_and_lane_by_id_mut(
@@ -738,9 +734,9 @@ impl Daemon {
     /// Returns None if not loaded.
     pub(crate) fn git_lane_state_by_url(&self, remote: &RemoteUrl) -> Option<&GitLaneState> {
         self.store_caches
-            .remote_to_store_id
+            .remote_to_store
             .get(remote)
-            .and_then(|store_id| self.git_lanes.get(store_id))
+            .and_then(|resolution| self.git_lanes.get(&resolution.store_id))
     }
 
     pub(crate) fn primary_remote_for_store(&self, store_id: &StoreId) -> Option<&RemoteUrl> {
@@ -756,7 +752,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore<'_>, OpError> {
         let resolved = self.store_caches.resolve_store(repo)?;
-        let store_id = resolved.store_id;
+        let store_id = resolved.store_id();
         let remote = resolved.remote;
         self.store_caches
             .path_to_remote
@@ -849,7 +845,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore<'_>, OpError> {
         let resolved = self.store_caches.resolve_store(repo)?;
-        let store_id = resolved.store_id;
+        let store_id = resolved.store_id();
         let remote = resolved.remote;
         self.store_caches
             .path_to_remote
@@ -1691,15 +1687,7 @@ impl Daemon {
             for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied()) {
                 let apply_start = Instant::now();
                 let apply_result = {
-                    let state = if namespace.is_core() {
-                        store.state.core_mut()
-                    } else {
-                        let non_core = namespace
-                            .clone()
-                            .try_non_core()
-                            .expect("non-core namespace");
-                        store.state.ensure_namespace(non_core)
-                    };
+                    let state = store.state.ensure_namespace(namespace.clone());
                     apply_event(state, &event.body)
                 };
                 let outcome = match apply_result {
@@ -2396,15 +2384,7 @@ pub(crate) fn replay_event_wal(
             ))
         })?;
 
-        let state_for_namespace = if namespace.is_core() {
-            state.core_mut()
-        } else {
-            let non_core = namespace
-                .clone()
-                .try_non_core()
-                .expect("non-core namespace");
-            state.ensure_namespace(non_core)
-        };
+        let state_for_namespace = state.ensure_namespace(namespace.clone());
         let mut from_seq_excl = Seq0::ZERO;
         while from_seq_excl.get() < row.applied.seq().get() {
             let items = wal_index.reader().iter_from(
@@ -2697,12 +2677,15 @@ pub(crate) fn insert_store_for_tests(
     );
     daemon
         .store_caches
-        .remote_to_store_id
-        .insert(remote.clone(), store_id);
+        .remote_to_store
+        .insert(remote.clone(), StoreIdResolution::verified(store_id, StoreIdSource::GitMeta));
     daemon
         .store_caches
-        .path_to_store_id
-        .insert(repo_path.to_owned(), store_id);
+        .path_to_store
+        .insert(
+            repo_path.to_owned(),
+            StoreIdResolution::verified(store_id, StoreIdSource::GitMeta),
+        );
     daemon
         .store_caches
         .path_to_remote
@@ -2840,8 +2823,11 @@ mod tests {
         daemon.seed_actor_clocks(&runtime).unwrap();
         daemon
             .store_caches
-            .remote_to_store_id
-            .insert(remote.clone(), store_id);
+            .remote_to_store
+            .insert(
+                remote.clone(),
+                StoreIdResolution::unverified(store_id, StoreIdSource::RemoteFallback),
+            );
         daemon.stores.insert(store_id, runtime);
         daemon.git_lanes.insert(store_id, GitLaneState::new());
         store_id

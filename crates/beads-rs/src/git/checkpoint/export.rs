@@ -15,12 +15,11 @@ use super::layout::{
 use super::manifest::{CheckpointManifest, ManifestFile};
 use super::meta::{CheckpointMeta, IncludedHeads, IncludedWatermarks};
 use super::types::{CheckpointShardPayload, CheckpointSnapshot};
-use crate::core::tombstone::TombstoneKey;
 use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1};
 use crate::core::{
-    BeadSnapshotWireV1, ContentHash, Dot, Durable, HeadStatus, NamespaceId, NamespacePolicy,
-    NamespaceSet, ReplicaId, ReplicaRoster, StoreEpoch, StoreId, StoreState, Tombstone,
-    Watermarks, WireLineageStamp, WireStamp, WireTombstoneV1, sha256_bytes,
+    CheckpointContentSha256, ContentHash, Durable, HeadStatus, NamespaceId, NamespacePolicy,
+    NamespaceSet, ReplicaId, ReplicaRoster, SnapshotCodec, StoreEpoch, StoreId, StoreState,
+    Watermarks, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -239,7 +238,7 @@ pub fn export_checkpoint(
         roster_hash: snapshot.roster_hash,
         included: snapshot.included.clone(),
         included_heads: snapshot.included_heads.clone(),
-        content_hash: ContentHash::from_bytes([0u8; 32]),
+        content_hash: CheckpointContentSha256::from_checkpoint_preimage_bytes(&[0u8; 32]),
         manifest_hash,
     };
     let content_hash = meta.compute_content_hash()?;
@@ -383,44 +382,29 @@ fn build_namespace_shards(
     };
     let mut payloads: BTreeMap<CheckpointShardPath, Vec<u8>> = BTreeMap::new();
 
-    for (id, _) in state.iter_live() {
-        let shard = shard_for_bead(id);
+    let snapshot = SnapshotCodec::from_state(state);
+
+    for wire in snapshot.beads {
+        let shard = shard_for_bead(&wire.id);
         let path = CheckpointShardPath::new(namespace.clone(), CheckpointFileKind::State, shard);
-        let Some(view) = state.bead_view(id) else {
-            continue;
-        };
-        let label_state = state.label_store().state(id, view.bead.core.created());
-        let wire = BeadSnapshotWireV1::from_view(&view, label_state);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
-    for (key, tombstone) in state.iter_tombstones() {
-        let TombstoneKey { id, .. } = key;
-        let shard = shard_for_tombstone(&id);
+    for wire in snapshot.tombstones {
+        let shard = shard_for_tombstone(&wire.id);
         let path =
             CheckpointShardPath::new(namespace.clone(), CheckpointFileKind::Tombstones, shard);
-        let wire = wire_tombstone(tombstone);
         push_jsonl_line(&mut payloads, path, &wire)?;
     }
 
-    let dep_store = state.dep_store();
     let mut dep_entries_by_shard: BTreeMap<ShardName, Vec<WireDepEntryV1>> = BTreeMap::new();
-    for key in dep_store.values() {
-        let mut dots: Vec<Dot> = dep_store
-            .dots_for(key)
-            .map(|dots| dots.iter().copied().collect())
-            .unwrap_or_default();
-        dots.sort();
-        let entry = WireDepEntryV1 {
-            key: key.clone(),
-            dots,
-        };
-        let shard = shard_for_dep(key.from(), key.to(), key.kind());
+    for entry in snapshot.deps.entries {
+        let shard = shard_for_dep(entry.key.from(), entry.key.to(), entry.key.kind());
         dep_entries_by_shard.entry(shard).or_default().push(entry);
     }
 
     if dep_entries_by_shard.is_empty()
-        && (!dep_store.cc().max.is_empty() || dep_store.stamp().is_some())
+        && (!snapshot.deps.cc.max.is_empty() || snapshot.deps.stamp.is_some())
     {
         dep_entries_by_shard.insert(shard_name(0), Vec::new());
     }
@@ -428,11 +412,9 @@ fn build_namespace_shards(
     for (shard, mut entries) in dep_entries_by_shard {
         entries.sort_by(|a, b| a.key.cmp(&b.key));
         let wire = WireDepStoreV1 {
-            cc: dep_store.cc().clone(),
+            cc: snapshot.deps.cc.clone(),
             entries,
-            stamp: dep_store
-                .stamp()
-                .map(|stamp| (WireStamp::from(&stamp.at), stamp.by.clone())),
+            stamp: snapshot.deps.stamp.clone(),
         };
         let path = CheckpointShardPath::new(namespace.clone(), CheckpointFileKind::Deps, shard);
         push_jsonl_line(&mut payloads, path, &wire)?;
@@ -480,19 +462,6 @@ fn ensure_dirty_shards(
     Ok(dirty)
 }
 
-fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
-    let deleted = &tombstone.deleted;
-    let lineage = tombstone.lineage.as_ref().map(WireLineageStamp::from);
-
-    WireTombstoneV1 {
-        id: tombstone.id.clone(),
-        deleted_at: WireStamp::from(&deleted.at),
-        deleted_by: deleted.by.clone(),
-        reason: tombstone.reason.clone(),
-        lineage,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,7 +475,10 @@ mod tests {
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
-    use crate::core::{ActorId, CanonicalState, Dot, ReplicaDurabilityRole, ReplicaEntry, Seq0};
+    use crate::core::{
+        ActorId, BeadSnapshotWireV1, CanonicalState, Dot, ReplicaDurabilityRole, ReplicaEntry, Seq0,
+        Tombstone, WireLineageStamp, WireStamp, WireTombstoneV1,
+    };
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -531,6 +503,19 @@ mod tests {
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         crate::core::Bead::new(core, fields)
+    }
+
+    fn wire_tombstone(tombstone: &Tombstone) -> WireTombstoneV1 {
+        let deleted = &tombstone.deleted;
+        let lineage = tombstone.lineage.as_ref().map(WireLineageStamp::from);
+
+        WireTombstoneV1 {
+            id: tombstone.id.clone(),
+            deleted_at: WireStamp::from(&deleted.at),
+            deleted_by: deleted.by.clone(),
+            reason: tombstone.reason.clone(),
+            lineage,
+        }
     }
 
     fn find_two_ids_same_shard() -> (BeadId, BeadId, ShardName) {

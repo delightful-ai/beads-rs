@@ -5,29 +5,19 @@
 //! - `_v` object maps field names to stamps only when they differ from bead-level
 //! - If all fields share bead-level stamp, `_v` is omitted
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::error::WireError;
-use crate::core::state::LabelState;
 use crate::core::{
-    ActorId, Bead, BeadId, BeadSlug, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey,
-    DepStore, Dot, LabelStore, Note, NoteAppendV1, NoteId, NoteStore, OrSet, Stamp, Tombstone,
-    WireDepEntryV1, WireDepStoreV1, WireFieldStamp, WireLineageStamp, WireNoteV1, WireStamp,
-    WireTombstoneV1, WriteStamp, sha256_bytes,
+    ActorId, Bead, BeadSlug, BeadSnapshotWireV1, CanonicalState, NoteAppendV1, SnapshotCodec,
+    SnapshotWireV1, Stamp, StateJsonlSha256, WireDepStoreV1, WireStamp, WireTombstoneV1,
+    WriteStamp,
 };
 
 // =============================================================================
 // Wire format types (intermediate representation for JSON)
 // =============================================================================
-
-#[derive(Clone, Debug)]
-struct ParsedWireBead {
-    bead: Bead,
-    label_state: LabelState,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct WireBeadFullCompat {
@@ -129,21 +119,21 @@ struct WireMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_write_stamp: Option<WireStamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    state_sha256: Option<ContentHash>,
+    state_sha256: Option<StateJsonlSha256>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tombstones_sha256: Option<ContentHash>,
+    tombstones_sha256: Option<StateJsonlSha256>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    deps_sha256: Option<ContentHash>,
+    deps_sha256: Option<StateJsonlSha256>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    notes_sha256: Option<ContentHash>,
+    notes_sha256: Option<StateJsonlSha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreChecksums {
-    pub state: ContentHash,
-    pub tombstones: ContentHash,
-    pub deps: ContentHash,
-    pub notes: Option<ContentHash>,
+    pub state: StateJsonlSha256,
+    pub tombstones: StateJsonlSha256,
+    pub deps: StateJsonlSha256,
+    pub notes: Option<StateJsonlSha256>,
 }
 
 impl StoreChecksums {
@@ -154,10 +144,10 @@ impl StoreChecksums {
         notes_bytes: Option<&[u8]>,
     ) -> Self {
         Self {
-            state: ContentHash::from_bytes(sha256_bytes(state_bytes).0),
-            tombstones: ContentHash::from_bytes(sha256_bytes(tombs_bytes).0),
-            deps: ContentHash::from_bytes(sha256_bytes(deps_bytes).0),
-            notes: notes_bytes.map(|bytes| ContentHash::from_bytes(sha256_bytes(bytes).0)),
+            state: StateJsonlSha256::from_jsonl_bytes(state_bytes),
+            tombstones: StateJsonlSha256::from_jsonl_bytes(tombs_bytes),
+            deps: StateJsonlSha256::from_jsonl_bytes(deps_bytes),
+            notes: notes_bytes.map(StateJsonlSha256::from_jsonl_bytes),
         }
     }
 }
@@ -172,26 +162,8 @@ impl StoreChecksums {
 pub fn serialize_state(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
     let mut lines = Vec::new();
 
-    // Sort by ID
-    let mut ids: Vec<_> = state.iter_live().map(|(id, _)| id.clone()).collect();
-    ids.sort();
-
-    for id in ids {
-        let Some(view) = state.bead_view(&id) else {
-            continue;
-        };
-        let lineage_state = state.label_store().state(&id, view.bead.core.created());
-        let label_state = if state.has_collision_tombstone(&id) {
-            lineage_state.cloned()
-        } else {
-            match (lineage_state, state.label_store().legacy_state(&id)) {
-                (Some(lineage), Some(legacy)) => Some(LabelState::join(lineage, legacy)),
-                (Some(lineage), None) => Some(lineage.clone()),
-                (None, Some(legacy)) => Some(legacy.clone()),
-                (None, None) => None,
-            }
-        };
-        let wire = BeadSnapshotWireV1::from_view(&view, label_state.as_ref());
+    let snapshot = SnapshotCodec::from_state(state);
+    for wire in snapshot.beads {
         let compat = WireBeadFullCompat::from_wire(wire);
         let json = serde_json::to_string(&compat)?;
         lines.push(json);
@@ -208,17 +180,8 @@ pub fn serialize_state(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
 pub fn serialize_tombstones(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
     let mut lines = Vec::new();
 
-    let mut tombs: Vec<_> = state.iter_tombstones().collect();
-    tombs.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-    for (_, tomb) in tombs {
-        let wire = WireTombstoneV1 {
-            id: tomb.id.clone(),
-            deleted_at: WireStamp::from(&tomb.deleted.at),
-            deleted_by: tomb.deleted.by.clone(),
-            reason: tomb.reason.clone(),
-            lineage: tomb.lineage.as_ref().map(WireLineageStamp::from),
-        };
+    let snapshot = SnapshotCodec::from_state(state);
+    for wire in snapshot.tombstones {
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
@@ -232,28 +195,8 @@ pub fn serialize_tombstones(state: &CanonicalState) -> Result<Vec<u8>, WireError
 
 /// Serialize deps to deps.jsonl bytes.
 pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
-    let dep_store = state.dep_store();
-    let mut entries = Vec::new();
-
-    for key in dep_store.values() {
-        let mut dots: Vec<Dot> = dep_store
-            .dots_for(key)
-            .map(|dots| dots.iter().copied().collect())
-            .unwrap_or_default();
-        dots.sort();
-        entries.push(WireDepEntryV1 {
-            key: key.clone(),
-            dots,
-        });
-    }
-
-    entries.sort_by(|a, b| a.key.cmp(&b.key));
-
-    let wire = WireDepStoreV1 {
-        cc: dep_store.cc().clone(),
-        entries,
-        stamp: dep_store.stamp().map(stamp_to_field),
-    };
+    let snapshot = SnapshotCodec::from_state(state);
+    let wire = snapshot.deps;
 
     let json = serde_json::to_string(&wire)?;
     let mut output = json;
@@ -265,37 +208,9 @@ pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
 
 /// Serialize notes to notes.jsonl bytes.
 pub fn serialize_notes(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
-    let mut entries: Vec<(BeadId, Option<Stamp>, Note)> = Vec::new();
-
-    for (bead_id, lineage, notes) in state.note_store().iter_lineages() {
-        for note in notes.values() {
-            entries.push((bead_id.clone(), Some(lineage.clone()), note.clone()));
-        }
-    }
-
-    for (bead_id, notes) in state.note_store().iter_legacy() {
-        if state.has_collision_tombstone(bead_id) {
-            continue;
-        }
-        for note in notes.values() {
-            entries.push((bead_id.clone(), None, note.clone()));
-        }
-    }
-
-    entries.sort_by(|(a_id, a_lineage, a_note), (b_id, b_lineage, b_note)| {
-        a_id.cmp(b_id)
-            .then_with(|| a_lineage.cmp(b_lineage))
-            .then_with(|| a_note.at.cmp(&b_note.at))
-            .then_with(|| a_note.id.cmp(&b_note.id))
-    });
-
     let mut lines = Vec::new();
-    for (bead_id, lineage, note) in entries {
-        let wire = NoteAppendV1 {
-            bead_id,
-            note: WireNoteV1::from(note),
-            lineage: lineage.as_ref().map(WireLineageStamp::from),
-        };
+    let snapshot = SnapshotCodec::from_state(state);
+    for wire in snapshot.notes {
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
@@ -337,169 +252,76 @@ pub fn serialize_meta(
 pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
     Ok(parse_state_full(bytes)?
         .into_iter()
-        .map(|parsed| parsed.bead)
+        .map(Bead::from)
         .collect())
 }
 
-fn ensure_strictly_increasing<T: Ord + std::fmt::Debug>(
-    prev: Option<&T>,
-    current: &T,
-    file: &str,
-    line: usize,
-    label: &str,
-) -> Result<(), WireError> {
-    if let Some(prev) = prev {
-        match current.cmp(prev) {
-            Ordering::Greater => Ok(()),
-            Ordering::Equal => Err(WireError::InvalidValue(format!(
-                "{file} line {line}: duplicate {label} {current:?}"
-            ))),
-            Ordering::Less => Err(WireError::InvalidValue(format!(
-                "{file} line {line}: {label} out of order (prev={prev:?}, got={current:?})"
-            ))),
-        }
-    } else {
-        Ok(())
-    }
-}
-
-fn parse_state_full(bytes: &[u8]) -> Result<Vec<ParsedWireBead>, WireError> {
+fn parse_state_full(bytes: &[u8]) -> Result<Vec<BeadSnapshotWireV1>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut beads = Vec::new();
-    let mut prev_id: Option<BeadId> = None;
 
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = idx + 1;
+    for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
         let raw: serde_json::Value = serde_json::from_str(line)?;
         let compat: WireBeadFullCompat = serde_json::from_value(raw.clone())?;
         compat.validate_redundant_fields(&raw)?;
-        let parsed = wire_to_parts(compat.wire)?;
-        let bead_id = parsed.bead.id().clone();
-        ensure_strictly_increasing(
-            prev_id.as_ref(),
-            &bead_id,
-            "state.jsonl",
-            line_no,
-            "bead id",
-        )?;
-        prev_id = Some(bead_id);
-        beads.push(parsed);
+        beads.push(compat.wire);
     }
 
+    SnapshotCodec::validate_beads(&beads)
+        .map_err(|err| map_snapshot_error("state.jsonl", err))?;
     Ok(beads)
 }
 
-/// Parse tombstones.jsonl bytes.
-pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
+/// Parse tombstones.jsonl bytes into wire tombstones.
+pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<WireTombstoneV1>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut tombs = Vec::new();
-    let mut prev_key = None;
 
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = idx + 1;
+    for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
         let wire: WireTombstoneV1 = serde_json::from_str(line)?;
-        let deleted = wire.deleted_stamp();
-        let lineage = wire.lineage_stamp();
-        let tomb = if let Some(lineage) = lineage {
-            Tombstone::new_collision(wire.id.clone(), deleted, lineage, wire.reason)
-        } else {
-            Tombstone::new(wire.id.clone(), deleted, wire.reason)
-        };
-        let key = tomb.key();
-        ensure_strictly_increasing(
-            prev_key.as_ref(),
-            &key,
-            "tombstones.jsonl",
-            line_no,
-            "tombstone key",
-        )?;
-        prev_key = Some(key);
-        tombs.push(tomb);
+        tombs.push(wire);
     }
 
+    SnapshotCodec::validate_tombstones(&tombs)
+        .map_err(|err| map_snapshot_error("tombstones.jsonl", err))?;
     Ok(tombs)
 }
 
-/// Parse deps.jsonl bytes.
-fn parse_deps(bytes: &[u8]) -> Result<DepStore, WireError> {
+/// Parse deps.jsonl bytes into a wire dep store.
+fn parse_deps(bytes: &[u8]) -> Result<WireDepStoreV1, WireError> {
     let content = parse_utf8(bytes)?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return Ok(DepStore::new());
+        return Ok(WireDepStoreV1::default());
     }
 
     let wire: WireDepStoreV1 = serde_json::from_str(trimmed)?;
-    let mut prev_key: Option<DepKey> = None;
-    for (idx, entry) in wire.entries.iter().enumerate() {
-        let entry_no = idx + 1;
-        if let Some(prev) = prev_key.as_ref() {
-            match entry.key.cmp(prev) {
-                Ordering::Greater => {}
-                Ordering::Equal => {
-                    return Err(WireError::InvalidValue(format!(
-                        "deps.jsonl entry {entry_no}: duplicate dep key {key:?}",
-                        key = entry.key
-                    )));
-                }
-                Ordering::Less => {
-                    return Err(WireError::InvalidValue(format!(
-                        "deps.jsonl entry {entry_no}: dep key out of order (prev={prev:?}, got={key:?})",
-                        key = entry.key
-                    )));
-                }
-            }
-        }
-        prev_key = Some(entry.key.clone());
-    }
-    wire_dep_store_to_state(wire)
+    SnapshotCodec::validate_dep_store(&wire)
+        .map_err(|err| map_snapshot_error("deps.jsonl", err))?;
+    Ok(wire)
 }
 
-/// Parse notes.jsonl bytes.
-pub fn parse_notes(bytes: &[u8]) -> Result<Vec<(BeadId, Option<Stamp>, Note)>, WireError> {
+/// Parse notes.jsonl bytes into note append entries.
+pub fn parse_notes(bytes: &[u8]) -> Result<Vec<NoteAppendV1>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut notes = Vec::new();
-    let mut prev_key: Option<(BeadId, Option<Stamp>, WriteStamp, NoteId)> = None;
-    let mut seen_note_ids: BTreeSet<(BeadId, Option<Stamp>, NoteId)> = BTreeSet::new();
 
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = idx + 1;
+    for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
         let wire: NoteAppendV1 = serde_json::from_str(line)?;
-        let lineage = wire.lineage_stamp();
-        let bead_id = wire.bead_id;
-        let note = Note::from(wire.note);
-        let order_key = (
-            bead_id.clone(),
-            lineage.clone(),
-            note.at.clone(),
-            note.id.clone(),
-        );
-        ensure_strictly_increasing(
-            prev_key.as_ref(),
-            &order_key,
-            "notes.jsonl",
-            line_no,
-            "note entry",
-        )?;
-        let note_id = note.id.clone();
-        let id_key = (bead_id.clone(), lineage.clone(), note_id.clone());
-        if !seen_note_ids.insert(id_key) {
-            return Err(WireError::InvalidValue(format!(
-                "notes.jsonl line {line_no}: duplicate note id {note_id} for bead {bead_id} lineage {lineage:?}"
-            )));
-        }
-        prev_key = Some(order_key);
-        notes.push((bead_id, lineage, note));
+        notes.push(wire);
     }
 
+    SnapshotCodec::validate_notes(&notes)
+        .map_err(|err| map_snapshot_error("notes.jsonl", err))?;
     Ok(notes)
 }
 
@@ -512,30 +334,17 @@ pub fn parse_legacy_state(
 ) -> Result<CanonicalState, WireError> {
     let beads = parse_state_full(state_bytes)?;
     let tombstones = parse_tombstones(tombstones_bytes)?;
-    let dep_store = parse_deps(deps_bytes)?;
+    let deps = parse_deps(deps_bytes)?;
     let notes = parse_notes(notes_bytes)?;
 
-    let mut state = CanonicalState::new();
-    let mut label_store = LabelStore::new();
-    let mut note_store = NoteStore::new();
-    for parsed in beads {
-        let bead = parsed.bead;
-        let bead_id = bead.core.id.clone();
-        let lineage = bead.core.created().clone();
-        state.insert_live(bead);
-        insert_label_state(&mut label_store, bead_id, lineage, parsed.label_state);
-    }
-    for (bead_id, lineage, note) in notes {
-        note_store.insert(bead_id, lineage, note);
-    }
-    state.set_label_store(label_store);
-    state.set_note_store(note_store);
-    for tombstone in tombstones {
-        state.insert_tombstone(tombstone);
-    }
-    state.set_dep_store(dep_store);
-    state.rebuild_dep_indexes();
-    Ok(state)
+    let snapshot = SnapshotWireV1 {
+        beads,
+        tombstones,
+        deps,
+        notes,
+    };
+    SnapshotCodec::into_state(snapshot)
+        .map_err(|err| WireError::InvalidValue(format!("snapshot decode failed: {err}")))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -700,6 +509,10 @@ fn parse_utf8(bytes: &[u8]) -> Result<&str, WireError> {
     std::str::from_utf8(bytes).map_err(|e| WireError::InvalidValue(format!("utf-8 error: {e}")))
 }
 
+fn map_snapshot_error(file: &str, err: crate::core::SnapshotCodecError) -> WireError {
+    WireError::InvalidValue(format!("{file}: {err}"))
+}
+
 // =============================================================================
 // Conversion helpers
 // =============================================================================
@@ -712,15 +525,6 @@ fn wire_to_stamp(wire: WireStamp) -> WriteStamp {
     WriteStamp::from(wire)
 }
 
-fn stamp_to_field(stamp: &Stamp) -> WireFieldStamp {
-    (WireStamp::from(&stamp.at), stamp.by.clone())
-}
-
-fn wire_field_to_stamp(field: WireFieldStamp) -> Stamp {
-    let (at, by) = field;
-    Stamp::new(wire_to_stamp(at), by)
-}
-
 fn wire_field_stamp(wire: &BeadSnapshotWireV1, field: &str) -> Stamp {
     let bead_stamp = Stamp::new(wire_to_stamp(wire.at), wire.by.clone());
     if let Some(v_map) = &wire.v
@@ -731,52 +535,15 @@ fn wire_field_stamp(wire: &BeadSnapshotWireV1, field: &str) -> Stamp {
     bead_stamp
 }
 
-fn wire_dep_store_to_state(wire: WireDepStoreV1) -> Result<DepStore, WireError> {
-    let mut entries: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
-    for entry in wire.entries {
-        let mut dots = BTreeSet::new();
-        for dot in entry.dots {
-            dots.insert(dot);
-        }
-        entries.insert(entry.key, dots);
-    }
-
-    let stamp = wire.stamp.map(wire_field_to_stamp);
-    let set = OrSet::try_from_parts(entries, wire.cc)
-        .map_err(|err| WireError::InvalidValue(format!("dep orset invalid: {err}")))?;
-    Ok(DepStore::from_parts(set, stamp))
-}
-
-fn insert_label_state(
-    label_store: &mut LabelStore,
-    bead_id: BeadId,
-    lineage: Stamp,
-    state: LabelState,
-) {
-    let entry = label_store.state_mut(&bead_id, &lineage);
-    *entry = LabelState::join(entry, &state);
-}
-
-fn wire_to_parts(wire: BeadSnapshotWireV1) -> Result<ParsedWireBead, WireError> {
-    let label_stamp = wire.label_stamp();
-    let labels = wire.labels.clone();
-    let label_state = {
-        let set = OrSet::try_from_parts(labels.entries, labels.cc)
-            .map_err(|err| WireError::InvalidValue(format!("label orset invalid: {err}")))?;
-        LabelState::from_parts(set, Some(label_stamp))
-    };
-
-    let bead = Bead::from(wire);
-    Ok(ParsedWireBead { bead, label_state })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Label, Lww, NoteId, OrSet,
-        ParentEdge, Priority, ReplicaId, Workflow,
+        ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Dvv, Label,
+        LabelStore, Lww, Note, NoteId, OrSet, ParentEdge, Priority, ReplicaId, Tombstone,
+        WireDepEntryV1, WireFieldStamp, WireNoteV1, Workflow,
     };
+    use crate::core::state::LabelState;
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
@@ -825,6 +592,16 @@ mod tests {
         Bead::new(core, fields)
     }
 
+    fn insert_label_state(
+        label_store: &mut LabelStore,
+        bead_id: BeadId,
+        lineage: Stamp,
+        state: LabelState,
+    ) {
+        let entry = label_store.state_mut(&bead_id, &lineage);
+        *entry = LabelState::join(entry, &state);
+    }
+
     fn dot(replica_byte: u8, counter: u64) -> Dot {
         Dot {
             replica: ReplicaId::from(Uuid::from_bytes([replica_byte; 16])),
@@ -837,6 +614,19 @@ mod tests {
             .check_dep_add_key(key)
             .unwrap_or_else(|err| panic!("dep key invalid: {}", err.reason));
         state.apply_dep_add(key, dot, stamp);
+    }
+
+    fn tombstone_from_wire(wire: WireTombstoneV1) -> Tombstone {
+        let deleted = wire.deleted_stamp();
+        let lineage = wire.lineage_stamp();
+        match lineage {
+            Some(stamp) => Tombstone::new_collision(wire.id.clone(), deleted, stamp, wire.reason),
+            None => Tombstone::new(wire.id.clone(), deleted, wire.reason),
+        }
+    }
+
+    fn stamp_to_field(stamp: &Stamp) -> WireFieldStamp {
+        (WireStamp::from(&stamp.at), stamp.by.clone())
     }
 
     fn base58_id_strategy() -> impl Strategy<Value = String> {
@@ -950,7 +740,7 @@ mod tests {
             actor_id("alice"),
             WriteStamp::new(2, 0),
         );
-        state.insert_note(bead_id("bd-legacy"), Some(stamp.clone()), note);
+        state.insert_note(bead_id("bd-legacy"), stamp.clone(), note);
 
         let state_bytes = serialize_state(&state).unwrap();
         let tomb_bytes = serialize_tombstones(&state).unwrap();
@@ -963,6 +753,37 @@ mod tests {
         assert_eq!(serialize_tombstones(&parsed).unwrap(), tomb_bytes);
         assert_eq!(serialize_deps(&parsed).unwrap(), deps_bytes);
         assert_eq!(serialize_notes(&parsed).unwrap(), notes_bytes);
+    }
+
+    #[test]
+    fn parse_legacy_state_migrates_unscoped_notes() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-unscoped");
+        state.insert(make_bead(&id, &stamp)).unwrap();
+
+        let state_bytes = serialize_state(&state).unwrap();
+        let tomb_bytes = serialize_tombstones(&state).unwrap();
+        let deps_bytes = serialize_deps(&state).unwrap();
+
+        let note = Note::new(
+            NoteId::new("note-legacy").unwrap(),
+            "legacy note".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(2, 0),
+        );
+        let note_wire = NoteAppendV1 {
+            bead_id: id.clone(),
+            note: WireNoteV1::from(note.clone()),
+            lineage: None,
+        };
+        let notes_bytes = format!("{}\n", serde_json::to_string(&note_wire).unwrap()).into_bytes();
+
+        let parsed =
+            parse_legacy_state(&state_bytes, &tomb_bytes, &deps_bytes, &notes_bytes).unwrap();
+        let notes = parsed.notes_for(&id);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0], &note);
     }
 
     #[test]
@@ -1179,15 +1000,9 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        state.apply_label_add(
-            id.clone(),
-            label.clone(),
-            dot,
-            stamp.clone(),
-            Some(stamp.clone()),
-        );
-        let ctx = state.label_dvv(&id, &label, Some(&stamp));
-        state.apply_label_remove(id.clone(), &label, &ctx, stamp.clone(), Some(stamp.clone()));
+        state.apply_label_add(id.clone(), label.clone(), dot, stamp.clone(), stamp.clone());
+        let ctx = state.label_dvv(&id, &label, &stamp);
+        state.apply_label_remove(id.clone(), &label, &ctx, stamp.clone(), stamp.clone());
 
         let dep_key = DepKey::new(id.clone(), bead_id("bd-target"), DepKind::Blocks).unwrap();
         let dep_dot = Dot {
@@ -1205,7 +1020,7 @@ mod tests {
             actor_id("bob"),
             WriteStamp::new(6, 0),
         );
-        state.insert_note(id.clone(), Some(stamp.clone()), note);
+        state.insert_note(id.clone(), stamp.clone(), note);
 
         let state_bytes = serialize_state(&state).unwrap();
         let tomb_bytes = serialize_tombstones(&state).unwrap();
@@ -1233,22 +1048,22 @@ mod tests {
             label_a.clone(),
             dot(1, 1),
             stamp.clone(),
-            Some(stamp.clone()),
+            stamp.clone(),
         );
         state.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(2, 2),
             stamp.clone(),
-            Some(stamp.clone()),
+            stamp.clone(),
         );
-        let label_ctx = state.label_dvv(&id, &label_a, Some(&stamp));
+        let label_ctx = state.label_dvv(&id, &label_a, &stamp);
         state.apply_label_remove(
             id.clone(),
             &label_a,
             &label_ctx,
             stamp.clone(),
-            Some(stamp.clone()),
+            stamp.clone(),
         );
 
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-target-a"), DepKind::Blocks).unwrap();
@@ -1265,7 +1080,7 @@ mod tests {
             actor_id("bob"),
             WriteStamp::new(11, 0),
         );
-        state.insert_note(id.clone(), Some(stamp.clone()), note);
+        state.insert_note(id.clone(), stamp.clone(), note);
 
         let state_bytes = serialize_state(&state).unwrap();
         let tomb_bytes = serialize_tombstones(&state).unwrap();
@@ -1330,14 +1145,14 @@ mod tests {
             label_a.clone(),
             dot(5, 1),
             label_stamp_a.clone(),
-            Some(stamp.clone()),
+            stamp.clone(),
         );
         state_a.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(6, 2),
             label_stamp_b.clone(),
-            Some(stamp.clone()),
+            stamp.clone(),
         );
         let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
         let dep_key_b = DepKey::new(id.clone(), bead_id("bd-order-b"), DepKind::Related).unwrap();
@@ -1365,30 +1180,18 @@ mod tests {
             actor_id("carol"),
             WriteStamp::new(11, 0),
         );
-        state_a.insert_note(id.clone(), Some(stamp.clone()), note_a);
-        state_a.insert_note(id.clone(), Some(stamp.clone()), note_b);
+        state_a.insert_note(id.clone(), stamp.clone(), note_a);
+        state_a.insert_note(id.clone(), stamp.clone(), note_b);
 
         let mut state_b = CanonicalState::new();
         state_b.insert(make_bead(&id, &stamp)).unwrap();
-        state_b.apply_label_add(
-            id.clone(),
-            label_b,
-            dot(6, 2),
-            label_stamp_b,
-            Some(stamp.clone()),
-        );
-        state_b.apply_label_add(
-            id.clone(),
-            label_a,
-            dot(5, 1),
-            label_stamp_a,
-            Some(stamp.clone()),
-        );
+        state_b.apply_label_add(id.clone(), label_b, dot(6, 2), label_stamp_b, stamp.clone());
+        state_b.apply_label_add(id.clone(), label_a, dot(5, 1), label_stamp_a, stamp.clone());
         apply_dep_add_checked(&mut state_b, dep_key_b, dot(8, 4), dep_stamp_b);
         apply_dep_add_checked(&mut state_b, dep_key_a, dot(7, 3), dep_stamp_a);
         state_b.insert_note(
             id.clone(),
-            Some(stamp.clone()),
+            stamp.clone(),
             Note::new(
                 NoteId::new("note-b").unwrap(),
                 "second".to_string(),
@@ -1398,7 +1201,7 @@ mod tests {
         );
         state_b.insert_note(
             id.clone(),
-            Some(stamp.clone()),
+            stamp.clone(),
             Note::new(
                 NoteId::new("note-a").unwrap(),
                 "first".to_string(),
@@ -1437,20 +1240,20 @@ mod tests {
             label_a.clone(),
             dot(1, 1),
             stamp_a.clone(),
-            Some(base.clone()),
+            base.clone(),
         );
         state_a.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot(2, 1),
             stamp_b.clone(),
-            Some(base.clone()),
+            base.clone(),
         );
 
         let mut state_b = CanonicalState::new();
         state_b.insert(make_bead(&id, &base)).unwrap();
-        state_b.apply_label_add(id.clone(), label_b, dot(2, 1), stamp_b, Some(base.clone()));
-        state_b.apply_label_add(id.clone(), label_a, dot(1, 1), stamp_a, Some(base.clone()));
+        state_b.apply_label_add(id.clone(), label_b, dot(2, 1), stamp_b, base.clone());
+        state_b.apply_label_add(id.clone(), label_a, dot(1, 1), stamp_a, base.clone());
 
         assert_eq!(
             serialize_state(&state_a).unwrap(),
@@ -1557,7 +1360,9 @@ mod tests {
 
         let mut bytes = serde_json::to_vec(&wire).expect("serialize wire deps");
         bytes.push(b'\n');
-        let parsed = parse_deps(&bytes).expect("parse_deps");
+        let parsed_wire = parse_deps(&bytes).expect("parse_deps");
+        let parsed =
+            SnapshotCodec::dep_store_from_wire(parsed_wire).expect("parse dep store from wire");
 
         assert!(parsed.contains(&key_blocks));
         assert!(parsed.contains(&key_related));
@@ -1597,7 +1402,9 @@ mod tests {
         let mut bytes = serde_json::to_vec(&wire).expect("serialize wire deps");
         bytes.push(b'\n');
 
-        let parsed = parse_deps(&bytes).expect("parse legacy deps");
+        let parsed_wire = parse_deps(&bytes).expect("parse legacy deps");
+        let parsed =
+            SnapshotCodec::dep_store_from_wire(parsed_wire).expect("parse dep store from wire");
         let mut state = CanonicalState::new();
         state.set_dep_store(parsed);
 
@@ -1668,7 +1475,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("parse_tombstones failed: {e}"));
             let mut rebuilt = CanonicalState::new();
             for tomb in parsed {
-                rebuilt.delete(tomb);
+                rebuilt.delete(tombstone_from_wire(tomb));
             }
             let bytes2 = serialize_tombstones(&rebuilt)
                 .unwrap_or_else(|e| panic!("serialize_tombstones failed: {e}"));
@@ -1682,7 +1489,9 @@ mod tests {
                 apply_dep_add_checked(&mut state, key, dot, stamp);
             }
             let bytes = serialize_deps(&state).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
-            let parsed = parse_deps(&bytes).unwrap_or_else(|e| panic!("parse_deps failed: {e}"));
+            let parsed_wire = parse_deps(&bytes).unwrap_or_else(|e| panic!("parse_deps failed: {e}"));
+            let parsed =
+                SnapshotCodec::dep_store_from_wire(parsed_wire).unwrap_or_else(|e| panic!("dep store decode failed: {e}"));
             let mut rebuilt = CanonicalState::new();
             rebuilt.set_dep_store(parsed);
             let bytes2 = serialize_deps(&rebuilt).unwrap_or_else(|e| panic!("serialize_deps failed: {e}"));
@@ -1732,7 +1541,8 @@ mod tests {
         let err = parse_state(&bytes).expect_err("out-of-order state should fail");
         match err {
             WireError::InvalidValue(msg) => {
-                assert!(msg.contains("state.jsonl line 2"), "{msg}");
+                assert!(msg.contains("state.jsonl"), "{msg}");
+                assert!(msg.contains("line 2"), "{msg}");
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
@@ -1753,7 +1563,8 @@ mod tests {
         let err = parse_state(&bytes).expect_err("duplicate state should fail");
         match err {
             WireError::InvalidValue(msg) => {
-                assert!(msg.contains("state.jsonl line 2"), "{msg}");
+                assert!(msg.contains("state.jsonl"), "{msg}");
+                assert!(msg.contains("line 2"), "{msg}");
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
@@ -1774,7 +1585,8 @@ mod tests {
         let err = parse_tombstones(&bytes).expect_err("out-of-order tombstones should fail");
         match err {
             WireError::InvalidValue(msg) => {
-                assert!(msg.contains("tombstones.jsonl line 2"), "{msg}");
+                assert!(msg.contains("tombstones.jsonl"), "{msg}");
+                assert!(msg.contains("line 2"), "{msg}");
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
@@ -1795,7 +1607,8 @@ mod tests {
         let err = parse_tombstones(&bytes).expect_err("duplicate tombstones should fail");
         match err {
             WireError::InvalidValue(msg) => {
-                assert!(msg.contains("tombstones.jsonl line 2"), "{msg}");
+                assert!(msg.contains("tombstones.jsonl"), "{msg}");
+                assert!(msg.contains("line 2"), "{msg}");
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
@@ -1821,7 +1634,8 @@ mod tests {
         let err = parse_deps(&bytes).expect_err("out-of-order deps should fail");
         match err {
             WireError::InvalidValue(msg) => {
-                assert!(msg.contains("deps.jsonl entry 2"), "{msg}");
+                assert!(msg.contains("deps.jsonl"), "{msg}");
+                assert!(msg.contains("line 2"), "{msg}");
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
@@ -1848,7 +1662,8 @@ mod tests {
         let err = parse_deps(&bytes).expect_err("duplicate deps should fail");
         match err {
             WireError::InvalidValue(msg) => {
-                assert!(msg.contains("deps.jsonl entry 2"), "{msg}");
+                assert!(msg.contains("deps.jsonl"), "{msg}");
+                assert!(msg.contains("line 2"), "{msg}");
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
@@ -1870,8 +1685,8 @@ mod tests {
             actor_id("alice"),
             WriteStamp::new(2, 0),
         );
-        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note_a);
-        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note_b);
+        state.insert_note(bead_id("bd-a"), stamp.clone(), note_a);
+        state.insert_note(bead_id("bd-a"), stamp.clone(), note_b);
         let bytes = serialize_notes(&state).expect("serialize_notes");
 
         let mut lines = jsonl_lines(&bytes);
@@ -1881,7 +1696,8 @@ mod tests {
         let err = parse_notes(&bytes).expect_err("out-of-order notes should fail");
         match err {
             WireError::InvalidValue(msg) => {
-                assert!(msg.contains("notes.jsonl line 2"), "{msg}");
+                assert!(msg.contains("notes.jsonl"), "{msg}");
+                assert!(msg.contains("line 2"), "{msg}");
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
@@ -1897,7 +1713,7 @@ mod tests {
             actor_id("alice"),
             WriteStamp::new(1, 0),
         );
-        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note);
+        state.insert_note(bead_id("bd-a"), stamp.clone(), note);
         let bytes = serialize_notes(&state).expect("serialize_notes");
 
         let lines = jsonl_lines(&bytes);
@@ -1909,8 +1725,9 @@ mod tests {
         let err = parse_notes(&bytes).expect_err("duplicate note id should fail");
         match err {
             WireError::InvalidValue(msg) => {
-                assert!(msg.contains("notes.jsonl line 2"), "{msg}");
-                assert!(msg.contains("duplicate note id"), "{msg}");
+                assert!(msg.contains("notes.jsonl"), "{msg}");
+                assert!(msg.contains("line 2"), "{msg}");
+                assert!(msg.contains("duplicate"), "{msg}");
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }

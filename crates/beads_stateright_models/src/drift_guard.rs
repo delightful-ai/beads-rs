@@ -31,7 +31,7 @@ fn _drift_guard_examples(
     limits: &beads_rs::Limits,
     lookup: &dyn beads_rs::EventShaLookup,
 ) {
-    let _digest = digest::canonical_state_sha(state);
+    let _digest = digest::canonical_state_canon_json_sha256(state);
     let _event = factory.txn_body(
         seq,
         TxnId::new(origin.as_uuid()),

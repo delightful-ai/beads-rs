@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::core::error::details as error_details;
 use crate::core::{
-    ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId, ReplicaId,
-    ReplicaRole, SegmentId, Seq0, Seq1, StoreId, StoreMeta, StoreMetaVersions, TxnId, Watermark,
+    ActorId, Applied, CliErrorCode, ClientRequestId, Durable, ErrorCode, ErrorPayload, EventId,
+    HeadStatus, IntoErrorPayload, NamespaceId, ProtocolErrorCode, ReplicaId, ReplicaRole,
+    SegmentId, Seq0, Seq1, StoreId, StoreMeta, StoreMetaVersions, Transience, TxnId, Watermark,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
@@ -99,6 +101,200 @@ pub enum WalIndexError {
     WatermarkRowDecode(String),
     #[error("replica liveness row decode failed: {0}")]
     ReplicaLivenessRowDecode(String),
+}
+
+impl WalIndexError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            WalIndexError::SchemaVersionMismatch { .. } => {
+                ProtocolErrorCode::IndexRebuildRequired.into()
+            }
+            WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
+            WalIndexError::ClientRequestIdReuseMismatch { .. } => {
+                ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
+            }
+            WalIndexError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            WalIndexError::MetaMismatch { key, .. } => match *key {
+                "store_id" => ProtocolErrorCode::WrongStore.into(),
+                "store_epoch" => ProtocolErrorCode::StoreEpochMismatch.into(),
+                _ => ProtocolErrorCode::IndexCorrupt.into(),
+            },
+            WalIndexError::MetaMissing { .. }
+            | WalIndexError::EventIdDecode(_)
+            | WalIndexError::ClientRequestEventIds(_)
+            | WalIndexError::HlcRowDecode(_)
+            | WalIndexError::SegmentRowDecode(_)
+            | WalIndexError::WatermarkRowDecode(_)
+            | WalIndexError::ReplicaLivenessRowDecode(_)
+            | WalIndexError::CborDecode(_)
+            | WalIndexError::CborEncode(_)
+            | WalIndexError::ConcurrentWrite { .. }
+            | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
+            WalIndexError::Sqlite(_) => ProtocolErrorCode::IndexCorrupt.into(),
+            WalIndexError::Io { source, .. } => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    CliErrorCode::IoError.into()
+                }
+            }
+        }
+    }
+
+    pub fn transience(&self) -> Transience {
+        match self {
+            WalIndexError::Symlink { .. } => Transience::Permanent,
+            WalIndexError::SchemaVersionMismatch { .. } => Transience::Retryable,
+            WalIndexError::Io { source, .. } => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+            WalIndexError::MetaMismatch {
+                key: "store_id" | "store_epoch",
+                ..
+            } => Transience::Permanent,
+            WalIndexError::MetaMismatch { .. } => Transience::Retryable,
+            WalIndexError::Equivocation { .. }
+            | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
+            WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
+            _ => Transience::Retryable,
+        }
+    }
+
+    pub(crate) fn into_payload_with_context(
+        self,
+        message: String,
+        retryable: bool,
+    ) -> ErrorPayload {
+        let code = self.code();
+        match self {
+            WalIndexError::Symlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            WalIndexError::SchemaVersionMismatch { expected, got } => ErrorPayload::new(
+                ProtocolErrorCode::IndexRebuildRequired.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::IndexRebuildRequiredDetails {
+                namespace: None,
+                reason: format!("index schema version mismatch: expected {expected}, got {got}"),
+            }),
+            WalIndexError::Equivocation {
+                namespace,
+                origin,
+                seq,
+                existing_sha256,
+                new_sha256,
+            } => ErrorPayload::new(ProtocolErrorCode::Equivocation.into(), message, retryable)
+                .with_details(error_details::EquivocationDetails {
+                    eid: error_details::EventIdDetails {
+                        namespace: namespace.clone(),
+                        origin_replica_id: origin,
+                        origin_seq: seq,
+                    },
+                    existing_sha256: hex::encode(existing_sha256),
+                    new_sha256: hex::encode(new_sha256),
+                }),
+            WalIndexError::ClientRequestIdReuseMismatch {
+                namespace,
+                client_request_id,
+                expected_request_sha256,
+                got_request_sha256,
+                ..
+            } => ErrorPayload::new(
+                ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::ClientRequestIdReuseMismatchDetails {
+                namespace: namespace.clone(),
+                client_request_id,
+                expected_request_sha256: hex::encode(expected_request_sha256),
+                got_request_sha256: hex::encode(got_request_sha256),
+            }),
+            WalIndexError::MetaMismatch {
+                key: "store_id",
+                expected,
+                got,
+                ..
+            } => {
+                let expected = StoreId::parse_str(&expected).ok();
+                let got = StoreId::parse_str(&got).ok();
+                if let (Some(expected), Some(got)) = (expected, got) {
+                    ErrorPayload::new(ProtocolErrorCode::WrongStore.into(), message, retryable)
+                        .with_details(error_details::WrongStoreDetails {
+                            expected_store_id: expected,
+                            got_store_id: got,
+                        })
+                } else {
+                    let reason = message.clone();
+                    ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                        .with_details(error_details::IndexCorruptDetails { reason })
+                }
+            }
+            WalIndexError::MetaMismatch {
+                key: "store_epoch",
+                expected,
+                got,
+                store_id,
+            } => {
+                let expected_epoch = expected.parse::<u64>().ok();
+                let got_epoch = got.parse::<u64>().ok();
+                if let (Some(expected_epoch), Some(got_epoch)) = (expected_epoch, got_epoch) {
+                    ErrorPayload::new(
+                        ProtocolErrorCode::StoreEpochMismatch.into(),
+                        message,
+                        retryable,
+                    )
+                    .with_details(error_details::StoreEpochMismatchDetails {
+                        store_id,
+                        expected_epoch,
+                        got_epoch,
+                    })
+                } else {
+                    let reason = message.clone();
+                    ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                        .with_details(error_details::IndexCorruptDetails { reason })
+                }
+            }
+            WalIndexError::MetaMismatch { .. }
+            | WalIndexError::MetaMissing { .. }
+            | WalIndexError::EventIdDecode(_)
+            | WalIndexError::ClientRequestEventIds(_)
+            | WalIndexError::HlcRowDecode(_)
+            | WalIndexError::SegmentRowDecode(_)
+            | WalIndexError::WatermarkRowDecode(_)
+            | WalIndexError::ReplicaLivenessRowDecode(_)
+            | WalIndexError::CborDecode(_)
+            | WalIndexError::CborEncode(_)
+            | WalIndexError::ConcurrentWrite { .. }
+            | WalIndexError::OriginSeqOverflow { .. }
+            | WalIndexError::Sqlite(_) => ErrorPayload::new(
+                ProtocolErrorCode::IndexCorrupt.into(),
+                message.clone(),
+                retryable,
+            )
+            .with_details(error_details::IndexCorruptDetails { reason: message }),
+            _ => ErrorPayload::new(code, message, retryable),
+        }
+    }
+}
+
+impl IntoErrorPayload for WalIndexError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        self.into_payload_with_context(message, retryable)
+    }
 }
 
 pub trait WalIndex: Send + Sync {

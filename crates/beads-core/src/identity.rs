@@ -9,6 +9,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::event::sha256_bytes;
+use crate::json_canon::{CanonJsonError, to_canon_json_bytes};
+use crate::state::CanonicalState;
+
 use super::error::{CoreError, InvalidId};
 use super::{NamespaceId, Seq1};
 
@@ -824,6 +828,165 @@ impl<'de> serde::Deserialize<'de> for ContentHash {
     }
 }
 
+/// SHA256 of JSONL state representation (state/tombstones/deps/notes).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StateJsonlSha256(ContentHash);
+
+impl StateJsonlSha256 {
+    pub fn from_hex(s: &str) -> Result<Self, CoreError> {
+        ContentHash::from_hex(s).map(Self)
+    }
+
+    pub fn from_jsonl_bytes(bytes: &[u8]) -> Self {
+        Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
+    }
+
+    pub fn as_content_hash(&self) -> &ContentHash {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl fmt::Debug for StateJsonlSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StateJsonlSha256({})", self.to_hex())
+    }
+}
+
+impl fmt::Display for StateJsonlSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+/// SHA256 of canonical JSON representation of CanonicalState.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StateCanonicalJsonSha256(ContentHash);
+
+impl StateCanonicalJsonSha256 {
+    pub fn from_hex(s: &str) -> Result<Self, CoreError> {
+        ContentHash::from_hex(s).map(Self)
+    }
+
+    pub fn from_canonical_json_bytes(bytes: &[u8]) -> Self {
+        Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
+    }
+
+    pub fn from_canonical_state(state: &CanonicalState) -> Result<Self, CanonJsonError> {
+        let bytes = to_canon_json_bytes(state)?;
+        Ok(Self::from_canonical_json_bytes(&bytes))
+    }
+
+    pub fn as_content_hash(&self) -> &ContentHash {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl fmt::Debug for StateCanonicalJsonSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StateCanonicalJsonSha256({})", self.to_hex())
+    }
+}
+
+impl fmt::Display for StateCanonicalJsonSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+/// SHA256 of checkpoint meta preimage canonical JSON.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CheckpointContentSha256(ContentHash);
+
+impl CheckpointContentSha256 {
+    pub fn from_hex(s: &str) -> Result<Self, CoreError> {
+        ContentHash::from_hex(s).map(Self)
+    }
+
+    pub fn from_checkpoint_preimage_bytes(bytes: &[u8]) -> Self {
+        Self(ContentHash::from_bytes(sha256_bytes(bytes).0))
+    }
+
+    pub fn as_content_hash(&self) -> &ContentHash {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl fmt::Debug for CheckpointContentSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CheckpointContentSha256({})", self.to_hex())
+    }
+}
+
+impl fmt::Display for CheckpointContentSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StateDigest {
+    JsonlSha256(StateJsonlSha256),
+    CanonicalJsonSha256(StateCanonicalJsonSha256),
+    CheckpointContentSha256(CheckpointContentSha256),
+}
+
+impl StateDigest {
+    pub fn jsonl_sha256(bytes: &[u8]) -> Self {
+        StateDigest::JsonlSha256(StateJsonlSha256::from_jsonl_bytes(bytes))
+    }
+
+    pub fn canonical_json_sha256(bytes: &[u8]) -> Self {
+        StateDigest::CanonicalJsonSha256(StateCanonicalJsonSha256::from_canonical_json_bytes(bytes))
+    }
+
+    pub fn checkpoint_content_sha256(bytes: &[u8]) -> Self {
+        StateDigest::CheckpointContentSha256(CheckpointContentSha256::from_checkpoint_preimage_bytes(
+            bytes,
+        ))
+    }
+
+    pub fn to_hex(&self) -> String {
+        match self {
+            StateDigest::JsonlSha256(digest) => digest.to_hex(),
+            StateDigest::CanonicalJsonSha256(digest) => digest.to_hex(),
+            StateDigest::CheckpointContentSha256(digest) => digest.to_hex(),
+        }
+    }
+}
+
+impl From<StateJsonlSha256> for StateDigest {
+    fn from(digest: StateJsonlSha256) -> Self {
+        StateDigest::JsonlSha256(digest)
+    }
+}
+
+impl From<StateCanonicalJsonSha256> for StateDigest {
+    fn from(digest: StateCanonicalJsonSha256) -> Self {
+        StateDigest::CanonicalJsonSha256(digest)
+    }
+}
+
+impl From<CheckpointContentSha256> for StateDigest {
+    fn from(digest: CheckpointContentSha256) -> Self {
+        StateDigest::CheckpointContentSha256(digest)
+    }
+}
+
 /// Git branch name - non-empty string.
 ///
 /// Provides minimal validation to catch obviously invalid branch names.
@@ -897,6 +1060,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_canon::to_canon_json_bytes;
     use serde::de::DeserializeOwned;
 
     fn roundtrip<T>(value: &T)
@@ -1095,5 +1259,43 @@ mod tests {
     fn segment_id_serde_roundtrip() {
         let id = SegmentId::new(Uuid::from_bytes([7u8; 16]));
         roundtrip(&id);
+    }
+
+    #[test]
+    fn state_jsonl_digest_is_stable() {
+        let digest = StateJsonlSha256::from_jsonl_bytes(b"state.jsonl\n");
+        assert_eq!(
+            digest.to_hex(),
+            "14a69ad0a1e52c12f352264102871a7f75ced4fe94dea34a3b85dc7dde437706"
+        );
+    }
+
+    #[test]
+    fn state_canonical_json_digest_is_stable() {
+        let digest = StateCanonicalJsonSha256::from_canonical_json_bytes(b"{\"state\":{}}");
+        assert_eq!(
+            digest.to_hex(),
+            "f5ff958086348e8a6780cce4a1daf3d2a4037c95bb6e0bb5bb2eda93ccc9e5a1"
+        );
+    }
+
+    #[test]
+    fn checkpoint_content_digest_is_stable() {
+        let digest =
+            CheckpointContentSha256::from_checkpoint_preimage_bytes(b"{\"checkpoint\":\"meta\"}");
+        assert_eq!(
+            digest.to_hex(),
+            "0b5009d2e29a22aee5ac1913547fd5525ff45127dd687f65d27e529397df78c2"
+        );
+    }
+
+    #[test]
+    fn canonical_state_digest_matches_canon_bytes() {
+        let state = CanonicalState::new();
+        let bytes = to_canon_json_bytes(&state).expect("canonical json bytes");
+        let via_state =
+            StateCanonicalJsonSha256::from_canonical_state(&state).expect("state digest");
+        let via_bytes = StateCanonicalJsonSha256::from_canonical_json_bytes(&bytes);
+        assert_eq!(via_state, via_bytes);
     }
 }

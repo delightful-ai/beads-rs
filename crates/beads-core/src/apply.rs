@@ -15,7 +15,9 @@ use super::event::{
     ValidatedTxnOpV1, ValidatedTxnV1,
 };
 use super::identity::{ActorId, BeadId, BranchName, NoteId};
-use super::state::{CanonicalState, bead_collision_cmp, note_collision_cmp};
+use super::state::{
+    CanonicalState, bead_collision_cmp, legacy_fallback_lineage, note_collision_cmp,
+};
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
 use super::wire_bead::{WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WirePatch};
@@ -258,7 +260,7 @@ fn apply_label_add(
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let dot = op.dot.into();
-    let lineage = op.lineage_stamp();
+    let lineage = resolve_lineage(state, &op.bead_id, op.lineage_stamp());
     let change = state.apply_label_add(
         op.bead_id.clone(),
         op.label.clone(),
@@ -266,7 +268,7 @@ fn apply_label_add(
         event_stamp.clone(),
         lineage.clone(),
     );
-    if change.changed() && matches_live_lineage(state, &op.bead_id, lineage.as_ref()) {
+    if change.changed() && matches_live_lineage(state, &op.bead_id, &lineage) {
         outcome.changed_beads.insert(op.bead_id.clone());
     }
     Ok(())
@@ -279,7 +281,7 @@ fn apply_label_remove(
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let ctx = (&op.ctx).into();
-    let lineage = op.lineage_stamp();
+    let lineage = resolve_lineage(state, &op.bead_id, op.lineage_stamp());
     let change = state.apply_label_remove(
         op.bead_id.clone(),
         &op.label,
@@ -287,7 +289,7 @@ fn apply_label_remove(
         event_stamp.clone(),
         lineage.clone(),
     );
-    if change.changed() && matches_live_lineage(state, &op.bead_id, lineage.as_ref()) {
+    if change.changed() && matches_live_lineage(state, &op.bead_id, &lineage) {
         outcome.changed_beads.insert(op.bead_id.clone());
     }
     Ok(())
@@ -593,7 +595,7 @@ fn apply_note_append(
 ) -> Result<(), ApplyError> {
     let note = note_to_core(note);
     if apply_note(state, bead_id.clone(), lineage.clone(), note, outcome)?
-        && matches_live_lineage(state, &bead_id, lineage.as_ref())
+        && matches_live_lineage(state, &bead_id, &resolve_lineage(state, &bead_id, lineage))
     {
         outcome.changed_beads.insert(bead_id);
     }
@@ -607,6 +609,7 @@ fn apply_note(
     note: Note,
     outcome: &mut ApplyOutcome,
 ) -> Result<bool, ApplyError> {
+    let lineage = resolve_lineage(state, &bead_id, lineage);
     if let Some(existing) = state.insert_note(bead_id.clone(), lineage.clone(), note.clone()) {
         if existing == note {
             return Ok(false);
@@ -638,14 +641,26 @@ fn note_to_core(note: &WireNoteV1) -> Note {
     )
 }
 
-fn matches_live_lineage(state: &CanonicalState, bead_id: &BeadId, lineage: Option<&Stamp>) -> bool {
+fn resolve_lineage(state: &CanonicalState, bead_id: &BeadId, lineage: Option<Stamp>) -> Stamp {
+    match lineage {
+        Some(lineage) => lineage,
+        None => {
+            if state.has_collision_tombstone(bead_id) {
+                legacy_fallback_lineage()
+            } else if let Some(bead) = state.get_live(bead_id) {
+                bead.core.created().clone()
+            } else {
+                legacy_fallback_lineage()
+            }
+        }
+    }
+}
+
+fn matches_live_lineage(state: &CanonicalState, bead_id: &BeadId, lineage: &Stamp) -> bool {
     let Some(bead) = state.get_live(bead_id) else {
         return false;
     };
-    match lineage {
-        Some(lineage) => bead.core.created() == lineage,
-        None => !state.has_collision_tombstone(bead_id),
-    }
+    bead.core.created() == lineage
 }
 
 fn update_lww<T: Clone + PartialEq>(field: &mut Lww<T>, value: T, stamp: &Stamp) -> bool {
@@ -909,6 +924,7 @@ mod tests {
         let bead_id = BeadId::parse("bd-orphan-label").unwrap();
         let label = Label::parse("orphan").unwrap();
         let replica_id = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let lineage = Stamp::new(WriteStamp::new(5, 0), actor_id("alice"));
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -919,7 +935,7 @@ mod tests {
                     max: BTreeMap::new(),
                     dots: Vec::new(),
                 },
-                lineage: None,
+                lineage: Some(lineage.clone().into()),
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 10)).unwrap();
@@ -933,12 +949,12 @@ mod tests {
                     replica: replica_id,
                     counter: 1,
                 },
-                lineage: None,
+                lineage: Some(lineage.clone().into()),
             }))
             .unwrap();
         apply_event(&mut state, &event_with_delta(delta, 11)).unwrap();
 
-        let labels = state.legacy_labels_for(&bead_id);
+        let labels = state.labels_for_lineage(&bead_id, &lineage);
         assert!(labels.contains(label.as_str()));
     }
 

@@ -191,7 +191,7 @@ impl Daemon {
         let resolved = self.resolve_store(repo)?;
 
         // Remove cached state so ensure_repo_loaded will do a fresh load
-        self.drop_store_state(resolved.store_id);
+        self.drop_store_state(resolved.store_id());
 
         // Now load fresh from git
         self.ensure_repo_loaded_strict(repo, git_tx)

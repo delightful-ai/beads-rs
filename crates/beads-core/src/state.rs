@@ -12,6 +12,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -22,9 +23,9 @@ use super::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, Par
 use super::domain::DepKind;
 use super::error::{CoreError, InvalidDependency};
 use super::event::sha256_bytes;
-use super::identity::{BeadId, ContentHash, NoteId};
+use super::identity::{ActorId, BeadId, ContentHash, NoteId};
 use super::orset::{Dot, Dvv, OrSet, OrSetChange};
-use super::time::{Stamp, WallClock};
+use super::time::{Stamp, WallClock, WriteStamp};
 use super::tombstone::{Tombstone, TombstoneKey};
 use super::wire_bead::WireLineageStamp;
 
@@ -81,11 +82,27 @@ impl Default for LabelState {
     }
 }
 
+/// Deterministic fallback lineage for legacy data without lineage stamps.
+///
+/// This is a compatibility-only marker used during import and legacy op handling.
+/// Any state stored under this lineage should be migrated to a real bead lineage
+/// when possible; read paths never consult it directly.
+pub fn legacy_fallback_lineage() -> Stamp {
+    static STAMP: OnceLock<Stamp> = OnceLock::new();
+    STAMP
+        .get_or_init(|| {
+            Stamp::new(
+                WriteStamp::new(0, 0),
+                ActorId::new("legacy").expect("legacy actor id"),
+            )
+        })
+        .clone()
+}
+
 /// Canonical label store keyed by bead id + lineage stamp.
 #[derive(Clone, Debug, Default)]
 pub struct LabelStore {
     by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>>,
-    legacy_by_bead: BTreeMap<BeadId, LabelState>,
 }
 
 impl LabelStore {
@@ -105,28 +122,22 @@ impl LabelStore {
             .or_default()
     }
 
-    pub fn legacy_state(&self, id: &BeadId) -> Option<&LabelState> {
-        self.legacy_by_bead.get(id)
-    }
-
-    pub fn legacy_state_mut(&mut self, id: &BeadId) -> &mut LabelState {
-        self.legacy_by_bead.entry(id.clone()).or_default()
-    }
-
     pub fn insert_state(&mut self, id: BeadId, lineage: Stamp, state: LabelState) {
         self.by_bead.entry(id).or_default().insert(lineage, state);
     }
 
+    fn take_state(&mut self, id: &BeadId, lineage: &Stamp) -> Option<LabelState> {
+        let lineages = self.by_bead.get_mut(id)?;
+        let state = lineages.remove(lineage)?;
+        if lineages.is_empty() {
+            self.by_bead.remove(id);
+        }
+        Some(state)
+    }
+
     pub fn join(a: &Self, b: &Self) -> Self {
         let mut merged = LabelStore::new();
-        let ids: BTreeSet<_> = a
-            .by_bead
-            .keys()
-            .chain(b.by_bead.keys())
-            .chain(a.legacy_by_bead.keys())
-            .chain(b.legacy_by_bead.keys())
-            .cloned()
-            .collect();
+        let ids: BTreeSet<_> = a.by_bead.keys().chain(b.by_bead.keys()).cloned().collect();
         for id in ids {
             let mut merged_lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
             if let Some(states) = a.by_bead.get(&id) {
@@ -150,16 +161,6 @@ impl LabelStore {
             if !merged_lineages.is_empty() {
                 merged.by_bead.insert(id.clone(), merged_lineages);
             }
-
-            let merged_legacy = match (a.legacy_by_bead.get(&id), b.legacy_by_bead.get(&id)) {
-                (Some(left), Some(right)) => Some(LabelState::join(left, right)),
-                (Some(left), None) => Some(left.clone()),
-                (None, Some(right)) => Some(right.clone()),
-                (None, None) => None,
-            };
-            if let Some(state) = merged_legacy {
-                merged.legacy_by_bead.insert(id, state);
-            }
         }
         merged
     }
@@ -175,8 +176,6 @@ struct LineageLabelState {
 struct LabelStoreWire {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     by_bead: BTreeMap<BeadId, Vec<LineageLabelState>>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    legacy: BTreeMap<BeadId, LabelState>,
 }
 
 impl Serialize for LabelStore {
@@ -197,10 +196,7 @@ impl Serialize for LabelStore {
                 by_bead.insert(id.clone(), entries);
             }
         }
-        let wire = LabelStoreWire {
-            by_bead,
-            legacy: self.legacy_by_bead.clone(),
-        };
+        let wire = LabelStoreWire { by_bead };
         wire.serialize(serializer)
     }
 }
@@ -210,43 +206,26 @@ impl<'de> Deserialize<'de> for LabelStore {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum LabelStoreRepr {
-            Legacy(BTreeMap<BeadId, LabelState>),
-            Wire(LabelStoreWire),
-        }
-
-        match LabelStoreRepr::deserialize(deserializer)? {
-            LabelStoreRepr::Legacy(map) => Ok(LabelStore {
-                by_bead: BTreeMap::new(),
-                legacy_by_bead: map,
-            }),
-            LabelStoreRepr::Wire(wire) => {
-                let mut by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>> = BTreeMap::new();
-                for (id, entries) in wire.by_bead {
-                    let mut lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
-                    for entry in entries {
-                        let lineage = entry.lineage.stamp();
-                        match lineages.get(&lineage) {
-                            Some(existing) => {
-                                lineages.insert(lineage, LabelState::join(existing, &entry.state));
-                            }
-                            None => {
-                                lineages.insert(lineage, entry.state);
-                            }
-                        }
+        let wire = LabelStoreWire::deserialize(deserializer)?;
+        let mut by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>> = BTreeMap::new();
+        for (id, entries) in wire.by_bead {
+            let mut lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
+            for entry in entries {
+                let lineage = entry.lineage.stamp();
+                match lineages.get(&lineage) {
+                    Some(existing) => {
+                        lineages.insert(lineage, LabelState::join(existing, &entry.state));
                     }
-                    if !lineages.is_empty() {
-                        by_bead.insert(id, lineages);
+                    None => {
+                        lineages.insert(lineage, entry.state);
                     }
                 }
-                Ok(LabelStore {
-                    by_bead,
-                    legacy_by_bead: wire.legacy,
-                })
+            }
+            if !lineages.is_empty() {
+                by_bead.insert(id, lineages);
             }
         }
+        Ok(LabelStore { by_bead })
     }
 }
 
@@ -314,7 +293,6 @@ impl Default for DepStore {
 #[derive(Clone, Debug, Default)]
 pub struct NoteStore {
     by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>>,
-    legacy_by_bead: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
 }
 
 impl NoteStore {
@@ -322,16 +300,13 @@ impl NoteStore {
         Self::default()
     }
 
-    pub fn insert(&mut self, id: BeadId, lineage: Option<Stamp>, note: Note) -> Option<Note> {
-        let entry = match lineage {
-            Some(lineage) => self
-                .by_bead
-                .entry(id)
-                .or_default()
-                .entry(lineage)
-                .or_default(),
-            None => self.legacy_by_bead.entry(id).or_default(),
-        };
+    pub fn insert(&mut self, id: BeadId, lineage: Stamp, note: Note) -> Option<Note> {
+        let entry = self
+            .by_bead
+            .entry(id)
+            .or_default()
+            .entry(lineage)
+            .or_default();
         if let Some(existing) = entry.get(&note.id) {
             return Some(existing.clone());
         }
@@ -339,16 +314,13 @@ impl NoteStore {
         None
     }
 
-    pub fn replace(&mut self, id: BeadId, lineage: Option<Stamp>, note: Note) -> Option<Note> {
-        let entry = match lineage {
-            Some(lineage) => self
-                .by_bead
-                .entry(id)
-                .or_default()
-                .entry(lineage)
-                .or_default(),
-            None => self.legacy_by_bead.entry(id).or_default(),
-        };
+    pub fn replace(&mut self, id: BeadId, lineage: Stamp, note: Note) -> Option<Note> {
+        let entry = self
+            .by_bead
+            .entry(id)
+            .or_default()
+            .entry(lineage)
+            .or_default();
         entry.insert(note.id.clone(), note)
     }
 
@@ -367,22 +339,11 @@ impl NoteStore {
                 }
             }
         }
-        self.legacy_by_bead
-            .get(id)
-            .is_some_and(|notes| notes.contains_key(note_id))
+        false
     }
 
     pub fn notes_for(&self, id: &BeadId, lineage: &Stamp) -> Vec<&Note> {
         let Some(notes) = self.by_bead.get(id).and_then(|notes| notes.get(lineage)) else {
-            return Vec::new();
-        };
-        let mut out: Vec<&Note> = notes.values().collect();
-        out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
-        out
-    }
-
-    pub fn legacy_notes_for(&self, id: &BeadId) -> Vec<&Note> {
-        let Some(notes) = self.legacy_by_bead.get(id) else {
             return Vec::new();
         };
         let mut out: Vec<&Note> = notes.values().collect();
@@ -400,8 +361,17 @@ impl NoteStore {
         })
     }
 
-    pub fn iter_legacy(&self) -> impl Iterator<Item = (&BeadId, &BTreeMap<NoteId, Note>)> {
-        self.legacy_by_bead.iter()
+    fn take_lineage_notes(
+        &mut self,
+        id: &BeadId,
+        lineage: &Stamp,
+    ) -> Option<BTreeMap<NoteId, Note>> {
+        let lineages = self.by_bead.get_mut(id)?;
+        let notes = lineages.remove(lineage)?;
+        if lineages.is_empty() {
+            self.by_bead.remove(id);
+        }
+        Some(notes)
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
@@ -425,22 +395,6 @@ impl NoteStore {
             }
         }
 
-        for (id, notes) in a.legacy_by_bead.iter().chain(b.legacy_by_bead.iter()) {
-            let entry = merged.legacy_by_bead.entry(id.clone()).or_default();
-            for (note_id, note) in notes {
-                match entry.get(note_id) {
-                    None => {
-                        entry.insert(note_id.clone(), note.clone());
-                    }
-                    Some(existing) => {
-                        if note_collision_cmp(existing, note) == Ordering::Less {
-                            entry.insert(note_id.clone(), note.clone());
-                        }
-                    }
-                }
-            }
-        }
-
         merged
     }
 }
@@ -455,8 +409,6 @@ struct LineageNotes {
 struct NoteStoreWire {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     by_bead: BTreeMap<BeadId, Vec<LineageNotes>>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    legacy: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
 }
 
 impl Serialize for NoteStore {
@@ -477,10 +429,7 @@ impl Serialize for NoteStore {
                 by_bead.insert(id.clone(), entries);
             }
         }
-        let wire = NoteStoreWire {
-            by_bead,
-            legacy: self.legacy_by_bead.clone(),
-        };
+        let wire = NoteStoreWire { by_bead };
         wire.serialize(serializer)
     }
 }
@@ -490,59 +439,40 @@ impl<'de> Deserialize<'de> for NoteStore {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum NoteStoreRepr {
-            Legacy(BTreeMap<BeadId, BTreeMap<NoteId, Note>>),
-            Wire(NoteStoreWire),
-        }
-
-        match NoteStoreRepr::deserialize(deserializer)? {
-            NoteStoreRepr::Legacy(map) => Ok(NoteStore {
-                by_bead: BTreeMap::new(),
-                legacy_by_bead: map,
-            }),
-            NoteStoreRepr::Wire(wire) => {
-                let mut by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>> =
-                    BTreeMap::new();
-                for (id, entries) in wire.by_bead {
-                    let mut lineages: BTreeMap<Stamp, BTreeMap<NoteId, Note>> = BTreeMap::new();
-                    for entry in entries {
-                        let lineage = entry.lineage.stamp();
-                        match lineages.get(&lineage) {
-                            Some(existing) => {
-                                let mut merged = existing.clone();
-                                for (note_id, note) in entry.notes {
-                                    match merged.get(&note_id) {
-                                        None => {
-                                            merged.insert(note_id, note);
-                                        }
-                                        Some(existing_note) => {
-                                            if note_collision_cmp(existing_note, &note)
-                                                == Ordering::Less
-                                            {
-                                                merged.insert(note_id, note);
-                                            }
-                                        }
+        let wire = NoteStoreWire::deserialize(deserializer)?;
+        let mut by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>> =
+            BTreeMap::new();
+        for (id, entries) in wire.by_bead {
+            let mut lineages: BTreeMap<Stamp, BTreeMap<NoteId, Note>> = BTreeMap::new();
+            for entry in entries {
+                let lineage = entry.lineage.stamp();
+                match lineages.get(&lineage) {
+                    Some(existing) => {
+                        let mut merged = existing.clone();
+                        for (note_id, note) in entry.notes {
+                            match merged.get(&note_id) {
+                                None => {
+                                    merged.insert(note_id, note);
+                                }
+                                Some(existing_note) => {
+                                    if note_collision_cmp(existing_note, &note) == Ordering::Less {
+                                        merged.insert(note_id, note);
                                     }
                                 }
-                                lineages.insert(lineage, merged);
-                            }
-                            None => {
-                                lineages.insert(lineage, entry.notes);
                             }
                         }
+                        lineages.insert(lineage, merged);
                     }
-                    if !lineages.is_empty() {
-                        by_bead.insert(id, lineages);
+                    None => {
+                        lineages.insert(lineage, entry.notes);
                     }
                 }
-                Ok(NoteStore {
-                    by_bead,
-                    legacy_by_bead: wire.legacy,
-                })
+            }
+            if !lineages.is_empty() {
+                by_bead.insert(id, lineages);
             }
         }
+        Ok(NoteStore { by_bead })
     }
 }
 
@@ -741,19 +671,10 @@ impl CanonicalState {
             return Labels::new();
         };
         let lineage = bead.core.created();
-        let mut labels = self
-            .labels
+        self.labels
             .state(id, lineage)
             .map(LabelState::labels)
-            .unwrap_or_default();
-        if !self.has_collision_tombstone(id)
-            && let Some(legacy) = self.labels.legacy_state(id)
-        {
-            for label in legacy.labels().iter() {
-                labels.insert(label.clone());
-            }
-        }
-        labels
+            .unwrap_or_default()
     }
 
     pub fn labels_for_lineage(&self, id: &BeadId, lineage: &Stamp) -> Labels {
@@ -763,16 +684,8 @@ impl CanonicalState {
             .unwrap_or_default()
     }
 
-    pub fn legacy_labels_for(&self, id: &BeadId) -> Labels {
-        self.labels
-            .legacy_state(id)
-            .map(LabelState::labels)
-            .unwrap_or_default()
-    }
-
-    pub fn label_dvv(&self, id: &BeadId, label: &Label, lineage: Option<&Stamp>) -> Dvv {
+    pub fn label_dvv(&self, id: &BeadId, label: &Label, lineage: &Stamp) -> Dvv {
         let mut dots = BTreeSet::new();
-        let include_legacy = !self.has_collision_tombstone(id);
         let mut collect = |state: Option<&LabelState>| {
             if let Some(state) = state
                 && let Some(entries) = state.dots_for(label)
@@ -780,21 +693,7 @@ impl CanonicalState {
                 dots.extend(entries.iter().copied());
             }
         };
-
-        match lineage {
-            Some(lineage) => {
-                collect(self.labels.state(id, lineage));
-                if include_legacy {
-                    collect(self.labels.legacy_state(id));
-                }
-            }
-            None => {
-                collect(self.labels.legacy_state(id));
-                if include_legacy && let Some(bead) = self.get_live(id) {
-                    collect(self.labels.state(id, bead.core.created()));
-                }
-            }
-        }
+        collect(self.labels.state(id, lineage));
 
         Dvv::from_dots(dots.iter().copied())
     }
@@ -807,20 +706,10 @@ impl CanonicalState {
     pub fn label_stamp(&self, id: &BeadId) -> Option<Stamp> {
         let bead = self.get_live(id)?;
         let lineage = bead.core.created();
-        let lineage_stamp = self
-            .labels
+        self.labels
             .state(id, lineage)
             .and_then(|state| state.stamp())
-            .cloned();
-        if self.has_collision_tombstone(id) {
-            return lineage_stamp;
-        }
-        let legacy_stamp = self
-            .labels
-            .legacy_state(id)
-            .and_then(|state| state.stamp())
-            .cloned();
-        max_stamp(lineage_stamp.as_ref(), legacy_stamp.as_ref())
+            .cloned()
     }
 
     pub fn notes_for(&self, id: &BeadId) -> Vec<&Note> {
@@ -828,15 +717,7 @@ impl CanonicalState {
             return Vec::new();
         };
         let lineage = bead.core.created();
-        let mut notes = self.notes.notes_for(id, lineage);
-        if !self.has_collision_tombstone(id) {
-            let legacy = self.notes.legacy_notes_for(id);
-            if !legacy.is_empty() {
-                notes.extend(legacy);
-                notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
-            }
-        }
-        notes
+        self.notes.notes_for(id, lineage)
     }
 
     pub fn note_id_exists(&self, id: &BeadId, note_id: &NoteId) -> bool {
@@ -868,22 +749,52 @@ impl CanonicalState {
         self.rebuild_dep_indexes();
     }
 
+    fn absorb_legacy_lineage(&mut self, id: &BeadId, lineage: &Stamp) {
+        if self.has_collision_tombstone(id) {
+            return;
+        }
+        let legacy_lineage = legacy_fallback_lineage();
+        if &legacy_lineage == lineage {
+            return;
+        }
+
+        if let Some(legacy_state) = self.labels.take_state(id, &legacy_lineage) {
+            let state = self.labels.state_mut(id, lineage);
+            *state = LabelState::join(state, &legacy_state);
+        }
+
+        if let Some(legacy_notes) = self.notes.take_lineage_notes(id, &legacy_lineage) {
+            let entry = self
+                .notes
+                .by_bead
+                .entry(id.clone())
+                .or_default()
+                .entry(lineage.clone())
+                .or_default();
+            for (note_id, note) in legacy_notes {
+                match entry.get(&note_id) {
+                    None => {
+                        entry.insert(note_id, note);
+                    }
+                    Some(existing) => {
+                        if note_collision_cmp(existing, &note) == Ordering::Less {
+                            entry.insert(note_id, note);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn bead_view(&self, id: &BeadId) -> Option<BeadView> {
         let bead = self.get(id)?.clone();
         let labels = self.labels_for(id);
-        let mut notes = self
+        let notes = self
             .notes
             .notes_for(id, bead.core.created())
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
-        if !self.has_collision_tombstone(id) {
-            let legacy = self.notes.legacy_notes_for(id);
-            if !legacy.is_empty() {
-                notes.extend(legacy.into_iter().cloned());
-                notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
-            }
-        }
         let label_stamp = self.label_stamp(id);
         Some(BeadView::new(bead, labels, notes, label_stamp))
     }
@@ -898,35 +809,18 @@ impl CanonicalState {
 
     fn updated_stamp_for_merge(&self, id: &BeadId, bead: &Bead) -> Stamp {
         let lineage = bead.core.created();
-        let mut labels = self.labels_for_lineage(id, lineage);
-        let mut notes = self
+        let labels = self.labels_for_lineage(id, lineage);
+        let notes = self
             .notes
             .notes_for(id, lineage)
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
-        let mut label_stamp = self
+        let label_stamp = self
             .labels
             .state(id, lineage)
             .and_then(|state| state.stamp())
             .cloned();
-        if !self.has_collision_tombstone(id) {
-            let legacy_labels = self.legacy_labels_for(id);
-            for label in legacy_labels.iter() {
-                labels.insert(label.clone());
-            }
-            let legacy_notes = self.notes.legacy_notes_for(id);
-            if !legacy_notes.is_empty() {
-                notes.extend(legacy_notes.into_iter().cloned());
-                notes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
-            }
-            let legacy_stamp = self
-                .labels
-                .legacy_state(id)
-                .and_then(|state| state.stamp())
-                .cloned();
-            label_stamp = max_stamp(label_stamp.as_ref(), legacy_stamp.as_ref());
-        }
         BeadView::new(bead.clone(), labels, notes, label_stamp)
             .updated_stamp()
             .clone()
@@ -938,12 +832,9 @@ impl CanonicalState {
         label: Label,
         dot: Dot,
         stamp: Stamp,
-        lineage: Option<Stamp>,
+        lineage: Stamp,
     ) -> OrSetChange<Label> {
-        let state = match lineage {
-            Some(lineage) => self.labels.state_mut(&id, &lineage),
-            None => self.labels.legacy_state_mut(&id),
-        };
+        let state = self.labels.state_mut(&id, &lineage);
         let change = state.set.apply_add(dot, label);
         if change.changed() {
             state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
@@ -957,77 +848,14 @@ impl CanonicalState {
         label: &Label,
         ctx: &Dvv,
         stamp: Stamp,
-        lineage: Option<Stamp>,
+        lineage: Stamp,
     ) -> OrSetChange<Label> {
-        match lineage {
-            Some(lineage) => {
-                let include_legacy = !self.has_collision_tombstone(&id);
-                let mut change = {
-                    let state = self.labels.state_mut(&id, &lineage);
-                    let change = state.set.apply_remove(label, ctx);
-                    if change.changed() {
-                        state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
-                    }
-                    change
-                };
-
-                if include_legacy && self.labels.legacy_state(&id).is_some() {
-                    let legacy_change = {
-                        let state = self.labels.legacy_state_mut(&id);
-                        let change = state.set.apply_remove(label, ctx);
-                        if change.changed() {
-                            state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
-                        }
-                        change
-                    };
-                    if legacy_change.changed() {
-                        if change.changed() {
-                            change.added.extend(legacy_change.added);
-                            change.removed.extend(legacy_change.removed);
-                        } else {
-                            change = legacy_change;
-                        }
-                    }
-                }
-
-                change
-            }
-            None => {
-                let include_lineage = !self.has_collision_tombstone(&id);
-                let live_lineage = if include_lineage {
-                    self.get_live(&id).map(|bead| bead.core.created().clone())
-                } else {
-                    None
-                };
-                let mut change = {
-                    let state = self.labels.legacy_state_mut(&id);
-                    let change = state.set.apply_remove(label, ctx);
-                    if change.changed() {
-                        state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
-                    }
-                    change
-                };
-                if let Some(lineage) = live_lineage {
-                    let lineage_change = {
-                        let state = self.labels.state_mut(&id, &lineage);
-                        let change = state.set.apply_remove(label, ctx);
-                        if change.changed() {
-                            state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
-                        }
-                        change
-                    };
-                    if lineage_change.changed() {
-                        if change.changed() {
-                            change.added.extend(lineage_change.added);
-                            change.removed.extend(lineage_change.removed);
-                        } else {
-                            change = lineage_change;
-                        }
-                    }
-                }
-                change
-            }
+        let state = self.labels.state_mut(&id, &lineage);
+        let change = state.set.apply_remove(label, ctx);
+        if change.changed() {
+            state.stamp = max_stamp(state.stamp.as_ref(), Some(&stamp));
         }
+        change
     }
 
     pub fn apply_dep_add(&mut self, key: DepAddKey, dot: Dot, stamp: Stamp) -> OrSetChange<DepKey> {
@@ -1120,11 +948,11 @@ impl CanonicalState {
         change
     }
 
-    pub fn insert_note(&mut self, id: BeadId, lineage: Option<Stamp>, note: Note) -> Option<Note> {
+    pub fn insert_note(&mut self, id: BeadId, lineage: Stamp, note: Note) -> Option<Note> {
         self.notes.insert(id, lineage, note)
     }
 
-    pub fn replace_note(&mut self, id: BeadId, lineage: Option<Stamp>, note: Note) -> Option<Note> {
+    pub fn replace_note(&mut self, id: BeadId, lineage: Stamp, note: Note) -> Option<Note> {
         self.notes.replace(id, lineage, note)
     }
 
@@ -1197,6 +1025,7 @@ impl CanonicalState {
             }
             Some(BeadEntry::Tombstone(_)) | None => bead,
         };
+        self.absorb_legacy_lineage(&id, merged.core.created());
         self.beads.insert(id, BeadEntry::Live(Box::new(merged)));
 
         Ok(())
@@ -1247,6 +1076,7 @@ impl CanonicalState {
     /// Used for collision resolution when we've already handled the logic.
     /// Removes any tombstone for this ID.
     pub fn insert_live(&mut self, bead: Bead) {
+        self.absorb_legacy_lineage(&bead.core.id, bead.core.created());
         self.beads
             .insert(bead.core.id.clone(), BeadEntry::Live(Box::new(bead)));
     }
@@ -1865,8 +1695,6 @@ mod tests {
 
         let label_a = Label::parse("alpha").expect("label");
         let label_b = Label::parse("beta").expect("label");
-        let legacy_label = Label::parse("legacy").expect("label");
-
         let dot_a = Dot {
             replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
             counter: 1,
@@ -1875,31 +1703,20 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([2u8; 16])),
             counter: 1,
         };
-        let dot_legacy = Dot {
-            replica: ReplicaId::from(Uuid::from_bytes([3u8; 16])),
-            counter: 1,
-        };
 
         state_a.apply_label_add(
             id.clone(),
             label_a.clone(),
             dot_a,
             stamp_a.clone(),
-            Some(stamp_a.clone()),
+            stamp_a.clone(),
         );
         state_b.apply_label_add(
             id.clone(),
             label_b.clone(),
             dot_b,
             stamp_b.clone(),
-            Some(stamp_b.clone()),
-        );
-        state_a.apply_label_add(
-            id.clone(),
-            legacy_label.clone(),
-            dot_legacy,
-            stamp_a.clone(),
-            None,
+            stamp_b.clone(),
         );
 
         let note_a = Note::new(
@@ -1914,16 +1731,8 @@ mod tests {
             actor_id("bob"),
             WriteStamp::new(20, 0),
         );
-        let legacy_note = Note::new(
-            NoteId::new("note-legacy").unwrap(),
-            "note-legacy".to_string(),
-            actor_id("alice"),
-            WriteStamp::new(30, 0),
-        );
-
-        state_a.insert_note(id.clone(), Some(stamp_a.clone()), note_a);
-        state_b.insert_note(id.clone(), Some(stamp_b.clone()), note_b);
-        state_a.insert_note(id.clone(), None, legacy_note);
+        state_a.insert_note(id.clone(), stamp_a.clone(), note_a);
+        state_b.insert_note(id.clone(), stamp_b.clone(), note_b);
 
         let merged = CanonicalState::join(&state_a, &state_b)
             .unwrap_or_else(|e| panic!("join failed: {e:?}"));
@@ -1933,12 +1742,10 @@ mod tests {
         let labels = merged.labels_for(&id);
         assert!(labels.contains(label_b.as_str()));
         assert!(!labels.contains(label_a.as_str()));
-        assert!(!labels.contains(legacy_label.as_str()));
 
         let notes = merged.notes_for(&id);
         assert!(notes.iter().any(|note| note.content == "note-b"));
         assert!(!notes.iter().any(|note| note.content == "note-a"));
-        assert!(!notes.iter().any(|note| note.content == "note-legacy"));
     }
 
     #[test]
@@ -2083,9 +1890,9 @@ mod tests {
         );
 
         let mut store_a = NoteStore::new();
-        store_a.insert(bead.clone(), Some(lineage.clone()), note_a);
+        store_a.insert(bead.clone(), lineage.clone(), note_a);
         let mut store_b = NoteStore::new();
-        store_b.insert(bead.clone(), Some(lineage.clone()), note_b.clone());
+        store_b.insert(bead.clone(), lineage.clone(), note_b.clone());
 
         let joined_ab = NoteStore::join(&store_a, &store_b);
         let joined_ba = NoteStore::join(&store_b, &store_a);
@@ -2198,13 +2005,7 @@ mod tests {
             replica: ReplicaId::from(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        state.apply_label_add(
-            id.clone(),
-            label,
-            dot,
-            label_stamp.clone(),
-            Some(base.clone()),
-        );
+        state.apply_label_add(id.clone(), label, dot, label_stamp.clone(), base.clone());
 
         let updated = state.updated_stamp_for(&id).expect("updated stamp");
         assert_eq!(updated.at.wall_ms, label_stamp.at.wall_ms);
@@ -2213,7 +2014,7 @@ mod tests {
         let note_author = ActorId::new("carol").unwrap();
         let note_stamp = WriteStamp::new(3000, 0);
         let note = Note::new(note_id, "hi".to_string(), note_author.clone(), note_stamp);
-        state.insert_note(id.clone(), Some(base.clone()), note);
+        state.insert_note(id.clone(), base.clone(), note);
 
         let updated = state.updated_stamp_for(&id).expect("updated stamp");
         assert_eq!(updated.at.wall_ms, 3000);
@@ -2244,15 +2045,9 @@ mod tests {
             label.clone(),
             dot_a,
             stamp_new.clone(),
-            Some(base.clone()),
+            base.clone(),
         );
-        state.apply_label_add(
-            id.clone(),
-            label.clone(),
-            dot_b,
-            stamp_old,
-            Some(base.clone()),
-        );
+        state.apply_label_add(id.clone(), label.clone(), dot_b, stamp_old, base.clone());
 
         let stamp = state.label_stamp(&id).expect("label stamp");
         assert_eq!(stamp, stamp_new);
@@ -2277,20 +2072,8 @@ mod tests {
             counter: 2,
         };
 
-        state.apply_label_add(
-            id.clone(),
-            label.clone(),
-            dot_a,
-            stamp_a,
-            Some(base.clone()),
-        );
-        state.apply_label_add(
-            id.clone(),
-            label,
-            dot_b,
-            stamp_b.clone(),
-            Some(base.clone()),
-        );
+        state.apply_label_add(id.clone(), label.clone(), dot_a, stamp_a, base.clone());
+        state.apply_label_add(id.clone(), label, dot_b, stamp_b.clone(), base.clone());
 
         assert_eq!(state.labels_for(&id).len(), 1);
         let stamp = state.label_stamp(&id).expect("label stamp");

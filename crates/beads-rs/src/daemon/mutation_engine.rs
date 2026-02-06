@@ -920,7 +920,7 @@ impl MutationEngine {
         let lineage = bead.core.created().clone();
         let mut delta = TxnDeltaV1::new();
         for label in labels.iter() {
-            let ctx = state.label_dvv(&id, label, Some(&lineage));
+            let ctx = state.label_dvv(&id, label, &lineage);
             delta
                 .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
                     bead_id: id.clone(),

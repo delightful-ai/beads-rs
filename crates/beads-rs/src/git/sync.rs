@@ -1258,8 +1258,8 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, ContentHash, DepKey, DepKind,
-        Dot, Lww, Priority, ReplicaId, Stamp, Tombstone, Workflow,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
+        Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone, Workflow,
     };
     use crate::git::WireError;
     #[cfg(feature = "slow-tests")]
@@ -1548,7 +1548,7 @@ mod tests {
             &deps_bytes,
             Some(&notes_bytes),
         );
-        checksums.state = ContentHash::from_bytes([0xAB; 32]);
+        checksums.state = StateJsonlSha256::from_jsonl_bytes(&[0xAB; 32]);
         let meta_bytes = wire::serialize_meta(Some("test"), None, &checksums).unwrap();
         let oid =
             write_store_commit_with_meta_bytes(&repo, None, "bad-checksums", Some(meta_bytes));

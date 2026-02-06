@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::core::error::details as error_details;
+use crate::core::{
+    CliErrorCode, ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, Transience,
+};
+
 pub mod event_wal;
 pub mod frame;
 pub mod fsck;
@@ -83,4 +88,69 @@ pub enum EventWalError {
     SegmentHeaderMagicMismatch { got: [u8; 5] },
     #[error("segment header crc32c mismatch: expected {expected:#x}, got {got:#x}")]
     SegmentHeaderCrcMismatch { expected: u32, got: u32 },
+}
+
+impl EventWalError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            EventWalError::RecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
+            EventWalError::SegmentHeaderUnsupportedVersion { .. } => {
+                ProtocolErrorCode::WalFormatUnsupported.into()
+            }
+            EventWalError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            EventWalError::Io { source, .. } => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    CliErrorCode::IoError.into()
+                }
+            }
+            _ => ProtocolErrorCode::WalCorrupt.into(),
+        }
+    }
+
+    pub fn transience(&self) -> Transience {
+        match self {
+            EventWalError::Symlink { .. } => Transience::Permanent,
+            EventWalError::Io { source, .. } => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+            _ => Transience::Permanent,
+        }
+    }
+}
+
+impl IntoErrorPayload for EventWalError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        let code = self.code();
+        match self {
+            EventWalError::RecordTooLarge {
+                max_bytes,
+                got_bytes,
+            } => ErrorPayload::new(ProtocolErrorCode::WalRecordTooLarge.into(), message, retryable)
+                .with_details(error_details::WalRecordTooLargeDetails {
+                    max_wal_record_bytes: max_bytes as u64,
+                    estimated_bytes: got_bytes as u64,
+                }),
+            EventWalError::Symlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            _ => ErrorPayload::new(code, message.clone(), retryable).with_details(
+                error_details::WalErrorDetails {
+                    message,
+                },
+            ),
+        }
+    }
 }

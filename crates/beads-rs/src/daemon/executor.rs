@@ -228,11 +228,7 @@ impl Daemon {
         let mut proof = self.loaded_store(store_id, remote.clone());
         let draft = {
             let store_runtime = proof.runtime_mut();
-            let state_snapshot = if namespace.is_core() {
-                store_runtime.state.core().clone()
-            } else {
-                store_runtime.state.get_or_default(&namespace)
-            };
+            let state_snapshot = store_runtime.state.get_or_default(&namespace);
             let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, store_runtime);
             engine.plan(
                 &state_snapshot,

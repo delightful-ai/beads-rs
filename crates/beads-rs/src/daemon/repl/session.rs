@@ -14,8 +14,8 @@ use crate::core::error::details::{
 use crate::core::{
     Applied, DecodeError, Durable, ErrorPayload, EventFrameError, EventFrameV1, EventId,
     EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, ProtocolErrorCode,
-    ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark, hash_event_body,
-    verify_event_frame,
+    ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark,
+    IntoErrorPayload, hash_event_body, verify_event_frame,
 };
 use crate::daemon::admission::{AdmissionController, AdmissionRejection};
 use crate::daemon::metrics;
@@ -634,7 +634,7 @@ impl<R, P: PhasePeerOpt> Session<R, P> {
     }
 
     fn fail(self, error: ReplError) -> (SessionState<R>, Vec<SessionAction>) {
-        let payload = error.to_payload();
+        let payload = error.into_error_payload();
         let Session {
             role: _,
             phase,
@@ -2515,7 +2515,7 @@ mod tests {
     #[test]
     fn repl_lagged_payload_includes_reason() {
         let limits = Limits::default();
-        let payload = repl_lagged_error(ReplRejectReason::GapTimeout, &limits).to_payload();
+        let payload = repl_lagged_error(ReplRejectReason::GapTimeout, &limits).into_error_payload();
 
         assert_eq!(payload.code, ProtocolErrorCode::SubscriberLagged.into());
         assert_eq!(payload.message, "gap_timeout");
@@ -2731,7 +2731,7 @@ mod tests {
             None,
             0,
         )
-        .to_payload();
+        .into_error_payload();
         assert_eq!(payload.code, ProtocolErrorCode::NonCanonical.into());
         let details = payload
             .details_as::<NonCanonicalDetails>()
@@ -2756,7 +2756,7 @@ mod tests {
             None,
             0,
         )
-        .to_payload();
+        .into_error_payload();
         assert_eq!(payload.code, ProtocolErrorCode::FrameTooLarge.into());
         let details = payload
             .details_as::<FrameTooLargeDetails>()
@@ -2781,7 +2781,7 @@ mod tests {
             None,
             0,
         )
-        .to_payload();
+        .into_error_payload();
         assert_eq!(payload.code, ProtocolErrorCode::InvalidRequest.into());
         let details = payload
             .details_as::<InvalidRequestDetails>()
@@ -2810,7 +2810,7 @@ mod tests {
             None,
             0,
         )
-        .to_payload();
+        .into_error_payload();
 
         assert_eq!(payload.code, ProtocolErrorCode::HashMismatch.into());
         let details = payload
@@ -2841,7 +2841,7 @@ mod tests {
             Some(expected_prev),
             1,
         )
-        .to_payload();
+        .into_error_payload();
 
         assert_eq!(payload.code, ProtocolErrorCode::PrevShaMismatch.into());
         let details = payload

@@ -39,9 +39,16 @@ pub struct WalEntry {
 
 mod wal_state {
     use super::*;
-    use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1, WireFieldStamp, WireStamp};
+    use crate::core::state::{LabelState, legacy_fallback_lineage, note_collision_cmp};
+    use crate::core::wire_bead::{
+        SnapshotCodec, SnapshotWireV1, WireDepEntryV1, WireDepStoreV1, WireFieldStamp,
+        WireLineageStamp,
+    };
+    use crate::core::{Note, NoteId};
     use serde::de::Error as DeError;
     use serde::{Deserializer, Serializer};
+    use serde_json::Value;
+    use std::cmp::Ordering;
     use std::collections::{BTreeMap, BTreeSet};
 
     #[derive(Serialize, Deserialize)]
@@ -51,9 +58,9 @@ mod wal_state {
         #[serde(default)]
         deps: WalDepStore,
         #[serde(default)]
-        labels: LabelStore,
+        labels: WalLabelStore,
         #[serde(default)]
-        notes: NoteStore,
+        notes: WalNoteStore,
     }
 
     #[derive(Clone, Debug, Serialize)]
@@ -71,27 +78,6 @@ mod wal_state {
     }
 
     impl WalDepStore {
-        fn from_dep_store(store: &DepStore) -> Self {
-            let mut entries = Vec::new();
-            for key in store.values() {
-                let mut dots: Vec<Dot> = store
-                    .dots_for(key)
-                    .map(|dots| dots.iter().copied().collect())
-                    .unwrap_or_default();
-                dots.sort();
-                entries.push(WireDepEntryV1 {
-                    key: key.clone(),
-                    dots,
-                });
-            }
-            entries.sort_by(|a, b| a.key.cmp(&b.key));
-            Self(WireDepStoreV1 {
-                cc: store.cc().clone(),
-                entries,
-                stamp: store.stamp().map(wire_field_stamp_from_stamp),
-            })
-        }
-
         fn into_dep_store(self) -> DepStore {
             let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
             for entry in self.0.entries {
@@ -113,10 +99,6 @@ mod wal_state {
             let stamp = self.0.stamp.map(stamp_from_wire_field_stamp);
             DepStore::from_parts(set, stamp)
         }
-    }
-
-    fn wire_field_stamp_from_stamp(stamp: &Stamp) -> WireFieldStamp {
-        (WireStamp::from(&stamp.at), stamp.by.clone())
     }
 
     fn stamp_from_wire_field_stamp(stamp: WireFieldStamp) -> Stamp {
@@ -156,9 +138,204 @@ mod wal_state {
         }
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct WalLabelStore {
+        by_bead: LabelStore,
+        legacy: BTreeMap<BeadId, LabelState>,
+    }
+
+    impl From<LabelStore> for WalLabelStore {
+        fn from(store: LabelStore) -> Self {
+            Self {
+                by_bead: store,
+                legacy: BTreeMap::new(),
+            }
+        }
+    }
+
+    impl Serialize for WalLabelStore {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            self.by_bead.serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for WalLabelStore {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            struct WalLineageLabelState {
+                lineage: WireLineageStamp,
+                state: LabelState,
+            }
+
+            #[derive(Deserialize)]
+            struct WalLabelStoreWire {
+                #[serde(default)]
+                by_bead: BTreeMap<BeadId, Vec<WalLineageLabelState>>,
+                #[serde(default)]
+                legacy: BTreeMap<BeadId, LabelState>,
+            }
+
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum WalLabelStoreRepr {
+                Legacy(BTreeMap<BeadId, LabelState>),
+                Wire(WalLabelStoreWire),
+            }
+
+            match WalLabelStoreRepr::deserialize(deserializer)? {
+                WalLabelStoreRepr::Legacy(map) => Ok(WalLabelStore {
+                    by_bead: LabelStore::new(),
+                    legacy: map,
+                }),
+                WalLabelStoreRepr::Wire(wire) => {
+                    let mut store = LabelStore::new();
+                    for (id, entries) in wire.by_bead {
+                        for entry in entries {
+                            let lineage = entry.lineage.stamp();
+                            let state = store.state_mut(&id, &lineage);
+                            *state = LabelState::join(state, &entry.state);
+                        }
+                    }
+                    Ok(WalLabelStore {
+                        by_bead: store,
+                        legacy: wire.legacy,
+                    })
+                }
+            }
+        }
+    }
+
+    impl WalLabelStore {
+        fn into_label_store(self, state: &CanonicalState) -> LabelStore {
+            let mut store = self.by_bead;
+            for (id, legacy_state) in self.legacy {
+                let lineage = resolve_legacy_lineage(state, &id);
+                let entry = store.state_mut(&id, &lineage);
+                *entry = LabelState::join(entry, &legacy_state);
+            }
+            store
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct WalNoteStore {
+        by_bead: NoteStore,
+        legacy: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
+    }
+
+    impl From<NoteStore> for WalNoteStore {
+        fn from(store: NoteStore) -> Self {
+            Self {
+                by_bead: store,
+                legacy: BTreeMap::new(),
+            }
+        }
+    }
+
+    impl Serialize for WalNoteStore {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            self.by_bead.serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for WalNoteStore {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            struct WalLineageNotes {
+                lineage: WireLineageStamp,
+                notes: BTreeMap<NoteId, Note>,
+            }
+
+            #[derive(Deserialize)]
+            struct WalNoteStoreWire {
+                #[serde(default)]
+                by_bead: BTreeMap<BeadId, Vec<WalLineageNotes>>,
+                #[serde(default)]
+                legacy: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
+            }
+
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum WalNoteStoreRepr {
+                Legacy(BTreeMap<BeadId, BTreeMap<NoteId, Note>>),
+                Wire(WalNoteStoreWire),
+            }
+
+            match WalNoteStoreRepr::deserialize(deserializer)? {
+                WalNoteStoreRepr::Legacy(map) => Ok(WalNoteStore {
+                    by_bead: NoteStore::new(),
+                    legacy: map,
+                }),
+                WalNoteStoreRepr::Wire(wire) => {
+                    let mut store = NoteStore::new();
+                    for (id, entries) in wire.by_bead {
+                        for entry in entries {
+                            let lineage = entry.lineage.stamp();
+                            for (_note_id, note) in entry.notes {
+                                if let Some(existing) =
+                                    store.insert(id.clone(), lineage.clone(), note.clone())
+                                    && note_collision_cmp(&existing, &note) == Ordering::Less
+                                {
+                                    store.replace(id.clone(), lineage.clone(), note);
+                                }
+                            }
+                        }
+                    }
+                    Ok(WalNoteStore {
+                        by_bead: store,
+                        legacy: wire.legacy,
+                    })
+                }
+            }
+        }
+    }
+
+    impl WalNoteStore {
+        fn into_note_store(self, state: &CanonicalState) -> NoteStore {
+            let mut store = self.by_bead;
+            for (id, legacy_notes) in self.legacy {
+                let lineage = resolve_legacy_lineage(state, &id);
+                for (_note_id, note) in legacy_notes {
+                    if let Some(existing) = store.insert(id.clone(), lineage.clone(), note.clone())
+                        && note_collision_cmp(&existing, &note) == Ordering::Less
+                    {
+                        store.replace(id.clone(), lineage.clone(), note);
+                    }
+                }
+            }
+            store
+        }
+    }
+
+    fn resolve_legacy_lineage(state: &CanonicalState, bead_id: &BeadId) -> Stamp {
+        if state.has_collision_tombstone(bead_id) {
+            legacy_fallback_lineage()
+        } else if let Some(bead) = state.get_live(bead_id) {
+            bead.core.created().clone()
+        } else {
+            legacy_fallback_lineage()
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::core::collections::Label;
+        use crate::core::crdt::Lww;
+        use crate::core::domain::{BeadType, Priority};
+        use crate::core::{ActorId, BeadCore, BeadFields, Claim, ReplicaId, Workflow, WriteStamp};
         use uuid::Uuid;
 
         fn dep_key(from: &str, to: &str) -> DepKey {
@@ -237,6 +414,88 @@ mod wal_state {
             assert!(obj.contains_key("entries"));
             assert!(!obj.contains_key("stamp"));
         }
+
+        fn actor_id(actor: &str) -> ActorId {
+            ActorId::new(actor).unwrap_or_else(|e| panic!("invalid actor id {actor}: {e}"))
+        }
+
+        fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
+            Stamp::new(WriteStamp::new(wall_ms, counter), actor_id(actor))
+        }
+
+        fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
+            let core = BeadCore::new(id.clone(), stamp.clone(), None);
+            let fields = BeadFields {
+                title: Lww::new("title".to_string(), stamp.clone()),
+                description: Lww::new(String::new(), stamp.clone()),
+                design: Lww::new(None, stamp.clone()),
+                acceptance_criteria: Lww::new(None, stamp.clone()),
+                priority: Lww::new(Priority::default(), stamp.clone()),
+                bead_type: Lww::new(BeadType::Task, stamp.clone()),
+                external_ref: Lww::new(None, stamp.clone()),
+                source_repo: Lww::new(None, stamp.clone()),
+                estimated_minutes: Lww::new(None, stamp.clone()),
+                workflow: Lww::new(Workflow::default(), stamp.clone()),
+                claim: Lww::new(Claim::default(), stamp.clone()),
+            };
+            Bead::new(core, fields)
+        }
+
+        #[test]
+        fn wal_label_store_migrates_legacy_labels() {
+            let bead_id = BeadId::parse("bd-legacy-label").unwrap();
+            let lineage = make_stamp(10, 0, "alice");
+            let mut state = CanonicalState::new();
+            state.insert_live(make_bead(&bead_id, &lineage));
+
+            let label = Label::parse("urgent").unwrap();
+            let mut set = OrSet::new();
+            set.apply_add(
+                Dot {
+                    replica: ReplicaId::new(Uuid::from_bytes([7u8; 16])),
+                    counter: 1,
+                },
+                label.clone(),
+            );
+            let legacy_state = LabelState::from_parts(set, Some(lineage.clone()));
+            let mut legacy = BTreeMap::new();
+            legacy.insert(bead_id.clone(), legacy_state);
+
+            let value = serde_json::to_value(&legacy).unwrap();
+            let wal_labels: WalLabelStore = serde_json::from_value(value).unwrap();
+            let migrated = wal_labels.into_label_store(&state);
+            let labels = migrated
+                .state(&bead_id, &lineage)
+                .expect("label state missing")
+                .labels();
+            assert!(labels.contains(label.as_str()));
+        }
+
+        #[test]
+        fn wal_note_store_migrates_legacy_notes() {
+            let bead_id = BeadId::parse("bd-legacy-note").unwrap();
+            let lineage = make_stamp(20, 0, "alice");
+            let mut state = CanonicalState::new();
+            state.insert_live(make_bead(&bead_id, &lineage));
+
+            let note = Note::new(
+                NoteId::new("note-1").unwrap(),
+                "hello".to_string(),
+                actor_id("bob"),
+                WriteStamp::new(30, 0),
+            );
+            let mut notes = BTreeMap::new();
+            notes.insert(note.id.clone(), note.clone());
+            let mut legacy = BTreeMap::new();
+            legacy.insert(bead_id.clone(), notes);
+
+            let value = serde_json::to_value(&legacy).unwrap();
+            let wal_notes: WalNoteStore = serde_json::from_value(value).unwrap();
+            let migrated = wal_notes.into_note_store(&state);
+            let migrated_notes = migrated.notes_for(&bead_id, &lineage);
+            assert_eq!(migrated_notes.len(), 1);
+            assert_eq!(migrated_notes[0], &note);
+        }
     }
 
     #[derive(Deserialize)]
@@ -245,9 +504,9 @@ mod wal_state {
         tombstones: Vec<Tombstone>,
         deps: Vec<LegacyWalDep>,
         #[serde(default)]
-        labels: LabelStore,
+        labels: WalLabelStore,
         #[serde(default)]
-        notes: NoteStore,
+        notes: WalNoteStore,
     }
 
     #[derive(Deserialize)]
@@ -263,9 +522,9 @@ mod wal_state {
         tombstones: BTreeMap<TombstoneKey, Tombstone>,
         deps: BTreeMap<DepKey, serde_json::Value>,
         #[serde(default)]
-        labels: LabelStore,
+        labels: WalLabelStore,
         #[serde(default)]
-        notes: NoteStore,
+        notes: WalNoteStore,
     }
 
     #[derive(Deserialize)]
@@ -280,16 +539,7 @@ mod wal_state {
     where
         S: Serializer,
     {
-        let snapshot = WalStateV2 {
-            live: state.iter_live().map(|(_, bead)| bead.clone()).collect(),
-            tombstones: state
-                .iter_tombstones()
-                .map(|(_, tomb)| tomb.clone())
-                .collect(),
-            deps: WalDepStore::from_dep_store(state.dep_store()),
-            labels: state.label_store().clone(),
-            notes: state.note_store().clone(),
-        };
+        let snapshot = SnapshotCodec::from_state(state);
         snapshot.serialize(serializer)
     }
 
@@ -297,30 +547,43 @@ mod wal_state {
     where
         D: Deserializer<'de>,
     {
-        let (live, tombstones, deps, labels, notes) = match WalStateRepr::deserialize(deserializer)?
-        {
-            WalStateRepr::V2(snapshot) => (
-                snapshot.live,
-                snapshot.tombstones,
-                snapshot.deps.into_dep_store(),
-                snapshot.labels,
-                snapshot.notes,
-            ),
-            WalStateRepr::LegacyVecs(snapshot) => (
-                snapshot.live,
-                snapshot.tombstones,
-                dep_store_from_legacy(snapshot.deps.into_iter().map(|dep| dep.key)),
-                snapshot.labels,
-                snapshot.notes,
-            ),
-            WalStateRepr::LegacyMaps(snapshot) => (
-                snapshot.live.into_values().collect(),
-                snapshot.tombstones.into_values().collect(),
-                dep_store_from_legacy(snapshot.deps.into_keys()),
-                snapshot.labels,
-                snapshot.notes,
-            ),
-        };
+        let value = Value::deserialize(deserializer)?;
+        let is_object = value.is_object();
+        if !is_object {
+            return Err(DeError::custom("wal state must be a JSON object"));
+        }
+
+        let is_legacy = value.get("live").is_some();
+        if !is_legacy {
+            let snapshot: SnapshotWireV1 =
+                serde_json::from_value(value).map_err(DeError::custom)?;
+            return SnapshotCodec::into_state(snapshot).map_err(DeError::custom);
+        }
+
+        let (live, tombstones, deps, labels, notes) =
+            match serde_json::from_value::<WalStateRepr>(value).map_err(DeError::custom)? {
+                WalStateRepr::V2(snapshot) => (
+                    snapshot.live,
+                    snapshot.tombstones,
+                    snapshot.deps.into_dep_store(),
+                    snapshot.labels,
+                    snapshot.notes,
+                ),
+                WalStateRepr::LegacyVecs(snapshot) => (
+                    snapshot.live,
+                    snapshot.tombstones,
+                    dep_store_from_legacy(snapshot.deps.into_iter().map(|dep| dep.key)),
+                    snapshot.labels,
+                    snapshot.notes,
+                ),
+                WalStateRepr::LegacyMaps(snapshot) => (
+                    snapshot.live.into_values().collect(),
+                    snapshot.tombstones.into_values().collect(),
+                    dep_store_from_legacy(snapshot.deps.into_keys()),
+                    snapshot.labels,
+                    snapshot.notes,
+                ),
+            };
         let mut state = CanonicalState::new();
         for bead in live {
             state.insert(bead).map_err(DeError::custom)?;
@@ -328,6 +591,8 @@ mod wal_state {
         for tombstone in tombstones {
             state.insert_tombstone(tombstone);
         }
+        let labels = labels.into_label_store(&state);
+        let notes = notes.into_note_store(&state);
         state.set_label_store(labels);
         state.set_note_store(notes);
         state.set_dep_store(deps);

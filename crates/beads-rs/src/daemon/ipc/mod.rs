@@ -8,8 +8,8 @@
 pub use beads_surface::ipc::*;
 
 // Keep error types accessible.
-pub use beads_core::{ErrorCode, ErrorPayload};
+pub use beads_core::{ErrorCode, ErrorPayload, IntoErrorPayload};
 
 // Daemon-only additions.
 mod error_mapping;
-pub use error_mapping::{IntoErrorPayload, ResponseExt};
+pub use error_mapping::ResponseExt;

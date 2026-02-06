@@ -467,7 +467,7 @@ mod tests {
             label,
             dot(1, 1),
             label_stamp.clone(),
-            Some(base_stamp.clone()),
+            base_stamp.clone(),
         );
 
         let view = state.bead_view(&id).expect("bead view");
@@ -492,7 +492,7 @@ mod tests {
             note_author.clone(),
             WriteStamp::new(3_000, 0),
         );
-        state.insert_note(id.clone(), Some(base_stamp.clone()), note);
+        state.insert_note(id.clone(), base_stamp.clone(), note);
 
         let view = state.bead_view(&id).expect("bead view");
         let issue = Issue::from_view(&NamespaceId::core(), &view);

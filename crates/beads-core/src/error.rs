@@ -477,6 +477,29 @@ fn serialize_optional<T: Serialize>(value: T) -> Option<Value> {
 }
 
 // =============================================================================
+// Payload conversion
+// =============================================================================
+
+pub trait IntoErrorPayload {
+    fn into_error_payload(self) -> ErrorPayload;
+}
+
+impl IntoErrorPayload for ErrorPayload {
+    fn into_error_payload(self) -> ErrorPayload {
+        self
+    }
+}
+
+fn validation_payload(message: String, field: impl Into<String>, reason: impl Into<String>) -> ErrorPayload {
+    ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, false).with_details(
+        details::ValidationFailedDetails {
+            field: field.into(),
+            reason: reason.into(),
+        },
+    )
+}
+
+// =============================================================================
 // Typed error details
 // =============================================================================
 
@@ -1057,6 +1080,141 @@ pub mod details {
         ClientRequestId,
         TraceId,
         SegmentId,
+    }
+}
+
+impl IntoErrorPayload for InvalidId {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let details = match self {
+            InvalidId::Bead { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::Bead,
+                raw,
+                reason,
+            },
+            InvalidId::Actor { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::Actor,
+                raw,
+                reason,
+            },
+            InvalidId::Note { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::Note,
+                raw,
+                reason,
+            },
+            InvalidId::Branch { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::Branch,
+                raw,
+                reason,
+            },
+            InvalidId::ContentHash { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::ContentHash,
+                raw,
+                reason,
+            },
+            InvalidId::Namespace { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::Namespace,
+                raw,
+                reason,
+            },
+            InvalidId::StoreId { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::StoreId,
+                raw,
+                reason,
+            },
+            InvalidId::ReplicaId { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::ReplicaId,
+                raw,
+                reason,
+            },
+            InvalidId::TxnId { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::TxnId,
+                raw,
+                reason,
+            },
+            InvalidId::ClientRequestId { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::ClientRequestId,
+                raw,
+                reason,
+            },
+            InvalidId::TraceId { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::TraceId,
+                raw,
+                reason,
+            },
+            InvalidId::SegmentId { raw, reason } => details::InvalidIdDetails {
+                kind: details::InvalidIdKind::SegmentId,
+                raw,
+                reason,
+            },
+        };
+        ErrorPayload::new(CliErrorCode::InvalidId.into(), message, false).with_details(details)
+    }
+}
+
+impl IntoErrorPayload for InvalidLabel {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let InvalidLabel { raw, reason } = self;
+        validation_payload(message, "label", format!("{raw}: {reason}"))
+    }
+}
+
+impl IntoErrorPayload for RangeError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let RangeError {
+            field,
+            value,
+            min,
+            max,
+        } = self;
+        validation_payload(
+            message,
+            field,
+            format!("value {value} out of range {min}..={max}"),
+        )
+    }
+}
+
+impl IntoErrorPayload for CollisionError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let CollisionError { id } = self;
+        validation_payload(message, "bead_id", format!("collision for {id}"))
+    }
+}
+
+impl IntoErrorPayload for InvalidDependency {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let InvalidDependency { reason } = self;
+        validation_payload(message, "dependency", reason)
+    }
+}
+
+impl IntoErrorPayload for InvalidDepKind {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let InvalidDepKind { raw } = self;
+        validation_payload(
+            message,
+            "dependency_kind",
+            format!("invalid dependency kind `{raw}`"),
+        )
+    }
+}
+
+impl IntoErrorPayload for CoreError {
+    fn into_error_payload(self) -> ErrorPayload {
+        match self {
+            CoreError::InvalidId(err) => err.into_error_payload(),
+            CoreError::InvalidLabel(err) => err.into_error_payload(),
+            CoreError::Range(err) => err.into_error_payload(),
+            CoreError::Collision(err) => err.into_error_payload(),
+            CoreError::InvalidDependency(err) => err.into_error_payload(),
+            CoreError::InvalidDepKind(err) => err.into_error_payload(),
+        }
     }
 }
 

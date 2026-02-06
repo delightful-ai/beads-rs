@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::core::{ReplicaId, StoreId};
+use crate::core::error::details as error_details;
+use crate::core::{
+    ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, ReplicaId, StoreId, Transience,
+};
 use crate::paths;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +197,106 @@ pub enum StoreLockError {
         #[source]
         source: io::Error,
     },
+}
+
+impl StoreLockError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            StoreLockError::Held { .. } => ProtocolErrorCode::LockHeld.into(),
+            StoreLockError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            StoreLockError::MetadataCorrupt { .. } => ProtocolErrorCode::Corruption.into(),
+            StoreLockError::Io { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    ProtocolErrorCode::InternalError.into()
+                }
+            }
+        }
+    }
+
+    pub fn transience(&self) -> Transience {
+        match self {
+            StoreLockError::Held { .. }
+            | StoreLockError::Symlink { .. }
+            | StoreLockError::MetadataCorrupt { .. } => Transience::Permanent,
+            StoreLockError::Io { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+        }
+    }
+}
+
+impl IntoErrorPayload for StoreLockError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        match self {
+            StoreLockError::Held { store_id, meta, .. } => {
+                let (holder_pid, holder_replica_id, started_at_ms, daemon_version) = meta
+                    .as_deref()
+                    .map(|meta| {
+                        (
+                            Some(meta.pid),
+                            Some(meta.replica_id),
+                            Some(meta.started_at_ms),
+                            Some(meta.daemon_version.clone()),
+                        )
+                    })
+                    .unwrap_or((None, None, None, None));
+                ErrorPayload::new(ProtocolErrorCode::LockHeld.into(), message, retryable)
+                    .with_details(error_details::LockHeldDetails {
+                        store_id,
+                        holder_pid,
+                        holder_replica_id,
+                        started_at_ms,
+                        daemon_version,
+                    })
+            }
+            StoreLockError::Symlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            StoreLockError::MetadataCorrupt { source, .. } => {
+                ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable)
+                    .with_details(error_details::CorruptionDetails {
+                        reason: source.to_string(),
+                    })
+            }
+            StoreLockError::Io {
+                path,
+                operation,
+                source,
+            } => match source.kind() {
+                io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                    ProtocolErrorCode::PermissionDenied.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PermissionDeniedDetails {
+                    path: path.display().to_string(),
+                    operation: lock_permission_operation(operation),
+                }),
+                _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
+            },
+        }
+    }
+}
+
+fn lock_permission_operation(operation: StoreLockOperation) -> error_details::PermissionOperation {
+    match operation {
+        StoreLockOperation::Read => error_details::PermissionOperation::Read,
+        StoreLockOperation::Write => error_details::PermissionOperation::Write,
+        StoreLockOperation::Fsync => error_details::PermissionOperation::Fsync,
+    }
 }
 
 fn ensure_dir(path: &Path) -> Result<(), StoreLockError> {

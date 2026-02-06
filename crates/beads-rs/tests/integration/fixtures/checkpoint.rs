@@ -286,15 +286,7 @@ fn build_fixture_snapshot(
 ) -> CheckpointSnapshot {
     let mut store_state = StoreState::new();
     for (namespace, state) in states {
-        if namespace.is_core() {
-            store_state.set_core_state(state.clone());
-        } else {
-            let non_core = namespace
-                .clone()
-                .try_non_core()
-                .expect("non-core namespace");
-            store_state.set_namespace_state(non_core, state.clone());
-        }
+        store_state.set_namespace_state(namespace.clone(), state.clone());
     }
 
     beads_rs::git::checkpoint::build_snapshot(CheckpointSnapshotInput {

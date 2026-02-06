@@ -10,9 +10,11 @@ use std::path::{Path, PathBuf};
 use crc32c::crc32c;
 use thiserror::Error;
 
+use crate::core::error::details as error_details;
 use crate::core::{
-    Applied, DecodeError, Durable, EncodeError, EventId, HeadStatus, Limits, NamespaceId,
-    ReplicaId, SegmentId, Seq0, Seq1, StoreMeta, Watermark, WatermarkError, decode_event_body,
+    Applied, CliErrorCode, DecodeError, Durable, EncodeError, ErrorCode, ErrorPayload, EventId,
+    HeadStatus, IntoErrorPayload, Limits, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId,
+    Seq0, Seq1, StoreMeta, Transience, Watermark, WatermarkError, decode_event_body,
     decode_event_hlc_max,
 };
 
@@ -171,6 +173,141 @@ pub enum WalReplayError {
         #[source]
         source: EncodeError,
     },
+}
+
+impl WalReplayError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            WalReplayError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            WalReplayError::Io { source, .. } => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    CliErrorCode::IoError.into()
+                }
+            }
+            WalReplayError::SegmentHeader { source, .. } => source.code(),
+            WalReplayError::SegmentHeaderMismatch { .. } => {
+                ProtocolErrorCode::SegmentHeaderMismatch.into()
+            }
+            WalReplayError::RecordShaMismatch(_) | WalReplayError::RecordPayloadMismatch(_) => {
+                ProtocolErrorCode::HashMismatch.into()
+            }
+            WalReplayError::RecordDecode { .. }
+            | WalReplayError::EventBodyDecode { .. }
+            | WalReplayError::RecordHeaderMismatch { .. }
+            | WalReplayError::RecordCanonicalEncode { .. }
+            | WalReplayError::MissingHead { .. }
+            | WalReplayError::UnexpectedHead { .. }
+            | WalReplayError::SealedSegmentLenMismatch { .. }
+            | WalReplayError::MidFileCorruption { .. } => ProtocolErrorCode::WalCorrupt.into(),
+            WalReplayError::NonContiguousSeq { .. } => ProtocolErrorCode::GapDetected.into(),
+            WalReplayError::PrevShaMismatch { .. } => ProtocolErrorCode::PrevShaMismatch.into(),
+            WalReplayError::IndexOffsetInvalid { .. } | WalReplayError::OriginSeqOverflow { .. } => {
+                ProtocolErrorCode::IndexCorrupt.into()
+            }
+            WalReplayError::Index(err) => err.code(),
+        }
+    }
+
+    pub fn transience(&self) -> Transience {
+        match self {
+            WalReplayError::Symlink { .. } => Transience::Permanent,
+            WalReplayError::Io { source, .. } => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+            _ => Transience::Permanent,
+        }
+    }
+}
+
+impl IntoErrorPayload for WalReplayError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        let code = self.code();
+        match self {
+            WalReplayError::Symlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            WalReplayError::RecordShaMismatch(info) | WalReplayError::RecordPayloadMismatch(info) => {
+                let info = *info;
+                ErrorPayload::new(ProtocolErrorCode::HashMismatch.into(), message, retryable)
+                    .with_details(error_details::HashMismatchDetails {
+                        eid: error_details::EventIdDetails {
+                            namespace: info.namespace,
+                            origin_replica_id: info.origin,
+                            origin_seq: info.seq.get(),
+                        },
+                        expected_sha256: hex::encode(info.expected),
+                        got_sha256: hex::encode(info.got),
+                    })
+            }
+            WalReplayError::PrevShaMismatch {
+                namespace,
+                origin,
+                seq,
+                expected_prev_sha256,
+                got_prev_sha256,
+                head_seq,
+            } => ErrorPayload::new(ProtocolErrorCode::PrevShaMismatch.into(), message, retryable)
+                .with_details(error_details::PrevShaMismatchDetails {
+                    eid: error_details::EventIdDetails {
+                        namespace: namespace.clone(),
+                        origin_replica_id: origin,
+                        origin_seq: seq.get(),
+                    },
+                    expected_prev_sha256: hex::encode(expected_prev_sha256),
+                    got_prev_sha256: hex::encode(got_prev_sha256),
+                    head_seq: head_seq.get(),
+                }),
+            WalReplayError::NonContiguousSeq {
+                namespace,
+                origin,
+                expected,
+                got,
+            } => {
+                let durable_seen = expected.prev_seq0().get();
+                ErrorPayload::new(ProtocolErrorCode::GapDetected.into(), message, retryable)
+                    .with_details(error_details::GapDetectedDetails {
+                        namespace: namespace.clone(),
+                        origin_replica_id: origin,
+                        durable_seen,
+                        got_seq: got.get(),
+                    })
+            }
+            WalReplayError::IndexOffsetInvalid { .. }
+            | WalReplayError::OriginSeqOverflow { .. } => {
+                let reason = message.clone();
+                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                    .with_details(error_details::IndexCorruptDetails { reason })
+            }
+            WalReplayError::SegmentHeader {
+                source: EventWalError::SegmentHeaderUnsupportedVersion { got, supported },
+                ..
+            } => ErrorPayload::new(
+                ProtocolErrorCode::WalFormatUnsupported.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::WalFormatUnsupportedDetails {
+                wal_format_version: got,
+                supported: vec![supported],
+            }),
+            WalReplayError::SegmentHeader { .. } => ErrorPayload::new(code, message, retryable),
+            WalReplayError::Index(err) => err.into_payload_with_context(message, retryable),
+            _ => ErrorPayload::new(code, message, retryable),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

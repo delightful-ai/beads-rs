@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use super::CHECKPOINT_FORMAT_VERSION;
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use crate::core::{
-    ContentHash, NamespaceId, NamespaceSet, ReplicaId, StoreEpoch, StoreId, sha256_bytes,
+    CheckpointContentSha256, ContentHash, NamespaceId, NamespaceSet, ReplicaId, StoreEpoch,
+    StoreId,
 };
 
 pub type IncludedWatermarks = BTreeMap<NamespaceId, BTreeMap<ReplicaId, u64>>;
@@ -69,7 +70,7 @@ pub struct CheckpointMeta {
     pub included: IncludedWatermarks,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub included_heads: Option<IncludedHeads>,
-    pub content_hash: ContentHash,
+    pub content_hash: CheckpointContentSha256,
     pub manifest_hash: ContentHash,
 }
 
@@ -96,10 +97,10 @@ impl CheckpointMeta {
         to_canon_json_bytes(&self.normalized())
     }
 
-    pub fn compute_content_hash(&self) -> Result<ContentHash, CanonJsonError> {
+    pub fn compute_content_hash(&self) -> Result<CheckpointContentSha256, CanonJsonError> {
         let preimage = self.preimage();
         let bytes = to_canon_json_bytes(&preimage)?;
-        Ok(ContentHash::from_bytes(sha256_bytes(&bytes).0))
+        Ok(CheckpointContentSha256::from_checkpoint_preimage_bytes(&bytes))
     }
 
     pub fn preimage(&self) -> CheckpointMetaPreimage {
@@ -157,7 +158,7 @@ mod tests {
             roster_hash: None,
             included,
             included_heads: None,
-            content_hash: ContentHash::from_bytes([0u8; 32]),
+            content_hash: CheckpointContentSha256::from_checkpoint_preimage_bytes(&[0u8; 32]),
             manifest_hash: ContentHash::from_bytes([4u8; 32]),
         };
 
@@ -165,7 +166,7 @@ mod tests {
         let preimage_bytes = to_canon_json_bytes(&preimage).expect("preimage json");
         assert!(!String::from_utf8_lossy(&preimage_bytes).contains("content_hash"));
 
-        let expected = ContentHash::from_bytes(sha256_bytes(&preimage_bytes).0);
+        let expected = CheckpointContentSha256::from_checkpoint_preimage_bytes(&preimage_bytes);
         let computed = meta.compute_content_hash().expect("content hash");
         assert_eq!(computed, expected);
     }

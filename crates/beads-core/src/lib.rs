@@ -62,8 +62,8 @@ pub use durability::{
 };
 pub use effect::{Effect, Transience};
 pub use error::{
-    CliErrorCode, CollisionError, CoreError, ErrorCode, ErrorPayload, InvalidDependency, InvalidId,
-    InvalidLabel, ProtocolErrorCode, RangeError,
+    CliErrorCode, CollisionError, CoreError, ErrorCode, ErrorPayload, IntoErrorPayload,
+    InvalidDependency, InvalidId, InvalidLabel, ProtocolErrorCode, RangeError,
 };
 pub use event::{
     Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventFrameError, EventFrameV1,
@@ -76,8 +76,9 @@ pub use event::{
     sha256_bytes, verify_event_frame,
 };
 pub use identity::{
-    ActorId, BeadId, BeadSlug, BranchName, ClientRequestId, ContentHash, EventId, NoteId,
-    ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
+    ActorId, BeadId, BeadSlug, BranchName, CheckpointContentSha256, ClientRequestId, ContentHash,
+    EventId, NoteId, ReplicaId, SegmentId, StateCanonicalJsonSha256, StateDigest, StateJsonlSha256,
+    StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
 };
 pub use json_canon::{CanonJsonError, to_canon_json_bytes};
 pub use limits::Limits;
@@ -110,10 +111,10 @@ pub use watermark::{
     Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, Watermarks,
 };
 pub use wire_bead::{
-    BeadPatchWireV1, BeadSnapshotWireV1, NoteAppendV1, TxnDeltaError, TxnDeltaV1, TxnOpKey,
-    TxnOpV1, WireBeadFull, WireBeadPatch, WireClaimSnapshot, WireDepAddV1, WireDepEntryV1,
-    WireDepRemoveV1, WireDepStoreV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1,
-    WireLabelRemoveV1, WireLabelStateV1, WireLineageStamp, WireNoteV1, WireParentAddV1,
-    WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1, WireWorkflowSnapshot,
-    WorkflowStatus,
+    BeadPatchWireV1, BeadSnapshotWireV1, NoteAppendV1, SnapshotCodec, SnapshotCodecError,
+    SnapshotSection, SnapshotWireV1, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull,
+    WireBeadPatch, WireClaimSnapshot, WireDepAddV1, WireDepEntryV1, WireDepRemoveV1,
+    WireDepStoreV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1, WireLabelRemoveV1,
+    WireLabelStateV1, WireLineageStamp, WireNoteV1, WireParentAddV1, WireParentRemoveV1,
+    WirePatch, WireStamp, WireTombstoneV1, WireWorkflowSnapshot, WorkflowStatus,
 };

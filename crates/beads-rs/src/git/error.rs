@@ -4,7 +4,11 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::core::{ContentHash, CoreError};
+use crate::core::error::details as error_details;
+use crate::core::{
+    CliErrorCode, CoreError, ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode,
+    StateJsonlSha256,
+};
 use crate::error::{Effect, Transience};
 
 /// Errors that can occur during git sync operations.
@@ -70,6 +74,15 @@ pub enum SyncError {
 }
 
 impl SyncError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            SyncError::Wire(WireError::ChecksumMismatch { .. }) => {
+                ProtocolErrorCode::Corruption.into()
+            }
+            _ => CliErrorCode::SyncFailed.into(),
+        }
+    }
+
     /// Whether retrying this sync may succeed.
     pub fn transience(&self) -> Transience {
         match self {
@@ -115,6 +128,26 @@ impl SyncError {
     }
 }
 
+impl IntoErrorPayload for SyncError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        match self {
+            SyncError::Wire(WireError::ChecksumMismatch {
+                blob,
+                expected,
+                actual,
+            }) => ErrorPayload::new(ProtocolErrorCode::Corruption.into(), message, retryable)
+                .with_details(error_details::StoreChecksumMismatchDetails {
+                    blob: blob.to_string(),
+                    expected_sha256: expected.to_hex(),
+                    got_sha256: actual.to_hex(),
+                }),
+            _ => ErrorPayload::new(CliErrorCode::SyncFailed.into(), message, retryable),
+        }
+    }
+}
+
 /// Errors that can occur during wire format serialization/deserialization.
 #[derive(Error, Debug)]
 pub enum WireError {
@@ -133,8 +166,8 @@ pub enum WireError {
     #[error("checksum mismatch for {blob}: expected {expected}, got {actual}")]
     ChecksumMismatch {
         blob: &'static str,
-        expected: ContentHash,
-        actual: ContentHash,
+        expected: StateJsonlSha256,
+        actual: StateJsonlSha256,
     },
 }
 

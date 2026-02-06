@@ -5,7 +5,11 @@ pub mod payload;
 pub mod types;
 
 use beads_api::DaemonInfo;
-use beads_core::{CliErrorCode, Effect, ErrorCode, InvalidId, ProtocolErrorCode, Transience};
+use beads_core::error::details as error_details;
+use beads_core::{
+    CliErrorCode, Effect, ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId,
+    ProtocolErrorCode, Transience,
+};
 use thiserror::Error;
 
 pub use client::*;
@@ -93,6 +97,52 @@ impl IpcError {
             | IpcError::InvalidRequest { .. } => Effect::None,
             IpcError::DaemonVersionMismatch { .. } => Effect::None,
             IpcError::FrameTooLarge { .. } => Effect::None,
+        }
+    }
+}
+
+impl IntoErrorPayload for IpcError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        match self {
+            IpcError::Parse(err) => ErrorPayload::new(
+                ProtocolErrorCode::MalformedPayload.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::MalformedPayloadDetails {
+                parser: error_details::ParserKind::Json,
+                reason: Some(err.to_string()),
+            }),
+            IpcError::Io(_) => ErrorPayload::new(CliErrorCode::IoError.into(), message, retryable),
+            IpcError::InvalidId(err) => err.into_error_payload(),
+            IpcError::InvalidRequest { field, reason } => {
+                ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable)
+                    .with_details(error_details::InvalidRequestDetails {
+                        field,
+                        reason: Some(reason),
+                    })
+            }
+            IpcError::Disconnected => {
+                ErrorPayload::new(CliErrorCode::Disconnected.into(), message, retryable)
+            }
+            IpcError::DaemonUnavailable(_) => {
+                ErrorPayload::new(CliErrorCode::DaemonUnavailable.into(), message, retryable)
+            }
+            IpcError::DaemonVersionMismatch { .. } => ErrorPayload::new(
+                CliErrorCode::DaemonVersionMismatch.into(),
+                message,
+                retryable,
+            ),
+            IpcError::FrameTooLarge {
+                max_bytes,
+                got_bytes,
+            } => ErrorPayload::new(ProtocolErrorCode::FrameTooLarge.into(), message, retryable)
+                .with_details(error_details::FrameTooLargeDetails {
+                    max_frame_bytes: max_bytes as u64,
+                    got_bytes: got_bytes as u64,
+                }),
         }
     }
 }
