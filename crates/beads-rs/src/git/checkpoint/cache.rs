@@ -441,7 +441,7 @@ mod tests {
         let mut core_state = CanonicalState::new();
         core_state.insert(bead).unwrap();
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state);
+        state.set_core_state(core_state);
 
         let mut watermarks = Watermarks::<Durable>::new();
         watermarks

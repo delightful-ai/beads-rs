@@ -165,10 +165,7 @@ mod tests {
         let import = import_legacy_git_ref(&repo)
             .unwrap()
             .expect("legacy import");
-        let core_state = import
-            .state
-            .get(&crate::core::NamespaceId::core())
-            .expect("core namespace");
+        let core_state = import.state.core();
         assert_eq!(core_state.live_count(), 1);
         assert_eq!(import.root_slug.as_deref(), Some(root_slug));
         assert_eq!(import.last_write_stamp, Some(stamp));
@@ -195,10 +192,7 @@ mod tests {
         let import = import_legacy_snapshot_wal(&wal, &remote)
             .unwrap()
             .expect("legacy wal import");
-        let core_state = import
-            .state
-            .get(&crate::core::NamespaceId::core())
-            .expect("core namespace");
+        let core_state = import.state.core();
         assert_eq!(core_state.live_count(), 1);
         assert_eq!(import.root_slug.as_deref(), Some("wal-root"));
         assert_eq!(import.sequence, 7);

@@ -868,7 +868,7 @@ mod tests {
         let mut core_state = CanonicalState::new();
         core_state.insert(bead).unwrap();
         let mut state = StoreState::new();
-        state.set_namespace_state(namespace.clone(), core_state);
+        state.set_core_state(core_state);
 
         let mut watermarks = Watermarks::<Durable>::new();
         watermarks
@@ -961,7 +961,7 @@ mod tests {
         // Import remote checkpoint and verify both beads exist.
         let remote_export = read_checkpoint_export_at_oid(&remote_repo, remote_head).unwrap();
         let imported = import_checkpoint_export(&remote_export, &Limits::default()).unwrap();
-        let core_state = imported.state.get(&NamespaceId::core()).unwrap();
+        let core_state = imported.state.core();
 
         let a_id = BeadId::parse("beads-rs-aaa1").unwrap();
         let b_id = BeadId::parse("beads-rs-bbb1").unwrap();

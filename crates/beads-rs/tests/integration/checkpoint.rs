@@ -74,7 +74,11 @@ fn checkpoint_round_trip_preserves_state_and_manifest() {
     let imported = import_checkpoint(temp.path(), &beads_rs::Limits::default()).expect("import");
     assert_store_state_stats(&store_state, &imported.state);
 
-    assert!(imported.state.get(&core).is_some(), "core state present");
+    assert_eq!(
+        imported.state.core().live_count(),
+        store_state.core().live_count(),
+        "core state present"
+    );
     let imported_watermarks =
         watermarks_from_included(&imported.included, imported.included_heads.as_ref());
 
@@ -162,7 +166,7 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
     state.apply_dep_add(dep_key, dot, stamp.clone());
 
     let mut store_state = StoreState::new();
-    *store_state.ensure_namespace(core.clone()) = state.clone();
+    store_state.set_core_state(state.clone());
 
     let mut watermarks = Watermarks::<Durable>::new();
     watermarks
@@ -272,7 +276,7 @@ fn store_state_stats(state: &StoreState) -> BTreeMap<NamespaceId, (usize, usize,
     let mut stats = BTreeMap::new();
     for (namespace, state) in state.namespaces() {
         stats.insert(
-            namespace.clone(),
+            namespace,
             (
                 state.live_count(),
                 state.tombstone_count(),

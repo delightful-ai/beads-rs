@@ -117,18 +117,13 @@ impl Daemon {
             });
         }
 
-        let proof = self.ensure_repo_loaded_strict(repo, git_tx)?;
-        let meta = self.parse_mutation_meta(&proof, meta)?;
-        if self.store_runtime(&proof)?.maintenance_mode {
-            return Err(OpError::MaintenanceMode {
-                reason: Some("maintenance mode enabled".into()),
-            });
-        }
-        let admission = self.store_runtime(&proof)?.admission.clone();
-        let _permit = admission.try_admit_ipc_mutation().map_err(OpError::from)?;
-        let store = self.store_identity(&proof)?;
+        let actor = self.actor().clone();
         let limits = self.limits().clone();
-        let engine = MutationEngine::new(limits.clone());
+        let (store_id, remote, meta) = {
+            let proof = self.ensure_repo_loaded_strict(repo, git_tx)?;
+            let meta = proof.parse_mutation_meta(meta, &actor)?;
+            (proof.store_id(), proof.remote().clone(), meta)
+        };
 
         let ParsedMutationMeta {
             namespace,
@@ -137,6 +132,26 @@ impl Daemon {
             trace_id,
             actor_id,
         } = meta;
+        let store_dir = paths::store_dir(store_id);
+        let engine = MutationEngine::new(limits.clone());
+        let ctx = MutationContext {
+            namespace: namespace.clone(),
+            actor_id,
+            client_request_id,
+            trace_id,
+        };
+        let parsed_request = parse(&ctx.actor_id)?;
+
+        let proof = self.loaded_store(store_id, remote.clone());
+        if proof.runtime().maintenance_mode {
+            return Err(OpError::MaintenanceMode {
+                reason: Some("maintenance mode enabled".into()),
+            });
+        }
+        let admission = proof.runtime().admission.clone();
+        let _permit = admission.try_admit_ipc_mutation().map_err(OpError::from)?;
+        let store = proof.store_identity();
+
         let (
             origin_replica_id,
             wal_index,
@@ -145,7 +160,7 @@ impl Daemon {
             durable_watermarks_snapshot,
             applied_watermarks_snapshot,
         ) = {
-            let store_runtime = self.store_runtime(&proof)?;
+            let store_runtime = proof.runtime();
             (
                 store_runtime.meta.replica_id,
                 Arc::clone(&store_runtime.wal_index),
@@ -155,21 +170,11 @@ impl Daemon {
                 store_runtime.watermarks_applied.clone(),
             )
         };
-        let roster = load_replica_roster(proof.store_id())
-            .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
+        let roster =
+            load_replica_roster(store_id).map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
         let coordinator =
             DurabilityCoordinator::new(origin_replica_id, policies, roster, peer_acks);
         let wait_timeout = Duration::from_millis(limits.dead_ms);
-        let store_dir = paths::store_dir(proof.store_id());
-
-        let ctx = MutationContext {
-            namespace: namespace.clone(),
-            actor_id,
-            client_request_id,
-            trace_id,
-        };
-
-        let parsed_request = parse(&ctx.actor_id)?;
 
         if ctx.client_request_id.is_some()
             && let Some(mut outcome) = try_reuse_idempotent_response(
@@ -189,8 +194,8 @@ impl Daemon {
             )?
         {
             let empty_state = CanonicalState::new();
-            let state = self
-                .store_runtime(&proof)?
+            let state = proof
+                .runtime()
                 .state
                 .get(&namespace)
                 .unwrap_or(&empty_state);
@@ -201,7 +206,7 @@ impl Daemon {
         coordinator.ensure_available(&namespace, durability)?;
 
         let id_ctx = if matches!(parsed_request, ParsedMutationRequest::Create { .. }) {
-            let repo_state = self.git_lane_state(&proof)?;
+            let repo_state = proof.lane();
             Some(IdContext {
                 root_slug: repo_state.root_slug.clone(),
                 remote_url: proof.remote().clone(),
@@ -210,22 +215,28 @@ impl Daemon {
             None
         };
 
-        let durable_watermark = self
-            .store_runtime(&proof)?
+        let durable_watermark = proof
+            .runtime()
             .watermarks_durable
             .get(&namespace, &origin_replica_id)
             .copied()
             .unwrap_or_else(Watermark::genesis);
 
+        drop(proof);
         let (now_ms, stamp) = {
             let clock = self.clock_for_actor_mut(&ctx.actor_id);
             let now_ms = clock.wall_ms();
             let write_stamp = clock.tick();
             (now_ms, Stamp::new(write_stamp, ctx.actor_id.clone()))
         };
+        let mut proof = self.loaded_store(store_id, remote.clone());
         let draft = {
-            let store_runtime = self.store_runtime_mut(&proof)?;
-            let state_snapshot = store_runtime.state.get_or_default(&namespace);
+            let store_runtime = proof.runtime_mut();
+            let state_snapshot = if namespace.is_core() {
+                store_runtime.state.core().clone()
+            } else {
+                store_runtime.state.get_or_default(&namespace)
+            };
             let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, store_runtime);
             engine.plan(
                 &state_snapshot,
@@ -298,7 +309,7 @@ impl Daemon {
 
         let now_ms = sequenced.event_body.event_time_ms;
         let (append, segment_snapshot) = {
-            let store_runtime = self.store_runtime_mut(&proof)?;
+            let store_runtime = proof.runtime_mut();
             let append_start = Instant::now();
             let append = match store_runtime.event_wal.append(&namespace, &record, now_ms) {
                 Ok(append) => {
@@ -397,10 +408,18 @@ impl Daemon {
             applied_seq,
             durable_seq,
         ) = {
-            let (store_runtime, repo_state) = self.store_and_lane_mut(&proof)?;
+            let (store_runtime, repo_state) = proof.split_mut();
             let apply_start = Instant::now();
             let apply_result = {
-                let state = store_runtime.state.ensure_namespace(namespace.clone());
+                let state = if namespace.is_core() {
+                    store_runtime.state.core_mut()
+                } else {
+                    let non_core = namespace
+                        .clone()
+                        .try_non_core()
+                        .expect("non-core namespace");
+                    store_runtime.state.ensure_namespace(non_core)
+                };
                 apply_event(state, &sequenced.event_body)
             };
             let outcome = match apply_result {
@@ -474,9 +493,6 @@ impl Daemon {
             )
         };
 
-        self.mark_checkpoint_dirty(proof.store_id(), &namespace, 1);
-        self.schedule_sync(proof.remote().clone());
-
         let mut watermark_txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
         watermark_txn
             .update_watermark(
@@ -546,12 +562,15 @@ impl Daemon {
 
         tracing::info!("mutation committed");
         let empty_state = CanonicalState::new();
-        let state = self
-            .store_runtime(&proof)?
+        let state = proof
+            .runtime()
             .state
             .get(&namespace)
             .unwrap_or(&empty_state);
         attach_issue_if_created(&namespace, state, outcome.response_mut());
+        drop(proof);
+        self.mark_checkpoint_dirty(store_id, &namespace, 1);
+        self.schedule_sync(remote.clone());
         Ok(outcome)
     }
 
