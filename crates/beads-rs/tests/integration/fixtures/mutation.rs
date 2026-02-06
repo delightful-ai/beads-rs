@@ -6,7 +6,7 @@ use beads_rs::daemon::ipc::{
 };
 use beads_rs::daemon::mutation_engine::{MutationContext, MutationEngine, ParsedMutationRequest};
 use beads_rs::daemon::ops::{BeadPatch, OpError, Patch};
-use beads_rs::{ActorId, BeadType, DepKind, Limits, NamespaceId, Priority, TraceId};
+use beads_rs::{ActorId, BeadId, BeadType, DepKind, Limits, NamespaceId, Priority, TraceId};
 use uuid::Uuid;
 
 use super::identity;
@@ -27,6 +27,10 @@ pub fn context_with_client_request_id(seed: u8) -> MutationContext {
         trace_id: TraceId::from(client_request_id),
         ..default_context()
     }
+}
+
+fn parse_bead_id(raw: impl AsRef<str>) -> BeadId {
+    BeadId::parse(raw.as_ref()).expect("bead id")
 }
 
 #[derive(Clone, Debug)]
@@ -119,99 +123,103 @@ pub fn create_request(title: impl Into<String>) -> MutationPayload {
     })
 }
 
-pub fn update_request(id: impl Into<String>, patch: BeadPatch) -> MutationPayload {
+pub fn update_request(id: impl AsRef<str>, patch: BeadPatch) -> MutationPayload {
     MutationPayload::Update(UpdatePayload {
-        id: id.into(),
+        id: parse_bead_id(id),
         patch,
         cas: None,
     })
 }
 
-pub fn add_labels_request(id: impl Into<String>, labels: Vec<String>) -> MutationPayload {
+pub fn add_labels_request(id: impl AsRef<str>, labels: Vec<String>) -> MutationPayload {
     MutationPayload::AddLabels(LabelsPayload {
-        id: id.into(),
+        id: parse_bead_id(id),
         labels,
     })
 }
 
-pub fn remove_labels_request(id: impl Into<String>, labels: Vec<String>) -> MutationPayload {
+pub fn remove_labels_request(id: impl AsRef<str>, labels: Vec<String>) -> MutationPayload {
     MutationPayload::RemoveLabels(LabelsPayload {
-        id: id.into(),
+        id: parse_bead_id(id),
         labels,
     })
 }
 
-pub fn set_parent_request(id: impl Into<String>, parent: Option<String>) -> MutationPayload {
+pub fn set_parent_request(id: impl AsRef<str>, parent: Option<impl AsRef<str>>) -> MutationPayload {
     MutationPayload::SetParent(ParentPayload {
-        id: id.into(),
-        parent,
+        id: parse_bead_id(id),
+        parent: parent.map(parse_bead_id),
     })
 }
 
-pub fn close_request(id: impl Into<String>, reason: Option<String>) -> MutationPayload {
+pub fn close_request(id: impl AsRef<str>, reason: Option<String>) -> MutationPayload {
     MutationPayload::Close(ClosePayload {
-        id: id.into(),
+        id: parse_bead_id(id),
         reason,
         on_branch: None,
     })
 }
 
-pub fn reopen_request(id: impl Into<String>) -> MutationPayload {
-    MutationPayload::Reopen(IdPayload { id: id.into() })
+pub fn reopen_request(id: impl AsRef<str>) -> MutationPayload {
+    MutationPayload::Reopen(IdPayload {
+        id: parse_bead_id(id),
+    })
 }
 
-pub fn delete_request(id: impl Into<String>, reason: Option<String>) -> MutationPayload {
+pub fn delete_request(id: impl AsRef<str>, reason: Option<String>) -> MutationPayload {
     MutationPayload::Delete(DeletePayload {
-        id: id.into(),
+        id: parse_bead_id(id),
         reason,
     })
 }
 
 pub fn add_dep_request(
-    from: impl Into<String>,
-    to: impl Into<String>,
+    from: impl AsRef<str>,
+    to: impl AsRef<str>,
     kind: DepKind,
 ) -> MutationPayload {
     MutationPayload::AddDep(DepPayload {
-        from: from.into(),
-        to: to.into(),
+        from: parse_bead_id(from),
+        to: parse_bead_id(to),
         kind,
     })
 }
 
 pub fn remove_dep_request(
-    from: impl Into<String>,
-    to: impl Into<String>,
+    from: impl AsRef<str>,
+    to: impl AsRef<str>,
     kind: DepKind,
 ) -> MutationPayload {
     MutationPayload::RemoveDep(DepPayload {
-        from: from.into(),
-        to: to.into(),
+        from: parse_bead_id(from),
+        to: parse_bead_id(to),
         kind,
     })
 }
 
-pub fn add_note_request(id: impl Into<String>, content: impl Into<String>) -> MutationPayload {
+pub fn add_note_request(id: impl AsRef<str>, content: impl Into<String>) -> MutationPayload {
     MutationPayload::AddNote(AddNotePayload {
-        id: id.into(),
+        id: parse_bead_id(id),
         content: content.into(),
     })
 }
 
-pub fn claim_request(id: impl Into<String>, lease_secs: u64) -> MutationPayload {
+pub fn claim_request(id: impl AsRef<str>, lease_secs: u64) -> MutationPayload {
     MutationPayload::Claim(ClaimPayload {
-        id: id.into(),
+        id: parse_bead_id(id),
         lease_secs,
     })
 }
 
-pub fn unclaim_request(id: impl Into<String>) -> MutationPayload {
-    MutationPayload::Unclaim(IdPayload { id: id.into() })
+pub fn unclaim_request(id: impl AsRef<str>) -> MutationPayload {
+    MutationPayload::Unclaim(IdPayload {
+        id: parse_bead_id(id),
+    })
 }
 
-pub fn extend_claim_request(id: impl Into<String>, lease_secs: u64) -> MutationPayload {
+pub fn extend_claim_request(id: impl AsRef<str>, lease_secs: u64) -> MutationPayload {
     MutationPayload::ExtendClaim(LeasePayload {
-        id: id.into(),
+        id: parse_bead_id(id),
         lease_secs,
     })
 }

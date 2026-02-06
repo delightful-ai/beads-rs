@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::{Ctx, print_json, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_json, print_ok, send};
 use super::fmt_issue_ref;
 use crate::Result;
 use crate::api::QueryResult;
@@ -101,7 +101,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
 
             let mut closed = Vec::new();
             for s in &statuses {
-                let epic_id = s.epic.id.clone();
+                let epic_id = normalize_bead_id(&s.epic.id)?;
                 let req = Request::Close {
                     ctx: ctx.mutation_ctx(),
                     payload: ClosePayload {
@@ -111,7 +111,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
                     },
                 };
                 let _ = send(&req)?;
-                closed.push(epic_id);
+                closed.push(epic_id.as_str().to_string());
             }
 
             if ctx.json {

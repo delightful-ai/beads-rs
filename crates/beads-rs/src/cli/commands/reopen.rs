@@ -13,9 +13,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ReopenArgs) -> Result<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Reopen {
         ctx: ctx.mutation_ctx(),
-        payload: IdPayload {
-            id: id.as_str().to_string(),
-        },
+        payload: IdPayload { id },
     };
     let ok = send(&req)?;
     print_ok(&ok, ctx.json)

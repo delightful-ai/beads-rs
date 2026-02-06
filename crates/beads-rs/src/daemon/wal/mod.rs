@@ -18,9 +18,10 @@ pub mod segment;
 pub use event_wal::{EventWal, SegmentSnapshot};
 pub use frame::{FRAME_CRC_OFFSET, FRAME_HEADER_LEN, FrameReader, FrameWriter};
 pub use index::{
-    ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem, ReplicaDurabilityRole,
-    ReplicaDurabilityRoleError, ReplicaLivenessRow, SegmentRow, SqliteWalIndex, WalIndex,
-    WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
+    ClientRequestEventIds, ClientRequestEventIdsError, ClientRequestRow, HlcRow,
+    IndexDurabilityMode, IndexedRangeItem, ReplicaDurabilityRole, ReplicaDurabilityRoleError,
+    ReplicaLivenessRow, SegmentRow, SqliteWalIndex, WalIndex, WalIndexError, WalIndexReader,
+    WalIndexTxn, WalIndexWriter, WatermarkRow,
 };
 pub use memory_index::MemoryWalIndex;
 #[cfg(feature = "model-testing")]

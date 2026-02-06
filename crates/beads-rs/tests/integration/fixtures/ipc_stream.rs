@@ -36,7 +36,7 @@ pub struct StreamingClient {
 impl StreamingClient {
     pub fn subscribe(repo: PathBuf, namespace: NamespaceId) -> Result<Self, StreamClientError> {
         let read = ReadConsistency {
-            namespace: Some(namespace.as_str().to_string()),
+            namespace: Some(namespace),
             ..ReadConsistency::default()
         };
         Self::subscribe_with_read(repo, read)

@@ -136,7 +136,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
             let req = Request::AdminFlush {
                 ctx: ctx.repo_ctx(),
                 payload: AdminFlushPayload {
-                    namespace: ctx.namespace.as_ref().map(|ns| ns.as_str().to_string()),
+                    namespace: ctx.namespace.clone(),
                     checkpoint_now: args.checkpoint_now,
                 },
             };

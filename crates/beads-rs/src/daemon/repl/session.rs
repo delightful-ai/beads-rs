@@ -26,6 +26,55 @@ use super::proto::{
     WatermarkMap, WatermarkState,
 };
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedAck {
+    durable: WatermarkState<Durable>,
+    applied: Option<WatermarkState<Applied>>,
+}
+
+impl ValidatedAck {
+    pub fn durable(&self) -> &WatermarkState<Durable> {
+        &self.durable
+    }
+
+    pub fn applied(&self) -> Option<&WatermarkState<Applied>> {
+        self.applied.as_ref()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AllowedNamespaces(BTreeSet<NamespaceId>);
+
+impl AllowedNamespaces {
+    fn new(namespaces: &[NamespaceId]) -> Self {
+        let mut set = BTreeSet::new();
+        set.extend(namespaces.iter().cloned());
+        Self(set)
+    }
+
+    fn validate_ack(&self, ack: Ack) -> Result<ValidatedAck, ReplError> {
+        if let Some(namespace) = ack
+            .durable
+            .keys()
+            .find(|namespace| !self.0.contains(*namespace))
+        {
+            return Err(namespace_policy_violation_error(namespace));
+        }
+        if let Some(applied) = ack.applied.as_ref()
+            && let Some(namespace) = applied
+                .keys()
+                .find(|namespace| !self.0.contains(*namespace))
+        {
+            return Err(namespace_policy_violation_error(namespace));
+        }
+
+        Ok(ValidatedAck {
+            durable: ack.durable,
+            applied: ack.applied,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
     Connecting,
@@ -99,10 +148,29 @@ pub struct Connecting;
 #[derive(Clone, Copy, Debug)]
 pub struct Handshaking;
 
+#[derive(Clone, Copy, Debug)]
+pub struct LiveStream;
+
+#[derive(Clone, Copy, Debug)]
+pub struct SnapshotOnly;
+
 #[derive(Clone, Debug)]
-pub struct Streaming {
+pub struct Streaming<Mode> {
     peer: SessionPeer,
+    mode: PhantomData<Mode>,
 }
+
+impl<Mode> Streaming<Mode> {
+    fn new(peer: SessionPeer) -> Self {
+        Self {
+            peer,
+            mode: PhantomData,
+        }
+    }
+}
+
+pub type StreamingLive = Streaming<LiveStream>;
+pub type StreamingSnapshot = Streaming<SnapshotOnly>;
 
 #[derive(Clone, Debug)]
 pub struct Draining {
@@ -124,7 +192,7 @@ impl PhaseMarker for Handshaking {
     const PHASE: SessionPhase = SessionPhase::Handshaking;
 }
 
-impl PhaseMarker for Streaming {
+impl<Mode> PhaseMarker for Streaming<Mode> {
     const PHASE: SessionPhase = SessionPhase::Streaming;
 }
 
@@ -140,7 +208,7 @@ pub trait PhasePeer {
     fn peer(&self) -> &SessionPeer;
 }
 
-impl PhasePeer for Streaming {
+impl<Mode> PhasePeer for Streaming<Mode> {
     fn peer(&self) -> &SessionPeer {
         &self.peer
     }
@@ -168,7 +236,7 @@ impl PhasePeerOpt for Handshaking {
     }
 }
 
-impl PhasePeerOpt for Streaming {
+impl<Mode> PhasePeerOpt for Streaming<Mode> {
     fn into_peer(self) -> Option<SessionPeer> {
         Some(self.peer)
     }
@@ -211,7 +279,7 @@ impl PhaseWire for Handshaking {
     }
 }
 
-impl PhaseWire for Streaming {
+impl<Mode> PhaseWire for Streaming<Mode> {
     fn frame_limit(&self, _config: &SessionConfig) -> usize {
         self.peer.max_frame_bytes as usize
     }
@@ -245,9 +313,15 @@ trait PhaseWrap: PhaseMarker + PhasePeer + PhasePeerOpt + PhaseWire + Sized {
     fn wrap<R>(session: Session<R, Self>) -> SessionState<R>;
 }
 
-impl PhaseWrap for Streaming {
-    fn wrap<R>(session: Session<R, Streaming>) -> SessionState<R> {
-        SessionState::Streaming(session)
+impl PhaseWrap for StreamingLive {
+    fn wrap<R>(session: Session<R, StreamingLive>) -> SessionState<R> {
+        SessionState::StreamingLive(session)
+    }
+}
+
+impl PhaseWrap for StreamingSnapshot {
+    fn wrap<R>(session: Session<R, StreamingSnapshot>) -> SessionState<R> {
+        SessionState::StreamingSnapshot(session)
     }
 }
 
@@ -260,7 +334,8 @@ impl PhaseWrap for Draining {
 pub enum SessionState<R> {
     Connecting(Session<R, Connecting>),
     Handshaking(Session<R, Handshaking>),
-    Streaming(Session<R, Streaming>),
+    StreamingLive(Session<R, StreamingLive>),
+    StreamingSnapshot(Session<R, StreamingSnapshot>),
     Draining(Session<R, Draining>),
     Closed(Session<R, Closed>),
 }
@@ -279,7 +354,9 @@ impl<R> SessionState<R> {
         match self {
             SessionState::Connecting(_) => SessionPhase::Connecting,
             SessionState::Handshaking(_) => SessionPhase::Handshaking,
-            SessionState::Streaming(_) => SessionPhase::Streaming,
+            SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_) => {
+                SessionPhase::Streaming
+            }
             SessionState::Draining(_) => SessionPhase::Draining,
             SessionState::Closed(_) => SessionPhase::Closed,
         }
@@ -289,7 +366,8 @@ impl<R> SessionState<R> {
         match self {
             SessionState::Connecting(session) => session.wire_version(),
             SessionState::Handshaking(session) => session.wire_version(),
-            SessionState::Streaming(session) => session.wire_version(),
+            SessionState::StreamingLive(session) => session.wire_version(),
+            SessionState::StreamingSnapshot(session) => session.wire_version(),
             SessionState::Draining(session) => session.wire_version(),
             SessionState::Closed(session) => session.wire_version(),
         }
@@ -299,7 +377,8 @@ impl<R> SessionState<R> {
         match self {
             SessionState::Connecting(session) => session.frame_limit(),
             SessionState::Handshaking(session) => session.frame_limit(),
-            SessionState::Streaming(session) => session.frame_limit(),
+            SessionState::StreamingLive(session) => session.frame_limit(),
+            SessionState::StreamingSnapshot(session) => session.frame_limit(),
             SessionState::Draining(session) => session.frame_limit(),
             SessionState::Closed(session) => session.frame_limit(),
         }
@@ -310,7 +389,12 @@ impl<R> SessionState<R> {
         match self {
             SessionState::Connecting(session) => SessionState::Closed(session.with_phase(Closed)),
             SessionState::Handshaking(session) => SessionState::Closed(session.with_phase(Closed)),
-            SessionState::Streaming(session) => SessionState::Closed(session.with_phase(Closed)),
+            SessionState::StreamingLive(session) => {
+                SessionState::Closed(session.with_phase(Closed))
+            }
+            SessionState::StreamingSnapshot(session) => {
+                SessionState::Closed(session.with_phase(Closed))
+            }
             SessionState::Draining(session) => SessionState::Closed(session.with_phase(Closed)),
             SessionState::Closed(session) => SessionState::Closed(session),
         }
@@ -365,7 +449,7 @@ pub trait SessionStore {
 pub enum SessionAction {
     Send(ReplMessage),
     Close { error: Option<ErrorPayload> },
-    PeerAck(Ack),
+    PeerAck(ValidatedAck),
     PeerWant(Want),
     PeerError(ErrorPayload),
 }
@@ -420,6 +504,14 @@ impl<R, P> Session<R, P> {
             durable: self.durable,
             applied: self.applied,
             next_nonce: self.next_nonce,
+        }
+    }
+
+    fn with_streaming(self, peer: SessionPeer) -> SessionState<R> {
+        if peer.live_stream_enabled {
+            SessionState::StreamingLive(self.with_phase(Streaming::<LiveStream>::new(peer)))
+        } else {
+            SessionState::StreamingSnapshot(self.with_phase(Streaming::<SnapshotOnly>::new(peer)))
         }
     }
 
@@ -486,9 +578,13 @@ impl Session<Outbound, Handshaking> {
 }
 
 #[allow(private_bounds)]
-impl<R, P: PhaseWrap> Session<R, P> {
+impl<R, P: PhaseWrap + PhasePeer + PhasePeerOpt> Session<R, P> {
     fn handle_ack(self, ack: Ack) -> (SessionState<R>, Vec<SessionAction>) {
-        (P::wrap(self), vec![SessionAction::PeerAck(ack)])
+        let allowed = AllowedNamespaces::new(&self.peer().accepted_namespaces);
+        match allowed.validate_ack(ack) {
+            Ok(ack) => (P::wrap(self), vec![SessionAction::PeerAck(ack)]),
+            Err(err) => self.fail(err),
+        }
     }
 
     fn handle_want(self, want: Want) -> (SessionState<R>, Vec<SessionAction>) {
@@ -654,16 +750,20 @@ impl Session<Inbound, Connecting> {
             accepted_namespaces,
             live_stream_enabled: welcome.live_stream_enabled,
         };
-        let session = self.with_phase(Streaming { peer });
+        let session = self.with_streaming(peer);
         let mut actions = vec![SessionAction::Send(ReplMessage::Welcome(welcome))];
         if !wants.is_empty() {
             actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
         }
-        (SessionState::Streaming(session), actions)
+        (session, actions)
     }
 }
 
-impl Session<Inbound, Streaming> {
+#[allow(private_bounds)]
+impl<M> Session<Inbound, Streaming<M>>
+where
+    Streaming<M>: PhaseWrap,
+{
     fn handle_hello_replay(
         mut self,
         hello: Hello,
@@ -706,8 +806,11 @@ impl Session<Inbound, Streaming> {
 
         let snapshot = store.watermark_snapshot(&accepted_namespaces);
         let welcome = self.build_welcome(negotiated, &hello, snapshot, accepted_namespaces);
+        if welcome.live_stream_enabled != peer.live_stream_enabled {
+            return self.invalid_request("HELLO live_stream changed");
+        }
         (
-            SessionState::Streaming(self),
+            <Streaming<M> as PhaseWrap>::wrap(self),
             vec![SessionAction::Send(ReplMessage::Welcome(welcome))],
         )
     }
@@ -757,17 +860,21 @@ impl Session<Outbound, Handshaking> {
             accepted_namespaces: welcome.accepted_namespaces.clone(),
             live_stream_enabled: welcome.live_stream_enabled,
         };
-        let session = self.with_phase(Streaming { peer });
+        let session = self.with_streaming(peer);
         let actions = if wants.is_empty() {
             Vec::new()
         } else {
             vec![SessionAction::Send(ReplMessage::Want(Want { want: wants }))]
         };
-        (SessionState::Streaming(session), actions)
+        (session, actions)
     }
 }
 
-impl Session<Outbound, Streaming> {
+#[allow(private_bounds)]
+impl<M> Session<Outbound, Streaming<M>>
+where
+    Streaming<M>: PhaseWrap,
+{
     fn handle_welcome_replay(
         self,
         welcome: super::proto::Welcome,
@@ -789,8 +896,11 @@ impl Session<Outbound, Streaming> {
         if welcome.accepted_namespaces != peer.accepted_namespaces {
             return self.invalid_request("WELCOME namespaces changed");
         }
+        if welcome.live_stream_enabled != peer.live_stream_enabled {
+            return self.invalid_request("WELCOME live_stream changed");
+        }
 
-        (SessionState::Streaming(self), Vec::new())
+        (<Streaming<M> as PhaseWrap>::wrap(self), Vec::new())
     }
 }
 
@@ -804,19 +914,22 @@ pub fn handle_outbound_message(
         ReplMessage::Hello(_) => match session {
             SessionState::Connecting(session) => session.invalid_request("unexpected HELLO"),
             SessionState::Handshaking(session) => session.invalid_request("unexpected HELLO"),
-            SessionState::Streaming(session) => session.invalid_request("unexpected HELLO"),
+            SessionState::StreamingLive(session) => session.invalid_request("unexpected HELLO"),
+            SessionState::StreamingSnapshot(session) => session.invalid_request("unexpected HELLO"),
             SessionState::Draining(session) => session.invalid_request("unexpected HELLO"),
             SessionState::Closed(session) => session.invalid_request("unexpected HELLO"),
         },
         ReplMessage::Welcome(msg) => match session {
             SessionState::Handshaking(session) => session.handle_welcome(msg, store, now_ms),
-            SessionState::Streaming(session) => session.handle_welcome_replay(msg),
+            SessionState::StreamingLive(session) => session.handle_welcome_replay(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_welcome_replay(msg),
             SessionState::Connecting(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Draining(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Closed(session) => session.invalid_request("unexpected WELCOME"),
         },
         ReplMessage::Events(msg) => match session {
-            SessionState::Streaming(session) => session.handle_events(msg, store, now_ms),
+            SessionState::StreamingLive(session) => session.handle_events(msg, store, now_ms),
+            SessionState::StreamingSnapshot(session) => session.handle_events(msg, store, now_ms),
             SessionState::Draining(session) => session.handle_events(msg, store, now_ms),
             SessionState::Connecting(session) => session.invalid_request("EVENTS before handshake"),
             SessionState::Handshaking(session) => {
@@ -825,28 +938,32 @@ pub fn handle_outbound_message(
             SessionState::Closed(session) => session.invalid_request("EVENTS before handshake"),
         },
         ReplMessage::Ack(msg) => match session {
-            SessionState::Streaming(session) => session.handle_ack(msg),
+            SessionState::StreamingLive(session) => session.handle_ack(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_ack(msg),
             SessionState::Draining(session) => session.handle_ack(msg),
             SessionState::Connecting(session) => session.invalid_request("ACK before handshake"),
             SessionState::Handshaking(session) => session.invalid_request("ACK before handshake"),
             SessionState::Closed(session) => session.invalid_request("ACK before handshake"),
         },
         ReplMessage::Want(msg) => match session {
-            SessionState::Streaming(session) => session.handle_want(msg),
+            SessionState::StreamingLive(session) => session.handle_want(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_want(msg),
             SessionState::Draining(session) => session.handle_want(msg),
             SessionState::Connecting(session) => session.invalid_request("WANT before handshake"),
             SessionState::Handshaking(session) => session.invalid_request("WANT before handshake"),
             SessionState::Closed(session) => session.invalid_request("WANT before handshake"),
         },
         ReplMessage::Ping(msg) => match session {
-            SessionState::Streaming(session) => session.handle_ping(msg),
+            SessionState::StreamingLive(session) => session.handle_ping(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_ping(msg),
             SessionState::Draining(session) => session.handle_ping(msg),
             SessionState::Connecting(session) => session.invalid_request("PING before handshake"),
             SessionState::Handshaking(session) => session.invalid_request("PING before handshake"),
             SessionState::Closed(session) => session.invalid_request("PING before handshake"),
         },
         ReplMessage::Pong(msg) => match session {
-            SessionState::Streaming(session) => session.handle_pong(msg),
+            SessionState::StreamingLive(session) => session.handle_pong(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_pong(msg),
             SessionState::Draining(session) => session.handle_pong(msg),
             SessionState::Connecting(session) => session.invalid_request("PONG before handshake"),
             SessionState::Handshaking(session) => session.invalid_request("PONG before handshake"),
@@ -855,7 +972,8 @@ pub fn handle_outbound_message(
         ReplMessage::Error(msg) => match session {
             SessionState::Connecting(session) => session.handle_peer_error(msg),
             SessionState::Handshaking(session) => session.handle_peer_error(msg),
-            SessionState::Streaming(session) => session.handle_peer_error(msg),
+            SessionState::StreamingLive(session) => session.handle_peer_error(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_peer_error(msg),
             SessionState::Draining(session) => session.handle_peer_error(msg),
             SessionState::Closed(session) => session.handle_peer_error(msg),
         },
@@ -871,7 +989,8 @@ pub fn handle_inbound_message(
     match msg {
         ReplMessage::Hello(msg) => match session {
             SessionState::Connecting(session) => session.handle_hello(msg, store, now_ms),
-            SessionState::Streaming(session) => session.handle_hello_replay(msg, store),
+            SessionState::StreamingLive(session) => session.handle_hello_replay(msg, store),
+            SessionState::StreamingSnapshot(session) => session.handle_hello_replay(msg, store),
             SessionState::Draining(session) => session.invalid_request("unexpected HELLO"),
             SessionState::Handshaking(session) => session.invalid_request("unexpected HELLO"),
             SessionState::Closed(session) => session.invalid_request("unexpected HELLO"),
@@ -879,12 +998,16 @@ pub fn handle_inbound_message(
         ReplMessage::Welcome(_) => match session {
             SessionState::Connecting(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Handshaking(session) => session.invalid_request("unexpected WELCOME"),
-            SessionState::Streaming(session) => session.invalid_request("unexpected WELCOME"),
+            SessionState::StreamingLive(session) => session.invalid_request("unexpected WELCOME"),
+            SessionState::StreamingSnapshot(session) => {
+                session.invalid_request("unexpected WELCOME")
+            }
             SessionState::Draining(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Closed(session) => session.invalid_request("unexpected WELCOME"),
         },
         ReplMessage::Events(msg) => match session {
-            SessionState::Streaming(session) => session.handle_events(msg, store, now_ms),
+            SessionState::StreamingLive(session) => session.handle_events(msg, store, now_ms),
+            SessionState::StreamingSnapshot(session) => session.handle_events(msg, store, now_ms),
             SessionState::Draining(session) => session.handle_events(msg, store, now_ms),
             SessionState::Connecting(session) => session.invalid_request("EVENTS before handshake"),
             SessionState::Handshaking(session) => {
@@ -893,28 +1016,32 @@ pub fn handle_inbound_message(
             SessionState::Closed(session) => session.invalid_request("EVENTS before handshake"),
         },
         ReplMessage::Ack(msg) => match session {
-            SessionState::Streaming(session) => session.handle_ack(msg),
+            SessionState::StreamingLive(session) => session.handle_ack(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_ack(msg),
             SessionState::Draining(session) => session.handle_ack(msg),
             SessionState::Connecting(session) => session.invalid_request("ACK before handshake"),
             SessionState::Handshaking(session) => session.invalid_request("ACK before handshake"),
             SessionState::Closed(session) => session.invalid_request("ACK before handshake"),
         },
         ReplMessage::Want(msg) => match session {
-            SessionState::Streaming(session) => session.handle_want(msg),
+            SessionState::StreamingLive(session) => session.handle_want(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_want(msg),
             SessionState::Draining(session) => session.handle_want(msg),
             SessionState::Connecting(session) => session.invalid_request("WANT before handshake"),
             SessionState::Handshaking(session) => session.invalid_request("WANT before handshake"),
             SessionState::Closed(session) => session.invalid_request("WANT before handshake"),
         },
         ReplMessage::Ping(msg) => match session {
-            SessionState::Streaming(session) => session.handle_ping(msg),
+            SessionState::StreamingLive(session) => session.handle_ping(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_ping(msg),
             SessionState::Draining(session) => session.handle_ping(msg),
             SessionState::Connecting(session) => session.invalid_request("PING before handshake"),
             SessionState::Handshaking(session) => session.invalid_request("PING before handshake"),
             SessionState::Closed(session) => session.invalid_request("PING before handshake"),
         },
         ReplMessage::Pong(msg) => match session {
-            SessionState::Streaming(session) => session.handle_pong(msg),
+            SessionState::StreamingLive(session) => session.handle_pong(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_pong(msg),
             SessionState::Draining(session) => session.handle_pong(msg),
             SessionState::Connecting(session) => session.invalid_request("PONG before handshake"),
             SessionState::Handshaking(session) => session.invalid_request("PONG before handshake"),
@@ -923,7 +1050,8 @@ pub fn handle_inbound_message(
         ReplMessage::Error(msg) => match session {
             SessionState::Connecting(session) => session.handle_peer_error(msg),
             SessionState::Handshaking(session) => session.handle_peer_error(msg),
-            SessionState::Streaming(session) => session.handle_peer_error(msg),
+            SessionState::StreamingLive(session) => session.handle_peer_error(msg),
+            SessionState::StreamingSnapshot(session) => session.handle_peer_error(msg),
             SessionState::Draining(session) => session.handle_peer_error(msg),
             SessionState::Closed(session) => session.handle_peer_error(msg),
         },
@@ -1736,8 +1864,8 @@ mod tests {
         )
     }
 
-    fn expect_inbound_streaming(session: SessionState<Inbound>) -> Session<Inbound, Streaming> {
-        let SessionState::Streaming(session) = session else {
+    fn expect_inbound_streaming(session: SessionState<Inbound>) -> Session<Inbound, StreamingLive> {
+        let SessionState::StreamingLive(session) = session else {
             panic!("expected streaming session");
         };
         session
@@ -1748,6 +1876,65 @@ mod tests {
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));
         let replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         (TestStore::new(), identity, replica)
+    }
+
+    fn inbound_streaming_session(
+        namespaces: Vec<NamespaceId>,
+    ) -> (SessionState<Inbound>, TestStore, StoreIdentity) {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = namespaces.clone();
+        config.offered_namespaces = namespaces.clone();
+
+        let session = InboundConnecting::new(config, limits, admission);
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: ReplicaId::new(Uuid::from_bytes([3u8; 16])),
+            hello_nonce: 10,
+            max_frame_bytes: 1024,
+            requested_namespaces: namespaces.clone(),
+            offered_namespaces: namespaces,
+            seen_durable: BTreeMap::new(),
+            seen_applied: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        };
+
+        let (session, _actions) = apply_inbound_hello(session, hello, &mut store);
+        (session, store, identity)
+    }
+
+    fn ack_for(namespace: NamespaceId, origin: ReplicaId, seq: u64, applied: bool) -> Ack {
+        let head = HeadStatus::Known([seq as u8; 32]);
+        let durable = Watermark::new(Seq0::new(seq), head).unwrap_or_else(|_| Watermark::genesis());
+        let mut durable_state = WatermarkState::new();
+        durable_state
+            .entry(namespace.clone())
+            .or_default()
+            .insert(origin, durable);
+
+        let applied_state = if applied {
+            let applied =
+                Watermark::new(Seq0::new(seq), head).unwrap_or_else(|_| Watermark::genesis());
+            let mut state = WatermarkState::new();
+            state.entry(namespace).or_default().insert(origin, applied);
+            Some(state)
+        } else {
+            None
+        };
+
+        Ack {
+            durable: durable_state,
+            applied: applied_state,
+        }
     }
 
     fn make_event(
@@ -1829,6 +2016,45 @@ mod tests {
         };
         assert_eq!(welcome.protocol_version, PROTOCOL_VERSION_V1);
         assert_eq!(welcome.accepted_namespaces, vec![NamespaceId::core()]);
+    }
+
+    #[test]
+    fn handshake_negotiates_snapshot_only_when_peer_disables_live_stream() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()];
+        config.offered_namespaces = vec![NamespaceId::core()];
+
+        let session = InboundConnecting::new(config, limits, admission);
+
+        let peer_store = StoreIdentity::new(identity.store_id, identity.store_epoch);
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: peer_store.store_id,
+            store_epoch: peer_store.store_epoch,
+            sender_replica_id: ReplicaId::new(Uuid::from_bytes([7u8; 16])),
+            hello_nonce: 10,
+            max_frame_bytes: 1024,
+            requested_namespaces: vec![NamespaceId::core()],
+            offered_namespaces: vec![NamespaceId::core()],
+            seen_durable: BTreeMap::new(),
+            seen_applied: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: false,
+                supports_compression: false,
+            },
+        };
+
+        let (session, actions) = apply_inbound_hello(session, hello, &mut store);
+        assert!(matches!(session, SessionState::StreamingSnapshot(_)));
+        let SessionAction::Send(ReplMessage::Welcome(welcome)) = &actions[0] else {
+            panic!("expected welcome");
+        };
+        assert!(!welcome.live_stream_enabled);
     }
 
     #[test]
@@ -1950,11 +2176,120 @@ mod tests {
 
         let (session, _actions) =
             handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, 0);
-        let SessionState::Streaming(session) = session else {
+        let SessionState::StreamingLive(session) = session else {
             panic!("expected streaming session");
         };
         let _ = session.peer();
         let _ = session.negotiated_max_frame_bytes();
+    }
+
+    #[test]
+    fn typestate_outbound_reaches_snapshot_streaming() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()];
+        config.offered_namespaces = vec![NamespaceId::core()];
+
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (session, _action) = session.begin_handshake(&store, 0);
+        let session = SessionState::Handshaking(session);
+
+        let welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: ReplicaId::new(Uuid::from_bytes([13u8; 16])),
+            welcome_nonce: 10,
+            accepted_namespaces: vec![NamespaceId::core()],
+            receiver_seen_durable: BTreeMap::new(),
+            receiver_seen_applied: None,
+            live_stream_enabled: false,
+            max_frame_bytes: 1024,
+        };
+
+        let (session, _actions) =
+            handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, 0);
+        assert!(matches!(session, SessionState::StreamingSnapshot(_)));
+    }
+
+    #[test]
+    fn ack_allowed_namespace_forwards_validated_ack() {
+        let namespace = NamespaceId::core();
+        let (session, mut store, _identity) = inbound_streaming_session(vec![namespace.clone()]);
+        let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        let ack = ack_for(namespace.clone(), origin, 5, false);
+
+        let (session, actions) =
+            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+
+        assert!(matches!(session, SessionState::StreamingLive(_)));
+        let ack = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::PeerAck(ack) => Some(ack),
+                _ => None,
+            })
+            .expect("validated ack");
+        assert!(ack.applied().is_none());
+        assert!(ack.durable().contains_key(&namespace));
+    }
+
+    #[test]
+    fn ack_rejects_disallowed_namespace() {
+        let namespace = NamespaceId::core();
+        let disallowed = NamespaceId::parse("other").expect("namespace");
+        let (session, mut store, _identity) = inbound_streaming_session(vec![namespace.clone()]);
+        let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
+        let ack = ack_for(disallowed.clone(), origin, 2, false);
+
+        let (session, actions) =
+            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+
+        assert!(matches!(session, SessionState::Draining(_)));
+        let error = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+                _ => None,
+            })
+            .expect("error payload");
+        assert_eq!(
+            error.code,
+            ProtocolErrorCode::NamespacePolicyViolation.into()
+        );
+    }
+
+    #[test]
+    fn ack_rejects_mixed_namespaces() {
+        let namespace = NamespaceId::core();
+        let disallowed = NamespaceId::parse("other").expect("namespace");
+        let (session, mut store, _identity) = inbound_streaming_session(vec![namespace.clone()]);
+        let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
+        let mut ack = ack_for(namespace.clone(), origin, 1, false);
+        let head = HeadStatus::Known([3u8; 32]);
+        let other = Watermark::new(Seq0::new(3), head).unwrap();
+        ack.durable
+            .entry(disallowed.clone())
+            .or_default()
+            .insert(origin, other);
+
+        let (session, actions) =
+            handle_inbound_message(session, ReplMessage::Ack(ack), &mut store, 0);
+
+        assert!(matches!(session, SessionState::Draining(_)));
+        let error = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+                _ => None,
+            })
+            .expect("error payload");
+        assert_eq!(
+            error.code,
+            ProtocolErrorCode::NamespacePolicyViolation.into()
+        );
     }
 
     #[test]
@@ -1994,7 +2329,7 @@ mod tests {
         let e2_sha = e2.sha256;
 
         let (_session, actions) = handle_inbound_message(
-            SessionState::Streaming(session),
+            SessionState::StreamingLive(session),
             ReplMessage::Events(Events {
                 events: vec![e1, e2],
             }),
@@ -2063,7 +2398,7 @@ mod tests {
         let e3 = make_event(identity, NamespaceId::core(), origin, 3, Some(e1.sha256));
 
         let (_session, actions) = handle_inbound_message(
-            SessionState::Streaming(session),
+            SessionState::StreamingLive(session),
             ReplMessage::Events(Events { events: vec![e3] }),
             &mut store,
             10,
@@ -2144,7 +2479,7 @@ mod tests {
         let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
 
         let (session, actions) = handle_inbound_message(
-            SessionState::Streaming(session),
+            SessionState::StreamingLive(session),
             ReplMessage::Events(Events { events: vec![e2] }),
             &mut store,
             10,
@@ -2157,7 +2492,7 @@ mod tests {
 
         let session = expect_inbound_streaming(session);
         let (_session, actions) = handle_inbound_message(
-            SessionState::Streaming(session),
+            SessionState::StreamingLive(session),
             ReplMessage::Events(Events { events: vec![e1] }),
             &mut store,
             11,
@@ -2223,7 +2558,7 @@ mod tests {
         let e1 = make_event(identity, other_namespace, origin, 1, None);
 
         let (session, actions) = handle_inbound_message(
-            SessionState::Streaming(session),
+            SessionState::StreamingLive(session),
             ReplMessage::Events(Events { events: vec![e1] }),
             &mut store,
             10,
@@ -2281,7 +2616,7 @@ mod tests {
         let e1 = make_event(wrong_store, NamespaceId::core(), origin, 1, None);
 
         let (_session, actions) = handle_inbound_message(
-            SessionState::Streaming(session),
+            SessionState::StreamingLive(session),
             ReplMessage::Events(Events { events: vec![e1] }),
             &mut store,
             10,

@@ -8,8 +8,9 @@ use crate::core::{
 };
 
 use super::{
-    ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow,
-    SegmentRow, WalIndex, WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
+    ClientRequestEventIds, ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem,
+    ReplicaLivenessRow, SegmentRow, WalIndex, WalIndexError, WalIndexReader, WalIndexTxn,
+    WalIndexWriter, WatermarkRow,
 };
 
 type EventKey = (NamespaceId, ReplicaId, Seq1);
@@ -280,10 +281,11 @@ impl WalIndexTxn for MemoryWalIndexTxn {
         client_request_id: ClientRequestId,
         request_sha256: [u8; 32],
         txn_id: TxnId,
-        event_ids: &[EventId],
+        event_ids: &ClientRequestEventIds,
         created_at_ms: u64,
     ) -> Result<(), WalIndexError> {
         self.ensure_live()?;
+        event_ids.ensure_matches(ns, origin)?;
         let key = (ns.clone(), *origin, client_request_id);
         if let Some(existing) = self.working.client_requests.get(&key) {
             if existing.request_sha256 != request_sha256 {
@@ -303,7 +305,7 @@ impl WalIndexTxn for MemoryWalIndexTxn {
             ClientRequestRow {
                 request_sha256,
                 txn_id,
-                event_ids: event_ids.to_vec(),
+                event_ids: event_ids.clone(),
                 created_at_ms,
             },
         );
@@ -571,7 +573,7 @@ mod tests {
         let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
         let request_id = ClientRequestId::new(Uuid::from_bytes([5u8; 16]));
         let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).expect("seq1"));
-        let event_ids = [event_id.clone()];
+        let event_ids = ClientRequestEventIds::single(event_id.clone());
 
         let mut first = index.writer().begin_txn().expect("begin txn");
         first

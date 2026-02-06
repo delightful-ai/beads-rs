@@ -27,7 +27,7 @@ fn admin_status_monotonic_under_load() {
     let config = generator.config_mut();
     config.workers = 2;
     config.total_requests = 40;
-    config.namespace = Some(namespace.as_str().to_string());
+    config.namespace = Some(namespace.clone());
     config.autostart = Autostart::Disabled;
     let timeout = load_timeout(config.total_requests, config.workers);
 
@@ -86,7 +86,7 @@ fn run_load(
     let config = generator.config_mut();
     config.workers = 1;
     config.total_requests = total;
-    config.namespace = Some(namespace.as_str().to_string());
+    config.namespace = Some(namespace.clone());
     config.autostart = Autostart::Disabled;
     generator.run()
 }

@@ -204,7 +204,7 @@ fn e2e_replicated_fsync_receipt() {
     match response {
         Response::Ok {
             ok: ResponsePayload::Query(QueryResult::Issue(issue)),
-        } => assert_eq!(issue.id, issue_id),
+        } => assert_eq!(issue.id, issue_id.as_str()),
         other => panic!("unexpected show response: {other:?}"),
     }
 
@@ -315,14 +315,14 @@ fn create_issue_with_durability(
     node_idx: usize,
     title: &str,
     k: NonZeroU32,
-) -> (String, beads_rs::DurabilityReceipt) {
+) -> (BeadId, beads_rs::DurabilityReceipt) {
     let response = create_issue_with_durability_result(rig, node_idx, title, k);
     match response {
         Response::Ok {
             ok: ResponsePayload::Op(op),
         } => {
             let issue_id = match op.result {
-                OpResult::Created { id } => id.to_string(),
+                OpResult::Created { id } => id,
                 other => panic!("unexpected op result: {other:?}"),
             };
             (issue_id, op.receipt)
@@ -342,7 +342,7 @@ fn create_issue_with_durability_result(
         ctx: MutationCtx::new(
             node.repo_path(),
             MutationMeta {
-                durability: Some(format!("replicated_fsync({})", k)),
+                durability: Some(DurabilityClass::ReplicatedFsync { k }),
                 ..Default::default()
             },
         ),
@@ -368,14 +368,14 @@ fn create_issue_with_durability_result(
 fn show_issue_with_read(
     rig: &ReplicationRig,
     node_idx: usize,
-    issue_id: &str,
+    issue_id: &BeadId,
     read: ReadConsistency,
 ) -> Response {
     let node = rig.node(node_idx);
     let request = Request::Show {
         ctx: ReadCtx::new(node.repo_path(), read),
         payload: IdPayload {
-            id: issue_id.to_string(),
+            id: issue_id.clone(),
         },
     };
     node.apply_request(request)

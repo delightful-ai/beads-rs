@@ -255,7 +255,7 @@ impl Daemon {
     pub fn admin_flush(
         &mut self,
         repo: &Path,
-        namespace: Option<String>,
+        namespace: Option<NamespaceId>,
         checkpoint_now: bool,
         git_tx: &Sender<GitOp>,
     ) -> Response {

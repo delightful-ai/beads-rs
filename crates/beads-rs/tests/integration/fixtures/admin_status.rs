@@ -186,11 +186,7 @@ fn next_applied_requirement(
     status: &AdminStatusOutput,
     read: &ReadConsistency,
 ) -> Result<Watermarks<beads_rs::Applied>, StatusError> {
-    let namespace = read
-        .namespace
-        .as_deref()
-        .and_then(|raw| NamespaceId::parse(raw.to_string()).ok())
-        .unwrap_or_else(NamespaceId::core);
+    let namespace = read.namespace.clone().unwrap_or_else(NamespaceId::core);
     let current_seq = status
         .watermarks_applied
         .get(&namespace, &status.replica_id)

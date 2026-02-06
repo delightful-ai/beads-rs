@@ -11,7 +11,7 @@ use thiserror::Error;
 use beads_rs::daemon::ipc::{
     CreatePayload, IpcClient, IpcError, MutationCtx, MutationMeta, Request, Response,
 };
-use beads_rs::{BeadType, Priority};
+use beads_rs::{ActorId, BeadType, NamespaceId, Priority};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Autostart {
@@ -44,8 +44,8 @@ pub struct LoadConfig {
     pub workers: usize,
     pub total_requests: usize,
     pub rate_per_sec: Option<u64>,
-    pub namespace: Option<String>,
-    pub actor_id: Option<String>,
+    pub namespace: Option<NamespaceId>,
+    pub actor_id: Option<ActorId>,
     pub autostart: Autostart,
     pub max_errors: usize,
 }

@@ -28,12 +28,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
         Some(parse_since_ms(&args.since)?)
     };
 
-    let id = args
-        .id
-        .as_deref()
-        .map(normalize_bead_id)
-        .transpose()?
-        .map(|id| id.as_str().to_string());
+    let id = args.id.as_deref().map(normalize_bead_id).transpose()?;
     let req = Request::Deleted {
         ctx: ctx.read_ctx(),
         payload: DeletedPayload { since_ms, id },

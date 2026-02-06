@@ -120,9 +120,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         {
             Some(None)
         } else {
-            Some(Some(
-                normalize_bead_id_for("parent", v)?.as_str().to_string(),
-            ))
+            Some(Some(normalize_bead_id_for("parent", v)?))
         }
     } else {
         None
@@ -170,7 +168,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         let req = Request::Update {
             ctx: ctx.mutation_ctx(),
             payload: UpdatePayload {
-                id: id_str.clone(),
+                id: id.clone(),
                 patch,
                 cas: None,
             },
@@ -182,7 +180,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         let req = Request::AddLabels {
             ctx: ctx.mutation_ctx(),
             payload: LabelsPayload {
-                id: id_str.clone(),
+                id: id.clone(),
                 labels: add_labels,
             },
         };
@@ -193,7 +191,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         let req = Request::RemoveLabels {
             ctx: ctx.mutation_ctx(),
             payload: LabelsPayload {
-                id: id_str.clone(),
+                id: id.clone(),
                 labels: remove_labels,
             },
         };
@@ -205,7 +203,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         let req = Request::SetParent {
             ctx: ctx.mutation_ctx(),
             payload: ParentPayload {
-                id: id_str.clone(),
+                id: id.clone(),
                 parent: new_parent,
             },
         };
@@ -216,15 +214,16 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     if !args.deps.is_empty() {
         let dep_specs = normalize_dep_specs(args.deps)?;
         for spec in dep_specs {
-            let (kind, to) = if let Some((k, i)) = spec.split_once(':') {
-                (DepKind::parse(k).unwrap_or(DepKind::Blocks), i.to_string())
+            let (kind, to_raw) = if let Some((k, i)) = spec.split_once(':') {
+                (DepKind::parse(k).unwrap_or(DepKind::Blocks), i)
             } else {
-                (DepKind::Blocks, spec)
+                (DepKind::Blocks, spec.as_str())
             };
+            let to = normalize_bead_id_for("deps", to_raw)?;
             let _ = send(&Request::AddDep {
                 ctx: ctx.mutation_ctx(),
                 payload: DepPayload {
-                    from: id_str.clone(),
+                    from: id.clone(),
                     to,
                     kind,
                 },
@@ -237,7 +236,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         let note = Request::AddNote {
             ctx: ctx.mutation_ctx(),
             payload: AddNotePayload {
-                id: id_str.clone(),
+                id: id.clone(),
                 content,
             },
         };
@@ -249,7 +248,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         if assignee == "none" || assignee == "-" || assignee == "unassigned" {
             let req = Request::Unclaim {
                 ctx: ctx.mutation_ctx(),
-                payload: IdPayload { id: id_str.clone() },
+                payload: IdPayload { id: id.clone() },
             };
             let _ = send(&req)?;
         } else {
@@ -264,7 +263,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             let req = Request::Claim {
                 ctx: ctx.mutation_ctx(),
                 payload: ClaimPayload {
-                    id: id_str.clone(),
+                    id: id.clone(),
                     lease_secs: 3600,
                 },
             };
@@ -276,7 +275,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         let req = Request::Close {
             ctx: ctx.mutation_ctx(),
             payload: ClosePayload {
-                id: id_str.clone(),
+                id: id.clone(),
                 reason: close_reason,
                 on_branch: None,
             },

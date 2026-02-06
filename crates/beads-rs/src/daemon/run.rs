@@ -105,13 +105,19 @@ pub fn run_daemon() -> Result<()> {
     let git_worker = GitWorker::new(git_result_tx, (*limits).clone());
 
     // Spawn state thread.
+    let state_span = tracing::Span::current();
     let state_handle = std::thread::spawn(move || {
-        run_state_loop(daemon, req_rx, git_tx, git_result_rx);
+        state_span.in_scope(|| {
+            run_state_loop(daemon, req_rx, git_tx, git_result_rx);
+        });
     });
 
     // Spawn git thread.
+    let git_span = tracing::Span::current();
     let git_handle = std::thread::spawn(move || {
-        run_git_loop(git_worker, git_rx);
+        git_span.in_scope(|| {
+            run_git_loop(git_worker, git_rx);
+        });
     });
 
     // Ensure listener is blocking; wake with a self-connect on shutdown.
@@ -120,38 +126,44 @@ pub fn run_daemon() -> Result<()> {
     let accept_shutdown = Arc::clone(&shutdown);
     let accept_limits = Arc::clone(&limits);
     let accept_req_tx = req_tx.clone();
+    let accept_span = tracing::Span::current();
     let accept_handle = std::thread::spawn(move || {
-        loop {
-            if accept_shutdown.load(Ordering::Relaxed) {
-                tracing::info!("shutdown signal received (accept loop)");
-                break;
-            }
+        accept_span.in_scope(|| {
+            loop {
+                if accept_shutdown.load(Ordering::Relaxed) {
+                    tracing::info!("shutdown signal received (accept loop)");
+                    break;
+                }
 
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    if accept_shutdown.load(Ordering::Relaxed) {
-                        break;
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if accept_shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let req_tx = accept_req_tx.clone();
+                        let limits = Arc::clone(&accept_limits);
+                        let client_span = tracing::Span::current();
+                        std::thread::spawn(move || {
+                            client_span.in_scope(|| {
+                                let _ = stream.set_nonblocking(false);
+                                handle_client(stream, req_tx, limits);
+                            });
+                        });
                     }
-                    let req_tx = accept_req_tx.clone();
-                    let limits = Arc::clone(&accept_limits);
-                    std::thread::spawn(move || {
-                        let _ = stream.set_nonblocking(false);
-                        handle_client(stream, req_tx, limits);
-                    });
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                    if accept_shutdown.load(Ordering::Relaxed) {
-                        break;
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        if accept_shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
                     }
-                }
-                Err(e) => {
-                    if accept_shutdown.load(Ordering::Relaxed) {
-                        break;
+                    Err(e) => {
+                        if accept_shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        tracing::error!("accept error: {}", e);
                     }
-                    tracing::error!("accept error: {}", e);
                 }
             }
-        }
+        });
     });
 
     let _ = shutdown_rx.recv();

@@ -13,8 +13,8 @@ use crate::fixtures::tailnet_proxy::TailnetTraceMode;
 use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
 use beads_rs::core::{
-    BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode, ReplicaEntry,
-    ReplicaRole, Seq0,
+    BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode,
+    ReplicaDurabilityRole, ReplicaEntry, ReplicaRole, Seq0,
 };
 use beads_rs::daemon::ipc::{
     AdminCheckpointWaitPayload, CreatePayload, IdPayload, IpcClient, MutationCtx, MutationMeta,
@@ -77,7 +77,7 @@ fn wait_for_checkpoint(rig: &ReplRig, idx: usize, namespace: &NamespaceId, timeo
     let runtime_dir = node.runtime_dir().to_path_buf();
     let repo_dir = node.repo_dir().to_path_buf();
     let namespace_label = namespace.as_str().to_string();
-    let request_namespace = namespace_label.clone();
+    let request_namespace = namespace.clone();
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -383,7 +383,7 @@ fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
     wait_for_sample(&rig, &initial, Duration::from_secs(10));
 
     let mut entries = roster_entries(&rig);
-    entries[1].durability_eligible = false;
+    entries[1].role = ReplicaDurabilityRole::peer(false);
     rig.overwrite_roster(entries);
     for idx in 0..2 {
         rig.reload_replication(idx);
@@ -531,7 +531,7 @@ fn repl_daemon_replicated_fsync_receipt() {
     match response {
         Response::Ok {
             ok: ResponsePayload::Query(QueryResult::Issue(issue)),
-        } => assert_eq!(issue.id, issue_id),
+        } => assert_eq!(issue.id, issue_id.as_str()),
         other => panic!("unexpected show response: {other:?}"),
     }
 
@@ -584,8 +584,7 @@ fn roster_entries(rig: &ReplRig) -> Vec<ReplicaEntry> {
         .map(|(idx, node)| ReplicaEntry {
             replica_id: node.replica_id(),
             name: format!("node-{idx}"),
-            role: ReplicaRole::Peer,
-            durability_eligible: true,
+            role: ReplicaDurabilityRole::peer(true),
             allowed_namespaces: Some(vec![NamespaceId::core()]),
             expire_after_ms: None,
         })
@@ -642,14 +641,14 @@ fn create_issue_with_durability(
     node_idx: usize,
     title: &str,
     k: NonZeroU32,
-) -> (String, beads_rs::DurabilityReceipt) {
+) -> (BeadId, beads_rs::DurabilityReceipt) {
     let response = create_issue_with_durability_result(rig, node_idx, title, k);
     match response {
         Response::Ok {
             ok: ResponsePayload::Op(op),
         } => {
             let issue_id = match op.result {
-                OpResult::Created { id } => id.to_string(),
+                OpResult::Created { id } => id,
                 other => panic!("unexpected op result: {other:?}"),
             };
             (issue_id, op.receipt)
@@ -670,7 +669,7 @@ fn create_issue_with_durability_result(
         ctx: MutationCtx::new(
             node.repo_dir().to_path_buf(),
             MutationMeta {
-                durability: Some(format!("replicated_fsync({})", k)),
+                durability: Some(DurabilityClass::ReplicatedFsync { k }),
                 ..Default::default()
             },
         ),
@@ -696,7 +695,7 @@ fn create_issue_with_durability_result(
 fn show_issue_with_read(
     rig: &ReplRig,
     node_idx: usize,
-    issue_id: &str,
+    issue_id: &BeadId,
     read: ReadConsistency,
 ) -> Response {
     let node = rig.node(node_idx);
@@ -704,7 +703,7 @@ fn show_issue_with_read(
     let request = Request::Show {
         ctx: ReadCtx::new(node.repo_dir().to_path_buf(), read),
         payload: IdPayload {
-            id: issue_id.to_string(),
+            id: issue_id.clone(),
         },
     };
     client.send_request(&request).expect("show response")

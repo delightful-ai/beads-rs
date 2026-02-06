@@ -14,8 +14,8 @@ use beads_rs::daemon::repl::session::{
     handle_outbound_message,
 };
 use beads_rs::daemon::repl::{
-    Ack, Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionPhase,
-    SessionStore, Want, WatermarkSnapshot,
+    Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionPhase, SessionStore,
+    ValidatedAck, Want, WatermarkSnapshot,
 };
 use beads_rs::daemon::wal::ReplicaDurabilityRole;
 
@@ -107,7 +107,7 @@ impl SessionStore for MockStore {
 #[derive(Debug, Default)]
 pub struct MockPeerOutput {
     pub sent: Vec<beads_rs::daemon::repl::ReplMessage>,
-    pub peer_acks: Vec<Ack>,
+    pub peer_acks: Vec<ValidatedAck>,
     pub peer_wants: Vec<Want>,
     pub peer_errors: Vec<beads_rs::ErrorPayload>,
     pub closed: Option<beads_rs::ErrorPayload>,

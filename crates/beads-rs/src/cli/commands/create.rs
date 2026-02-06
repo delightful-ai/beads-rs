@@ -134,8 +134,8 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     let req = Request::Create {
         ctx: ctx.mutation_ctx(),
         payload: CreatePayload {
-            id: id.as_ref().map(|id| id.as_str().to_string()),
-            parent: parent.as_ref().map(|id| id.as_str().to_string()),
+            id,
+            parent,
             title,
             bead_type,
             priority,

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use beads_api::{AdminFingerprintMode, AdminFingerprintSample};
-use beads_core::{BeadType, DepKind, Priority};
+use beads_core::{BeadId, BeadType, BranchName, DepKind, NamespaceId, Priority};
 
 use crate::ops::BeadPatch;
 use crate::query::Filters;
@@ -11,20 +11,20 @@ pub struct EmptyPayload {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdPayload {
-    pub id: String,
+    pub id: BeadId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdsPayload {
-    pub ids: Vec<String>,
+    pub ids: Vec<BeadId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreatePayload {
     #[serde(default)]
-    pub id: Option<String>,
+    pub id: Option<BeadId>,
     #[serde(default)]
-    pub parent: Option<String>,
+    pub parent: Option<BeadId>,
     pub title: String,
     #[serde(rename = "type")]
     pub bead_type: BeadType,
@@ -49,7 +49,7 @@ pub struct CreatePayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePayload {
-    pub id: String,
+    pub id: BeadId,
     pub patch: BeadPatch,
     #[serde(default)]
     pub cas: Option<String>,
@@ -57,56 +57,56 @@ pub struct UpdatePayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabelsPayload {
-    pub id: String,
+    pub id: BeadId,
     pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParentPayload {
-    pub id: String,
+    pub id: BeadId,
     #[serde(default)]
-    pub parent: Option<String>,
+    pub parent: Option<BeadId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosePayload {
-    pub id: String,
+    pub id: BeadId,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
-    pub on_branch: Option<String>,
+    pub on_branch: Option<BranchName>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeletePayload {
-    pub id: String,
+    pub id: BeadId,
     #[serde(default)]
     pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepPayload {
-    pub from: String,
-    pub to: String,
+    pub from: BeadId,
+    pub to: BeadId,
     pub kind: DepKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddNotePayload {
-    pub id: String,
+    pub id: BeadId,
     pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimPayload {
-    pub id: String,
+    pub id: BeadId,
     #[serde(default = "super::default_lease_secs")]
     pub lease_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeasePayload {
-    pub id: String,
+    pub id: BeadId,
     pub lease_secs: u64,
 }
 
@@ -145,7 +145,7 @@ pub struct DeletedPayload {
     #[serde(default)]
     pub since_ms: Option<u64>,
     #[serde(default)]
-    pub id: Option<String>,
+    pub id: Option<BeadId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,7 +173,7 @@ pub struct AdminScrubPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminFlushPayload {
     #[serde(default)]
-    pub namespace: Option<String>,
+    pub namespace: Option<NamespaceId>,
     #[serde(default)]
     pub checkpoint_now: bool,
 }
@@ -181,7 +181,7 @@ pub struct AdminFlushPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminCheckpointWaitPayload {
     #[serde(default)]
-    pub namespace: Option<String>,
+    pub namespace: Option<NamespaceId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,15 +28,16 @@ use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
 #[cfg(test)]
 use crate::daemon::repl::proto::PROTOCOL_VERSION_V1;
-use crate::daemon::repl::proto::{Ack, Events, Want, WatermarkState};
+use crate::daemon::repl::proto::{Events, Want, WatermarkState};
 use crate::daemon::repl::session::{
-    Outbound, OutboundConnecting, Session, SessionState, SessionWire, Streaming,
+    Outbound, OutboundConnecting, Session, SessionState, SessionWire, Streaming, StreamingLive,
     handle_outbound_message,
 };
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
     FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, SessionAction, SessionConfig,
-    SessionStore, SharedSessionStore, WalRangeReader, decode_envelope, encode_envelope,
+    SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader, decode_envelope,
+    encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
 
@@ -165,11 +166,11 @@ where
         }
 
         let role = roster_entry
-            .map(|entry| entry.role)
+            .map(|entry| entry.role())
             .or(peer.role)
             .unwrap_or(ReplicaRole::Peer);
         let durability_eligible = roster_entry
-            .map(|entry| entry.durability_eligible)
+            .map(|entry| entry.durability_eligible())
             .unwrap_or(role != ReplicaRole::Observer);
         let allowed_namespaces = roster_entry
             .and_then(|entry| entry.allowed_namespaces.clone())
@@ -405,15 +406,8 @@ where
         });
     });
 
-    let subscription = broadcaster.subscribe(subscriber_limits(&limits))?;
-    let (event_tx, event_rx) = crossbeam::channel::unbounded::<BroadcastEvent>();
-    let event_shutdown = shutdown.clone();
-    let event_span = tracing::Span::current();
-    let event_handle = thread::spawn(move || {
-        event_span.in_scope(|| {
-            run_event_forwarder(subscription, event_tx, event_shutdown);
-        });
-    });
+    let mut event_rx: crossbeam::channel::Receiver<BroadcastEvent> = crossbeam::channel::never();
+    let mut event_handle: Option<JoinHandle<()>> = None;
 
     let mut config = SessionConfig::new(local_store, local_replica_id, &limits);
     config.requested_namespaces = plan.requested_namespaces.clone();
@@ -472,27 +466,50 @@ where
                             }
 
                             if let SessionAction::PeerWant(want) = &action {
-                                let SessionState::Streaming(streaming_session) = &session else {
-                                    continue;
-                                };
-                                let allowed_set = streaming_session
-                                    .peer()
-                                    .accepted_namespaces
-                                    .iter()
-                                    .cloned()
-                                    .collect::<BTreeSet<_>>();
-                                let mut ctx = WantContext {
-                                    writer: &mut writer,
-                                    session: streaming_session,
-                                    broadcaster: &broadcaster,
-                                    wal_reader: runtime.wal_reader.as_ref(),
-                                    limits: &limits,
-                                    allowed_set: Some(&allowed_set),
-                                    keepalive: &mut keepalive,
-                                };
-                                if let Err(err) = handle_want(want, &mut ctx) {
-                                    tracing::warn!("peer want handling failed: {err}");
-                                    return Err(err);
+                                match &session {
+                                    SessionState::StreamingLive(streaming_session) => {
+                                        let allowed_set = streaming_session
+                                            .peer()
+                                            .accepted_namespaces
+                                            .iter()
+                                            .cloned()
+                                            .collect::<BTreeSet<_>>();
+                                        let mut ctx = WantContext {
+                                            writer: &mut writer,
+                                            session: streaming_session,
+                                            broadcaster: &broadcaster,
+                                            wal_reader: runtime.wal_reader.as_ref(),
+                                            limits: &limits,
+                                            allowed_set: Some(&allowed_set),
+                                            keepalive: &mut keepalive,
+                                        };
+                                        if let Err(err) = handle_want(want, &mut ctx) {
+                                            tracing::warn!("peer want handling failed: {err}");
+                                            return Err(err);
+                                        }
+                                    }
+                                    SessionState::StreamingSnapshot(streaming_session) => {
+                                        let allowed_set = streaming_session
+                                            .peer()
+                                            .accepted_namespaces
+                                            .iter()
+                                            .cloned()
+                                            .collect::<BTreeSet<_>>();
+                                        let mut ctx = WantContext {
+                                            writer: &mut writer,
+                                            session: streaming_session,
+                                            broadcaster: &broadcaster,
+                                            wal_reader: runtime.wal_reader.as_ref(),
+                                            limits: &limits,
+                                            allowed_set: Some(&allowed_set),
+                                            keepalive: &mut keepalive,
+                                        };
+                                        if let Err(err) = handle_want(want, &mut ctx) {
+                                            tracing::warn!("peer want handling failed: {err}");
+                                            return Err(err);
+                                        }
+                                    }
+                                    _ => continue,
                                 }
                             } else if apply_action(&mut writer, &session, action, &mut keepalive)? {
                                 return Ok(());
@@ -518,7 +535,7 @@ where
                     Err(_) => break,
                 };
 
-                let SessionState::Streaming(streaming_session) = &session else {
+                let SessionState::StreamingLive(streaming_session) = &session else {
                     let drop = pending_events.push(event);
                     if drop.dropped_any() {
                         let dropped_events = drop.total_events();
@@ -559,7 +576,7 @@ where
             recv(tick) -> _ => {}
         }
 
-        if let SessionState::Streaming(streaming_session) = &session {
+        if let SessionState::StreamingLive(streaming_session) = &session {
             if handshake_at_ms.is_none() {
                 let now_ms = now_ms();
                 handshake_at_ms = Some(now_ms);
@@ -585,6 +602,19 @@ where
                     live_stream = peer.live_stream_enabled,
                     "replication handshake accepted"
                 );
+            }
+
+            if event_handle.is_none() {
+                let subscription = broadcaster.subscribe(subscriber_limits(&limits))?;
+                let (event_tx, next_event_rx) = crossbeam::channel::unbounded::<BroadcastEvent>();
+                let event_shutdown = shutdown.clone();
+                let event_span = tracing::Span::current();
+                event_handle = Some(thread::spawn(move || {
+                    event_span.in_scope(|| {
+                        run_event_forwarder(subscription, event_tx, event_shutdown);
+                    });
+                }));
+                event_rx = next_event_rx;
             }
 
             if !pending_events.is_empty() {
@@ -614,6 +644,30 @@ where
                 )?;
                 sent_hot_cache = true;
             }
+        } else if let SessionState::StreamingSnapshot(streaming_session) = &session
+            && handshake_at_ms.is_none()
+        {
+            let now_ms = now_ms();
+            handshake_at_ms = Some(now_ms);
+            last_hello_at_ms = None;
+            if let Err(err) =
+                store.update_replica_liveness(plan.replica_id, now_ms, now_ms, plan.durability_role)
+            {
+                tracing::warn!("replica liveness update failed: {err}");
+            }
+            let peer = streaming_session.peer();
+            tracing::info!(
+                target: "repl",
+                direction = "outbound",
+                peer_replica_id = %peer.replica_id,
+                auth_identity = "none",
+                requested_namespaces = ?plan.requested_namespaces,
+                offered_namespaces = ?plan.offered_namespaces,
+                accepted_namespaces = ?peer.accepted_namespaces,
+                incoming_namespaces = ?peer.incoming_namespaces,
+                live_stream = peer.live_stream_enabled,
+                "replication handshake accepted"
+            );
         }
 
         if let SessionState::Handshaking(session) = &mut session {
@@ -631,7 +685,10 @@ where
             }
         }
 
-        if matches!(session, SessionState::Streaming(_)) {
+        if matches!(
+            session,
+            SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_)
+        ) {
             let now_ms = now_ms();
             if let Some(decision) = keepalive.poll(now_ms) {
                 match decision {
@@ -659,7 +716,9 @@ where
 
     let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
     let _ = reader_handle.join();
-    let _ = event_handle.join();
+    if let Some(handle) = event_handle {
+        let _ = handle.join();
+    }
 
     Ok(())
 }
@@ -775,9 +834,9 @@ fn send_payload<S: SessionWire>(
     Ok(())
 }
 
-fn send_events<R>(
+fn send_events(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session<R, Streaming>,
+    session: &Session<Outbound, StreamingLive>,
     frames: Vec<EventFrameV1>,
     limits: &crate::core::Limits,
     keepalive: &mut KeepaliveTracker,
@@ -847,8 +906,80 @@ fn send_events<R>(
     Ok(())
 }
 
-fn events_envelope_len<R>(
-    session: &Session<R, Streaming>,
+fn send_want_frames<M>(
+    writer: &mut FrameWriter<TcpStream>,
+    session: &Session<Outbound, Streaming<M>>,
+    frames: Vec<EventFrameV1>,
+    limits: &crate::core::Limits,
+    keepalive: &mut KeepaliveTracker,
+) -> Result<(), PeerError> {
+    if frames.is_empty() {
+        return Ok(());
+    }
+
+    let max_frame_bytes = session.negotiated_max_frame_bytes();
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0usize;
+
+    for frame in frames {
+        let frame_bytes = frame.bytes.len();
+        if !batch.is_empty()
+            && (batch.len() >= limits.max_event_batch_events
+                || batch_bytes.saturating_add(frame_bytes) > limits.max_event_batch_bytes)
+        {
+            metrics::repl_events_out(batch.len());
+            send_payload(
+                writer,
+                session,
+                ReplMessage::Events(Events { events: batch }),
+                keepalive,
+            )?;
+            batch = Vec::new();
+            batch_bytes = 0;
+        }
+
+        batch_bytes = batch_bytes.saturating_add(frame_bytes);
+        batch.push(frame);
+
+        let envelope_bytes = events_envelope_len(session, &batch)?;
+        if envelope_bytes > max_frame_bytes {
+            let frame = batch.pop().expect("batch not empty");
+            if !batch.is_empty() {
+                metrics::repl_events_out(batch.len());
+                send_payload(
+                    writer,
+                    session,
+                    ReplMessage::Events(Events { events: batch }),
+                    keepalive,
+                )?;
+            }
+            batch = vec![frame];
+            batch_bytes = frame_bytes;
+            let single_len = events_envelope_len(session, &batch)?;
+            if single_len > max_frame_bytes {
+                return Err(PeerError::Frame(FrameError::FrameTooLarge {
+                    max_frame_bytes,
+                    got_bytes: single_len,
+                }));
+            }
+        }
+    }
+
+    if !batch.is_empty() {
+        metrics::repl_events_out(batch.len());
+        send_payload(
+            writer,
+            session,
+            ReplMessage::Events(Events { events: batch }),
+            keepalive,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn events_envelope_len<M>(
+    session: &Session<Outbound, Streaming<M>>,
     batch: &[EventFrameV1],
 ) -> Result<usize, PeerError> {
     let version = session.peer().protocol_version;
@@ -864,7 +995,7 @@ fn events_envelope_len<R>(
 
 fn send_hot_cache(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session<Outbound, Streaming>,
+    session: &Session<Outbound, StreamingLive>,
     broadcaster: &EventBroadcaster,
     allowed_set: &[NamespaceId],
     limits: &crate::core::Limits,
@@ -883,14 +1014,14 @@ fn update_peer_ack(
     store: &impl SessionStore,
     peer_acks: &Arc<Mutex<crate::daemon::repl::PeerAckTable>>,
     peer: ReplicaId,
-    ack: &Ack,
+    ack: &ValidatedAck,
 ) -> Result<(), Box<crate::daemon::repl::PeerAckError>> {
     let now_ms = now_ms();
     let mut table = peer_acks.lock().expect("peer ack lock poisoned");
-    table.update_peer(peer, &ack.durable, ack.applied.as_ref(), now_ms)?;
-    let namespaces: Vec<NamespaceId> = ack.durable.keys().cloned().collect();
+    table.update_peer(peer, ack.durable(), ack.applied(), now_ms)?;
+    let namespaces: Vec<NamespaceId> = ack.durable().keys().cloned().collect();
     let snapshot = store.watermark_snapshot(&namespaces);
-    emit_peer_lag(peer, &snapshot.durable, &ack.durable);
+    emit_peer_lag(peer, &snapshot.durable, ack.durable());
     Ok(())
 }
 
@@ -910,9 +1041,9 @@ fn emit_peer_lag(peer: ReplicaId, local: &WatermarkState<Durable>, ack: &Waterma
     }
 }
 
-struct WantContext<'a> {
+struct WantContext<'a, M> {
     writer: &'a mut FrameWriter<TcpStream>,
-    session: &'a Session<Outbound, Streaming>,
+    session: &'a Session<Outbound, Streaming<M>>,
     broadcaster: &'a EventBroadcaster,
     wal_reader: Option<&'a WalRangeReader>,
     limits: &'a crate::core::Limits,
@@ -920,7 +1051,7 @@ struct WantContext<'a> {
     keepalive: &'a mut KeepaliveTracker,
 }
 
-fn handle_want(want: &Want, ctx: &mut WantContext<'_>) -> Result<(), PeerError> {
+fn handle_want<M>(want: &Want, ctx: &mut WantContext<'_, M>) -> Result<(), PeerError> {
     if want.want.is_empty() {
         return Ok(());
     }
@@ -943,7 +1074,7 @@ fn handle_want(want: &Want, ctx: &mut WantContext<'_>) -> Result<(), PeerError> 
 
     match outcome {
         WantFramesOutcome::Frames(frames) => {
-            send_events(ctx.writer, ctx.session, frames, ctx.limits, ctx.keepalive)
+            send_want_frames(ctx.writer, ctx.session, frames, ctx.limits, ctx.keepalive)
         }
         WantFramesOutcome::BootstrapRequired { namespaces } => {
             let payload = ErrorPayload::new(
@@ -1100,6 +1231,7 @@ mod tests {
         peer_replica: ReplicaId,
         respond_with_welcome: bool,
         accepted_override: Option<Vec<NamespaceId>>,
+        live_stream_enabled_override: Option<bool>,
     ) -> (std::net::SocketAddr, Receiver<ReplMessage>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -1155,6 +1287,11 @@ mod tests {
                                 {
                                     welcome.accepted_namespaces = override_namespaces;
                                 }
+                                if let Some(live_stream_enabled) = live_stream_enabled_override
+                                    && let ReplMessage::Welcome(ref mut welcome) = message
+                                {
+                                    welcome.live_stream_enabled = live_stream_enabled;
+                                }
                                 let envelope = ReplEnvelope {
                                     version: PROTOCOL_VERSION_V1,
                                     message,
@@ -1193,7 +1330,7 @@ mod tests {
         );
         let local_replica = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
-        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, false, None);
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, false, None, None);
         let addr = addr.to_string();
 
         let config = ReplicationManagerConfig {
@@ -1239,7 +1376,7 @@ mod tests {
         );
         let local_replica = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
-        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, None);
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, None, None);
         let addr = addr.to_string();
 
         let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
@@ -1314,6 +1451,69 @@ mod tests {
     }
 
     #[test]
+    fn manager_skips_live_stream_when_disabled() {
+        let local_store = StoreIdentity::new(
+            crate::core::StoreId::new(Uuid::from_bytes([30u8; 16])),
+            crate::core::StoreEpoch::ZERO,
+        );
+        let local_replica = ReplicaId::new(Uuid::from_bytes([31u8; 16]));
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([32u8; 16]));
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, None, Some(false));
+        let addr = addr.to_string();
+
+        let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+            max_subscribers: 4,
+            hot_cache_max_events: 16,
+            hot_cache_max_bytes: 1024,
+        });
+
+        let config = ReplicationManagerConfig {
+            local_store,
+            local_replica_id: local_replica,
+            admission: AdmissionController::new(&test_limits()),
+            broadcaster: broadcaster.clone(),
+            peer_acks: Arc::new(Mutex::new(crate::daemon::repl::PeerAckTable::new())),
+            policies: test_policy(),
+            roster: None,
+            peers: vec![test_peer_config(peer_replica, addr.clone())],
+            wal_reader: None,
+            limits: test_limits(),
+            backoff: BackoffPolicy {
+                base: Duration::from_millis(5),
+                max: Duration::from_millis(10),
+            },
+        };
+        let manager = ReplicationManager::new(SharedSessionStore::new(TestStore), config);
+
+        let handle = manager.start();
+        rx.recv_timeout(Duration::from_secs(1)).expect("hello");
+
+        let core_event = BroadcastEvent::new(
+            EventId::new(
+                local_replica,
+                NamespaceId::core(),
+                Seq1::from_u64(1).unwrap(),
+            ),
+            Sha256([3u8; 32]),
+            None,
+            EventBytes::<Opaque>::new(Bytes::from_static(b"core")),
+        );
+        broadcaster.publish(core_event).unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if let Ok(msg) = rx.recv_timeout(remaining) {
+                if matches!(msg, ReplMessage::Events(_)) {
+                    panic!("unexpected live events in snapshot-only session");
+                }
+            }
+        }
+
+        handle.shutdown();
+    }
+
+    #[test]
     fn send_events_respects_negotiated_max_frame_bytes() {
         let limits = test_limits();
         let local_store =
@@ -1343,7 +1543,7 @@ mod tests {
         };
         let (session, _actions) =
             handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, now_ms());
-        let SessionState::Streaming(session) = session else {
+        let SessionState::StreamingLive(session) = session else {
             panic!("expected streaming session");
         };
 
@@ -1427,7 +1627,7 @@ mod tests {
         let local_replica = ReplicaId::new(Uuid::from_bytes([13u8; 16]));
         let peer_replica = ReplicaId::new(Uuid::from_bytes([14u8; 16]));
         let accepted = Some(vec![NamespaceId::core()]);
-        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, accepted);
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, accepted, None);
         let addr = addr.to_string();
 
         let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {

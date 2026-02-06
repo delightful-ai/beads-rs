@@ -30,8 +30,9 @@ use super::mutation_engine::{
 use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, RecordHeader, RecordRequest, SegmentRow, VerifiedRecord,
-    WalIndex, WalIndexError, WalIndexTxn, WalReplayError, open_segment_reader,
+    ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RecordRequest,
+    SegmentRow, VerifiedRecord, WalIndex, WalIndexError, WalIndexTxn, WalReplayError,
+    open_segment_reader,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
@@ -349,7 +350,7 @@ impl Daemon {
             broadcast_prev,
             EventBytes::from(sequenced.event_bytes.clone()),
         );
-        let event_ids = vec![event_id];
+        let event_ids = ClientRequestEventIds::single(event_id.clone());
         txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
         if let Some(sealed) = append.sealed.as_ref() {
             let sealed_row = SegmentRow::sealed(
@@ -364,7 +365,7 @@ impl Daemon {
         }
         txn.record_event(
             &namespace,
-            &event_ids[0],
+            &event_id,
             sha_bytes,
             prev_sha,
             append.segment_id,
@@ -486,7 +487,7 @@ impl Daemon {
         let receipt = DurabilityReceipt::local_fsync(
             store,
             sequenced.event_body.txn_id,
-            event_ids,
+            event_ids.event_ids(),
             now_ms,
             durable_watermarks,
             applied_watermarks,
@@ -900,29 +901,19 @@ fn try_reuse_idempotent_response(
         });
     }
 
-    let Some(event_id) = row.event_ids.first() else {
-        return Err(OpError::Internal("idempotency row missing event id"));
-    };
-    let event_body = load_event_body(store_dir, wal_index, event_id, limits)?;
+    let event_id = row.event_ids.first_event_id();
+    let event_body = load_event_body(store_dir, wal_index, &event_id, limits)?;
     let EventKindV1::TxnV1(txn) = &event_body.kind;
     let result = op_result_from_delta(request, &txn.delta)?;
     let receipt = DurabilityReceipt::local_fsync(
         store,
         row.txn_id,
-        row.event_ids.clone(),
+        row.event_ids.event_ids(),
         row.created_at_ms,
         durable_watermarks,
         applied_watermarks,
     );
-    let mut max_seq = event_id.origin_seq;
-    for eid in &row.event_ids {
-        if eid.origin_replica_id != origin_replica_id || eid.namespace != ctx.namespace {
-            return Err(OpError::Internal("idempotent request event id mismatch"));
-        }
-        if eid.origin_seq > max_seq {
-            max_seq = eid.origin_seq;
-        }
-    }
+    let max_seq = row.event_ids.max_seq();
 
     let mut response = OpResponse::new(result, receipt);
     let outcome = match durability {
@@ -969,15 +960,22 @@ fn try_reuse_idempotent_response(
         _ => MutationOutcome::Immediate(response),
     };
 
-    tracing::info!(
-        target: "mutation",
+    let span = tracing::info_span!(
+        "mutation",
+        store_id = %store.store_id,
+        store_epoch = store.store_epoch.get(),
+        replica_id = %origin_replica_id,
+        actor_id = %ctx.actor_id,
+        durability = ?durability,
         txn_id = %row.txn_id,
-        client_request_id = %client_request_id,
+        client_request_id = ?ctx.client_request_id,
+        trace_id = %ctx.trace_id,
         namespace = %ctx.namespace,
         origin_replica_id = %origin_replica_id,
-        origin_seq = max_seq.get(),
-        "mutation idempotent reuse"
+        origin_seq = max_seq.get()
     );
+    let _guard = span.enter();
+    tracing::info!(target: "mutation", "mutation idempotent reuse");
 
     Ok(Some(outcome))
 }
@@ -1405,7 +1403,7 @@ mod tests {
             ctx: crate::daemon::ipc::MutationCtx::new(
                 repo_path.clone(),
                 MutationMeta {
-                    client_request_id: Some(client_request_id.to_string()),
+                    client_request_id: Some(client_request_id),
                     ..MutationMeta::default()
                 },
             ),
@@ -1597,7 +1595,7 @@ mod tests {
             trace_id: TraceId::from(client_request_id),
         };
         let request = ParsedMutationRequest::parse_add_labels(LabelsPayload {
-            id: "bd-123".into(),
+            id: BeadId::parse("bd-123").expect("bead id"),
             labels: vec!["alpha".into()],
         })
         .unwrap();

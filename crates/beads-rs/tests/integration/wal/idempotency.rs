@@ -2,7 +2,7 @@
 
 use uuid::Uuid;
 
-use beads_rs::daemon::wal::{WalIndex, WalIndexError};
+use beads_rs::daemon::wal::{ClientRequestEventIds, WalIndex, WalIndexError};
 use beads_rs::{EventId, NamespaceId, Seq1, TxnId};
 
 use crate::fixtures::identity;
@@ -21,6 +21,7 @@ fn idempotency_mapping_reuses_txn_and_event_ids() {
     let request_sha = mutation::request_sha256(&ctx, &request).expect("request sha");
 
     let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).expect("seq1"));
+    let event_ids = ClientRequestEventIds::single(event_id.clone());
     let txn_id = TxnId::new(Uuid::from_bytes([5u8; 16]));
     let created_at_ms = 1_700_000_000_000;
 
@@ -32,7 +33,7 @@ fn idempotency_mapping_reuses_txn_and_event_ids() {
         client_request_id,
         request_sha,
         txn_id,
-        std::slice::from_ref(&event_id),
+        &event_ids,
         created_at_ms,
     )
     .expect("upsert client request");
@@ -44,7 +45,7 @@ fn idempotency_mapping_reuses_txn_and_event_ids() {
         .expect("lookup client request")
         .expect("client request row");
     assert_eq!(row.txn_id, txn_id);
-    assert_eq!(row.event_ids, vec![event_id.clone()]);
+    assert_eq!(row.event_ids.event_ids(), vec![event_id.clone()]);
 
     let row_again = index
         .reader()
@@ -60,7 +61,7 @@ fn idempotency_mapping_reuses_txn_and_event_ids() {
         client_request_id,
         request_sha,
         txn_id,
-        &[event_id],
+        &event_ids,
         created_at_ms,
     )
     .expect("idempotent upsert");
@@ -79,6 +80,7 @@ fn request_sha_mismatch_returns_error() {
     let request_sha = mutation::request_sha256(&ctx, &request).expect("request sha");
 
     let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(1).expect("seq1"));
+    let event_ids = ClientRequestEventIds::single(event_id.clone());
     let txn_id = TxnId::new(Uuid::from_bytes([6u8; 16]));
     let created_at_ms = 1_700_000_000_100;
 
@@ -90,7 +92,7 @@ fn request_sha_mismatch_returns_error() {
         client_request_id,
         request_sha,
         txn_id,
-        &[event_id],
+        &event_ids,
         created_at_ms,
     )
     .expect("upsert client request");
@@ -108,7 +110,7 @@ fn request_sha_mismatch_returns_error() {
             client_request_id,
             mismatched_sha,
             txn_id,
-            &[],
+            &event_ids,
             created_at_ms + 1,
         )
         .expect_err("expected mismatch error");

@@ -30,7 +30,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
         let req = Request::Delete {
             ctx: ctx.mutation_ctx(),
             payload: DeletePayload {
-                id: id_str.clone(),
+                id: id.clone(),
                 reason: args.reason.clone(),
             },
         };

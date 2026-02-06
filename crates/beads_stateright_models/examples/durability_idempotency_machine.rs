@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use beads_rs::daemon::repl::proto::WatermarkState;
-use beads_rs::daemon::wal::WalIndex;
+use beads_rs::daemon::wal::{ClientRequestEventIds, WalIndex};
 use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot, PeerAckTable, durability};
 use beads_rs::{
     Applied, ClientRequestId, DurabilityClass, DurabilityReceipt, Durable, EventId, HeadStatus,
@@ -194,16 +194,14 @@ impl ModelActor {
                 beads_rs::ReplicaEntry {
                     replica_id: local_replica,
                     name: "local".to_string(),
-                    role: beads_rs::ReplicaRole::Anchor,
-                    durability_eligible: true,
+                    role: beads_rs::ReplicaDurabilityRole::anchor(true),
                     allowed_namespaces: None,
                     expire_after_ms: None,
                 },
                 beads_rs::ReplicaEntry {
                     replica_id: replica_for(PEER_ID),
                     name: "peer".to_string(),
-                    role: beads_rs::ReplicaRole::Peer,
-                    durability_eligible: true,
+                    role: beads_rs::ReplicaDurabilityRole::peer(true),
                     allowed_namespaces: None,
                     expire_after_ms: None,
                 },
@@ -563,12 +561,7 @@ fn build_receipt(
         if row.request_sha256 != request_sha {
             return Err(());
         }
-        let max_seq = row
-            .event_ids
-            .iter()
-            .map(|eid| eid.origin_seq)
-            .max()
-            .unwrap_or_else(|| Seq1::from_u64(1).expect("seq1"));
+        let max_seq = row.event_ids.max_seq();
         (row.txn_id, row.event_ids, row.created_at_ms, max_seq)
     } else {
         let mut txn = index.writer().begin_txn().map_err(|_| ())?;
@@ -576,6 +569,7 @@ fn build_receipt(
             .next_origin_seq(&cfg.namespace, &cfg.local_replica)
             .map_err(|_| ())?;
         let event_id = EventId::new(cfg.local_replica, cfg.namespace.clone(), seq);
+        let event_ids = ClientRequestEventIds::single(event_id.clone());
         let txn_id = TxnId::new(make_uuid(cfg.local_replica, seq.get(), 0));
         txn.upsert_client_request(
             &cfg.namespace,
@@ -583,18 +577,18 @@ fn build_receipt(
             request_id,
             request_sha,
             txn_id,
-            std::slice::from_ref(&event_id),
+            &event_ids,
             now_ms,
         )
         .map_err(|_| ())?;
         txn.commit().map_err(|_| ())?;
-        (txn_id, vec![event_id], now_ms, seq)
+        (txn_id, event_ids, now_ms, seq)
     };
 
     let receipt = DurabilityReceipt::local_fsync(
         cfg.store,
         txn_id,
-        event_ids.clone(),
+        event_ids.event_ids(),
         created_at_ms,
         Watermarks::<beads_rs::Durable>::new(),
         Watermarks::<Applied>::new(),
@@ -619,7 +613,7 @@ fn lookup_receipt(
     Ok(DurabilityReceipt::local_fsync(
         cfg.store,
         row.txn_id,
-        row.event_ids,
+        row.event_ids.event_ids(),
         row.created_at_ms,
         Watermarks::<beads_rs::Durable>::new(),
         Watermarks::<Applied>::new(),

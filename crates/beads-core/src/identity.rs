@@ -12,9 +12,9 @@ use uuid::Uuid;
 use super::error::{CoreError, InvalidId};
 use super::{NamespaceId, Seq1};
 
-/// Actor identifier - non-empty string.
+/// Actor identifier - non-empty string after trimming.
 ///
-/// Agents name themselves. No validation beyond non-empty.
+/// Agents name themselves. Validation only rejects empty/whitespace-only values.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ActorId(String);
@@ -22,7 +22,7 @@ pub struct ActorId(String);
 impl ActorId {
     pub fn new(s: impl Into<String>) -> Result<Self, CoreError> {
         let s = s.into();
-        if s.is_empty() {
+        if s.trim().is_empty() {
             Err(InvalidId::Actor {
                 raw: s,
                 reason: "empty".into(),
@@ -1033,6 +1033,19 @@ mod tests {
         let json = serde_json::to_string(&note).unwrap();
         let back: NoteId = serde_json::from_str(&json).unwrap();
         assert_eq!(note, back);
+    }
+
+    #[test]
+    fn actor_id_rejects_whitespace_only() {
+        let err = ActorId::new("   ").expect_err("whitespace actor id must fail");
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn actor_id_serde_rejects_whitespace_only() {
+        let err =
+            serde_json::from_str::<ActorId>(r#""   ""#).expect_err("whitespace actor id must fail");
+        assert!(err.to_string().contains("empty"));
     }
 
     #[test]

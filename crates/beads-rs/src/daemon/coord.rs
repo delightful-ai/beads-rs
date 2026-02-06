@@ -12,16 +12,15 @@ use super::core::{
 };
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{
-    ErrorPayload, IntoErrorPayload, IpcError, MutationMeta, ReadConsistency, Request, Response,
-    ResponseExt, ResponsePayload,
+    ErrorPayload, MutationMeta, ReadConsistency, Request, Response, ResponseExt, ResponsePayload,
 };
 use super::ops::OpError;
 use super::remote::RemoteUrl;
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
-    ActorId, BeadId, CanonicalState, CliErrorCode, ClientRequestId, CoreError, DurabilityClass,
-    ErrorCode, NamespaceId, ProtocolErrorCode, TraceId, WallClock,
+    ActorId, CanonicalState, CliErrorCode, DurabilityClass, ErrorCode, NamespaceId,
+    ProtocolErrorCode, TraceId, WallClock,
 };
 use crate::git::{SyncError, SyncOutcome};
 
@@ -444,11 +443,7 @@ impl Daemon {
             Request::Show { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match BeadId::parse(&payload.id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
-                };
-                self.query_show(&repo, &id, read, git_tx).into()
+                self.query_show(&repo, &payload.id, read, git_tx).into()
             }
 
             Request::ShowMultiple { ctx, payload } => {
@@ -474,11 +469,7 @@ impl Daemon {
             Request::DepTree { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match BeadId::parse(&payload.id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
-                };
-                self.query_dep_tree(&repo, &id, read, git_tx).into()
+                self.query_dep_tree(&repo, &payload.id, read, git_tx).into()
             }
 
             Request::DepCycles { ctx, .. } => {
@@ -490,21 +481,13 @@ impl Daemon {
             Request::Deps { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match BeadId::parse(&payload.id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
-                };
-                self.query_deps(&repo, &id, read, git_tx).into()
+                self.query_deps(&repo, &payload.id, read, git_tx).into()
             }
 
             Request::Notes { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match BeadId::parse(&payload.id) {
-                    Ok(id) => id,
-                    Err(e) => return Response::err_from(invalid_id_payload(e)).into(),
-                };
-                self.query_notes(&repo, &id, read, git_tx).into()
+                self.query_notes(&repo, &payload.id, read, git_tx).into()
             }
 
             Request::Blocked { ctx, .. } => {
@@ -543,16 +526,7 @@ impl Daemon {
             Request::Deleted { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                let id = match payload.id {
-                    Some(s) => Some(match BeadId::parse(&s) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            return Response::err_from(invalid_id_payload(e)).into();
-                        }
-                    }),
-                    None => None,
-                };
-                self.query_deleted(&repo, payload.since_ms, id.as_ref(), read, git_tx)
+                self.query_deleted(&repo, payload.since_ms, payload.id.as_ref(), read, git_tx)
                     .into()
             }
 
@@ -744,12 +718,12 @@ impl LoadedStore<'_> {
         actor: &ActorId,
     ) -> Result<ParsedMutationMeta, OpError> {
         let namespace = self.normalize_namespace(meta.namespace)?;
-        let durability = parse_durability_meta(meta.durability)?;
-        let client_request_id = parse_optional_client_request_id(meta.client_request_id)?;
+        let durability = meta.durability.unwrap_or(DurabilityClass::LocalFsync);
+        let client_request_id = meta.client_request_id;
         let trace_id = client_request_id
             .map(TraceId::from)
             .unwrap_or_else(|| TraceId::new(Uuid::new_v4()));
-        let actor_id = parse_optional_actor_id(meta.actor_id, actor)?;
+        let actor_id = meta.actor_id.unwrap_or_else(|| actor.clone());
 
         Ok(ParsedMutationMeta {
             namespace,
@@ -811,19 +785,11 @@ impl LoadedStore<'_> {
         })
     }
 
-    pub(crate) fn normalize_namespace(&self, raw: Option<String>) -> Result<NamespaceId, OpError> {
-        let namespace = match raw {
-            None => NamespaceId::core(),
-            Some(value) => {
-                let trimmed = value.trim();
-                NamespaceId::parse(trimmed.to_string()).map_err(|err| {
-                    OpError::NamespaceInvalid {
-                        namespace: trimmed.to_string(),
-                        reason: err.to_string(),
-                    }
-                })?
-            }
-        };
+    pub(crate) fn normalize_namespace(
+        &self,
+        raw: Option<NamespaceId>,
+    ) -> Result<NamespaceId, OpError> {
+        let namespace = raw.unwrap_or_else(NamespaceId::core);
         if self.runtime().policies.contains_key(&namespace) {
             Ok(namespace)
         } else {
@@ -864,60 +830,4 @@ impl LoadedStore<'_> {
 
 fn error_payload(code: ErrorCode, message: &str, retryable: bool) -> ErrorPayload {
     ErrorPayload::new(code, message, retryable)
-}
-
-fn invalid_id_payload(err: CoreError) -> ErrorPayload {
-    match err {
-        CoreError::InvalidId(id) => IpcError::from(id).into_error_payload(),
-        other => ErrorPayload::new(
-            ProtocolErrorCode::InternalError.into(),
-            other.to_string(),
-            false,
-        ),
-    }
-}
-
-fn parse_optional_client_request_id(
-    raw: Option<String>,
-) -> Result<Option<ClientRequestId>, OpError> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(OpError::InvalidRequest {
-            field: Some("client_request_id".into()),
-            reason: "client_request_id cannot be empty".into(),
-        });
-    }
-    ClientRequestId::parse_str(trimmed)
-        .map(Some)
-        .map_err(|err| OpError::InvalidRequest {
-            field: Some("client_request_id".into()),
-            reason: err.to_string(),
-        })
-}
-
-fn parse_optional_actor_id(raw: Option<String>, fallback: &ActorId) -> Result<ActorId, OpError> {
-    let Some(raw) = raw else {
-        return Ok(fallback.clone());
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(OpError::InvalidRequest {
-            field: Some("actor_id".into()),
-            reason: "actor_id cannot be empty".into(),
-        });
-    }
-    ActorId::new(trimmed.to_string()).map_err(|err| OpError::InvalidRequest {
-        field: Some("actor_id".into()),
-        reason: err.to_string(),
-    })
-}
-
-fn parse_durability_meta(raw: Option<String>) -> Result<DurabilityClass, OpError> {
-    DurabilityClass::parse_optional(raw.as_deref()).map_err(|err| OpError::InvalidRequest {
-        field: Some("durability".into()),
-        reason: err.to_string(),
-    })
 }

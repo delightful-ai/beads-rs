@@ -2738,9 +2738,9 @@ mod tests {
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim,
-        ContentHash, Durable, ErrorCode, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww,
-        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaEntry,
-        ReplicaId, ReplicaRole, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
+        ContentHash, Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId,
+        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaDurabilityRole,
+        ReplicaEntry, ReplicaId, ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch,
         StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnOpV1, TxnV1,
         VerifiedEvent, WallClock, Watermarks, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
         WriteStamp, encode_event_body_canonical, hash_event_body,
@@ -2760,15 +2760,6 @@ mod tests {
 
     fn test_actor() -> ActorId {
         ActorId::new("test@host".to_string()).unwrap()
-    }
-
-    fn assert_err_code(outcome: HandleOutcome, expected: ErrorCode) {
-        match outcome {
-            HandleOutcome::Response(Response::Err { err }) => {
-                assert_eq!(err.code, expected);
-            }
-            other => panic!("expected error response, got {other:?}"),
-        }
     }
 
     fn test_remote() -> RemoteUrl {
@@ -2970,8 +2961,7 @@ mod tests {
             replicas: vec![ReplicaEntry {
                 replica_id: ReplicaId::new(Uuid::from_bytes([45u8; 16])),
                 name: "alpha".to_string(),
-                role: ReplicaRole::Anchor,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::anchor(true),
                 allowed_namespaces: None,
                 expire_after_ms: None,
             }],
@@ -3524,7 +3514,7 @@ mod tests {
                 ctx: MutationCtx::new(
                     repo_path.clone(),
                     MutationMeta {
-                        namespace: Some(tmp_ns.as_str().to_string()),
+                        namespace: Some(tmp_ns.clone()),
                         ..MutationMeta::default()
                     },
                 ),
@@ -3558,7 +3548,7 @@ mod tests {
         };
 
         let read = ReadConsistency {
-            namespace: Some(tmp_ns.as_str().to_string()),
+            namespace: Some(tmp_ns.clone()),
             ..ReadConsistency::default()
         };
         let response = daemon.query_show(&repo_path, &created_id, read, &git_tx);
@@ -3582,78 +3572,6 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(core_count, 0);
         assert_eq!(tmp_count, 1);
-    }
-
-    #[test]
-    fn mutation_meta_rejects_invalid_fields() {
-        let tmp = test_store_dir();
-        let mut daemon = Daemon::new(test_actor());
-        let remote = test_remote();
-        let repo_path = tmp.data_dir().join("repo");
-        std::fs::create_dir_all(&repo_path).unwrap();
-        let store_id = store_id_from_remote(&remote);
-        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
-        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
-
-        let base_request = |meta| Request::Create {
-            ctx: MutationCtx::new(repo_path.clone(), meta),
-            payload: CreatePayload {
-                id: None,
-                parent: None,
-                title: "bad".to_string(),
-                bead_type: BeadType::Task,
-                priority: Priority::MEDIUM,
-                description: None,
-                design: None,
-                acceptance_criteria: None,
-                assignee: None,
-                external_ref: None,
-                estimated_minutes: None,
-                labels: Vec::new(),
-                dependencies: Vec::new(),
-            },
-        };
-
-        assert_err_code(
-            daemon.handle_request(
-                base_request(MutationMeta {
-                    durability: Some("nope".into()),
-                    ..MutationMeta::default()
-                }),
-                &git_tx,
-            ),
-            ProtocolErrorCode::InvalidRequest.into(),
-        );
-        assert_err_code(
-            daemon.handle_request(
-                base_request(MutationMeta {
-                    client_request_id: Some("not-a-uuid".into()),
-                    ..MutationMeta::default()
-                }),
-                &git_tx,
-            ),
-            ProtocolErrorCode::InvalidRequest.into(),
-        );
-        assert_err_code(
-            daemon.handle_request(
-                base_request(MutationMeta {
-                    actor_id: Some("   ".into()),
-                    ..MutationMeta::default()
-                }),
-                &git_tx,
-            ),
-            ProtocolErrorCode::InvalidRequest.into(),
-        );
-        assert_err_code(
-            daemon.handle_request(
-                base_request(MutationMeta {
-                    namespace: Some("BAD".into()),
-                    ..MutationMeta::default()
-                }),
-                &git_tx,
-            ),
-            ProtocolErrorCode::NamespaceInvalid.into(),
-        );
     }
 
     #[test]
@@ -3690,7 +3608,7 @@ mod tests {
                 ctx: MutationCtx::new(
                     repo_path.clone(),
                     MutationMeta {
-                        actor_id: Some(actor.as_str().to_string()),
+                        actor_id: Some(actor.clone()),
                         ..MutationMeta::default()
                     },
                 ),

@@ -218,7 +218,7 @@ struct Ctx {
     repo: PathBuf,
     json: bool,
     namespace: Option<NamespaceId>,
-    durability: Option<String>,
+    durability: Option<DurabilityClass>,
     client_request_id: Option<ClientRequestId>,
     require_min_seen: Option<Watermarks<Applied>>,
     wait_timeout_ms: Option<u64>,
@@ -228,13 +228,10 @@ struct Ctx {
 impl Ctx {
     fn mutation_meta(&self) -> MutationMeta {
         MutationMeta {
-            namespace: self.namespace.as_ref().map(|ns| ns.as_str().to_string()),
-            durability: self.durability.clone(),
-            client_request_id: self.client_request_id.as_ref().map(|id| id.to_string()),
-            actor_id: self
-                .actor_id
-                .as_ref()
-                .map(|actor| actor.as_str().to_string()),
+            namespace: self.namespace.clone(),
+            durability: self.durability,
+            client_request_id: self.client_request_id,
+            actor_id: self.actor_id.clone(),
         }
     }
 
@@ -244,7 +241,7 @@ impl Ctx {
 
     fn read_consistency(&self) -> ReadConsistency {
         ReadConsistency {
-            namespace: self.namespace.as_ref().map(|ns| ns.as_str().to_string()),
+            namespace: self.namespace.clone(),
             require_min_seen: self.require_min_seen.clone(),
             wait_timeout_ms: self.wait_timeout_ms,
         }
@@ -314,7 +311,7 @@ fn resolve_namespace(cli_value: Option<&str>, config: &Config) -> Result<Option<
     }
 }
 
-fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Result<Option<String>> {
+fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Result<Option<DurabilityClass>> {
     let raw = cli_value
         .map(str::to_string)
         .or_else(|| config.defaults.durability.as_ref().map(ToString::to_string));
@@ -327,7 +324,7 @@ fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Result<Option
             reason: err.to_string(),
         })
     })?;
-    Ok(Some(parsed.to_string()))
+    Ok(Some(parsed))
 }
 
 pub(super) fn normalize_bead_id(id: &str) -> Result<BeadId> {
@@ -643,9 +640,7 @@ fn send(req: &Request) -> Result<ResponsePayload> {
 fn fetch_issue(ctx: &Ctx, id: &BeadId) -> Result<crate::api::Issue> {
     let req = Request::Show {
         ctx: ctx.read_ctx(),
-        payload: IdPayload {
-            id: id.as_str().to_string(),
-        },
+        payload: IdPayload { id: id.clone() },
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
@@ -763,7 +758,12 @@ mod tests {
         let namespace = resolve_namespace(None, &config).expect("namespace");
         assert_eq!(namespace, Some(NamespaceId::parse("wf").unwrap()));
         let durability = resolve_durability(None, &config).expect("durability");
-        assert_eq!(durability, Some("replicated_fsync(2)".to_string()));
+        assert_eq!(
+            durability,
+            Some(DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).expect("k")
+            })
+        );
     }
 
     #[test]
@@ -781,7 +781,12 @@ mod tests {
         assert_eq!(namespace, Some(NamespaceId::core()));
         let durability =
             resolve_durability(Some("replicated_fsync(3)"), &config).expect("durability");
-        assert_eq!(durability, Some("replicated_fsync(3)".to_string()));
+        assert_eq!(
+            durability,
+            Some(DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(3).expect("k")
+            })
+        );
     }
 
     #[test]
@@ -823,7 +828,7 @@ mod tests {
             actor_id: Some(actor.clone()),
         };
         let meta = ctx.mutation_meta();
-        assert_eq!(meta.actor_id, Some(actor.as_str().to_string()));
+        assert_eq!(meta.actor_id, Some(actor));
     }
 
     #[test]

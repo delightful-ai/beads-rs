@@ -10,4 +10,5 @@
 //! Each example in `examples/` focuses on one "little machine" at a time.
 
 pub mod drift_guard;
+pub mod ordered_reliable_link;
 pub mod realtime_types_sketch;

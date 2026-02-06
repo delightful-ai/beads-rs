@@ -19,8 +19,9 @@ use beads_rs::api::{AdminStatusOutput, QueryResult};
 use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_rs::core::error::CliErrorCode;
 use beads_rs::core::{
-    Applied, BeadType, ErrorPayload, NamespaceId, Priority, ProtocolErrorCode, ReplicaEntry,
-    ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch, StoreMeta, Watermarks,
+    Applied, BeadId, BeadType, ErrorPayload, NamespaceId, Priority, ProtocolErrorCode,
+    ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch,
+    StoreMeta, Watermarks,
 };
 use beads_rs::daemon::ipc::{
     CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta,
@@ -608,7 +609,7 @@ impl Node {
             let request = Request::Show {
                 ctx: ReadCtx::new(self.repo_dir.clone(), read),
                 payload: IdPayload {
-                    id: issue_id.to_string(),
+                    id: BeadId::parse(issue_id).expect("bead id"),
                 },
             };
             let response = self.send_request(&request).expect("bd show");
@@ -870,8 +871,7 @@ fn build_roster_entries(nodes: &[Node]) -> Vec<ReplicaEntry> {
         .map(|(idx, node)| ReplicaEntry {
             replica_id: node.replica_id,
             name: format!("node-{idx}"),
-            role: ReplicaRole::Peer,
-            durability_eligible: true,
+            role: ReplicaDurabilityRole::peer(true),
             allowed_namespaces: Some(vec![NamespaceId::core()]),
             expire_after_ms: None,
         })

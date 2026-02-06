@@ -18,7 +18,9 @@ use crate::core::{
 
 use super::EventWalError;
 use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
-use super::index::{HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow};
+use super::index::{
+    ClientRequestEventIds, HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow,
+};
 use super::record::{RecordHeaderMismatch, RecordVerifyError, UnverifiedRecord, VerifiedRecord};
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
 
@@ -453,13 +455,14 @@ fn index_record(
     if let (Some(client_request_id), Some(request_sha256)) =
         (header.client_request_id(), header.request_sha256())
     {
+        let event_ids = ClientRequestEventIds::single(event_id.clone());
         txn.upsert_client_request(
             namespace,
             &header.origin_replica_id,
             client_request_id,
             request_sha256,
             header.txn_id,
-            &[event_id],
+            &event_ids,
             header.event_time_ms,
         )?;
     }

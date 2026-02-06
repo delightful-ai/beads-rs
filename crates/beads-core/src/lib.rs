@@ -85,7 +85,10 @@ pub use namespace::{
 pub use namespace_policies::{NamespacePolicies, NamespacePoliciesError};
 pub use namespaced_state::StoreState;
 pub use orset::{Dot, Dvv, OrSet, OrSetChange, OrSetError, OrSetNormalization, OrSetValue};
-pub use replica_roster::{ReplicaEntry, ReplicaRole, ReplicaRoster, ReplicaRosterError};
+pub use replica_roster::{
+    ReplicaDurabilityRole, ReplicaDurabilityRoleError, ReplicaEntry, ReplicaRole, ReplicaRoster,
+    ReplicaRosterError,
+};
 pub use state::{CanonicalState, DepIndexes, DepStore, LabelStore, LiveLookupError, NoteStore};
 pub use store_meta::{StoreMeta, StoreMetaVersions};
 pub mod store_state {

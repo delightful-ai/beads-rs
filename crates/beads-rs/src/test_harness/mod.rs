@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
 use crate::core::{
     ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, Limits,
-    NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0, Sha256, StoreEpoch,
-    StoreId, StoreIdentity, Watermark,
+    NamespaceId, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0,
+    Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark,
 };
 use crate::daemon::Clock;
 use crate::daemon::admission::AdmissionController;
@@ -36,8 +36,8 @@ use crate::daemon::repl::session::{
     handle_outbound_message,
 };
 use crate::daemon::repl::{
-    Ack, Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionStore, Want,
-    WatermarkMap, WatermarkSnapshot, WatermarkState,
+    Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionStore, ValidatedAck,
+    Want, WatermarkMap, WatermarkSnapshot, WatermarkState,
 };
 use crate::daemon::wal::{
     EventWal, MemoryWalIndex, SegmentConfig, SegmentSyncMode, WalIndexError, rebuild_index,
@@ -489,15 +489,15 @@ impl TestNode {
         })
     }
 
-    pub fn record_peer_ack(&self, peer: ReplicaId, ack: &Ack) {
+    pub fn record_peer_ack(&self, peer: ReplicaId, ack: &ValidatedAck) {
         self.with_daemon(|daemon| {
             let store_id = self.store_id();
             let runtime = daemon.store_runtime_by_id(store_id).expect("store runtime");
             let mut table = runtime.peer_acks.lock().expect("peer ack lock poisoned");
             let _ = table.update_peer(
                 peer,
-                &ack.durable,
-                ack.applied.as_ref(),
+                ack.durable(),
+                ack.applied(),
                 crate::core::WallClock::now().0,
             );
         });
@@ -676,8 +676,7 @@ impl ReplicationRig {
             .map(|(idx, node)| ReplicaEntry {
                 replica_id: node.replica_id(),
                 name: format!("node-{idx}"),
-                role: ReplicaRole::Peer,
-                durability_eligible: true,
+                role: ReplicaDurabilityRole::peer(true),
                 allowed_namespaces: Some(vec![NamespaceId::core()]),
                 expire_after_ms: None,
             })
@@ -1057,7 +1056,10 @@ impl RigLink {
             }
         }
 
-        if matches!(self.inbound.as_ref(), Some(SessionState::Streaming(_))) {
+        if matches!(
+            self.inbound.as_ref(),
+            Some(SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_))
+        ) {
             let inbound_snapshot = self
                 .inbound_store
                 .watermark_snapshot(&[NamespaceId::core()]);
@@ -1120,10 +1122,20 @@ impl RigLink {
             SessionAction::PeerWant(want) => {
                 let streaming = match endpoint {
                     Endpoint::Outbound => {
-                        matches!(self.outbound.as_ref(), Some(SessionState::Streaming(_)))
+                        matches!(
+                            self.outbound.as_ref(),
+                            Some(
+                                SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_)
+                            )
+                        )
                     }
                     Endpoint::Inbound => {
-                        matches!(self.inbound.as_ref(), Some(SessionState::Streaming(_)))
+                        matches!(
+                            self.inbound.as_ref(),
+                            Some(
+                                SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_)
+                            )
+                        )
                     }
                 };
                 if !streaming {
