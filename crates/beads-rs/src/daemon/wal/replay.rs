@@ -11,8 +11,9 @@ use crc32c::crc32c;
 use thiserror::Error;
 
 use crate::core::{
-    DecodeError, EncodeError, EventId, Limits, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1,
-    StoreMeta, decode_event_body, decode_event_hlc_max,
+    Applied, DecodeError, Durable, EncodeError, EventId, HeadStatus, Limits, NamespaceId,
+    ReplicaId, SegmentId, Seq0, Seq1, StoreMeta, Watermark, WatermarkError, decode_event_body,
+    decode_event_hlc_max,
 };
 
 use super::EventWalError;
@@ -109,8 +110,6 @@ pub enum WalReplayError {
         offset: u64,
         len: u64,
     },
-    #[error("sealed segment missing final_len at {path:?}. Run `bd store fsck` to repair.")]
-    SealedSegmentFinalLenMissing { path: PathBuf },
     #[error(
         "sealed segment length mismatch at {path:?}: expected {expected}, got {actual}. Run `bd store fsck` to repair."
     )]
@@ -240,7 +239,7 @@ fn replay_index(
         let mut existing = BTreeMap::new();
         if mode == ReplayMode::CatchUp {
             for row in index.reader().list_segments(&namespace)? {
-                existing.insert(row.segment_id, row);
+                existing.insert(row.segment_id(), row);
             }
         }
 
@@ -251,7 +250,7 @@ fn replay_index(
                 ReplayMode::Rebuild => segment.header_len,
                 ReplayMode::CatchUp => existing
                     .get(&segment.header.segment_id)
-                    .map(|row| row.last_indexed_offset)
+                    .map(|row| row.last_indexed_offset())
                     .unwrap_or(segment.header_len),
             };
 
@@ -273,13 +272,11 @@ fn replay_index(
             if mode == ReplayMode::CatchUp
                 && let Some(row) = existing
                     .get(&segment.header.segment_id)
-                    .filter(|row| row.sealed)
+                    .filter(|row| row.is_sealed())
             {
-                let final_len =
-                    row.final_len
-                        .ok_or_else(|| WalReplayError::SealedSegmentFinalLenMissing {
-                            path: segment.path.clone(),
-                        })?;
+                let final_len = row
+                    .final_len()
+                    .expect("sealed segment rows always carry final_len");
                 if segment.file_len != final_len {
                     return Err(WalReplayError::SealedSegmentLenMismatch {
                         path: segment.path.clone(),
@@ -321,16 +318,23 @@ fn replay_index(
                 }
             }
 
-            let sealed = !is_last;
-            let final_len = sealed.then_some(scan.last_indexed_offset);
-            let segment_row = SegmentRow {
-                namespace: namespace.clone(),
-                segment_id: segment.header.segment_id,
-                segment_path: segment_rel_path(store_dir, &segment.path),
-                created_at_ms: segment.header.created_at_ms,
-                last_indexed_offset: scan.last_indexed_offset,
-                sealed,
-                final_len,
+            let segment_row = if is_last {
+                SegmentRow::open(
+                    namespace.clone(),
+                    segment.header.segment_id,
+                    segment_rel_path(store_dir, &segment.path),
+                    segment.header.created_at_ms,
+                    scan.last_indexed_offset,
+                )
+            } else {
+                SegmentRow::sealed(
+                    namespace.clone(),
+                    segment.header.segment_id,
+                    segment_rel_path(store_dir, &segment.path),
+                    segment.header.created_at_ms,
+                    scan.last_indexed_offset,
+                    scan.last_indexed_offset,
+                )
             };
             txn.upsert_segment(&segment_row)?;
             txn.commit()?;
@@ -365,7 +369,43 @@ fn replay_index(
                     origin,
                 })?;
 
-            txn.update_watermark(&namespace, &origin, seq.get(), seq.get(), head, head)?;
+            let head_status = match head {
+                Some(sha) => HeadStatus::Known(sha),
+                None => HeadStatus::Genesis,
+            };
+            let applied = Watermark::new(seq, head_status).map_err(|err| match err {
+                WatermarkError::MissingHead { .. } => WalReplayError::MissingHead {
+                    namespace: namespace.clone(),
+                    origin,
+                    seq,
+                },
+                WatermarkError::UnexpectedHead { .. } => WalReplayError::UnexpectedHead {
+                    namespace: namespace.clone(),
+                    origin,
+                    seq,
+                },
+                other => {
+                    WalReplayError::Index(WalIndexError::WatermarkRowDecode(other.to_string()))
+                }
+            })?;
+            let durable = Watermark::new(seq, head_status).map_err(|err| match err {
+                WatermarkError::MissingHead { .. } => WalReplayError::MissingHead {
+                    namespace: namespace.clone(),
+                    origin,
+                    seq,
+                },
+                WatermarkError::UnexpectedHead { .. } => WalReplayError::UnexpectedHead {
+                    namespace: namespace.clone(),
+                    origin,
+                    seq,
+                },
+                other => {
+                    WalReplayError::Index(WalIndexError::WatermarkRowDecode(other.to_string()))
+                }
+            })?;
+            let applied: Watermark<Applied> = applied;
+            let durable: Watermark<Durable> = durable;
+            txn.update_watermark(&namespace, &origin, applied, durable)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
         }
     }
@@ -407,11 +447,11 @@ fn index_record(
         frame_len,
         header.event_time_ms,
         header.txn_id,
-        header.client_request_id,
+        header.client_request_id(),
     )?;
 
     if let (Some(client_request_id), Some(request_sha256)) =
-        (header.client_request_id, header.request_sha256)
+        (header.client_request_id(), header.request_sha256())
     {
         txn.upsert_client_request(
             namespace,
@@ -523,7 +563,10 @@ fn cleanup_orphan_tmp_segments(
 ) -> Result<(), WalReplayError> {
     reject_symlink(namespace_dir)?;
     let referenced: BTreeSet<PathBuf> = match index.reader().list_segments(namespace) {
-        Ok(rows) => rows.into_iter().map(|row| row.segment_path).collect(),
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| row.segment_path().to_path_buf())
+            .collect(),
         Err(err) => {
             tracing::warn!(
                 namespace = %namespace,
@@ -972,7 +1015,7 @@ mod tests {
         encode_event_body_canonical,
     };
     use crate::daemon::wal::SegmentConfig;
-    use crate::daemon::wal::record::RecordHeader;
+    use crate::daemon::wal::record::{RecordHeader, RecordRequest};
     use crate::daemon::wal::segment::SegmentWriter;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex};
 
@@ -1078,8 +1121,12 @@ mod tests {
                 origin_seq: body.origin_seq,
                 event_time_ms: body.event_time_ms,
                 txn_id: body.txn_id,
-                client_request_id: body.client_request_id,
-                request_sha256: None,
+                request: body
+                    .client_request_id
+                    .map(|client_request_id| RecordRequest {
+                        client_request_id,
+                        request_sha256: None,
+                    }),
                 sha256: expected_sha,
                 prev_sha256: None,
             },
@@ -1163,15 +1210,13 @@ mod tests {
         std::fs::write(&orphan, b"orphan").unwrap();
 
         let mut txn = index.writer().begin_txn().unwrap();
-        let segment_row = SegmentRow {
-            namespace: namespace.clone(),
-            segment_id: SegmentId::new(Uuid::from_bytes([1u8; 16])),
-            segment_path: segment_rel_path(temp.path(), &keep),
-            created_at_ms: 1,
-            last_indexed_offset: 0,
-            sealed: false,
-            final_len: None,
-        };
+        let segment_row = SegmentRow::open(
+            namespace.clone(),
+            SegmentId::new(Uuid::from_bytes([1u8; 16])),
+            segment_rel_path(temp.path(), &keep),
+            1,
+            0,
+        );
         txn.upsert_segment(&segment_row).unwrap();
         txn.commit().unwrap();
 
@@ -1194,25 +1239,10 @@ impl ReplayTracker {
 
     fn seed_from_watermarks(&mut self, rows: Vec<WatermarkRow>) -> Result<(), WalReplayError> {
         for row in rows {
-            let durable_seq = Seq0::new(row.durable_seq);
-            let head = if durable_seq == Seq0::ZERO {
-                if row.durable_head_sha.is_some() {
-                    return Err(WalReplayError::UnexpectedHead {
-                        namespace: row.namespace.clone(),
-                        origin: row.origin,
-                        seq: durable_seq,
-                    });
-                }
-                None
-            } else {
-                Some(
-                    row.durable_head_sha
-                        .ok_or_else(|| WalReplayError::MissingHead {
-                            namespace: row.namespace.clone(),
-                            origin: row.origin,
-                            seq: durable_seq,
-                        })?,
-                )
+            let durable_seq = row.durable.seq();
+            let head = match row.durable.head() {
+                HeadStatus::Genesis => None,
+                HeadStatus::Known(sha) => Some(sha),
             };
 
             let state = OriginReplayState {

@@ -1102,8 +1102,8 @@ fn check_index_offsets(
         match index.reader().list_segments(&namespace) {
             Ok(rows) => {
                 for row in rows {
-                    indexed_segment_ids.insert(row.segment_id);
-                    let full_path = store_dir.join(&row.segment_path);
+                    indexed_segment_ids.insert(row.segment_id());
+                    let full_path = store_dir.join(row.segment_path());
                     let Some(segment) = segments_by_path.get(&full_path).cloned() else {
                         builder.record_issue(
                             FsckCheckId::IndexOffsets,
@@ -1123,7 +1123,7 @@ fn check_index_offsets(
                         continue;
                     };
 
-                    if row.segment_id != segment.header.segment_id {
+                    if row.segment_id() != segment.header.segment_id {
                         builder.record_issue(
                             FsckCheckId::IndexOffsets,
                             FsckStatus::Fail,
@@ -1143,26 +1143,8 @@ fn check_index_offsets(
                         );
                     }
 
-                    if row.sealed {
-                        let Some(final_len) = row.final_len else {
-                            builder.record_issue(
-                                FsckCheckId::IndexOffsets,
-                                FsckStatus::Fail,
-                                FsckSeverity::High,
-                                FsckEvidence {
-                                    code: FsckEvidenceCode::SealedSegmentLenMismatch,
-                                    message: "wal.sqlite sealed segment missing final_len"
-                                        .to_string(),
-                                    path: Some(full_path.clone()),
-                                    namespace: Some(namespace.clone()),
-                                    origin: None,
-                                    seq: None,
-                                    offset: None,
-                                },
-                                Some("rebuild wal.sqlite from WAL segments"),
-                            );
-                            continue;
-                        };
+                    if row.is_sealed() {
+                        let final_len = row.final_len().expect("sealed segments carry final_len");
                         if final_len != segment.file_len {
                             builder.record_issue(
                                 FsckCheckId::IndexOffsets,
@@ -1185,7 +1167,7 @@ fn check_index_offsets(
                         }
                     }
 
-                    if row.last_indexed_offset > segment.file_len {
+                    if row.last_indexed_offset() > segment.file_len {
                         builder.record_issue(
                             FsckCheckId::IndexOffsets,
                             FsckStatus::Fail,
@@ -1198,11 +1180,11 @@ fn check_index_offsets(
                                 namespace: Some(namespace.clone()),
                                 origin: None,
                                 seq: None,
-                                offset: Some(row.last_indexed_offset),
+                                offset: Some(row.last_indexed_offset()),
                             },
                             Some("rebuild wal.sqlite from WAL segments"),
                         );
-                    } else if row.last_indexed_offset < segment.header_len {
+                    } else if row.last_indexed_offset() < segment.header_len {
                         builder.record_issue(
                             FsckCheckId::IndexOffsets,
                             FsckStatus::Fail,
@@ -1215,11 +1197,11 @@ fn check_index_offsets(
                                 namespace: Some(namespace.clone()),
                                 origin: None,
                                 seq: None,
-                                offset: Some(row.last_indexed_offset),
+                                offset: Some(row.last_indexed_offset()),
                             },
                             Some("rebuild wal.sqlite from WAL segments"),
                         );
-                    } else if row.last_indexed_offset < segment.file_len {
+                    } else if row.last_indexed_offset() < segment.file_len {
                         builder.record_issue(
                             FsckCheckId::IndexOffsets,
                             FsckStatus::Warn,
@@ -1232,7 +1214,7 @@ fn check_index_offsets(
                                 namespace: Some(namespace.clone()),
                                 origin: None,
                                 seq: None,
-                                offset: Some(row.last_indexed_offset),
+                                offset: Some(row.last_indexed_offset()),
                             },
                             Some("rebuild wal.sqlite from WAL segments"),
                         );

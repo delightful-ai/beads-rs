@@ -13,9 +13,9 @@ use uuid::Uuid;
 
 use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
 use crate::core::{
-    ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, HeadStatus,
-    Limits, NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0, Sha256,
-    StoreEpoch, StoreId, StoreIdentity, Watermark,
+    ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, Limits,
+    NamespaceId, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0, Sha256, StoreEpoch,
+    StoreId, StoreIdentity, Watermark,
 };
 use crate::daemon::Clock;
 use crate::daemon::admission::AdmissionController;
@@ -560,24 +560,11 @@ impl SessionStore for TestSessionStore {
 
                 let ns = row.namespace.clone();
                 let origin = row.origin;
-                let durable_head = match row.durable_head_sha {
-                    Some(head) => HeadStatus::Known(head),
-                    None => HeadStatus::Genesis,
-                };
-                if let Ok(watermark) = Watermark::new(Seq0::new(row.durable_seq), durable_head) {
-                    durable
-                        .entry(ns.clone())
-                        .or_default()
-                        .insert(origin, watermark);
-                }
-
-                let applied_head = match row.applied_head_sha {
-                    Some(head) => HeadStatus::Known(head),
-                    None => HeadStatus::Genesis,
-                };
-                if let Ok(watermark) = Watermark::new(Seq0::new(row.applied_seq), applied_head) {
-                    applied.entry(ns).or_default().insert(origin, watermark);
-                }
+                durable
+                    .entry(ns.clone())
+                    .or_default()
+                    .insert(origin, row.durable);
+                applied.entry(ns).or_default().insert(origin, row.applied);
             }
 
             WatermarkSnapshot { durable, applied }

@@ -14,8 +14,8 @@ use crate::core::error::details::{
 };
 use crate::core::{
     Applied, CliErrorCode, Durable, ErrorPayload, EventBytes, EventFrameV1, EventId,
-    EventShaLookupError, HeadStatus, Limits, NamespaceId, Opaque, PrevVerified, ProtocolErrorCode,
-    ReplicaId, SegmentId, Seq0, Sha256, StoreId, VerifiedEvent, Watermark, decode_event_body,
+    EventShaLookupError, Limits, NamespaceId, Opaque, PrevVerified, ProtocolErrorCode, ReplicaId,
+    SegmentId, Seq0, Sha256, StoreId, VerifiedEvent, decode_event_body,
 };
 use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
 use crate::daemon::repl::proto::WatermarkState;
@@ -100,34 +100,11 @@ impl SessionStore for ReplSessionStore {
 
             let ns = row.namespace.clone();
             let origin = row.origin;
-            let durable_head = match row.durable_head_sha {
-                Some(head) => HeadStatus::Known(head),
-                None => HeadStatus::Genesis,
-            };
-            match Watermark::new(Seq0::new(row.durable_seq), durable_head) {
-                Ok(watermark) => {
-                    durable
-                        .entry(ns.clone())
-                        .or_default()
-                        .insert(origin, watermark);
-                }
-                Err(err) => {
-                    tracing::warn!("invalid durable watermark snapshot for {ns} {origin}: {err}");
-                }
-            }
-
-            let applied_head = match row.applied_head_sha {
-                Some(head) => HeadStatus::Known(head),
-                None => HeadStatus::Genesis,
-            };
-            match Watermark::new(Seq0::new(row.applied_seq), applied_head) {
-                Ok(watermark) => {
-                    applied.entry(ns).or_default().insert(origin, watermark);
-                }
-                Err(err) => {
-                    tracing::warn!("invalid applied watermark snapshot for {ns} {origin}: {err}");
-                }
-            }
+            durable
+                .entry(ns.clone())
+                .or_default()
+                .insert(origin, row.durable);
+            applied.entry(ns).or_default().insert(origin, row.applied);
         }
 
         WatermarkSnapshot { durable, applied }
@@ -366,12 +343,12 @@ fn segment_paths_for_namespace(
     let segments = wal_index.reader().list_segments(namespace)?;
     let mut map = HashMap::new();
     for segment in segments {
-        let path = if segment.segment_path.is_absolute() {
-            segment.segment_path
+        let path = if segment.segment_path().is_absolute() {
+            segment.segment_path().to_path_buf()
         } else {
-            store_dir.join(&segment.segment_path)
+            store_dir.join(segment.segment_path())
         };
-        map.insert(segment.segment_id, path);
+        map.insert(segment.segment_id(), path);
     }
     Ok(map)
 }

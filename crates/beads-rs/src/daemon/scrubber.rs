@@ -725,7 +725,7 @@ fn scrub_index_offsets(
 
     let mut segment_paths = BTreeMap::new();
     for segment in segments {
-        segment_paths.insert(segment.segment_id, segment.segment_path);
+        segment_paths.insert(segment.segment_id(), segment.segment_path().to_path_buf());
     }
 
     if segment_paths.is_empty() {

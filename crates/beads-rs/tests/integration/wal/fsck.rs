@@ -7,7 +7,7 @@ use uuid::Uuid;
 use beads_rs::daemon::wal::fsck::{
     FsckCheckId, FsckEvidenceCode, FsckOptions, FsckRepairKind, FsckStatus, fsck_store_dir,
 };
-use beads_rs::daemon::wal::{VerifiedRecord, WalIndex, rebuild_index};
+use beads_rs::daemon::wal::{SegmentRow, VerifiedRecord, WalIndex, rebuild_index};
 use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
@@ -201,13 +201,37 @@ fn fsck_reports_sealed_len_mismatch() {
     rebuild_index(temp.store_dir(), temp.meta(), &index, &limits).expect("rebuild index");
 
     let rows = index.reader().list_segments(&namespace).expect("segments");
-    let mut sealed = rows
+    let sealed = rows
         .iter()
-        .find(|row| row.segment_id == segment1.header.segment_id)
-        .expect("segment1 row")
-        .clone();
-    let final_len = sealed.final_len.expect("sealed final_len");
-    sealed.final_len = Some(final_len.saturating_add(1));
+        .find(|row| row.segment_id() == segment1.header.segment_id)
+        .expect("segment1 row");
+    let (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, final_len) =
+        match sealed {
+            SegmentRow::Sealed {
+                namespace,
+                segment_id,
+                segment_path,
+                created_at_ms,
+                last_indexed_offset,
+                final_len,
+            } => (
+                namespace.clone(),
+                *segment_id,
+                segment_path.clone(),
+                *created_at_ms,
+                *last_indexed_offset,
+                *final_len,
+            ),
+            SegmentRow::Open { .. } => panic!("expected sealed segment row"),
+        };
+    let sealed = SegmentRow::sealed(
+        namespace,
+        segment_id,
+        segment_path,
+        created_at_ms,
+        last_indexed_offset,
+        final_len.saturating_add(1),
+    );
     let mut txn = index.writer().begin_txn().expect("begin txn");
     txn.upsert_segment(&sealed).expect("upsert segment");
     txn.commit().expect("commit");

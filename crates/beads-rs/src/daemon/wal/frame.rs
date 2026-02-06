@@ -137,7 +137,7 @@ mod tests {
         Seq1, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnDeltaV1, TxnId, TxnV1,
         encode_event_body_canonical, hash_event_body,
     };
-    use crate::daemon::wal::record::{RecordHeader, VerifiedRecord};
+    use crate::daemon::wal::record::{RecordHeader, RecordRequest, VerifiedRecord};
     use std::io::Cursor;
     use uuid::Uuid;
 
@@ -150,8 +150,8 @@ mod tests {
             origin_seq: header.origin_seq,
             event_time_ms: header.event_time_ms,
             txn_id: header.txn_id,
-            client_request_id: header.client_request_id,
-            trace_id: header.client_request_id.map(TraceId::from),
+            client_request_id: header.client_request_id(),
+            trace_id: header.client_request_id().map(TraceId::from),
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta: TxnDeltaV1::new(),
                 hlc_max: HlcMax {
@@ -170,8 +170,10 @@ mod tests {
             origin_seq: Seq1::from_u64(7).unwrap(),
             event_time_ms: 1_700_000_000_000,
             txn_id: TxnId::new(Uuid::from_bytes([2u8; 16])),
-            client_request_id: Some(ClientRequestId::new(Uuid::from_bytes([3u8; 16]))),
-            request_sha256: Some([4u8; 32]),
+            request: Some(RecordRequest {
+                client_request_id: ClientRequestId::new(Uuid::from_bytes([3u8; 16])),
+                request_sha256: Some([4u8; 32]),
+            }),
             sha256: [0u8; 32],
             prev_sha256: Some([6u8; 32]),
         };

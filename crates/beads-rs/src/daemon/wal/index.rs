@@ -12,8 +12,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::core::{
-    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, ReplicaRole, SegmentId, Seq0, Seq1,
-    StoreId, StoreMeta, StoreMetaVersions, TxnId,
+    ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId, ReplicaId,
+    ReplicaRole, SegmentId, Seq0, Seq1, StoreId, StoreMeta, StoreMetaVersions, TxnId, Watermark,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
@@ -125,10 +125,8 @@ pub trait WalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: u64,
-        durable: u64,
-        applied_head_sha: Option<[u8; 32]>,
-        durable_head_sha: Option<[u8; 32]>,
+        applied: Watermark<Applied>,
+        durable: Watermark<Durable>,
     ) -> Result<(), WalIndexError>;
     fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalIndexError>;
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError>;
@@ -196,24 +194,157 @@ pub struct IndexedRangeItem {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SegmentRow {
-    pub namespace: NamespaceId,
-    pub segment_id: SegmentId,
-    pub segment_path: PathBuf,
-    pub created_at_ms: u64,
-    pub last_indexed_offset: u64,
-    pub sealed: bool,
-    pub final_len: Option<u64>,
+pub enum SegmentRow {
+    Open {
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+    },
+    Sealed {
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+        final_len: u64,
+    },
+}
+
+impl SegmentRow {
+    pub fn open(
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+    ) -> Self {
+        Self::Open {
+            namespace,
+            segment_id,
+            segment_path,
+            created_at_ms,
+            last_indexed_offset,
+        }
+    }
+
+    pub fn sealed(
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+        final_len: u64,
+    ) -> Self {
+        Self::Sealed {
+            namespace,
+            segment_id,
+            segment_path,
+            created_at_ms,
+            last_indexed_offset,
+            final_len,
+        }
+    }
+
+    pub fn namespace(&self) -> &NamespaceId {
+        match self {
+            SegmentRow::Open { namespace, .. } | SegmentRow::Sealed { namespace, .. } => namespace,
+        }
+    }
+
+    pub fn segment_id(&self) -> SegmentId {
+        match self {
+            SegmentRow::Open { segment_id, .. } | SegmentRow::Sealed { segment_id, .. } => {
+                *segment_id
+            }
+        }
+    }
+
+    pub fn segment_path(&self) -> &Path {
+        match self {
+            SegmentRow::Open { segment_path, .. } | SegmentRow::Sealed { segment_path, .. } => {
+                segment_path.as_path()
+            }
+        }
+    }
+
+    pub fn created_at_ms(&self) -> u64 {
+        match self {
+            SegmentRow::Open { created_at_ms, .. } | SegmentRow::Sealed { created_at_ms, .. } => {
+                *created_at_ms
+            }
+        }
+    }
+
+    pub fn last_indexed_offset(&self) -> u64 {
+        match self {
+            SegmentRow::Open {
+                last_indexed_offset,
+                ..
+            }
+            | SegmentRow::Sealed {
+                last_indexed_offset,
+                ..
+            } => *last_indexed_offset,
+        }
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, SegmentRow::Sealed { .. })
+    }
+
+    pub fn final_len(&self) -> Option<u64> {
+        match self {
+            SegmentRow::Open { .. } => None,
+            SegmentRow::Sealed { final_len, .. } => Some(*final_len),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct WatermarkRow {
     pub namespace: NamespaceId,
     pub origin: ReplicaId,
-    pub applied_seq: u64,
-    pub durable_seq: u64,
-    pub applied_head_sha: Option<[u8; 32]>,
-    pub durable_head_sha: Option<[u8; 32]>,
+    pub applied: Watermark<Applied>,
+    pub durable: Watermark<Durable>,
+}
+
+impl WatermarkRow {
+    pub fn applied_seq(&self) -> u64 {
+        self.applied.seq().get()
+    }
+
+    pub fn durable_seq(&self) -> u64 {
+        self.durable.seq().get()
+    }
+
+    pub fn applied_head_sha(&self) -> Option<[u8; 32]> {
+        head_sha_from_status(self.applied.head())
+    }
+
+    pub fn durable_head_sha(&self) -> Option<[u8; 32]> {
+        head_sha_from_status(self.durable.head())
+    }
+}
+
+fn head_sha_from_status(head: HeadStatus) -> Option<[u8; 32]> {
+    match head {
+        HeadStatus::Known(sha) => Some(sha),
+        HeadStatus::Genesis => None,
+    }
+}
+
+fn watermark_from_columns<K>(
+    seq: u64,
+    head_sha: Option<[u8; 32]>,
+) -> Result<Watermark<K>, WalIndexError> {
+    let seq0 = Seq0::new(seq);
+    let head = match head_sha {
+        Some(sha) => HeadStatus::Known(sha),
+        None => HeadStatus::Genesis,
+    };
+    Watermark::new(seq0, head).map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -605,15 +736,13 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: u64,
-        durable: u64,
-        applied_head_sha: Option<[u8; 32]>,
-        durable_head_sha: Option<[u8; 32]>,
+        applied: Watermark<Applied>,
+        durable: Watermark<Durable>,
     ) -> Result<(), WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
-        let applied_blob = applied_head_sha.map(|value| value.to_vec());
-        let durable_blob = durable_head_sha.map(|value| value.to_vec());
+        let applied_blob = head_sha_from_status(applied.head()).map(|value| value.to_vec());
+        let durable_blob = head_sha_from_status(durable.head()).map(|value| value.to_vec());
 
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
@@ -627,8 +756,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         stmt.execute(params![
             namespace,
             origin_blob,
-            applied as i64,
-            durable as i64,
+            u64::from(applied.seq()) as i64,
+            u64::from(durable.seq()) as i64,
             applied_blob,
             durable_blob,
         ])?;
@@ -655,11 +784,11 @@ impl WalIndexTxn for SqliteWalIndexTxn {
     }
 
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError> {
-        let namespace = segment.namespace.as_str();
-        let segment_blob = uuid_blob(segment.segment_id.as_uuid());
-        let path_str = segment.segment_path.to_string_lossy();
-        let sealed = if segment.sealed { 1 } else { 0 };
-        let final_len = segment.final_len.map(|value| value as i64);
+        let namespace = segment.namespace().as_str();
+        let segment_blob = uuid_blob(segment.segment_id().as_uuid());
+        let path_str = segment.segment_path().to_string_lossy();
+        let sealed = if segment.is_sealed() { 1 } else { 0 };
+        let final_len = segment.final_len().map(|value| value as i64);
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO segments (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
@@ -674,8 +803,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             namespace,
             segment_blob,
             path_str.as_ref(),
-            segment.created_at_ms as i64,
-            segment.last_indexed_offset as i64,
+            segment.created_at_ms() as i64,
+            segment.last_indexed_offset() as i64,
             sealed,
             final_len,
         ])?;
@@ -864,16 +993,38 @@ impl WalIndexReader for SqliteWalIndexReader {
 
                 let segment_uuid = blob_uuid(segment_id)
                     .map_err(|err| WalIndexError::SegmentRowDecode(err.to_string()))?;
-
-                segments.push(SegmentRow {
-                    namespace: ns.clone(),
-                    segment_id: SegmentId::new(segment_uuid),
-                    segment_path: PathBuf::from(segment_path),
-                    created_at_ms,
-                    last_indexed_offset,
-                    sealed: sealed != 0,
-                    final_len,
-                });
+                let namespace = ns.clone();
+                let segment_id = SegmentId::new(segment_uuid);
+                let segment_path = PathBuf::from(segment_path);
+                let sealed = sealed != 0;
+                let segment_row = match (sealed, final_len) {
+                    (false, None) => SegmentRow::open(
+                        namespace,
+                        segment_id,
+                        segment_path,
+                        created_at_ms,
+                        last_indexed_offset,
+                    ),
+                    (true, Some(final_len)) => SegmentRow::sealed(
+                        namespace,
+                        segment_id,
+                        segment_path,
+                        created_at_ms,
+                        last_indexed_offset,
+                        final_len,
+                    ),
+                    (true, None) => {
+                        return Err(WalIndexError::SegmentRowDecode(
+                            "sealed segment missing final_len".to_string(),
+                        ));
+                    }
+                    (false, Some(_)) => {
+                        return Err(WalIndexError::SegmentRowDecode(
+                            "open segment has final_len".to_string(),
+                        ));
+                    }
+                };
+                segments.push(segment_row);
             }
             Ok(segments)
         })
@@ -917,10 +1068,8 @@ impl WalIndexReader for SqliteWalIndexReader {
                 watermarks.push(WatermarkRow {
                     namespace,
                     origin: ReplicaId::new(origin_uuid),
-                    applied_seq,
-                    durable_seq,
-                    applied_head_sha,
-                    durable_head_sha,
+                    applied: watermark_from_columns::<Applied>(applied_seq, applied_head_sha)?,
+                    durable: watermark_from_columns::<Durable>(durable_seq, durable_head_sha)?,
                 });
             }
             Ok(watermarks)
@@ -1618,7 +1767,9 @@ mod tests {
         )
         .unwrap();
         let seq = origin_seq.get();
-        txn.update_watermark(&ns, &origin, seq, seq, Some(sha), Some(sha))
+        let applied = Watermark::<Applied>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
+        let durable = Watermark::<Durable>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
+        txn.update_watermark(&ns, &origin, applied, durable)
             .unwrap();
         txn.upsert_client_request(
             &ns,
@@ -1652,6 +1803,160 @@ mod tests {
         assert_eq!(req.event_ids, vec![event_id]);
         assert_eq!(req.created_at_ms, 1_700_000);
         assert_eq!(reader.max_origin_seq(&ns, &origin).unwrap(), Seq0::new(1));
+    }
+
+    #[test]
+    fn sqlite_index_round_trips_watermarks() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+
+        let applied_head = [5u8; 32];
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(applied_head)).unwrap();
+        let durable = Watermark::<Durable>::genesis();
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.update_watermark(&ns, &origin, applied, durable)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let rows = index.reader().load_watermarks().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.namespace, ns);
+        assert_eq!(row.origin, origin);
+        assert_eq!(
+            row.applied,
+            Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(applied_head)).unwrap()
+        );
+        assert_eq!(row.durable, Watermark::<Durable>::genesis());
+    }
+
+    #[test]
+    fn sqlite_index_rejects_invalid_watermark_rows() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+
+        conn.execute(
+            "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                ns.as_str(),
+                uuid_blob(origin.as_uuid()),
+                1i64,
+                0i64,
+                Option::<Vec<u8>>::None,
+                Option::<Vec<u8>>::None,
+            ],
+        )
+        .unwrap();
+
+        let err = index.reader().load_watermarks().unwrap_err();
+        assert!(matches!(err, WalIndexError::WatermarkRowDecode(_)));
+    }
+
+    #[test]
+    fn sqlite_index_round_trips_segments() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let open = SegmentRow::open(
+            ns.clone(),
+            SegmentId::new(Uuid::from_bytes([1u8; 16])),
+            PathBuf::from("open.wal"),
+            1_700_000,
+            0,
+        );
+        let sealed = SegmentRow::sealed(
+            ns.clone(),
+            SegmentId::new(Uuid::from_bytes([2u8; 16])),
+            PathBuf::from("sealed.wal"),
+            1_700_100,
+            128,
+            128,
+        );
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        txn.upsert_segment(&open).unwrap();
+        txn.upsert_segment(&sealed).unwrap();
+        txn.commit().unwrap();
+
+        let rows = index.reader().list_segments(&ns).unwrap();
+        assert!(rows.contains(&open));
+        assert!(rows.contains(&sealed));
+    }
+
+    #[test]
+    fn sqlite_index_rejects_sealed_segment_without_final_len() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+        let segment_id = SegmentId::new(Uuid::from_bytes([9u8; 16]));
+        conn.execute(
+            "INSERT INTO segments (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                ns.as_str(),
+                uuid_blob(segment_id.as_uuid()),
+                "bad-sealed.wal",
+                1_700_000i64,
+                0i64,
+                1i64,
+                Option::<i64>::None,
+            ],
+        )
+        .unwrap();
+
+        let err = index.reader().list_segments(&ns).unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::SegmentRowDecode(msg)
+                if msg.contains("sealed segment missing final_len")
+        ));
+    }
+
+    #[test]
+    fn sqlite_index_rejects_open_segment_with_final_len() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+        let segment_id = SegmentId::new(Uuid::from_bytes([10u8; 16]));
+        conn.execute(
+            "INSERT INTO segments (namespace, segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                ns.as_str(),
+                uuid_blob(segment_id.as_uuid()),
+                "bad-open.wal",
+                1_700_000i64,
+                0i64,
+                0i64,
+                Some(64i64),
+            ],
+        )
+        .unwrap();
+
+        let err = index.reader().list_segments(&ns).unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::SegmentRowDecode(msg)
+                if msg.contains("open segment has final_len")
+        ));
     }
 
     #[test]

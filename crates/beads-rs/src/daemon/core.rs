@@ -42,8 +42,8 @@ use super::store::StoreCaches;
 use super::store::discovery::ResolvedStore;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    EventWalError, FrameReader, HlcRow, RecordHeader, SegmentRow, VerifiedRecord, WalIndex,
-    WalIndexError, WalReplayError, open_segment_reader,
+    EventWalError, FrameReader, HlcRow, RecordHeader, RecordRequest, SegmentRow, VerifiedRecord,
+    WalIndex, WalIndexError, WalReplayError, open_segment_reader,
 };
 
 use crate::compat::ExportContext;
@@ -1591,8 +1591,13 @@ impl Daemon {
                     origin_seq: event.body.origin_seq,
                     event_time_ms: event.body.event_time_ms,
                     txn_id: event.body.txn_id,
-                    client_request_id: event.body.client_request_id,
-                    request_sha256: None,
+                    request: event
+                        .body
+                        .client_request_id
+                        .map(|client_request_id| RecordRequest {
+                            client_request_id,
+                            request_sha256: None,
+                        }),
                     sha256: sha,
                     prev_sha256: event.prev.prev.map(|sha| sha.0),
                 },
@@ -1635,28 +1640,25 @@ impl Daemon {
                         )
                     })?;
             let last_indexed_offset = append.offset + append.len as u64;
-            let segment_row = SegmentRow {
-                namespace: namespace.clone(),
-                segment_id: append.segment_id,
-                segment_path: segment_rel_path(&store_dir, &segment_snapshot.path),
-                created_at_ms: segment_snapshot.created_at_ms,
+            let segment_row = SegmentRow::open(
+                namespace.clone(),
+                append.segment_id,
+                segment_rel_path(&store_dir, &segment_snapshot.path),
+                segment_snapshot.created_at_ms,
                 last_indexed_offset,
-                sealed: false,
-                final_len: None,
-            };
+            );
 
             txn.upsert_segment(&segment_row)
                 .map_err(|err| wal_index_error_payload(&err))?;
             if let Some(sealed) = append.sealed.as_ref() {
-                let sealed_row = SegmentRow {
-                    namespace: namespace.clone(),
-                    segment_id: sealed.segment_id,
-                    segment_path: segment_rel_path(&store_dir, &sealed.path),
-                    created_at_ms: sealed.created_at_ms,
-                    last_indexed_offset: sealed.final_len,
-                    sealed: true,
-                    final_len: Some(sealed.final_len),
-                };
+                let sealed_row = SegmentRow::sealed(
+                    namespace.clone(),
+                    sealed.segment_id,
+                    segment_rel_path(&store_dir, &sealed.path),
+                    sealed.created_at_ms,
+                    sealed.final_len,
+                    sealed.final_len,
+                );
                 txn.upsert_segment(&sealed_row)
                     .map_err(|err| wal_index_error_payload(&err))?;
             }
@@ -1685,7 +1687,7 @@ impl Daemon {
 
         txn.commit().map_err(|err| wal_index_error_payload(&err))?;
 
-        let (remote, max_stamp, durable, applied, applied_head, durable_head) = {
+        let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
             for (event, canonical_sha) in batch.iter().zip(canonical_shas.iter().copied()) {
                 let apply_start = Instant::now();
@@ -1757,18 +1759,9 @@ impl Daemon {
                 .get(&namespace, &origin)
                 .copied()
                 .unwrap_or_else(Watermark::genesis);
-            let applied_head = store.applied_head_sha(&namespace, &origin);
-            let durable_head = store.durable_head_sha(&namespace, &origin);
             let remote = store.primary_remote.clone();
 
-            (
-                remote,
-                max_stamp,
-                durable,
-                applied,
-                applied_head,
-                durable_head,
-            )
+            (remote, max_stamp, durable, applied)
         };
 
         for (actor_id, stamp) in actor_stamps {
@@ -1781,22 +1774,12 @@ impl Daemon {
         self.mark_checkpoint_dirty(store_id, &namespace, batch.len() as u64);
         self.schedule_sync(remote);
 
-        let applied_seq = applied.seq().get();
-        let durable_seq = durable.seq().get();
-
         let mut watermark_txn = wal_index
             .writer()
             .begin_txn()
             .map_err(|err| wal_index_error_payload(&err))?;
         watermark_txn
-            .update_watermark(
-                &namespace,
-                &origin,
-                applied_seq,
-                durable_seq,
-                applied_head,
-                durable_head,
-            )
+            .update_watermark(&namespace, &origin, applied, durable)
             .map_err(|err| wal_index_error_payload(&err))?;
         watermark_txn
             .commit()
@@ -2272,23 +2255,7 @@ fn apply_checkpoint_watermarks(
             })?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
 
-            if durable.seq().get() == 0 {
-                txn.update_watermark(&namespace, &origin, 0, 0, None, None)?;
-                continue;
-            }
-
-            let applied_head = head_sha(applied.head());
-            let durable_head = head_sha(durable.head());
-            if let (Some(applied_head), Some(durable_head)) = (applied_head, durable_head) {
-                txn.update_watermark(
-                    &namespace,
-                    &origin,
-                    applied.seq().get(),
-                    durable.seq().get(),
-                    Some(applied_head),
-                    Some(durable_head),
-                )?;
-            }
+            txn.update_watermark(&namespace, &origin, applied, durable)?;
         }
     }
     txn.commit()?;
@@ -2313,13 +2280,6 @@ fn checkpoint_head_status(
     Err(WatermarkError::MissingHead {
         seq: Seq0::new(seq),
     })
-}
-
-fn head_sha(head: HeadStatus) -> Option<[u8; 32]> {
-    match head {
-        HeadStatus::Known(sha) => Some(sha),
-        _ => None,
-    }
 }
 
 fn checkpoint_ref_oid(repo: &Repository, git_ref: &str) -> Result<Option<Oid>, git2::Error> {
@@ -2425,7 +2385,7 @@ pub(crate) fn replay_event_wal(
     let mut applied_any = false;
 
     for row in rows {
-        if row.applied_seq == 0 {
+        if row.applied.seq().get() == 0 {
             continue;
         }
         let namespace = row.namespace.clone();
@@ -2449,7 +2409,7 @@ pub(crate) fn replay_event_wal(
             state.ensure_namespace(non_core)
         };
         let mut from_seq_excl = Seq0::ZERO;
-        while from_seq_excl.get() < row.applied_seq {
+        while from_seq_excl.get() < row.applied.seq().get() {
             let items = wal_index.reader().iter_from(
                 &namespace,
                 &row.origin,
@@ -2468,8 +2428,8 @@ pub(crate) fn replay_event_wal(
             }
             for item in items {
                 let seq = item.event_id.origin_seq.get();
-                if seq > row.applied_seq {
-                    from_seq_excl = Seq0::new(row.applied_seq);
+                if seq > row.applied.seq().get() {
+                    from_seq_excl = row.applied.seq();
                     break;
                 }
                 let segment_path = segments.get(&item.segment_id).ok_or_else(|| {
@@ -2505,12 +2465,12 @@ fn segment_paths_for_namespace(
     let segments = wal_index.reader().list_segments(namespace)?;
     let mut map = HashMap::new();
     for segment in segments {
-        let path = if segment.segment_path.is_absolute() {
-            segment.segment_path
+        let path = if segment.segment_path().is_absolute() {
+            segment.segment_path().to_path_buf()
         } else {
-            store_dir.join(&segment.segment_path)
+            store_dir.join(segment.segment_path())
         };
-        map.insert(segment.segment_id, path);
+        map.insert(segment.segment_id(), path);
     }
     Ok(map)
 }
@@ -2790,7 +2750,7 @@ mod tests {
     use crate::daemon::store_lock::read_lock_meta;
     use crate::daemon::store_runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
-    use crate::daemon::wal::{HlcRow, RecordHeader, SegmentHeader, VerifiedRecord};
+    use crate::daemon::wal::{HlcRow, RecordHeader, RecordRequest, SegmentHeader, VerifiedRecord};
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointImport,
         CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks, build_snapshot,
@@ -3138,8 +3098,13 @@ mod tests {
                 origin_seq: event.body.origin_seq,
                 event_time_ms: event.body.event_time_ms,
                 txn_id: event.body.txn_id,
-                client_request_id: event.body.client_request_id,
-                request_sha256: None,
+                request: event
+                    .body
+                    .client_request_id
+                    .map(|client_request_id| RecordRequest {
+                        client_request_id,
+                        request_sha256: None,
+                    }),
                 sha256: sha256,
                 prev_sha256: event.prev.prev.map(|sha| sha.0),
             },
@@ -3931,13 +3896,13 @@ mod tests {
             .expect("segments");
         assert_eq!(segments.len(), 2);
 
-        let sealed = segments.iter().find(|row| row.sealed).expect("sealed");
-        assert!(segments.iter().any(|row| !row.sealed));
-        let sealed_path = paths::store_dir(store_id).join(&sealed.segment_path);
+        let sealed = segments.iter().find(|row| row.is_sealed()).expect("sealed");
+        assert!(segments.iter().any(|row| !row.is_sealed()));
+        let sealed_path = paths::store_dir(store_id).join(sealed.segment_path());
         let sealed_len = std::fs::metadata(&sealed_path)
             .expect("sealed segment metadata")
             .len();
-        assert_eq!(sealed.final_len, Some(sealed_len));
+        assert_eq!(sealed.final_len(), Some(sealed_len));
     }
 
     #[test]

@@ -625,26 +625,26 @@ fn build_wal_status(
         let mut segments = reader
             .list_segments(namespace)
             .map_err(|err| OpError::StoreRuntime(Box::new(StoreRuntimeError::WalIndex(err))))?;
-        segments.sort_by_key(|segment| (segment.created_at_ms, segment.segment_id));
+        segments.sort_by_key(|segment| (segment.created_at_ms(), segment.segment_id()));
         let mut segment_infos = Vec::new();
         let mut segment_stats = Vec::new();
         let mut total_bytes = 0u64;
         for segment in segments {
-            let resolved_path = resolve_segment_path(&store_dir, &segment.segment_path);
-            let bytes = segment_bytes(&resolved_path, segment.final_len);
+            let resolved_path = resolve_segment_path(&store_dir, segment.segment_path());
+            let bytes = segment_bytes(&resolved_path, segment.final_len());
             if let Some(value) = bytes {
                 total_bytes = total_bytes.saturating_add(value);
             }
             segment_stats.push(WalSegmentStats {
-                created_at_ms: segment.created_at_ms,
+                created_at_ms: segment.created_at_ms(),
                 bytes: bytes.unwrap_or(0),
             });
             segment_infos.push(AdminWalSegment {
-                segment_id: segment.segment_id,
-                created_at_ms: segment.created_at_ms,
-                last_indexed_offset: segment.last_indexed_offset,
-                sealed: segment.sealed,
-                final_len: segment.final_len,
+                segment_id: segment.segment_id(),
+                created_at_ms: segment.created_at_ms(),
+                last_indexed_offset: segment.last_indexed_offset(),
+                sealed: segment.is_sealed(),
+                final_len: segment.final_len(),
                 bytes,
                 path: resolved_path.to_string_lossy().to_string(),
             });
