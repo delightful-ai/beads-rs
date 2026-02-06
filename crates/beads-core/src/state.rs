@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::bead::{Bead, BeadView};
+use super::bead::{Bead, BeadView, SameLineageBead};
 use super::collections::{Label, Labels};
 use super::composite::Note;
 use super::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof};
@@ -1186,12 +1186,15 @@ impl CanonicalState {
 
     /// Insert a bead - removes any tombstone for this ID.
     ///
-    /// If bead already exists, merges via Bead::join.
+    /// If bead already exists, merges via SameLineageBead::join.
     /// Returns Err on ID collision (same ID, different creation stamp).
     pub fn insert(&mut self, bead: Bead) -> Result<(), CoreError> {
         let id = bead.core.id.clone();
         let merged = match self.beads.remove(&id) {
-            Some(BeadEntry::Live(existing)) => Bead::join(existing.as_ref(), &bead)?,
+            Some(BeadEntry::Live(existing)) => {
+                let (a, b) = Bead::same_lineage(existing.as_ref(), &bead)?;
+                SameLineageBead::join(a, b)?
+            }
             Some(BeadEntry::Tombstone(_)) | None => bead,
         };
         self.beads.insert(id, BeadEntry::Live(Box::new(merged)));
@@ -1327,13 +1330,11 @@ impl CanonicalState {
 
             // Merge beads if both exist (resolve collisions deterministically)
             let merged_bead = match (a_bead, b_bead) {
-                (Some(ab), Some(bb)) => {
-                    if ab.core.created() == bb.core.created() {
-                        Some(
-                            Bead::join(ab, bb)
-                                .expect("bead join should succeed for identical lineage"),
-                        )
-                    } else {
+                (Some(ab), Some(bb)) => match Bead::same_lineage(ab, bb)
+                    .and_then(|(a, b)| SameLineageBead::join(a, b))
+                {
+                    Ok(merged) => Some(merged),
+                    Err(_) => {
                         let ordering = bead_collision_cmp(&result, ab, bb);
                         let (winner, loser_stamp) = if ordering == Ordering::Less {
                             (bb.clone(), ab.core.created().clone())
@@ -1350,7 +1351,7 @@ impl CanonicalState {
                         ));
                         Some(winner)
                     }
-                }
+                },
                 (Some(b), None) | (None, Some(b)) => Some(b.clone()),
                 (None, None) => None,
             };

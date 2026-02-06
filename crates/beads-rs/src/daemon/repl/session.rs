@@ -1203,6 +1203,15 @@ fn event_frame_error_payload(
             field: Some("event_id".to_string()),
             reason: Some("event_id does not match decoded body".to_string()),
         })),
+        EventFrameError::NonCanonical => ReplError::new(
+            ProtocolErrorCode::NonCanonical.into(),
+            "event body is not canonically encoded",
+            false,
+        )
+        .with_details(ReplErrorDetails::NonCanonical(NonCanonicalDetails {
+            format: "cbor".to_string(),
+            reason: Some("event body is not canonically encoded".to_string()),
+        })),
         EventFrameError::HashMismatch => {
             let expected = hash_event_body(&frame.bytes);
             ReplError::new(
@@ -1237,6 +1246,7 @@ fn event_frame_error_payload(
             reason: Some(err.to_string()),
         })),
         EventFrameError::Decode(err) => decode_error_payload(&err, limits, frame.bytes.len()),
+        EventFrameError::Encode(err) => internal_error(err.to_string()),
         EventFrameError::Lookup(err) => internal_error(err.to_string()),
         EventFrameError::Equivocation => ReplError::new(
             ProtocolErrorCode::Equivocation.into(),
