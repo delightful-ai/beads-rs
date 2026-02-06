@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::super::{Ctx, print_ok, send};
+use super::super::{Ctx, print_line, print_ok, send};
 use super::fmt_issue_ref;
 use crate::Result;
 use crate::api::QueryResult;
@@ -23,13 +23,11 @@ pub(crate) fn handle(ctx: &Ctx, args: ReadyArgs) -> Result<()> {
         return print_ok(&ok, true);
     }
     match ok {
-        ResponsePayload::Query(QueryResult::Ready(result)) => {
-            println!(
-                "{}",
-                render_ready(&result.issues, result.blocked_count, result.closed_count)
-            );
-            Ok(())
-        }
+        ResponsePayload::Query(QueryResult::Ready(result)) => print_line(&render_ready(
+            &result.issues,
+            result.blocked_count,
+            result.closed_count,
+        )),
         other => print_ok(&other, false),
     }
 }

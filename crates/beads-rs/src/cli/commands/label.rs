@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::{Ctx, fetch_issue, normalize_bead_id, print_json, send};
+use super::super::{Ctx, fetch_issue, normalize_bead_id, print_json, print_line, send};
 use crate::api::QueryResult;
 use crate::core::BeadId;
 use crate::daemon::ipc::{LabelsPayload, ListPayload, Request, ResponsePayload};
@@ -70,7 +70,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             }
 
             for r in results {
-                println!("✓ Added label '{}' to {}", r.label, r.issue_id);
+                print_line(&render_label_added(&r.label, &r.issue_id))?;
             }
             Ok(())
         }
@@ -101,7 +101,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             }
 
             for r in results {
-                println!("✓ Removed label '{}' from {}", r.label, r.issue_id);
+                print_line(&render_label_removed(&r.label, &r.issue_id))?;
             }
             Ok(())
         }
@@ -112,8 +112,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 print_json(&issue.labels)?;
                 return Ok(());
             }
-            println!("{}", render_label_list(&issue.id, &issue.labels));
-            Ok(())
+            print_line(&render_label_list(&issue.id, &issue.labels))
         }
         LabelCmd::ListAll => {
             let req = Request::List {
@@ -143,8 +142,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 print_json(&out)?;
                 return Ok(());
             }
-            println!("{}", render_label_list_all(&counts));
-            Ok(())
+            print_line(&render_label_list_all(&counts))
         }
     }
 }
@@ -174,6 +172,14 @@ pub(crate) fn render_label_list_all(counts: &std::collections::BTreeMap<String, 
     }
     out.push('\n');
     out
+}
+
+fn render_label_added(label: &str, issue_id: &str) -> String {
+    format!("✓ Added label '{label}' to {issue_id}")
+}
+
+fn render_label_removed(label: &str, issue_id: &str) -> String {
+    format!("✓ Removed label '{label}' from {issue_id}")
 }
 
 fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {

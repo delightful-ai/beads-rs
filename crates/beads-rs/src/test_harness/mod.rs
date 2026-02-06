@@ -15,7 +15,7 @@ use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_f
 use crate::core::{
     ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, Limits,
     NamespaceId, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0,
-    Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark,
+    Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEventFrame, Watermark,
 };
 use crate::daemon::Clock;
 use crate::daemon::admission::AdmissionController;
@@ -27,9 +27,9 @@ use crate::daemon::ipc::{
 };
 use crate::daemon::ops::OpError;
 use crate::daemon::remote::RemoteUrl;
-use crate::daemon::repl::frame::{FrameReader, encode_frame};
+use crate::daemon::repl::frame::{FrameLimitState, FrameReader, encode_frame};
 use crate::daemon::repl::proto::{
-    PROTOCOL_VERSION_V1, ReplEnvelope, decode_envelope, encode_envelope,
+    PROTOCOL_VERSION_V1, ReplEnvelope, WireReplEnvelope, decode_envelope, encode_envelope,
 };
 use crate::daemon::repl::session::{
     Inbound, InboundConnecting, Outbound, OutboundConnecting, SessionState, handle_inbound_message,
@@ -467,14 +467,15 @@ impl TestNode {
         namespace: &NamespaceId,
         origin: &ReplicaId,
         from_seq_excl: Seq0,
-    ) -> Vec<crate::core::EventFrameV1> {
+    ) -> Vec<VerifiedEventFrame> {
         self.with_daemon(|daemon| {
             let store_id = self.store_id();
             let runtime = daemon.store_runtime_by_id(store_id).expect("store runtime");
+            let limits = daemon.limits().clone();
             let reader = crate::daemon::repl::WalRangeReader::new(
                 store_id,
                 runtime.wal_index.clone(),
-                daemon.limits().clone(),
+                limits.clone(),
             );
             match reader.read_range(
                 namespace,
@@ -482,7 +483,13 @@ impl TestNode {
                 from_seq_excl,
                 daemon.limits().max_event_batch_bytes,
             ) {
-                Ok(frames) => frames,
+                Ok(frames) => frames
+                    .into_iter()
+                    .map(|frame| {
+                        VerifiedEventFrame::try_from_frame(frame, &limits)
+                            .expect("wal frame verify")
+                    })
+                    .collect(),
                 Err(crate::daemon::repl::WalRangeError::MissingRange { .. }) => Vec::new(),
                 Err(err) => panic!("wal range: {err:?}"),
             }
@@ -587,20 +594,11 @@ impl SessionStore for TestSessionStore {
 
     fn ingest_remote_batch(
         &mut self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        batch: &[crate::core::VerifiedEvent<crate::core::PrevVerified>],
+        batch: &crate::daemon::repl::ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
-        let events = batch.to_vec();
         self.node.with_daemon_mut(|daemon, _git_tx| {
-            daemon.ingest_remote_batch_for_tests(
-                self.store_id,
-                namespace.clone(),
-                *origin,
-                events,
-                now_ms,
-            )
+            daemon.ingest_remote_batch_for_tests(self.store_id, batch.clone(), now_ms)
         })
     }
 
@@ -1548,12 +1546,12 @@ impl ChannelEndpoint {
         self.sender.send(frame);
     }
 
-    pub fn try_recv_message(&self) -> Option<ReplEnvelope> {
+    pub fn try_recv_message(&self) -> Option<WireReplEnvelope> {
         let frame = self.receiver.try_recv().ok()?;
         Some(decode_message_frame(&frame, self.max_frame_bytes))
     }
 
-    pub fn drain_messages(&self) -> Vec<ReplEnvelope> {
+    pub fn drain_messages(&self) -> Vec<WireReplEnvelope> {
         let mut out = Vec::new();
         while let Ok(frame) = self.receiver.try_recv() {
             out.push(decode_message_frame(&frame, self.max_frame_bytes));
@@ -1637,8 +1635,11 @@ fn encode_message_frame(
     encode_frame(&payload, max_frame_bytes).expect("encode repl frame")
 }
 
-fn decode_message_frame(frame: &[u8], max_frame_bytes: usize) -> ReplEnvelope {
-    let mut reader = FrameReader::new(Cursor::new(frame), max_frame_bytes);
+fn decode_message_frame(frame: &[u8], max_frame_bytes: usize) -> WireReplEnvelope {
+    let mut reader = FrameReader::new(
+        Cursor::new(frame),
+        FrameLimitState::unnegotiated(max_frame_bytes),
+    );
     let payload = reader
         .read_next()
         .expect("decode repl frame")

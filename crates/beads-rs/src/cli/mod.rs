@@ -474,9 +474,13 @@ fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
         return print_json(payload);
     }
     let s = render_human(payload);
+    print_line(&s)
+}
+
+pub(super) fn print_line(line: &str) -> Result<()> {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
-    if let Err(e) = writeln!(stdout, "{s}")
+    if let Err(e) = writeln!(stdout, "{line}")
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
         return Err(crate::daemon::IpcError::from(e).into());

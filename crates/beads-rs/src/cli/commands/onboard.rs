@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 
 use crate::Result;
+use crate::cli::print_line;
 use crate::daemon::ipc::{EmptyPayload, RepoCtx, Request, Response, send_request};
 use crate::repo;
 
@@ -43,8 +44,8 @@ pub(crate) fn handle(output: Option<&Path>) -> Result<()> {
 
     if let Some(path) = output {
         generate_guide(path);
-        println!("Generated {}", path.display());
-        println!("This file is auto-generated - do not edit manually");
+        print_line(&format!("Generated {}", path.display()))?;
+        print_line("This file is auto-generated - do not edit manually")?;
     } else {
         render_instructions(init_result);
     }

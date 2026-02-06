@@ -17,7 +17,7 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use beads_rs::core::Limits;
-use beads_rs::daemon::repl::frame::{FrameError, FrameReader, FrameWriter};
+use beads_rs::daemon::repl::frame::{FrameError, FrameLimitState, FrameReader, FrameWriter};
 
 #[derive(Parser, Debug)]
 #[command(name = "tailnet_proxy")]
@@ -623,8 +623,12 @@ fn run_trace_replay(
     let _ = client_read.set_read_timeout(Some(trace.timeout));
     let _ = upstream_read.set_read_timeout(Some(trace.timeout));
 
-    let mut reader_a = FrameReader::new(client_read, max_frame_bytes);
-    let mut reader_b = FrameReader::new(upstream_read, max_frame_bytes);
+    let mut reader_a =
+        FrameReader::new(client_read, FrameLimitState::unnegotiated(max_frame_bytes));
+    let mut reader_b = FrameReader::new(
+        upstream_read,
+        FrameLimitState::unnegotiated(max_frame_bytes),
+    );
     let mut writer_a = FrameWriter::new(client_write, max_frame_bytes);
     let mut writer_b = FrameWriter::new(upstream_write, max_frame_bytes);
 
@@ -658,7 +662,7 @@ fn trace_reader(
     tx: mpsc::Sender<IncomingFrame>,
     max_frame_bytes: usize,
 ) {
-    let mut frame_reader = FrameReader::new(reader, max_frame_bytes);
+    let mut frame_reader = FrameReader::new(reader, FrameLimitState::unnegotiated(max_frame_bytes));
     loop {
         match frame_reader.read_next() {
             Ok(Some(payload)) => {
@@ -742,7 +746,7 @@ fn run_reader(
     max_frame_bytes: usize,
 ) {
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut frame_reader = FrameReader::new(reader, max_frame_bytes);
+    let mut frame_reader = FrameReader::new(reader, FrameLimitState::unnegotiated(max_frame_bytes));
     let mut frames_seen: u64 = 0;
     let mut bytes_seen: u64 = 0;
     let mut blackhole_until: Option<Instant> = None;

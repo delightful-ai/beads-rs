@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::super::{Ctx, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send};
 use crate::Result;
 use crate::daemon::ipc::{ClosePayload, Request};
 
@@ -13,7 +13,6 @@ pub struct CloseArgs {
 }
 
 pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
-    let reason_str = args.reason.clone().unwrap_or_else(|| "Closed".to_string());
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Close {
         ctx: ctx.mutation_ctx(),
@@ -27,10 +26,14 @@ pub(crate) fn handle(ctx: &Ctx, args: CloseArgs) -> Result<()> {
     if ctx.json {
         return print_ok(&ok, true);
     }
-    println!("✓ Closed {}: {}", id.as_str(), reason_str);
-    Ok(())
+    let reason = args.reason.as_deref().unwrap_or("Closed");
+    print_line(&render_closed_with_reason(id.as_str(), reason))
 }
 
 pub(crate) fn render_closed(id: &str) -> String {
     format!("✓ Closed {id}")
+}
+
+fn render_closed_with_reason(id: &str, reason: &str) -> String {
+    format!("✓ Closed {id}: {reason}")
 }

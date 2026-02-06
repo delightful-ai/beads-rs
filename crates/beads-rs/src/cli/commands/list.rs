@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::super::{CommonFilterArgs, Ctx, normalize_bead_id_for, print_ok, send};
+use super::super::{CommonFilterArgs, Ctx, normalize_bead_id_for, print_line, print_ok, send};
 use super::{fmt_issue_ref, fmt_labels};
 use crate::api::QueryResult;
 use crate::cli::parse::{parse_sort, parse_status};
@@ -81,8 +81,7 @@ pub(crate) fn handle_list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         && let ResponsePayload::Query(QueryResult::Issues(ref views)) = ok
     {
         let output = render_issue_list_opts(views, args.show_labels);
-        println!("{}", output);
-        return Ok(());
+        return print_line(&output);
     }
 
     print_ok(&ok, ctx.json)

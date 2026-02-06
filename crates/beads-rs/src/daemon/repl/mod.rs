@@ -1,5 +1,6 @@
 //! Replication protocol modules.
 
+pub mod contiguous_batch;
 pub mod error;
 pub mod frame;
 pub mod gap_buffer;
@@ -14,8 +15,9 @@ pub mod session;
 pub mod store;
 mod want;
 
+pub use contiguous_batch::{ContiguousBatch, ContiguousBatchError};
 pub use error::{ReplError, ReplErrorDetails};
-pub use frame::{FrameError, FrameReader, FrameWriter};
+pub use frame::{FrameError, FrameLimitState, FrameReader, FrameWriter, NegotiatedFrameLimit};
 pub use gap_buffer::{GapBufferByNsOrigin, IngestDecision, OriginStreamState};
 pub use manager::{
     BackoffPolicy, PeerConfig, ReplicationManager, ReplicationManagerConfig,
@@ -24,7 +26,8 @@ pub use manager::{
 pub use peer_acks::{PeerAckError, PeerAckTable, QuorumOutcome};
 pub use proto::{
     Ack, Capabilities, Events, Hello, ProtoDecodeError, ProtoEncodeError, ReplEnvelope,
-    ReplMessage, Want, WatermarkMap, WatermarkState, decode_envelope, encode_envelope,
+    ReplMessage, Want, WatermarkMap, WatermarkState, WireEvents, WireReplEnvelope, WireReplMessage,
+    decode_envelope, encode_envelope,
 };
 pub use runtime::{ReplIngestRequest, ReplSessionStore, WalRangeError, WalRangeReader};
 pub use server::{

@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::super::{Ctx, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send};
 use super::fmt_wall_ms;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{DeletedPayload, Request, ResponsePayload};
@@ -40,8 +40,7 @@ pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
 
     match ok {
         ResponsePayload::Query(QueryResult::Deleted(tombs)) => {
-            println!("{}", render_deleted_list(&tombs, &args.since, args.all));
-            Ok(())
+            print_line(&render_deleted_list(&tombs, &args.since, args.all))
         }
         other => print_ok(&other, false),
     }

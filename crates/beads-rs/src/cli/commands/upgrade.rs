@@ -3,7 +3,7 @@
 use clap::Args;
 use serde::Serialize;
 
-use super::super::print_json;
+use super::super::{print_json, print_line};
 use crate::Result;
 use crate::config::load_or_init;
 use crate::upgrade::{UpgradeMethod, UpgradeOutcome, run_upgrade};
@@ -43,23 +43,24 @@ pub(crate) fn handle(json: bool, background: bool) -> Result<()> {
         return Ok(());
     }
 
-    render_human(&outcome);
-    Ok(())
+    render_human(&outcome)
 }
 
-fn render_human(outcome: &UpgradeOutcome) {
+fn render_human(outcome: &UpgradeOutcome) -> Result<()> {
     if !outcome.updated {
-        println!("bd is up to date (version {}).", outcome.from_version);
-        return;
+        return print_line(&format!(
+            "bd is up to date (version {}).",
+            outcome.from_version
+        ));
     }
 
-    println!(
+    print_line(&format!(
         "Upgraded bd from {} to {} using {}.",
         outcome.from_version,
         outcome.to_version.as_deref().unwrap_or("unknown"),
         method_str(outcome.method),
-    );
-    println!("Installed: {}", outcome.install_path.display());
+    ))?;
+    print_line(&format!("Installed: {}", outcome.install_path.display()))
 }
 
 fn method_str(method: UpgradeMethod) -> &'static str {

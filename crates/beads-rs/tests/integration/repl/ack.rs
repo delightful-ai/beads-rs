@@ -9,7 +9,9 @@ use beads_rs::daemon::admission::AdmissionController;
 use beads_rs::daemon::repl::session::{
     Inbound, InboundConnecting, SessionState, handle_inbound_message,
 };
-use beads_rs::daemon::repl::{Events, ReplMessage, SessionAction, SessionConfig, WalRangeReader};
+use beads_rs::daemon::repl::{
+    ReplMessage, SessionAction, SessionConfig, WalRangeReader, WireEvents, WireReplMessage,
+};
 use beads_rs::daemon::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
 };
@@ -42,7 +44,7 @@ fn inbound_session() -> (SessionState<Inbound>, MockStore, StoreIdentity) {
     let hello = repl_frames::hello(identity, peer_replica);
     let (session, _) = handle_inbound_message(
         SessionState::Connecting(session),
-        ReplMessage::Hello(hello),
+        WireReplMessage::Hello(hello),
         &mut store,
         0,
     );
@@ -103,7 +105,7 @@ fn repl_ack_advances_watermarks() {
 
     let (_session, actions) = handle_inbound_message(
         session,
-        ReplMessage::Events(Events {
+        WireReplMessage::Events(WireEvents {
             events: vec![e1, e2.clone()],
         }),
         &mut store,
@@ -142,7 +144,7 @@ fn repl_gap_triggers_want() {
 
     let (_session, actions) = handle_inbound_message(
         session,
-        ReplMessage::Events(Events { events: vec![e3] }),
+        WireReplMessage::Events(WireEvents { events: vec![e3] }),
         &mut store,
         10,
     );
@@ -173,7 +175,7 @@ fn repl_equivocation_errors() {
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
     let (session, _) = handle_inbound_message(
         session,
-        ReplMessage::Events(Events { events: vec![e1] }),
+        WireReplMessage::Events(WireEvents { events: vec![e1] }),
         &mut store,
         10,
     );
@@ -181,7 +183,7 @@ fn repl_equivocation_errors() {
     let e1_alt = event_frame_with_txn(identity, namespace.clone(), origin, 1, None, 7);
     let (_session, actions) = handle_inbound_message(
         session,
-        ReplMessage::Events(Events {
+        WireReplMessage::Events(WireEvents {
             events: vec![e1_alt],
         }),
         &mut store,
@@ -209,7 +211,7 @@ fn repl_prev_sha_mismatch_rejects() {
     let expected_prev = e1.sha256;
     let (session, _) = handle_inbound_message(
         session,
-        ReplMessage::Events(Events { events: vec![e1] }),
+        WireReplMessage::Events(WireEvents { events: vec![e1] }),
         &mut store,
         10,
     );
@@ -218,7 +220,7 @@ fn repl_prev_sha_mismatch_rejects() {
     let e2_bad = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(bad_prev));
     let (_session, actions) = handle_inbound_message(
         session,
-        ReplMessage::Events(Events {
+        WireReplMessage::Events(WireEvents {
             events: vec![e2_bad],
         }),
         &mut store,

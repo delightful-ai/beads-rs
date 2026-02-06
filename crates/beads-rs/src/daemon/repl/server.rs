@@ -16,8 +16,9 @@ use crate::core::error::details::{
     BootstrapRequiredDetails, SnapshotRangeReason, UnknownReplicaDetails,
 };
 use crate::core::{
-    Durable, ErrorPayload, EventFrameV1, Limits, NamespaceId, NamespacePolicy, ProtocolErrorCode,
-    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    Durable, ErrorPayload, EventFrameError, EventFrameV1, Limits, NamespaceId, NamespacePolicy,
+    ProtocolErrorCode, ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    VerifiedEventFrame,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
@@ -34,9 +35,9 @@ use crate::daemon::repl::session::{
 };
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
-    FrameError, FrameReader, FrameWriter, PeerAckTable, ReplEnvelope, ReplMessage, SessionAction,
-    SessionConfig, SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader, decode_envelope,
-    encode_envelope,
+    FrameError, FrameLimitState, FrameReader, FrameWriter, PeerAckTable, ReplEnvelope, ReplMessage,
+    SessionAction, SessionConfig, SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader,
+    WireReplMessage, decode_envelope, encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
 
@@ -173,13 +174,15 @@ enum ConnectionError {
     Frame(#[from] FrameError),
     #[error("encode error: {0}")]
     Encode(#[from] crate::daemon::repl::proto::ProtoEncodeError),
+    #[error("event frame error: {0}")]
+    EventFrame(#[from] EventFrameError),
     #[error("broadcast error: {0}")]
     Broadcast(#[from] BroadcastError),
 }
 
 #[derive(Clone, Debug)]
 enum InboundMessage {
-    Message(ReplMessage),
+    Message(WireReplMessage),
     Terminated { payload: Option<ErrorPayload> },
 }
 
@@ -332,7 +335,8 @@ where
 
     let reader_stream = stream.try_clone()?;
     let writer_stream = stream.try_clone()?;
-    let mut reader = FrameReader::new(reader_stream, limits.max_frame_bytes);
+    let reader_limit_state = FrameLimitState::unnegotiated(limits.max_frame_bytes);
+    let mut reader = FrameReader::new(reader_stream, reader_limit_state.clone());
     let mut writer = FrameWriter::new(writer_stream, limits.max_frame_bytes);
 
     let Some(bytes) = reader.read_next()? else {
@@ -349,7 +353,7 @@ where
     };
 
     let hello = match envelope.message {
-        ReplMessage::Hello(hello) => hello,
+        WireReplMessage::Hello(hello) => hello,
         _ => {
             let payload = ErrorPayload::new(
                 ProtocolErrorCode::InvalidRequest.into(),
@@ -421,7 +425,7 @@ where
     keepalive.note_recv(now_ms_val);
     let (mut session, actions) = handle_inbound_message(
         SessionState::Connecting(session),
-        ReplMessage::Hello(hello),
+        WireReplMessage::Hello(hello),
         &mut store,
         now_ms_val,
     );
@@ -472,22 +476,13 @@ where
         }
     }
 
-    let (inbound_tx, inbound_rx) = crossbeam::channel::unbounded::<InboundMessage>();
-    let reader_shutdown = shutdown.clone();
-    let reader_limits = limits.clone();
-    let reader_span = tracing::Span::current();
-    let reader_handle = thread::spawn(move || {
-        reader_span.in_scope(|| {
-            run_reader_loop(&mut reader, inbound_tx, reader_shutdown, reader_limits);
-        });
-    });
-
     let mut live_stream_enabled = false;
     match &session {
         SessionState::StreamingLive(streaming_session) => {
             let peer = streaming_session.peer();
             live_stream_enabled = true;
             handshake_at_ms = Some(now_ms_val);
+            reader_limit_state.apply_negotiated_limit(streaming_session.negotiated_frame_limit());
             if let Err(err) = store.update_replica_liveness(
                 peer_replica_id,
                 now_ms_val,
@@ -513,6 +508,7 @@ where
         SessionState::StreamingSnapshot(streaming_session) => {
             let peer = streaming_session.peer();
             handshake_at_ms = Some(now_ms_val);
+            reader_limit_state.apply_negotiated_limit(streaming_session.negotiated_frame_limit());
             if let Err(err) = store.update_replica_liveness(
                 peer_replica_id,
                 now_ms_val,
@@ -537,6 +533,21 @@ where
         }
         _ => {}
     }
+
+    let (inbound_tx, inbound_rx) = crossbeam::channel::unbounded::<InboundMessage>();
+    let reader_shutdown = shutdown.clone();
+    let reader_decode_limits = limits.clone();
+    let reader_span = tracing::Span::current();
+    let reader_handle = thread::spawn(move || {
+        reader_span.in_scope(|| {
+            run_reader_loop(
+                &mut reader,
+                inbound_tx,
+                reader_shutdown,
+                reader_decode_limits,
+            );
+        });
+    });
 
     let (event_rx, event_handle) = if live_stream_enabled {
         let subscription = broadcaster.subscribe(subscriber_limits(&limits))?;
@@ -695,7 +706,10 @@ where
                 {
                     continue;
                 }
-                let frame = broadcast_to_frame(event);
+                let frame = VerifiedEventFrame::try_from_frame(
+                    broadcast_to_frame(event),
+                    &limits,
+                )?;
                 send_events(
                     &mut writer,
                     streaming_session,
@@ -724,6 +738,7 @@ where
                     .filter(|event| peer.accepted_namespaces.contains(&event.namespace))
                     .map(broadcast_to_frame)
                     .collect::<Vec<_>>();
+                let frames = verify_frames(frames, &limits)?;
                 send_events(
                     &mut writer,
                     streaming_session,
@@ -809,7 +824,7 @@ fn run_reader_loop(
         match reader.read_next() {
             Ok(Some(bytes)) => match decode_envelope(&bytes, &limits) {
                 Ok(envelope) => {
-                    if let ReplMessage::Events(events) = &envelope.message {
+                    if let WireReplMessage::Events(events) = &envelope.message {
                         let total_bytes = events
                             .events
                             .iter()
@@ -920,7 +935,7 @@ fn send_pre_handshake_error(
 fn send_events(
     writer: &mut FrameWriter<TcpStream>,
     session: &Session<Inbound, StreamingLive>,
-    frames: Vec<EventFrameV1>,
+    frames: Vec<VerifiedEventFrame>,
     limits: &Limits,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<(), ConnectionError> {
@@ -991,7 +1006,7 @@ fn send_events(
 fn send_want_frames<M>(
     writer: &mut FrameWriter<TcpStream>,
     session: &Session<Inbound, Streaming<M>>,
-    frames: Vec<EventFrameV1>,
+    frames: Vec<VerifiedEventFrame>,
     limits: &Limits,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<(), ConnectionError> {
@@ -1061,7 +1076,7 @@ fn send_want_frames<M>(
 
 fn events_envelope_len<M>(
     session: &Session<Inbound, Streaming<M>>,
-    batch: &[EventFrameV1],
+    batch: &[VerifiedEventFrame],
 ) -> Result<usize, ConnectionError> {
     let version = session.peer().protocol_version;
     let envelope = ReplEnvelope {
@@ -1072,6 +1087,16 @@ fn events_envelope_len<M>(
     };
     let bytes = encode_envelope(&envelope)?;
     Ok(bytes.len())
+}
+
+fn verify_frames(
+    frames: Vec<EventFrameV1>,
+    limits: &Limits,
+) -> Result<Vec<VerifiedEventFrame>, EventFrameError> {
+    frames
+        .into_iter()
+        .map(|frame| VerifiedEventFrame::try_from_frame(frame, limits))
+        .collect()
 }
 
 fn send_hot_cache(
@@ -1088,6 +1113,7 @@ fn send_hot_cache(
         .filter(|event| allowed_set.contains(&event.namespace))
         .map(broadcast_to_frame)
         .collect::<Vec<_>>();
+    let frames = verify_frames(frames, limits)?;
     send_events(writer, session, frames, limits, keepalive)
 }
 
@@ -1155,6 +1181,7 @@ fn handle_want<M>(want: &Want, ctx: &mut WantContext<'_, M>) -> Result<(), Conne
 
     match outcome {
         WantFramesOutcome::Frames(frames) => {
+            let frames = verify_frames(frames, ctx.limits)?;
             send_want_frames(ctx.writer, ctx.session, frames, ctx.limits, ctx.keepalive)
         }
         WantFramesOutcome::BootstrapRequired { namespaces } => {
@@ -1235,7 +1262,7 @@ mod tests {
     };
     use crate::daemon::broadcast::BroadcasterLimits;
     use crate::daemon::repl::proto::{Capabilities, Hello};
-    use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
+    use crate::daemon::repl::{ContiguousBatch, IngestOutcome, ReplError, WatermarkSnapshot};
 
     #[derive(Default)]
     struct TestStore;
@@ -1257,16 +1284,10 @@ mod tests {
 
         fn ingest_remote_batch(
             &mut self,
-            _namespace: &NamespaceId,
-            _origin: &ReplicaId,
-            batch: &[crate::core::VerifiedEvent<crate::core::PrevVerified>],
+            batch: &ContiguousBatch,
             _now_ms: u64,
         ) -> Result<IngestOutcome, ReplError> {
-            let Some(last) = batch.last() else {
-                let durable = Watermark::<Durable>::genesis();
-                let applied = Watermark::<Applied>::genesis();
-                return Ok(IngestOutcome { durable, applied });
-            };
+            let last = batch.last_event();
             let seq = Seq0::new(last.seq().get());
             let head = HeadStatus::Known(last.sha256.0);
             let watermark = Watermark::<Durable>::new(seq, head).expect("watermark");
@@ -1338,7 +1359,7 @@ mod tests {
         writer.write_frame(&bytes).expect("write");
     }
 
-    fn read_message(reader: &mut FrameReader<TcpStream>, limits: &Limits) -> ReplMessage {
+    fn read_message(reader: &mut FrameReader<TcpStream>, limits: &Limits) -> WireReplMessage {
         let bytes = reader.read_next().expect("read").expect("frame");
         let envelope = decode_envelope(&bytes, limits).expect("decode");
         envelope.message
@@ -1382,7 +1403,10 @@ mod tests {
         let stream = TcpStream::connect(handle.local_addr()).expect("connect");
         let mut writer =
             FrameWriter::new(stream.try_clone().expect("clone"), limits.max_frame_bytes);
-        let mut reader = FrameReader::new(stream, limits.max_frame_bytes);
+        let mut reader = FrameReader::new(
+            stream,
+            FrameLimitState::unnegotiated(limits.max_frame_bytes),
+        );
         let hello = build_hello(
             identity,
             ReplicaId::new(Uuid::from_bytes([3u8; 16])),
@@ -1391,7 +1415,7 @@ mod tests {
         send_message(&mut writer, hello);
 
         match read_message(&mut reader, &limits) {
-            ReplMessage::Welcome(_) => {}
+            WireReplMessage::Welcome(_) => {}
             other => panic!("unexpected response: {other:?}"),
         }
 
@@ -1416,8 +1440,10 @@ mod tests {
         let first = TcpStream::connect(handle.local_addr()).expect("connect first");
         let mut writer =
             FrameWriter::new(first.try_clone().expect("clone"), limits.max_frame_bytes);
-        let mut reader =
-            FrameReader::new(first.try_clone().expect("clone"), limits.max_frame_bytes);
+        let mut reader = FrameReader::new(
+            first.try_clone().expect("clone"),
+            FrameLimitState::unnegotiated(limits.max_frame_bytes),
+        );
         let hello = build_hello(
             identity,
             ReplicaId::new(Uuid::from_bytes([5u8; 16])),
@@ -1425,16 +1451,19 @@ mod tests {
         );
         send_message(&mut writer, hello);
         let response = read_message(&mut reader, &limits);
-        assert!(matches!(response, ReplMessage::Welcome(_)));
+        assert!(matches!(response, WireReplMessage::Welcome(_)));
 
         let second = TcpStream::connect(handle.local_addr()).expect("connect second");
         second
             .set_read_timeout(Some(Duration::from_secs(1)))
             .expect("timeout");
-        let mut reader = FrameReader::new(second, limits.max_frame_bytes);
+        let mut reader = FrameReader::new(
+            second,
+            FrameLimitState::unnegotiated(limits.max_frame_bytes),
+        );
         let response = read_message(&mut reader, &limits);
         match response {
-            ReplMessage::Error(payload) => {
+            WireReplMessage::Error(payload) => {
                 assert_eq!(payload.code, ProtocolErrorCode::Overloaded.into())
             }
             other => panic!("unexpected response: {other:?}"),
@@ -1471,7 +1500,10 @@ mod tests {
         let stream = TcpStream::connect(handle.local_addr()).expect("connect");
         let mut writer =
             FrameWriter::new(stream.try_clone().expect("clone"), limits.max_frame_bytes);
-        let mut reader = FrameReader::new(stream, limits.max_frame_bytes);
+        let mut reader = FrameReader::new(
+            stream,
+            FrameLimitState::unnegotiated(limits.max_frame_bytes),
+        );
         let hello = build_hello(
             identity,
             ReplicaId::new(Uuid::from_bytes([8u8; 16])),
@@ -1480,7 +1512,7 @@ mod tests {
         send_message(&mut writer, hello);
         let response = read_message(&mut reader, &limits);
         match response {
-            ReplMessage::Error(payload) => {
+            WireReplMessage::Error(payload) => {
                 assert_eq!(payload.code, ProtocolErrorCode::UnknownReplica.into())
             }
             other => panic!("unexpected response: {other:?}"),

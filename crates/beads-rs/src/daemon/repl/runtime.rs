@@ -14,12 +14,12 @@ use crate::core::error::details::{
 };
 use crate::core::{
     Applied, CliErrorCode, Durable, ErrorPayload, EventBytes, EventFrameV1, EventId,
-    EventShaLookupError, Limits, NamespaceId, Opaque, PrevVerified, ProtocolErrorCode, ReplicaId,
-    SegmentId, Seq0, Seq1, Sha256, StoreId, VerifiedEvent, decode_event_body,
+    EventShaLookupError, Limits, NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, SegmentId,
+    Seq0, Seq1, Sha256, StoreId, decode_event_body,
 };
 use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
 use crate::daemon::repl::proto::WatermarkState;
-use crate::daemon::repl::{IngestOutcome, SessionStore, WatermarkSnapshot};
+use crate::daemon::repl::{ContiguousBatch, IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
     EventWalError, FrameReader, IndexedRangeItem, ReplicaDurabilityRole, ReplicaLivenessRow,
     VerifiedRecord, WalIndex, WalIndexError, open_segment_reader,
@@ -30,9 +30,7 @@ const DEFAULT_RETRY_AFTER_MS: u64 = 100;
 
 pub struct ReplIngestRequest {
     pub store_id: StoreId,
-    pub namespace: NamespaceId,
-    pub origin: ReplicaId,
-    pub batch: Vec<VerifiedEvent<PrevVerified>>,
+    pub batch: ContiguousBatch,
     pub now_ms: u64,
     pub respond: Sender<Result<IngestOutcome, ReplError>>,
 }
@@ -120,17 +118,13 @@ impl SessionStore for ReplSessionStore {
 
     fn ingest_remote_batch(
         &mut self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        batch: &[VerifiedEvent<PrevVerified>],
+        batch: &ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let request = ReplIngestRequest {
             store_id: self.store_id,
-            namespace: namespace.clone(),
-            origin: *origin,
-            batch: batch.to_vec(),
+            batch: batch.clone(),
             now_ms,
             respond: respond_tx,
         };

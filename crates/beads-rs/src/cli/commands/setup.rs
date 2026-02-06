@@ -13,6 +13,7 @@ use clap::{Args, Subcommand};
 
 use serde_json::{Map, Value, json};
 
+use crate::cli::print_line;
 use crate::daemon::OpError;
 use crate::{Error, Result};
 
@@ -79,10 +80,10 @@ pub(crate) fn handle_claude(project: bool, check: bool, remove: bool) -> Result<
 
 fn install_claude(project: bool) -> Result<()> {
     let settings_path = if project {
-        println!("Installing Claude hooks for this project...");
+        print_line("Installing Claude hooks for this project...")?;
         PathBuf::from(".claude/settings.local.json")
     } else {
-        println!("Installing Claude hooks globally...");
+        print_line("Installing Claude hooks globally...")?;
         let home = home_dir()?;
         home.join(".claude/settings.json")
     };
@@ -125,13 +126,21 @@ fn install_claude(project: bool) -> Result<()> {
     let command = "bd prime";
 
     // Add SessionStart hook
-    if add_hook_command(hooks, "SessionStart", command) {
-        println!("✓ Registered SessionStart hook");
+    match add_hook_command(hooks, "SessionStart", command) {
+        HookAddOutcome::Added => print_line("✓ Registered SessionStart hook")?,
+        HookAddOutcome::AlreadyPresent => {
+            print_line("✓ Hook already registered: SessionStart")?;
+        }
+        HookAddOutcome::Skipped => {}
     }
 
     // Add PreCompact hook
-    if add_hook_command(hooks, "PreCompact", command) {
-        println!("✓ Registered PreCompact hook");
+    match add_hook_command(hooks, "PreCompact", command) {
+        HookAddOutcome::Added => print_line("✓ Registered PreCompact hook")?,
+        HookAddOutcome::AlreadyPresent => {
+            print_line("✓ Hook already registered: PreCompact")?;
+        }
+        HookAddOutcome::Skipped => {}
     }
 
     // Write back
@@ -143,11 +152,11 @@ fn install_claude(project: bool) -> Result<()> {
     })?;
     atomic_write(&settings_path, data.as_bytes())?;
 
-    println!();
-    println!("✓ Claude Code integration installed");
-    println!("  Settings: {}", settings_path.display());
-    println!();
-    println!("Restart Claude Code for changes to take effect.");
+    print_line("")?;
+    print_line("✓ Claude Code integration installed")?;
+    print_line(&format!("  Settings: {}", settings_path.display()))?;
+    print_line("")?;
+    print_line("Restart Claude Code for changes to take effect.")?;
 
     Ok(())
 }
@@ -161,24 +170,30 @@ fn check_claude() -> Result<()> {
     let project_hooks = has_beads_hooks(&project_settings);
 
     if global_hooks {
-        println!("✓ Global hooks installed: {}", global_settings.display());
+        print_line(&format!(
+            "✓ Global hooks installed: {}",
+            global_settings.display()
+        ))?;
         Ok(())
     } else if project_hooks {
-        println!("✓ Project hooks installed: {}", project_settings.display());
+        print_line(&format!(
+            "✓ Project hooks installed: {}",
+            project_settings.display()
+        ))?;
         Ok(())
     } else {
-        println!("✗ No hooks installed");
-        println!("  Run: bd setup claude");
+        print_line("✗ No hooks installed")?;
+        print_line("  Run: bd setup claude")?;
         std::process::exit(1);
     }
 }
 
 fn remove_claude(project: bool) -> Result<()> {
     let settings_path = if project {
-        println!("Removing Claude hooks from project...");
+        print_line("Removing Claude hooks from project...")?;
         PathBuf::from(".claude/settings.local.json")
     } else {
-        println!("Removing Claude hooks globally...");
+        print_line("Removing Claude hooks globally...")?;
         let home = home_dir()?;
         home.join(".claude/settings.json")
     };
@@ -186,7 +201,7 @@ fn remove_claude(project: bool) -> Result<()> {
     let data = match fs::read_to_string(&settings_path) {
         Ok(d) => d,
         Err(_) => {
-            println!("No settings file found");
+            print_line("No settings file found")?;
             return Ok(());
         }
     };
@@ -194,13 +209,19 @@ fn remove_claude(project: bool) -> Result<()> {
     let mut settings: Map<String, Value> = serde_json::from_str(&data).unwrap_or_default();
 
     let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        println!("No hooks found");
+        print_line("No hooks found")?;
         return Ok(());
     };
 
     // Remove bd prime hooks
-    remove_hook_command(hooks, "SessionStart", "bd prime");
-    remove_hook_command(hooks, "PreCompact", "bd prime");
+    let removed_session = remove_hook_command(hooks, "SessionStart", "bd prime");
+    let removed_precompact = remove_hook_command(hooks, "PreCompact", "bd prime");
+    if removed_session {
+        print_line("✓ Removed SessionStart hook")?;
+    }
+    if removed_precompact {
+        print_line("✓ Removed PreCompact hook")?;
+    }
 
     // Write back
     let data = serde_json::to_string_pretty(&settings).map_err(|e| {
@@ -211,18 +232,24 @@ fn remove_claude(project: bool) -> Result<()> {
     })?;
     atomic_write(&settings_path, data.as_bytes())?;
 
-    println!("✓ Claude hooks removed");
+    print_line("✓ Claude hooks removed")?;
     Ok(())
 }
 
-fn add_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) -> bool {
+enum HookAddOutcome {
+    Added,
+    AlreadyPresent,
+    Skipped,
+}
+
+fn add_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) -> HookAddOutcome {
     let event_hooks = hooks
         .entry(event.to_string())
         .or_insert_with(|| json!([]))
         .as_array_mut();
 
     let Some(event_hooks) = event_hooks else {
-        return false;
+        return HookAddOutcome::Skipped;
     };
 
     // Check if bd hook already registered
@@ -234,8 +261,7 @@ fn add_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) 
                 if let Some(cmd_map) = cmd.as_object()
                     && cmd_map.get("command").and_then(|c| c.as_str()) == Some(command)
                 {
-                    println!("✓ Hook already registered: {event}");
-                    return false;
+                    return HookAddOutcome::AlreadyPresent;
                 }
             }
         }
@@ -251,12 +277,12 @@ fn add_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) 
     });
 
     event_hooks.push(new_hook);
-    true
+    HookAddOutcome::Added
 }
 
-fn remove_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) {
+fn remove_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) -> bool {
     let Some(event_hooks) = hooks.get_mut(event).and_then(|h| h.as_array_mut()) else {
-        return;
+        return false;
     };
 
     let original_len = event_hooks.len();
@@ -279,9 +305,7 @@ fn remove_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &st
         true
     });
 
-    if event_hooks.len() < original_len {
-        println!("✓ Removed {event} hook");
-    }
+    event_hooks.len() < original_len
 }
 
 fn has_beads_hooks(settings_path: &Path) -> bool {
@@ -374,7 +398,7 @@ pub(crate) fn handle_cursor(check: bool, remove: bool) -> Result<()> {
 fn install_cursor() -> Result<()> {
     let rules_path = PathBuf::from(".cursor/rules/beads.mdc");
 
-    println!("Installing Cursor integration...");
+    print_line("Installing Cursor integration...")?;
 
     // Ensure parent directory exists
     if let Some(parent) = rules_path.parent() {
@@ -388,11 +412,11 @@ fn install_cursor() -> Result<()> {
 
     atomic_write(&rules_path, CURSOR_RULES.as_bytes())?;
 
-    println!();
-    println!("✓ Cursor integration installed");
-    println!("  Rules: {}", rules_path.display());
-    println!();
-    println!("Restart Cursor for changes to take effect.");
+    print_line("")?;
+    print_line("✓ Cursor integration installed")?;
+    print_line(&format!("  Rules: {}", rules_path.display()))?;
+    print_line("")?;
+    print_line("Restart Cursor for changes to take effect.")?;
 
     Ok(())
 }
@@ -401,11 +425,14 @@ fn check_cursor() -> Result<()> {
     let rules_path = PathBuf::from(".cursor/rules/beads.mdc");
 
     if rules_path.exists() {
-        println!("✓ Cursor integration installed: {}", rules_path.display());
+        print_line(&format!(
+            "✓ Cursor integration installed: {}",
+            rules_path.display()
+        ))?;
         Ok(())
     } else {
-        println!("✗ Cursor integration not installed");
-        println!("  Run: bd setup cursor");
+        print_line("✗ Cursor integration not installed")?;
+        print_line("  Run: bd setup cursor")?;
         std::process::exit(1);
     }
 }
@@ -413,14 +440,14 @@ fn check_cursor() -> Result<()> {
 fn remove_cursor() -> Result<()> {
     let rules_path = PathBuf::from(".cursor/rules/beads.mdc");
 
-    println!("Removing Cursor integration...");
+    print_line("Removing Cursor integration...")?;
 
     match fs::remove_file(&rules_path) {
         Ok(_) => {
-            println!("✓ Removed Cursor integration");
+            print_line("✓ Removed Cursor integration")?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("No rules file found");
+            print_line("No rules file found")?;
         }
         Err(e) => {
             return Err(Error::Op(OpError::ValidationFailed {
@@ -584,7 +611,7 @@ fn install_aider() -> Result<()> {
     let instructions_path = PathBuf::from(".aider/BEADS.md");
     let readme_path = PathBuf::from(".aider/README.md");
 
-    println!("Installing Aider integration...");
+    print_line("Installing Aider integration...")?;
 
     // Ensure .aider directory exists
     fs::create_dir_all(".aider").map_err(|e| {
@@ -603,21 +630,21 @@ fn install_aider() -> Result<()> {
     // Write README (for humans)
     atomic_write(&readme_path, AIDER_README.as_bytes())?;
 
-    println!();
-    println!("✓ Aider integration installed");
-    println!("  Config: {}", config_path.display());
-    println!(
+    print_line("")?;
+    print_line("✓ Aider integration installed")?;
+    print_line(&format!("  Config: {}", config_path.display()))?;
+    print_line(&format!(
         "  Instructions: {} (loaded by AI)",
         instructions_path.display()
-    );
-    println!("  README: {} (for humans)", readme_path.display());
-    println!();
-    println!("Usage:");
-    println!("  1. Start aider in this directory");
-    println!("  2. Ask AI for available work (it will suggest: /run bd ready)");
-    println!("  3. Run suggested commands using /run");
-    println!();
-    println!("Note: Aider requires you to explicitly run commands via /run");
+    ))?;
+    print_line(&format!("  README: {} (for humans)", readme_path.display()))?;
+    print_line("")?;
+    print_line("Usage:")?;
+    print_line("  1. Start aider in this directory")?;
+    print_line("  2. Ask AI for available work (it will suggest: /run bd ready)")?;
+    print_line("  3. Run suggested commands using /run")?;
+    print_line("")?;
+    print_line("Note: Aider requires you to explicitly run commands via /run")?;
 
     Ok(())
 }
@@ -626,11 +653,14 @@ fn check_aider() -> Result<()> {
     let config_path = PathBuf::from(".aider.conf.yml");
 
     if config_path.exists() {
-        println!("✓ Aider integration installed: {}", config_path.display());
+        print_line(&format!(
+            "✓ Aider integration installed: {}",
+            config_path.display()
+        ))?;
         Ok(())
     } else {
-        println!("✗ Aider integration not installed");
-        println!("  Run: bd setup aider");
+        print_line("✗ Aider integration not installed")?;
+        print_line("  Run: bd setup aider")?;
         std::process::exit(1);
     }
 }
@@ -641,7 +671,7 @@ fn remove_aider() -> Result<()> {
     let readme_path = PathBuf::from(".aider/README.md");
     let aider_dir = PathBuf::from(".aider");
 
-    println!("Removing Aider integration...");
+    print_line("Removing Aider integration...")?;
 
     let mut removed = false;
 
@@ -662,9 +692,9 @@ fn remove_aider() -> Result<()> {
     let _ = fs::remove_dir(&aider_dir);
 
     if removed {
-        println!("✓ Removed Aider integration");
+        print_line("✓ Removed Aider integration")?;
     } else {
-        println!("No Aider integration files found");
+        print_line("No Aider integration files found")?;
     }
 
     Ok(())

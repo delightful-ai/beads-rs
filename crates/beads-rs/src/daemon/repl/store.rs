@@ -2,10 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::{IngestOutcome, ReplError, SessionStore, WatermarkSnapshot};
-use crate::core::{
-    EventId, EventShaLookupError, NamespaceId, PrevVerified, ReplicaId, Sha256, VerifiedEvent,
-};
+use super::{ContiguousBatch, IngestOutcome, ReplError, SessionStore, WatermarkSnapshot};
+use crate::core::{EventId, EventShaLookupError, NamespaceId, ReplicaId, Sha256};
 use crate::daemon::wal::{ReplicaDurabilityRole, WalIndexError};
 
 pub struct SharedSessionStore<S> {
@@ -47,13 +45,10 @@ impl<S: SessionStore> SessionStore for SharedSessionStore<S> {
 
     fn ingest_remote_batch(
         &mut self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        batch: &[VerifiedEvent<PrevVerified>],
+        batch: &ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
-        self.lock()
-            .ingest_remote_batch(namespace, origin, batch, now_ms)
+        self.lock().ingest_remote_batch(batch, now_ms)
     }
 
     fn update_replica_liveness(

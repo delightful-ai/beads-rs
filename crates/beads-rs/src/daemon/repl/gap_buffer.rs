@@ -7,6 +7,7 @@ use crate::core::{
     Durable, HeadStatus, Limits, NamespaceId, PrevVerified, ReplicaId, Seq0, Seq1, Sha256,
     VerifiedEvent, VerifiedEventAny, Watermark, WatermarkError,
 };
+use crate::daemon::repl::{ContiguousBatch, ContiguousBatchError};
 
 #[derive(Clone, Debug)]
 pub struct GapBuffer {
@@ -172,10 +173,11 @@ pub struct OriginStreamState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IngestDecision {
-    ForwardContiguousBatch(Vec<VerifiedEvent<crate::core::PrevVerified>>),
+    ForwardContiguousBatch(ContiguousBatch),
     BufferedNeedWant { want_from: Seq0 },
     DuplicateNoop,
     Reject { reason: ReplRejectReason },
+    InvalidBatch(ContiguousBatchError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,6 +190,7 @@ pub enum DrainError {
         got: Option<Sha256>,
         head_seq: u64,
     },
+    InvalidBatch(ContiguousBatchError),
 }
 
 impl OriginStreamState {
@@ -259,14 +262,14 @@ impl OriginStreamState {
             self.gap.started_at_ms = None;
         }
 
-        IngestDecision::ForwardContiguousBatch(batch)
+        match ContiguousBatch::try_new(batch) {
+            Ok(batch) => IngestDecision::ForwardContiguousBatch(batch),
+            Err(err) => IngestDecision::InvalidBatch(err),
+        }
     }
 
-    pub fn advance_durable_batch(
-        &mut self,
-        batch: &[VerifiedEvent<crate::core::PrevVerified>],
-    ) -> Result<(), WatermarkError> {
-        for event in batch {
+    pub fn advance_durable_batch(&mut self, batch: &ContiguousBatch) -> Result<(), WatermarkError> {
+        for event in batch.events() {
             let expected = self.durable.seq().next();
             if event.seq() != expected {
                 return Err(WatermarkError::NonContiguous {
@@ -282,9 +285,7 @@ impl OriginStreamState {
         Ok(())
     }
 
-    pub fn drain_ready(
-        &mut self,
-    ) -> Result<Option<Vec<VerifiedEvent<crate::core::PrevVerified>>>, DrainError> {
+    pub fn drain_ready(&mut self) -> Result<Option<ContiguousBatch>, DrainError> {
         let mut head = match self.durable.head() {
             HeadStatus::Genesis => None,
             HeadStatus::Known(head) => Some(Sha256(head)),
@@ -343,7 +344,9 @@ impl OriginStreamState {
             return Ok(None);
         }
 
-        Ok(Some(batch))
+        ContiguousBatch::try_new(batch)
+            .map(Some)
+            .map_err(DrainError::InvalidBatch)
     }
 
     fn buffer_gap(&mut self, ev: VerifiedEventAny, now_ms: u64) -> IngestDecision {
@@ -404,16 +407,13 @@ impl GapBufferByNsOrigin {
         state.ingest_one(event, now_ms)
     }
 
-    pub fn advance_durable_batch(
-        &mut self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        batch: &[VerifiedEvent<crate::core::PrevVerified>],
-    ) -> Result<(), WatermarkError> {
+    pub fn advance_durable_batch(&mut self, batch: &ContiguousBatch) -> Result<(), WatermarkError> {
+        let namespace = batch.namespace();
+        let origin = batch.origin();
         let Some(origins) = self.by_ns.get_mut(namespace) else {
             return Ok(());
         };
-        let Some(state) = origins.get_mut(origin) else {
+        let Some(state) = origins.get_mut(&origin) else {
             return Ok(());
         };
         state.advance_durable_batch(batch)
@@ -423,7 +423,7 @@ impl GapBufferByNsOrigin {
         &mut self,
         namespace: &NamespaceId,
         origin: &ReplicaId,
-    ) -> Result<Option<Vec<VerifiedEvent<crate::core::PrevVerified>>>, DrainError> {
+    ) -> Result<Option<ContiguousBatch>, DrainError> {
         let Some(origins) = self.by_ns.get_mut(namespace) else {
             return Ok(None);
         };
@@ -520,11 +520,16 @@ mod tests {
     fn contiguous_event(seq: u64) -> VerifiedEventAny {
         let body = sample_body(seq);
         let bytes = event_bytes(&body);
+        let prev = if seq > 1 {
+            Some(crate::core::Sha256([seq.saturating_sub(1) as u8; 32]))
+        } else {
+            None
+        };
         VerifiedEventAny::Contiguous(VerifiedEvent {
             body,
             bytes,
             sha256: crate::core::Sha256([seq as u8; 32]),
-            prev: crate::core::PrevVerified { prev: None },
+            prev: crate::core::PrevVerified { prev },
         })
     }
 
@@ -565,8 +570,8 @@ mod tests {
             panic!("expected contiguous batch");
         };
         assert_eq!(batch.len(), 2);
-        assert_eq!(batch[0].seq().get(), 1);
-        assert_eq!(batch[1].seq().get(), 2);
+        assert_eq!(batch.events()[0].seq().get(), 1);
+        assert_eq!(batch.events()[1].seq().get(), 2);
         assert!(state.gap.buffered.is_empty());
     }
 
@@ -584,7 +589,7 @@ mod tests {
             panic!("expected contiguous batch");
         };
         assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].seq().get(), 1);
+        assert_eq!(batch.events()[0].seq().get(), 1);
         state.advance_durable_batch(&batch).unwrap();
 
         let IngestDecision::ForwardContiguousBatch(batch) =
@@ -593,8 +598,8 @@ mod tests {
             panic!("expected contiguous batch");
         };
         assert_eq!(batch.len(), 2);
-        assert_eq!(batch[0].seq().get(), 2);
-        assert_eq!(batch[1].seq().get(), 3);
+        assert_eq!(batch.events()[0].seq().get(), 2);
+        assert_eq!(batch.events()[1].seq().get(), 3);
         assert_eq!(state.gap.buffered.len(), 1);
     }
 
@@ -611,7 +616,7 @@ mod tests {
             panic!("expected contiguous batch");
         };
         assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].seq().get(), 1);
+        assert_eq!(batch.events()[0].seq().get(), 1);
         assert_eq!(state.gap.buffered.len(), 1);
     }
 

@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::super::{Ctx, normalize_bead_id, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send};
 use super::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
 use crate::Result;
 use crate::api::IssueSummary;
@@ -105,8 +105,7 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
                 discovered,
             };
 
-            println!("{}", render_show(&view, &outgoing_views, &incoming, &notes));
-            Ok(())
+            print_line(&render_show(&view, &outgoing_views, &incoming, &notes))
         }
         other => print_ok(&other, false),
     }

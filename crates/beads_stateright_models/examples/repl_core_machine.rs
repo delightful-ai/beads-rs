@@ -12,9 +12,9 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use beads_rs::model::{
-    BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOrigin, GapBufferByNsOriginSnapshot,
-    GapBufferSnapshot, HeadSnapshot, OriginStreamSnapshot, WatermarkSnapshot, event_factory,
-    repl_ingest,
+    BufferedEventSnapshot, BufferedPrevSnapshot, ContiguousBatch, GapBufferByNsOrigin,
+    GapBufferByNsOriginSnapshot, GapBufferSnapshot, HeadSnapshot, OriginStreamSnapshot,
+    WatermarkSnapshot, event_factory, repl_ingest,
 };
 use beads_rs::{
     ActorId, Applied, Durable, EventFrameError, EventFrameV1, EventId, EventShaLookup, HeadStatus,
@@ -763,10 +763,7 @@ impl NodeState {
                 self.refresh_maxes();
                 LastEffectKind::Applied {
                     key,
-                    seq: batch
-                        .first()
-                        .map(|ev| ev.seq())
-                        .unwrap_or_else(|| prev_seen.next()),
+                    seq: batch.first(),
                     prev_seen,
                 }
             }
@@ -796,6 +793,12 @@ impl NodeState {
                     code: reject_reason_code(&reason),
                 }
             }
+            beads_rs::model::IngestDecision::InvalidBatch(_) => {
+                self.errored = true;
+                LastEffectKind::Rejected {
+                    code: "invalid_batch",
+                }
+            }
         }
     }
 
@@ -803,13 +806,13 @@ impl NodeState {
         &mut self,
         namespace: &NamespaceId,
         origin: ReplicaId,
-        batch: &[beads_rs::VerifiedEvent<beads_rs::PrevVerified>],
+        batch: &ContiguousBatch,
     ) -> Result<(), &'static str> {
         if batch.is_empty() {
             return Ok(());
         }
 
-        for ev in batch {
+        for ev in batch.events() {
             let eid = EventId::new(
                 ev.body.origin_replica_id,
                 namespace.clone(),
@@ -819,10 +822,10 @@ impl NodeState {
         }
 
         self.gap
-            .advance_durable_batch(namespace, &origin, batch)
+            .advance_durable_batch(batch)
             .map_err(|_| "gap_advance")?;
 
-        let last = batch.last().expect("batch non-empty");
+        let last = batch.last_event();
         let seq0 = Seq0::new(last.seq().get());
         let head = HeadStatus::Known(last.sha256.0);
         let durable = Watermark::new(seq0, head).map_err(|_| "watermark")?;
