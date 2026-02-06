@@ -2,11 +2,10 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use serde::Serialize;
 
 use beads_api::{
     AdminFsckOutput, AdminStoreLockInfoOutput, AdminStoreUnlockOutput, FsckStatus,
-    StoreLockMetaOutput,
+    StoreLockMetaOutput, UnlockAction,
 };
 use beads_surface::ipc::payload::{AdminStoreFsckPayload, AdminStoreUnlockPayload};
 use beads_surface::ipc::types::{AdminOp, Request};
@@ -87,8 +86,15 @@ fn handle_fsck(json: bool, args: StoreFsckArgs) -> Result<()> {
                 reason: err.message,
             }));
         }
-        // Daemon not running or unexpected response — fall back to offline.
-        _ => {}
+        Ok(other) => {
+            tracing::debug!(
+                ?other,
+                "unexpected daemon response for fsck, falling back to offline"
+            );
+        }
+        Err(err) => {
+            tracing::debug!(%err, "daemon not reachable for fsck, falling back to offline");
+        }
     }
 
     // Offline fallback: call fsck directly, convert to API types for
@@ -120,7 +126,7 @@ pub fn render_admin_fsck(output: &AdminFsckOutput) -> String {
         output.stats.namespaces, output.stats.segments, output.stats.records
     ));
     out.push_str(&format!(
-        "  summary: risk={:?} safe_to_accept_writes={} safe_to_prune_wal={} safe_to_rebuild_index={}\n",
+        "  summary: risk={} safe_to_accept_writes={} safe_to_prune_wal={} safe_to_rebuild_index={}\n",
         output.summary.risk,
         output.summary.safe_to_accept_writes,
         output.summary.safe_to_prune_wal,
@@ -136,7 +142,7 @@ pub fn render_admin_fsck(output: &AdminFsckOutput) -> String {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "none".to_string());
             out.push_str(&format!(
-                "    - {:?}: {} ({path})\n",
+                "    - {}: {} ({path})\n",
                 repair.kind, repair.detail
             ));
         }
@@ -145,7 +151,7 @@ pub fn render_admin_fsck(output: &AdminFsckOutput) -> String {
     out.push_str("  checks:\n");
     for check in &output.checks {
         out.push_str(&format!(
-            "    - {:?}: {:?} (severity={:?}, issues={})\n",
+            "    - {}: {} (severity={}, issues={})\n",
             check.id,
             check.status,
             check.severity,
@@ -177,7 +183,7 @@ pub fn render_admin_fsck(output: &AdminFsckOutput) -> String {
                     .map(|offset| format!(" offset={offset}"))
                     .unwrap_or_default();
                 out.push_str(&format!(
-                    "      * {:?}: {}{path}{namespace}{origin}{seq}{offset}\n",
+                    "      * {}: {}{path}{namespace}{origin}{seq}{offset}\n",
                     evidence.code, evidence.message
                 ));
             }
@@ -196,30 +202,11 @@ pub fn render_admin_fsck(output: &AdminFsckOutput) -> String {
 // Unlock
 // =============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PidState {
     Missing,
     Alive,
     Unknown,
-}
-
-crate::enum_str! {
-    impl PidState {
-        fn as_str(&self) -> &'static str;
-        fn parse_str(raw: &str) -> Option<Self>;
-        variants {
-            Missing => ["missing"],
-            Alive => ["alive"],
-            Unknown => ["unknown"],
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PidCheck {
-    state: PidState,
-    error: Option<String>,
 }
 
 fn handle_unlock(json: bool, args: StoreUnlockArgs) -> Result<()> {
@@ -249,18 +236,21 @@ fn handle_unlock(json: bool, args: StoreUnlockArgs) -> Result<()> {
                 reason: err.message,
             }));
         }
-        // Daemon not running — fall back to offline.
-        _ => {}
+        Ok(other) => {
+            tracing::debug!(
+                ?other,
+                "unexpected daemon response for unlock, falling back to offline"
+            );
+        }
+        Err(err) => {
+            tracing::debug!(%err, "daemon not reachable for unlock, falling back to offline");
+        }
     }
 
-    // Offline fallback: do the unlock directly.
+    // Offline fallback: do the unlock directly, convert to API types
+    // for consistent JSON output regardless of online/offline path.
     let daemon_pid = daemon_pid();
     let report = unlock_store_offline(store_id, args.force, daemon_pid)?;
-
-    if json {
-        return print_json(&report);
-    }
-    write_stdout(&render_unlock_report_offline(&report))?;
 
     if let OfflineUnlockAction::RequireForce { reason } = report.result {
         return Err(Error::Op(OpError::InvalidRequest {
@@ -268,6 +258,12 @@ fn handle_unlock(json: bool, args: StoreUnlockArgs) -> Result<()> {
             reason: format!("lock appears active ({})", reason.as_str()),
         }));
     }
+
+    let output = offline_unlock_to_api(&report);
+    if json {
+        return print_json(&output);
+    }
+    write_stdout(&render_admin_store_unlock(&output))?;
     Ok(())
 }
 
@@ -280,7 +276,7 @@ pub fn render_admin_store_unlock(output: &AdminStoreUnlockOutput) -> String {
     if let Some(daemon_pid) = output.daemon_pid {
         out.push_str(&format!("  daemon_pid: {daemon_pid}\n"));
     }
-    out.push_str(&format!("  action: {:?}\n", output.action));
+    out.push_str(&format!("  action: {}\n", output.action));
     out
 }
 
@@ -317,8 +313,7 @@ fn render_lock_meta_output(out: &mut String, meta: Option<&StoreLockMetaOutput>)
 // Offline unlock logic (fallback when daemon not running)
 // =============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnlockReason {
     PidMissing,
     PidReuse,
@@ -337,8 +332,7 @@ impl UnlockReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum OfflineUnlockAction {
     NoLock,
     Removed {
@@ -378,17 +372,11 @@ impl OfflineUnlockAction {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct OfflineUnlockReport {
     store_id: StoreId,
     lock_path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<crate::daemon::store_lock::StoreLockMeta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pid_state: Option<PidState>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pid_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     daemon_pid: Option<u32>,
     result: OfflineUnlockAction,
 }
@@ -408,7 +396,7 @@ fn unlock_store_with<F>(
     check_pid: F,
 ) -> Result<OfflineUnlockReport>
 where
-    F: FnOnce(u32) -> PidCheck,
+    F: FnOnce(u32) -> PidState,
 {
     let lock_path = paths::store_lock_path(store_id);
     let meta = crate::daemon::store_lock::read_lock_meta(store_id).map_err(store_lock_error)?;
@@ -417,15 +405,13 @@ where
             store_id,
             lock_path,
             meta: None,
-            pid_state: None,
-            pid_error: None,
             daemon_pid,
             result: OfflineUnlockAction::NoLock,
         });
     };
 
-    let check = check_pid(meta.pid);
-    let mut result = decide_unlock(check.state, daemon_pid, meta.pid, force);
+    let pid_state = check_pid(meta.pid);
+    let mut result = decide_unlock(pid_state, daemon_pid, meta.pid, force);
     if let OfflineUnlockAction::Removed { removed, .. } = &mut result {
         let removed_flag =
             crate::daemon::store_lock::remove_lock_file(store_id).map_err(store_lock_error)?;
@@ -444,8 +430,6 @@ where
         store_id,
         lock_path,
         meta: Some(meta),
-        pid_state: Some(check.state),
-        pid_error: check.error,
         daemon_pid,
         result,
     })
@@ -510,63 +494,45 @@ fn daemon_pid() -> Option<u32> {
     }
 }
 
-fn pid_check(pid: u32) -> PidCheck {
+fn pid_check(pid: u32) -> PidState {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
 
     let nix_pid = Pid::from_raw(pid as i32);
     match kill(nix_pid, None) {
-        Ok(()) => PidCheck {
-            state: PidState::Alive,
-            error: None,
-        },
-        Err(Errno::ESRCH) => PidCheck {
-            state: PidState::Missing,
-            error: None,
-        },
-        Err(Errno::EPERM) => PidCheck {
-            state: PidState::Alive,
-            error: None,
-        },
-        Err(e) => PidCheck {
-            state: PidState::Unknown,
-            error: Some(e.to_string()),
-        },
+        Ok(()) | Err(Errno::EPERM) => PidState::Alive,
+        Err(Errno::ESRCH) => PidState::Missing,
+        Err(e) => {
+            tracing::debug!(%e, pid, "pid check returned unexpected error");
+            PidState::Unknown
+        }
     }
 }
 
-fn render_unlock_report_offline(report: &OfflineUnlockReport) -> String {
-    let mut out = String::new();
-    out.push_str("Store lock:\n");
-    out.push_str(&format!("  store_id: {}\n", report.store_id));
-    out.push_str(&format!("  lock_path: {}\n", report.lock_path.display()));
-
-    if let Some(meta) = &report.meta {
-        out.push_str(&format!("  replica_id: {}\n", meta.replica_id));
-        out.push_str(&format!("  pid: {}\n", meta.pid));
-        out.push_str(&format!("  started_at_ms: {}\n", meta.started_at_ms));
-        out.push_str(&format!("  daemon_version: {}\n", meta.daemon_version));
-        if let Some(heartbeat) = meta.last_heartbeat_ms {
-            out.push_str(&format!("  last_heartbeat_ms: {heartbeat}\n"));
-        } else {
-            out.push_str("  last_heartbeat_ms: none\n");
+fn offline_unlock_to_api(report: &OfflineUnlockReport) -> AdminStoreUnlockOutput {
+    let action = match report.result {
+        OfflineUnlockAction::NoLock => UnlockAction::NoLock,
+        OfflineUnlockAction::Removed { forced: true, .. } => UnlockAction::RemovedForced,
+        OfflineUnlockAction::Removed { forced: false, .. } => UnlockAction::RemovedStale,
+        OfflineUnlockAction::RequireForce { .. } => {
+            unreachable!("RequireForce should be handled before conversion")
         }
-    } else {
-        out.push_str("  meta: none\n");
+    };
+    AdminStoreUnlockOutput {
+        store_id: report.store_id,
+        lock_path: report.lock_path.clone(),
+        meta: report.meta.as_ref().map(|m| StoreLockMetaOutput {
+            store_id: m.store_id,
+            replica_id: m.replica_id,
+            pid: m.pid,
+            started_at_ms: m.started_at_ms,
+            daemon_version: m.daemon_version.clone(),
+            last_heartbeat_ms: m.last_heartbeat_ms,
+        }),
+        daemon_pid: report.daemon_pid,
+        action,
     }
-
-    if let Some(pid_state) = report.pid_state {
-        out.push_str(&format!("  pid_state: {}\n", pid_state.as_str()));
-    }
-    if let Some(pid_error) = &report.pid_error {
-        out.push_str(&format!("  pid_error: {pid_error}\n"));
-    }
-    if let Some(daemon_pid) = report.daemon_pid {
-        out.push_str(&format!("  daemon_pid: {daemon_pid}\n"));
-    }
-    out.push_str(&format!("  action: {}\n", report.result.describe()));
-    out
 }
 
 fn store_lock_error(err: crate::daemon::store_lock::StoreLockError) -> Error {
@@ -660,11 +626,8 @@ mod tests {
                 last_heartbeat_ms: Some(2),
             };
             write_lock_meta(&lock_path, &meta);
-            let report = unlock_store_with(store_id, false, Some(4242), |_| PidCheck {
-                state: PidState::Alive,
-                error: None,
-            })
-            .unwrap();
+            let report =
+                unlock_store_with(store_id, false, Some(4242), |_| PidState::Alive).unwrap();
             assert!(lock_path.exists());
             assert!(matches!(
                 report.result,
@@ -736,15 +699,15 @@ mod tests {
             "  store_id: 09090909-0909-0909-0909-090909090909\n",
             "  checked_at_ms: 12345\n",
             "  stats: namespaces=1 segments=2 records=3\n",
-            "  summary: risk=High safe_to_accept_writes=false safe_to_prune_wal=false safe_to_rebuild_index=true\n",
+            "  summary: risk=high safe_to_accept_writes=false safe_to_prune_wal=false safe_to_rebuild_index=true\n",
             "  repairs:\n",
-            "    - TruncateTail: truncated tail corruption (/tmp/wal/segment-1)\n",
+            "    - truncate_tail: truncated tail corruption (/tmp/wal/segment-1)\n",
             "  checks:\n",
-            "    - SegmentFrames: Fail (severity=High, issues=1)\n",
-            "      * FrameCrcMismatch: crc mismatch path=/tmp/wal/segment-1 namespace=core origin=07070707-0707-0707-0707-070707070707 seq=5 offset=128\n",
+            "    - segment_frames: fail (severity=high, issues=1)\n",
+            "      * frame_crc_mismatch: crc mismatch path=/tmp/wal/segment-1 namespace=core origin=07070707-0707-0707-0707-070707070707 seq=5 offset=128\n",
             "      actions:\n",
             "        - run `bd store fsck --repair` to truncate tail corruption\n",
-            "    - IndexOffsets: Pass (severity=Low, issues=0)\n",
+            "    - index_offsets: pass (severity=low, issues=0)\n",
         );
         assert_eq!(output, expected);
     }

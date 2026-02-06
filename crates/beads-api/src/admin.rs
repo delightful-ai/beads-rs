@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::fmt;
 use std::path::PathBuf;
 
 use beads_core::{
@@ -52,6 +53,14 @@ pub struct AdminClockAnomaly {
 #[serde(rename_all = "snake_case")]
 pub enum AdminClockAnomalyKind {
     ForwardJumpClamped,
+}
+
+impl fmt::Display for AdminClockAnomalyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ForwardJumpClamped => "forward_jump_clamped",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +222,16 @@ pub enum AdminHealthStatus {
     Fail,
 }
 
+impl fmt::Display for AdminHealthStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminHealthSeverity {
@@ -222,6 +241,17 @@ pub enum AdminHealthSeverity {
     Critical,
 }
 
+impl fmt::Display for AdminHealthSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminHealthRisk {
@@ -229,6 +259,17 @@ pub enum AdminHealthRisk {
     Medium,
     High,
     Critical,
+}
+
+impl fmt::Display for AdminHealthRisk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        })
+    }
 }
 
 impl From<AdminHealthSeverity> for AdminHealthRisk {
@@ -251,6 +292,17 @@ pub enum AdminHealthCheckId {
     CheckpointCache,
 }
 
+impl fmt::Display for AdminHealthCheckId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::WalFrames => "wal_frames",
+            Self::WalHashes => "wal_hashes",
+            Self::IndexOffsets => "index_offsets",
+            Self::CheckpointCache => "checkpoint_cache",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminHealthEvidenceCode {
@@ -266,6 +318,25 @@ pub enum AdminHealthEvidenceCode {
     IndexSegmentMissing,
     IndexOpenFailed,
     CheckpointCacheInvalid,
+}
+
+impl fmt::Display for AdminHealthEvidenceCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SegmentHeaderInvalid => "segment_header_invalid",
+            Self::FrameHeaderInvalid => "frame_header_invalid",
+            Self::FrameTruncated => "frame_truncated",
+            Self::FrameCrcMismatch => "frame_crc_mismatch",
+            Self::RecordDecodeInvalid => "record_decode_invalid",
+            Self::EventBodyDecodeInvalid => "event_body_decode_invalid",
+            Self::RecordHeaderMismatch => "record_header_mismatch",
+            Self::RecordShaMismatch => "record_sha_mismatch",
+            Self::IndexOffsetInvalid => "index_offset_invalid",
+            Self::IndexSegmentMissing => "index_segment_missing",
+            Self::IndexOpenFailed => "index_open_failed",
+            Self::CheckpointCacheInvalid => "checkpoint_cache_invalid",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -480,6 +551,16 @@ pub enum FsckStatus {
     Fail,
 }
 
+impl fmt::Display for FsckStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsckSeverity {
@@ -487,6 +568,17 @@ pub enum FsckSeverity {
     Medium,
     High,
     Critical,
+}
+
+impl fmt::Display for FsckSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -498,6 +590,17 @@ pub enum FsckRisk {
     Critical,
 }
 
+impl fmt::Display for FsckRisk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsckCheckId {
@@ -507,6 +610,19 @@ pub enum FsckCheckId {
     OriginContiguity,
     IndexOffsets,
     CheckpointCache,
+}
+
+impl fmt::Display for FsckCheckId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SegmentHeaders => "segment_headers",
+            Self::SegmentFrames => "segment_frames",
+            Self::RecordHashes => "record_hashes",
+            Self::OriginContiguity => "origin_contiguity",
+            Self::IndexOffsets => "index_offsets",
+            Self::CheckpointCache => "checkpoint_cache",
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,6 +645,30 @@ pub enum FsckEvidenceCode {
     IndexBehindWal,
     IndexOpenFailed,
     CheckpointCacheInvalid,
+}
+
+impl fmt::Display for FsckEvidenceCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SegmentHeaderInvalid => "segment_header_invalid",
+            Self::SegmentHeaderMismatch => "segment_header_mismatch",
+            Self::SegmentHeaderSymlink => "segment_header_symlink",
+            Self::FrameHeaderInvalid => "frame_header_invalid",
+            Self::FrameCrcMismatch => "frame_crc_mismatch",
+            Self::FrameTruncated => "frame_truncated",
+            Self::RecordDecodeInvalid => "record_decode_invalid",
+            Self::RecordHeaderMismatch => "record_header_mismatch",
+            Self::RecordShaMismatch => "record_sha_mismatch",
+            Self::PrevShaMismatch => "prev_sha_mismatch",
+            Self::NonContiguousSeq => "non_contiguous_seq",
+            Self::SealedSegmentLenMismatch => "sealed_segment_len_mismatch",
+            Self::IndexOffsetOutOfBounds => "index_offset_out_of_bounds",
+            Self::IndexMissingSegment => "index_missing_segment",
+            Self::IndexBehindWal => "index_behind_wal",
+            Self::IndexOpenFailed => "index_open_failed",
+            Self::CheckpointCacheInvalid => "checkpoint_cache_invalid",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -564,6 +704,16 @@ pub enum FsckRepairKind {
     TruncateTail,
     QuarantineSegment,
     RebuildIndex,
+}
+
+impl fmt::Display for FsckRepairKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::TruncateTail => "truncate_tail",
+            Self::QuarantineSegment => "quarantine_segment",
+            Self::RebuildIndex => "rebuild_index",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -622,4 +772,14 @@ pub enum UnlockAction {
     NoLock,
     RemovedForced,
     RemovedStale,
+}
+
+impl fmt::Display for UnlockAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NoLock => "no_lock",
+            Self::RemovedForced => "removed_forced",
+            Self::RemovedStale => "removed_stale",
+        })
+    }
 }

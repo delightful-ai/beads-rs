@@ -3,11 +3,11 @@ use clap::{Args, Subcommand};
 use super::super::{Ctx, print_ok, send};
 use super::{fmt_metric_labels, fmt_wall_ms};
 use crate::api::{
-    AdminCheckpointOutput, AdminClockAnomalyKind, AdminDoctorOutput, AdminFingerprintKind,
-    AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput,
-    AdminHealthReport, AdminHealthStatus, AdminMaintenanceModeOutput, AdminMetricsOutput,
-    AdminRebuildIndexOutput, AdminReloadLimitsOutput, AdminReloadPoliciesOutput,
-    AdminReloadReplicationOutput, AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
+    AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode,
+    AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput, AdminHealthReport,
+    AdminHealthStatus, AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
 };
 use crate::core::{HeadStatus, ReplicaRole, Watermarks};
 use crate::daemon::ipc::{
@@ -226,7 +226,7 @@ pub(crate) fn render_admin_status(status: &AdminStatusOutput) -> String {
     if let Some(anomaly) = &status.last_clock_anomaly {
         out.push_str(&format!(
             "Clock anomaly: {} delta={}ms at {}\n",
-            clock_anomaly_kind_str(&anomaly.kind),
+            anomaly.kind,
             anomaly.delta_ms,
             fmt_wall_ms(anomaly.at_wall_ms)
         ));
@@ -666,12 +666,6 @@ fn fingerprint_kind_str(kind: &AdminFingerprintKind) -> &'static str {
     }
 }
 
-fn clock_anomaly_kind_str(kind: &AdminClockAnomalyKind) -> &'static str {
-    match kind {
-        AdminClockAnomalyKind::ForwardJumpClamped => "forward_jump_clamped",
-    }
-}
-
 fn replica_role_str(role: ReplicaRole) -> &'static str {
     match role {
         ReplicaRole::Anchor => "anchor",
@@ -699,7 +693,7 @@ fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
     out.push_str(&format!("checked_at_ms: {}\n", report.checked_at_ms));
     out.push_str(&format!(
         "summary: risk={} safe_to_accept_writes={} safe_to_prune_wal={} safe_to_rebuild_index={}\n",
-        health_risk_str(&report.summary.risk),
+        report.summary.risk,
         report.summary.safe_to_accept_writes,
         report.summary.safe_to_prune_wal,
         report.summary.safe_to_rebuild_index
@@ -715,7 +709,7 @@ fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
     if let Some(anomaly) = &report.last_clock_anomaly {
         out.push_str(&format!(
             "clock_anomaly: {} delta={}ms at {}\n",
-            clock_anomaly_kind_str(&anomaly.kind),
+            anomaly.kind,
             anomaly.delta_ms,
             fmt_wall_ms(anomaly.at_wall_ms)
         ));
@@ -725,9 +719,9 @@ fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
     for check in &report.checks {
         out.push_str(&format!(
             "  - {}: {} (severity={}, issues={})\n",
-            health_check_id_str(&check.id),
-            health_status_str(&check.status),
-            health_severity_str(&check.severity),
+            check.id,
+            check.status,
+            check.severity,
             check.evidence.len()
         ));
         if check.status != AdminHealthStatus::Pass {
@@ -761,8 +755,7 @@ fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
                     .unwrap_or_default();
                 out.push_str(&format!(
                     "      * {}: {}{path}{namespace}{origin}{seq}{offset}{segment}\n",
-                    health_evidence_code_str(&evidence.code),
-                    evidence.message
+                    evidence.code, evidence.message
                 ));
             }
             if !check.suggested_actions.is_empty() {
@@ -775,58 +768,6 @@ fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
     }
 
     out.trim_end().into()
-}
-
-fn health_status_str(status: &AdminHealthStatus) -> &'static str {
-    match status {
-        AdminHealthStatus::Pass => "pass",
-        AdminHealthStatus::Warn => "warn",
-        AdminHealthStatus::Fail => "fail",
-    }
-}
-
-fn health_severity_str(severity: &crate::api::AdminHealthSeverity) -> &'static str {
-    match severity {
-        crate::api::AdminHealthSeverity::Low => "low",
-        crate::api::AdminHealthSeverity::Medium => "medium",
-        crate::api::AdminHealthSeverity::High => "high",
-        crate::api::AdminHealthSeverity::Critical => "critical",
-    }
-}
-
-fn health_risk_str(risk: &crate::api::AdminHealthRisk) -> &'static str {
-    match risk {
-        crate::api::AdminHealthRisk::Low => "low",
-        crate::api::AdminHealthRisk::Medium => "medium",
-        crate::api::AdminHealthRisk::High => "high",
-        crate::api::AdminHealthRisk::Critical => "critical",
-    }
-}
-
-fn health_check_id_str(id: &crate::api::AdminHealthCheckId) -> &'static str {
-    match id {
-        crate::api::AdminHealthCheckId::WalFrames => "wal_frames",
-        crate::api::AdminHealthCheckId::WalHashes => "wal_hashes",
-        crate::api::AdminHealthCheckId::IndexOffsets => "index_offsets",
-        crate::api::AdminHealthCheckId::CheckpointCache => "checkpoint_cache",
-    }
-}
-
-fn health_evidence_code_str(code: &crate::api::AdminHealthEvidenceCode) -> &'static str {
-    match code {
-        crate::api::AdminHealthEvidenceCode::SegmentHeaderInvalid => "segment_header_invalid",
-        crate::api::AdminHealthEvidenceCode::FrameHeaderInvalid => "frame_header_invalid",
-        crate::api::AdminHealthEvidenceCode::FrameTruncated => "frame_truncated",
-        crate::api::AdminHealthEvidenceCode::FrameCrcMismatch => "frame_crc_mismatch",
-        crate::api::AdminHealthEvidenceCode::RecordDecodeInvalid => "record_decode_invalid",
-        crate::api::AdminHealthEvidenceCode::EventBodyDecodeInvalid => "event_body_decode_invalid",
-        crate::api::AdminHealthEvidenceCode::RecordHeaderMismatch => "record_header_mismatch",
-        crate::api::AdminHealthEvidenceCode::RecordShaMismatch => "record_sha_mismatch",
-        crate::api::AdminHealthEvidenceCode::IndexOffsetInvalid => "index_offset_invalid",
-        crate::api::AdminHealthEvidenceCode::IndexSegmentMissing => "index_segment_missing",
-        crate::api::AdminHealthEvidenceCode::IndexOpenFailed => "index_open_failed",
-        crate::api::AdminHealthEvidenceCode::CheckpointCacheInvalid => "checkpoint_cache_invalid",
-    }
 }
 
 #[cfg(test)]

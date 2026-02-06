@@ -607,7 +607,7 @@ impl Daemon {
             Ok(report) => report,
             Err(err) => {
                 return Response::err_from(OpError::InvalidRequest {
-                    field: Some("store_id".into()),
+                    field: Some("store-id".into()),
                     reason: err.to_string(),
                 });
             }
