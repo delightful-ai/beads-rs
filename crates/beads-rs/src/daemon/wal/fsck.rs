@@ -243,10 +243,7 @@ pub fn fsck_store_dir(
     let namespaces = list_namespaces(&wal_dir, &mut builder)?;
     builder.stats.namespaces = namespaces.len();
 
-    let max_record_bytes = options
-        .limits
-        .max_wal_record_bytes
-        .min(options.limits.max_frame_bytes);
+    let max_record_bytes = options.limits.policy().max_wal_record_bytes();
 
     let mut tracker = FsckTracker::default();
     let mut segments_by_path = BTreeMap::new();

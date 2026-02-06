@@ -85,7 +85,7 @@ fn checkpoint_round_trip_preserves_state_and_manifest() {
     let snapshot = build_snapshot_from_state(
         SnapshotBuildArgs {
             checkpoint_group: "core".to_string(),
-            namespaces: vec![core.clone()],
+            namespaces: vec![core.clone()].into(),
             store_id: expected_export.meta.store_id,
             store_epoch: expected_export.meta.store_epoch,
             created_at_ms: expected_export.meta.created_at_ms,
@@ -116,9 +116,7 @@ fn checkpoint_round_trip_preserves_state_and_manifest() {
 #[test]
 fn checkpoint_multi_namespace_includes_all_namespaces() {
     let fixture = fixture_multi_namespace();
-    let mut namespaces = fixture.export.manifest.namespaces.clone();
-    namespaces.sort();
-    namespaces.dedup();
+    let namespaces = fixture.export.manifest.namespaces.clone();
     assert_eq!(namespaces.len(), 2);
 
     let files = fixture.export.files.keys().collect::<Vec<_>>();
@@ -185,7 +183,7 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
     let snapshot = build_snapshot_from_state(
         SnapshotBuildArgs {
             checkpoint_group: "core".to_string(),
-            namespaces: vec![core],
+            namespaces: vec![core].into(),
             store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
             store_epoch: StoreEpoch::new(0),
             created_at_ms: 1_700_000_000_000,
@@ -223,7 +221,7 @@ fn build_snapshot_from_state(
 ) -> beads_rs::git::checkpoint::CheckpointSnapshot {
     beads_rs::git::checkpoint::build_snapshot(CheckpointSnapshotInput {
         checkpoint_group: args.checkpoint_group,
-        namespaces: args.namespaces,
+        namespaces: args.namespaces.into(),
         store_id: args.store_id,
         store_epoch: args.store_epoch,
         created_at_ms: args.created_at_ms,

@@ -42,7 +42,7 @@ impl SegmentConfig {
 
     pub fn from_limits(limits: &crate::core::Limits) -> Self {
         let mut config = Self {
-            max_record_bytes: limits.max_wal_record_bytes,
+            max_record_bytes: limits.policy().max_wal_record_bytes(),
             max_segment_bytes: limits.wal_segment_max_bytes as u64,
             max_segment_age_ms: limits.wal_segment_max_age_ms,
             sync_mode: SegmentSyncMode::Data,

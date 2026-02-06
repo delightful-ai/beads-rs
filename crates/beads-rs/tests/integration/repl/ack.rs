@@ -34,8 +34,8 @@ fn inbound_session() -> (SessionState<Inbound>, MockStore, StoreIdentity) {
     let identity = identity::store_identity_with_epoch(1, 1);
     let local_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
     let mut config = SessionConfig::new(identity, local_replica, &limits);
-    config.requested_namespaces = vec![NamespaceId::core()];
-    config.offered_namespaces = vec![NamespaceId::core()];
+    config.requested_namespaces = vec![NamespaceId::core()].into();
+    config.offered_namespaces = vec![NamespaceId::core()].into();
     let admission = AdmissionController::new(&limits);
     let session = InboundConnecting::new(config, limits, admission);
     let mut store = MockStore::default();

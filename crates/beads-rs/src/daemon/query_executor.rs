@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crossbeam::channel::Sender;
 
-use super::core::{Daemon, NormalizedReadConsistency};
+use super::core::{Daemon, ReadScope};
 use super::git_lane::GitLaneState;
 use super::git_worker::GitOp;
 use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
@@ -24,7 +24,7 @@ use beads_api::{
 
 struct ReadCtx<'a> {
     remote: RemoteUrl,
-    read: NormalizedReadConsistency,
+    read: ReadScope,
     store: &'a StoreRuntime,
     state: &'a CanonicalState,
     repo_state: Option<&'a GitLaneState>,
@@ -53,7 +53,7 @@ impl Daemon {
         F: for<'a> FnOnce(ReadCtx<'a>) -> Result<T, OpError>,
     {
         let loaded = self.ensure_repo_fresh(repo, git_tx)?;
-        let read = loaded.normalize_read_consistency(read)?;
+        let read = loaded.read_scope(read)?;
         loaded.check_read_gate(&read)?;
         let store = loaded.runtime();
         let state = Self::namespace_state(&loaded, read.namespace());
@@ -81,10 +81,9 @@ impl Daemon {
         F: for<'a> FnOnce(ReadCtx<'a>) -> Result<T, OpError>,
     {
         let loaded = self.ensure_repo_fresh(repo, git_tx)?;
-        let read = loaded.normalize_read_consistency(read)?;
+        let read = loaded.read_scope(read)?;
         let store = loaded.runtime();
-        let empty_state = CanonicalState::new();
-        let state = store.state.get(read.namespace()).unwrap_or(&empty_state);
+        let state = Self::namespace_state(&loaded, read.namespace());
         let repo_state = want_repo_state.then(|| loaded.lane());
         let remote = loaded.remote().clone();
 
@@ -184,14 +183,12 @@ impl Daemon {
 
             // Build children set if parent filter is specified.
             // Parent deps: from=child, to=parent, kind=Parent.
-            let children_of_parent: Option<std::collections::HashSet<&BeadId>> =
+            let children_of_parent: Option<std::collections::HashSet<BeadId>> =
                 filters.parent.as_ref().map(|parent_id| {
                     state
-                        .dep_indexes()
-                        .in_edges(parent_id)
-                        .iter()
-                        .filter(|(_, kind)| *kind == DepKind::Parent)
-                        .map(|(from, _)| from)
+                        .parent_edges_to(parent_id)
+                        .into_iter()
+                        .map(|edge| edge.child().clone())
                         .collect()
                 });
 
@@ -1013,14 +1010,11 @@ fn compute_epic_statuses(
     // Build epic -> children mapping from parent edges.
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
-    for key in state.dep_store().values() {
-        if key.kind() != DepKind::Parent {
-            continue;
-        }
+    for edge in state.parent_edges() {
         children
-            .entry(key.to().clone())
+            .entry(edge.parent().clone())
             .or_default()
-            .push(key.from().clone());
+            .push(edge.child().clone());
     }
 
     let mut out = Vec::new();

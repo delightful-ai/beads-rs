@@ -57,10 +57,8 @@ fn diff_manifest(expected: &CheckpointManifest, actual: &CheckpointManifest) -> 
         ));
     }
 
-    let mut expected_ns = expected.namespaces.clone();
-    expected_ns.sort();
-    let mut actual_ns = actual.namespaces.clone();
-    actual_ns.sort();
+    let expected_ns = expected.namespaces.clone();
+    let actual_ns = actual.namespaces.clone();
     if expected_ns != actual_ns {
         diffs.push(format!(
             "manifest namespaces mismatch: expected {:?}, got {:?}",

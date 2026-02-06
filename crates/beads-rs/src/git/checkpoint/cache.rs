@@ -455,7 +455,7 @@ mod tests {
 
         let snapshot = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
-            namespaces: vec![namespace.clone()],
+            namespaces: vec![namespace.clone()].into(),
             store_id,
             store_epoch: StoreEpoch::new(0),
             created_at_ms,

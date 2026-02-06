@@ -91,8 +91,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 .root_slug
                 .as_deref()
                 .map(|slug| normalize_bead_slug_for("root_slug", slug))
-                .transpose()?
-                .map(|slug| slug.as_str().to_string());
+                .transpose()?;
             let (imported, report) =
                 crate::migrate::import_go_export(&args.input, &actor, root_slug)?;
 
@@ -180,8 +179,8 @@ fn read_current_format_version(repo: &git2::Repository) -> Result<u32> {
     let meta_blob = meta_obj
         .peel_to_blob()
         .map_err(|_| crate::git::SyncError::NotABlob("meta.json"))?;
-    let parsed =
-        crate::git::wire::parse_meta(meta_blob.content()).map_err(crate::git::SyncError::from)?;
+    let parsed = crate::git::wire::parse_supported_meta(meta_blob.content())
+        .map_err(crate::git::SyncError::from)?;
     match parsed.meta() {
         crate::git::wire::StoreMeta::V1 { .. } => Ok(1),
         crate::git::wire::StoreMeta::Legacy => Ok(0),

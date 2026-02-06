@@ -6,7 +6,7 @@ use bytes::Bytes;
 
 use super::layout::CheckpointShardPath;
 use super::meta::{IncludedHeads, IncludedWatermarks};
-use crate::core::{ContentHash, NamespaceId, ReplicaId, StoreEpoch, StoreId};
+use crate::core::{ContentHash, NamespaceSet, ReplicaId, StoreEpoch, StoreId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointShardPayload {
@@ -20,7 +20,7 @@ pub struct CheckpointSnapshot {
     pub checkpoint_group: String,
     pub store_id: StoreId,
     pub store_epoch: StoreEpoch,
-    pub namespaces: Vec<NamespaceId>,
+    pub namespaces: NamespaceSet,
     pub created_at_ms: u64,
     pub created_by_replica_id: ReplicaId,
     pub policy_hash: ContentHash,

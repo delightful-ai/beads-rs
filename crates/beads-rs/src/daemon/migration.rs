@@ -22,7 +22,7 @@ pub struct LegacyGitImport {
 #[derive(Debug, Clone)]
 pub struct LegacyWalImport {
     pub state: StoreState,
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
     pub sequence: u64,
 }
 
@@ -189,7 +189,7 @@ mod tests {
 
         let mut state = crate::core::CanonicalState::new();
         state.insert(make_bead("bd-legacy-wal")).unwrap();
-        let entry = WalEntry::new(state, Some("wal-root".to_string()), 7, 123);
+        let entry = WalEntry::new(state, Some(BeadSlug::parse("wal-root").unwrap()), 7, 123);
         wal.write(&remote, &entry).unwrap();
 
         let import = import_legacy_snapshot_wal(&wal, &remote)
@@ -197,7 +197,7 @@ mod tests {
             .expect("legacy wal import");
         let core_state = import.state.core();
         assert_eq!(core_state.live_count(), 1);
-        assert_eq!(import.root_slug.as_deref(), Some("wal-root"));
+        assert_eq!(import.root_slug, Some(BeadSlug::parse("wal-root").unwrap()));
         assert_eq!(import.sequence, 7);
     }
 

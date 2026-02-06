@@ -21,8 +21,8 @@ fn inbound_session_with_limits(
     let identity = identity::store_identity_with_epoch(2, 1);
     let local_replica = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
     let mut config = SessionConfig::new(identity, local_replica, &limits);
-    config.requested_namespaces = vec![NamespaceId::core()];
-    config.offered_namespaces = vec![NamespaceId::core()];
+    config.requested_namespaces = vec![NamespaceId::core()].into();
+    config.offered_namespaces = vec![NamespaceId::core()].into();
     let admission = AdmissionController::new(&limits);
     let session = InboundConnecting::new(config, limits, admission);
     let mut store = MockStore::default();

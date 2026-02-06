@@ -1,6 +1,7 @@
 //! Namespace identity and policies.
 
 use std::fmt;
+use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +116,95 @@ impl From<NamespaceId> for String {
     fn from(id: NamespaceId) -> String {
         id.0
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "Vec<NamespaceId>", into = "Vec<NamespaceId>")]
+pub struct NamespaceSet(Vec<NamespaceId>);
+
+impl NamespaceSet {
+    pub fn new(mut namespaces: Vec<NamespaceId>) -> Self {
+        canonicalize_namespaces(&mut namespaces);
+        Self(namespaces)
+    }
+
+    pub fn as_slice(&self) -> &[NamespaceId] {
+        &self.0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &NamespaceId> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn into_vec(self) -> Vec<NamespaceId> {
+        self.0
+    }
+}
+
+impl From<Vec<NamespaceId>> for NamespaceSet {
+    fn from(namespaces: Vec<NamespaceId>) -> Self {
+        Self::new(namespaces)
+    }
+}
+
+impl From<NamespaceSet> for Vec<NamespaceId> {
+    fn from(namespaces: NamespaceSet) -> Self {
+        namespaces.0
+    }
+}
+
+impl AsRef<[NamespaceId]> for NamespaceSet {
+    fn as_ref(&self) -> &[NamespaceId] {
+        &self.0
+    }
+}
+
+impl Deref for NamespaceSet {
+    type Target = [NamespaceId];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a NamespaceSet {
+    type Item = &'a NamespaceId;
+    type IntoIter = std::slice::Iter<'a, NamespaceId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for NamespaceSet {
+    type Item = NamespaceId;
+    type IntoIter = std::vec::IntoIter<NamespaceId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl FromIterator<NamespaceId> for NamespaceSet {
+    fn from_iter<T: IntoIterator<Item = NamespaceId>>(iter: T) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+fn canonicalize_namespaces(namespaces: &mut Vec<NamespaceId>) {
+    if namespaces.len() <= 1 {
+        return;
+    }
+    namespaces.sort();
+    namespaces.dedup();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +357,25 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         let parsed: NamespaceId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn namespace_set_sorts_and_dedups() {
+        let alpha = NamespaceId::parse("alpha").unwrap();
+        let beta = NamespaceId::parse("beta").unwrap();
+        let set = NamespaceSet::from(vec![beta.clone(), alpha.clone(), beta.clone()]);
+        assert_eq!(set.as_slice(), &[alpha, beta]);
+    }
+
+    #[test]
+    fn namespace_set_json_roundtrip() {
+        let set = NamespaceSet::from(vec![
+            NamespaceId::core(),
+            NamespaceId::parse("alpha").unwrap(),
+        ]);
+        let json = serde_json::to_string(&set).unwrap();
+        let parsed: NamespaceSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, set);
     }
 
     #[test]

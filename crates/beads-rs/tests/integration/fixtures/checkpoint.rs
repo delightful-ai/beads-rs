@@ -181,7 +181,7 @@ pub fn build_manifest_from_files(
         checkpoint_group: checkpoint_group.to_string(),
         store_id,
         store_epoch,
-        namespaces,
+        namespaces: namespaces.into(),
         files: manifest_files,
     }
 }
@@ -299,7 +299,7 @@ fn build_fixture_snapshot(
 
     beads_rs::git::checkpoint::build_snapshot(CheckpointSnapshotInput {
         checkpoint_group: checkpoint_group.to_string(),
-        namespaces,
+        namespaces: namespaces.into(),
         store_id: identity::store_id(1),
         store_epoch: beads_rs::StoreEpoch::new(0),
         created_at_ms: 1_700_000_000_000,

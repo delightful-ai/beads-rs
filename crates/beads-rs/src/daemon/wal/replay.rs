@@ -221,7 +221,7 @@ fn replay_index(
 ) -> Result<ReplayStats, WalReplayError> {
     let mut stats = ReplayStats::default();
     let wal_dir = store_dir.join("wal");
-    let max_record_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+    let max_record_bytes = limits.policy().max_wal_record_bytes();
 
     let mut tracker = ReplayTracker::new();
     if mode == ReplayMode::CatchUp {
@@ -1166,7 +1166,7 @@ mod tests {
         let crc = crc32c(&frame_body);
         file.seek(SeekFrom::Start(frame_offset + 8)).unwrap();
         file.write_all(&crc.to_le_bytes()).unwrap();
-        let max_record_bytes = limits.max_wal_record_bytes.min(limits.max_frame_bytes);
+        let max_record_bytes = limits.policy().max_wal_record_bytes();
         let err = match scan_segment(
             &verified,
             verified.header_len,

@@ -128,8 +128,8 @@ impl MockPeer<Inbound> {
         limits: Limits,
     ) -> Self {
         let mut config = SessionConfig::new(identity, replica_id, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
         let admission = AdmissionController::new(&limits);
         let session = InboundConnecting::new(config, limits, admission);
         Self {
@@ -149,8 +149,8 @@ impl MockPeer<Outbound> {
         limits: Limits,
     ) -> Self {
         let mut config = SessionConfig::new(identity, replica_id, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
         let admission = AdmissionController::new(&limits);
         let session = OutboundConnecting::new(config, limits, admission);
         Self {

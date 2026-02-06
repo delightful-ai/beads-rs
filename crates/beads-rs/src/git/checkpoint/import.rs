@@ -19,14 +19,15 @@ use super::{
     ParsedCheckpointManifest, SupportedCheckpointMeta,
 };
 use crate::core::error::CoreError;
+use crate::core::limits::LimitViolation;
 use crate::core::state::LabelState;
 use crate::core::wire_bead::{
     WireDepStoreV1, WireLabelStateV1, WireNoteV1, WireStamp, WireTombstoneV1,
 };
 use crate::core::{
     BeadId, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore,
-    Limits, NamespaceId, NoteId, OrSet, Stamp, StoreState, Tombstone, TombstoneKey, WriteStamp,
-    sha256_bytes,
+    Limits, NamespaceId, NamespaceSet, NoteId, OrSet, Stamp, StoreState, Tombstone, TombstoneKey,
+    WriteStamp, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -69,13 +70,13 @@ pub enum CheckpointImportError {
     GroupMismatch { meta: String, manifest: String },
     #[error("checkpoint namespaces mismatch (meta {meta:?}, manifest {manifest:?})")]
     NamespacesMismatch {
-        meta: Vec<NamespaceId>,
-        manifest: Vec<NamespaceId>,
+        meta: NamespaceSet,
+        manifest: NamespaceSet,
     },
     #[error("checkpoint namespaces not normalized for {which}: {namespaces:?}")]
     NamespacesNotNormalized {
         which: &'static str,
-        namespaces: Vec<NamespaceId>,
+        namespaces: NamespaceSet,
     },
     #[error("checkpoint format version unsupported: {got}")]
     UnsupportedFormatVersion { got: u32 },
@@ -220,13 +221,10 @@ pub fn import_checkpoint(
             });
         }
 
-        if entry.bytes > limits.max_jsonl_shard_bytes as u64 {
-            return Err(CheckpointImportError::ShardTooLarge {
-                path: full_path.clone(),
-                max_bytes: limits.max_jsonl_shard_bytes as u64,
-                got_bytes: entry.bytes,
-            });
-        }
+        limits
+            .policy()
+            .jsonl_shard_bytes(entry.bytes)
+            .map_err(|err| map_jsonl_shard_violation(err, &full_path, entry.bytes))?;
 
         let mut prev_bead: Option<BeadId> = None;
         let mut prev_tombstone: Option<TombstoneKey> = None;
@@ -334,6 +332,14 @@ pub fn import_checkpoint(
 ///
 /// This is the same verification + parsing as `import_checkpoint(dir, limits)`, but without filesystem I/O.
 pub fn import_checkpoint_export(
+    export: &CheckpointExport,
+    limits: &Limits,
+) -> Result<CheckpointImport, CheckpointImportError> {
+    let parsed = parse_checkpoint_export(export)?;
+    import_checkpoint_export_parsed(&parsed, limits)
+}
+
+fn import_checkpoint_export_parsed(
     export: &ParsedCheckpointExport,
     limits: &Limits,
 ) -> Result<CheckpointImport, CheckpointImportError> {
@@ -378,15 +384,11 @@ pub fn import_checkpoint_export(
             });
         }
 
-        if entry.bytes > limits.max_jsonl_shard_bytes as u64 {
-            return Err(CheckpointImportError::ShardTooLarge {
-                path: PathBuf::from(rel_path.to_path()),
-                max_bytes: limits.max_jsonl_shard_bytes as u64,
-                got_bytes: entry.bytes,
-            });
-        }
-
         let path = PathBuf::from(rel_path.to_path());
+        limits
+            .policy()
+            .jsonl_shard_bytes(entry.bytes)
+            .map_err(|err| map_jsonl_shard_violation(err, &path, entry.bytes))?;
         let mut prev_bead: Option<BeadId> = None;
         let mut prev_tombstone: Option<TombstoneKey> = None;
         match rel_path.kind {
@@ -645,26 +647,20 @@ where
     F: FnMut(JsonlLineContext, T) -> Result<(), CheckpointImportError>,
 {
     let total_bytes = bytes.len() as u64;
-    if total_bytes > limits.max_jsonl_shard_bytes as u64 {
-        return Err(CheckpointImportError::ShardTooLarge {
-            path: path.to_path_buf(),
-            max_bytes: limits.max_jsonl_shard_bytes as u64,
-            got_bytes: total_bytes,
-        });
-    }
+    limits
+        .policy()
+        .jsonl_shard_bytes(total_bytes)
+        .map_err(|err| map_jsonl_shard_violation(err, path, total_bytes))?;
 
     let mut line_no = 0u64;
     let mut entries = 0usize;
 
     for chunk in bytes.split_inclusive(|b| *b == b'\n') {
-        if chunk.len() > limits.max_jsonl_line_bytes {
-            return Err(CheckpointImportError::LineTooLong {
-                path: path.to_path_buf(),
-                line: line_no + 1,
-                max_bytes: limits.max_jsonl_line_bytes as u64,
-                got_bytes: chunk.len() as u64,
-            });
-        }
+        let line_bytes = chunk.len();
+        limits
+            .policy()
+            .jsonl_line_bytes(line_bytes)
+            .map_err(|err| map_jsonl_line_violation(err, path, line_no + 1, line_bytes))?;
 
         let line = if chunk.ends_with(b"\n") {
             &chunk[..chunk.len() - 1]
@@ -675,13 +671,10 @@ where
         line_no += 1;
         let value = parse_json_line::<T>(line, limits, path, line_no)?;
         entries += 1;
-        if entries > limits.max_snapshot_entries {
-            return Err(CheckpointImportError::ShardEntryLimit {
-                path: path.to_path_buf(),
-                max_entries: limits.max_snapshot_entries,
-                got_entries: entries,
-            });
-        }
+        limits
+            .policy()
+            .snapshot_entries(entries)
+            .map_err(|err| map_snapshot_entries_violation(err, path, entries))?;
 
         let ctx = JsonlLineContext {
             line_no,
@@ -727,23 +720,17 @@ where
             break;
         }
         total_bytes = total_bytes.saturating_add(read as u64);
-        if total_bytes > limits.max_jsonl_shard_bytes as u64 {
-            return Err(CheckpointImportError::ShardTooLarge {
-                path: path.to_path_buf(),
-                max_bytes: limits.max_jsonl_shard_bytes as u64,
-                got_bytes: total_bytes,
-            });
-        }
+        limits
+            .policy()
+            .jsonl_shard_bytes(total_bytes)
+            .map_err(|err| map_jsonl_shard_violation(err, path, total_bytes))?;
         hasher.update(&buf);
 
-        if buf.len() > limits.max_jsonl_line_bytes {
-            return Err(CheckpointImportError::LineTooLong {
-                path: path.to_path_buf(),
-                line: line_no + 1,
-                max_bytes: limits.max_jsonl_line_bytes as u64,
-                got_bytes: buf.len() as u64,
-            });
-        }
+        let line_bytes = buf.len();
+        limits
+            .policy()
+            .jsonl_line_bytes(line_bytes)
+            .map_err(|err| map_jsonl_line_violation(err, path, line_no + 1, line_bytes))?;
 
         let line = if buf.ends_with(b"\n") {
             &buf[..buf.len() - 1]
@@ -753,13 +740,10 @@ where
         line_no += 1;
         let value = parse_json_line::<T>(line, limits, path, line_no)?;
         entries += 1;
-        if entries > limits.max_snapshot_entries {
-            return Err(CheckpointImportError::ShardEntryLimit {
-                path: path.to_path_buf(),
-                max_entries: limits.max_snapshot_entries,
-                got_entries: entries,
-            });
-        }
+        limits
+            .policy()
+            .snapshot_entries(entries)
+            .map_err(|err| map_snapshot_entries_violation(err, path, entries))?;
 
         let namespace = namespace.clone();
         let ctx = JsonlLineContext { line_no, namespace };
@@ -788,14 +772,10 @@ fn parse_json_line<T: DeserializeOwned>(
             source,
         })?;
     let depth = json_depth(&value);
-    if depth > limits.max_cbor_depth {
-        return Err(CheckpointImportError::JsonDepthExceeded {
-            path: path.to_path_buf(),
-            line: line_no,
-            max_depth: limits.max_cbor_depth,
-            got_depth: depth,
-        });
-    }
+    limits
+        .policy()
+        .json_depth(depth)
+        .map_err(|err| map_json_depth_violation(err, path, line_no, depth))?;
     serde_json::from_value(value).map_err(|source| CheckpointImportError::JsonLine {
         path: path.to_path_buf(),
         line: line_no,
@@ -808,6 +788,76 @@ fn json_depth(value: &Value) -> usize {
         Value::Array(values) => 1 + values.iter().map(json_depth).max().unwrap_or(0),
         Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
         _ => 1,
+    }
+}
+
+fn map_jsonl_shard_violation(
+    err: LimitViolation,
+    path: &Path,
+    got_bytes: u64,
+) -> CheckpointImportError {
+    match err {
+        LimitViolation::JsonlShardTooLarge { max_bytes, .. } => {
+            CheckpointImportError::ShardTooLarge {
+                path: path.to_path_buf(),
+                max_bytes,
+                got_bytes,
+            }
+        }
+        other => unreachable!("unexpected shard limit violation: {other}"),
+    }
+}
+
+fn map_jsonl_line_violation(
+    err: LimitViolation,
+    path: &Path,
+    line: u64,
+    got_bytes: usize,
+) -> CheckpointImportError {
+    match err {
+        LimitViolation::JsonlLineTooLarge { max_bytes, .. } => CheckpointImportError::LineTooLong {
+            path: path.to_path_buf(),
+            line,
+            max_bytes,
+            got_bytes: got_bytes as u64,
+        },
+        other => unreachable!("unexpected jsonl line limit violation: {other}"),
+    }
+}
+
+fn map_snapshot_entries_violation(
+    err: LimitViolation,
+    path: &Path,
+    entries: usize,
+) -> CheckpointImportError {
+    match err {
+        LimitViolation::SnapshotEntriesTooMany { max_entries, .. } => {
+            CheckpointImportError::ShardEntryLimit {
+                path: path.to_path_buf(),
+                max_entries,
+                got_entries: entries,
+            }
+        }
+        other => unreachable!("unexpected snapshot entry limit violation: {other}"),
+    }
+}
+
+fn map_json_depth_violation(
+    err: LimitViolation,
+    path: &Path,
+    line: u64,
+    depth: usize,
+) -> CheckpointImportError {
+    match err {
+        LimitViolation::JsonDepthExceeded { max_depth, .. } => {
+            CheckpointImportError::JsonDepthExceeded {
+                path: path.to_path_buf(),
+                line,
+                max_depth,
+                got_depth: depth,
+            }
+        }
+        other => unreachable!("unexpected json depth violation: {other}"),
     }
 }
 
@@ -1021,7 +1071,7 @@ mod tests {
             checkpoint_group: "core".to_string(),
             store_id,
             store_epoch,
-            namespaces: vec![NamespaceId::core()],
+            namespaces: vec![NamespaceId::core()].into(),
             files: Default::default(),
         };
         let manifest_hash = manifest.manifest_hash().unwrap();
@@ -1030,7 +1080,7 @@ mod tests {
             store_id,
             store_epoch,
             checkpoint_group: "core".to_string(),
-            namespaces: vec![NamespaceId::core()],
+            namespaces: vec![NamespaceId::core()].into(),
             created_at_ms: 1,
             created_by_replica_id: ReplicaId::new(Uuid::from_u128(2)),
             policy_hash: ContentHash::from_bytes([3u8; 32]),
@@ -1131,9 +1181,7 @@ mod tests {
 
         let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
         let extra = NamespaceId::parse("extra").unwrap();
-        manifest.namespaces = vec![NamespaceId::core(), extra];
-        manifest.namespaces.sort();
-        manifest.namespaces.dedup();
+        manifest.namespaces = vec![NamespaceId::core(), extra].into();
         meta.manifest_hash = manifest.manifest_hash().unwrap();
         meta.content_hash = meta.compute_content_hash().unwrap();
 
@@ -1165,9 +1213,29 @@ mod tests {
             files: BTreeMap::new(),
         };
 
-        let parsed = parse_checkpoint_export(&export).unwrap();
-        let imported = import_checkpoint_export(&parsed, &Limits::default()).unwrap();
+        let _parsed = parse_checkpoint_export(&export).unwrap();
+        let imported = import_checkpoint_export(&export, &Limits::default()).unwrap();
         assert_eq!(imported.checkpoint_group, "core");
+    }
+
+    #[test]
+    fn import_export_rejects_store_id_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (manifest, mut meta) = minimal_manifest_and_meta(dir);
+        meta.store_id = StoreId::new(Uuid::from_bytes([9u8; 16]));
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::new(),
+        };
+
+        let err = import_checkpoint_export(&export, &Limits::default()).unwrap_err();
+        assert!(matches!(err, CheckpointImportError::StoreIdMismatch { .. }));
     }
 
     #[test]

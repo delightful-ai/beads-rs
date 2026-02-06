@@ -411,8 +411,8 @@ where
     let eligible = eligible_namespaces(&runtime.policies, role, allowed_namespaces.as_ref());
 
     let mut config = SessionConfig::new(runtime.local_store, runtime.local_replica_id, &limits);
-    config.requested_namespaces = eligible.clone();
-    config.offered_namespaces = eligible;
+    config.requested_namespaces = eligible.clone().into();
+    config.offered_namespaces = eligible.into();
 
     let peer_replica_id = hello.sender_replica_id;
     tracing::Span::current().record("peer_replica_id", tracing::field::display(peer_replica_id));
@@ -1351,8 +1351,8 @@ mod tests {
             sender_replica_id: replica_id,
             hello_nonce: 1,
             max_frame_bytes: limits.max_frame_bytes as u32,
-            requested_namespaces: vec![NamespaceId::core()],
-            offered_namespaces: vec![NamespaceId::core()],
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
             seen_durable: BTreeMap::new(),
             seen_applied: Some(BTreeMap::new()),
             capabilities: Capabilities {

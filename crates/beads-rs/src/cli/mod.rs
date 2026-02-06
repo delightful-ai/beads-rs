@@ -14,7 +14,8 @@ use clap::{ArgAction, Parser, builder::BoolishValueParser};
 use crate::api::QueryResult;
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{
-    ActorId, Applied, BeadId, BeadSlug, ClientRequestId, DurabilityClass, NamespaceId, Watermarks,
+    ActorId, Applied, BeadId, BeadSlug, ClientRequestId, DurabilityClass, NamespaceId,
+    ValidatedActorId, ValidatedBeadId, ValidatedNamespaceId, Watermarks,
 };
 use crate::daemon::ipc::{
     IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta, ReadConsistency, ReadCtx,
@@ -339,7 +340,7 @@ pub(crate) fn validation_error(field: impl Into<String>, reason: impl Into<Strin
 }
 
 pub(super) fn normalize_bead_id_for(field: &str, id: &str) -> Result<BeadId> {
-    BeadId::parse(id).map_err(|e| {
+    ValidatedBeadId::parse(id).map(Into::into).map_err(|e| {
         Error::Op(crate::daemon::OpError::ValidationFailed {
             field: field.into(),
             reason: e.to_string(),
@@ -386,14 +387,8 @@ fn normalize_optional_namespace(raw: Option<&str>) -> Result<Option<NamespaceId>
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "namespace".into(),
-            reason: "namespace cannot be empty".into(),
-        }));
-    }
-    NamespaceId::parse(trimmed.to_string())
+    ValidatedNamespaceId::parse(raw)
+        .map(Into::into)
         .map(Some)
         .map_err(|e| {
             Error::Op(crate::daemon::OpError::ValidationFailed {
@@ -435,8 +430,7 @@ fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied
 }
 
 fn validate_actor_id(raw: &str) -> Result<ActorId> {
-    let trimmed = raw.trim();
-    ActorId::new(trimmed).map_err(|e| {
+    ValidatedActorId::parse(raw).map(Into::into).map_err(|e| {
         Error::Op(crate::daemon::OpError::ValidationFailed {
             field: "actor".into(),
             reason: e.to_string(),
@@ -471,7 +465,7 @@ pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
     })?;
 
     Ok(parsed
-        .into_iter()
+        .iter()
         .map(|spec| spec.to_spec_string())
         .collect())
 }
@@ -751,6 +745,12 @@ mod tests {
     fn normalize_optional_namespace_accepts_core() {
         let ns = normalize_optional_namespace(Some("core")).expect("valid namespace");
         assert_eq!(ns.unwrap().as_str(), "core");
+    }
+
+    #[test]
+    fn normalize_optional_namespace_rejects_invalid_chars() {
+        let err = normalize_optional_namespace(Some("core name")).unwrap_err();
+        assert_validation_failed(err, "namespace");
     }
 
     #[test]

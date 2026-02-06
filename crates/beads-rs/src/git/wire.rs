@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use super::error::WireError;
 use crate::core::state::LabelState;
 use crate::core::{
-    Bead, BeadId, BeadSlug, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot,
-    LabelStore, Note, NoteAppendV1, NoteId, NoteStore, OrSet, Stamp, Tombstone, WireDepEntryV1,
-    WireDepStoreV1, WireFieldStamp, WireLineageStamp, WireNoteV1, WireStamp, WireTombstoneV1,
-    WriteStamp, sha256_bytes,
+    ActorId, Bead, BeadId, BeadSlug, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey,
+    DepStore, Dot, LabelStore, Note, NoteAppendV1, NoteId, NoteStore, OrSet, Stamp, Tombstone,
+    WireDepEntryV1, WireDepStoreV1, WireFieldStamp, WireLineageStamp, WireNoteV1, WireStamp,
+    WireTombstoneV1, WriteStamp, sha256_bytes,
 };
 
 // =============================================================================
@@ -27,6 +27,98 @@ use crate::core::{
 struct ParsedWireBead {
     bead: Bead,
     label_state: LabelState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireBeadFullCompat {
+    #[serde(flatten)]
+    wire: BeadSnapshotWireV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    closed_at: Option<WireStamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    closed_by: Option<ActorId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assignee_at: Option<WireStamp>,
+}
+
+impl WireBeadFullCompat {
+    fn from_wire(wire: BeadSnapshotWireV1) -> Self {
+        let workflow_stamp = wire_field_stamp(&wire, "workflow");
+        let claim_stamp = wire_field_stamp(&wire, "claim");
+        let (closed_at, closed_by) = match &wire.workflow {
+            crate::core::WireWorkflowSnapshot::Closed { .. } => (
+                Some(WireStamp::from(&workflow_stamp.at)),
+                Some(workflow_stamp.by.clone()),
+            ),
+            _ => (None, None),
+        };
+        let assignee_at = match &wire.claim {
+            crate::core::WireClaimSnapshot::Claimed(_) => Some(WireStamp::from(&claim_stamp.at)),
+            crate::core::WireClaimSnapshot::Unclaimed(_) => None,
+        };
+        Self {
+            wire,
+            closed_at,
+            closed_by,
+            assignee_at,
+        }
+    }
+
+    fn validate_redundant_fields(&self, raw: &serde_json::Value) -> Result<(), WireError> {
+        let obj = raw.as_object().ok_or_else(|| {
+            WireError::InvalidValue("state.jsonl bead must be a JSON object".to_string())
+        })?;
+
+        let workflow_closed = matches!(
+            &self.wire.workflow,
+            crate::core::WireWorkflowSnapshot::Closed { .. }
+        );
+        if workflow_closed {
+            match (self.closed_at.as_ref(), self.closed_by.as_ref()) {
+                (Some(closed_at), Some(closed_by)) => {
+                    let workflow_stamp = wire_field_stamp(&self.wire, "workflow");
+                    let closed_stamp = Stamp::new(wire_to_stamp(*closed_at), closed_by.clone());
+                    if closed_stamp != workflow_stamp {
+                        return Err(WireError::InvalidValue(
+                            "closed_at/closed_by does not match workflow stamp".to_string(),
+                        ));
+                    }
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(WireError::InvalidValue(
+                        "closed_at/closed_by must be provided together".to_string(),
+                    ));
+                }
+            }
+        } else if self.closed_at.is_some() || self.closed_by.is_some() {
+            return Err(WireError::InvalidValue(
+                "closed_at/closed_by present for non-closed status".to_string(),
+            ));
+        }
+
+        let claim_claimed = matches!(&self.wire.claim, crate::core::WireClaimSnapshot::Claimed(_));
+        let assignee_present = obj.get("assignee").is_some();
+        let assignee_expires_present = obj.get("assignee_expires").is_some();
+        if claim_claimed {
+            if let Some(assignee_at) = self.assignee_at.as_ref() {
+                let claim_stamp = wire_field_stamp(&self.wire, "claim");
+                if wire_to_stamp(*assignee_at) != claim_stamp.at {
+                    return Err(WireError::InvalidValue(
+                        "assignee_at does not match claim stamp".to_string(),
+                    ));
+                }
+            }
+        } else {
+            if assignee_present || assignee_expires_present || self.assignee_at.is_some() {
+                return Err(WireError::InvalidValue(
+                    "assignee_at/expires present without assignee".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -100,7 +192,8 @@ pub fn serialize_state(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
             }
         };
         let wire = BeadSnapshotWireV1::from_view(&view, label_state.as_ref());
-        let json = serde_json::to_string(&wire)?;
+        let compat = WireBeadFullCompat::from_wire(wire);
+        let json = serde_json::to_string(&compat)?;
         lines.push(json);
     }
 
@@ -280,8 +373,10 @@ fn parse_state_full(bytes: &[u8]) -> Result<Vec<ParsedWireBead>, WireError> {
         if line.trim().is_empty() {
             continue;
         }
-        let wire: BeadSnapshotWireV1 = serde_json::from_str(line)?;
-        let parsed = wire_to_parts(wire)?;
+        let raw: serde_json::Value = serde_json::from_str(line)?;
+        let compat: WireBeadFullCompat = serde_json::from_value(raw.clone())?;
+        compat.validate_redundant_fields(&raw)?;
+        let parsed = wire_to_parts(compat.wire)?;
         let bead_id = parsed.bead.id().clone();
         ensure_strictly_increasing(
             prev_id.as_ref(),
@@ -428,7 +523,7 @@ pub fn parse_legacy_state(
         let bead_id = bead.core.id.clone();
         let lineage = bead.core.created().clone();
         state.insert_live(bead);
-        label_store.insert_state(bead_id.clone(), lineage, parsed.label_state);
+        insert_label_state(&mut label_store, bead_id, lineage, parsed.label_state);
     }
     for (bead_id, lineage, note) in notes {
         note_store.insert(bead_id, lineage, note);
@@ -553,8 +648,8 @@ impl SupportedStoreMeta {
     }
 }
 
-/// Parse meta.json bytes.
-pub fn parse_meta(bytes: &[u8]) -> Result<SupportedStoreMeta, WireError> {
+/// Parse meta.json bytes into a supported meta type.
+pub fn parse_supported_meta(bytes: &[u8]) -> Result<SupportedStoreMeta, WireError> {
     SupportedStoreMeta::parse(bytes)
 }
 
@@ -626,6 +721,16 @@ fn wire_field_to_stamp(field: WireFieldStamp) -> Stamp {
     Stamp::new(wire_to_stamp(at), by)
 }
 
+fn wire_field_stamp(wire: &BeadSnapshotWireV1, field: &str) -> Stamp {
+    let bead_stamp = Stamp::new(wire_to_stamp(wire.at), wire.by.clone());
+    if let Some(v_map) = &wire.v
+        && let Some((at, by)) = v_map.get(field)
+    {
+        return Stamp::new(wire_to_stamp(*at), by.clone());
+    }
+    bead_stamp
+}
+
 fn wire_dep_store_to_state(wire: WireDepStoreV1) -> Result<DepStore, WireError> {
     let mut entries: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
     for entry in wire.entries {
@@ -640,6 +745,16 @@ fn wire_dep_store_to_state(wire: WireDepStoreV1) -> Result<DepStore, WireError> 
     let set = OrSet::try_from_parts(entries, wire.cc)
         .map_err(|err| WireError::InvalidValue(format!("dep orset invalid: {err}")))?;
     Ok(DepStore::from_parts(set, stamp))
+}
+
+fn insert_label_state(
+    label_store: &mut LabelStore,
+    bead_id: BeadId,
+    lineage: Stamp,
+    state: LabelState,
+) {
+    let entry = label_store.state_mut(&bead_id, &lineage);
+    *entry = LabelState::join(entry, &state);
 }
 
 fn wire_to_parts(wire: BeadSnapshotWireV1) -> Result<ParsedWireBead, WireError> {
@@ -659,8 +774,8 @@ fn wire_to_parts(wire: BeadSnapshotWireV1) -> Result<ParsedWireBead, WireError> 
 mod tests {
     use super::*;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Label, Lww, NoteId, Priority,
-        ReplicaId, Workflow,
+        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Label, Lww, NoteId, OrSet,
+        ParentEdge, Priority, ReplicaId, Workflow,
     };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -688,6 +803,24 @@ mod tests {
             estimated_minutes: Lww::new(None, stamp.clone()),
             workflow: Lww::new(Workflow::default(), stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
+    fn make_bead_with(id: &BeadId, stamp: &Stamp, workflow: Workflow, claim: Claim) -> Bead {
+        let core = BeadCore::new(id.clone(), stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), stamp.clone()),
+            description: Lww::new(String::new(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(workflow, stamp.clone()),
+            claim: Lww::new(claim, stamp.clone()),
         };
         Bead::new(core, fields)
     }
@@ -725,19 +858,16 @@ mod tests {
     }
 
     fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
-        let kind = prop_oneof![
+        let non_parent_kind = prop_oneof![
             Just(DepKind::Blocks),
-            Just(DepKind::Parent),
             Just(DepKind::Related),
             Just(DepKind::DiscoveredFrom),
         ];
-        let dot_strategy =
-            (0u8..=255, 0u64..10_000).prop_map(|(replica, counter)| dot(replica, counter));
-        (
+        let non_parent = (
             base58_id_strategy(),
             base58_id_strategy(),
-            kind,
-            dot_strategy,
+            non_parent_kind,
+            (0u8..=255, 0u64..10_000).prop_map(|(replica, counter)| dot(replica, counter)),
             stamp_strategy(),
         )
             .prop_filter("deps cannot be self-referential", |(from, to, _, _, _)| {
@@ -747,7 +877,25 @@ mod tests {
                 let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
                     .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
                 (key, dot, stamp)
-            })
+            });
+
+        let parent = (
+            base58_id_strategy(),
+            base58_id_strategy(),
+            (0u8..=255, 0u64..10_000).prop_map(|(replica, counter)| dot(replica, counter)),
+            stamp_strategy(),
+        )
+            .prop_filter(
+                "deps cannot be self-referential",
+                |(child, parent, _, _)| child != parent,
+            )
+            .prop_map(|(child, parent, dot, stamp)| {
+                let edge = ParentEdge::new(bead_id(&child), bead_id(&parent))
+                    .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason));
+                (edge.to_dep_key(), dot, stamp)
+            });
+
+        prop_oneof![non_parent, parent]
     }
 
     fn jsonl_lines(bytes: &[u8]) -> Vec<String> {
@@ -815,6 +963,155 @@ mod tests {
         assert_eq!(serialize_tombstones(&parsed).unwrap(), tomb_bytes);
         assert_eq!(serialize_deps(&parsed).unwrap(), deps_bytes);
         assert_eq!(serialize_notes(&parsed).unwrap(), notes_bytes);
+    }
+
+    #[test]
+    fn insert_label_state_merges_existing_entry() {
+        let mut label_store = LabelStore::new();
+        let bead_id = bead_id("bd-label-merge");
+        let lineage = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let label_a = Label::parse("urgent").unwrap();
+        let label_b = Label::parse("backend").unwrap();
+        let stamp_a = Stamp::new(WriteStamp::new(2, 0), actor_id("bob"));
+        let stamp_b = Stamp::new(WriteStamp::new(3, 0), actor_id("carol"));
+
+        let mut set_a = OrSet::new();
+        set_a.apply_add(dot(1, 1), label_a.clone());
+        let state_a = LabelState::from_parts(set_a, Some(stamp_a.clone()));
+
+        let mut set_b = OrSet::new();
+        set_b.apply_add(dot(2, 2), label_b.clone());
+        let state_b = LabelState::from_parts(set_b, Some(stamp_b.clone()));
+
+        insert_label_state(&mut label_store, bead_id.clone(), lineage.clone(), state_a);
+        insert_label_state(&mut label_store, bead_id.clone(), lineage.clone(), state_b);
+
+        let merged = label_store
+            .state(&bead_id, &lineage)
+            .expect("label state missing");
+        assert!(merged.dots_for(&label_a).is_some());
+        assert!(merged.dots_for(&label_b).is_some());
+        assert_eq!(merged.stamp(), Some(&stamp_b));
+    }
+
+    #[test]
+    fn serialize_state_emits_workflow_and_claim_timestamps() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let claim = Claim::claimed(actor_id("bob"), None);
+        let bead = make_bead_with(&bead_id("bd-closed"), &stamp, workflow, claim);
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let lines = jsonl_lines(&bytes);
+        assert_eq!(lines.len(), 1);
+        let value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object().expect("object");
+        assert!(obj.contains_key("closed_at"));
+        assert!(obj.contains_key("closed_by"));
+        assert!(obj.contains_key("assignee_at"));
+    }
+
+    #[test]
+    fn parse_state_accepts_legacy_closed_without_closed_at_by() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let bead = make_bead_with(&bead_id("bd-missing"), &stamp, workflow, Claim::default());
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let mut lines = jsonl_lines(&bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.remove("closed_at");
+        obj.remove("closed_by");
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let parsed = parse_state(&join_jsonl(&lines)).expect("legacy closed fields remain readable");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].fields.workflow.value.is_closed());
+    }
+
+    #[test]
+    fn parse_state_accepts_legacy_assignee_without_assignee_at() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let claim = Claim::claimed(actor_id("bob"), None);
+        let bead = make_bead_with(&bead_id("bd-claimed"), &stamp, Workflow::Open, claim);
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let mut lines = jsonl_lines(&bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.remove("assignee_at");
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let parsed = parse_state(&join_jsonl(&lines)).expect("legacy claim fields remain readable");
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(
+            parsed[0].fields.claim.value,
+            Claim::Claimed { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_state_rejects_partial_closed_redundant_fields() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let bead = make_bead_with(&bead_id("bd-partial-closed"), &stamp, workflow, Claim::default());
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let mut lines = jsonl_lines(&bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.remove("closed_by");
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let err = parse_state(&join_jsonl(&lines))
+            .expect_err("partial closed_at/closed_by should remain invalid");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn parse_state_rejects_mismatched_closed_stamp() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let bead = make_bead_with(&bead_id("bd-closed2"), &stamp, workflow, Claim::default());
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let mut lines = jsonl_lines(&bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.insert("closed_at".to_string(), serde_json::json!([999, 0]));
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let err = parse_state(&join_jsonl(&lines)).expect_err("expected mismatched stamp");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn parse_state_rejects_assignee_expires_without_assignee() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let bead = make_bead(&bead_id("bd-unclaimed"), &stamp);
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let mut lines = jsonl_lines(&bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.insert("assignee_expires".to_string(), serde_json::json!(12345));
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let err = parse_state(&join_jsonl(&lines)).expect_err("expected invalid claim data");
+        assert!(matches!(err, WireError::InvalidValue(_)));
     }
 
     #[test]
@@ -1197,7 +1494,9 @@ mod tests {
         let key_blocks = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
         let key_discovered =
             DepKey::new(from.clone(), to.clone(), DepKind::DiscoveredFrom).unwrap();
-        let key_parent = DepKey::new(from.clone(), to.clone(), DepKind::Parent).unwrap();
+        let key_parent = ParentEdge::new(from.clone(), to.clone())
+            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason))
+            .to_dep_key();
         let key_related = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
 
         apply_dep_add_checked(&mut state, key_related, dot(1, 4), stamp.clone());
@@ -1271,12 +1570,9 @@ mod tests {
 
     #[test]
     fn legacy_deps_parse_then_serialize_is_deterministic() {
-        let key_parent = DepKey::new(
-            bead_id("bd-legacy-a"),
-            bead_id("bd-legacy-b"),
-            DepKind::Parent,
-        )
-        .unwrap();
+        let key_parent = ParentEdge::new(bead_id("bd-legacy-a"), bead_id("bd-legacy-b"))
+            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason))
+            .to_dep_key();
         let key_blocks = DepKey::new(
             bead_id("bd-legacy-a"),
             bead_id("bd-legacy-c"),
@@ -1399,7 +1695,8 @@ mod tests {
             let checksums = StoreChecksums::from_bytes(&[], &[], &[], Some(&[]));
             let bytes = serialize_meta(root.as_deref(), write_stamp.as_ref(), &checksums)
                 .unwrap_or_else(|e| panic!("serialize_meta failed: {e}"));
-            let parsed = parse_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
+            let parsed =
+                parse_supported_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
             let expected_root = root
                 .as_ref()
                 .map(|raw| BeadSlug::parse(raw).expect("slug parse"));
@@ -1603,7 +1900,7 @@ mod tests {
         state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note);
         let bytes = serialize_notes(&state).expect("serialize_notes");
 
-        let mut lines = jsonl_lines(&bytes);
+        let lines = jsonl_lines(&bytes);
         let mut wire: NoteAppendV1 = serde_json::from_str(&lines[0]).expect("note json");
         wire.note.at = WireStamp(9, 0);
         let dup_line = serde_json::to_string(&wire).expect("note json");
@@ -1635,19 +1932,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_meta_rejects_unsupported_version() {
+    fn parse_supported_meta_rejects_unsupported_version() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         value["format_version"] = serde_json::Value::from(2);
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let err = parse_meta(&mutated).expect_err("unsupported version should fail");
+        let err = parse_supported_meta(&mutated).expect_err("unsupported version should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
 
+
     #[test]
-    fn parse_meta_accepts_missing_notes_checksum_for_legacy_v1() {
+    fn parse_supported_meta_accepts_missing_notes_checksum_for_legacy_v1() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -1657,13 +1955,13 @@ mod tests {
             .remove("notes_sha256");
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let parsed = parse_meta(&mutated).expect("legacy v1 notes checksum is optional");
+        let parsed = parse_supported_meta(&mutated).expect("legacy v1 notes checksum is optional");
         let parsed_checksums = parsed.checksums().expect("checksums");
         assert_eq!(parsed_checksums.notes, None);
     }
 
     #[test]
-    fn parse_meta_rejects_missing_required_checksums() {
+    fn parse_supported_meta_rejects_missing_required_checksums() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -1673,27 +1971,27 @@ mod tests {
             .remove("state_sha256");
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let err = parse_meta(&mutated).expect_err("missing required checksums should fail");
+        let err =
+            parse_supported_meta(&mutated).expect_err("missing required checksums should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
-
     #[test]
-    fn parse_meta_rejects_invalid_root_slug() {
+    fn parse_supported_meta_rejects_invalid_root_slug() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         value["root_slug"] = serde_json::Value::from("bad slug");
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let err = parse_meta(&mutated).expect_err("invalid slug should fail");
+        let err = parse_supported_meta(&mutated).expect_err("invalid slug should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
 
     #[test]
-    fn parse_meta_accepts_v1_with_checksums() {
+    fn parse_supported_meta_accepts_v1_with_checksums() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
-        let parsed = parse_meta(&bytes).expect("parse meta");
+        let parsed = parse_supported_meta(&bytes).expect("parse meta");
         match parsed.meta() {
             StoreMeta::V1 {
                 root_slug,

@@ -19,8 +19,8 @@ use crate::core::tombstone::TombstoneKey;
 use crate::core::wire_bead::{WireDepEntryV1, WireDepStoreV1};
 use crate::core::{
     BeadSnapshotWireV1, ContentHash, Dot, Durable, HeadStatus, NamespaceId, NamespacePolicy,
-    ReplicaId, ReplicaRoster, StoreEpoch, StoreId, StoreState, Tombstone, Watermarks,
-    WireLineageStamp, WireStamp, WireTombstoneV1, sha256_bytes,
+    NamespaceSet, ReplicaId, ReplicaRoster, StoreEpoch, StoreId, StoreState, Tombstone,
+    Watermarks, WireLineageStamp, WireStamp, WireTombstoneV1, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -62,8 +62,8 @@ pub enum CheckpointExportError {
         "checkpoint export previous namespaces mismatch (previous {previous:?}, snapshot {snapshot:?})"
     )]
     PreviousNamespaces {
-        previous: Vec<NamespaceId>,
-        snapshot: Vec<NamespaceId>,
+        previous: NamespaceSet,
+        snapshot: NamespaceSet,
     },
     #[error(transparent)]
     CanonJson(#[from] CanonJsonError),
@@ -91,7 +91,7 @@ pub fn roster_hash(roster: &ReplicaRoster) -> Result<ContentHash, CanonJsonError
 
 pub struct CheckpointSnapshotInput<'a> {
     pub checkpoint_group: String,
-    pub namespaces: Vec<NamespaceId>,
+    pub namespaces: NamespaceSet,
     pub store_id: StoreId,
     pub store_epoch: StoreEpoch,
     pub created_at_ms: u64,
@@ -108,7 +108,7 @@ pub struct CheckpointSnapshotInput<'a> {
 /// Equivalent to `build_snapshot`, but caller provides `included` watermarks and heads directly.
 pub struct CheckpointSnapshotFromStateInput<'a> {
     pub checkpoint_group: String,
-    pub namespaces: Vec<NamespaceId>,
+    pub namespaces: NamespaceSet,
     pub store_id: StoreId,
     pub store_epoch: StoreEpoch,
     pub created_at_ms: u64,
@@ -126,7 +126,7 @@ pub fn build_snapshot_from_state(
 ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
     let CheckpointSnapshotFromStateInput {
         checkpoint_group,
-        mut namespaces,
+        namespaces,
         store_id,
         store_epoch,
         created_at_ms,
@@ -139,11 +139,8 @@ pub fn build_snapshot_from_state(
         state,
     } = input;
 
-    namespaces.sort();
-    namespaces.dedup();
-
     let mut shards: BTreeMap<CheckpointShardPath, CheckpointShardPayload> = BTreeMap::new();
-    for namespace in &namespaces {
+    for namespace in namespaces.iter() {
         let ns_shards = build_namespace_shards(namespace, state)?;
         shards.extend(ns_shards);
     }
@@ -174,7 +171,7 @@ pub fn build_snapshot(
 ) -> Result<CheckpointSnapshot, CheckpointSnapshotError> {
     let CheckpointSnapshotInput {
         checkpoint_group,
-        mut namespaces,
+        namespaces,
         store_id,
         store_epoch,
         created_at_ms,
@@ -185,11 +182,8 @@ pub fn build_snapshot(
         state,
         watermarks_durable,
     } = input;
-    namespaces.sort();
-    namespaces.dedup();
-
     let mut shards: BTreeMap<CheckpointShardPath, CheckpointShardPayload> = BTreeMap::new();
-    for namespace in &namespaces {
+    for namespace in namespaces.iter() {
         let ns_shards = build_namespace_shards(namespace, state)?;
         shards.extend(ns_shards);
     }
@@ -281,8 +275,8 @@ fn validate_previous(
             snapshot: snapshot.checkpoint_group.clone(),
         });
     }
-    let prev_namespaces = normalize_namespaces(&prev_manifest.namespaces);
-    let snap_namespaces = normalize_namespaces(&snapshot.namespaces);
+    let prev_namespaces = prev_manifest.namespaces.clone();
+    let snap_namespaces = snapshot.namespaces.clone();
     if prev_namespaces != snap_namespaces {
         return Err(CheckpointExportError::PreviousNamespaces {
             previous: prev_namespaces,
@@ -290,13 +284,6 @@ fn validate_previous(
         });
     }
     Ok(())
-}
-
-fn normalize_namespaces(namespaces: &[NamespaceId]) -> Vec<NamespaceId> {
-    let mut out = namespaces.to_vec();
-    out.sort();
-    out.dedup();
-    out
 }
 
 fn assemble_export_files(
@@ -623,7 +610,7 @@ mod tests {
             .unwrap();
         build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
-            namespaces: vec![namespace.clone()],
+            namespaces: vec![namespace.clone()].into(),
             store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
             store_epoch: StoreEpoch::new(0),
             created_at_ms: 1_700_000_000_000,
@@ -679,7 +666,7 @@ mod tests {
 
         let snapshot = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
-            namespaces: vec![namespace.clone()],
+            namespaces: vec![namespace.clone()].into(),
             store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
             store_epoch: StoreEpoch::new(0),
             created_at_ms: 1_700_000_000_000,
@@ -781,7 +768,7 @@ mod tests {
         ));
         let custom = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
-            namespaces: vec![namespace.clone()],
+            namespaces: vec![namespace.clone()].into(),
             store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
             store_epoch: StoreEpoch::new(0),
             created_at_ms: 1_700_000_000_000,
@@ -812,7 +799,7 @@ mod tests {
 
         let err = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
-            namespaces: vec![namespace.clone()],
+            namespaces: vec![namespace.clone()].into(),
             store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
             store_epoch: StoreEpoch::new(0),
             created_at_ms: 1_700_000_000_000,

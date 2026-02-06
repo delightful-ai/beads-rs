@@ -242,7 +242,7 @@ mod tests {
                 .len() as u64;
         let mut limits = Limits::default();
         limits.wal_segment_max_bytes =
-            (header_len + frame_len(&record, limits.max_wal_record_bytes) * 10) as usize;
+            (header_len + frame_len(&record, limits.policy().max_wal_record_bytes()) * 10) as usize;
 
         let mut wal = EventWal::new(temp.path().to_path_buf(), meta, &limits);
 
@@ -272,7 +272,7 @@ mod tests {
                 .unwrap()
                 .len() as u64;
         let mut limits = Limits::default();
-        let frame_len = frame_len(&record, limits.max_wal_record_bytes);
+        let frame_len = frame_len(&record, limits.policy().max_wal_record_bytes());
         limits.wal_segment_max_bytes = (header_len + frame_len + 1) as usize;
 
         let mut wal = EventWal::new(temp.path().to_path_buf(), meta, &limits);

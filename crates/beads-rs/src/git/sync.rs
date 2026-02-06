@@ -757,7 +757,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         let meta_blob = repo
             .find_object(meta_entry.id(), Some(ObjectType::Blob))?
             .peel_to_blob()?;
-        wire::parse_meta(meta_blob.content())?
+        wire::parse_supported_meta(meta_blob.content())?
     } else {
         wire::SupportedStoreMeta::legacy()
     };

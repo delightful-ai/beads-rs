@@ -422,8 +422,8 @@ where
     let mut event_handle: Option<JoinHandle<()>> = None;
 
     let mut config = SessionConfig::new(local_store, local_replica_id, &limits);
-    config.requested_namespaces = plan.requested_namespaces.clone();
-    config.offered_namespaces = plan.offered_namespaces.clone();
+    config.requested_namespaces = plan.requested_namespaces.clone().into();
+    config.offered_namespaces = plan.offered_namespaces.clone().into();
 
     let session = OutboundConnecting::new(config, limits.clone(), admission);
     let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
@@ -1322,7 +1322,7 @@ mod tests {
                                 if let Some(override_namespaces) = accepted_override.clone()
                                     && let ReplMessage::Welcome(ref mut welcome) = message
                                 {
-                                    welcome.accepted_namespaces = override_namespaces;
+                                    welcome.accepted_namespaces = override_namespaces.into();
                                 }
                                 if let Some(live_stream_enabled) = live_stream_enabled_override
                                     && let ReplMessage::Welcome(ref mut welcome) = message
@@ -1538,8 +1538,8 @@ mod tests {
         let peer_replica = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
 
         let mut config = SessionConfig::new(local_store, local_replica, &limits);
-        config.requested_namespaces = vec![NamespaceId::core()];
-        config.offered_namespaces = vec![NamespaceId::core()];
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
         let session =
             OutboundConnecting::new(config, limits.clone(), AdmissionController::new(&limits));
         let mut store = TestStore;
@@ -1595,7 +1595,7 @@ mod tests {
             store_epoch: local_store.store_epoch,
             receiver_replica_id: peer_replica,
             welcome_nonce: 1,
-            accepted_namespaces: vec![NamespaceId::core()],
+            accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
             live_stream_enabled: true,

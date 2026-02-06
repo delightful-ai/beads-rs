@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::BeadSlug;
+
 /// Format version for wire format.
 ///
 /// Current version is 1.
@@ -46,7 +48,7 @@ pub struct Meta {
     /// When set, new bead IDs will use this slug (e.g., "myproject-xxx").
     /// When None, falls back to inferring from existing IDs or "bd".
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
 }
 
 impl Meta {
@@ -66,7 +68,7 @@ impl Meta {
     }
 
     /// Create meta with a specific root slug.
-    pub fn with_root_slug(root_slug: String) -> Self {
+    pub fn with_root_slug(root_slug: BeadSlug) -> Self {
         Self {
             format_version: FormatVersion::CURRENT,
             root_slug: Some(root_slug),
@@ -102,5 +104,14 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: Meta = serde_json::from_str(&json).unwrap();
         assert_eq!(meta, parsed);
+    }
+
+    #[test]
+    fn meta_serde_roundtrip_with_root_slug() {
+        let meta = Meta::with_root_slug(BeadSlug::parse("beads-rs").unwrap());
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: Meta = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta, parsed);
+        assert_eq!(parsed.root_slug.unwrap().as_str(), "beads-rs");
     }
 }
