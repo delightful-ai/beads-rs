@@ -13,9 +13,9 @@ use crate::core::error::details::{
 };
 use crate::core::{
     Applied, DecodeError, Durable, ErrorPayload, EventFrameError, EventFrameV1, EventId,
-    EventShaLookup, EventShaLookupError, HeadStatus, Limits, NamespaceId, ProtocolErrorCode,
-    ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, Watermark,
-    IntoErrorPayload, hash_event_body, verify_event_frame,
+    EventShaLookup, EventShaLookupError, HeadStatus, IntoErrorPayload, Limits, NamespaceId,
+    ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
+    Watermark, hash_event_body, verify_event_frame,
 };
 use crate::daemon::admission::{AdmissionController, AdmissionRejection};
 use crate::daemon::metrics;
@@ -172,7 +172,9 @@ pub struct Outbound;
 pub struct Connecting;
 
 #[derive(Clone, Copy, Debug)]
-pub struct Handshaking;
+pub struct Handshaking {
+    expected_hello_nonce: u64,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct LiveStream;
@@ -590,7 +592,9 @@ impl Session<Outbound, Connecting> {
     ) -> (Session<Outbound, Handshaking>, SessionAction) {
         let hello = self.build_hello(store, now_ms);
         (
-            self.with_phase(Handshaking),
+            self.with_phase(Handshaking {
+                expected_hello_nonce: hello.hello_nonce,
+            }),
             SessionAction::Send(ReplMessage::Hello(hello)),
         )
     }
@@ -599,6 +603,7 @@ impl Session<Outbound, Connecting> {
 impl Session<Outbound, Handshaking> {
     pub fn resend_handshake(&mut self, store: &impl SessionStore, now_ms: u64) -> SessionAction {
         let hello = self.build_hello(store, now_ms);
+        self.phase.expected_hello_nonce = hello.hello_nonce;
         SessionAction::Send(ReplMessage::Hello(hello))
     }
 }
@@ -855,6 +860,13 @@ impl Session<Outbound, Handshaking> {
             welcome.receiver_replica_id,
         ) {
             return self.fail(error);
+        }
+
+        // Protocol v1 requires a strict nonce echo. Keep this exact match so
+        // WELCOME is bound to the most recent HELLO and cannot be replayed or
+        // mixed across concurrent handshakes.
+        if welcome.welcome_nonce != self.phase.expected_hello_nonce {
+            return self.invalid_request("welcome_nonce does not match hello_nonce");
         }
 
         let local_min = self.config.protocol.min;
@@ -1224,7 +1236,7 @@ impl<R, P> Session<R, P> {
             store_id: hello.store_id,
             store_epoch: hello.store_epoch,
             receiver_replica_id: self.config.local_replica_id,
-            welcome_nonce: self.next_nonce(),
+            welcome_nonce: hello.hello_nonce,
             accepted_namespaces,
             receiver_seen_durable: snapshot.durable,
             receiver_seen_applied: Some(snapshot.applied),
@@ -2158,7 +2170,11 @@ mod tests {
         config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = OutboundConnecting::new(config, limits, admission);
-        let (session, _action) = session.begin_handshake(&store, 0);
+        let (session, action) = session.begin_handshake(&store, 0);
+        let hello_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
         let session = SessionState::Handshaking(session);
 
         let peer_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
@@ -2176,7 +2192,7 @@ mod tests {
             store_id: identity.store_id,
             store_epoch: identity.store_epoch,
             receiver_replica_id: peer_replica,
-            welcome_nonce: 10,
+            welcome_nonce: hello_nonce,
             accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: receiver_seen,
             receiver_seen_applied: None,
@@ -2200,6 +2216,104 @@ mod tests {
             .copied()
             .unwrap_or(Seq0::ZERO);
         assert_eq!(seq, Seq0::ZERO);
+    }
+
+    #[test]
+    fn welcome_rejects_nonce_mismatch() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
+
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (session, action) = session.begin_handshake(&store, 0);
+        let hello_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
+        let session = SessionState::Handshaking(session);
+
+        let welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: ReplicaId::new(Uuid::from_bytes([11u8; 16])),
+            welcome_nonce: hello_nonce.saturating_add(1),
+            accepted_namespaces: vec![NamespaceId::core()].into(),
+            receiver_seen_durable: BTreeMap::new(),
+            receiver_seen_applied: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 1024,
+        };
+
+        let (session, actions) =
+            handle_outbound_message(session, WireReplMessage::Welcome(welcome), &mut store, 0);
+
+        assert!(matches!(session, SessionState::Closed(_)));
+        let error = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+                _ => None,
+            })
+            .expect("error payload");
+        assert_eq!(error.code, ProtocolErrorCode::InvalidRequest.into());
+    }
+
+    #[test]
+    fn welcome_rejects_stale_nonce_after_hello_resend() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
+
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (mut session, action) = session.begin_handshake(&store, 0);
+        let first_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
+        let resend = session.resend_handshake(&store, 1);
+        let second_nonce = match resend {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello resend action, got {other:?}"),
+        };
+        assert_ne!(first_nonce, second_nonce);
+        let session = SessionState::Handshaking(session);
+
+        let stale_welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: ReplicaId::new(Uuid::from_bytes([11u8; 16])),
+            welcome_nonce: first_nonce,
+            accepted_namespaces: vec![NamespaceId::core()].into(),
+            receiver_seen_durable: BTreeMap::new(),
+            receiver_seen_applied: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 1024,
+        };
+
+        let (session, actions) = handle_outbound_message(
+            session,
+            WireReplMessage::Welcome(stale_welcome),
+            &mut store,
+            1,
+        );
+
+        assert!(matches!(session, SessionState::Closed(_)));
+        let error = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Error(payload)) => Some(payload),
+                _ => None,
+            })
+            .expect("error payload");
+        assert_eq!(error.code, ProtocolErrorCode::InvalidRequest.into());
     }
 
     #[test]
@@ -2249,7 +2363,11 @@ mod tests {
         config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = OutboundConnecting::new(config, limits, admission);
-        let (session, _action) = session.begin_handshake(&store, 0);
+        let (session, action) = session.begin_handshake(&store, 0);
+        let hello_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
         let session = SessionState::Handshaking(session);
 
         let welcome = proto::Welcome {
@@ -2257,7 +2375,7 @@ mod tests {
             store_id: identity.store_id,
             store_epoch: identity.store_epoch,
             receiver_replica_id: ReplicaId::new(Uuid::from_bytes([12u8; 16])),
-            welcome_nonce: 10,
+            welcome_nonce: hello_nonce,
             accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
@@ -2284,7 +2402,11 @@ mod tests {
         config.offered_namespaces = vec![NamespaceId::core()].into();
 
         let session = OutboundConnecting::new(config, limits, admission);
-        let (session, _action) = session.begin_handshake(&store, 0);
+        let (session, action) = session.begin_handshake(&store, 0);
+        let hello_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
         let session = SessionState::Handshaking(session);
 
         let welcome = proto::Welcome {
@@ -2292,7 +2414,7 @@ mod tests {
             store_id: identity.store_id,
             store_epoch: identity.store_epoch,
             receiver_replica_id: ReplicaId::new(Uuid::from_bytes([13u8; 16])),
-            welcome_nonce: 10,
+            welcome_nonce: hello_nonce,
             accepted_namespaces: vec![NamespaceId::core()].into(),
             receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,

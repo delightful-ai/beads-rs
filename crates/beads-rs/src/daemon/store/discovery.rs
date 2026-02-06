@@ -78,8 +78,7 @@ impl StoreCaches {
         let remote = self.resolve_remote(repo_path)?;
         let resolution = self.resolve_store_id(repo_path, &remote)?;
 
-        self.path_to_store
-            .insert(repo_path.to_owned(), resolution);
+        self.path_to_store.insert(repo_path.to_owned(), resolution);
         self.remote_to_store.insert(remote.clone(), resolution);
 
         if resolution.should_persist()
@@ -149,9 +148,8 @@ impl StoreCaches {
         }
 
         let cached = self.path_to_store.get(repo_path).copied();
-        let mapped = load_store_id_for_path(repo_path).map(|store_id| {
-            StoreIdResolution::unverified(store_id, StoreIdSource::PathMap)
-        });
+        let mapped = load_store_id_for_path(repo_path)
+            .map(|store_id| StoreIdResolution::unverified(store_id, StoreIdSource::PathMap));
 
         if let Some(resolution) = cached.or(mapped) {
             if let Ok(repo) = Repository::open(repo_path)
@@ -380,19 +378,15 @@ fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, Sto
     Ok(ids.into_iter().next())
 }
 
-fn resolve_verified_store_id(
-    repo: &Repository,
-) -> Result<Option<StoreIdResolution>, OpError> {
-    let meta =
-        read_store_id_from_git_meta(repo).map_err(|err| OpError::InvalidRequest {
-            field: Some("store_id".into()),
-            reason: err.to_string(),
-        })?;
-    let refs =
-        discover_store_id_from_refs(repo).map_err(|err| OpError::InvalidRequest {
-            field: Some("store_id".into()),
-            reason: err.to_string(),
-        })?;
+fn resolve_verified_store_id(repo: &Repository) -> Result<Option<StoreIdResolution>, OpError> {
+    let meta = read_store_id_from_git_meta(repo).map_err(|err| OpError::InvalidRequest {
+        field: Some("store_id".into()),
+        reason: err.to_string(),
+    })?;
+    let refs = discover_store_id_from_refs(repo).map_err(|err| OpError::InvalidRequest {
+        field: Some("store_id".into()),
+        reason: err.to_string(),
+    })?;
 
     if let (Some(meta_id), Some(refs_id)) = (meta, refs) {
         if meta_id != refs_id {
@@ -482,9 +476,7 @@ mod tests {
 
         let remote = RemoteUrl(normalize_url("https://example.com/repo.git"));
         let mut caches = StoreCaches::new();
-        let err = caches
-            .resolve_store_id(dir.path(), &remote)
-            .unwrap_err();
+        let err = caches.resolve_store_id(dir.path(), &remote).unwrap_err();
 
         assert!(matches!(
             err,
@@ -508,7 +500,10 @@ mod tests {
         let resolved = caches.resolve_store(dir.path()).unwrap();
 
         assert_eq!(resolved.resolution.source, StoreIdSource::RemoteFallback);
-        assert_eq!(resolved.resolution.verified, StoreIdVerification::Unverified);
+        assert_eq!(
+            resolved.resolution.verified,
+            StoreIdVerification::Unverified
+        );
         assert_eq!(
             resolved.resolution.store_id,
             store_id_from_remote(&resolved.remote)

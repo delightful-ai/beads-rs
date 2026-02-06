@@ -13,9 +13,7 @@ impl StoreState {
     pub fn new() -> Self {
         let mut by_namespace = BTreeMap::new();
         by_namespace.insert(NamespaceId::core(), CanonicalState::default());
-        Self {
-            by_namespace,
-        }
+        Self { by_namespace }
     }
 
     pub fn core(&self) -> &CanonicalState {

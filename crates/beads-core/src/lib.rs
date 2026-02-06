@@ -48,7 +48,7 @@ pub mod watermark;
 pub mod wire_bead;
 
 pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
-pub use bead::{Bead, BeadCore, BeadFields, BeadView};
+pub use bead::{Bead, BeadCore, BeadFields, BeadProjection, BeadView};
 pub use collections::{Label, Labels};
 pub use composite::{Claim, Closure, Note, Workflow};
 pub use crdt::Lww;
@@ -95,7 +95,7 @@ pub use replica_roster::{
     ReplicaRosterError,
 };
 pub use state::{CanonicalState, DepIndexes, DepStore, LabelStore, LiveLookupError, NoteStore};
-pub use store_meta::{StoreMeta, StoreMetaVersions};
+pub use store_meta::{LEGACY_SNAPSHOT_FORMAT_VERSION, StoreMeta, StoreMetaVersions};
 pub mod store_state {
     pub use super::namespaced_state::*;
 }
@@ -115,6 +115,6 @@ pub use wire_bead::{
     SnapshotSection, SnapshotWireV1, TxnDeltaError, TxnDeltaV1, TxnOpKey, TxnOpV1, WireBeadFull,
     WireBeadPatch, WireClaimSnapshot, WireDepAddV1, WireDepEntryV1, WireDepRemoveV1,
     WireDepStoreV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1, WireLabelRemoveV1,
-    WireLabelStateV1, WireLineageStamp, WireNoteV1, WireParentAddV1, WireParentRemoveV1,
-    WirePatch, WireStamp, WireTombstoneV1, WireWorkflowSnapshot, WorkflowStatus,
+    WireLabelStateV1, WireLineageStamp, WireNoteV1, WireParentAddV1, WireParentRemoveV1, WirePatch,
+    WireStamp, WireTombstoneV1, WireWorkflowSnapshot, WorkflowStatus,
 };

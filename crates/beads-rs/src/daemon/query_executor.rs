@@ -1073,7 +1073,8 @@ mod tests {
     use super::{dep_cycles_from_state, sort_ready_issues};
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey,
-        DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Stamp, Workflow, WriteStamp,
+        DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Stamp, Workflow, WorkflowStatus,
+        WriteStamp,
     };
     use uuid::Uuid;
 
@@ -1086,9 +1087,9 @@ mod tests {
             description: "desc".to_string(),
             design: None,
             acceptance_criteria: None,
-            status: "open".to_string(),
+            status: WorkflowStatus::Open,
             priority,
-            issue_type: "task".to_string(),
+            issue_type: BeadType::Task,
             labels: Vec::new(),
             assignee: None,
             assignee_expires: None,

@@ -1090,6 +1090,11 @@ impl CanonicalState {
             return;
         }
 
+        if let Some(lineage) = tombstone.lineage.as_ref() {
+            self.labels.take_state(&tombstone.id, lineage);
+            self.notes.take_lineage_notes(&tombstone.id, lineage);
+        }
+
         let key = tombstone.key();
         self.collision_tombstones
             .entry(key)
@@ -1224,6 +1229,8 @@ impl CanonicalState {
             }
         }
 
+        result.prune_collision_lineages();
+
         // Rebuild derived indexes from merged dep store
         result.rebuild_dep_indexes();
 
@@ -1231,6 +1238,23 @@ impl CanonicalState {
             Ok(result)
         } else {
             Err(errors)
+        }
+    }
+
+    fn prune_collision_lineages(&mut self) {
+        let lineages: Vec<(BeadId, Stamp)> = self
+            .collision_tombstones
+            .keys()
+            .filter_map(|key| {
+                key.lineage
+                    .as_ref()
+                    .map(|lineage| (key.id.clone(), lineage.clone()))
+            })
+            .collect();
+
+        for (id, lineage) in lineages {
+            self.labels.take_state(&id, &lineage);
+            self.notes.take_lineage_notes(&id, &lineage);
         }
     }
 
@@ -1746,6 +1770,8 @@ mod tests {
         let notes = merged.notes_for(&id);
         assert!(notes.iter().any(|note| note.content == "note-b"));
         assert!(!notes.iter().any(|note| note.content == "note-a"));
+        assert!(merged.label_store().state(&id, &stamp_a).is_none());
+        assert!(merged.note_store().notes_for(&id, &stamp_a).is_empty());
     }
 
     #[test]

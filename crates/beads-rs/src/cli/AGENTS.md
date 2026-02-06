@@ -14,5 +14,7 @@ NEVER: mutate state by directly calling git sync; always go through daemon reque
 - `cargo run --bin bd -- --help`
 - `cargo test`
 
-## Don’t copy this
-- Don’t print from deep helpers; prefer returning `ResponsePayload` and rendering at the edge.
+## Don't copy this
+- Don't print from deep helpers; prefer returning `ResponsePayload` and rendering at the edge.
+- Don't parse/validate IDs here; use `ValidatedBeadId`, `ValidatedNamespaceId` etc from `beads-core::validated`.
+- Don't normalize collections; use `NamespaceSet` / `DepSpecSet` which self-canonicalize.

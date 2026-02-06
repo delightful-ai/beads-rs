@@ -5,7 +5,6 @@
 //! - `_v` object maps field names to stamps only when they differ from bead-level
 //! - If all fields share bead-level stamp, `_v` is omitted
 
-
 use serde::{Deserialize, Serialize};
 
 use super::error::WireError;
@@ -270,8 +269,7 @@ fn parse_state_full(bytes: &[u8]) -> Result<Vec<BeadSnapshotWireV1>, WireError> 
         beads.push(compat.wire);
     }
 
-    SnapshotCodec::validate_beads(&beads)
-        .map_err(|err| map_snapshot_error("state.jsonl", err))?;
+    SnapshotCodec::validate_beads(&beads).map_err(|err| map_snapshot_error("state.jsonl", err))?;
     Ok(beads)
 }
 
@@ -320,8 +318,7 @@ pub fn parse_notes(bytes: &[u8]) -> Result<Vec<NoteAppendV1>, WireError> {
         notes.push(wire);
     }
 
-    SnapshotCodec::validate_notes(&notes)
-        .map_err(|err| map_snapshot_error("notes.jsonl", err))?;
+    SnapshotCodec::validate_notes(&notes).map_err(|err| map_snapshot_error("notes.jsonl", err))?;
     Ok(notes)
 }
 
@@ -538,12 +535,12 @@ fn wire_field_stamp(wire: &BeadSnapshotWireV1, field: &str) -> Stamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::state::LabelState;
     use crate::core::{
         ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Dvv, Label,
         LabelStore, Lww, Note, NoteId, OrSet, ParentEdge, Priority, ReplicaId, Tombstone,
         WireDepEntryV1, WireFieldStamp, WireNoteV1, Workflow,
     };
-    use crate::core::state::LabelState;
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
@@ -1759,7 +1756,6 @@ mod tests {
         let err = parse_supported_meta(&mutated).expect_err("unsupported version should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
-
 
     #[test]
     fn parse_supported_meta_accepts_missing_notes_checksum_for_legacy_v1() {

@@ -62,8 +62,8 @@ impl CheckpointManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::checkpoint::{CheckpointFileKind, shard_name};
     use crate::core::NamespaceId;
+    use crate::git::checkpoint::{CheckpointFileKind, shard_name};
     use uuid::Uuid;
 
     #[test]

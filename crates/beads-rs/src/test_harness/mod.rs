@@ -40,7 +40,8 @@ use crate::daemon::repl::{
     Want, WatermarkMap, WatermarkSnapshot, WatermarkState,
 };
 use crate::daemon::wal::{
-    EventWal, MemoryWalIndex, SegmentConfig, SegmentSyncMode, WalIndexError, rebuild_index,
+    EventWal, MemoryWalIndex, ReplicaLivenessRow, SegmentConfig, SegmentSyncMode, WalIndexError,
+    rebuild_index,
 };
 use crate::paths;
 use std::io::Cursor;
@@ -419,6 +420,19 @@ impl TestNode {
         }
     }
 
+    pub fn replica_liveness(&self) -> Vec<ReplicaLivenessRow> {
+        self.with_daemon(|daemon| {
+            let runtime = daemon
+                .store_runtime_by_id(self.store_id())
+                .expect("store runtime");
+            runtime
+                .wal_index
+                .reader()
+                .load_replica_liveness()
+                .expect("load replica liveness")
+        })
+    }
+
     pub fn has_bead(&self, bead_id: &BeadId) -> bool {
         self.with_daemon(|daemon| {
             let store_id = self.store_id();
@@ -691,6 +705,32 @@ impl ReplicationRig {
         }
 
         entries
+    }
+
+    pub fn assert_replication_ready(&mut self, max_steps: usize) {
+        self.pump_until(max_steps, |rig| rig.replication_ready());
+    }
+
+    pub fn replication_ready(&self) -> bool {
+        if self.nodes.len() < 2 {
+            return true;
+        }
+        let expected: Vec<ReplicaId> = self.nodes.iter().map(|node| node.replica_id()).collect();
+        for node in &self.nodes {
+            let liveness = node.replica_liveness();
+            for peer in &expected {
+                if *peer == node.replica_id() {
+                    continue;
+                }
+                let Some(row) = liveness.iter().find(|row| row.replica_id == *peer) else {
+                    return false;
+                };
+                if row.last_handshake_ms == 0 {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     pub fn apply_request_with_wait(

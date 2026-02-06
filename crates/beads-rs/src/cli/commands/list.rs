@@ -1,12 +1,11 @@
 use clap::Args;
 
-use super::super::{
-    CommonFilterArgs, Ctx, normalize_bead_id_for, print_line, print_ok, send, validation_error,
-};
+use super::super::validation::{normalize_bead_id_for, validation_error};
+use super::super::{CommonFilterArgs, Ctx, print_line, print_ok, send};
 use super::{fmt_issue_ref, fmt_labels};
 use crate::Result;
 use crate::api::QueryResult;
-use crate::cli::parse::{parse_sort, parse_status};
+use crate::cli::parsers::{parse_sort, parse_status};
 use crate::daemon::ipc::{ListPayload, Request, ResponsePayload};
 use crate::daemon::query::Filters;
 
@@ -96,8 +95,8 @@ fn render_issue_summary_opts(v: &crate::api::IssueSummary, show_labels: bool) ->
         "{} [P{}] [{}] {}",
         fmt_issue_ref(&v.namespace, &v.id),
         v.priority,
-        v.issue_type,
-        v.status
+        v.issue_type.as_str(),
+        v.status.as_str()
     );
     if let Some(a) = &v.assignee
         && !a.is_empty()
@@ -114,7 +113,7 @@ fn render_issue_summary_opts(v: &crate::api::IssueSummary, show_labels: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{NamespaceId, WriteStamp};
+    use crate::core::{BeadType, NamespaceId, WorkflowStatus, WriteStamp};
 
     fn sample_summary(namespace: &str, id: &str) -> crate::api::IssueSummary {
         crate::api::IssueSummary {
@@ -124,9 +123,9 @@ mod tests {
             description: String::new(),
             design: None,
             acceptance_criteria: None,
-            status: "open".to_string(),
+            status: WorkflowStatus::Open,
             priority: 1,
-            issue_type: "task".to_string(),
+            issue_type: BeadType::Task,
             labels: Vec::new(),
             assignee: None,
             assignee_expires: None,

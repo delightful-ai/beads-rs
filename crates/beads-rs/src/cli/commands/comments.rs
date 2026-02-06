@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send, validation_error};
+use super::super::validation::{normalize_bead_id, validation_error};
+use super::super::{Ctx, print_line, print_ok, send};
 use super::fmt_wall_ms;
 use crate::Result;
 use crate::api::QueryResult;

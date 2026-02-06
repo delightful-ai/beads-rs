@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::CHECKPOINT_FORMAT_VERSION;
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use crate::core::{
-    CheckpointContentSha256, ContentHash, NamespaceId, NamespaceSet, ReplicaId, StoreEpoch,
-    StoreId,
+    CheckpointContentSha256, ContentHash, NamespaceId, NamespaceSet, ReplicaId, StoreEpoch, StoreId,
 };
 
 pub type IncludedWatermarks = BTreeMap<NamespaceId, BTreeMap<ReplicaId, u64>>;
@@ -100,7 +99,9 @@ impl CheckpointMeta {
     pub fn compute_content_hash(&self) -> Result<CheckpointContentSha256, CanonJsonError> {
         let preimage = self.preimage();
         let bytes = to_canon_json_bytes(&preimage)?;
-        Ok(CheckpointContentSha256::from_checkpoint_preimage_bytes(&bytes))
+        Ok(CheckpointContentSha256::from_checkpoint_preimage_bytes(
+            &bytes,
+        ))
     }
 
     pub fn preimage(&self) -> CheckpointMetaPreimage {

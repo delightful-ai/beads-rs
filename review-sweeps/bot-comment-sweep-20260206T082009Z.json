@@ -1,0 +1,269 @@
+{
+  "generated_at": "2026-02-06T08:20:09Z",
+  "cutoff": "2026-02-06T07:19:46Z",
+  "bots": [
+    "chatgpt-codex-connector[bot]",
+    "cursor[bot]"
+  ],
+  "repo": "delightful-ai/beads-rs",
+  "prs": [
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38
+  ],
+  "items": [
+    {
+      "pr": 25,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/25",
+      "kind": "issue_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:16:58Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/25#issuecomment-3858732710",
+      "body": "Codex Review: Didn't find any major issues. Bravo.\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 26,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/26",
+      "kind": "issue_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:14:16Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/26#issuecomment-3858720879",
+      "body": "Codex Review: Didn't find any major issues. Can't wait for the next one!\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 27,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/27",
+      "kind": "issue_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:16:09Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/27#issuecomment-3858729085",
+      "body": "Codex Review: Didn't find any major issues. Bravo.\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 28,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/28",
+      "kind": "review:COMMENTED",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:11:26Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/28#pullrequestreview-3761462742",
+      "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `4abf16316a`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 28,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/28",
+      "kind": "review_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:11:27Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/28#discussion_r2772859451",
+      "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Use canonical bytes when broadcasting canonical sha**\n\nIn `ingest_remote_batch`, the broadcast event is built with a canonical SHA (`canonical_sha`) but reuses `event.bytes` from the incoming frame. `verify_event_frame` accepts non-canonical bytes as long as the frame hash matches the bytes, so `event.bytes` can be non-canonical even when the body validates. After this change, any such event will be re-broadcast with a SHA computed from canonical bytes but payload bytes that hash differently, triggering `EventFrameError::HashMismatch` for subscribers and causing replication/apply failures. This only occurs when peers send non-canonical payloads, but those were accepted before; now the broadcast path should use the canonical payload you already computed.\n\nUseful? React with \ud83d\udc4d\u00a0/ \ud83d\udc4e.",
+      "path": "crates/beads-rs/src/daemon/core.rs",
+      "line": 1727
+    },
+    {
+      "pr": 29,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/29",
+      "kind": "review:COMMENTED",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:14:54Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/29#pullrequestreview-3761473399",
+      "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `abc62c0a1b`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 29,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/29",
+      "kind": "review_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:14:54Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/29#discussion_r2772869331",
+      "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Prevent partial apply on dep-add cycle errors**\n\nThis new cycle check can return `ApplyError::InvalidDependency`, but `apply_event` applies ops sequentially and does not roll back on error; if a txn contains multiple ops and a later dep-add fails (e.g., cycle introduced by existing state), earlier ops have already mutated state even though the event is rejected by the caller. This creates partial application and can leave state diverged from WAL/replication expectations. Consider pre-validating all dep adds before mutating state or applying to a temporary copy and committing only on success.\n\nUseful? React with \ud83d\udc4d\u00a0/ \ud83d\udc4e.",
+      "path": "crates/beads-core/src/apply.rs",
+      "line": 297
+    },
+    {
+      "pr": 30,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/30",
+      "kind": "issue_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:11:29Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/30#issuecomment-3858711145",
+      "body": "Codex Review: Didn't find any major issues. Nice work!\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 31,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/31",
+      "kind": "issue_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:15:30Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/31#issuecomment-3858726221",
+      "body": "Codex Review: Didn't find any major issues. You're on a roll.\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 32,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/32",
+      "kind": "issue_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:14:13Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/32#issuecomment-3858720680",
+      "body": "Codex Review: Didn't find any major issues. Nice work!\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 33,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/33",
+      "kind": "issue_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:13:57Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/33#issuecomment-3858719677",
+      "body": "Codex Review: Didn't find any major issues. Nice work!\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 34,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/34",
+      "kind": "issue_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:16:13Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/34#issuecomment-3858729405",
+      "body": "Codex Review: Didn't find any major issues. :+1:\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 35,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/35",
+      "kind": "review:COMMENTED",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:13:59Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/35#pullrequestreview-3761470404",
+      "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `c7de47d9cd`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 35,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/35",
+      "kind": "review_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:14:00Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/35#discussion_r2772866518",
+      "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Update reader expected_version after handshake**\n\nThe reader loop enforces `decode_envelope_with_version` using this `expected_version`, but it\u2019s only initialized from the pre-handshake session state (`Connecting/Handshaking` always report `PROTOCOL_VERSION_V1`) and never updated when the session transitions to `Streaming` with the negotiated protocol version. That means a peer that negotiates a higher protocol version will start sending envelopes with `v > 1`, which the reader will reject and terminate the connection. This shows up after a protocol bump or when a peer advertises a higher version; you likely want to `store()` the negotiated version on handshake acceptance (similar to the manager-side reader).\n\nUseful? React with \ud83d\udc4d\u00a0/ \ud83d\udc4e.",
+      "path": "crates/beads-rs/src/daemon/repl/server.rs",
+      "line": 541
+    },
+    {
+      "pr": 36,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/36",
+      "kind": "review:COMMENTED",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:15:34Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/36#pullrequestreview-3761475452",
+      "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `fb89a784a5`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 36,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/36",
+      "kind": "review_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:15:34Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/36#discussion_r2772871194",
+      "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Keep legacy checkpoints readable without redundant fields**\n\nThis new validation makes `state.jsonl` require redundant `closed_at`/`closed_by` fields whenever a bead is closed (and similarly `assignee_at` for claimed beads), but older checkpoints serialized via `BeadSnapshotWireV1` never emitted those extra fields. After this change, upgrading a repo that contains any closed or claimed beads written by previous versions will fail to load with `WireError::InvalidValue`, because the legacy lines lack these redundant stamps. If backward compatibility is required (no format version bump is present), the parser needs to accept the older shape or gate the strict check behind a new checkpoint format version.\n\nUseful? React with \ud83d\udc4d\u00a0/ \ud83d\udc4e.",
+      "path": "crates/beads-rs/src/git/wire.rs",
+      "line": 76
+    },
+    {
+      "pr": 36,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/36",
+      "kind": "review:COMMENTED",
+      "bot": "cursor[bot]",
+      "time": "2026-02-06T08:19:28Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/36#pullrequestreview-3761490210",
+      "body": "Cursor Bugbot has reviewed your changes and found 1 potential issue.\n\n<sup>Bugbot Autofix is OFF. To automatically fix reported issues with Cloud Agents, enable Autofix in the [Cursor dashboard](https://www.cursor.com/dashboard?tab=bugbot).</sup>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 36,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/36",
+      "kind": "review_comment",
+      "bot": "cursor[bot]",
+      "time": "2026-02-06T08:19:28Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/36#discussion_r2772883550",
+      "body": "### Parent filter returns empty for tombstoned parent beads\n\n**Medium Severity**\n\n<!-- DESCRIPTION START -->\n`parent_edges_to` returns an empty vector when the parent bead is tombstoned (via the early `get_live(parent).is_none()` check), which changes the behavior of the parent filter in `list_issues`. The old code used raw `dep_indexes().in_edges()` which didn't check parent liveness, so querying children of a deleted epic would still return its live children. Now `children_of_parent` becomes `Some(empty_set)`, causing every bead to be filtered out and returning an empty list.\n<!-- DESCRIPTION END -->\n\n<!-- BUGBOT_BUG_ID: 53f28576-23bd-403d-aba7-c22b2ad1cf93 -->\n\n<!-- LOCATIONS START\ncrates/beads-core/src/state.rs#L1465-L1476\ncrates/beads-rs/src/daemon/query_executor.rs#L185-L192\nLOCATIONS END -->\n<details>\n<summary>Additional Locations (1)</summary>\n\n- [`crates/beads-rs/src/daemon/query_executor.rs#L185-L192`](https://github.com/delightful-ai/beads-rs/blob/fb89a784a562ccb173b30f6a60110c5fae679cac/crates/beads-rs/src/daemon/query_executor.rs#L185-L192)\n\n</details>\n\n<p><a href=\"https://cursor.com/open?data=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJ1Z2JvdC12MiJ9.eyJ2ZXJzaW9uIjoxLCJ0eXBlIjoiQlVHQk9UX0ZJWF9JTl9DVVJTT1IiLCJkYXRhIjp7InJlZGlzS2V5IjoiYnVnYm90OmI5NWUxNjBjLTU0MmUtNDZjNy1hNTI0LWQ0NmI0Y2VmZWJlZCIsImVuY3J5cHRpb25LZXkiOiJtS2E4aDdYYjFDaEhYZGhnNmNqVkZkdE4xM1BKS3BLaEpDeUl1WFZNa1RJIiwiYnJhbmNoIjoicHIvMTItdmFsaWRhdGVkLWNvbW1hbmQtc3VyZmFjZSIsInJlcG9Pd25lciI6ImRlbGlnaHRmdWwtYWkiLCJyZXBvTmFtZSI6ImJlYWRzLXJzIn0sImlhdCI6MTc3MDM2NTk2OCwiZXhwIjoxNzcyOTU3OTY4fQ.M140Fd1lhEdbN9u-U4KnbEbnNq2Q6qFDDuOWYpgbw2zJd855ZAqnQpMsZ6pXkKNll4SY3DkfH4JiIlWvx1N9MPFDfH0XTpumwKaMXBLpQSsdlfPyYbr2xiOEEpfH7wUlQPJYQutCujGyWEB8KyBRf1sjqOHxJMQ5GNudUlC3cBDE_gZt1b_JaZQCYY6cq7ix6cwTAzb5jdgrEYLrbTbYnX1CylRZmlSz8NFjNt28-qrc3cgj1fHERMUx2gV9Gsx-XI_Ds5neGvbAf9BeQxSRJ50NQb4JXsXAWBaAO35B6VaRkGhwSIgn8Byi_E3KbMCbPlNwBD-VuNio83Yn44rBvg\" target=\"_blank\" rel=\"noopener noreferrer\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://cursor.com/assets/images/fix-in-cursor-dark.png\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://cursor.com/assets/images/fix-in-cursor-light.png\"><img alt=\"Fix in Cursor\" width=\"115\" height=\"28\" src=\"https://cursor.com/assets/images/fix-in-cursor-dark.png\"></picture></a>&nbsp;<a href=\"https://cursor.com/agents?data=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJ1Z2JvdC12MiJ9.eyJ2ZXJzaW9uIjoxLCJ0eXBlIjoiQlVHQk9UX0ZJWF9JTl9XRUIiLCJkYXRhIjp7InJlZGlzS2V5IjoiYnVnYm90OmI5NWUxNjBjLTU0MmUtNDZjNy1hNTI0LWQ0NmI0Y2VmZWJlZCIsImVuY3J5cHRpb25LZXkiOiJtS2E4aDdYYjFDaEhYZGhnNmNqVkZkdE4xM1BKS3BLaEpDeUl1WFZNa1RJIiwiYnJhbmNoIjoicHIvMTItdmFsaWRhdGVkLWNvbW1hbmQtc3VyZmFjZSIsInJlcG9Pd25lciI6ImRlbGlnaHRmdWwtYWkiLCJyZXBvTmFtZSI6ImJlYWRzLXJzIiwicHJOdW1iZXIiOjM2LCJjb21taXRTaGEiOiJmYjg5YTc4NGE1NjJjY2IxNzNiMzBmNmE2MDExMGM1ZmFlNjc5Y2FjIiwicHJvdmlkZXIiOiJnaXRodWIifSwiaWF0IjoxNzcwMzY1OTY4LCJleHAiOjE3NzI5NTc5Njh9.QF2rar9rpD3ODFM65ftyhkIXkVqbJce4TzTzLQtFynSePTwfuM8czXvFZd3X7lF4GQxqv0q72A7-EuGLFIzOpp08Jg3uz5ZFr6Gh20Uj2yvtPKr69e3aul0dh_3rK03sy6u_JTOvgR-Iln2qNsfpizxIPijs8pDKkulaYzQvPVpwhPtjdZVGynYZaBgmMRPMs3SKp2PvLDstkUvkUBwEsIcFBrBLh3lam9vnPYFicpfFG70ldQ8pGrIDKvqsENQOTDbe7jpyVw1tiizkazKmLmqIpdPCKYPQnGo2ZBnOu-iBLIerh4a2WxIBwnsrZsJYcnfhQnr3x-i9S4q0YUimVQ\" target=\"_blank\" rel=\"noopener noreferrer\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://cursor.com/assets/images/fix-in-web-dark.png\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://cursor.com/assets/images/fix-in-web-light.png\"><img alt=\"Fix in Web\" width=\"99\" height=\"28\" src=\"https://cursor.com/assets/images/fix-in-web-dark.png\"></picture></a></p>",
+      "path": "crates/beads-core/src/state.rs",
+      "line": 1476
+    },
+    {
+      "pr": 37,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/37",
+      "kind": "review:COMMENTED",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:13:03Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/37#pullrequestreview-3761467573",
+      "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `4c00a8a6f4`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 37,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/37",
+      "kind": "review_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:13:03Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/37#discussion_r2772863930",
+      "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Merge legacy notes after stores are loaded**\n\nIn `SnapshotCodec::into_state`, `state.insert_live` runs while `label_store`/`note_store` are still empty, but `insert_live` calls `absorb_legacy_lineage` to migrate legacy-scoped labels/notes into the bead\u2019s real lineage. If a snapshot contains legacy lineage notes (e.g., from older ops with no lineage and no collision tombstone), those notes are loaded after the insert and never re-absorbed, so `bead_view` won\u2019t show them. This is a regression specific to snapshot import; consider setting the stores before `insert_live` or re-running `absorb_legacy_lineage` after loading notes/labels.\n\nUseful? React with \ud83d\udc4d\u00a0/ \ud83d\udc4e.",
+      "path": "crates/beads-core/src/wire_bead.rs",
+      "line": 783
+    },
+    {
+      "pr": 38,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/38",
+      "kind": "review:COMMENTED",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:13:30Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/38#pullrequestreview-3761468924",
+      "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `3eaf642910`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+      "path": null,
+      "line": null
+    },
+    {
+      "pr": 38,
+      "pr_url": "https://github.com/delightful-ai/beads-rs/pull/38",
+      "kind": "review_comment",
+      "bot": "chatgpt-codex-connector[bot]",
+      "time": "2026-02-06T08:13:30Z",
+      "url": "https://github.com/delightful-ai/beads-rs/pull/38#discussion_r2772865114",
+      "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Avoid breaking v1 peers with strict nonce echo**\n\nThe new strict check requires `welcome_nonce == hello_nonce` and rejects the handshake otherwise. The v1 spec draft only declares that `WELCOME` carries a `welcome_nonce` (no echo requirement), so older peers that generate an independent welcome nonce will now be rejected as `invalid_request`, breaking mixed-version replication without a protocol bump or fallback. This will surface when a new outbound session connects to an older inbound peer that still follows the previous behavior. Consider gating the echo requirement on a new protocol version or accepting non-matching nonces for v1 compatibility.\n\nUseful? React with \ud83d\udc4d\u00a0/ \ud83d\udc4e.",
+      "path": "crates/beads-rs/src/daemon/repl/session.rs",
+      "line": 869
+    }
+  ]
+}

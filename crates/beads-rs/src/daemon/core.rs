@@ -1684,7 +1684,8 @@ impl Daemon {
 
         let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
-            for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied()) {
+            for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied())
+            {
                 let apply_start = Instant::now();
                 let apply_result = {
                     let state = store.state.ensure_namespace(namespace.clone());
@@ -2675,17 +2676,14 @@ pub(crate) fn insert_store_for_tests(
         store_id,
         GitLaneState::with_path(None, repo_path.to_owned()),
     );
-    daemon
-        .store_caches
-        .remote_to_store
-        .insert(remote.clone(), StoreIdResolution::verified(store_id, StoreIdSource::GitMeta));
-    daemon
-        .store_caches
-        .path_to_store
-        .insert(
-            repo_path.to_owned(),
-            StoreIdResolution::verified(store_id, StoreIdSource::GitMeta),
-        );
+    daemon.store_caches.remote_to_store.insert(
+        remote.clone(),
+        StoreIdResolution::verified(store_id, StoreIdSource::GitMeta),
+    );
+    daemon.store_caches.path_to_store.insert(
+        repo_path.to_owned(),
+        StoreIdResolution::verified(store_id, StoreIdSource::GitMeta),
+    );
     daemon
         .store_caches
         .path_to_remote
@@ -2821,13 +2819,10 @@ mod tests {
         .unwrap()
         .runtime;
         daemon.seed_actor_clocks(&runtime).unwrap();
-        daemon
-            .store_caches
-            .remote_to_store
-            .insert(
-                remote.clone(),
-                StoreIdResolution::unverified(store_id, StoreIdSource::RemoteFallback),
-            );
+        daemon.store_caches.remote_to_store.insert(
+            remote.clone(),
+            StoreIdResolution::unverified(store_id, StoreIdSource::RemoteFallback),
+        );
         daemon.stores.insert(store_id, runtime);
         daemon.git_lanes.insert(store_id, GitLaneState::new());
         store_id

@@ -14,8 +14,8 @@ use clap::{ArgAction, Parser, builder::BoolishValueParser};
 use crate::api::QueryResult;
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{
-    ActorId, Applied, BeadId, BeadSlug, ClientRequestId, DurabilityClass, NamespaceId,
-    ValidatedActorId, ValidatedBeadId, ValidatedNamespaceId, Watermarks,
+    ActorId, Applied, BeadId, ClientRequestId, DurabilityClass, NamespaceId, ValidatedActorId,
+    Watermarks,
 };
 use crate::daemon::ipc::{
     IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta, ReadConsistency, ReadCtx,
@@ -29,7 +29,8 @@ pub(super) use filters::CommonFilterArgs;
 
 mod commands;
 mod filters;
-mod parse;
+mod parsers;
+mod validation;
 
 thread_local! {
     static COMMAND_CONNECTION: RefCell<Option<IpcConnection>> = const { RefCell::new(None) };
@@ -163,7 +164,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 json: cli.json,
                 namespace: resolve_namespace(cli.namespace.as_deref(), &config)?,
                 durability: resolve_durability(cli.durability.as_deref(), &config)?,
-                client_request_id: normalize_optional_client_request_id(
+                client_request_id: validation::normalize_optional_client_request_id(
                     cli.client_request_id.as_deref(),
                 )?,
                 require_min_seen: parse_require_min_seen(cli.require_min_seen.as_deref())?,
@@ -306,7 +307,7 @@ fn load_cli_config(repo: &Path) -> Config {
 
 fn resolve_namespace(cli_value: Option<&str>, config: &Config) -> Result<Option<NamespaceId>> {
     if let Some(raw) = cli_value {
-        normalize_optional_namespace(Some(raw))
+        validation::normalize_optional_namespace(Some(raw))
     } else {
         Ok(config.defaults.namespace.clone())
     }
@@ -326,39 +327,6 @@ fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Result<Option
         })
     })?;
     Ok(Some(parsed))
-}
-
-pub(super) fn normalize_bead_id(id: &str) -> Result<BeadId> {
-    normalize_bead_id_for("id", id)
-}
-
-pub(crate) fn validation_error(field: impl Into<String>, reason: impl Into<String>) -> Error {
-    Error::Op(crate::daemon::OpError::ValidationFailed {
-        field: field.into(),
-        reason: reason.into(),
-    })
-}
-
-pub(super) fn normalize_bead_id_for(field: &str, id: &str) -> Result<BeadId> {
-    ValidatedBeadId::parse(id).map(Into::into).map_err(|e| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: field.into(),
-            reason: e.to_string(),
-        })
-    })
-}
-
-pub(super) fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<BeadId>> {
-    ids.into_iter().map(|id| normalize_bead_id(&id)).collect()
-}
-
-pub(super) fn normalize_bead_slug_for(field: &str, slug: &str) -> Result<BeadSlug> {
-    BeadSlug::parse(slug).map_err(|e| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: field.into(),
-            reason: e.to_string(),
-        })
-    })
 }
 
 pub(super) fn resolve_description(
@@ -381,40 +349,6 @@ pub(super) fn resolve_description(
         (None, Some(b)) => Ok(Some(b)),
         (None, None) => Ok(None),
     }
-}
-
-fn normalize_optional_namespace(raw: Option<&str>) -> Result<Option<NamespaceId>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    ValidatedNamespaceId::parse(raw)
-        .map(Into::into)
-        .map(Some)
-        .map_err(|e| {
-            Error::Op(crate::daemon::OpError::ValidationFailed {
-                field: "namespace".into(),
-                reason: e.to_string(),
-            })
-        })
-}
-
-fn normalize_optional_client_request_id(raw: Option<&str>) -> Result<Option<ClientRequestId>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "client_request_id".into(),
-            reason: "client_request_id cannot be empty".into(),
-        }));
-    }
-    ClientRequestId::parse_str(trimmed).map(Some).map_err(|e| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "client_request_id".into(),
-            reason: e.to_string(),
-        })
-    })
 }
 
 fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied>>> {
@@ -454,20 +388,6 @@ pub(super) fn current_actor_id() -> Result<ActorId> {
     let username = whoami::username();
     let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
     validate_actor_id(&format!("{}@{}", username, hostname))
-}
-
-pub(super) fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
-    let parsed = crate::core::DepSpec::parse_list(&specs).map_err(|e| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "deps".into(),
-            reason: e.to_string(),
-        })
-    })?;
-
-    Ok(parsed
-        .iter()
-        .map(|spec| spec.to_spec_string())
-        .collect())
 }
 
 fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
@@ -700,6 +620,10 @@ fn canonical_flag(flag: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::validation::{
+        normalize_bead_id, normalize_bead_slug_for, normalize_optional_client_request_id,
+        normalize_optional_namespace,
+    };
     use super::*;
     use crate::config::DefaultsConfig;
     use crate::core::{DurabilityClass, HeadStatus, ReplicaId, Seq0};

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::deps::DepEdge;
 use beads_core::{
-    BeadView, BranchName, Claim, NamespaceId, SegmentId, Tombstone as CoreTombstone, WallClock,
-    Workflow, WriteStamp,
+    BeadProjection, BeadType, BeadView, BranchName, NamespaceId, SegmentId,
+    Tombstone as CoreTombstone, WallClock, WorkflowStatus, WriteStamp,
 };
 
 // =============================================================================
@@ -211,10 +211,10 @@ pub struct Issue {
     pub description: String,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub status: String,
+    pub status: WorkflowStatus,
     pub priority: u8,
     #[serde(rename = "type")]
-    pub issue_type: String,
+    pub issue_type: BeadType,
     pub labels: Vec<String>,
 
     pub assignee: Option<String>,
@@ -262,10 +262,10 @@ pub struct IssueSummary {
     pub description: String,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub status: String,
+    pub status: WorkflowStatus,
     pub priority: u8,
     #[serde(rename = "type")]
-    pub issue_type: String,
+    pub issue_type: BeadType,
     pub labels: Vec<String>,
 
     pub assignee: Option<String>,
@@ -287,31 +287,9 @@ pub struct IssueSummary {
 }
 
 impl Issue {
-    pub fn from_view(namespace: &NamespaceId, view: &BeadView) -> Self {
-        let bead = &view.bead;
-        let updated = view.updated_stamp();
-
-        let (assignee, assignee_at, assignee_expires) = match &bead.fields.claim.value {
-            Claim::Claimed { assignee, expires } => (
-                Some(assignee.as_str().to_string()),
-                Some(bead.fields.claim.stamp.at.clone()),
-                *expires,
-            ),
-            Claim::Unclaimed => (None, None, None),
-        };
-
-        let (closed_at, closed_by, closed_reason, closed_on_branch) =
-            match &bead.fields.workflow.value {
-                Workflow::Closed(c) => (
-                    Some(bead.fields.workflow.stamp.at.clone()),
-                    Some(bead.fields.workflow.stamp.by.as_str().to_string()),
-                    c.reason.clone(),
-                    c.on_branch.clone(),
-                ),
-                _ => (None, None, None, None),
-            };
-
-        let notes = view.notes.iter().map(Note::from).collect();
+    pub fn from_projection(namespace: &NamespaceId, projection: &BeadProjection) -> Self {
+        let bead = &projection.bead;
+        let notes = projection.notes.iter().map(Note::from).collect();
 
         Self {
             id: bead.core.id.as_str().to_string(),
@@ -320,37 +298,51 @@ impl Issue {
             description: bead.fields.description.value.clone(),
             design: bead.fields.design.value.clone(),
             acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
-            status: bead.fields.workflow.value.status().to_string(),
+            status: projection.status,
             priority: bead.fields.priority.value.value(),
-            issue_type: bead.fields.bead_type.value.as_str().to_string(),
-            labels: view.labels.iter().map(|l| l.as_str().to_string()).collect(),
-            assignee,
-            assignee_at,
-            assignee_expires,
-            created_at: bead.core.created().at.clone(),
-            created_by: bead.core.created().by.as_str().to_string(),
-            created_on_branch: bead.core.created_on_branch().cloned(),
-            updated_at: updated.at.clone(),
-            updated_by: updated.by.as_str().to_string(),
-            closed_at,
-            closed_by,
-            closed_reason,
-            closed_on_branch,
+            issue_type: projection.issue_type,
+            labels: projection
+                .labels
+                .iter()
+                .map(|l| l.as_str().to_string())
+                .collect(),
+            assignee: projection
+                .assignee
+                .as_ref()
+                .map(|assignee| assignee.as_str().to_string()),
+            assignee_at: projection.assignee_at.clone(),
+            assignee_expires: projection.assignee_expires,
+            created_at: projection.created_at().clone(),
+            created_by: projection.created_by().as_str().to_string(),
+            created_on_branch: projection.created_on_branch().cloned(),
+            updated_at: projection.updated_at().clone(),
+            updated_by: projection.updated_by().as_str().to_string(),
+            closed_at: projection.closed_at.clone(),
+            closed_by: projection
+                .closed_by
+                .as_ref()
+                .map(|actor| actor.as_str().to_string()),
+            closed_reason: projection.closed_reason.clone(),
+            closed_on_branch: projection.closed_on_branch.clone(),
             external_ref: bead.fields.external_ref.value.clone(),
             source_repo: bead.fields.source_repo.value.clone(),
             estimated_minutes: bead.fields.estimated_minutes.value,
-            content_hash: view.content_hash().to_hex(),
+            content_hash: projection.content_hash.to_hex(),
             notes,
             deps_incoming: Vec::new(),
             deps_outgoing: Vec::new(),
         }
     }
+
+    pub fn from_view(namespace: &NamespaceId, view: &BeadView) -> Self {
+        let projection = BeadProjection::from_view(view);
+        Self::from_projection(namespace, &projection)
+    }
 }
 
 impl IssueSummary {
-    pub fn from_view(namespace: &NamespaceId, view: &BeadView) -> Self {
-        let bead = &view.bead;
-        let updated = view.updated_stamp();
+    pub fn from_projection(namespace: &NamespaceId, projection: &BeadProjection) -> Self {
+        let bead = &projection.bead;
         Self {
             id: bead.core.id.as_str().to_string(),
             namespace: namespace.clone(),
@@ -358,25 +350,32 @@ impl IssueSummary {
             description: bead.fields.description.value.clone(),
             design: bead.fields.design.value.clone(),
             acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
-            status: bead.fields.workflow.value.status().to_string(),
+            status: projection.status,
             priority: bead.fields.priority.value.value(),
-            issue_type: bead.fields.bead_type.value.as_str().to_string(),
-            labels: view.labels.iter().map(|l| l.as_str().to_string()).collect(),
-            assignee: bead
-                .fields
-                .claim
-                .value
-                .assignee()
-                .map(|a| a.as_str().to_string()),
-            assignee_expires: bead.fields.claim.value.expires(),
-            created_at: bead.core.created().at.clone(),
-            created_by: bead.core.created().by.as_str().to_string(),
-            updated_at: updated.at.clone(),
-            updated_by: updated.by.as_str().to_string(),
+            issue_type: projection.issue_type,
+            labels: projection
+                .labels
+                .iter()
+                .map(|l| l.as_str().to_string())
+                .collect(),
+            assignee: projection
+                .assignee
+                .as_ref()
+                .map(|assignee| assignee.as_str().to_string()),
+            assignee_expires: projection.assignee_expires,
+            created_at: projection.created_at().clone(),
+            created_by: projection.created_by().as_str().to_string(),
+            updated_at: projection.updated_at().clone(),
+            updated_by: projection.updated_by().as_str().to_string(),
             estimated_minutes: bead.fields.estimated_minutes.value,
-            content_hash: view.content_hash().to_hex(),
-            note_count: view.notes.len(),
+            content_hash: projection.content_hash.to_hex(),
+            note_count: projection.note_count(),
         }
+    }
+
+    pub fn from_view(namespace: &NamespaceId, view: &BeadView) -> Self {
+        let projection = BeadProjection::from_view(view);
+        Self::from_projection(namespace, &projection)
     }
 
     pub fn from_issue(issue: &Issue) -> Self {
@@ -387,9 +386,9 @@ impl IssueSummary {
             description: issue.description.clone(),
             design: issue.design.clone(),
             acceptance_criteria: issue.acceptance_criteria.clone(),
-            status: issue.status.clone(),
+            status: issue.status,
             priority: issue.priority,
-            issue_type: issue.issue_type.clone(),
+            issue_type: issue.issue_type,
             labels: issue.labels.clone(),
             assignee: issue.assignee.clone(),
             assignee_expires: issue.assignee_expires,
@@ -410,8 +409,10 @@ mod tests {
     use beads_core::orset::Dot;
     use beads_core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Label, Lww,
-        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow, WriteStamp,
+        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow,
+        WorkflowStatus, WriteStamp,
     };
+    use serde_json::Value;
     use uuid::Uuid;
 
     fn actor_id(raw: &str) -> ActorId {
@@ -498,5 +499,35 @@ mod tests {
         let issue = Issue::from_view(&NamespaceId::core(), &view);
         assert_eq!(issue.updated_at, WriteStamp::new(3_000, 0));
         assert_eq!(issue.updated_by, note_author.as_str());
+    }
+
+    #[test]
+    fn issue_serializes_status_and_type_as_strings() {
+        let base_stamp = Stamp::new(WriteStamp::new(1_000, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let id = bead_id("bd-json");
+        state
+            .insert(make_bead(&id, &base_stamp))
+            .expect("insert bead");
+
+        let view = state.bead_view(&id).expect("bead view");
+        let issue = Issue::from_view(&NamespaceId::core(), &view);
+        assert_eq!(issue.status, WorkflowStatus::Open);
+        assert_eq!(issue.issue_type, BeadType::Task);
+
+        let value = serde_json::to_value(&issue).expect("serialize issue");
+        assert_eq!(value.get("status").and_then(Value::as_str), Some("open"));
+        assert_eq!(value.get("type").and_then(Value::as_str), Some("task"));
+
+        let summary = IssueSummary::from_view(&NamespaceId::core(), &view);
+        let summary_value = serde_json::to_value(&summary).expect("serialize summary");
+        assert_eq!(
+            summary_value.get("status").and_then(Value::as_str),
+            Some("open")
+        );
+        assert_eq!(
+            summary_value.get("type").and_then(Value::as_str),
+            Some("task")
+        );
     }
 }

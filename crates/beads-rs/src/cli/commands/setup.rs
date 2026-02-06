@@ -14,7 +14,8 @@ use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
 
 use crate::Result;
-use crate::cli::{print_line, validation_error};
+use crate::cli::print_line;
+use crate::cli::validation::validation_error;
 
 #[derive(Subcommand, Debug)]
 pub enum SetupCmd {

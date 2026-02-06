@@ -9,10 +9,10 @@ use minicbor::{Decoder, Encoder};
 use serde_json::Value;
 use thiserror::Error;
 
+pub use crate::core::NamespaceSet;
 use crate::core::error::details::{
     BatchTooLargeDetails, InvalidRequestDetails, MalformedPayloadDetails, ParserKind,
 };
-pub use crate::core::NamespaceSet;
 use crate::core::{
     Applied, Durable, ErrorCode, ErrorPayload, EventBytes, EventFrameV1, EventId, HeadStatus,
     Limits, NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch,

@@ -955,9 +955,9 @@ impl StateDigest {
     }
 
     pub fn checkpoint_content_sha256(bytes: &[u8]) -> Self {
-        StateDigest::CheckpointContentSha256(CheckpointContentSha256::from_checkpoint_preimage_bytes(
-            bytes,
-        ))
+        StateDigest::CheckpointContentSha256(
+            CheckpointContentSha256::from_checkpoint_preimage_bytes(bytes),
+        )
     }
 
     pub fn to_hex(&self) -> String {

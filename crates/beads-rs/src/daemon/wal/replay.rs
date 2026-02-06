@@ -203,9 +203,8 @@ impl WalReplayError {
             | WalReplayError::MidFileCorruption { .. } => ProtocolErrorCode::WalCorrupt.into(),
             WalReplayError::NonContiguousSeq { .. } => ProtocolErrorCode::GapDetected.into(),
             WalReplayError::PrevShaMismatch { .. } => ProtocolErrorCode::PrevShaMismatch.into(),
-            WalReplayError::IndexOffsetInvalid { .. } | WalReplayError::OriginSeqOverflow { .. } => {
-                ProtocolErrorCode::IndexCorrupt.into()
-            }
+            WalReplayError::IndexOffsetInvalid { .. }
+            | WalReplayError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalReplayError::Index(err) => err.code(),
         }
     }
@@ -239,7 +238,8 @@ impl IntoErrorPayload for WalReplayError {
             .with_details(error_details::PathSymlinkRejectedDetails {
                 path: path.display().to_string(),
             }),
-            WalReplayError::RecordShaMismatch(info) | WalReplayError::RecordPayloadMismatch(info) => {
+            WalReplayError::RecordShaMismatch(info)
+            | WalReplayError::RecordPayloadMismatch(info) => {
                 let info = *info;
                 ErrorPayload::new(ProtocolErrorCode::HashMismatch.into(), message, retryable)
                     .with_details(error_details::HashMismatchDetails {
@@ -259,17 +259,21 @@ impl IntoErrorPayload for WalReplayError {
                 expected_prev_sha256,
                 got_prev_sha256,
                 head_seq,
-            } => ErrorPayload::new(ProtocolErrorCode::PrevShaMismatch.into(), message, retryable)
-                .with_details(error_details::PrevShaMismatchDetails {
-                    eid: error_details::EventIdDetails {
-                        namespace: namespace.clone(),
-                        origin_replica_id: origin,
-                        origin_seq: seq.get(),
-                    },
-                    expected_prev_sha256: hex::encode(expected_prev_sha256),
-                    got_prev_sha256: hex::encode(got_prev_sha256),
-                    head_seq: head_seq.get(),
-                }),
+            } => ErrorPayload::new(
+                ProtocolErrorCode::PrevShaMismatch.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PrevShaMismatchDetails {
+                eid: error_details::EventIdDetails {
+                    namespace: namespace.clone(),
+                    origin_replica_id: origin,
+                    origin_seq: seq.get(),
+                },
+                expected_prev_sha256: hex::encode(expected_prev_sha256),
+                got_prev_sha256: hex::encode(got_prev_sha256),
+                head_seq: head_seq.get(),
+            }),
             WalReplayError::NonContiguousSeq {
                 namespace,
                 origin,

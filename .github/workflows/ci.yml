@@ -29,12 +29,12 @@ jobs:
     name: Test (slow)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --features slow-tests
-        timeout-minutes: 10
       - run: cargo check
         working-directory: beads_stateright_models
 

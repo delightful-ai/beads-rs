@@ -1,8 +1,8 @@
-//! Write-Ahead Log for mutation durability.
+//! Legacy snapshot persistence for migration/import.
 //!
-//! Provides crash-safe persistence without flooding git history with commits.
-//! WAL entries are state snapshots (not operation replay) written atomically
-//! via rename. Cleared after successful remote sync.
+//! These snapshots are full-state records written atomically via rename.
+//! On disk they remain in the legacy `wal/` directory and `.wal` extension
+//! for compatibility with older runtimes.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -14,22 +14,20 @@ use thiserror::Error;
 
 use super::remote::RemoteUrl;
 use crate::core::{
-    Bead, BeadId, BeadSlug, CanonicalState, DepKey, DepStore, Dot, Dvv, LabelStore, Limits,
-    NoteStore, OrSet, OrSetValue, Stamp, Tombstone, TombstoneKey,
+    Bead, BeadId, BeadSlug, CanonicalState, DepKey, DepStore, Dot, Dvv,
+    LEGACY_SNAPSHOT_FORMAT_VERSION, LabelStore, Limits, NoteStore, OrSet, OrSetValue, Stamp,
+    Tombstone, TombstoneKey,
 };
 
-/// WAL format version.
-const WAL_VERSION: u32 = 1;
-
-/// A WAL entry containing a full state snapshot.
+/// A legacy snapshot entry containing a full state snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalEntry {
+pub struct LegacySnapshotEntry {
     /// Format version for future compatibility.
     pub version: u32,
     /// Wall clock time when written (for debugging).
     pub written_at_ms: u64,
     /// Full state snapshot.
-    #[serde(with = "wal_state")]
+    #[serde(with = "snapshot_state")]
     pub state: CanonicalState,
     /// Root slug for bead IDs.
     pub root_slug: Option<BeadSlug>,
@@ -37,7 +35,7 @@ pub struct WalEntry {
     pub sequence: u64,
 }
 
-mod wal_state {
+mod snapshot_state {
     use super::*;
     use crate::core::state::{LabelState, legacy_fallback_lineage, note_collision_cmp};
     use crate::core::wire_bead::{
@@ -52,22 +50,22 @@ mod wal_state {
     use std::collections::{BTreeMap, BTreeSet};
 
     #[derive(Serialize, Deserialize)]
-    struct WalStateV2 {
+    struct SnapshotStateV2 {
         live: Vec<Bead>,
         tombstones: Vec<Tombstone>,
         #[serde(default)]
-        deps: WalDepStore,
+        deps: SnapshotDepStore,
         #[serde(default)]
-        labels: WalLabelStore,
+        labels: SnapshotLabelStore,
         #[serde(default)]
-        notes: WalNoteStore,
+        notes: SnapshotNoteStore,
     }
 
     #[derive(Clone, Debug, Serialize)]
     #[serde(transparent)]
-    struct WalDepStore(WireDepStoreV1);
+    struct SnapshotDepStore(WireDepStoreV1);
 
-    impl Default for WalDepStore {
+    impl Default for SnapshotDepStore {
         fn default() -> Self {
             Self(WireDepStoreV1 {
                 cc: Dvv::default(),
@@ -77,7 +75,7 @@ mod wal_state {
         }
     }
 
-    impl WalDepStore {
+    impl SnapshotDepStore {
         fn into_dep_store(self) -> DepStore {
             let mut map: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
             for entry in self.0.entries {
@@ -93,7 +91,7 @@ mod wal_state {
                     pruned_dots = normalization.pruned_dots,
                     removed_empty_entries = normalization.removed_empty_entries,
                     resolved_collisions = normalization.resolved_collisions,
-                    "normalized dep OR-Set from WAL snapshot"
+                    "normalized dep OR-Set from legacy snapshot"
                 );
             }
             let stamp = self.0.stamp.map(stamp_from_wire_field_stamp);
@@ -106,14 +104,14 @@ mod wal_state {
         Stamp::new(crate::core::WriteStamp::from(wire), actor)
     }
 
-    impl<'de> Deserialize<'de> for WalDepStore {
+    impl<'de> Deserialize<'de> for SnapshotDepStore {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: Deserializer<'de>,
         {
             #[derive(Deserialize)]
             #[serde(untagged)]
-            enum WalDepStoreRepr {
+            enum SnapshotDepStoreRepr {
                 V2 {
                     #[serde(default)]
                     cc: Dvv,
@@ -125,26 +123,28 @@ mod wal_state {
                 LegacyEntries(Vec<WireDepEntryV1>),
             }
 
-            match WalDepStoreRepr::deserialize(deserializer)? {
-                WalDepStoreRepr::V2 { cc, entries, stamp } => {
-                    Ok(WalDepStore(WireDepStoreV1 { cc, entries, stamp }))
+            match SnapshotDepStoreRepr::deserialize(deserializer)? {
+                SnapshotDepStoreRepr::V2 { cc, entries, stamp } => {
+                    Ok(SnapshotDepStore(WireDepStoreV1 { cc, entries, stamp }))
                 }
-                WalDepStoreRepr::LegacyEntries(entries) => Ok(WalDepStore(WireDepStoreV1 {
-                    cc: Dvv::default(),
-                    entries,
-                    stamp: None,
-                })),
+                SnapshotDepStoreRepr::LegacyEntries(entries) => {
+                    Ok(SnapshotDepStore(WireDepStoreV1 {
+                        cc: Dvv::default(),
+                        entries,
+                        stamp: None,
+                    }))
+                }
             }
         }
     }
 
     #[derive(Clone, Debug, Default)]
-    struct WalLabelStore {
+    struct SnapshotLabelStore {
         by_bead: LabelStore,
         legacy: BTreeMap<BeadId, LabelState>,
     }
 
-    impl From<LabelStore> for WalLabelStore {
+    impl From<LabelStore> for SnapshotLabelStore {
         fn from(store: LabelStore) -> Self {
             Self {
                 by_bead: store,
@@ -153,7 +153,7 @@ mod wal_state {
         }
     }
 
-    impl Serialize for WalLabelStore {
+    impl Serialize for SnapshotLabelStore {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
@@ -162,38 +162,38 @@ mod wal_state {
         }
     }
 
-    impl<'de> Deserialize<'de> for WalLabelStore {
+    impl<'de> Deserialize<'de> for SnapshotLabelStore {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: Deserializer<'de>,
         {
             #[derive(Deserialize)]
-            struct WalLineageLabelState {
+            struct SnapshotLineageLabelState {
                 lineage: WireLineageStamp,
                 state: LabelState,
             }
 
             #[derive(Deserialize)]
-            struct WalLabelStoreWire {
+            struct SnapshotLabelStoreWire {
                 #[serde(default)]
-                by_bead: BTreeMap<BeadId, Vec<WalLineageLabelState>>,
+                by_bead: BTreeMap<BeadId, Vec<SnapshotLineageLabelState>>,
                 #[serde(default)]
                 legacy: BTreeMap<BeadId, LabelState>,
             }
 
             #[derive(Deserialize)]
             #[serde(untagged)]
-            enum WalLabelStoreRepr {
+            enum SnapshotLabelStoreRepr {
                 Legacy(BTreeMap<BeadId, LabelState>),
-                Wire(WalLabelStoreWire),
+                Wire(SnapshotLabelStoreWire),
             }
 
-            match WalLabelStoreRepr::deserialize(deserializer)? {
-                WalLabelStoreRepr::Legacy(map) => Ok(WalLabelStore {
+            match SnapshotLabelStoreRepr::deserialize(deserializer)? {
+                SnapshotLabelStoreRepr::Legacy(map) => Ok(SnapshotLabelStore {
                     by_bead: LabelStore::new(),
                     legacy: map,
                 }),
-                WalLabelStoreRepr::Wire(wire) => {
+                SnapshotLabelStoreRepr::Wire(wire) => {
                     let mut store = LabelStore::new();
                     for (id, entries) in wire.by_bead {
                         for entry in entries {
@@ -202,7 +202,7 @@ mod wal_state {
                             *state = LabelState::join(state, &entry.state);
                         }
                     }
-                    Ok(WalLabelStore {
+                    Ok(SnapshotLabelStore {
                         by_bead: store,
                         legacy: wire.legacy,
                     })
@@ -211,7 +211,7 @@ mod wal_state {
         }
     }
 
-    impl WalLabelStore {
+    impl SnapshotLabelStore {
         fn into_label_store(self, state: &CanonicalState) -> LabelStore {
             let mut store = self.by_bead;
             for (id, legacy_state) in self.legacy {
@@ -224,12 +224,12 @@ mod wal_state {
     }
 
     #[derive(Clone, Debug, Default)]
-    struct WalNoteStore {
+    struct SnapshotNoteStore {
         by_bead: NoteStore,
         legacy: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
     }
 
-    impl From<NoteStore> for WalNoteStore {
+    impl From<NoteStore> for SnapshotNoteStore {
         fn from(store: NoteStore) -> Self {
             Self {
                 by_bead: store,
@@ -238,7 +238,7 @@ mod wal_state {
         }
     }
 
-    impl Serialize for WalNoteStore {
+    impl Serialize for SnapshotNoteStore {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
@@ -247,38 +247,38 @@ mod wal_state {
         }
     }
 
-    impl<'de> Deserialize<'de> for WalNoteStore {
+    impl<'de> Deserialize<'de> for SnapshotNoteStore {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: Deserializer<'de>,
         {
             #[derive(Deserialize)]
-            struct WalLineageNotes {
+            struct SnapshotLineageNotes {
                 lineage: WireLineageStamp,
                 notes: BTreeMap<NoteId, Note>,
             }
 
             #[derive(Deserialize)]
-            struct WalNoteStoreWire {
+            struct SnapshotNoteStoreWire {
                 #[serde(default)]
-                by_bead: BTreeMap<BeadId, Vec<WalLineageNotes>>,
+                by_bead: BTreeMap<BeadId, Vec<SnapshotLineageNotes>>,
                 #[serde(default)]
                 legacy: BTreeMap<BeadId, BTreeMap<NoteId, Note>>,
             }
 
             #[derive(Deserialize)]
             #[serde(untagged)]
-            enum WalNoteStoreRepr {
+            enum SnapshotNoteStoreRepr {
                 Legacy(BTreeMap<BeadId, BTreeMap<NoteId, Note>>),
-                Wire(WalNoteStoreWire),
+                Wire(SnapshotNoteStoreWire),
             }
 
-            match WalNoteStoreRepr::deserialize(deserializer)? {
-                WalNoteStoreRepr::Legacy(map) => Ok(WalNoteStore {
+            match SnapshotNoteStoreRepr::deserialize(deserializer)? {
+                SnapshotNoteStoreRepr::Legacy(map) => Ok(SnapshotNoteStore {
                     by_bead: NoteStore::new(),
                     legacy: map,
                 }),
-                WalNoteStoreRepr::Wire(wire) => {
+                SnapshotNoteStoreRepr::Wire(wire) => {
                     let mut store = NoteStore::new();
                     for (id, entries) in wire.by_bead {
                         for entry in entries {
@@ -293,7 +293,7 @@ mod wal_state {
                             }
                         }
                     }
-                    Ok(WalNoteStore {
+                    Ok(SnapshotNoteStore {
                         by_bead: store,
                         legacy: wire.legacy,
                     })
@@ -302,7 +302,7 @@ mod wal_state {
         }
     }
 
-    impl WalNoteStore {
+    impl SnapshotNoteStore {
         fn into_note_store(self, state: &CanonicalState) -> NoteStore {
             let mut store = self.by_bead;
             for (id, legacy_notes) in self.legacy {
@@ -355,9 +355,9 @@ mod wal_state {
         }
 
         #[test]
-        fn wal_dep_store_empty_dots_pruned() {
+        fn snapshot_dep_store_empty_dots_pruned() {
             let key = dep_key("bd-a", "bd-b");
-            let store = WalDepStore(WireDepStoreV1 {
+            let store = SnapshotDepStore(WireDepStoreV1 {
                 cc: Dvv::default(),
                 entries: vec![WireDepEntryV1 {
                     key: key.clone(),
@@ -372,10 +372,10 @@ mod wal_state {
         }
 
         #[test]
-        fn wal_dep_store_mixed_dots_preserves_non_empty() {
+        fn snapshot_dep_store_mixed_dots_preserves_non_empty() {
             let empty_key = dep_key("bd-a", "bd-b");
             let filled_key = dep_key("bd-a", "bd-c");
-            let store = WalDepStore(WireDepStoreV1 {
+            let store = SnapshotDepStore(WireDepStoreV1 {
                 cc: Dvv::default(),
                 entries: vec![
                     WireDepEntryV1 {
@@ -397,9 +397,9 @@ mod wal_state {
         }
 
         #[test]
-        fn wal_dep_store_serializes_transparently() {
+        fn snapshot_dep_store_serializes_transparently() {
             let key = dep_key("bd-a", "bd-b");
-            let store = WalDepStore(WireDepStoreV1 {
+            let store = SnapshotDepStore(WireDepStoreV1 {
                 cc: Dvv::default(),
                 entries: vec![WireDepEntryV1 {
                     key,
@@ -442,7 +442,7 @@ mod wal_state {
         }
 
         #[test]
-        fn wal_label_store_migrates_legacy_labels() {
+        fn snapshot_label_store_migrates_legacy_labels() {
             let bead_id = BeadId::parse("bd-legacy-label").unwrap();
             let lineage = make_stamp(10, 0, "alice");
             let mut state = CanonicalState::new();
@@ -462,8 +462,8 @@ mod wal_state {
             legacy.insert(bead_id.clone(), legacy_state);
 
             let value = serde_json::to_value(&legacy).unwrap();
-            let wal_labels: WalLabelStore = serde_json::from_value(value).unwrap();
-            let migrated = wal_labels.into_label_store(&state);
+            let snapshot_labels: SnapshotLabelStore = serde_json::from_value(value).unwrap();
+            let migrated = snapshot_labels.into_label_store(&state);
             let labels = migrated
                 .state(&bead_id, &lineage)
                 .expect("label state missing")
@@ -472,7 +472,7 @@ mod wal_state {
         }
 
         #[test]
-        fn wal_note_store_migrates_legacy_notes() {
+        fn snapshot_note_store_migrates_legacy_notes() {
             let bead_id = BeadId::parse("bd-legacy-note").unwrap();
             let lineage = make_stamp(20, 0, "alice");
             let mut state = CanonicalState::new();
@@ -490,8 +490,8 @@ mod wal_state {
             legacy.insert(bead_id.clone(), notes);
 
             let value = serde_json::to_value(&legacy).unwrap();
-            let wal_notes: WalNoteStore = serde_json::from_value(value).unwrap();
-            let migrated = wal_notes.into_note_store(&state);
+            let snapshot_notes: SnapshotNoteStore = serde_json::from_value(value).unwrap();
+            let migrated = snapshot_notes.into_note_store(&state);
             let migrated_notes = migrated.notes_for(&bead_id, &lineage);
             assert_eq!(migrated_notes.len(), 1);
             assert_eq!(migrated_notes[0], &note);
@@ -499,40 +499,40 @@ mod wal_state {
     }
 
     #[derive(Deserialize)]
-    struct LegacyWalStateVec {
+    struct LegacySnapshotStateVec {
         live: Vec<Bead>,
         tombstones: Vec<Tombstone>,
-        deps: Vec<LegacyWalDep>,
+        deps: Vec<LegacySnapshotDep>,
         #[serde(default)]
-        labels: WalLabelStore,
+        labels: SnapshotLabelStore,
         #[serde(default)]
-        notes: WalNoteStore,
+        notes: SnapshotNoteStore,
     }
 
     #[derive(Deserialize)]
-    struct LegacyWalDep {
+    struct LegacySnapshotDep {
         key: DepKey,
         #[serde(flatten)]
         _edge: BTreeMap<String, serde_json::Value>,
     }
 
     #[derive(Deserialize)]
-    struct LegacyWalStateMap {
+    struct LegacySnapshotStateMap {
         live: BTreeMap<BeadId, Bead>,
         tombstones: BTreeMap<TombstoneKey, Tombstone>,
         deps: BTreeMap<DepKey, serde_json::Value>,
         #[serde(default)]
-        labels: WalLabelStore,
+        labels: SnapshotLabelStore,
         #[serde(default)]
-        notes: WalNoteStore,
+        notes: SnapshotNoteStore,
     }
 
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum WalStateRepr {
-        V2(WalStateV2),
-        LegacyVecs(LegacyWalStateVec),
-        LegacyMaps(LegacyWalStateMap),
+    enum SnapshotStateRepr {
+        V2(SnapshotStateV2),
+        LegacyVecs(LegacySnapshotStateVec),
+        LegacyMaps(LegacySnapshotStateMap),
     }
 
     pub fn serialize<S>(state: &CanonicalState, serializer: S) -> Result<S::Ok, S::Error>
@@ -550,7 +550,9 @@ mod wal_state {
         let value = Value::deserialize(deserializer)?;
         let is_object = value.is_object();
         if !is_object {
-            return Err(DeError::custom("wal state must be a JSON object"));
+            return Err(DeError::custom(
+                "legacy snapshot state must be a JSON object",
+            ));
         }
 
         let is_legacy = value.get("live").is_some();
@@ -561,22 +563,22 @@ mod wal_state {
         }
 
         let (live, tombstones, deps, labels, notes) =
-            match serde_json::from_value::<WalStateRepr>(value).map_err(DeError::custom)? {
-                WalStateRepr::V2(snapshot) => (
+            match serde_json::from_value::<SnapshotStateRepr>(value).map_err(DeError::custom)? {
+                SnapshotStateRepr::V2(snapshot) => (
                     snapshot.live,
                     snapshot.tombstones,
                     snapshot.deps.into_dep_store(),
                     snapshot.labels,
                     snapshot.notes,
                 ),
-                WalStateRepr::LegacyVecs(snapshot) => (
+                SnapshotStateRepr::LegacyVecs(snapshot) => (
                     snapshot.live,
                     snapshot.tombstones,
                     dep_store_from_legacy(snapshot.deps.into_iter().map(|dep| dep.key)),
                     snapshot.labels,
                     snapshot.notes,
                 ),
-                WalStateRepr::LegacyMaps(snapshot) => (
+                SnapshotStateRepr::LegacyMaps(snapshot) => (
                     snapshot.live.into_values().collect(),
                     snapshot.tombstones.into_values().collect(),
                     dep_store_from_legacy(snapshot.deps.into_keys()),
@@ -615,7 +617,7 @@ mod wal_state {
                 pruned_dots = normalization.pruned_dots,
                 removed_empty_entries = normalization.removed_empty_entries,
                 resolved_collisions = normalization.resolved_collisions,
-                "normalized legacy dep OR-Set during WAL decode"
+                "normalized legacy dep OR-Set during legacy snapshot decode"
             );
         }
         DepStore::from_parts(set, None)
@@ -638,16 +640,16 @@ mod wal_state {
     }
 }
 
-impl WalEntry {
-    /// Create a new WAL entry.
+impl LegacySnapshotEntry {
+    /// Create a new legacy snapshot entry.
     pub fn new(
         state: CanonicalState,
         root_slug: Option<BeadSlug>,
         sequence: u64,
         wall_ms: u64,
     ) -> Self {
-        WalEntry {
-            version: WAL_VERSION,
+        LegacySnapshotEntry {
+            version: LEGACY_SNAPSHOT_FORMAT_VERSION,
             written_at_ms: wall_ms,
             state,
             root_slug,
@@ -656,34 +658,34 @@ impl WalEntry {
     }
 }
 
-/// WAL errors.
+/// Legacy snapshot errors.
 #[derive(Debug, Error)]
-pub enum WalError {
+pub enum LegacySnapshotError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("WAL version mismatch: expected {expected}, got {got}")]
+    #[error("legacy snapshot version mismatch: expected {expected}, got {got}")]
     VersionMismatch { expected: u32, got: u32 },
 
-    #[error("WAL record too large: max {max_bytes} bytes, got {got_bytes} bytes")]
+    #[error("legacy snapshot record too large: max {max_bytes} bytes, got {got_bytes} bytes")]
     TooLarge { max_bytes: usize, got_bytes: usize },
 }
 
-/// Write-Ahead Log manager.
+/// Legacy snapshot manager.
 ///
-/// Stores per-remote WAL files in a subdirectory of a persistent base dir.
-pub struct Wal {
+/// Stores per-remote snapshot files in a subdirectory of a persistent base dir.
+pub struct LegacySnapshotStore {
     dir: PathBuf,
 }
 
-impl Wal {
-    /// Create a new WAL manager.
+impl LegacySnapshotStore {
+    /// Create a new legacy snapshot store.
     ///
-    /// Creates the WAL directory if it doesn't exist.
-    pub fn new(base_dir: &Path) -> Result<Self, WalError> {
+    /// Creates the legacy snapshot directory if it doesn't exist.
+    pub fn new(base_dir: &Path) -> Result<Self, LegacySnapshotError> {
         let dir = base_dir.join("wal");
         fs::create_dir_all(&dir)?;
 
@@ -693,13 +695,13 @@ impl Wal {
             let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
         }
 
-        Ok(Wal { dir })
+        Ok(LegacySnapshotStore { dir })
     }
 
-    /// Best-effort migration from a legacy runtime WAL directory.
+    /// Best-effort migration from a legacy runtime snapshot directory.
     ///
-    /// The legacy path is `<runtime_dir>/wal`. Any WAL files found there are
-    /// copied into the persistent WAL dir. If both exist, the newer entry wins.
+    /// The legacy path is `<runtime_dir>/wal`. Any snapshot files found there are
+    /// copied into the persistent snapshot dir. If both exist, the newer entry wins.
     pub fn migrate_from_runtime_dir(&self, runtime_dir: &Path) {
         let legacy_dir = runtime_dir.join("wal");
         if legacy_dir == self.dir || !legacy_dir.exists() {
@@ -709,7 +711,11 @@ impl Wal {
         let entries = match fs::read_dir(&legacy_dir) {
             Ok(entries) => entries,
             Err(e) => {
-                tracing::warn!("wal migration: failed to read {:?}: {}", legacy_dir, e);
+                tracing::warn!(
+                    "legacy snapshot migration: failed to read {:?}: {}",
+                    legacy_dir,
+                    e
+                );
                 return;
             }
         };
@@ -730,7 +736,11 @@ impl Wal {
 
             if !dest.exists() {
                 if let Err(e) = copy_then_remove(&path, &dest) {
-                    tracing::warn!("wal migration: failed to move {:?}: {}", path, e);
+                    tracing::warn!(
+                        "legacy snapshot migration: failed to move {:?}: {}",
+                        path,
+                        e
+                    );
                 }
                 continue;
             }
@@ -742,27 +752,39 @@ impl Wal {
                 (Ok(src), Ok(dest_entry)) => {
                     if is_newer(&src, &dest_entry) {
                         if let Err(e) = copy_then_remove(&path, &dest) {
-                            tracing::warn!("wal migration: failed to update {:?}: {}", dest, e);
+                            tracing::warn!(
+                                "legacy snapshot migration: failed to update {:?}: {}",
+                                dest,
+                                e
+                            );
                         }
                     } else if let Err(e) = fs::remove_file(&path) {
-                        tracing::warn!("wal migration: failed to remove {:?}: {}", path, e);
+                        tracing::warn!(
+                            "legacy snapshot migration: failed to remove {:?}: {}",
+                            path,
+                            e
+                        );
                     }
                 }
                 (Ok(_), Err(_)) => {
                     if let Err(e) = copy_then_remove(&path, &dest) {
-                        tracing::warn!("wal migration: failed to update {:?}: {}", dest, e);
+                        tracing::warn!(
+                            "legacy snapshot migration: failed to update {:?}: {}",
+                            dest,
+                            e
+                        );
                     }
                 }
                 (Err(e), Ok(_)) => {
                     tracing::warn!(
-                        "wal migration: keeping legacy WAL {:?} (unreadable): {}",
+                        "legacy snapshot migration: keeping legacy snapshot {:?} (unreadable): {}",
                         path,
                         e
                     );
                 }
                 (Err(e1), Err(e2)) => {
                     tracing::warn!(
-                        "wal migration: keeping legacy WAL {:?} (unreadable): {}, {}",
+                        "legacy snapshot migration: keeping legacy snapshot {:?} (unreadable): {}, {}",
                         path,
                         e1,
                         e2
@@ -772,8 +794,8 @@ impl Wal {
         }
     }
 
-    /// Get the WAL file path for a remote.
-    fn wal_path(&self, remote: &RemoteUrl) -> PathBuf {
+    /// Get the legacy snapshot file path for a remote.
+    fn snapshot_path(&self, remote: &RemoteUrl) -> PathBuf {
         // Hash the remote URL to get a stable filename
         let mut hasher = Sha256::new();
         hasher.update(remote.0.as_bytes());
@@ -783,32 +805,36 @@ impl Wal {
     }
 
     /// Get the temporary file path for atomic writes.
-    fn tmp_path(&self, remote: &RemoteUrl) -> PathBuf {
-        let wal_path = self.wal_path(remote);
-        wal_path.with_extension("wal.tmp")
+    fn snapshot_tmp_path(&self, remote: &RemoteUrl) -> PathBuf {
+        let snapshot_path = self.snapshot_path(remote);
+        snapshot_path.with_extension("wal.tmp")
     }
 
-    /// Write state to WAL atomically.
+    /// Write state to a legacy snapshot atomically.
     ///
     /// Uses write-to-temp + fsync + rename for crash safety.
-    pub fn write(&self, remote: &RemoteUrl, entry: &WalEntry) -> Result<(), WalError> {
+    pub fn write(
+        &self,
+        remote: &RemoteUrl,
+        entry: &LegacySnapshotEntry,
+    ) -> Result<(), LegacySnapshotError> {
         self.write_with_limits(remote, entry, &Limits::default())
     }
 
-    /// Write state to WAL atomically with limit enforcement.
+    /// Write state to a legacy snapshot atomically with limit enforcement.
     pub fn write_with_limits(
         &self,
         remote: &RemoteUrl,
-        entry: &WalEntry,
+        entry: &LegacySnapshotEntry,
         limits: &Limits,
-    ) -> Result<(), WalError> {
-        let tmp_path = self.tmp_path(remote);
-        let wal_path = self.wal_path(remote);
+    ) -> Result<(), LegacySnapshotError> {
+        let tmp_path = self.snapshot_tmp_path(remote);
+        let snapshot_path = self.snapshot_path(remote);
 
         // Serialize to JSON
         let data = serde_json::to_vec(entry)?;
         if data.len() > limits.policy().max_wal_record_bytes() {
-            return Err(WalError::TooLarge {
+            return Err(LegacySnapshotError::TooLarge {
                 max_bytes: limits.policy().max_wal_record_bytes(),
                 got_bytes: data.len(),
             });
@@ -820,7 +846,7 @@ impl Wal {
         file.sync_all()?; // fsync for durability
 
         // Atomic rename
-        fs::rename(&tmp_path, &wal_path)?;
+        fs::rename(&tmp_path, &snapshot_path)?;
 
         // fsync the directory to ensure rename is durable
         #[cfg(unix)]
@@ -833,24 +859,27 @@ impl Wal {
         Ok(())
     }
 
-    /// Read state from WAL if it exists.
+    /// Read state from a legacy snapshot if it exists.
     ///
-    /// Returns None if no WAL file exists.
+    /// Returns None if no snapshot file exists.
     /// Returns error if file exists but is corrupted.
-    pub fn read(&self, remote: &RemoteUrl) -> Result<Option<WalEntry>, WalError> {
-        let wal_path = self.wal_path(remote);
+    pub fn read(
+        &self,
+        remote: &RemoteUrl,
+    ) -> Result<Option<LegacySnapshotEntry>, LegacySnapshotError> {
+        let snapshot_path = self.snapshot_path(remote);
 
-        if !wal_path.exists() {
+        if !snapshot_path.exists() {
             return Ok(None);
         }
 
-        let data = fs::read(&wal_path)?;
-        let entry: WalEntry = serde_json::from_slice(&data)?;
+        let data = fs::read(&snapshot_path)?;
+        let entry: LegacySnapshotEntry = serde_json::from_slice(&data)?;
 
         // Version check
-        if entry.version != WAL_VERSION {
-            return Err(WalError::VersionMismatch {
-                expected: WAL_VERSION,
+        if entry.version != LEGACY_SNAPSHOT_FORMAT_VERSION {
+            return Err(LegacySnapshotError::VersionMismatch {
+                expected: LEGACY_SNAPSHOT_FORMAT_VERSION,
                 got: entry.version,
             });
         }
@@ -858,29 +887,29 @@ impl Wal {
         Ok(Some(entry))
     }
 
-    /// Delete WAL for a remote.
+    /// Delete legacy snapshots for a remote.
     ///
     /// Called after successful remote sync.
-    pub fn delete(&self, remote: &RemoteUrl) -> Result<(), WalError> {
-        let wal_path = self.wal_path(remote);
-        let tmp_path = self.tmp_path(remote);
+    pub fn delete(&self, remote: &RemoteUrl) -> Result<(), LegacySnapshotError> {
+        let snapshot_path = self.snapshot_path(remote);
+        let tmp_path = self.snapshot_tmp_path(remote);
 
-        // Remove both WAL and any stale temp file
-        let _ = fs::remove_file(&wal_path);
+        // Remove both snapshots and any stale temp file
+        let _ = fs::remove_file(&snapshot_path);
         let _ = fs::remove_file(&tmp_path);
 
         Ok(())
     }
 
-    /// Check if a WAL exists for a remote.
+    /// Check if a legacy snapshot exists for a remote.
     pub fn exists(&self, remote: &RemoteUrl) -> bool {
-        self.wal_path(remote).exists()
+        self.snapshot_path(remote).exists()
     }
 
     /// Clean up any stale temp files (from crashes during write).
     ///
     /// Called on startup.
-    pub fn cleanup_stale(&self) -> Result<(), WalError> {
+    pub fn cleanup_stale(&self) -> Result<(), LegacySnapshotError> {
         if let Ok(entries) = fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -893,23 +922,23 @@ impl Wal {
     }
 }
 
-fn read_entry_at(path: &Path) -> Result<WalEntry, WalError> {
+fn read_entry_at(path: &Path) -> Result<LegacySnapshotEntry, LegacySnapshotError> {
     let data = fs::read(path)?;
-    let entry: WalEntry = serde_json::from_slice(&data)?;
-    if entry.version != WAL_VERSION {
-        return Err(WalError::VersionMismatch {
-            expected: WAL_VERSION,
+    let entry: LegacySnapshotEntry = serde_json::from_slice(&data)?;
+    if entry.version != LEGACY_SNAPSHOT_FORMAT_VERSION {
+        return Err(LegacySnapshotError::VersionMismatch {
+            expected: LEGACY_SNAPSHOT_FORMAT_VERSION,
             got: entry.version,
         });
     }
     Ok(entry)
 }
 
-fn is_newer(a: &WalEntry, b: &WalEntry) -> bool {
+fn is_newer(a: &LegacySnapshotEntry, b: &LegacySnapshotEntry) -> bool {
     a.sequence > b.sequence || (a.sequence == b.sequence && a.written_at_ms > b.written_at_ms)
 }
 
-fn copy_then_remove(src: &Path, dest: &Path) -> Result<(), WalError> {
+fn copy_then_remove(src: &Path, dest: &Path) -> Result<(), LegacySnapshotError> {
     fs::copy(src, dest)?;
     fs::remove_file(src)?;
     Ok(())
@@ -934,20 +963,20 @@ mod tests {
     #[test]
     fn write_read_roundtrip() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshot_store = LegacySnapshotStore::new(tmp.path()).unwrap();
         let remote = test_remote();
 
-        let entry = WalEntry::new(
+        let entry = LegacySnapshotEntry::new(
             CanonicalState::new(),
             Some(BeadSlug::parse("test-slug").unwrap()),
             42,
             1234567890,
         );
 
-        wal.write(&remote, &entry).unwrap();
+        snapshot_store.write(&remote, &entry).unwrap();
 
-        let loaded = wal.read(&remote).unwrap().unwrap();
-        assert_eq!(loaded.version, WAL_VERSION);
+        let loaded = snapshot_store.read(&remote).unwrap().unwrap();
+        assert_eq!(loaded.version, LEGACY_SNAPSHOT_FORMAT_VERSION);
         assert_eq!(
             loaded.root_slug,
             Some(BeadSlug::parse("test-slug").unwrap())
@@ -959,17 +988,19 @@ mod tests {
     #[test]
     fn write_rejects_oversize_entry() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshot_store = LegacySnapshotStore::new(tmp.path()).unwrap();
         let remote = test_remote();
 
-        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
+        let entry = LegacySnapshotEntry::new(CanonicalState::new(), None, 1, 0);
         let limits = Limits {
             max_wal_record_bytes: 1,
             ..Limits::default()
         };
 
-        let err = wal.write_with_limits(&remote, &entry, &limits).unwrap_err();
-        assert!(matches!(err, WalError::TooLarge { .. }));
+        let err = snapshot_store
+            .write_with_limits(&remote, &entry, &limits)
+            .unwrap_err();
+        assert!(matches!(err, LegacySnapshotError::TooLarge { .. }));
     }
 
     fn make_bead(id: &str, stamp: &Stamp) -> Bead {
@@ -993,7 +1024,7 @@ mod tests {
     #[test]
     fn write_read_roundtrip_with_tombstones_and_deps() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshot_store = LegacySnapshotStore::new(tmp.path()).unwrap();
         let remote = test_remote();
 
         let actor = ActorId::new("tester").unwrap();
@@ -1019,10 +1050,10 @@ mod tests {
         let dep_key = state.check_dep_add_key(dep_key).unwrap();
         state.apply_dep_add(dep_key, dep_dot, stamp.clone());
 
-        let entry = WalEntry::new(state, None, 7, 42);
-        wal.write(&remote, &entry).unwrap();
+        let entry = LegacySnapshotEntry::new(state, None, 7, 42);
+        snapshot_store.write(&remote, &entry).unwrap();
 
-        let loaded = wal.read(&remote).unwrap().unwrap();
+        let loaded = snapshot_store.read(&remote).unwrap().unwrap();
         assert_eq!(loaded.state.live_count(), 1);
         assert_eq!(loaded.state.tombstone_count(), 1);
         assert_eq!(loaded.state.dep_count(), 1);
@@ -1031,17 +1062,17 @@ mod tests {
     #[test]
     fn read_legacy_map_state_format() {
         #[derive(Serialize)]
-        struct LegacyWalState {
+        struct LegacySnapshotState {
             live: BTreeMap<BeadId, Bead>,
             tombstones: BTreeMap<TombstoneKey, Tombstone>,
             deps: BTreeMap<DepKey, serde_json::Value>,
         }
 
         #[derive(Serialize)]
-        struct LegacyWalEntry {
+        struct LegacySnapshotWireEntry {
             version: u32,
             written_at_ms: u64,
-            state: LegacyWalState,
+            state: LegacySnapshotState,
             root_slug: Option<String>,
             sequence: u64,
         }
@@ -1053,10 +1084,10 @@ mod tests {
         let mut live = BTreeMap::new();
         live.insert(bead.core.id.clone(), bead);
 
-        let legacy = LegacyWalEntry {
-            version: WAL_VERSION,
+        let legacy = LegacySnapshotWireEntry {
+            version: LEGACY_SNAPSHOT_FORMAT_VERSION,
             written_at_ms: 1,
-            state: LegacyWalState {
+            state: LegacySnapshotState {
                 live,
                 tombstones: BTreeMap::new(),
                 deps: BTreeMap::new(),
@@ -1066,7 +1097,7 @@ mod tests {
         };
 
         let data = serde_json::to_vec(&legacy).unwrap();
-        let loaded: WalEntry = serde_json::from_slice(&data).unwrap();
+        let loaded: LegacySnapshotEntry = serde_json::from_slice(&data).unwrap();
         assert_eq!(loaded.state.live_count(), 1);
         assert_eq!(loaded.state.tombstone_count(), 0);
         assert_eq!(loaded.state.dep_count(), 0);
@@ -1075,16 +1106,16 @@ mod tests {
     #[test]
     fn read_legacy_dep_store_entries_format() {
         #[derive(Serialize)]
-        struct LegacyWalDepEntry {
+        struct LegacySnapshotDepEntry {
             key: DepKey,
             dots: Vec<Dot>,
         }
 
         #[derive(Serialize)]
-        struct LegacyWalState {
+        struct LegacySnapshotState {
             live: Vec<Bead>,
             tombstones: Vec<Tombstone>,
-            deps: Vec<LegacyWalDepEntry>,
+            deps: Vec<LegacySnapshotDepEntry>,
             #[serde(default)]
             labels: LabelStore,
             #[serde(default)]
@@ -1092,10 +1123,10 @@ mod tests {
         }
 
         #[derive(Serialize)]
-        struct LegacyWalEntry {
+        struct LegacySnapshotWireEntry {
             version: u32,
             written_at_ms: u64,
-            state: LegacyWalState,
+            state: LegacySnapshotState,
             root_slug: Option<String>,
             sequence: u64,
         }
@@ -1115,13 +1146,13 @@ mod tests {
             counter: 7,
         };
 
-        let legacy = LegacyWalEntry {
-            version: WAL_VERSION,
+        let legacy = LegacySnapshotWireEntry {
+            version: LEGACY_SNAPSHOT_FORMAT_VERSION,
             written_at_ms: 1,
-            state: LegacyWalState {
+            state: LegacySnapshotState {
                 live: vec![bead],
                 tombstones: Vec::new(),
-                deps: vec![LegacyWalDepEntry {
+                deps: vec![LegacySnapshotDepEntry {
                     key: dep_key.clone(),
                     dots: vec![dep_dot],
                 }],
@@ -1133,7 +1164,7 @@ mod tests {
         };
 
         let data = serde_json::to_vec(&legacy).unwrap();
-        let loaded: WalEntry = serde_json::from_slice(&data).unwrap();
+        let loaded: LegacySnapshotEntry = serde_json::from_slice(&data).unwrap();
         assert_eq!(loaded.state.live_count(), 1);
         assert_eq!(loaded.state.dep_count(), 1);
         assert!(loaded.state.dep_contains(&dep_key));
@@ -1142,80 +1173,80 @@ mod tests {
     #[test]
     fn read_nonexistent() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshot_store = LegacySnapshotStore::new(tmp.path()).unwrap();
         let remote = test_remote();
 
-        assert!(wal.read(&remote).unwrap().is_none());
+        assert!(snapshot_store.read(&remote).unwrap().is_none());
     }
 
     #[test]
     fn delete_removes_file() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshot_store = LegacySnapshotStore::new(tmp.path()).unwrap();
         let remote = test_remote();
 
-        let entry = WalEntry::new(CanonicalState::new(), None, 1, 0);
-        wal.write(&remote, &entry).unwrap();
-        assert!(wal.exists(&remote));
+        let entry = LegacySnapshotEntry::new(CanonicalState::new(), None, 1, 0);
+        snapshot_store.write(&remote, &entry).unwrap();
+        assert!(snapshot_store.exists(&remote));
 
-        wal.delete(&remote).unwrap();
-        assert!(!wal.exists(&remote));
+        snapshot_store.delete(&remote).unwrap();
+        assert!(!snapshot_store.exists(&remote));
     }
 
     #[test]
     fn cleanup_stale_removes_tmp() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshot_store = LegacySnapshotStore::new(tmp.path()).unwrap();
 
         // Create a stale .tmp file
-        let stale = wal.dir.join("stale.wal.tmp");
+        let stale = snapshot_store.dir.join("stale.wal.tmp");
         fs::write(&stale, b"garbage").unwrap();
         assert!(stale.exists());
 
-        wal.cleanup_stale().unwrap();
+        snapshot_store.cleanup_stale().unwrap();
         assert!(!stale.exists());
     }
 
     #[test]
     fn different_remotes_different_files() {
         let tmp = TempDir::new().unwrap();
-        let wal = Wal::new(tmp.path()).unwrap();
+        let snapshot_store = LegacySnapshotStore::new(tmp.path()).unwrap();
 
         let remote1 = RemoteUrl("git@github.com:user/repo1.git".into());
         let remote2 = RemoteUrl("git@github.com:user/repo2.git".into());
 
-        let entry1 = WalEntry::new(
+        let entry1 = LegacySnapshotEntry::new(
             CanonicalState::new(),
             Some(BeadSlug::parse("slug1").unwrap()),
             1,
             0,
         );
-        let entry2 = WalEntry::new(
+        let entry2 = LegacySnapshotEntry::new(
             CanonicalState::new(),
             Some(BeadSlug::parse("slug2").unwrap()),
             2,
             0,
         );
 
-        wal.write(&remote1, &entry1).unwrap();
-        wal.write(&remote2, &entry2).unwrap();
+        snapshot_store.write(&remote1, &entry1).unwrap();
+        snapshot_store.write(&remote2, &entry2).unwrap();
 
-        let loaded1 = wal.read(&remote1).unwrap().unwrap();
-        let loaded2 = wal.read(&remote2).unwrap().unwrap();
+        let loaded1 = snapshot_store.read(&remote1).unwrap().unwrap();
+        let loaded2 = snapshot_store.read(&remote2).unwrap().unwrap();
 
         assert_eq!(loaded1.root_slug, Some(BeadSlug::parse("slug1").unwrap()));
         assert_eq!(loaded2.root_slug, Some(BeadSlug::parse("slug2").unwrap()));
     }
 
     #[test]
-    fn migrate_from_runtime_dir_moves_wal() {
+    fn migrate_from_runtime_dir_moves_snapshot() {
         let legacy_base = TempDir::new().unwrap();
         let new_base = TempDir::new().unwrap();
-        let legacy = Wal::new(legacy_base.path()).unwrap();
-        let current = Wal::new(new_base.path()).unwrap();
+        let legacy = LegacySnapshotStore::new(legacy_base.path()).unwrap();
+        let current = LegacySnapshotStore::new(new_base.path()).unwrap();
         let remote = test_remote();
 
-        let entry = WalEntry::new(CanonicalState::new(), None, 1, 123);
+        let entry = LegacySnapshotEntry::new(CanonicalState::new(), None, 1, 123);
         legacy.write(&remote, &entry).unwrap();
         assert!(legacy.exists(&remote));
 
@@ -1228,12 +1259,12 @@ mod tests {
     fn migrate_prefers_newer_sequence() {
         let legacy_base = TempDir::new().unwrap();
         let new_base = TempDir::new().unwrap();
-        let legacy = Wal::new(legacy_base.path()).unwrap();
-        let current = Wal::new(new_base.path()).unwrap();
+        let legacy = LegacySnapshotStore::new(legacy_base.path()).unwrap();
+        let current = LegacySnapshotStore::new(new_base.path()).unwrap();
         let remote = test_remote();
 
-        let older = WalEntry::new(CanonicalState::new(), None, 1, 100);
-        let newer = WalEntry::new(CanonicalState::new(), None, 2, 200);
+        let older = LegacySnapshotEntry::new(CanonicalState::new(), None, 1, 100);
+        let newer = LegacySnapshotEntry::new(CanonicalState::new(), None, 2, 200);
 
         current.write(&remote, &older).unwrap();
         legacy.write(&remote, &newer).unwrap();

@@ -510,6 +510,7 @@ fn repl_daemon_replicated_fsync_receipt() {
     let replicated = receipt
         .durability_proof()
         .replicated
+        .clone()
         .expect("replicated proof");
     assert_eq!(replicated.k, NonZeroU32::new(2).unwrap());
     let mut acked_by = replicated.acked_by.clone();
