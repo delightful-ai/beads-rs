@@ -131,7 +131,8 @@ fn sink() -> Arc<dyn MetricSink> {
         .clone()
 }
 
-pub fn set_sink(sink: Arc<dyn MetricSink>) {
+#[cfg(test)]
+fn set_sink(sink: Arc<dyn MetricSink>) {
     let lock = METRIC_SINK.get_or_init(|| RwLock::new(Arc::new(TracingSink)));
     *lock.write().expect("metrics sink lock poisoned") = sink;
 }
