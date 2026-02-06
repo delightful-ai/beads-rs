@@ -13,12 +13,12 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::OpError;
 use crate::core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState, Claim,
     Closure, DepKey, DepKind, Dot, Labels, Lww, Note, NoteId, OrSetValue, Priority, ReplicaId,
     Stamp, Tombstone, Workflow, WriteStamp,
 };
-use crate::OpError;
 use crate::daemon::IpcError;
 use crate::{Error, Result};
 

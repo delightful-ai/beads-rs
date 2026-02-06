@@ -174,6 +174,21 @@ pub enum AdminOp {
         #[serde(flatten)]
         payload: EmptyPayload,
     },
+    /// Offline WAL fsck.
+    StoreFsck {
+        #[serde(flatten)]
+        payload: AdminStoreFsckPayload,
+    },
+    /// Store lock info.
+    StoreLockInfo {
+        #[serde(flatten)]
+        payload: AdminStoreLockInfoPayload,
+    },
+    /// Store unlock.
+    StoreUnlock {
+        #[serde(flatten)]
+        payload: AdminStoreUnlockPayload,
+    },
 }
 
 /// IPC request (mutation or query).
@@ -535,6 +550,9 @@ impl Request {
                     info_from_repo("admin_maintenance_mode", ctx)
                 }
                 AdminOp::RebuildIndex { ctx, .. } => info_from_repo("admin_rebuild_index", ctx),
+                AdminOp::StoreFsck { .. } => info_none("admin_store_fsck"),
+                AdminOp::StoreLockInfo { .. } => info_none("admin_store_lock_info"),
+                AdminOp::StoreUnlock { .. } => info_none("admin_store_unlock"),
             },
             Request::Validate { ctx, .. } => info_from_read("validate", ctx),
             Request::Subscribe { ctx, .. } => info_from_read("subscribe", ctx),
@@ -584,6 +602,17 @@ fn info_from_repo<'a>(op: &'static str, ctx: &'a RepoCtx) -> RequestInfo<'a> {
     RequestInfo {
         op,
         repo: Some(&ctx.path),
+        namespace: None,
+        actor_id: None,
+        client_request_id: None,
+        read: None,
+    }
+}
+
+fn info_none(op: &'static str) -> RequestInfo<'static> {
+    RequestInfo {
+        op,
+        repo: None,
         namespace: None,
         actor_id: None,
         client_request_id: None,

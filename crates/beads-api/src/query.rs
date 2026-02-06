@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::{
     AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
-    AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminFsckOutput, AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
     AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
-    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, DaemonInfo,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminStoreLockInfoOutput,
+    AdminStoreUnlockOutput, DaemonInfo,
 };
 use crate::deps::{DepCycles, DepEdge};
 use crate::issues::{
@@ -109,4 +110,13 @@ pub enum QueryResult {
 
     /// Rebuild index outcome.
     AdminRebuildIndex(AdminRebuildIndexOutput),
+
+    /// Offline WAL fsck report.
+    AdminFsck(AdminFsckOutput),
+
+    /// Store unlock result.
+    AdminStoreUnlock(AdminStoreUnlockOutput),
+
+    /// Store lock info.
+    AdminStoreLockInfo(AdminStoreLockInfoOutput),
 }

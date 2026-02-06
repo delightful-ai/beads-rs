@@ -803,10 +803,7 @@ impl SnapshotCodec {
         state.set_note_store(note_store);
         // Re-apply insert_live so legacy-lineage labels/notes loaded from snapshot note
         // appends are absorbed into the concrete bead lineage in canonical state.
-        let live_beads: Vec<Bead> = state
-            .iter_live()
-            .map(|(_, bead)| bead.clone())
-            .collect();
+        let live_beads: Vec<Bead> = state.iter_live().map(|(_, bead)| bead.clone()).collect();
         for bead in live_beads {
             state.insert_live(bead);
         }

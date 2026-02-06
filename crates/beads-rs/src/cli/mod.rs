@@ -500,6 +500,9 @@ fn render_query(q: &QueryResult) -> String {
         }
         QueryResult::AdminMaintenanceMode(out) => commands::admin::render_admin_maintenance(out),
         QueryResult::AdminRebuildIndex(out) => commands::admin::render_admin_rebuild_index(out),
+        QueryResult::AdminFsck(out) => commands::store::render_admin_fsck(out),
+        QueryResult::AdminStoreUnlock(out) => commands::store::render_admin_store_unlock(out),
+        QueryResult::AdminStoreLockInfo(out) => commands::store::render_admin_store_lock_info(out),
         QueryResult::Validation { warnings } => {
             if warnings.is_empty() {
                 "ok".into()
@@ -625,9 +628,9 @@ mod tests {
         normalize_optional_namespace,
     };
     use super::*;
+    use crate::OpError;
     use crate::config::DefaultsConfig;
     use crate::core::{DurabilityClass, HeadStatus, ReplicaId, Seq0};
-    use crate::OpError;
     use std::num::NonZeroU32;
     use std::path::PathBuf;
     use uuid::Uuid;

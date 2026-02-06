@@ -847,7 +847,8 @@ mod tests {
         obj.remove("closed_by");
         lines[0] = serde_json::to_string(&value).unwrap();
 
-        let parsed = parse_state(&join_jsonl(&lines)).expect("legacy closed fields remain readable");
+        let parsed =
+            parse_state(&join_jsonl(&lines)).expect("legacy closed fields remain readable");
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].fields.workflow.value.is_closed());
     }
@@ -879,7 +880,12 @@ mod tests {
     fn parse_state_rejects_partial_closed_redundant_fields() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
         let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
-        let bead = make_bead_with(&bead_id("bd-partial-closed"), &stamp, workflow, Claim::default());
+        let bead = make_bead_with(
+            &bead_id("bd-partial-closed"),
+            &stamp,
+            workflow,
+            Claim::default(),
+        );
         let mut state = CanonicalState::new();
         state.insert(bead).unwrap();
 
