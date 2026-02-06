@@ -852,8 +852,8 @@ fn build_replica_liveness(
             replica_id: row.replica_id,
             last_seen_ms: row.last_seen_ms,
             last_handshake_ms: row.last_handshake_ms,
-            role: row.role,
-            durability_eligible: row.durability_eligible,
+            role: row.role.role(),
+            durability_eligible: row.role.durability_eligible(),
         })
         .collect()
 }
