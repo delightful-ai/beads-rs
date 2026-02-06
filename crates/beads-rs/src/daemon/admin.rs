@@ -376,8 +376,7 @@ impl Daemon {
             Err(err) => {
                 let reason = match &err {
                     FingerprintError::Snapshot(_) => err.to_string(),
-                    FingerprintError::InvalidShardPath { .. }
-                    | FingerprintError::InvalidShardIndex { .. } => err.to_string(),
+                    FingerprintError::InvalidShardIndex { .. } => err.to_string(),
                 };
                 return Response::err_from(OpError::InvalidRequest {
                     field: None,

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -12,16 +12,21 @@ use thiserror::Error;
 
 use super::export::CheckpointExport;
 use super::json_canon::CanonJsonError;
-use super::layout::{CheckpointFileKind, MANIFEST_FILE, META_FILE, parse_shard_path};
-use super::{CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks};
+use super::layout::{CheckpointFileKind, CheckpointShardPath, MANIFEST_FILE, META_FILE};
+use super::types::CheckpointShardPayload;
+use super::{
+    CheckpointFormatVersion, CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks,
+    ParsedCheckpointManifest, SupportedCheckpointMeta,
+};
 use crate::core::error::CoreError;
 use crate::core::state::LabelState;
 use crate::core::wire_bead::{
-    WireBeadFull, WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1,
+    WireDepStoreV1, WireLabelStateV1, WireNoteV1, WireStamp, WireTombstoneV1,
 };
 use crate::core::{
-    BeadId, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore, Limits, NamespaceId,
-    OrSet, Stamp, StoreState, Tombstone, WriteStamp, sha256_bytes,
+    BeadId, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore,
+    Limits, NamespaceId, NoteId, OrSet, Stamp, StoreState, Tombstone, TombstoneKey, WriteStamp,
+    sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -67,6 +72,13 @@ pub enum CheckpointImportError {
         meta: Vec<NamespaceId>,
         manifest: Vec<NamespaceId>,
     },
+    #[error("checkpoint namespaces not normalized for {which}: {namespaces:?}")]
+    NamespacesNotNormalized {
+        which: &'static str,
+        namespaces: Vec<NamespaceId>,
+    },
+    #[error("checkpoint format version unsupported: {got}")]
+    UnsupportedFormatVersion { got: u32 },
     #[error("checkpoint file missing at {path:?}")]
     MissingFile { path: PathBuf },
     #[error("checkpoint file size mismatch for {path:?}: expected {expected}, got {got}")]
@@ -122,12 +134,16 @@ pub enum CheckpointImportError {
     },
     #[error("checkpoint contains unexpected file {path}")]
     UnexpectedFile { path: String },
-    #[error("checkpoint contains invalid path {path}")]
-    InvalidPath { path: String },
     #[error("invalid tombstone lineage at {path:?} line {line}")]
     InvalidLineage { path: PathBuf, line: u64 },
     #[error("invalid dep at {path:?} line {line}: {reason}")]
     InvalidDep {
+        path: PathBuf,
+        line: u64,
+        reason: String,
+    },
+    #[error("checkpoint entries out of order at {path:?} line {line}: {reason}")]
+    OutOfOrder {
         path: PathBuf,
         line: u64,
         reason: String,
@@ -182,81 +198,25 @@ pub fn import_checkpoint(
             source,
         })?;
 
-    if meta.store_id != manifest.store_id {
-        return Err(CheckpointImportError::StoreIdMismatch {
-            meta: meta.store_id,
-            manifest: manifest.store_id,
-        });
-    }
-    if meta.store_epoch != manifest.store_epoch {
-        return Err(CheckpointImportError::StoreEpochMismatch {
-            meta: meta.store_epoch,
-            manifest: manifest.store_epoch,
-        });
-    }
-    if meta.checkpoint_group != manifest.checkpoint_group {
-        return Err(CheckpointImportError::GroupMismatch {
-            meta: meta.checkpoint_group.clone(),
-            manifest: manifest.checkpoint_group.clone(),
-        });
-    }
-
-    let mut meta_namespaces = meta.namespaces.clone();
-    meta_namespaces.sort();
-    meta_namespaces.dedup();
-    let mut manifest_namespaces = manifest.namespaces.clone();
-    manifest_namespaces.sort();
-    manifest_namespaces.dedup();
-    if meta_namespaces != manifest_namespaces {
-        return Err(CheckpointImportError::NamespacesMismatch {
-            meta: meta_namespaces,
-            manifest: manifest_namespaces,
-        });
-    }
-
-    let manifest_hash = ContentHash::from_bytes(sha256_bytes(&manifest_bytes).0);
-    if manifest_hash != meta.manifest_hash {
-        return Err(CheckpointImportError::ManifestHashMismatch {
-            expected: meta.manifest_hash,
-            got: manifest_hash,
-        });
-    }
-
-    let content_hash = meta.compute_content_hash()?;
-    if content_hash != meta.content_hash {
-        return Err(CheckpointImportError::ContentHashMismatch {
-            expected: meta.content_hash,
-            got: content_hash,
-        });
-    }
+    let (meta, manifest) = validate_meta_and_manifest(meta, manifest)?;
 
     let mut state = StoreState::new();
     let mut label_stores: BTreeMap<NamespaceId, LabelStore> = BTreeMap::new();
     let mut dep_stores: BTreeMap<NamespaceId, DepStore> = BTreeMap::new();
-    let allowed_namespaces: BTreeSet<NamespaceId> = manifest_namespaces.iter().cloned().collect();
+    let allowed_namespaces: BTreeSet<NamespaceId> =
+        manifest.manifest().namespaces.iter().cloned().collect();
 
-    for (rel_path, entry) in &manifest.files {
-        validate_rel_path(rel_path)?;
-        if rel_path == META_FILE || rel_path == MANIFEST_FILE {
-            return Err(CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
-            });
-        }
-
-        let full_path = dir.join(rel_path);
+    for (rel_path, entry) in &manifest.manifest().files {
+        let full_path = dir.join(rel_path.to_path());
         if !full_path.exists() {
             return Err(CheckpointImportError::MissingFile {
                 path: full_path.clone(),
             });
         }
 
-        let shard =
-            parse_shard_path(rel_path).ok_or_else(|| CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
-            })?;
-        if !allowed_namespaces.contains(&shard.namespace) {
+        if !allowed_namespaces.contains(&rel_path.namespace) {
             return Err(CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
+                path: rel_path.to_path(),
             });
         }
 
@@ -268,12 +228,22 @@ pub fn import_checkpoint(
             });
         }
 
-        let stats = match shard.kind {
-            CheckpointFileKind::State => parse_jsonl_file::<WireBeadFull, _>(
+        let mut prev_bead: Option<BeadId> = None;
+        let mut prev_tombstone: Option<TombstoneKey> = None;
+        let stats = match rel_path.kind {
+            CheckpointFileKind::State => parse_jsonl_file::<BeadSnapshotWireV1, _>(
                 &full_path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    ensure_strictly_increasing(
+                        &mut prev_bead,
+                        wire.id.clone(),
+                        &full_path,
+                        line.line_no,
+                        "state",
+                    )?;
+                    ensure_notes_sorted(&full_path, line.line_no, &wire.notes)?;
                     let ns = line.namespace.clone();
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
@@ -307,9 +277,17 @@ pub fn import_checkpoint(
             )?,
             CheckpointFileKind::Tombstones => parse_jsonl_file::<WireTombstoneV1, _>(
                 &full_path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    let key = tombstone_key_from_wire(&wire, &full_path, line.line_no)?;
+                    ensure_strictly_increasing(
+                        &mut prev_tombstone,
+                        key,
+                        &full_path,
+                        line.line_no,
+                        "tombstones",
+                    )?;
                     let ns = line.namespace.clone();
                     let tomb = tombstone_from_wire(&wire, &full_path, line)?;
                     state_for_namespace(&mut state, &ns).insert_tombstone(tomb);
@@ -318,9 +296,10 @@ pub fn import_checkpoint(
             )?,
             CheckpointFileKind::Deps => parse_jsonl_file::<WireDepStoreV1, _>(
                 &full_path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    ensure_dep_entry_order(&wire, &full_path, line.line_no)?;
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &full_path, line)?;
                     let entry = dep_stores.entry(ns.clone()).or_default();
@@ -340,6 +319,7 @@ pub fn import_checkpoint(
         state_for_namespace(&mut state, &ns).set_dep_store(deps);
     }
 
+    let meta = meta.meta();
     Ok(CheckpointImport {
         checkpoint_group: meta.checkpoint_group.clone(),
         policy_hash: meta.policy_hash,
@@ -354,80 +334,21 @@ pub fn import_checkpoint(
 ///
 /// This is the same verification + parsing as `import_checkpoint(dir, limits)`, but without filesystem I/O.
 pub fn import_checkpoint_export(
-    export: &CheckpointExport,
+    export: &ParsedCheckpointExport,
     limits: &Limits,
 ) -> Result<CheckpointImport, CheckpointImportError> {
-    let meta = &export.meta;
-    let manifest = &export.manifest;
-
-    if meta.store_id != manifest.store_id {
-        return Err(CheckpointImportError::StoreIdMismatch {
-            meta: meta.store_id,
-            manifest: manifest.store_id,
-        });
-    }
-    if meta.store_epoch != manifest.store_epoch {
-        return Err(CheckpointImportError::StoreEpochMismatch {
-            meta: meta.store_epoch,
-            manifest: manifest.store_epoch,
-        });
-    }
-    if meta.checkpoint_group != manifest.checkpoint_group {
-        return Err(CheckpointImportError::GroupMismatch {
-            meta: meta.checkpoint_group.clone(),
-            manifest: manifest.checkpoint_group.clone(),
-        });
-    }
-
-    let mut meta_namespaces = meta.namespaces.clone();
-    meta_namespaces.sort();
-    meta_namespaces.dedup();
-    let mut manifest_namespaces = manifest.namespaces.clone();
-    manifest_namespaces.sort();
-    manifest_namespaces.dedup();
-    if meta_namespaces != manifest_namespaces {
-        return Err(CheckpointImportError::NamespacesMismatch {
-            meta: meta_namespaces,
-            manifest: manifest_namespaces,
-        });
-    }
-
-    // Verify manifest hash and meta content hash using canonical encoding.
-    let manifest_hash = manifest.manifest_hash()?;
-    if manifest_hash != meta.manifest_hash {
-        return Err(CheckpointImportError::ManifestHashMismatch {
-            expected: meta.manifest_hash,
-            got: manifest_hash,
-        });
-    }
-    let content_hash = meta.compute_content_hash()?;
-    if content_hash != meta.content_hash {
-        return Err(CheckpointImportError::ContentHashMismatch {
-            expected: meta.content_hash,
-            got: content_hash,
-        });
-    }
+    let meta = export.meta.meta();
+    let manifest = export.manifest.manifest();
 
     let mut state = StoreState::new();
     let mut label_stores: BTreeMap<NamespaceId, LabelStore> = BTreeMap::new();
     let mut dep_stores: BTreeMap<NamespaceId, DepStore> = BTreeMap::new();
-    let allowed_namespaces: BTreeSet<NamespaceId> = manifest_namespaces.iter().cloned().collect();
+    let allowed_namespaces: BTreeSet<NamespaceId> = manifest.namespaces.iter().cloned().collect();
 
     for (rel_path, entry) in &manifest.files {
-        validate_rel_path(rel_path)?;
-        if rel_path == META_FILE || rel_path == MANIFEST_FILE {
+        if !allowed_namespaces.contains(&rel_path.namespace) {
             return Err(CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
-            });
-        }
-
-        let shard =
-            parse_shard_path(rel_path).ok_or_else(|| CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
-            })?;
-        if !allowed_namespaces.contains(&shard.namespace) {
-            return Err(CheckpointImportError::UnexpectedFile {
-                path: rel_path.clone(),
+                path: rel_path.to_path(),
             });
         }
 
@@ -436,14 +357,14 @@ pub fn import_checkpoint_export(
                 .files
                 .get(rel_path)
                 .ok_or_else(|| CheckpointImportError::MissingFile {
-                    path: PathBuf::from(rel_path),
+                    path: PathBuf::from(rel_path.to_path()),
                 })?;
         let bytes = payload.bytes.as_ref();
 
         let got_bytes = bytes.len() as u64;
         if got_bytes != entry.bytes {
             return Err(CheckpointImportError::FileSizeMismatch {
-                path: PathBuf::from(rel_path),
+                path: PathBuf::from(rel_path.to_path()),
                 expected: entry.bytes,
                 got: got_bytes,
             });
@@ -451,7 +372,7 @@ pub fn import_checkpoint_export(
         let got_hash = ContentHash::from_bytes(sha256_bytes(bytes).0);
         if got_hash != entry.sha256 {
             return Err(CheckpointImportError::FileHashMismatch {
-                path: PathBuf::from(rel_path),
+                path: PathBuf::from(rel_path.to_path()),
                 expected: entry.sha256,
                 got: got_hash,
             });
@@ -459,20 +380,30 @@ pub fn import_checkpoint_export(
 
         if entry.bytes > limits.max_jsonl_shard_bytes as u64 {
             return Err(CheckpointImportError::ShardTooLarge {
-                path: PathBuf::from(rel_path),
+                path: PathBuf::from(rel_path.to_path()),
                 max_bytes: limits.max_jsonl_shard_bytes as u64,
                 got_bytes: entry.bytes,
             });
         }
 
-        let path = PathBuf::from(rel_path);
-        match shard.kind {
-            CheckpointFileKind::State => parse_jsonl_bytes::<WireBeadFull, _>(
+        let path = PathBuf::from(rel_path.to_path());
+        let mut prev_bead: Option<BeadId> = None;
+        let mut prev_tombstone: Option<TombstoneKey> = None;
+        match rel_path.kind {
+            CheckpointFileKind::State => parse_jsonl_bytes::<BeadSnapshotWireV1, _>(
                 bytes,
                 &path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    ensure_strictly_increasing(
+                        &mut prev_bead,
+                        wire.id.clone(),
+                        &path,
+                        line.line_no,
+                        "state",
+                    )?;
+                    ensure_notes_sorted(&path, line.line_no, &wire.notes)?;
                     let ns = line.namespace.clone();
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
@@ -507,9 +438,17 @@ pub fn import_checkpoint_export(
             CheckpointFileKind::Tombstones => parse_jsonl_bytes::<WireTombstoneV1, _>(
                 bytes,
                 &path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    let key = tombstone_key_from_wire(&wire, &path, line.line_no)?;
+                    ensure_strictly_increasing(
+                        &mut prev_tombstone,
+                        key,
+                        &path,
+                        line.line_no,
+                        "tombstones",
+                    )?;
                     let ns = line.namespace.clone();
                     let tomb = tombstone_from_wire(&wire, &path, line)?;
                     state_for_namespace(&mut state, &ns).insert_tombstone(tomb);
@@ -519,9 +458,10 @@ pub fn import_checkpoint_export(
             CheckpointFileKind::Deps => parse_jsonl_bytes::<WireDepStoreV1, _>(
                 bytes,
                 &path,
-                &shard.namespace,
+                &rel_path.namespace,
                 limits,
                 |line, wire| {
+                    ensure_dep_entry_order(&wire, &path, line.line_no)?;
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &path, line)?;
                     let entry = dep_stores.entry(ns.clone()).or_default();
@@ -547,6 +487,98 @@ pub fn import_checkpoint_export(
         included: meta.included.clone(),
         included_heads: meta.included_heads.clone(),
     })
+}
+
+#[derive(Clone, Debug)]
+pub struct ParsedCheckpointExport {
+    pub meta: SupportedCheckpointMeta,
+    pub manifest: ParsedCheckpointManifest,
+    pub files: BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
+}
+
+pub fn parse_checkpoint_export(
+    export: &CheckpointExport,
+) -> Result<ParsedCheckpointExport, CheckpointImportError> {
+    let (meta, manifest) =
+        validate_meta_and_manifest(export.meta.clone(), export.manifest.clone())?;
+    Ok(ParsedCheckpointExport {
+        meta,
+        manifest,
+        files: export.files.clone(),
+    })
+}
+
+fn validate_meta_and_manifest(
+    meta: CheckpointMeta,
+    manifest: CheckpointManifest,
+) -> Result<(SupportedCheckpointMeta, ParsedCheckpointManifest), CheckpointImportError> {
+    let version = CheckpointFormatVersion::parse(meta.checkpoint_format_version).ok_or(
+        CheckpointImportError::UnsupportedFormatVersion {
+            got: meta.checkpoint_format_version,
+        },
+    )?;
+
+    let meta_namespaces = meta.namespaces_normalized();
+    if meta_namespaces != meta.namespaces {
+        return Err(CheckpointImportError::NamespacesNotNormalized {
+            which: "meta",
+            namespaces: meta.namespaces.clone(),
+        });
+    }
+
+    let manifest_namespaces = manifest.namespaces_normalized();
+    if manifest_namespaces != manifest.namespaces {
+        return Err(CheckpointImportError::NamespacesNotNormalized {
+            which: "manifest",
+            namespaces: manifest.namespaces.clone(),
+        });
+    }
+
+    if meta.store_id != manifest.store_id {
+        return Err(CheckpointImportError::StoreIdMismatch {
+            meta: meta.store_id,
+            manifest: manifest.store_id,
+        });
+    }
+    if meta.store_epoch != manifest.store_epoch {
+        return Err(CheckpointImportError::StoreEpochMismatch {
+            meta: meta.store_epoch,
+            manifest: manifest.store_epoch,
+        });
+    }
+    if meta.checkpoint_group != manifest.checkpoint_group {
+        return Err(CheckpointImportError::GroupMismatch {
+            meta: meta.checkpoint_group.clone(),
+            manifest: manifest.checkpoint_group.clone(),
+        });
+    }
+    if meta.namespaces != manifest.namespaces {
+        return Err(CheckpointImportError::NamespacesMismatch {
+            meta: meta.namespaces.clone(),
+            manifest: manifest.namespaces.clone(),
+        });
+    }
+
+    let manifest_hash = manifest.manifest_hash()?;
+    if manifest_hash != meta.manifest_hash {
+        return Err(CheckpointImportError::ManifestHashMismatch {
+            expected: meta.manifest_hash,
+            got: manifest_hash,
+        });
+    }
+
+    let content_hash = meta.compute_content_hash()?;
+    if content_hash != meta.content_hash {
+        return Err(CheckpointImportError::ContentHashMismatch {
+            expected: meta.content_hash,
+            got: content_hash,
+        });
+    }
+
+    Ok((
+        SupportedCheckpointMeta::new(meta, version),
+        ParsedCheckpointManifest::new(manifest),
+    ))
 }
 
 pub fn merge_store_states(
@@ -779,25 +811,61 @@ fn json_depth(value: &Value) -> usize {
     }
 }
 
-fn validate_rel_path(path: &str) -> Result<(), CheckpointImportError> {
-    let rel = Path::new(path);
-    if rel.is_absolute() {
-        return Err(CheckpointImportError::InvalidPath {
-            path: path.to_string(),
+fn ensure_strictly_increasing<T: Ord + std::fmt::Debug>(
+    prev: &mut Option<T>,
+    next: T,
+    path: &Path,
+    line: u64,
+    label: &str,
+) -> Result<(), CheckpointImportError> {
+    if let Some(prev) = prev.as_ref()
+        && next <= *prev
+    {
+        return Err(CheckpointImportError::OutOfOrder {
+            path: path.to_path_buf(),
+            line,
+            reason: format!(
+                "{label} entries out of order (prev: {:?}, next: {:?})",
+                prev, next
+            ),
         });
     }
-    for component in rel.components() {
-        match component {
-            Component::ParentDir
-            | Component::CurDir
-            | Component::RootDir
-            | Component::Prefix(_) => {
-                return Err(CheckpointImportError::InvalidPath {
-                    path: path.to_string(),
-                });
-            }
-            Component::Normal(_) => {}
-        }
+    *prev = Some(next);
+    Ok(())
+}
+
+fn ensure_notes_sorted(
+    path: &Path,
+    line: u64,
+    notes: &[WireNoteV1],
+) -> Result<(), CheckpointImportError> {
+    let mut prev: Option<NoteId> = None;
+    for note in notes {
+        ensure_strictly_increasing(&mut prev, note.id.clone(), path, line, "notes")?;
+    }
+    Ok(())
+}
+
+fn tombstone_key_from_wire(
+    wire: &WireTombstoneV1,
+    _path: &Path,
+    _line: u64,
+) -> Result<TombstoneKey, CheckpointImportError> {
+    let lineage = wire.lineage_stamp();
+    Ok(match lineage {
+        Some(stamp) => TombstoneKey::lineage(wire.id.clone(), stamp),
+        None => TombstoneKey::global(wire.id.clone()),
+    })
+}
+
+fn ensure_dep_entry_order(
+    wire: &WireDepStoreV1,
+    path: &Path,
+    line: u64,
+) -> Result<(), CheckpointImportError> {
+    let mut prev: Option<DepKey> = None;
+    for entry in &wire.entries {
+        ensure_strictly_increasing(&mut prev, entry.key.clone(), path, line, "deps")?;
     }
     Ok(())
 }
@@ -936,7 +1004,9 @@ mod tests {
         ActorId, BeadId, BeadType, CanonicalState, Dvv, NamespaceId, Priority, ReplicaId,
         StoreEpoch, StoreId,
     };
-    use crate::git::checkpoint::ManifestFile;
+    use crate::git::checkpoint::{
+        CheckpointFileKind, CheckpointShardPath, ManifestFile, shard_name,
+    };
     use crate::git::wire::{serialize_deps, serialize_state, serialize_tombstones};
 
     fn write_file(path: &Path, bytes: &[u8]) {
@@ -973,8 +1043,8 @@ mod tests {
         (manifest, meta)
     }
 
-    fn sample_wire_bead_full(id: &str) -> WireBeadFull {
-        WireBeadFull {
+    fn sample_wire_bead_full(id: &str) -> BeadSnapshotWireV1 {
+        BeadSnapshotWireV1 {
             id: BeadId::parse(id).unwrap(),
             created_at: WireStamp(1, 0),
             created_by: ActorId::new("me").unwrap(),
@@ -1009,6 +1079,98 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_unsupported_version() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (manifest, mut meta) = minimal_manifest_and_meta(dir);
+        meta.checkpoint_format_version = 99;
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
+        write_file(
+            &dir.join(MANIFEST_FILE),
+            manifest.canon_bytes().unwrap().as_slice(),
+        );
+
+        let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::UnsupportedFormatVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_export_rejects_unsupported_version() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (manifest, mut meta) = minimal_manifest_and_meta(dir);
+        meta.checkpoint_format_version = 99;
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::new(),
+        };
+
+        let err = parse_checkpoint_export(&export).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::UnsupportedFormatVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_export_rejects_namespace_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
+        let extra = NamespaceId::parse("extra").unwrap();
+        manifest.namespaces = vec![NamespaceId::core(), extra];
+        manifest.namespaces.sort();
+        manifest.namespaces.dedup();
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::new(),
+        };
+
+        let err = parse_checkpoint_export(&export).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::NamespacesMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn import_export_accepts_v1() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (manifest, mut meta) = minimal_manifest_and_meta(dir);
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::new(),
+        };
+
+        let parsed = parse_checkpoint_export(&export).unwrap();
+        let imported = import_checkpoint_export(&parsed, &Limits::default()).unwrap();
+        assert_eq!(imported.checkpoint_group, "core");
+    }
+
+    #[test]
     fn import_rejects_manifest_hash_mismatch() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
@@ -1036,13 +1198,18 @@ mod tests {
         let dir = tmp.path();
 
         let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
-        let shard_path = "namespaces/core/state/00.jsonl";
+        let shard_path = CheckpointShardPath::new(
+            NamespaceId::core(),
+            CheckpointFileKind::State,
+            shard_name(0),
+        );
+        let shard_rel = shard_path.to_path();
         let line = serde_json::to_vec(&sample_wire_bead_full("bd-abc")).unwrap();
-        write_file(&dir.join(shard_path), &line);
+        write_file(&dir.join(&shard_rel), &line);
 
         let file_bytes = line.len() as u64;
         manifest.files.insert(
-            shard_path.to_string(),
+            shard_path,
             ManifestFile {
                 sha256: ContentHash::from_bytes(sha256_bytes(&line).0),
                 bytes: file_bytes,
@@ -1071,12 +1238,17 @@ mod tests {
         let dir = tmp.path();
 
         let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
-        let shard_path = "namespaces/core/state/00.jsonl";
+        let shard_path = CheckpointShardPath::new(
+            NamespaceId::core(),
+            CheckpointFileKind::State,
+            shard_name(0),
+        );
+        let shard_rel = shard_path.to_path();
         let line = b"[[[]]]\n";
-        write_file(&dir.join(shard_path), line);
+        write_file(&dir.join(&shard_rel), line);
 
         manifest.files.insert(
-            shard_path.to_string(),
+            shard_path,
             ManifestFile {
                 sha256: ContentHash::from_bytes(sha256_bytes(line).0),
                 bytes: line.len() as u64,
@@ -1108,7 +1280,12 @@ mod tests {
         let dir = tmp.path();
 
         let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
-        let shard_path = "namespaces/core/state/00.jsonl";
+        let shard_path = CheckpointShardPath::new(
+            NamespaceId::core(),
+            CheckpointFileKind::State,
+            shard_name(0),
+        );
+        let shard_rel = shard_path.to_path();
         let line1 = serde_json::to_vec(&sample_wire_bead_full("bd-abc")).unwrap();
         let line2 = serde_json::to_vec(&sample_wire_bead_full("bd-def")).unwrap();
         let mut shard_bytes = Vec::new();
@@ -1116,10 +1293,10 @@ mod tests {
         shard_bytes.push(b'\n');
         shard_bytes.extend_from_slice(&line2);
         shard_bytes.push(b'\n');
-        write_file(&dir.join(shard_path), &shard_bytes);
+        write_file(&dir.join(&shard_rel), &shard_bytes);
 
         manifest.files.insert(
-            shard_path.to_string(),
+            shard_path,
             ManifestFile {
                 sha256: ContentHash::from_bytes(sha256_bytes(&shard_bytes).0),
                 bytes: shard_bytes.len() as u64,
@@ -1140,6 +1317,47 @@ mod tests {
         };
         let err = import_checkpoint(dir, &limits).unwrap_err();
         assert!(matches!(err, CheckpointImportError::ShardEntryLimit { .. }));
+    }
+
+    #[test]
+    fn import_rejects_out_of_order_state_entries() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
+        let shard_path = CheckpointShardPath::new(
+            NamespaceId::core(),
+            CheckpointFileKind::State,
+            shard_name(0),
+        );
+        let shard_rel = shard_path.to_path();
+        let line1 = serde_json::to_vec(&sample_wire_bead_full("bd-zzz")).unwrap();
+        let line2 = serde_json::to_vec(&sample_wire_bead_full("bd-aaa")).unwrap();
+        let mut shard_bytes = Vec::new();
+        shard_bytes.extend_from_slice(&line1);
+        shard_bytes.push(b'\n');
+        shard_bytes.extend_from_slice(&line2);
+        shard_bytes.push(b'\n');
+        write_file(&dir.join(&shard_rel), &shard_bytes);
+
+        manifest.files.insert(
+            shard_path,
+            ManifestFile {
+                sha256: ContentHash::from_bytes(sha256_bytes(&shard_bytes).0),
+                bytes: shard_bytes.len() as u64,
+            },
+        );
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
+        write_file(
+            &dir.join(MANIFEST_FILE),
+            manifest.canon_bytes().unwrap().as_slice(),
+        );
+
+        let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
+        assert!(matches!(err, CheckpointImportError::OutOfOrder { .. }));
     }
 
     #[test]

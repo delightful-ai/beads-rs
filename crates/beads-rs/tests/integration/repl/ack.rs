@@ -86,12 +86,8 @@ fn event_frame_with_txn(
     let sha = hash_event_body(&canonical);
     let bytes = EventBytes::<Opaque>::new(bytes::Bytes::copy_from_slice(canonical.as_ref()));
 
-    EventFrameV1 {
-        eid: EventId::new(origin, namespace, body.origin_seq),
-        sha256: sha,
-        prev_sha256: prev,
-        bytes,
-    }
+    let eid = EventId::new(origin, namespace, body.origin_seq);
+    EventFrameV1::try_from_parts(eid, sha, prev, bytes).expect("event frame")
 }
 
 #[test]
@@ -101,7 +97,7 @@ fn repl_ack_advances_watermarks() {
     let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
-    let e2 = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(e1.sha256));
+    let e2 = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(e1.sha256()));
 
     let (_session, actions) = handle_inbound_message(
         session,
@@ -127,7 +123,7 @@ fn repl_ack_advances_watermarks() {
         .copied()
         .unwrap_or_else(Watermark::genesis);
     assert_eq!(watermark.seq(), Seq0::new(2));
-    assert_eq!(watermark.head(), HeadStatus::Known(e2.sha256.0));
+    assert_eq!(watermark.head(), HeadStatus::Known(e2.sha256().0));
 
     let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(2).expect("seq1"));
     assert!(store.has_event(&event_id));
@@ -140,7 +136,7 @@ fn repl_gap_triggers_want() {
     let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
-    let e3 = repl_frames::event_frame(identity, namespace.clone(), origin, 3, Some(e1.sha256));
+    let e3 = repl_frames::event_frame(identity, namespace.clone(), origin, 3, Some(e1.sha256()));
 
     let (_session, actions) = handle_inbound_message(
         session,
@@ -208,7 +204,7 @@ fn repl_prev_sha_mismatch_rejects() {
     let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
-    let expected_prev = e1.sha256;
+    let expected_prev = e1.sha256();
     let (session, _) = handle_inbound_message(
         session,
         WireReplMessage::Events(WireEvents { events: vec![e1] }),
@@ -299,6 +295,6 @@ fn repl_want_reads_from_wal() {
         .expect("read wal range");
 
     assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0].eid.origin_seq.get(), 1);
-    assert_eq!(frames[1].eid.origin_seq.get(), 2);
+    assert_eq!(frames[0].eid().origin_seq.get(), 1);
+    assert_eq!(frames[1].eid().origin_seq.get(), 2);
 }

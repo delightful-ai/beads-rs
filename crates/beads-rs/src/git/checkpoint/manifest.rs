@@ -5,7 +5,23 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
+use super::layout::CheckpointShardPath;
 use crate::core::{ContentHash, NamespaceId, StoreEpoch, StoreId, sha256_bytes};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedCheckpointManifest {
+    manifest: CheckpointManifest,
+}
+
+impl ParsedCheckpointManifest {
+    pub(crate) fn new(manifest: CheckpointManifest) -> Self {
+        Self { manifest }
+    }
+
+    pub fn manifest(&self) -> &CheckpointManifest {
+        &self.manifest
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestFile {
@@ -19,7 +35,7 @@ pub struct CheckpointManifest {
     pub store_id: StoreId,
     pub store_epoch: StoreEpoch,
     pub namespaces: Vec<NamespaceId>,
-    pub files: BTreeMap<String, ManifestFile>,
+    pub files: BTreeMap<CheckpointShardPath, ManifestFile>,
 }
 
 impl CheckpointManifest {
@@ -38,11 +54,19 @@ impl CheckpointManifest {
         cloned.namespaces.dedup();
         cloned
     }
+
+    pub(crate) fn namespaces_normalized(&self) -> Vec<NamespaceId> {
+        let mut namespaces = self.namespaces.clone();
+        namespaces.sort();
+        namespaces.dedup();
+        namespaces
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::checkpoint::{CheckpointFileKind, shard_name};
     use uuid::Uuid;
 
     #[test]
@@ -50,7 +74,11 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_u128(1));
         let mut files = BTreeMap::new();
         files.insert(
-            "namespaces/core/state/00.jsonl".to_string(),
+            CheckpointShardPath::new(
+                NamespaceId::core(),
+                CheckpointFileKind::State,
+                shard_name(0),
+            ),
             ManifestFile {
                 sha256: ContentHash::from_bytes([2u8; 32]),
                 bytes: 12,

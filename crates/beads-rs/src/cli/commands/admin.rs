@@ -12,7 +12,7 @@ use crate::api::{
 use crate::core::{HeadStatus, ReplicaRole, Watermarks};
 use crate::daemon::ipc::{
     AdminDoctorPayload, AdminFingerprintPayload, AdminFlushPayload, AdminMaintenanceModePayload,
-    AdminScrubPayload, EmptyPayload, Request,
+    AdminOp, AdminScrubPayload, EmptyPayload, Request,
 };
 use crate::{Result, WallClock};
 
@@ -95,51 +95,51 @@ pub struct AdminFingerprintArgs {
 pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
     match cmd {
         AdminCmd::Status => {
-            let req = Request::AdminStatus {
+            let req = Request::Admin(AdminOp::Status {
                 ctx: ctx.read_ctx(),
                 payload: EmptyPayload {},
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::Metrics => {
-            let req = Request::AdminMetrics {
+            let req = Request::Admin(AdminOp::Metrics {
                 ctx: ctx.read_ctx(),
                 payload: EmptyPayload {},
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::Doctor(args) => {
-            let req = Request::AdminDoctor {
+            let req = Request::Admin(AdminOp::Doctor {
                 ctx: ctx.read_ctx(),
                 payload: AdminDoctorPayload {
                     max_records_per_namespace: Some(args.max_records),
                     verify_checkpoint_cache: true,
                 },
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::Scrub(args) => {
-            let req = Request::AdminScrub {
+            let req = Request::Admin(AdminOp::Scrub {
                 ctx: ctx.read_ctx(),
                 payload: AdminScrubPayload {
                     max_records_per_namespace: Some(args.max_records),
                     verify_checkpoint_cache: args.verify_checkpoint_cache,
                 },
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::Flush(args) => {
-            let req = Request::AdminFlush {
+            let req = Request::Admin(AdminOp::Flush {
                 ctx: ctx.repo_ctx(),
                 payload: AdminFlushPayload {
                     namespace: ctx.namespace.clone(),
                     checkpoint_now: args.checkpoint_now,
                 },
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
@@ -156,51 +156,51 @@ pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
                 }
                 None => (AdminFingerprintMode::Full, None),
             };
-            let req = Request::AdminFingerprint {
+            let req = Request::Admin(AdminOp::Fingerprint {
                 ctx: ctx.read_ctx(),
                 payload: AdminFingerprintPayload { mode, sample },
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::ReloadPolicies => {
-            let req = Request::AdminReloadPolicies {
+            let req = Request::Admin(AdminOp::ReloadPolicies {
                 ctx: ctx.repo_ctx(),
                 payload: EmptyPayload {},
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::ReloadLimits => {
-            let req = Request::AdminReloadLimits {
+            let req = Request::Admin(AdminOp::ReloadLimits {
                 ctx: ctx.repo_ctx(),
                 payload: EmptyPayload {},
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::RotateReplicaId => {
-            let req = Request::AdminRotateReplicaId {
+            let req = Request::Admin(AdminOp::RotateReplicaId {
                 ctx: ctx.repo_ctx(),
                 payload: EmptyPayload {},
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::Maintenance { cmd } => {
             let enabled = matches!(cmd, AdminMaintenanceCmd::On);
-            let req = Request::AdminMaintenanceMode {
+            let req = Request::Admin(AdminOp::MaintenanceMode {
                 ctx: ctx.repo_ctx(),
                 payload: AdminMaintenanceModePayload { enabled },
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }
         AdminCmd::RebuildIndex => {
-            let req = Request::AdminRebuildIndex {
+            let req = Request::Admin(AdminOp::RebuildIndex {
                 ctx: ctx.repo_ctx(),
                 payload: EmptyPayload {},
-            };
+            });
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
         }

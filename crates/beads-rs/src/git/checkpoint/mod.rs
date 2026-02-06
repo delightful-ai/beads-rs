@@ -22,16 +22,19 @@ pub use export::{
     build_snapshot_from_state, export_checkpoint, policy_hash, roster_hash,
 };
 pub use import::{
-    CheckpointImport, CheckpointImportError, import_checkpoint, import_checkpoint_export,
-    merge_store_states, store_state_from_legacy,
+    CheckpointImport, CheckpointImportError, ParsedCheckpointExport, import_checkpoint,
+    import_checkpoint_export, merge_store_states, parse_checkpoint_export, store_state_from_legacy,
 };
 pub use layout::{
     CheckpointFileKind, CheckpointShardPath, DEPS_DIR, MANIFEST_FILE, META_FILE, NAMESPACES_DIR,
-    SHARD_COUNT, STATE_DIR, TOMBSTONES_DIR, parse_shard_path, shard_for_bead, shard_for_dep,
-    shard_for_tombstone, shard_name, shard_path,
+    SHARD_COUNT, STATE_DIR, ShardName, TOMBSTONES_DIR, parse_shard_path, shard_for_bead,
+    shard_for_dep, shard_for_tombstone, shard_name, shard_path,
 };
-pub use manifest::{CheckpointManifest, ManifestFile};
-pub use meta::{CheckpointMeta, CheckpointMetaPreimage, IncludedHeads, IncludedWatermarks};
+pub use manifest::{CheckpointManifest, ManifestFile, ParsedCheckpointManifest};
+pub use meta::{
+    CheckpointFormatVersion, CheckpointMeta, CheckpointMetaPreimage, IncludedHeads,
+    IncludedWatermarks, SupportedCheckpointMeta,
+};
 pub use publish::{
     CheckpointPublishError, CheckpointPublishOutcome, CheckpointStoreMeta, STORE_META_REF,
     publish_checkpoint, publish_checkpoint_with_retry,

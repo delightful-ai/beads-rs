@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::identity::{ActorId, NoteId};
+use super::identity::{ActorId, BranchName, NoteId};
 use super::time::{WallClock, WriteStamp}; // WriteStamp still used in Note
 
 /// Immutable note/comment on a bead.
@@ -100,11 +100,11 @@ impl Claim {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Closure {
     pub reason: Option<String>,
-    pub on_branch: Option<String>,
+    pub on_branch: Option<BranchName>,
 }
 
 impl Closure {
-    pub fn new(reason: Option<String>, on_branch: Option<String>) -> Self {
+    pub fn new(reason: Option<String>, on_branch: Option<BranchName>) -> Self {
         Self { reason, on_branch }
     }
 }

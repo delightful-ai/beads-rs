@@ -1,10 +1,10 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send};
+use super::super::{Ctx, normalize_bead_id, print_line, print_ok, send, validation_error};
 use super::fmt_wall_ms;
+use crate::Result;
 use crate::api::QueryResult;
 use crate::daemon::ipc::{AddNotePayload, IdPayload, Request, ResponsePayload};
-use crate::{Error, Result};
 
 #[derive(Args, Debug)]
 pub struct CommentsArgs {
@@ -36,12 +36,9 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
     match args.cmd {
         Some(CommentsCmd::Add(add)) => handle_comment_add(ctx, add),
         None => {
-            let id = args.id.ok_or_else(|| {
-                Error::Op(crate::daemon::OpError::ValidationFailed {
-                    field: "comments".into(),
-                    reason: "missing issue id".into(),
-                })
-            })?;
+            let id = args
+                .id
+                .ok_or_else(|| validation_error("comments", "missing issue id"))?;
             let id_for_render = normalize_bead_id(&id)?;
             let req = Request::Notes {
                 ctx: ctx.read_ctx(),

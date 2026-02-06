@@ -13,7 +13,7 @@ use super::event::{
     ValidatedBeadPatch, ValidatedDepAdd, ValidatedDepRemove, ValidatedEventBody,
     ValidatedEventKindV1, ValidatedTombstone, ValidatedTxnOpV1, ValidatedTxnV1,
 };
-use super::identity::{ActorId, BeadId, NoteId};
+use super::identity::{ActorId, BeadId, BranchName, NoteId};
 use super::state::{CanonicalState, bead_collision_cmp, note_collision_cmp};
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
@@ -486,7 +486,7 @@ fn apply_patch_to_bead(
 fn build_workflow(
     status: super::wire_bead::WorkflowStatus,
     closed_reason: &WirePatch<String>,
-    closed_on_branch: &WirePatch<String>,
+    closed_on_branch: &WirePatch<BranchName>,
     existing: &Workflow,
 ) -> Workflow {
     match status {

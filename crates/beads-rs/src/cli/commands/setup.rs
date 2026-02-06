@@ -13,9 +13,8 @@ use clap::{Args, Subcommand};
 
 use serde_json::{Map, Value, json};
 
-use crate::cli::print_line;
-use crate::daemon::OpError;
-use crate::{Error, Result};
+use crate::Result;
+use crate::cli::{print_line, validation_error};
 
 #[derive(Subcommand, Debug)]
 pub enum SetupCmd {
@@ -90,22 +89,14 @@ fn install_claude(project: bool) -> Result<()> {
 
     // Ensure parent directory exists
     if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            Error::Op(OpError::ValidationFailed {
-                field: "setup".into(),
-                reason: format!("failed to create directory: {e}"),
-            })
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|e| validation_error("setup", format!("failed to create directory: {e}")))?;
     }
 
     // Load or create settings
     let mut settings: Map<String, Value> = if settings_path.exists() {
-        let data = fs::read_to_string(&settings_path).map_err(|e| {
-            Error::Op(OpError::ValidationFailed {
-                field: "setup".into(),
-                reason: format!("failed to read settings: {e}"),
-            })
-        })?;
+        let data = fs::read_to_string(&settings_path)
+            .map_err(|e| validation_error("setup", format!("failed to read settings: {e}")))?;
         serde_json::from_str(&data).unwrap_or_default()
     } else {
         Map::new()
@@ -116,12 +107,7 @@ fn install_claude(project: bool) -> Result<()> {
         .entry("hooks".to_string())
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .ok_or_else(|| {
-            Error::Op(OpError::ValidationFailed {
-                field: "hooks".into(),
-                reason: "hooks is not an object".into(),
-            })
-        })?;
+        .ok_or_else(|| validation_error("hooks", "hooks is not an object"))?;
 
     let command = "bd prime";
 
@@ -144,12 +130,8 @@ fn install_claude(project: bool) -> Result<()> {
     }
 
     // Write back
-    let data = serde_json::to_string_pretty(&settings).map_err(|e| {
-        Error::Op(OpError::ValidationFailed {
-            field: "setup".into(),
-            reason: format!("failed to serialize settings: {e}"),
-        })
-    })?;
+    let data = serde_json::to_string_pretty(&settings)
+        .map_err(|e| validation_error("setup", format!("failed to serialize settings: {e}")))?;
     atomic_write(&settings_path, data.as_bytes())?;
 
     print_line("")?;
@@ -224,12 +206,8 @@ fn remove_claude(project: bool) -> Result<()> {
     }
 
     // Write back
-    let data = serde_json::to_string_pretty(&settings).map_err(|e| {
-        Error::Op(OpError::ValidationFailed {
-            field: "setup".into(),
-            reason: format!("failed to serialize settings: {e}"),
-        })
-    })?;
+    let data = serde_json::to_string_pretty(&settings)
+        .map_err(|e| validation_error("setup", format!("failed to serialize settings: {e}")))?;
     atomic_write(&settings_path, data.as_bytes())?;
 
     print_line("✓ Claude hooks removed")?;
@@ -402,12 +380,8 @@ fn install_cursor() -> Result<()> {
 
     // Ensure parent directory exists
     if let Some(parent) = rules_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            Error::Op(OpError::ValidationFailed {
-                field: "setup".into(),
-                reason: format!("failed to create directory: {e}"),
-            })
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|e| validation_error("setup", format!("failed to create directory: {e}")))?;
     }
 
     atomic_write(&rules_path, CURSOR_RULES.as_bytes())?;
@@ -450,10 +424,10 @@ fn remove_cursor() -> Result<()> {
             print_line("No rules file found")?;
         }
         Err(e) => {
-            return Err(Error::Op(OpError::ValidationFailed {
-                field: "setup".into(),
-                reason: format!("failed to remove file: {e}"),
-            }));
+            return Err(validation_error(
+                "setup",
+                format!("failed to remove file: {e}"),
+            ));
         }
     }
 
@@ -614,12 +588,8 @@ fn install_aider() -> Result<()> {
     print_line("Installing Aider integration...")?;
 
     // Ensure .aider directory exists
-    fs::create_dir_all(".aider").map_err(|e| {
-        Error::Op(OpError::ValidationFailed {
-            field: "setup".into(),
-            reason: format!("failed to create directory: {e}"),
-        })
-    })?;
+    fs::create_dir_all(".aider")
+        .map_err(|e| validation_error("setup", format!("failed to create directory: {e}")))?;
 
     // Write config file
     atomic_write(&config_path, AIDER_CONFIG.as_bytes())?;
@@ -680,10 +650,10 @@ fn remove_aider() -> Result<()> {
             Ok(_) => removed = true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(Error::Op(OpError::ValidationFailed {
-                    field: "setup".into(),
-                    reason: format!("failed to remove file: {e}"),
-                }));
+                return Err(validation_error(
+                    "setup",
+                    format!("failed to remove file: {e}"),
+                ));
             }
         }
     }
@@ -705,45 +675,24 @@ fn remove_aider() -> Result<()> {
 // =============================================================================
 
 fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().ok_or_else(|| {
-        Error::Op(OpError::ValidationFailed {
-            field: "setup".into(),
-            reason: "failed to get home directory".into(),
-        })
-    })
+    dirs::home_dir().ok_or_else(|| validation_error("setup", "failed to get home directory"))
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     // Write to temp file then rename for atomicity
     let temp_path = path.with_extension("tmp");
 
-    let mut file = fs::File::create(&temp_path).map_err(|e| {
-        Error::Op(OpError::ValidationFailed {
-            field: "setup".into(),
-            reason: format!("failed to create temp file: {e}"),
-        })
-    })?;
+    let mut file = fs::File::create(&temp_path)
+        .map_err(|e| validation_error("setup", format!("failed to create temp file: {e}")))?;
 
-    file.write_all(data).map_err(|e| {
-        Error::Op(OpError::ValidationFailed {
-            field: "setup".into(),
-            reason: format!("failed to write file: {e}"),
-        })
-    })?;
+    file.write_all(data)
+        .map_err(|e| validation_error("setup", format!("failed to write file: {e}")))?;
 
-    file.sync_all().map_err(|e| {
-        Error::Op(OpError::ValidationFailed {
-            field: "setup".into(),
-            reason: format!("failed to sync file: {e}"),
-        })
-    })?;
+    file.sync_all()
+        .map_err(|e| validation_error("setup", format!("failed to sync file: {e}")))?;
 
-    fs::rename(&temp_path, path).map_err(|e| {
-        Error::Op(OpError::ValidationFailed {
-            field: "setup".into(),
-            reason: format!("failed to rename file: {e}"),
-        })
-    })?;
+    fs::rename(&temp_path, path)
+        .map_err(|e| validation_error("setup", format!("failed to rename file: {e}")))?;
 
     Ok(())
 }

@@ -6,7 +6,8 @@ use bytes::Bytes;
 
 use beads_rs::core::ContentHash;
 use beads_rs::git::checkpoint::{
-    CheckpointExport, CheckpointManifest, CheckpointMeta, CheckpointShardPayload,
+    CheckpointExport, CheckpointManifest, CheckpointMeta, CheckpointShardPath,
+    CheckpointShardPayload,
 };
 use beads_rs::sha256_bytes;
 
@@ -89,8 +90,8 @@ fn diff_manifest(expected: &CheckpointManifest, actual: &CheckpointManifest) -> 
 }
 
 fn diff_files(
-    expected: &BTreeMap<String, CheckpointShardPayload>,
-    actual: &BTreeMap<String, CheckpointShardPayload>,
+    expected: &BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
+    actual: &BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
 ) -> Vec<String> {
     let mut diffs = Vec::new();
     for (path, payload) in expected {
@@ -160,6 +161,7 @@ mod tests {
             .files
             .insert(path.clone(), corrupt_payload(&payload));
         let diffs = diff_exports(&fixture.export, &mutated);
-        assert!(diffs.iter().any(|diff| diff.contains(&path)));
+        let path_str = path.to_path();
+        assert!(diffs.iter().any(|diff| diff.contains(&path_str)));
     }
 }

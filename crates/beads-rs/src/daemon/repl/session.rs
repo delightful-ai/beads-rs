@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
+use thiserror::Error;
+
 use crate::core::error::details::{
     EventIdDetails, FrameTooLargeDetails, HashMismatchDetails, InternalErrorDetails,
     InvalidRequestDetails, NamespacePolicyViolationDetails, NonCanonicalDetails, OverloadedDetails,
@@ -92,9 +94,31 @@ pub struct ProtocolRange {
     pub max: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("protocol range invalid: min {min} greater than max {max}")]
+pub struct ProtocolRangeError {
+    min: u32,
+    max: u32,
+}
+
 impl ProtocolRange {
-    pub fn new(min: u32, max: u32) -> Self {
-        Self { min, max }
+    pub fn new(min: u32, max: u32) -> Result<Self, ProtocolRangeError> {
+        if min <= max {
+            Ok(Self { min, max })
+        } else {
+            Err(ProtocolRangeError { min, max })
+        }
+    }
+
+    pub fn exact(version: u32) -> Self {
+        Self {
+            min: version,
+            max: version,
+        }
+    }
+
+    pub fn range(min: u32, max: u32) -> Result<Self, ProtocolRangeError> {
+        Self::new(min, max)
     }
 }
 
@@ -114,7 +138,7 @@ impl SessionConfig {
         Self {
             local_store,
             local_replica_id,
-            protocol: ProtocolRange::new(PROTOCOL_VERSION_V1, PROTOCOL_VERSION_V1),
+            protocol: ProtocolRange::exact(PROTOCOL_VERSION_V1),
             requested_namespaces: Vec::new(),
             offered_namespaces: Vec::new(),
             capabilities: Capabilities {
@@ -1076,7 +1100,7 @@ impl<R, P: PhaseWrap> Session<R, P> {
         let total_bytes: u64 = events
             .events
             .iter()
-            .map(|frame| frame.bytes.len() as u64)
+            .map(|frame| frame.bytes().len() as u64)
             .sum();
         let event_count = events.events.len() as u64;
         metrics::repl_events_in(event_count as usize);
@@ -1096,8 +1120,8 @@ impl<R, P: PhaseWrap> Session<R, P> {
             applied_updates: &mut applied_updates,
         };
         for frame in events.events {
-            let namespace = frame.eid.namespace.clone();
-            let origin = frame.eid.origin_replica_id;
+            let namespace = frame.eid().namespace.clone();
+            let origin = frame.eid().origin_replica_id;
             if !incoming_namespaces.contains(&namespace) {
                 return self.fail(namespace_policy_violation_error(&namespace));
             }
@@ -1108,7 +1132,7 @@ impl<R, P: PhaseWrap> Session<R, P> {
                 HeadStatus::Known(head) => Some(Sha256(head)),
             };
 
-            let expected_prev = match self.expected_prev_head(durable, frame.eid.origin_seq) {
+            let expected_prev = match self.expected_prev_head(durable, frame.eid().origin_seq) {
                 Ok(prev) => prev,
                 Err(error) => return self.fail(error),
             };
@@ -1644,16 +1668,16 @@ fn event_frame_error_payload(
             reason: Some("event body is not canonically encoded".to_string()),
         })),
         EventFrameError::HashMismatch => {
-            let expected = hash_event_body(&frame.bytes);
+            let expected = hash_event_body(frame.bytes());
             ReplError::new(
                 ProtocolErrorCode::HashMismatch.into(),
                 "event sha256 mismatch",
                 false,
             )
             .with_details(ReplErrorDetails::HashMismatch(HashMismatchDetails {
-                eid: event_id_details(&frame.eid),
+                eid: event_id_details(frame.eid()),
                 expected_sha256: sha256_hex(expected),
-                got_sha256: sha256_hex(frame.sha256),
+                got_sha256: sha256_hex(frame.sha256()),
             }))
         }
         EventFrameError::PrevMismatch => ReplError::new(
@@ -1662,9 +1686,9 @@ fn event_frame_error_payload(
             false,
         )
         .with_details(ReplErrorDetails::PrevShaMismatch(PrevShaMismatchDetails {
-            eid: event_id_details(&frame.eid),
+            eid: event_id_details(frame.eid()),
             expected_prev_sha256: sha256_hex_or_zero(head_sha),
-            got_prev_sha256: sha256_hex_or_zero(frame.prev_sha256),
+            got_prev_sha256: sha256_hex_or_zero(frame.prev_sha256()),
             head_seq,
         })),
         EventFrameError::Validation(err) => ReplError::new(
@@ -1676,7 +1700,7 @@ fn event_frame_error_payload(
             field: None,
             reason: Some(err.to_string()),
         })),
-        EventFrameError::Decode(err) => decode_error_payload(&err, limits, frame.bytes.len()),
+        EventFrameError::Decode(err) => decode_error_payload(&err, limits, frame.bytes().len()),
         EventFrameError::Encode(err) => internal_error(err.to_string()),
         EventFrameError::Lookup(err) => internal_error(err.to_string()),
         EventFrameError::Equivocation => ReplError::new(
@@ -1881,6 +1905,19 @@ mod tests {
         (TestStore::new(), identity, replica)
     }
 
+    #[test]
+    fn protocol_range_rejects_inverted() {
+        let err = ProtocolRange::range(3, 2).unwrap_err();
+        assert_eq!(err.min, 3);
+        assert_eq!(err.max, 2);
+    }
+
+    #[test]
+    fn protocol_range_exact_negotiates() {
+        let negotiated = negotiate_version(ProtocolRange::exact(2), 3, 1).unwrap();
+        assert_eq!(negotiated, 2);
+    }
+
     fn inbound_streaming_session(
         namespaces: Vec<NamespaceId>,
     ) -> (SessionState<Inbound>, TestStore, StoreIdentity) {
@@ -1968,12 +2005,14 @@ mod tests {
         };
         let bytes = encode_event_body_canonical(&body).unwrap();
         let sha = hash_event_body(&bytes);
-        EventFrameV1 {
-            eid: EventId::new(origin, namespace.clone(), body.origin_seq),
-            sha256: sha,
-            prev_sha256: prev,
-            bytes: EventBytes::<crate::core::Opaque>::from(bytes),
-        }
+        let eid = EventId::new(origin, namespace.clone(), body.origin_seq);
+        EventFrameV1::try_from_parts(
+            eid,
+            sha,
+            prev,
+            EventBytes::<crate::core::Opaque>::from(bytes),
+        )
+        .expect("frame")
     }
 
     #[test]
@@ -2328,8 +2367,8 @@ mod tests {
 
         let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
-        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
-        let e2_sha = e2.sha256;
+        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256()));
+        let e2_sha = e2.sha256();
 
         let (_session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
@@ -2398,7 +2437,7 @@ mod tests {
 
         let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
-        let e3 = make_event(identity, NamespaceId::core(), origin, 3, Some(e1.sha256));
+        let e3 = make_event(identity, NamespaceId::core(), origin, 3, Some(e1.sha256()));
 
         let (_session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
@@ -2479,7 +2518,7 @@ mod tests {
 
         let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         let e1 = make_event(identity, NamespaceId::core(), origin, 1, None);
-        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256));
+        let e2 = make_event(identity, NamespaceId::core(), origin, 2, Some(e1.sha256()));
 
         let (session, actions) = handle_inbound_message(
             SessionState::StreamingLive(session),
@@ -2675,7 +2714,7 @@ mod tests {
             .unwrap()
             .expect("frame too large details");
         assert_eq!(details.max_frame_bytes, limits.max_frame_bytes as u64);
-        assert_eq!(details.got_bytes, frame.bytes.len() as u64);
+        assert_eq!(details.got_bytes, frame.bytes().len() as u64);
     }
 
     #[test]
@@ -2710,8 +2749,10 @@ mod tests {
     #[test]
     fn hash_mismatch_maps_to_hash_mismatch_details() {
         let (_store, identity, origin) = base_store();
-        let mut frame = make_event(identity, NamespaceId::core(), origin, 1, None);
-        frame.sha256 = Sha256([9u8; 32]);
+        let frame = make_event(identity, NamespaceId::core(), origin, 1, None);
+        let (eid, _sha256, prev_sha256, bytes) = frame.into_parts();
+        let frame = EventFrameV1::try_from_parts(eid, Sha256([9u8; 32]), prev_sha256, bytes)
+            .expect("frame");
 
         let payload = event_frame_error_payload(
             &frame,
@@ -2727,14 +2768,14 @@ mod tests {
             .details_as::<HashMismatchDetails>()
             .unwrap()
             .expect("hash mismatch details");
-        assert_eq!(details.eid.namespace, frame.eid.namespace);
-        assert_eq!(details.eid.origin_replica_id, frame.eid.origin_replica_id);
-        assert_eq!(details.eid.origin_seq, frame.eid.origin_seq.get());
+        assert_eq!(details.eid.namespace, frame.eid().namespace);
+        assert_eq!(details.eid.origin_replica_id, frame.eid().origin_replica_id);
+        assert_eq!(details.eid.origin_seq, frame.eid().origin_seq.get());
         assert_eq!(
             details.expected_sha256,
-            hex::encode(hash_event_body(&frame.bytes).as_bytes())
+            hex::encode(hash_event_body(frame.bytes()).as_bytes())
         );
-        assert_eq!(details.got_sha256, hex::encode(frame.sha256.as_bytes()));
+        assert_eq!(details.got_sha256, hex::encode(frame.sha256().as_bytes()));
     }
 
     #[test]
@@ -2758,9 +2799,9 @@ mod tests {
             .details_as::<PrevShaMismatchDetails>()
             .unwrap()
             .expect("prev mismatch details");
-        assert_eq!(details.eid.namespace, frame.eid.namespace);
-        assert_eq!(details.eid.origin_replica_id, frame.eid.origin_replica_id);
-        assert_eq!(details.eid.origin_seq, frame.eid.origin_seq.get());
+        assert_eq!(details.eid.namespace, frame.eid().namespace);
+        assert_eq!(details.eid.origin_replica_id, frame.eid().origin_replica_id);
+        assert_eq!(details.eid.origin_seq, frame.eid().origin_seq.get());
         assert_eq!(
             details.expected_prev_sha256,
             hex::encode(expected_prev.as_bytes())

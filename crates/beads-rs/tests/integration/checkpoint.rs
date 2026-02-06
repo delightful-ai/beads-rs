@@ -53,7 +53,7 @@ fn checkpoint_import_rejects_corrupt_files() {
     write_checkpoint_tree(temp.path(), &fixture.export).expect("write checkpoint");
 
     let (path, _) = fixture.export.files.iter().next().expect("export file");
-    let target = temp.path().join(path);
+    let target = temp.path().join(path.to_path());
     corrupt_jsonl_preserving_syntax(&target).expect("corrupt file");
 
     let err = import_checkpoint(temp.path(), &beads_rs::Limits::default()).unwrap_err();
@@ -122,8 +122,16 @@ fn checkpoint_multi_namespace_includes_all_namespaces() {
     assert_eq!(namespaces.len(), 2);
 
     let files = fixture.export.files.keys().collect::<Vec<_>>();
-    assert!(files.iter().any(|path| path.contains("namespaces/core/")));
-    assert!(files.iter().any(|path| path.contains("namespaces/sys/")));
+    assert!(
+        files
+            .iter()
+            .any(|path| path.to_path().contains("namespaces/core/"))
+    );
+    assert!(
+        files
+            .iter()
+            .any(|path| path.to_path().contains("namespaces/sys/"))
+    );
 }
 
 #[test]
@@ -299,7 +307,7 @@ fn write_checkpoint_tree(dir: &Path, export: &CheckpointExport) -> std::io::Resu
     )?;
 
     for (path, payload) in &export.files {
-        let file_path = dir.join(path);
+        let file_path = dir.join(path.to_path());
         write_bytes(&file_path, payload.bytes.as_ref())?;
     }
     Ok(())

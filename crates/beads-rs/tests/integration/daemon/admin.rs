@@ -20,9 +20,9 @@ use beads_rs::api::{
 use beads_rs::api::{AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample};
 use beads_rs::core::BeadType;
 use beads_rs::daemon::ipc::{
-    AdminDoctorPayload, AdminFingerprintPayload, AdminMaintenanceModePayload, AdminScrubPayload,
-    CreatePayload, EmptyPayload, IpcClient, MutationCtx, MutationMeta, ReadConsistency, ReadCtx,
-    RepoCtx, Request, Response, ResponsePayload,
+    AdminDoctorPayload, AdminFingerprintPayload, AdminMaintenanceModePayload, AdminOp,
+    AdminScrubPayload, CreatePayload, EmptyPayload, IpcClient, MutationCtx, MutationMeta,
+    ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_rs::daemon::ops::OpResult;
 use beads_rs::{
@@ -183,33 +183,33 @@ impl AdminFixture {
     }
 
     fn admin_status(&self) -> AdminStatusOutput {
-        match self.send_query(Request::AdminStatus {
+        match self.send_query(Request::Admin(AdminOp::Status {
             ctx: ReadCtx::new(
                 self.repo_dir.path().to_path_buf(),
                 ReadConsistency::default(),
             ),
             payload: EmptyPayload {},
-        }) {
+        })) {
             beads_rs::api::QueryResult::AdminStatus(status) => status,
             other => panic!("unexpected admin status payload: {other:?}"),
         }
     }
 
     fn admin_metrics(&self) -> AdminMetricsOutput {
-        match self.send_query(Request::AdminMetrics {
+        match self.send_query(Request::Admin(AdminOp::Metrics {
             ctx: ReadCtx::new(
                 self.repo_dir.path().to_path_buf(),
                 ReadConsistency::default(),
             ),
             payload: EmptyPayload {},
-        }) {
+        })) {
             beads_rs::api::QueryResult::AdminMetrics(metrics) => metrics,
             other => panic!("unexpected admin metrics payload: {other:?}"),
         }
     }
 
     fn admin_doctor(&self) -> beads_rs::api::AdminDoctorOutput {
-        match self.send_query(Request::AdminDoctor {
+        match self.send_query(Request::Admin(AdminOp::Doctor {
             ctx: ReadCtx::new(
                 self.repo_dir.path().to_path_buf(),
                 ReadConsistency::default(),
@@ -218,14 +218,14 @@ impl AdminFixture {
                 max_records_per_namespace: None,
                 verify_checkpoint_cache: false,
             },
-        }) {
+        })) {
             beads_rs::api::QueryResult::AdminDoctor(output) => output,
             other => panic!("unexpected admin doctor payload: {other:?}"),
         }
     }
 
     fn admin_scrub(&self, max_records_per_namespace: Option<u64>) -> AdminScrubOutput {
-        match self.send_query(Request::AdminScrub {
+        match self.send_query(Request::Admin(AdminOp::Scrub {
             ctx: ReadCtx::new(
                 self.repo_dir.path().to_path_buf(),
                 ReadConsistency::default(),
@@ -234,17 +234,17 @@ impl AdminFixture {
                 max_records_per_namespace,
                 verify_checkpoint_cache: false,
             },
-        }) {
+        })) {
             beads_rs::api::QueryResult::AdminScrub(output) => output,
             other => panic!("unexpected admin scrub payload: {other:?}"),
         }
     }
 
     fn admin_reload_policies(&self) -> AdminReloadPoliciesOutput {
-        match self.send_query(Request::AdminReloadPolicies {
+        match self.send_query(Request::Admin(AdminOp::ReloadPolicies {
             ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
             payload: EmptyPayload {},
-        }) {
+        })) {
             beads_rs::api::QueryResult::AdminReloadPolicies(output) => output,
             other => panic!("unexpected admin reload policies payload: {other:?}"),
         }
@@ -255,30 +255,30 @@ impl AdminFixture {
         mode: AdminFingerprintMode,
         sample: Option<AdminFingerprintSample>,
     ) -> AdminFingerprintOutput {
-        match self.send_query(Request::AdminFingerprint {
+        match self.send_query(Request::Admin(AdminOp::Fingerprint {
             ctx: ReadCtx::new(
                 self.repo_dir.path().to_path_buf(),
                 ReadConsistency::default(),
             ),
             payload: AdminFingerprintPayload { mode, sample },
-        }) {
+        })) {
             beads_rs::api::QueryResult::AdminFingerprint(output) => output,
             other => panic!("unexpected admin fingerprint payload: {other:?}"),
         }
     }
 
     fn admin_maintenance(&self, enabled: bool) -> Response {
-        self.send_request(&Request::AdminMaintenanceMode {
+        self.send_request(&Request::Admin(AdminOp::MaintenanceMode {
             ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
             payload: AdminMaintenanceModePayload { enabled },
-        })
+        }))
     }
 
     fn admin_rebuild_index(&self) -> Response {
-        self.send_request(&Request::AdminRebuildIndex {
+        self.send_request(&Request::Admin(AdminOp::RebuildIndex {
             ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
             payload: EmptyPayload {},
-        })
+        }))
     }
 
     fn send_query(&self, request: Request) -> beads_rs::api::QueryResult {

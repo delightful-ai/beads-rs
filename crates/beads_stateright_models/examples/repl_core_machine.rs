@@ -103,9 +103,9 @@ struct FrameMsg {
 impl FrameMsg {
     fn new(frame: EventFrameV1) -> Self {
         let digest = FrameDigest {
-            eid: frame.eid.clone(),
-            sha256: frame.sha256,
-            prev_sha256: frame.prev_sha256,
+            eid: frame.eid().clone(),
+            sha256: frame.sha256(),
+            prev_sha256: frame.prev_sha256(),
         };
         Self { digest, frame }
     }
@@ -243,7 +243,7 @@ impl ReplActor {
                 let txn_id = TxnId::new(make_uuid(replica_id, seq, 0));
                 let body = factory.txn_body(seq1, txn_id, seq, 0, TxnDeltaV1::new(), None);
                 let frame = event_factory::encode_frame(&body, prev_for_seq).expect("encode frame");
-                prev_sha = Some(frame.sha256);
+                prev_sha = Some(frame.sha256());
                 frames.push(FrameMsg::new(frame));
 
                 if self.equivocate && seq == EQUIVOCATE_SEQ {
@@ -718,15 +718,15 @@ impl NodeState {
         limits: &Limits,
         store: StoreIdentity,
     ) -> LastEffectKind {
-        let namespace = frame.eid.namespace.clone();
-        let origin = frame.eid.origin_replica_id;
+        let namespace = frame.eid().namespace.clone();
+        let origin = frame.eid().origin_replica_id;
         let key = StreamKey::new(namespace.clone(), origin);
         let durable = self
             .durable
             .get(&key)
             .copied()
             .unwrap_or_else(Watermark::genesis);
-        let expected_prev = expected_prev_head(durable, frame.eid.origin_seq);
+        let expected_prev = expected_prev_head(durable, frame.eid().origin_seq);
         let lookup = EventLookup {
             events: &self.event_store,
         };
@@ -776,7 +776,7 @@ impl NodeState {
                 self.refresh_maxes();
                 LastEffectKind::Buffered {
                     key,
-                    seq: frame.eid.origin_seq,
+                    seq: frame.eid().origin_seq,
                 }
             }
             beads_rs::model::IngestDecision::DuplicateNoop => {
@@ -784,7 +784,7 @@ impl NodeState {
                 self.refresh_maxes();
                 LastEffectKind::Duplicate {
                     key,
-                    seq: frame.eid.origin_seq,
+                    seq: frame.eid().origin_seq,
                 }
             }
             beads_rs::model::IngestDecision::Reject { reason } => {

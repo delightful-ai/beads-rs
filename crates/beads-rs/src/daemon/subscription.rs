@@ -186,7 +186,7 @@ fn build_backfill_plan<R: WalRangeRead>(
                     from_seq_excl,
                 }));
             };
-            from_seq_excl = Seq0::new(last.eid.origin_seq.get());
+            from_seq_excl = Seq0::new(last.eid().origin_seq.get());
             plan.frames.extend(frames);
         }
     }
@@ -275,12 +275,15 @@ mod tests {
     }
 
     fn frame(origin: ReplicaId, namespace: NamespaceId, seq: u64) -> EventFrameV1 {
-        EventFrameV1 {
-            eid: EventId::new(origin, namespace, Seq1::from_u64(seq).unwrap()),
-            sha256: Sha256([seq as u8; 32]),
-            prev_sha256: None,
-            bytes: EventBytes::<Opaque>::new(Bytes::from(vec![seq as u8])),
-        }
+        let eid = EventId::new(origin, namespace, Seq1::from_u64(seq).unwrap());
+        let sha256 = Sha256([seq as u8; 32]);
+        let prev_sha256 = if seq == 1 {
+            None
+        } else {
+            Some(Sha256([(seq - 1) as u8; 32]))
+        };
+        let bytes = EventBytes::<Opaque>::new(Bytes::from(vec![seq as u8]));
+        EventFrameV1::try_from_parts(eid, sha256, prev_sha256, bytes).expect("frame")
     }
 
     fn watermark(seq: u64) -> Watermark<Applied> {

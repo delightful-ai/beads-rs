@@ -12,7 +12,9 @@ use super::export::{
     CheckpointExport, CheckpointExportError, CheckpointExportInput,
     CheckpointSnapshotFromStateInput, build_snapshot_from_state, export_checkpoint,
 };
-use super::import::{CheckpointImportError, import_checkpoint_export, merge_store_states};
+use super::import::{
+    CheckpointImportError, import_checkpoint_export, merge_store_states, parse_checkpoint_export,
+};
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{MANIFEST_FILE, META_FILE};
 use crate::core::{ContentHash, Limits, StoreEpoch, StoreId};
@@ -114,7 +116,8 @@ pub fn publish_checkpoint_with_retry(
 
     // Candidate state starts as the caller-provided export.
     let mut candidate_export = export.clone();
-    let mut candidate_state = import_checkpoint_export(&candidate_export, &limits)?.state;
+    let mut candidate_state =
+        import_checkpoint_export(&parse_checkpoint_export(&candidate_export)?, &limits)?.state;
     let mut remote_parent: Option<Oid> = None;
 
     let mut retries = 0usize;
@@ -158,7 +161,8 @@ pub fn publish_checkpoint_with_retry(
 
                 let remote_export = read_checkpoint_export_at_oid(repo, remote_oid)?;
                 ensure_checkpoint_compatible(&candidate_export, &remote_export)?;
-                let remote_state = import_checkpoint_export(&remote_export, &limits)?.state;
+                let remote_parsed = parse_checkpoint_export(&remote_export)?;
+                let remote_state = import_checkpoint_export(&remote_parsed, &limits)?.state;
 
                 let merged_state = merge_store_states(&candidate_state, &remote_state)?;
                 let merged_included = merge_included_watermarks(
@@ -290,7 +294,8 @@ fn build_checkpoint_tree(
     insert_path(&mut root, MANIFEST_FILE, manifest_oid)?;
     for (path, payload) in &export.files {
         let oid = repo.blob(payload.bytes.as_ref())?;
-        insert_path(&mut root, path, oid)?;
+        let full_path = path.to_path();
+        insert_path(&mut root, &full_path, oid)?;
     }
 
     build_tree(repo, &root)
@@ -766,7 +771,8 @@ fn read_checkpoint_export_at_oid(
 
     let mut files = BTreeMap::new();
     for path in manifest.files.keys() {
-        let bytes = read_blob_bytes(repo, &tree, path)?;
+        let full_path = path.to_path();
+        let bytes = read_blob_bytes(repo, &tree, &full_path)?;
         files.insert(
             path.clone(),
             super::types::CheckpointShardPayload {
@@ -960,7 +966,8 @@ mod tests {
 
         // Import remote checkpoint and verify both beads exist.
         let remote_export = read_checkpoint_export_at_oid(&remote_repo, remote_head).unwrap();
-        let imported = import_checkpoint_export(&remote_export, &Limits::default()).unwrap();
+        let parsed = parse_checkpoint_export(&remote_export).unwrap();
+        let imported = import_checkpoint_export(&parsed, &Limits::default()).unwrap();
         let core_state = imported.state.core();
 
         let a_id = BeadId::parse("beads-rs-aaa1").unwrap();

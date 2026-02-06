@@ -2,8 +2,9 @@ use clap::Args;
 
 use super::super::{
     Ctx, fetch_issue, normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, print_line,
-    print_ok, resolve_description, send,
+    print_ok, resolve_description, send, validation_error,
 };
+use crate::Result;
 use crate::api::QueryResult;
 use crate::cli::parse::{parse_bead_type, parse_priority, parse_status as parse_status_arg};
 use crate::core::{BeadType, Priority};
@@ -13,8 +14,7 @@ use crate::daemon::ipc::{
     ParentPayload, Request, ResponsePayload, UpdatePayload,
 };
 use crate::daemon::ops::BeadPatchDaemonExt;
-use crate::{Error, Result};
-use beads_surface::ops::{BeadPatch, Patch};
+use beads_surface::ops::{BeadPatch, OpenInProgress, Patch};
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -103,10 +103,10 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     let remove_labels = std::mem::take(&mut args.remove_label);
 
     if close_reason.is_some() && !status_closed {
-        return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "reason".into(),
-            reason: "--reason requires --status=closed".into(),
-        }));
+        return Err(validation_error(
+            "reason",
+            "--reason requires --status=closed",
+        ));
     }
 
     let parent_action = if args.no_parent {
@@ -156,10 +156,16 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         patch.bead_type = Patch::Set(bead_type);
     }
     if let Some(status) = status {
-        if status == WorkflowStatus::Closed && close_reason.is_some() {
-            // Close via explicit close op to preserve reason.
-        } else {
-            patch.status = Patch::Set(status);
+        match status {
+            WorkflowStatus::Closed => {
+                // Close via explicit close op to preserve reason/branch semantics.
+            }
+            WorkflowStatus::Open => {
+                patch.status = Patch::Set(OpenInProgress::Open);
+            }
+            WorkflowStatus::InProgress => {
+                patch.status = Patch::Set(OpenInProgress::InProgress);
+            }
         }
     }
 
@@ -255,10 +261,10 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
             let current = ctx.actor_string()?;
             if !assignee.is_empty() && assignee != "me" && assignee != "self" && assignee != current
             {
-                return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-                    field: "assignee".into(),
-                    reason: "cannot assign other actors; run bd as that actor".into(),
-                }));
+                return Err(validation_error(
+                    "assignee",
+                    "cannot assign other actors; run bd as that actor",
+                ));
             }
             let req = Request::Claim {
                 ctx: ctx.mutation_ctx(),
@@ -271,7 +277,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
         }
     }
 
-    if status_closed && close_reason.is_some() {
+    if status_closed {
         let req = Request::Close {
             ctx: ctx.mutation_ctx(),
             payload: ClosePayload {
@@ -313,10 +319,6 @@ fn normalize_reason(reason: Option<String>) -> Option<String> {
 }
 
 fn parse_status(raw: &str) -> Result<WorkflowStatus> {
-    WorkflowStatus::parse(raw).ok_or_else(|| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "status".into(),
-            reason: format!("unknown status {raw:?}"),
-        })
-    })
+    WorkflowStatus::parse(raw)
+        .ok_or_else(|| validation_error("status", format!("unknown status {raw:?}")))
 }

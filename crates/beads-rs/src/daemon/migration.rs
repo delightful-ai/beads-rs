@@ -3,7 +3,7 @@
 use git2::{ErrorCode, Oid, Repository};
 use thiserror::Error;
 
-use crate::core::{StoreState, WriteStamp};
+use crate::core::{BeadSlug, StoreState, WriteStamp};
 use crate::daemon::remote::RemoteUrl;
 use crate::daemon::wal_legacy_snapshot::{Wal, WalEntry, WalError};
 use crate::git::checkpoint::store_state_from_legacy;
@@ -15,7 +15,7 @@ const LEGACY_REF: &str = "refs/heads/beads/store";
 #[derive(Debug, Clone)]
 pub struct LegacyGitImport {
     pub state: StoreState,
-    pub root_slug: Option<String>,
+    pub root_slug: Option<BeadSlug>,
     pub last_write_stamp: Option<WriteStamp>,
 }
 
@@ -42,8 +42,8 @@ pub fn import_legacy_git_ref(repo: &Repository) -> Result<Option<LegacyGitImport
     let loaded = read_state_at_oid(repo, oid)?;
     Ok(Some(LegacyGitImport {
         state: store_state_from_legacy(loaded.state),
-        root_slug: loaded.root_slug,
-        last_write_stamp: loaded.last_write_stamp,
+        root_slug: loaded.meta.root_slug().cloned(),
+        last_write_stamp: loaded.meta.last_write_stamp().cloned(),
     }))
 }
 
@@ -167,7 +167,10 @@ mod tests {
             .expect("legacy import");
         let core_state = import.state.core();
         assert_eq!(core_state.live_count(), 1);
-        assert_eq!(import.root_slug.as_deref(), Some(root_slug));
+        assert_eq!(
+            import.root_slug.as_ref().map(BeadSlug::as_str),
+            Some(root_slug)
+        );
         assert_eq!(import.last_write_stamp, Some(stamp));
     }
 

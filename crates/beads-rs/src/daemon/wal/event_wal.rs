@@ -167,9 +167,9 @@ mod tests {
     use crate::core::{
         ReplicaId, SegmentId, Seq1, StoreEpoch, StoreId, StoreIdentity, StoreMetaVersions,
     };
-    use crate::daemon::wal::RecordHeader;
     use crate::daemon::wal::frame::encode_frame;
     use crate::daemon::wal::segment::SegmentHeader;
+    use crate::daemon::wal::{RecordHeader, RequestProof};
 
     fn test_meta(store_id: StoreId) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));
@@ -189,7 +189,7 @@ mod tests {
             origin_seq: Seq1::from_u64(1).unwrap(),
             event_time_ms: 1_700_000_000_100,
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
-            request: None,
+            request_proof: RequestProof::None,
             sha256: [0u8; 32],
             prev_sha256: None,
         };

@@ -4,12 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 
+use super::layout::CheckpointShardPath;
 use super::meta::{IncludedHeads, IncludedWatermarks};
 use crate::core::{ContentHash, NamespaceId, ReplicaId, StoreEpoch, StoreId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointShardPayload {
-    pub path: String,
+    pub path: CheckpointShardPath,
     pub bytes: Bytes,
 }
 
@@ -26,6 +27,6 @@ pub struct CheckpointSnapshot {
     pub roster_hash: Option<ContentHash>,
     pub included: IncludedWatermarks,
     pub included_heads: Option<IncludedHeads>,
-    pub shards: BTreeMap<String, CheckpointShardPayload>,
-    pub dirty_shards: BTreeSet<String>,
+    pub shards: BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
+    pub dirty_shards: BTreeSet<CheckpointShardPath>,
 }

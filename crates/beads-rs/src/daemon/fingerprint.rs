@@ -8,7 +8,7 @@ use crate::api::{AdminFingerprintKind, AdminFingerprintShard, AdminNamespaceFing
 use crate::core::{ContentHash, NamespaceId, sha256_bytes};
 use crate::daemon::store_runtime::StoreRuntime;
 use crate::git::checkpoint::CheckpointSnapshotError;
-use crate::git::checkpoint::layout::{CheckpointFileKind, SHARD_COUNT, parse_shard_path};
+use crate::git::checkpoint::layout::{CheckpointFileKind, SHARD_COUNT, ShardName};
 
 const FINGERPRINT_GROUP: &str = "admin-fingerprint";
 
@@ -22,8 +22,6 @@ pub enum FingerprintMode {
 pub enum FingerprintError {
     #[error(transparent)]
     Snapshot(#[from] CheckpointSnapshotError),
-    #[error("invalid checkpoint shard path {path}")]
-    InvalidShardPath { path: String },
     #[error("invalid checkpoint shard index for {path}")]
     InvalidShardIndex { path: String },
 }
@@ -43,15 +41,15 @@ pub fn fingerprint_namespaces(
     }
 
     for (path, payload) in &snapshot.shards {
-        let parsed = parse_shard_path(path)
-            .ok_or_else(|| FingerprintError::InvalidShardPath { path: path.clone() })?;
-        let shard_index = shard_index(&parsed.shard)
-            .ok_or_else(|| FingerprintError::InvalidShardIndex { path: path.clone() })?;
+        let shard_index =
+            shard_index(&path.shard).ok_or_else(|| FingerprintError::InvalidShardIndex {
+                path: path.to_path(),
+            })?;
         let hash = ContentHash::from_bytes(sha256_bytes(payload.bytes.as_ref()).0);
         let entry = by_namespace
-            .entry(parsed.namespace.clone())
+            .entry(path.namespace.clone())
             .or_insert_with(|| NamespaceHashes::new(empty_hash));
-        entry.assign(parsed.kind, shard_index, hash);
+        entry.assign(path.kind, shard_index, hash);
     }
 
     let mut out = Vec::new();
@@ -109,8 +107,8 @@ impl NamespaceHashes {
     }
 }
 
-fn shard_index(file: &str) -> Option<u8> {
-    let stem = file.trim_end_matches(".jsonl");
+fn shard_index(shard: &ShardName) -> Option<u8> {
+    let stem = shard.as_str().trim_end_matches(".jsonl");
     if stem.len() != 2 {
         return None;
     }

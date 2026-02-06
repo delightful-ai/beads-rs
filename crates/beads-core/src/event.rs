@@ -12,7 +12,8 @@ use thiserror::Error;
 use super::dep::DepKey;
 use super::domain::DepKind;
 use super::identity::{
-    ActorId, BeadId, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity, TraceId, TxnId,
+    ActorId, BeadId, BranchName, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity,
+    TraceId, TxnId,
 };
 use super::limits::Limits;
 use super::namespace::NamespaceId;
@@ -290,10 +291,64 @@ pub enum ValidatedTxnOpV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventFrameV1 {
-    pub eid: EventId,
-    pub sha256: Sha256,
-    pub prev_sha256: Option<Sha256>,
-    pub bytes: EventBytes<Opaque>,
+    eid: EventId,
+    sha256: Sha256,
+    prev_sha256: Option<Sha256>,
+    bytes: EventBytes<Opaque>,
+}
+
+impl EventFrameV1 {
+    pub fn try_from_parts(
+        eid: EventId,
+        sha256: Sha256,
+        prev_sha256: Option<Sha256>,
+        bytes: EventBytes<Opaque>,
+    ) -> Result<Self, EventFrameError> {
+        validate_frame_prev_seq(&eid, prev_sha256)?;
+        Ok(Self {
+            eid,
+            sha256,
+            prev_sha256,
+            bytes,
+        })
+    }
+
+    pub fn new_genesis(
+        eid: EventId,
+        sha256: Sha256,
+        bytes: EventBytes<Opaque>,
+    ) -> Result<Self, EventFrameError> {
+        Self::try_from_parts(eid, sha256, None, bytes)
+    }
+
+    pub fn new_with_prev(
+        eid: EventId,
+        sha256: Sha256,
+        prev_sha256: Sha256,
+        bytes: EventBytes<Opaque>,
+    ) -> Result<Self, EventFrameError> {
+        Self::try_from_parts(eid, sha256, Some(prev_sha256), bytes)
+    }
+
+    pub fn eid(&self) -> &EventId {
+        &self.eid
+    }
+
+    pub fn sha256(&self) -> Sha256 {
+        self.sha256
+    }
+
+    pub fn prev_sha256(&self) -> Option<Sha256> {
+        self.prev_sha256
+    }
+
+    pub fn bytes(&self) -> &EventBytes<Opaque> {
+        &self.bytes
+    }
+
+    pub fn into_parts(self) -> (EventId, Sha256, Option<Sha256>, EventBytes<Opaque>) {
+        (self.eid, self.sha256, self.prev_sha256, self.bytes)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -471,50 +526,53 @@ pub enum EventFrameError {
     Equivocation,
 }
 
+fn validate_frame_prev_seq(
+    eid: &EventId,
+    prev_sha256: Option<Sha256>,
+) -> Result<(), EventFrameError> {
+    let seq = eid.origin_seq.get();
+    match (seq, prev_sha256.is_some()) {
+        (1, false) => Ok(()),
+        (1, true) => Err(EventFrameError::PrevMismatch),
+        (s, true) if s > 1 => Ok(()),
+        (s, false) if s > 1 => Err(EventFrameError::PrevMismatch),
+        _ => Err(EventFrameError::PrevMismatch),
+    }
+}
+
 impl VerifiedEventFrame {
     pub fn try_from_frame(frame: EventFrameV1, limits: &Limits) -> Result<Self, EventFrameError> {
         validate_frame_prev_seq(&frame.eid, frame.prev_sha256)?;
 
         let (_, body) =
-            decode_event_body(frame.bytes.as_ref(), limits).map_err(|err| match err {
+            decode_event_body(frame.bytes().as_ref(), limits).map_err(|err| match err {
                 DecodeError::Validation(source) => EventFrameError::Validation(source),
                 other => EventFrameError::Decode(other),
             })?;
 
-        if body.origin_replica_id != frame.eid.origin_replica_id
-            || body.namespace != frame.eid.namespace
-            || body.origin_seq != frame.eid.origin_seq
+        if body.origin_replica_id != frame.eid().origin_replica_id
+            || body.namespace != frame.eid().namespace
+            || body.origin_seq != frame.eid().origin_seq
         {
             return Err(EventFrameError::FrameMismatch);
         }
 
         let canonical = encode_event_body_canonical(body.as_ref())?;
-        if canonical.as_ref() != frame.bytes.as_ref() {
+        if canonical.as_ref() != frame.bytes().as_ref() {
             return Err(EventFrameError::NonCanonical);
         }
 
         let computed = hash_event_body(&canonical);
-        if computed != frame.sha256 {
+        if computed != frame.sha256() {
             return Err(EventFrameError::HashMismatch);
         }
 
         Ok(VerifiedEventFrame::from_parts(
-            frame.eid,
-            frame.prev_sha256,
+            frame.eid().clone(),
+            frame.prev_sha256(),
             canonical,
             computed,
         ))
-    }
-}
-
-fn validate_frame_prev_seq(eid: &EventId, prev_sha256: Option<Sha256>) -> Result<(), EventFrameError> {
-    let seq = eid.origin_seq.get();
-    match (seq, prev_sha256) {
-        (1, None) => Ok(()),
-        (1, Some(_)) => Err(EventFrameError::PrevMismatch),
-        (s, Some(_)) if s > 1 => Ok(()),
-        (s, None) if s > 1 => Err(EventFrameError::PrevMismatch),
-        _ => Err(EventFrameError::PrevMismatch),
     }
 }
 
@@ -1262,7 +1320,7 @@ fn encode_wire_bead_patch(
     }
     if !patch.closed_on_branch.is_keep() {
         enc.str("closed_on_branch")?;
-        encode_wire_patch_str(enc, &patch.closed_on_branch)?;
+        encode_wire_patch_branch(enc, &patch.closed_on_branch)?;
     }
     if !patch.closed_reason.is_keep() {
         enc.str("closed_reason")?;
@@ -1278,7 +1336,7 @@ fn encode_wire_bead_patch(
     }
     if let Some(created_on_branch) = &patch.created_on_branch {
         enc.str("created_on_branch")?;
-        enc.str(created_on_branch)?;
+        enc.str(created_on_branch.as_str())?;
     }
     if let Some(description) = &patch.description {
         enc.str("description")?;
@@ -1346,7 +1404,7 @@ fn decode_wire_bead_patch(
                 patch.assignee_expires = decode_wire_patch_wallclock(dec, limits)?;
             }
             "closed_on_branch" => {
-                patch.closed_on_branch = decode_wire_patch_str(dec, limits)?;
+                patch.closed_on_branch = decode_wire_patch_branch(dec, limits, "closed_on_branch")?;
             }
             "closed_reason" => {
                 patch.closed_reason = decode_wire_patch_str(dec, limits)?;
@@ -1359,7 +1417,8 @@ fn decode_wire_bead_patch(
                 patch.created_by = Some(parse_actor_id(raw, "created_by")?);
             }
             "created_on_branch" => {
-                patch.created_on_branch = Some(decode_text(dec, limits)?.to_string());
+                let raw = decode_text(dec, limits)?;
+                patch.created_on_branch = Some(parse_branch_name(raw, "created_on_branch")?);
             }
             "description" => {
                 patch.description = Some(decode_text(dec, limits)?.to_string());
@@ -2097,6 +2156,23 @@ fn encode_wire_patch_str(
     }
 }
 
+fn encode_wire_patch_branch(
+    enc: &mut Encoder<&mut Vec<u8>>,
+    patch: &WirePatch<BranchName>,
+) -> Result<(), EncodeError> {
+    match patch {
+        WirePatch::Keep => Ok(()),
+        WirePatch::Clear => {
+            enc.null()?;
+            Ok(())
+        }
+        WirePatch::Set(value) => {
+            enc.str(value.as_str())?;
+            Ok(())
+        }
+    }
+}
+
 fn encode_wire_patch_u32(
     enc: &mut Encoder<&mut Vec<u8>>,
     patch: &WirePatch<u32>,
@@ -2161,6 +2237,28 @@ fn decode_wire_patch_str(
         Type::String => Ok(WirePatch::Set(decode_text(dec, limits)?.to_string())),
         other => Err(DecodeError::InvalidField {
             field: "patch",
+            reason: format!("expected null or string, got {other:?}"),
+        }),
+    }
+}
+
+fn decode_wire_patch_branch(
+    dec: &mut Decoder,
+    limits: &Limits,
+    field: &'static str,
+) -> Result<WirePatch<BranchName>, DecodeError> {
+    match dec.datatype()? {
+        Type::Null => {
+            dec.null()?;
+            Ok(WirePatch::Clear)
+        }
+        Type::StringIndef => Err(DecodeError::IndefiniteLength),
+        Type::String => {
+            let raw = decode_text(dec, limits)?;
+            Ok(WirePatch::Set(parse_branch_name(raw, field)?))
+        }
+        other => Err(DecodeError::InvalidField {
+            field,
             reason: format!("expected null or string, got {other:?}"),
         }),
     }
@@ -2536,6 +2634,13 @@ fn parse_actor_id(raw: &str, field: &'static str) -> Result<ActorId, DecodeError
     })
 }
 
+fn parse_branch_name(raw: &str, field: &'static str) -> Result<BranchName, DecodeError> {
+    BranchName::parse(raw.to_string()).map_err(|e| DecodeError::InvalidField {
+        field,
+        reason: e.to_string(),
+    })
+}
+
 fn parse_bead_id(raw: &str) -> Result<super::identity::BeadId, DecodeError> {
     super::identity::BeadId::parse(raw).map_err(|e| DecodeError::InvalidField {
         field: "bead_id",
@@ -2614,7 +2719,7 @@ pub(crate) enum WorkflowPatch {
     SetStatus {
         status: WorkflowStatus,
         closed_reason: WirePatch<String>,
-        closed_on_branch: WirePatch<String>,
+        closed_on_branch: WirePatch<BranchName>,
     },
 }
 
@@ -2854,7 +2959,7 @@ pub fn verify_event_frame(
     expected_prev_head: Option<Sha256>,
     lookup: &dyn EventShaLookup,
 ) -> Result<VerifiedEventAny, EventFrameError> {
-    let (_, body) = decode_event_body(frame.bytes.as_ref(), limits).map_err(|err| match err {
+    let (_, body) = decode_event_body(frame.bytes().as_ref(), limits).map_err(|err| match err {
         DecodeError::Validation(source) => EventFrameError::Validation(source),
         other => EventFrameError::Decode(other),
     })?;
@@ -2867,47 +2972,49 @@ pub fn verify_event_frame(
         });
     }
 
-    if body.origin_replica_id != frame.eid.origin_replica_id
-        || body.namespace != frame.eid.namespace
-        || body.origin_seq != frame.eid.origin_seq
+    if body.origin_replica_id != frame.eid().origin_replica_id
+        || body.namespace != frame.eid().namespace
+        || body.origin_seq != frame.eid().origin_seq
     {
         return Err(EventFrameError::FrameMismatch);
     }
 
-    if canonical.as_ref() != frame.bytes.as_ref() {
+    if canonical.as_ref() != frame.bytes().as_ref() {
         return Err(EventFrameError::NonCanonical);
     }
 
     let computed = hash_event_body(&canonical);
-    if computed != frame.sha256 {
+    if computed != frame.sha256() {
         return Err(EventFrameError::HashMismatch);
     }
 
-    match lookup.lookup_event_sha(&frame.eid)? {
+    match lookup.lookup_event_sha(frame.eid())? {
         None => {}
-        Some(existing) if existing == frame.sha256 => {}
+        Some(existing) if existing == frame.sha256() => {}
         Some(_) => return Err(EventFrameError::Equivocation),
     }
 
     let seq = body.origin_seq.get();
-    match (seq, frame.prev_sha256, expected_prev_head) {
-        (1, None, _) => Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
+    if seq == 1 {
+        return Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
             body,
             bytes: canonical.clone(),
-            sha256: frame.sha256,
+            sha256: frame.sha256(),
             prev: PrevVerified { prev: None },
+        }));
+    }
+
+    let prev = frame
+        .prev_sha256()
+        .expect("non-genesis frame must have prev");
+    match expected_prev_head {
+        Some(head) if head == prev => Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
+            body,
+            bytes: canonical.clone(),
+            sha256: frame.sha256(),
+            prev: PrevVerified { prev: Some(prev) },
         })),
-        (1, Some(_), _) => Err(EventFrameError::PrevMismatch),
-        (s, None, _) if s > 1 => Err(EventFrameError::PrevMismatch),
-        (s, Some(prev), Some(head)) if s > 1 && prev == head => {
-            Ok(VerifiedEventAny::Contiguous(VerifiedEvent {
-                body,
-                bytes: canonical.clone(),
-                sha256: frame.sha256,
-                prev: PrevVerified { prev: Some(prev) },
-            }))
-        }
-        (s, Some(prev), None) if s > 1 => {
+        None => {
             let expected_prev_seq = body
                 .origin_seq
                 .prev()
@@ -2915,7 +3022,7 @@ pub fn verify_event_frame(
             Ok(VerifiedEventAny::Deferred(VerifiedEvent {
                 body,
                 bytes: canonical.clone(),
-                sha256: frame.sha256,
+                sha256: frame.sha256(),
                 prev: PrevDeferred {
                     prev,
                     expected_prev_seq,
@@ -3327,16 +3434,12 @@ mod tests {
     fn sample_frame(body: &EventBody, prev_sha256: Option<Sha256>) -> EventFrameV1 {
         let bytes = encode_event_body_canonical(body).unwrap();
         let sha256 = hash_event_body(&bytes);
-        EventFrameV1 {
-            eid: EventId::new(
-                body.origin_replica_id,
-                body.namespace.clone(),
-                body.origin_seq,
-            ),
-            sha256,
-            prev_sha256,
-            bytes: bytes.into(),
-        }
+        let eid = EventId::new(
+            body.origin_replica_id,
+            body.namespace.clone(),
+            body.origin_seq,
+        );
+        EventFrameV1::try_from_parts(eid, sha256, prev_sha256, bytes.into()).expect("sample frame")
     }
 
     fn encode_event_body_noncanonical(body: &EventBody) -> Vec<u8> {
@@ -3480,6 +3583,23 @@ mod tests {
         let mut dec = Decoder::new(buf.as_slice());
         let err = decode_wire_tombstone(&mut dec, &Limits::default(), 0).unwrap_err();
         assert!(matches!(err, DecodeError::InvalidField { field, .. } if field == "bead_delete"));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_branch_name() {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.map(2).unwrap();
+        enc.str("id").unwrap();
+        enc.str("bd-test1").unwrap();
+        enc.str("created_on_branch").unwrap();
+        enc.str("bad branch").unwrap();
+
+        let mut dec = Decoder::new(buf.as_slice());
+        let err = decode_wire_bead_patch(&mut dec, &Limits::default(), 0).unwrap_err();
+        assert!(
+            matches!(err, DecodeError::InvalidField { field, .. } if field == "created_on_branch")
+        );
     }
 
     #[test]
@@ -4118,12 +4238,44 @@ mod tests {
     }
 
     #[test]
+    fn event_frame_rejects_prev_seq_mismatch() {
+        let first = sample_body_with_seq(1);
+        let first_bytes = encode_event_body_canonical(&first).unwrap();
+        let first_sha = hash_event_body(&first_bytes);
+        let first_eid = EventId::new(
+            first.origin_replica_id,
+            first.namespace.clone(),
+            first.origin_seq,
+        );
+        let err = EventFrameV1::try_from_parts(
+            first_eid,
+            first_sha,
+            Some(Sha256([9u8; 32])),
+            first_bytes.into(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, EventFrameError::PrevMismatch));
+
+        let second = sample_body_with_seq(2);
+        let second_bytes = encode_event_body_canonical(&second).unwrap();
+        let second_sha = hash_event_body(&second_bytes);
+        let second_eid = EventId::new(
+            second.origin_replica_id,
+            second.namespace.clone(),
+            second.origin_seq,
+        );
+        let err = EventFrameV1::try_from_parts(second_eid, second_sha, None, second_bytes.into())
+            .unwrap_err();
+        assert!(matches!(err, EventFrameError::PrevMismatch));
+    }
+
+    #[test]
     fn verify_event_frame_defers_prev_when_head_unknown() {
         let limits = Limits::default();
         let first = sample_body_with_seq(1);
         let first_frame = sample_frame(&first, None);
         let second = sample_body_with_seq(2);
-        let second_frame = sample_frame(&second, Some(first_frame.sha256));
+        let second_frame = sample_frame(&second, Some(first_frame.sha256()));
         let lookup = MapLookup(std::collections::BTreeMap::new());
 
         let verified =
@@ -4131,7 +4283,7 @@ mod tests {
 
         match verified {
             VerifiedEventAny::Deferred(ev) => {
-                assert_eq!(ev.prev.prev, first_frame.sha256);
+                assert_eq!(ev.prev.prev, first_frame.sha256());
                 assert_eq!(ev.prev.expected_prev_seq, Seq1::from_u64(1).unwrap());
             }
             other => panic!("expected deferred, got {other:?}"),
@@ -4144,21 +4296,21 @@ mod tests {
         let first = sample_body_with_seq(1);
         let first_frame = sample_frame(&first, None);
         let second = sample_body_with_seq(2);
-        let second_frame = sample_frame(&second, Some(first_frame.sha256));
+        let second_frame = sample_frame(&second, Some(first_frame.sha256()));
         let lookup = MapLookup(std::collections::BTreeMap::new());
 
         let verified = verify_event_frame(
             &second_frame,
             &limits,
             second.store,
-            Some(first_frame.sha256),
+            Some(first_frame.sha256()),
             &lookup,
         )
         .unwrap();
 
         match verified {
             VerifiedEventAny::Contiguous(ev) => {
-                assert_eq!(ev.prev.prev, Some(first_frame.sha256));
+                assert_eq!(ev.prev.prev, Some(first_frame.sha256()));
                 assert_eq!(ev.seq(), Seq1::from_u64(2).unwrap());
             }
             other => panic!("expected contiguous, got {other:?}"),
@@ -4174,16 +4326,13 @@ mod tests {
         assert_ne!(canonical.as_ref(), noncanonical.as_slice());
 
         let bytes = EventBytes::<Opaque>::new(Bytes::from(noncanonical.clone()));
-        let frame = EventFrameV1 {
-            eid: EventId::new(
-                body.origin_replica_id,
-                body.namespace.clone(),
-                body.origin_seq,
-            ),
-            sha256: hash_event_body(&bytes),
-            prev_sha256: None,
-            bytes,
-        };
+        let eid = EventId::new(
+            body.origin_replica_id,
+            body.namespace.clone(),
+            body.origin_seq,
+        );
+        let frame =
+            EventFrameV1::try_from_parts(eid, hash_event_body(&bytes), None, bytes).expect("frame");
         let lookup = MapLookup(std::collections::BTreeMap::new());
 
         let err = verify_event_frame(&frame, &limits, body.store, None, &lookup).unwrap_err();
@@ -4211,16 +4360,13 @@ mod tests {
         assert_ne!(canonical.as_ref(), noncanonical.as_slice());
 
         let bytes = EventBytes::<Opaque>::new(Bytes::from(noncanonical));
-        let frame = EventFrameV1 {
-            eid: EventId::new(
-                body.origin_replica_id,
-                body.namespace.clone(),
-                body.origin_seq,
-            ),
-            sha256: hash_event_body(&bytes),
-            prev_sha256: None,
-            bytes,
-        };
+        let eid = EventId::new(
+            body.origin_replica_id,
+            body.namespace.clone(),
+            body.origin_seq,
+        );
+        let frame =
+            EventFrameV1::try_from_parts(eid, hash_event_body(&bytes), None, bytes).expect("frame");
 
         let err = VerifiedEventFrame::try_from_frame(frame, &limits).unwrap_err();
         assert!(matches!(err, EventFrameError::NonCanonical));
@@ -4230,8 +4376,10 @@ mod tests {
     fn verified_event_frame_rejects_hash_mismatch() {
         let limits = Limits::default();
         let body = sample_body_with_seq(1);
-        let mut frame = sample_frame(&body, None);
-        frame.sha256 = Sha256([7u8; 32]);
+        let frame = sample_frame(&body, None);
+        let (eid, _sha256, prev_sha256, bytes) = frame.into_parts();
+        let frame = EventFrameV1::try_from_parts(eid, Sha256([7u8; 32]), prev_sha256, bytes)
+            .expect("frame");
 
         let err = VerifiedEventFrame::try_from_frame(frame, &limits).unwrap_err();
         assert!(matches!(err, EventFrameError::HashMismatch));

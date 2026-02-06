@@ -5,137 +5,25 @@
 //! - `_v` object maps field names to stamps only when they differ from bead-level
 //! - If all fields share bead-level stamp, `_v` is omitted
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::error::WireError;
-use crate::core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, BeadView, CanonicalState, Claim,
-    Closure, ContentHash, DepKey, DepStore, Dot, Dvv, Label, LabelStore, Lww, Note, NoteId,
-    NoteStore, OrSet, Priority, Stamp, Tombstone, WallClock, Workflow, WriteStamp, sha256_bytes,
-};
-
 use crate::core::state::LabelState;
+use crate::core::{
+    Bead, BeadId, BeadSlug, BeadSnapshotWireV1, CanonicalState, ContentHash, DepKey, DepStore, Dot,
+    LabelStore, Note, NoteAppendV1, NoteId, NoteStore, OrSet, Stamp, Tombstone, WireDepEntryV1,
+    WireDepStoreV1, WireFieldStamp, WireLineageStamp, WireNoteV1, WireStamp, WireTombstoneV1,
+    WriteStamp, sha256_bytes,
+};
 
 // =============================================================================
 // Wire format types (intermediate representation for JSON)
 // =============================================================================
 
-/// Write stamp as array: [wall_ms, counter]
-type WireStamp = (u64, u32);
-
-/// Field stamp as array: [(wall_ms, counter), actor]
-type WireFieldStamp = (WireStamp, String);
-
-#[derive(Serialize, Deserialize)]
-struct WireLabelState {
-    entries: BTreeMap<Label, BTreeSet<Dot>>,
-    cc: Dvv,
-}
-
-/// Bead wire format with sparse _v
-#[derive(Serialize, Deserialize)]
-struct WireBead {
-    // Core (immutable)
-    id: String,
-    created_at: WireStamp,
-    created_by: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    created_on_branch: Option<String>,
-
-    // Fields (mutable)
-    title: String,
-    description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    design: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    acceptance_criteria: Option<String>,
-    priority: u8,
-    #[serde(rename = "type")]
-    bead_type: String,
-    labels: WireLabelState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    external_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source_repo: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    estimated_minutes: Option<u32>,
-
-    // Workflow state
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    closed_at: Option<WireStamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    closed_by: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    closed_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    closed_on_branch: Option<String>,
-
-    // Claim
-    #[serde(skip_serializing_if = "Option::is_none")]
-    assignee: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    assignee_at: Option<WireStamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    assignee_expires: Option<u64>,
-
-    // Version metadata (sparse)
-    #[serde(rename = "_at")]
-    at: WireStamp,
-    #[serde(rename = "_by")]
-    by: String,
-    #[serde(rename = "_v", skip_serializing_if = "Option::is_none")]
-    v: Option<BTreeMap<String, (WireStamp, String)>>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireNote {
-    id: String,
-    content: String,
-    author: String,
-    at: WireStamp,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireNoteEntry {
-    bead_id: String,
-    note: WireNote,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lineage_created_at: Option<WireStamp>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lineage_created_by: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireTombstone {
-    id: String,
-    deleted_at: WireStamp,
-    deleted_by: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lineage_created_at: Option<WireStamp>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lineage_created_by: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireDepStore {
-    cc: Dvv,
-    entries: Vec<WireDepEntry>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stamp: Option<WireFieldStamp>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireDepEntry {
-    key: DepKey,
-    dots: Vec<Dot>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct ParsedWireBead {
     bead: Bead,
     label_state: LabelState,
@@ -211,7 +99,7 @@ pub fn serialize_state(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
                 (None, None) => None,
             }
         };
-        let wire = bead_to_wire(&view, label_state.as_ref());
+        let wire = BeadSnapshotWireV1::from_view(&view, label_state.as_ref());
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
     }
@@ -231,18 +119,12 @@ pub fn serialize_tombstones(state: &CanonicalState) -> Result<Vec<u8>, WireError
     tombs.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     for (_, tomb) in tombs {
-        let (lineage_created_at, lineage_created_by) = tomb
-            .lineage
-            .as_ref()
-            .map(|s| (Some(stamp_to_wire(&s.at)), Some(s.by.as_str().to_string())))
-            .unwrap_or((None, None));
-        let wire = WireTombstone {
-            id: tomb.id.as_str().to_string(),
-            deleted_at: stamp_to_wire(&tomb.deleted.at),
-            deleted_by: tomb.deleted.by.as_str().to_string(),
+        let wire = WireTombstoneV1 {
+            id: tomb.id.clone(),
+            deleted_at: WireStamp::from(&tomb.deleted.at),
+            deleted_by: tomb.deleted.by.clone(),
             reason: tomb.reason.clone(),
-            lineage_created_at,
-            lineage_created_by,
+            lineage: tomb.lineage.as_ref().map(WireLineageStamp::from),
         };
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
@@ -266,7 +148,7 @@ pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
             .map(|dots| dots.iter().copied().collect())
             .unwrap_or_default();
         dots.sort();
-        entries.push(WireDepEntry {
+        entries.push(WireDepEntryV1 {
             key: key.clone(),
             dots,
         });
@@ -274,7 +156,7 @@ pub fn serialize_deps(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
 
     entries.sort_by(|a, b| a.key.cmp(&b.key));
 
-    let wire = WireDepStore {
+    let wire = WireDepStoreV1 {
         cc: dep_store.cc().clone(),
         entries,
         stamp: dep_store.stamp().map(stamp_to_field),
@@ -316,25 +198,10 @@ pub fn serialize_notes(state: &CanonicalState) -> Result<Vec<u8>, WireError> {
 
     let mut lines = Vec::new();
     for (bead_id, lineage, note) in entries {
-        let (lineage_created_at, lineage_created_by) = lineage
-            .as_ref()
-            .map(|stamp| {
-                (
-                    Some(stamp_to_wire(&stamp.at)),
-                    Some(stamp.by.as_str().to_string()),
-                )
-            })
-            .unwrap_or((None, None));
-        let wire = WireNoteEntry {
-            bead_id: bead_id.as_str().to_string(),
-            note: WireNote {
-                id: note.id.as_str().to_string(),
-                content: note.content,
-                author: note.author.as_str().to_string(),
-                at: (note.at.wall_ms, note.at.counter),
-            },
-            lineage_created_at,
-            lineage_created_by,
+        let wire = NoteAppendV1 {
+            bead_id,
+            note: WireNoteV1::from(note),
+            lineage: lineage.as_ref().map(WireLineageStamp::from),
         };
         let json = serde_json::to_string(&wire)?;
         lines.push(json);
@@ -353,6 +220,9 @@ pub fn serialize_meta(
     last_write_stamp: Option<&WriteStamp>,
     checksums: &StoreChecksums,
 ) -> Result<Vec<u8>, WireError> {
+    let notes = checksums
+        .notes
+        .ok_or_else(|| WireError::InvalidValue("meta.json missing checksum fields".into()))?;
     let meta = WireMeta {
         format_version: 1,
         root_slug: root_slug.map(|s| s.to_string()),
@@ -360,7 +230,7 @@ pub fn serialize_meta(
         state_sha256: Some(checksums.state),
         tombstones_sha256: Some(checksums.tombstones),
         deps_sha256: Some(checksums.deps),
-        notes_sha256: checksums.notes,
+        notes_sha256: Some(notes),
     };
     let json = serde_json::to_string_pretty(&meta)?;
     Ok(json.into_bytes())
@@ -378,16 +248,49 @@ pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
         .collect())
 }
 
+fn ensure_strictly_increasing<T: Ord + std::fmt::Debug>(
+    prev: Option<&T>,
+    current: &T,
+    file: &str,
+    line: usize,
+    label: &str,
+) -> Result<(), WireError> {
+    if let Some(prev) = prev {
+        match current.cmp(prev) {
+            Ordering::Greater => Ok(()),
+            Ordering::Equal => Err(WireError::InvalidValue(format!(
+                "{file} line {line}: duplicate {label} {current:?}"
+            ))),
+            Ordering::Less => Err(WireError::InvalidValue(format!(
+                "{file} line {line}: {label} out of order (prev={prev:?}, got={current:?})"
+            ))),
+        }
+    } else {
+        Ok(())
+    }
+}
+
 fn parse_state_full(bytes: &[u8]) -> Result<Vec<ParsedWireBead>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut beads = Vec::new();
+    let mut prev_id: Option<BeadId> = None;
 
-    for line in content.lines() {
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
         if line.trim().is_empty() {
             continue;
         }
-        let wire: WireBead = serde_json::from_str(line)?;
+        let wire: BeadSnapshotWireV1 = serde_json::from_str(line)?;
         let parsed = wire_to_parts(wire)?;
+        let bead_id = parsed.bead.id().clone();
+        ensure_strictly_increasing(
+            prev_id.as_ref(),
+            &bead_id,
+            "state.jsonl",
+            line_no,
+            "bead id",
+        )?;
+        prev_id = Some(bead_id);
         beads.push(parsed);
     }
 
@@ -398,42 +301,30 @@ fn parse_state_full(bytes: &[u8]) -> Result<Vec<ParsedWireBead>, WireError> {
 pub fn parse_tombstones(bytes: &[u8]) -> Result<Vec<Tombstone>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut tombs = Vec::new();
+    let mut prev_key = None;
 
-    for line in content.lines() {
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
         if line.trim().is_empty() {
             continue;
         }
-        let wire: WireTombstone = serde_json::from_str(line)?;
-        let deleted = Stamp::new(
-            wire_to_stamp(wire.deleted_at),
-            ActorId::new(wire.deleted_by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-        );
-        let lineage = match (wire.lineage_created_at, wire.lineage_created_by) {
-            (Some(at), Some(by)) => Some(Stamp::new(
-                wire_to_stamp(at),
-                ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            )),
-            (None, None) => None,
-            _ => {
-                return Err(WireError::InvalidValue(
-                    "tombstone lineage requires both created_at and created_by".to_string(),
-                ));
-            }
-        };
+        let wire: WireTombstoneV1 = serde_json::from_str(line)?;
+        let deleted = wire.deleted_stamp();
+        let lineage = wire.lineage_stamp();
         let tomb = if let Some(lineage) = lineage {
-            Tombstone::new_collision(
-                BeadId::parse(&wire.id).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-                deleted,
-                lineage,
-                wire.reason,
-            )
+            Tombstone::new_collision(wire.id.clone(), deleted, lineage, wire.reason)
         } else {
-            Tombstone::new(
-                BeadId::parse(&wire.id).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-                deleted,
-                wire.reason,
-            )
+            Tombstone::new(wire.id.clone(), deleted, wire.reason)
         };
+        let key = tomb.key();
+        ensure_strictly_increasing(
+            prev_key.as_ref(),
+            &key,
+            "tombstones.jsonl",
+            line_no,
+            "tombstone key",
+        )?;
+        prev_key = Some(key);
         tombs.push(tomb);
     }
 
@@ -448,7 +339,29 @@ fn parse_deps(bytes: &[u8]) -> Result<DepStore, WireError> {
         return Ok(DepStore::new());
     }
 
-    let wire: WireDepStore = serde_json::from_str(trimmed)?;
+    let wire: WireDepStoreV1 = serde_json::from_str(trimmed)?;
+    let mut prev_key: Option<DepKey> = None;
+    for (idx, entry) in wire.entries.iter().enumerate() {
+        let entry_no = idx + 1;
+        if let Some(prev) = prev_key.as_ref() {
+            match entry.key.cmp(prev) {
+                Ordering::Greater => {}
+                Ordering::Equal => {
+                    return Err(WireError::InvalidValue(format!(
+                        "deps.jsonl entry {entry_no}: duplicate dep key {key:?}",
+                        key = entry.key
+                    )));
+                }
+                Ordering::Less => {
+                    return Err(WireError::InvalidValue(format!(
+                        "deps.jsonl entry {entry_no}: dep key out of order (prev={prev:?}, got={key:?})",
+                        key = entry.key
+                    )));
+                }
+            }
+        }
+        prev_key = Some(entry.key.clone());
+    }
     wire_dep_store_to_state(wire)
 }
 
@@ -456,36 +369,39 @@ fn parse_deps(bytes: &[u8]) -> Result<DepStore, WireError> {
 pub fn parse_notes(bytes: &[u8]) -> Result<Vec<(BeadId, Option<Stamp>, Note)>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut notes = Vec::new();
+    let mut prev_key: Option<(BeadId, Option<Stamp>, WriteStamp, NoteId)> = None;
+    let mut seen_note_ids: BTreeSet<(BeadId, Option<Stamp>, NoteId)> = BTreeSet::new();
 
-    for line in content.lines() {
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
         if line.trim().is_empty() {
             continue;
         }
-        let wire: WireNoteEntry = serde_json::from_str(line)?;
-        let bead_id =
-            BeadId::parse(&wire.bead_id).map_err(|e| WireError::InvalidValue(e.to_string()))?;
-        let note_id =
-            NoteId::new(wire.note.id).map_err(|e| WireError::InvalidValue(e.to_string()))?;
-        let author =
-            ActorId::new(wire.note.author).map_err(|e| WireError::InvalidValue(e.to_string()))?;
-        let note = Note::new(
-            note_id,
-            wire.note.content,
-            author,
-            wire_to_stamp(wire.note.at),
+        let wire: NoteAppendV1 = serde_json::from_str(line)?;
+        let lineage = wire.lineage_stamp();
+        let bead_id = wire.bead_id;
+        let note = Note::from(wire.note);
+        let order_key = (
+            bead_id.clone(),
+            lineage.clone(),
+            note.at.clone(),
+            note.id.clone(),
         );
-        let lineage = match (wire.lineage_created_at, wire.lineage_created_by) {
-            (None, None) => None,
-            (Some(at), Some(by)) => Some(Stamp::new(
-                wire_to_stamp(at),
-                ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            )),
-            _ => {
-                return Err(WireError::InvalidValue(
-                    "lineage_created_at and lineage_created_by must be set together".into(),
-                ));
-            }
-        };
+        ensure_strictly_increasing(
+            prev_key.as_ref(),
+            &order_key,
+            "notes.jsonl",
+            line_no,
+            "note entry",
+        )?;
+        let note_id = note.id.clone();
+        let id_key = (bead_id.clone(), lineage.clone(), note_id.clone());
+        if !seen_note_ids.insert(id_key) {
+            return Err(WireError::InvalidValue(format!(
+                "notes.jsonl line {line_no}: duplicate note id {note_id} for bead {bead_id} lineage {lineage:?}"
+            )));
+        }
+        prev_key = Some(order_key);
         notes.push((bead_id, lineage, note));
     }
 
@@ -527,43 +443,119 @@ pub fn parse_legacy_state(
     Ok(state)
 }
 
-/// Parsed metadata from meta.json.
-pub struct ParsedMeta {
-    pub format_version: u32,
-    pub root_slug: Option<String>,
-    pub last_write_stamp: Option<WriteStamp>,
-    pub checksums: Option<StoreChecksums>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreMeta {
+    Legacy,
+    V1 {
+        root_slug: Option<BeadSlug>,
+        last_write_stamp: Option<WriteStamp>,
+        checksums: StoreChecksums,
+    },
+}
+
+impl StoreMeta {
+    pub fn root_slug(&self) -> Option<&BeadSlug> {
+        match self {
+            StoreMeta::Legacy => None,
+            StoreMeta::V1 { root_slug, .. } => root_slug.as_ref(),
+        }
+    }
+
+    pub fn last_write_stamp(&self) -> Option<&WriteStamp> {
+        match self {
+            StoreMeta::Legacy => None,
+            StoreMeta::V1 {
+                last_write_stamp, ..
+            } => last_write_stamp.as_ref(),
+        }
+    }
+
+    pub fn checksums(&self) -> Option<&StoreChecksums> {
+        match self {
+            StoreMeta::Legacy => None,
+            StoreMeta::V1 { checksums, .. } => Some(checksums),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SupportedStoreMeta {
+    meta: StoreMeta,
+}
+
+impl SupportedStoreMeta {
+    pub fn legacy() -> Self {
+        Self {
+            meta: StoreMeta::Legacy,
+        }
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, WireError> {
+        let content = parse_utf8(bytes)?;
+        let meta: WireMeta = serde_json::from_str(content)?;
+        if meta.format_version != 1 {
+            return Err(WireError::InvalidValue(format!(
+                "unsupported meta format_version {}",
+                meta.format_version
+            )));
+        }
+        let checksums = match (
+            meta.state_sha256,
+            meta.tombstones_sha256,
+            meta.deps_sha256,
+            meta.notes_sha256,
+        ) {
+            (Some(state), Some(tombstones), Some(deps), notes) => StoreChecksums {
+                state,
+                tombstones,
+                deps,
+                notes,
+            },
+            _ => {
+                return Err(WireError::InvalidValue(
+                    "meta.json missing checksum fields".into(),
+                ));
+            }
+        };
+        let root_slug = match meta.root_slug {
+            Some(raw) => {
+                Some(BeadSlug::parse(&raw).map_err(|e| WireError::InvalidValue(e.to_string()))?)
+            }
+            None => None,
+        };
+        Ok(Self {
+            meta: StoreMeta::V1 {
+                root_slug,
+                last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
+                checksums,
+            },
+        })
+    }
+
+    pub fn meta(&self) -> &StoreMeta {
+        &self.meta
+    }
+
+    pub fn root_slug(&self) -> Option<&BeadSlug> {
+        self.meta.root_slug()
+    }
+
+    pub fn last_write_stamp(&self) -> Option<&WriteStamp> {
+        self.meta.last_write_stamp()
+    }
+
+    pub fn checksums(&self) -> Option<&StoreChecksums> {
+        self.meta.checksums()
+    }
+
+    pub fn is_legacy(&self) -> bool {
+        matches!(self.meta, StoreMeta::Legacy)
+    }
 }
 
 /// Parse meta.json bytes.
-pub fn parse_meta(bytes: &[u8]) -> Result<ParsedMeta, WireError> {
-    let content = parse_utf8(bytes)?;
-    let meta: WireMeta = serde_json::from_str(content)?;
-    let checksums = match (
-        meta.state_sha256,
-        meta.tombstones_sha256,
-        meta.deps_sha256,
-        meta.notes_sha256,
-    ) {
-        (None, None, None, None) => None,
-        (Some(state), Some(tombstones), Some(deps), notes) => Some(StoreChecksums {
-            state,
-            tombstones,
-            deps,
-            notes,
-        }),
-        _ => {
-            return Err(WireError::InvalidValue(
-                "meta.json missing checksum fields".into(),
-            ));
-        }
-    };
-    Ok(ParsedMeta {
-        format_version: meta.format_version,
-        root_slug: meta.root_slug,
-        last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
-        checksums,
-    })
+pub fn parse_meta(bytes: &[u8]) -> Result<SupportedStoreMeta, WireError> {
+    SupportedStoreMeta::parse(bytes)
 }
 
 pub fn verify_store_checksums(
@@ -618,41 +610,23 @@ fn parse_utf8(bytes: &[u8]) -> Result<&str, WireError> {
 // =============================================================================
 
 fn stamp_to_wire(stamp: &WriteStamp) -> WireStamp {
-    (stamp.wall_ms, stamp.counter)
+    WireStamp::from(stamp)
 }
 
 fn wire_to_stamp(wire: WireStamp) -> WriteStamp {
-    WriteStamp::new(wire.0, wire.1)
+    WriteStamp::from(wire)
 }
 
 fn stamp_to_field(stamp: &Stamp) -> WireFieldStamp {
-    (stamp_to_wire(&stamp.at), stamp.by.as_str().to_string())
+    (WireStamp::from(&stamp.at), stamp.by.clone())
 }
 
-fn wire_field_to_stamp(field: WireFieldStamp) -> Result<Stamp, WireError> {
+fn wire_field_to_stamp(field: WireFieldStamp) -> Stamp {
     let (at, by) = field;
-    Ok(Stamp::new(
-        wire_to_stamp(at),
-        ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-    ))
+    Stamp::new(wire_to_stamp(at), by)
 }
 
-fn label_state_to_wire(state: Option<&LabelState>) -> WireLabelState {
-    let mut entries: BTreeMap<Label, BTreeSet<Dot>> = BTreeMap::new();
-    let cc = state.map(|state| state.cc().clone()).unwrap_or_default();
-
-    if let Some(state) = state {
-        for label in state.values() {
-            if let Some(dots) = state.dots_for(label) {
-                entries.insert(label.clone(), dots.clone());
-            }
-        }
-    }
-
-    WireLabelState { entries, cc }
-}
-
-fn wire_dep_store_to_state(wire: WireDepStore) -> Result<DepStore, WireError> {
+fn wire_dep_store_to_state(wire: WireDepStoreV1) -> Result<DepStore, WireError> {
     let mut entries: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
     for entry in wire.entries {
         let mut dots = BTreeSet::new();
@@ -662,216 +636,32 @@ fn wire_dep_store_to_state(wire: WireDepStore) -> Result<DepStore, WireError> {
         entries.insert(entry.key, dots);
     }
 
-    let stamp = match wire.stamp {
-        Some(stamp) => Some(wire_field_to_stamp(stamp)?),
-        None => None,
-    };
+    let stamp = wire.stamp.map(wire_field_to_stamp);
     let set = OrSet::try_from_parts(entries, wire.cc)
         .map_err(|err| WireError::InvalidValue(format!("dep orset invalid: {err}")))?;
     Ok(DepStore::from_parts(set, stamp))
 }
 
-fn str_to_bead_type(s: &str) -> Result<BeadType, WireError> {
-    match s {
-        "bug" => Ok(BeadType::Bug),
-        "feature" => Ok(BeadType::Feature),
-        "task" => Ok(BeadType::Task),
-        "epic" => Ok(BeadType::Epic),
-        "chore" => Ok(BeadType::Chore),
-        _ => Err(WireError::InvalidValue(format!("unknown bead type: {}", s))),
-    }
-}
-
-/// Convert Bead view to wire format with sparse _v.
-fn bead_to_wire(view: &BeadView, label_state: Option<&LabelState>) -> WireBead {
-    let bead = &view.bead;
-    // Find bead-level stamp (max of all field stamps)
-    let bead_stamp = view.updated_stamp().clone();
-
-    // Build sparse _v: only include fields with different stamps
-    let mut v_map: BTreeMap<String, (WireStamp, String)> = BTreeMap::new();
-
-    macro_rules! check_field {
-        ($field:expr, $name:expr) => {
-            if $field.stamp != bead_stamp {
-                v_map.insert(
-                    $name.to_string(),
-                    (
-                        stamp_to_wire(&$field.stamp.at),
-                        $field.stamp.by.as_str().to_string(),
-                    ),
-                );
-            }
-        };
-    }
-
-    check_field!(bead.fields.title, "title");
-    check_field!(bead.fields.description, "description");
-    check_field!(bead.fields.design, "design");
-    check_field!(bead.fields.acceptance_criteria, "acceptance_criteria");
-    check_field!(bead.fields.priority, "priority");
-    check_field!(bead.fields.bead_type, "type");
-    if let Some(label_stamp) = view.label_stamp.as_ref()
-        && label_stamp != &bead_stamp
-    {
-        v_map.insert(
-            "labels".to_string(),
-            (
-                stamp_to_wire(&label_stamp.at),
-                label_stamp.by.as_str().to_string(),
-            ),
-        );
-    }
-    check_field!(bead.fields.external_ref, "external_ref");
-    check_field!(bead.fields.source_repo, "source_repo");
-    check_field!(bead.fields.estimated_minutes, "estimated_minutes");
-    check_field!(bead.fields.workflow, "workflow");
-    check_field!(bead.fields.claim, "claim");
-
-    // Extract closure info from workflow
-    let (closed_at, closed_by, closed_reason, closed_on_branch) =
-        if let Workflow::Closed(ref closure) = bead.fields.workflow.value {
-            // Derive closed_at/closed_by from workflow stamp
-            (
-                Some(stamp_to_wire(&bead.fields.workflow.stamp.at)),
-                Some(bead.fields.workflow.stamp.by.as_str().to_string()),
-                closure.reason.clone(),
-                closure.on_branch.clone(),
-            )
-        } else {
-            (None, None, None, None)
-        };
-
-    // Extract claim info
-    let (assignee, assignee_at, assignee_expires) =
-        if let Claim::Claimed { assignee, expires } = &bead.fields.claim.value {
-            (
-                Some(assignee.as_str().to_string()),
-                Some(stamp_to_wire(&bead.fields.claim.stamp.at)),
-                expires.map(|w| w.0),
-            )
-        } else {
-            (None, None, None)
-        };
-
-    let labels = label_state_to_wire(label_state);
-
-    WireBead {
-        id: bead.core.id.as_str().to_string(),
-        created_at: stamp_to_wire(&bead.core.created().at),
-        created_by: bead.core.created().by.as_str().to_string(),
-        created_on_branch: bead.core.created_on_branch().map(|s| s.to_string()),
-        title: bead.fields.title.value.clone(),
-        description: bead.fields.description.value.clone(),
-        design: bead.fields.design.value.clone(),
-        acceptance_criteria: bead.fields.acceptance_criteria.value.clone(),
-        priority: bead.fields.priority.value.value(),
-        bead_type: bead.fields.bead_type.value.as_str().to_string(),
-        labels,
-        external_ref: bead.fields.external_ref.value.clone(),
-        source_repo: bead.fields.source_repo.value.clone(),
-        estimated_minutes: bead.fields.estimated_minutes.value,
-        status: bead.fields.workflow.value.status().to_string(),
-        closed_at,
-        closed_by,
-        closed_reason,
-        closed_on_branch,
-        assignee,
-        assignee_at,
-        assignee_expires,
-        at: stamp_to_wire(&bead_stamp.at),
-        by: bead_stamp.by.as_str().to_string(),
-        v: if v_map.is_empty() { None } else { Some(v_map) },
-    }
-}
-
-fn wire_to_parts(wire: WireBead) -> Result<ParsedWireBead, WireError> {
-    // Default stamp is bead-level
-    let default_stamp = Stamp::new(
-        wire_to_stamp(wire.at),
-        ActorId::new(&wire.by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-    );
-
-    // Helper to get field stamp from _v or default
-    let get_stamp = |field: &str| -> Result<Stamp, WireError> {
-        if let Some(ref v_map) = wire.v
-            && let Some((at, by)) = v_map.get(field)
-        {
-            return Ok(Stamp::new(
-                wire_to_stamp(*at),
-                ActorId::new(by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            ));
-        }
-        Ok(default_stamp.clone())
-    };
-
-    let label_stamp = get_stamp("labels")?;
-
-    // Parse core
-    let core = BeadCore::new(
-        BeadId::parse(&wire.id).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-        Stamp::new(
-            wire_to_stamp(wire.created_at),
-            ActorId::new(&wire.created_by).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-        ),
-        wire.created_on_branch,
-    );
-
-    // Parse claim
-    let claim_value = match wire.assignee {
-        Some(assignee) => Claim::claimed(
-            ActorId::new(assignee).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            wire.assignee_expires.map(WallClock),
-        ),
-        None => Claim::Unclaimed,
-    };
-
-    // Parse workflow
-    let workflow_value = match wire.status.as_str() {
-        "open" => Workflow::Open,
-        "in_progress" => Workflow::InProgress,
-        "closed" => Workflow::Closed(Closure::new(wire.closed_reason, wire.closed_on_branch)),
-        _ => {
-            return Err(WireError::InvalidValue(format!(
-                "unknown status: {}",
-                wire.status
-            )));
-        }
-    };
-
+fn wire_to_parts(wire: BeadSnapshotWireV1) -> Result<ParsedWireBead, WireError> {
+    let label_stamp = wire.label_stamp();
+    let labels = wire.labels.clone();
     let label_state = {
-        let set = OrSet::try_from_parts(wire.labels.entries, wire.labels.cc)
+        let set = OrSet::try_from_parts(labels.entries, labels.cc)
             .map_err(|err| WireError::InvalidValue(format!("label orset invalid: {err}")))?;
-        LabelState::from_parts(set, Some(label_stamp.clone()))
+        LabelState::from_parts(set, Some(label_stamp))
     };
 
-    // Build fields
-    let fields = BeadFields {
-        title: Lww::new(wire.title, get_stamp("title")?),
-        description: Lww::new(wire.description, get_stamp("description")?),
-        design: Lww::new(wire.design, get_stamp("design")?),
-        acceptance_criteria: Lww::new(wire.acceptance_criteria, get_stamp("acceptance_criteria")?),
-        priority: Lww::new(
-            Priority::new(wire.priority).map_err(|e| WireError::InvalidValue(e.to_string()))?,
-            get_stamp("priority")?,
-        ),
-        bead_type: Lww::new(str_to_bead_type(&wire.bead_type)?, get_stamp("type")?),
-        external_ref: Lww::new(wire.external_ref, get_stamp("external_ref")?),
-        source_repo: Lww::new(wire.source_repo, get_stamp("source_repo")?),
-        estimated_minutes: Lww::new(wire.estimated_minutes, get_stamp("estimated_minutes")?),
-        workflow: Lww::new(workflow_value, get_stamp("workflow")?),
-        claim: Lww::new(claim_value, get_stamp("claim")?),
-    };
-
-    let bead = Bead::new(core, fields);
-
+    let bead = Bead::from(wire);
     Ok(ParsedWireBead { bead, label_state })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{DepKind, ReplicaId};
+    use crate::core::{
+        ActorId, BeadCore, BeadFields, BeadType, Claim, DepKind, Dvv, Label, Lww, NoteId, Priority,
+        ReplicaId, Workflow,
+    };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
@@ -960,6 +750,22 @@ mod tests {
             })
     }
 
+    fn jsonl_lines(bytes: &[u8]) -> Vec<String> {
+        String::from_utf8(bytes.to_vec())
+            .expect("utf-8")
+            .lines()
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    fn join_jsonl(lines: &[String]) -> Vec<u8> {
+        let mut output = lines.join("\n");
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.into_bytes()
+    }
+
     #[test]
     fn roundtrip_empty_state() {
         let state = CanonicalState::new();
@@ -1009,6 +815,59 @@ mod tests {
         assert_eq!(serialize_tombstones(&parsed).unwrap(), tomb_bytes);
         assert_eq!(serialize_deps(&parsed).unwrap(), deps_bytes);
         assert_eq!(serialize_notes(&parsed).unwrap(), notes_bytes);
+    }
+
+    #[test]
+    fn serialize_state_omits_sparse_v_when_stamps_match() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let bead = make_bead(&bead_id("bd-sparse"), &stamp);
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let lines = jsonl_lines(&bytes);
+        assert_eq!(lines.len(), 1);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("state.jsonl should deserialize");
+        let obj = value.as_object().expect("state json object");
+        assert!(!obj.contains_key("_v"), "expected sparse _v to be omitted");
+    }
+
+    #[test]
+    fn serialize_state_includes_sparse_v_for_overrides() {
+        let base = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let newer = Stamp::new(WriteStamp::new(2, 0), actor_id("bob"));
+        let core = BeadCore::new(bead_id("bd-sparse-v"), base.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new("title".to_string(), base.clone()),
+            description: Lww::new(String::new(), newer.clone()),
+            design: Lww::new(None, base.clone()),
+            acceptance_criteria: Lww::new(None, base.clone()),
+            priority: Lww::new(Priority::default(), base.clone()),
+            bead_type: Lww::new(BeadType::Task, base.clone()),
+            external_ref: Lww::new(None, base.clone()),
+            source_repo: Lww::new(None, base.clone()),
+            estimated_minutes: Lww::new(None, base.clone()),
+            workflow: Lww::new(Workflow::default(), base.clone()),
+            claim: Lww::new(Claim::default(), base.clone()),
+        };
+        let mut state = CanonicalState::new();
+        state.insert(Bead::new(core, fields)).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let lines = jsonl_lines(&bytes);
+        assert_eq!(lines.len(), 1);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("state.jsonl should deserialize");
+        let obj = value.as_object().expect("state json object");
+        let v_map = obj
+            .get("_v")
+            .and_then(|value| value.as_object())
+            .expect("expected sparse _v map");
+        assert!(v_map.contains_key("title"));
+        assert!(!v_map.contains_key("description"));
     }
 
     #[test]
@@ -1347,7 +1206,7 @@ mod tests {
         apply_dep_add_checked(&mut state, key_blocks, dot(1, 1), stamp.clone());
 
         let bytes = serialize_deps(&state).unwrap();
-        let wire: WireDepStore =
+        let wire: WireDepStoreV1 =
             serde_json::from_slice(&bytes).expect("deps.jsonl should deserialize");
         let kinds: Vec<DepKind> = wire.entries.iter().map(|entry| entry.key.kind()).collect();
         assert_eq!(
@@ -1379,17 +1238,17 @@ mod tests {
         )
         .unwrap();
 
-        let wire = WireDepStore {
+        let wire = WireDepStoreV1 {
             cc: Dvv {
                 max: BTreeMap::from([(replica_a, 1), (replica_b, 2)]),
                 dots: BTreeSet::new(),
             },
             entries: vec![
-                WireDepEntry {
+                WireDepEntryV1 {
                     key: key_related.clone(),
                     dots: vec![dot(7, 5), dot(7, 3)],
                 },
-                WireDepEntry {
+                WireDepEntryV1 {
                     key: key_blocks.clone(),
                     dots: vec![dot(4, 2)],
                 },
@@ -1425,14 +1284,14 @@ mod tests {
         )
         .unwrap();
 
-        let wire = WireDepStore {
+        let wire = WireDepStoreV1 {
             cc: Dvv::default(),
             entries: vec![
-                WireDepEntry {
+                WireDepEntryV1 {
                     key: key_parent.clone(),
                     dots: vec![dot(9, 2), dot(9, 1)],
                 },
-                WireDepEntry {
+                WireDepEntryV1 {
                     key: key_blocks.clone(),
                     dots: vec![dot(8, 3)],
                 },
@@ -1454,7 +1313,7 @@ mod tests {
             "deps.jsonl should end with newline"
         );
 
-        let wire_out: WireDepStore =
+        let wire_out: WireDepStoreV1 =
             serde_json::from_slice(&serialized).expect("deps.jsonl should deserialize");
         let keys: Vec<DepKey> = wire_out
             .entries
@@ -1541,9 +1400,222 @@ mod tests {
             let bytes = serialize_meta(root.as_deref(), write_stamp.as_ref(), &checksums)
                 .unwrap_or_else(|e| panic!("serialize_meta failed: {e}"));
             let parsed = parse_meta(&bytes).unwrap_or_else(|e| panic!("parse_meta failed: {e}"));
-            prop_assert_eq!(parsed.root_slug, root);
-            prop_assert_eq!(parsed.last_write_stamp, write_stamp);
-            prop_assert_eq!(parsed.checksums, Some(checksums));
+            let expected_root = root
+                .as_ref()
+                .map(|raw| BeadSlug::parse(raw).expect("slug parse"));
+            match parsed.meta() {
+                StoreMeta::V1 {
+                    root_slug,
+                    last_write_stamp,
+                    checksums: parsed_checksums,
+                } => {
+                    prop_assert_eq!(root_slug, &expected_root);
+                    prop_assert_eq!(last_write_stamp, &write_stamp);
+                    prop_assert_eq!(parsed_checksums, &checksums);
+                }
+                StoreMeta::Legacy => {
+                    prop_assert!(false, "expected v1 meta");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_state_rejects_out_of_order() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        state.insert_live(make_bead(&bead_id("bd-a"), &stamp));
+        state.insert_live(make_bead(&bead_id("bd-b"), &stamp));
+        let bytes = serialize_state(&state).expect("serialize_state");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.swap(0, 1);
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_state(&bytes).expect_err("out-of-order state should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("state.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_state_rejects_duplicate() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        state.insert_live(make_bead(&bead_id("bd-a"), &stamp));
+        state.insert_live(make_bead(&bead_id("bd-b"), &stamp));
+        let bytes = serialize_state(&state).expect("serialize_state");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.insert(1, lines[0].clone());
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_state(&bytes).expect_err("duplicate state should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("state.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tombstones_rejects_out_of_order() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        state.delete(Tombstone::new(bead_id("bd-a"), stamp.clone(), None));
+        state.delete(Tombstone::new(bead_id("bd-b"), stamp.clone(), None));
+        let bytes = serialize_tombstones(&state).expect("serialize_tombstones");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.swap(0, 1);
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_tombstones(&bytes).expect_err("out-of-order tombstones should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("tombstones.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tombstones_rejects_duplicate() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        state.delete(Tombstone::new(bead_id("bd-a"), stamp.clone(), None));
+        state.delete(Tombstone::new(bead_id("bd-b"), stamp.clone(), None));
+        let bytes = serialize_tombstones(&state).expect("serialize_tombstones");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.insert(1, lines[0].clone());
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_tombstones(&bytes).expect_err("duplicate tombstones should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("tombstones.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_deps_rejects_out_of_order() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let key_a =
+            DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).expect("dep key a");
+        let key_b =
+            DepKey::new(bead_id("bd-a"), bead_id("bd-c"), DepKind::Blocks).expect("dep key b");
+        apply_dep_add_checked(&mut state, key_a, dot(1, 1), stamp.clone());
+        apply_dep_add_checked(&mut state, key_b, dot(2, 2), stamp.clone());
+        let bytes = serialize_deps(&state).expect("serialize_deps");
+
+        let mut wire: WireDepStoreV1 = serde_json::from_slice(&bytes).expect("deps json");
+        wire.entries.swap(0, 1);
+        let mut bytes = serde_json::to_vec(&wire).expect("deps json");
+        bytes.push(b'\n');
+
+        let err = parse_deps(&bytes).expect_err("out-of-order deps should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("deps.jsonl entry 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_deps_rejects_duplicate() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let key_a =
+            DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).expect("dep key a");
+        let key_b =
+            DepKey::new(bead_id("bd-a"), bead_id("bd-c"), DepKind::Blocks).expect("dep key b");
+        apply_dep_add_checked(&mut state, key_a, dot(1, 1), stamp.clone());
+        apply_dep_add_checked(&mut state, key_b, dot(2, 2), stamp.clone());
+        let bytes = serialize_deps(&state).expect("serialize_deps");
+
+        let mut wire: WireDepStoreV1 = serde_json::from_slice(&bytes).expect("deps json");
+        let entry = wire.entries[0].clone();
+        wire.entries.insert(1, entry);
+        let mut bytes = serde_json::to_vec(&wire).expect("deps json");
+        bytes.push(b'\n');
+
+        let err = parse_deps(&bytes).expect_err("duplicate deps should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("deps.jsonl entry 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_notes_rejects_out_of_order() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let note_a = Note::new(
+            NoteId::new("note-a").unwrap(),
+            "note a".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(1, 0),
+        );
+        let note_b = Note::new(
+            NoteId::new("note-b").unwrap(),
+            "note b".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(2, 0),
+        );
+        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note_a);
+        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note_b);
+        let bytes = serialize_notes(&state).expect("serialize_notes");
+
+        let mut lines = jsonl_lines(&bytes);
+        lines.swap(0, 1);
+        let bytes = join_jsonl(&lines);
+
+        let err = parse_notes(&bytes).expect_err("out-of-order notes should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("notes.jsonl line 2"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_notes_rejects_duplicate_note_id() {
+        let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
+        let mut state = CanonicalState::new();
+        let note = Note::new(
+            NoteId::new("note-a").unwrap(),
+            "note a".to_string(),
+            actor_id("alice"),
+            WriteStamp::new(1, 0),
+        );
+        state.insert_note(bead_id("bd-a"), Some(stamp.clone()), note);
+        let bytes = serialize_notes(&state).expect("serialize_notes");
+
+        let mut lines = jsonl_lines(&bytes);
+        let mut wire: NoteAppendV1 = serde_json::from_str(&lines[0]).expect("note json");
+        wire.note.at = WireStamp(9, 0);
+        let dup_line = serde_json::to_string(&wire).expect("note json");
+        let bytes = join_jsonl(&vec![lines[0].clone(), dup_line]);
+
+        let err = parse_notes(&bytes).expect_err("duplicate note id should fail");
+        match err {
+            WireError::InvalidValue(msg) => {
+                assert!(msg.contains("notes.jsonl line 2"), "{msg}");
+                assert!(msg.contains("duplicate note id"), "{msg}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
         }
     }
 
@@ -1559,6 +1631,83 @@ mod tests {
                 assert_eq!(blob, "state.jsonl");
             }
             other => panic!("expected checksum mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_meta_rejects_unsupported_version() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["format_version"] = serde_json::Value::from(2);
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let err = parse_meta(&mutated).expect_err("unsupported version should fail");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn parse_meta_accepts_missing_notes_checksum_for_legacy_v1() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("notes_sha256");
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let parsed = parse_meta(&mutated).expect("legacy v1 notes checksum is optional");
+        let parsed_checksums = parsed.checksums().expect("checksums");
+        assert_eq!(parsed_checksums.notes, None);
+    }
+
+    #[test]
+    fn parse_meta_rejects_missing_required_checksums() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("state_sha256");
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let err = parse_meta(&mutated).expect_err("missing required checksums should fail");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn parse_meta_rejects_invalid_root_slug() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["root_slug"] = serde_json::Value::from("bad slug");
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let err = parse_meta(&mutated).expect_err("invalid slug should fail");
+        assert!(matches!(err, WireError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn parse_meta_accepts_v1_with_checksums() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let parsed = parse_meta(&bytes).expect("parse meta");
+        match parsed.meta() {
+            StoreMeta::V1 {
+                root_slug,
+                last_write_stamp,
+                checksums: parsed_checksums,
+            } => {
+                assert_eq!(
+                    root_slug,
+                    &Some(BeadSlug::parse("valid-slug").expect("slug"))
+                );
+                assert_eq!(last_write_stamp, &None);
+                assert_eq!(parsed_checksums, &checksums);
+            }
+            StoreMeta::Legacy => panic!("expected v1 meta"),
         }
     }
 }

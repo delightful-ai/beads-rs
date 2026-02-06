@@ -25,12 +25,12 @@ use super::ipc::{
 };
 use super::mutation_engine::{
     DotAllocator, EventDraft, IdContext, MutationContext, MutationEngine, ParsedMutationRequest,
-    SequencedEvent,
+    SequencedEvent, StampedContext,
 };
 use super::ops::OpError;
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
-    ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RecordRequest,
+    ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
     SegmentRow, VerifiedRecord, WalIndex, WalIndexError, WalIndexTxn, WalReplayError,
     open_segment_reader,
 };
@@ -224,6 +224,7 @@ impl Daemon {
             let write_stamp = clock.tick();
             (now_ms, Stamp::new(write_stamp, ctx.actor_id.clone()))
         };
+        let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone())?;
         let mut proof = self.loaded_store(store_id, remote.clone());
         let draft = {
             let store_runtime = proof.runtime_mut();
@@ -236,10 +237,9 @@ impl Daemon {
             engine.plan(
                 &state_snapshot,
                 now_ms,
-                stamp,
+                stamped_ctx,
                 store,
                 id_ctx.as_ref(),
-                ctx.clone(),
                 parsed_request.clone(),
                 &mut dot_alloc,
             )
@@ -279,12 +279,13 @@ impl Daemon {
 
         let sha = hash_event_body(&sequenced.event_bytes);
         let sha_bytes = sha.0;
-        let request = sequenced
+        let request_proof = sequenced
             .client_request_id
-            .map(|client_request_id| RecordRequest {
+            .map(|client_request_id| RequestProof::Client {
                 client_request_id,
-                request_sha256: Some(sequenced.request_sha256),
-            });
+                request_sha256: sequenced.request_sha256,
+            })
+            .unwrap_or(RequestProof::None);
 
         let record = VerifiedRecord::new(
             RecordHeader {
@@ -292,7 +293,7 @@ impl Daemon {
                 origin_seq,
                 event_time_ms: sequenced.event_body.event_time_ms,
                 txn_id: sequenced.event_body.txn_id,
-                request,
+                request_proof,
                 sha256: sha_bytes,
                 prev_sha256: prev_sha,
             },
@@ -1168,7 +1169,7 @@ mod tests {
     };
     use crate::daemon::Clock;
     use crate::daemon::Daemon;
-    use crate::daemon::core::insert_store_for_tests;
+    use crate::daemon::core::{HandleOutcome, insert_store_for_tests};
     use crate::daemon::ipc::{MutationMeta, Request};
     use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{
@@ -1397,9 +1398,13 @@ mod tests {
             },
         };
 
-        tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
-            let _ = daemon.handle_request(request, &git_tx);
-        });
+        let outcome =
+            tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+                daemon.handle_request(request, &git_tx)
+            });
+        if let HandleOutcome::Response(crate::daemon::ipc::Response::Err { err }) = &outcome {
+            panic!("mutation failed: {err:?}");
+        }
 
         let captured = spans.lock().expect("span capture");
         assert!(!captured.is_empty(), "expected mutation span fields");
@@ -1578,15 +1583,15 @@ mod tests {
         let mut clock = fixed_clock(1_700_000_000_000);
         let now_ms = clock.wall_ms();
         let stamp = Stamp::new(clock.tick(), actor.clone());
+        let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone()).unwrap();
         let mut dots = TestDotAllocator::new(replica_id);
         let draft = engine
             .plan(
                 &state,
                 now_ms,
-                stamp,
+                stamped_ctx,
                 store,
                 None,
-                ctx.clone(),
                 request.clone(),
                 &mut dots,
             )
@@ -1596,19 +1601,21 @@ mod tests {
             .unwrap();
 
         let sha = hash_event_body(&sequenced.event_bytes).0;
+        let request_proof = sequenced
+            .event_body
+            .client_request_id
+            .map(|client_request_id| RequestProof::Client {
+                client_request_id,
+                request_sha256: sequenced.request_sha256,
+            })
+            .unwrap_or(RequestProof::None);
         let record = VerifiedRecord::new(
             RecordHeader {
                 origin_replica_id: replica_id,
                 origin_seq,
                 event_time_ms: sequenced.event_body.event_time_ms,
                 txn_id: sequenced.event_body.txn_id,
-                request: sequenced
-                    .event_body
-                    .client_request_id
-                    .map(|client_request_id| RecordRequest {
-                        client_request_id,
-                        request_sha256: Some(sequenced.request_sha256),
-                    }),
+                request_proof,
                 sha256: sha,
                 prev_sha256: None,
             },

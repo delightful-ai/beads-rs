@@ -1018,7 +1018,7 @@ mod tests {
         encode_event_body_canonical,
     };
     use crate::daemon::wal::SegmentConfig;
-    use crate::daemon::wal::record::{RecordHeader, RecordRequest};
+    use crate::daemon::wal::record::{RecordHeader, RequestProof};
     use crate::daemon::wal::segment::SegmentWriter;
     use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex};
 
@@ -1124,12 +1124,10 @@ mod tests {
                 origin_seq: body.origin_seq,
                 event_time_ms: body.event_time_ms,
                 txn_id: body.txn_id,
-                request: body
+                request_proof: body
                     .client_request_id
-                    .map(|client_request_id| RecordRequest {
-                        client_request_id,
-                        request_sha256: None,
-                    }),
+                    .map(|client_request_id| RequestProof::ClientNoHash { client_request_id })
+                    .unwrap_or(RequestProof::None),
                 sha256: expected_sha,
                 prev_sha256: None,
             },

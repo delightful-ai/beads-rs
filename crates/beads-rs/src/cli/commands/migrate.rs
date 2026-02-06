@@ -1,9 +1,9 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, normalize_bead_slug_for, print_json};
+use super::super::{Ctx, normalize_bead_slug_for, print_json, validation_error};
+use crate::Result;
 use crate::core::FormatVersion;
 use crate::daemon::ipc::{EmptyPayload, Request, send_request};
-use crate::{Error, Result};
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
@@ -76,13 +76,13 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
             print_json(&payload)?;
             Ok(())
         }
-        MigrateCmd::To(args) => Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-            field: "migrate".into(),
-            reason: format!(
+        MigrateCmd::To(args) => Err(validation_error(
+            "migrate",
+            format!(
                 "migration to format {} not implemented yet (dry_run={}, force={}, no_push={})",
                 args.to, args.dry_run, args.force, args.no_push
             ),
-        })),
+        )),
         MigrateCmd::FromGo(args) => {
             use crate::git::SyncProcess;
 
@@ -114,10 +114,10 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 .map_err(|e| crate::git::SyncError::OpenRepo(ctx.repo.clone(), e))?;
 
             if repo.refname_to_id("refs/heads/beads/store").is_ok() && !args.force {
-                return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
-                    field: "migrate".into(),
-                    reason: "beads/store already exists; use --force to overwrite via merge".into(),
-                }));
+                return Err(validation_error(
+                    "migrate",
+                    "beads/store already exists; use --force to overwrite via merge",
+                ));
             }
 
             let committed = SyncProcess::new(ctx.repo.clone())
@@ -182,5 +182,8 @@ fn read_current_format_version(repo: &git2::Repository) -> Result<u32> {
         .map_err(|_| crate::git::SyncError::NotABlob("meta.json"))?;
     let parsed =
         crate::git::wire::parse_meta(meta_blob.content()).map_err(crate::git::SyncError::from)?;
-    Ok(parsed.format_version)
+    match parsed.meta() {
+        crate::git::wire::StoreMeta::V1 { .. } => Ok(1),
+        crate::git::wire::StoreMeta::Legacy => Ok(0),
+    }
 }

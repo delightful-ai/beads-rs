@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use beads_rs::core::BranchName;
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
     ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId,
@@ -26,7 +27,8 @@ pub fn sample_bead_patch(seed: u8) -> WireBeadPatch {
     let mut patch = WireBeadPatch::new(id);
     patch.created_at = Some(WireStamp(10_000 + seed as u64, 1));
     patch.created_by = Some(actor_id(seed));
-    patch.created_on_branch = Some(format!("branch-{seed:02x}"));
+    patch.created_on_branch =
+        Some(BranchName::parse(format!("branch-{seed:02x}")).expect("valid branch name fixture"));
     patch.title = Some(format!("title-{seed:02x}"));
     patch.description = Some(format!("description-{seed:02x}"));
     patch.design = WirePatch::Set(format!("design-{seed:02x}"));
