@@ -91,7 +91,8 @@ fn handle_fsck(json: bool, args: StoreFsckArgs) -> Result<()> {
         _ => {}
     }
 
-    // Offline fallback: call fsck directly.
+    // Offline fallback: call fsck directly, convert to API types for
+    // consistent rendering and JSON output.
     let config = crate::config::load_or_init();
     let options = crate::daemon::wal::fsck::FsckOptions::new(args.repair, config.limits);
     let report = crate::daemon::wal::fsck::fsck_store(store_id, options).map_err(|err| {
@@ -100,11 +101,12 @@ fn handle_fsck(json: bool, args: StoreFsckArgs) -> Result<()> {
             reason: err.to_string(),
         })
     })?;
+    let output = crate::daemon::admin::fsck_report_to_output(report);
 
     if json {
-        return print_json(&report);
+        return print_json(&output);
     }
-    write_stdout(&render_fsck_report_offline(&report))?;
+    write_stdout(&render_admin_fsck(&output))?;
     Ok(())
 }
 
@@ -150,90 +152,6 @@ pub fn render_admin_fsck(output: &AdminFsckOutput) -> String {
             check.evidence.len()
         ));
         if check.status != FsckStatus::Pass {
-            for evidence in &check.evidence {
-                let path = evidence
-                    .path
-                    .as_ref()
-                    .map(|p| format!(" path={}", p.display()))
-                    .unwrap_or_default();
-                let namespace = evidence
-                    .namespace
-                    .as_ref()
-                    .map(|ns| format!(" namespace={}", ns.as_str()))
-                    .unwrap_or_default();
-                let origin = evidence
-                    .origin
-                    .as_ref()
-                    .map(|id| format!(" origin={id}"))
-                    .unwrap_or_default();
-                let seq = evidence
-                    .seq
-                    .map(|seq| format!(" seq={seq}"))
-                    .unwrap_or_default();
-                let offset = evidence
-                    .offset
-                    .map(|offset| format!(" offset={offset}"))
-                    .unwrap_or_default();
-                out.push_str(&format!(
-                    "      * {:?}: {}{path}{namespace}{origin}{seq}{offset}\n",
-                    evidence.code, evidence.message
-                ));
-            }
-            if !check.suggested_actions.is_empty() {
-                out.push_str("      actions:\n");
-                for action in &check.suggested_actions {
-                    out.push_str(&format!("        - {action}\n"));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Render offline FsckReport (daemon types, not API types). Used when daemon is
-/// not running and we call fsck_store directly.
-fn render_fsck_report_offline(report: &crate::daemon::wal::fsck::FsckReport) -> String {
-    let mut out = String::new();
-    out.push_str("Store fsck:\n");
-    out.push_str(&format!("  store_id: {}\n", report.store_id));
-    out.push_str(&format!("  checked_at_ms: {}\n", report.checked_at_ms));
-    out.push_str(&format!(
-        "  stats: namespaces={} segments={} records={}\n",
-        report.stats.namespaces, report.stats.segments, report.stats.records
-    ));
-    out.push_str(&format!(
-        "  summary: risk={:?} safe_to_accept_writes={} safe_to_prune_wal={} safe_to_rebuild_index={}\n",
-        report.summary.risk,
-        report.summary.safe_to_accept_writes,
-        report.summary.safe_to_prune_wal,
-        report.summary.safe_to_rebuild_index
-    ));
-
-    if !report.repairs.is_empty() {
-        out.push_str("  repairs:\n");
-        for repair in &report.repairs {
-            let path = repair
-                .path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "none".to_string());
-            out.push_str(&format!(
-                "    - {:?}: {} ({path})\n",
-                repair.kind, repair.detail
-            ));
-        }
-    }
-
-    out.push_str("  checks:\n");
-    for check in &report.checks {
-        out.push_str(&format!(
-            "    - {:?}: {:?} (severity={:?}, issues={})\n",
-            check.id,
-            check.status,
-            check.severity,
-            check.evidence.len()
-        ));
-        if check.status != crate::daemon::wal::fsck::FsckStatus::Pass {
             for evidence in &check.evidence {
                 let path = evidence
                     .path
@@ -359,16 +277,10 @@ pub fn render_admin_store_unlock(output: &AdminStoreUnlockOutput) -> String {
     out.push_str(&format!("  store_id: {}\n", output.store_id));
     out.push_str(&format!("  lock_path: {}\n", output.lock_path.display()));
     render_lock_meta_output(&mut out, output.meta.as_ref());
-    if let Some(pid_state) = &output.pid_state {
-        out.push_str(&format!("  pid_state: {pid_state}\n"));
-    }
-    if let Some(pid_error) = &output.pid_error {
-        out.push_str(&format!("  pid_error: {pid_error}\n"));
-    }
     if let Some(daemon_pid) = output.daemon_pid {
         out.push_str(&format!("  daemon_pid: {daemon_pid}\n"));
     }
-    out.push_str(&format!("  action: {}\n", output.action));
+    out.push_str(&format!("  action: {:?}\n", output.action));
     out
 }
 
@@ -817,7 +729,8 @@ mod tests {
     #[test]
     fn render_fsck_human_golden() {
         let report = sample_fsck_report();
-        let output = render_fsck_report_offline(&report);
+        let api_output = crate::daemon::admin::fsck_report_to_output(report);
+        let output = render_admin_fsck(&api_output);
         let expected = concat!(
             "Store fsck:\n",
             "  store_id: 09090909-0909-0909-0909-090909090909\n",

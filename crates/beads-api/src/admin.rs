@@ -612,10 +612,14 @@ pub struct AdminStoreUnlockOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<StoreLockMetaOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_pid: Option<u32>,
-    pub action: String,
+    pub action: UnlockAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnlockAction {
+    NoLock,
+    RemovedForced,
+    RemovedStale,
 }

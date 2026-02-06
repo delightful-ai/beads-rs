@@ -32,7 +32,7 @@ use beads_api::{
 use beads_api::{
     AdminFsckOutput, AdminStoreLockInfoOutput, AdminStoreUnlockOutput, FsckCheck, FsckCheckId,
     FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRepairKind, FsckRisk, FsckSeverity, FsckStats,
-    FsckStatus, FsckSummary, StoreLockMetaOutput,
+    FsckStatus, FsckSummary, StoreLockMetaOutput, UnlockAction,
 };
 
 use super::core::Daemon;
@@ -646,76 +646,60 @@ impl Daemon {
                 )));
             }
         };
+        let our_pid = std::process::id();
         let Some(lock_meta) = meta else {
-            let output = AdminStoreUnlockOutput {
-                store_id,
-                lock_path,
-                meta: None,
-                pid_state: None,
-                pid_error: None,
-                daemon_pid: Some(std::process::id()),
-                action: "no_lock".to_string(),
-            };
-            return Response::ok(ResponsePayload::query(QueryResult::AdminStoreUnlock(
-                output,
-            )));
+            return unlock_ok(store_id, lock_path, None, our_pid, UnlockAction::NoLock);
         };
 
-        // The daemon IS running (we're handling this request), so the lock
-        // holder is either us or stale. Check if the lock pid matches ours.
-        let our_pid = std::process::id();
         let lock_is_ours = lock_meta.pid == our_pid;
 
-        let (action, removed) = if lock_is_ours && !force {
-            ("require_force_live_daemon".to_string(), false)
-        } else if lock_is_ours && force {
-            let removed = match crate::daemon::store::lock::remove_lock_file(store_id) {
-                Ok(r) => r,
-                Err(err) => {
-                    return Response::err_from(OpError::StoreRuntime(Box::new(
-                        StoreRuntimeError::Lock(err),
-                    )));
-                }
-            };
-            (
-                format!("removed_forced{}", if removed { "" } else { "_already" }),
-                removed,
-            )
-        } else {
-            // Lock held by different pid — stale, remove it
-            let removed = match crate::daemon::store::lock::remove_lock_file(store_id) {
-                Ok(r) => r,
-                Err(err) => {
-                    return Response::err_from(OpError::StoreRuntime(Box::new(
-                        StoreRuntimeError::Lock(err),
-                    )));
-                }
-            };
-            (
-                format!("removed_stale{}", if removed { "" } else { "_already" }),
-                removed,
-            )
-        };
-
-        if !removed && action.starts_with("require_force") {
+        // Lock is ours and no --force: reject.
+        if lock_is_ours && !force {
             return Response::err_from(OpError::InvalidRequest {
                 field: Some("force".into()),
                 reason: "lock appears active (live daemon)".to_string(),
             });
         }
-        let output = AdminStoreUnlockOutput {
+
+        // Either forced (ours + --force) or stale (different pid). Remove it.
+        if let Err(err) = crate::daemon::store::lock::remove_lock_file(store_id) {
+            return Response::err_from(OpError::StoreRuntime(Box::new(StoreRuntimeError::Lock(
+                err,
+            ))));
+        }
+
+        let action = if lock_is_ours {
+            UnlockAction::RemovedForced
+        } else {
+            UnlockAction::RemovedStale
+        };
+        unlock_ok(
             store_id,
             lock_path,
-            meta: Some(lock_meta_to_api(lock_meta)),
-            pid_state: None,
-            pid_error: None,
-            daemon_pid: Some(our_pid),
+            Some(lock_meta_to_api(lock_meta)),
+            our_pid,
             action,
-        };
-        Response::ok(ResponsePayload::query(QueryResult::AdminStoreUnlock(
-            output,
-        )))
+        )
     }
+}
+
+fn unlock_ok(
+    store_id: StoreId,
+    lock_path: PathBuf,
+    meta: Option<StoreLockMetaOutput>,
+    daemon_pid: u32,
+    action: UnlockAction,
+) -> Response {
+    let output = AdminStoreUnlockOutput {
+        store_id,
+        lock_path,
+        meta,
+        daemon_pid: Some(daemon_pid),
+        action,
+    };
+    Response::ok(ResponsePayload::query(QueryResult::AdminStoreUnlock(
+        output,
+    )))
 }
 
 fn lock_meta_to_api(meta: crate::daemon::store::lock::StoreLockMeta) -> StoreLockMetaOutput {
@@ -729,7 +713,9 @@ fn lock_meta_to_api(meta: crate::daemon::store::lock::StoreLockMeta) -> StoreLoc
     }
 }
 
-fn fsck_report_to_output(report: crate::daemon::wal::fsck::FsckReport) -> AdminFsckOutput {
+pub(crate) fn fsck_report_to_output(
+    report: crate::daemon::wal::fsck::FsckReport,
+) -> AdminFsckOutput {
     AdminFsckOutput {
         store_id: report.store_id,
         checked_at_ms: report.checked_at_ms,
