@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use beads_rs::{
-    ApplyOutcome, Bead, BeadId, CanonicalState, EventBody, NoteId, NoteKey, apply_event,
+    ApplyOutcome, Bead, BeadId, CanonicalState, NoteId, NoteKey, ValidatedEventBody, apply_event,
 };
 
 pub struct ApplyHarness {
@@ -19,11 +19,11 @@ impl ApplyHarness {
         &self.state
     }
 
-    pub fn apply(&mut self, body: &EventBody) -> ApplyOutcome {
+    pub fn apply(&mut self, body: &ValidatedEventBody) -> ApplyOutcome {
         apply_event(&mut self.state, body).expect("apply_event fixture")
     }
 
-    pub fn apply_twice(&mut self, body: &EventBody) -> (ApplyOutcome, ApplyOutcome) {
+    pub fn apply_twice(&mut self, body: &ValidatedEventBody) -> (ApplyOutcome, ApplyOutcome) {
         let first = self.apply(body);
         let second = self.apply(body);
         (first, second)

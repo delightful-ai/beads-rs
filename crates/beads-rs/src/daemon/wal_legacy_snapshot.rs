@@ -100,7 +100,16 @@ mod wal_state {
                     map.insert(entry.key, dots);
                 }
             }
-            let set = OrSet::from_parts(map, self.0.cc);
+            let (set, normalization) = OrSet::normalize_for_import(map, self.0.cc);
+            if normalization.changed() {
+                tracing::warn!(
+                    normalized_cc = normalization.normalized_cc,
+                    pruned_dots = normalization.pruned_dots,
+                    removed_empty_entries = normalization.removed_empty_entries,
+                    resolved_collisions = normalization.resolved_collisions,
+                    "normalized dep OR-Set from WAL snapshot"
+                );
+            }
             let stamp = self.0.stamp.map(stamp_from_wire_field_stamp);
             DepStore::from_parts(set, stamp)
         }
@@ -334,7 +343,16 @@ mod wal_state {
             let dot = legacy_dot_from_bytes(&key.collision_bytes());
             entries.insert(key, BTreeSet::from([dot]));
         }
-        let set = OrSet::from_parts(entries, Dvv::default());
+        let (set, normalization) = OrSet::normalize_for_import(entries, Dvv::default());
+        if normalization.changed() {
+            tracing::warn!(
+                normalized_cc = normalization.normalized_cc,
+                pruned_dots = normalization.pruned_dots,
+                removed_empty_entries = normalization.removed_empty_entries,
+                resolved_collisions = normalization.resolved_collisions,
+                "normalized legacy dep OR-Set during WAL decode"
+            );
+        }
         DepStore::from_parts(set, None)
     }
 

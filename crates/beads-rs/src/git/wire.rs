@@ -666,7 +666,8 @@ fn wire_dep_store_to_state(wire: WireDepStore) -> Result<DepStore, WireError> {
         Some(stamp) => Some(wire_field_to_stamp(stamp)?),
         None => None,
     };
-    let set = OrSet::from_parts(entries, wire.cc);
+    let set = OrSet::try_from_parts(entries, wire.cc)
+        .map_err(|err| WireError::InvalidValue(format!("dep orset invalid: {err}")))?;
     Ok(DepStore::from_parts(set, stamp))
 }
 
@@ -839,7 +840,8 @@ fn wire_to_parts(wire: WireBead) -> Result<ParsedWireBead, WireError> {
     };
 
     let label_state = {
-        let set = OrSet::from_parts(wire.labels.entries, wire.labels.cc);
+        let set = OrSet::try_from_parts(wire.labels.entries, wire.labels.cc)
+            .map_err(|err| WireError::InvalidValue(format!("label orset invalid: {err}")))?;
         LabelState::from_parts(set, Some(label_stamp.clone()))
     };
 
@@ -1362,7 +1364,7 @@ mod tests {
 
         let wire = WireDepStore {
             cc: Dvv {
-                max: BTreeMap::from([(replica_a, 2), (replica_b, 5)]),
+                max: BTreeMap::from([(replica_a, 1), (replica_b, 2)]),
                 dots: BTreeSet::new(),
             },
             entries: vec![
@@ -1385,8 +1387,8 @@ mod tests {
         assert!(parsed.contains(&key_blocks));
         assert!(parsed.contains(&key_related));
         assert_eq!(parsed.stamp(), Some(&stamp));
-        assert_eq!(parsed.cc().max.get(&replica_a), Some(&2));
-        assert_eq!(parsed.cc().max.get(&replica_b), Some(&5));
+        assert_eq!(parsed.cc().max.get(&replica_a), Some(&1));
+        assert_eq!(parsed.cc().max.get(&replica_b), Some(&2));
         let related_dots = parsed.dots_for(&key_related).expect("related dots");
         assert_eq!(related_dots, &BTreeSet::from([dot(7, 5), dot(7, 3)]));
     }

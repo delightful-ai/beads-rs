@@ -682,18 +682,52 @@ impl WireLabelRemoveV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireDepAddV1 {
-    pub from: BeadId,
-    pub to: BeadId,
-    pub kind: DepKind,
+    #[serde(flatten)]
+    pub key: DepKey,
     pub dot: WireDotV1,
+}
+
+impl WireDepAddV1 {
+    pub fn key(&self) -> &DepKey {
+        &self.key
+    }
+
+    pub fn from(&self) -> &BeadId {
+        self.key.from()
+    }
+
+    pub fn to(&self) -> &BeadId {
+        self.key.to()
+    }
+
+    pub fn kind(&self) -> DepKind {
+        self.key.kind()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireDepRemoveV1 {
-    pub from: BeadId,
-    pub to: BeadId,
-    pub kind: DepKind,
+    #[serde(flatten)]
+    pub key: DepKey,
     pub ctx: WireDvvV1,
+}
+
+impl WireDepRemoveV1 {
+    pub fn key(&self) -> &DepKey {
+        &self.key
+    }
+
+    pub fn from(&self) -> &BeadId {
+        self.key.from()
+    }
+
+    pub fn to(&self) -> &BeadId {
+        self.key.to()
+    }
+
+    pub fn kind(&self) -> DepKind {
+        self.key.kind()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -744,15 +778,11 @@ impl TxnOpV1 {
                 lineage: op.lineage_stamp(),
             },
             TxnOpV1::DepAdd(dep) => TxnOpKey::DepAdd {
-                from: dep.from.clone(),
-                to: dep.to.clone(),
-                kind: dep.kind,
+                key: dep.key.clone(),
                 dot: dep.dot.into(),
             },
             TxnOpV1::DepRemove(dep) => TxnOpKey::DepRemove {
-                from: dep.from.clone(),
-                to: dep.to.clone(),
-                kind: dep.kind,
+                key: dep.key.clone(),
             },
             TxnOpV1::NoteAppend(append) => TxnOpKey::NoteAppend {
                 bead_id: append.bead_id.clone(),
@@ -784,15 +814,11 @@ pub enum TxnOpKey {
         lineage: Option<Stamp>,
     },
     DepAdd {
-        from: BeadId,
-        to: BeadId,
-        kind: DepKind,
+        key: DepKey,
         dot: Dot,
     },
     DepRemove {
-        from: BeadId,
-        to: BeadId,
-        kind: DepKind,
+        key: DepKey,
     },
     NoteAppend {
         bead_id: BeadId,
@@ -852,24 +878,19 @@ impl TxnOpKey {
                     lineage_suffix(lineage.as_ref())
                 )
             }
-            TxnOpKey::DepAdd {
-                from,
-                to,
-                kind,
-                dot,
-            } => format!(
+            TxnOpKey::DepAdd { key, dot } => format!(
                 "dep_add:{}:{}:{}:{}:{}",
-                from.as_str(),
-                to.as_str(),
-                kind.as_str(),
+                key.from().as_str(),
+                key.to().as_str(),
+                key.kind().as_str(),
                 dot.replica,
                 dot.counter
             ),
-            TxnOpKey::DepRemove { from, to, kind } => format!(
+            TxnOpKey::DepRemove { key } => format!(
                 "dep_remove:{}:{}:{}",
-                from.as_str(),
-                to.as_str(),
-                kind.as_str()
+                key.from().as_str(),
+                key.to().as_str(),
+                key.kind().as_str()
             ),
             TxnOpKey::NoteAppend {
                 bead_id,
@@ -1120,6 +1141,13 @@ mod tests {
     }
 
     #[test]
+    fn wire_dep_add_rejects_self_dependency() {
+        let json = r#"{"from":"bd-self","to":"bd-self","kind":"blocks","dot":{"replica":"01010101-0101-0101-0101-010101010101","counter":1}}"#;
+        let result: Result<WireDepAddV1, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn txn_delta_orders_ops_canonically() {
         let mut delta = TxnDeltaV1::new();
         let delete = WireTombstoneV1 {
@@ -1130,18 +1158,14 @@ mod tests {
             lineage: None,
         };
         let dep_add = WireDepAddV1 {
-            from: bead_id("bd-order"),
-            to: bead_id("bd-up"),
-            kind: DepKind::Blocks,
+            key: DepKey::new(bead_id("bd-order"), bead_id("bd-up"), DepKind::Blocks).unwrap(),
             dot: WireDotV1 {
                 replica: ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])),
                 counter: 1,
             },
         };
         let dep_remove = WireDepRemoveV1 {
-            from: bead_id("bd-order"),
-            to: bead_id("bd-down"),
-            kind: DepKind::Related,
+            key: DepKey::new(bead_id("bd-order"), bead_id("bd-down"), DepKind::Related).unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::new(),
                 dots: Vec::new(),
@@ -1216,9 +1240,7 @@ mod tests {
             .unwrap();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: bead_id("bd-rt"),
-                to: bead_id("bd-rt-dep"),
-                kind: DepKind::Blocks,
+                key: DepKey::new(bead_id("bd-rt"), bead_id("bd-rt-dep"), DepKind::Blocks).unwrap(),
                 dot: WireDotV1 {
                     replica: ReplicaId::from(uuid::Uuid::from_bytes([2u8; 16])),
                     counter: 7,
@@ -1227,9 +1249,8 @@ mod tests {
             .unwrap();
         delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                from: bead_id("bd-rt"),
-                to: bead_id("bd-rt-dep2"),
-                kind: DepKind::Related,
+                key: DepKey::new(bead_id("bd-rt"), bead_id("bd-rt-dep2"), DepKind::Related)
+                    .unwrap(),
                 ctx: WireDvvV1 {
                     max: BTreeMap::from([
                         (ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])), 5),

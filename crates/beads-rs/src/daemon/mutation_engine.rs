@@ -11,10 +11,10 @@ use crate::core::{
     ActorId, BeadId, BeadSlug, BeadType, CanonicalState, ClientRequestId, CoreError, DepKey,
     DepKind, DepSpec, Dot, EventBody, EventBytes, EventKindV1, HlcMax, Label, Labels, Limits,
     NamespaceId, NoteAppendV1, NoteId, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId,
-    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireDepAddV1,
-    WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
-    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
-    sha256_bytes, to_canon_json_bytes, validate_event_body,
+    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedEventBody, WallClock, WireBeadPatch,
+    WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1,
+    WireNoteV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
+    sha256_bytes, to_canon_json_bytes,
 };
 use crate::daemon::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
@@ -54,7 +54,7 @@ pub struct EventDraft {
 
 #[derive(Clone, Debug)]
 pub struct SequencedEvent {
-    pub event_body: EventBody,
+    pub event_body: ValidatedEventBody,
     pub event_bytes: EventBytes<crate::core::Canonical>,
     pub request_sha256: [u8; 32],
     pub client_request_id: Option<ClientRequestId>,
@@ -500,12 +500,13 @@ impl MutationEngine {
             }),
         };
 
-        validate_event_body(&event_body, &self.limits).map_err(|err| {
-            OpError::ValidationFailed {
-                field: "event".into(),
-                reason: err.to_string(),
-            }
-        })?;
+        let event_body =
+            event_body
+                .into_validated(&self.limits)
+                .map_err(|err| OpError::ValidationFailed {
+                    field: "event".into(),
+                    reason: err.to_string(),
+                })?;
 
         let event_bytes = encode_event_body_canonical(&event_body)
             .map_err(|_| OpError::Internal("event_body encode failed"))?;
@@ -862,9 +863,12 @@ impl MutationEngine {
         if let Some(parent_id) = parent_id {
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    from: id.clone(),
-                    to: parent_id,
-                    kind: DepKind::Parent,
+                    key: DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
+                        OpError::ValidationFailed {
+                            field: "parent".into(),
+                            reason: e.reason,
+                        }
+                    })?,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -873,9 +877,12 @@ impl MutationEngine {
         for spec in parsed_deps {
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    from: id.clone(),
-                    to: spec.id().clone(),
-                    kind: spec.kind(),
+                    key: DepKey::new(id.clone(), spec.id().clone(), spec.kind()).map_err(|e| {
+                        OpError::ValidationFailed {
+                            field: "dependency".into(),
+                            reason: e.reason,
+                        }
+                    })?,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -1105,10 +1112,11 @@ impl MutationEngine {
         kind: DepKind,
         dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedDelta, OpError> {
-        DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
-            field: "dependency".into(),
-            reason: e.reason,
-        })?;
+        let key =
+            DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: e.reason,
+            })?;
 
         if state.get_live(&from).is_none() {
             return Err(OpError::NotFound(from));
@@ -1129,9 +1137,7 @@ impl MutationEngine {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind,
+                key: key.clone(),
                 dot: WireDotV1::from(dot_alloc.next_dot()?),
             }))
             .map_err(delta_error_to_op)?;
@@ -1158,9 +1164,7 @@ impl MutationEngine {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind,
+                key: key.clone(),
                 ctx: WireDvvV1::from(&state.dep_dvv(&key)),
             }))
             .map_err(delta_error_to_op)?;
@@ -1223,9 +1227,7 @@ impl MutationEngine {
                 })?;
             delta
                 .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                    from: id.clone(),
-                    to: existing_parent,
-                    kind: DepKind::Parent,
+                    key: key.clone(),
                     ctx: WireDvvV1::from(&state.dep_dvv(&key)),
                 }))
                 .map_err(delta_error_to_op)?;
@@ -1234,9 +1236,12 @@ impl MutationEngine {
         if let Some(parent_id) = parent_id.clone() {
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                    from: id.clone(),
-                    to: parent_id,
-                    kind: DepKind::Parent,
+                    key: DepKey::new(id.clone(), parent_id, DepKind::Parent).map_err(|e| {
+                        OpError::ValidationFailed {
+                            field: "parent".into(),
+                            reason: e.reason,
+                        }
+                    })?,
                     dot: WireDotV1::from(dot_alloc.next_dot()?),
                 }))
                 .map_err(delta_error_to_op)?;

@@ -20,8 +20,8 @@ use crate::core::wire_bead::{
     WireBeadFull, WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1,
 };
 use crate::core::{
-    CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore, Limits, NamespaceId, OrSet,
-    Stamp, StoreState, Tombstone, WriteStamp, sha256_bytes,
+    BeadId, CanonicalState, ContentHash, DepKey, DepStore, Dot, LabelStore, Limits, NamespaceId,
+    OrSet, Stamp, StoreState, Tombstone, WriteStamp, sha256_bytes,
 };
 
 #[derive(Debug, Error)]
@@ -262,7 +262,13 @@ pub fn import_checkpoint(
                     let ns = line.namespace.clone();
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
-                    let label_state = label_state_from_wire(wire.labels.clone(), label_stamp);
+                    let label_state = label_state_from_wire(
+                        wire.labels.clone(),
+                        label_stamp,
+                        &full_path,
+                        line,
+                        &bead_id,
+                    );
                     let lineage =
                         Stamp::new(WriteStamp::from(wire.created_at), wire.created_by.clone());
                     label_stores.entry(ns.clone()).or_default().insert_state(
@@ -455,7 +461,13 @@ pub fn import_checkpoint_export(
                     let ns = line.namespace.clone();
                     let bead_id = wire.id.clone();
                     let label_stamp = wire.label_stamp();
-                    let label_state = label_state_from_wire(wire.labels.clone(), label_stamp);
+                    let label_state = label_state_from_wire(
+                        wire.labels.clone(),
+                        label_stamp,
+                        &path,
+                        line,
+                        &bead_id,
+                    );
                     let lineage =
                         Stamp::new(WriteStamp::from(wire.created_at), wire.created_by.clone());
                     label_stores.entry(ns.clone()).or_default().insert_state(
@@ -830,8 +842,27 @@ fn tombstone_from_wire(
     })
 }
 
-fn label_state_from_wire(wire: WireLabelStateV1, stamp: Stamp) -> LabelState {
-    let set = OrSet::from_parts(wire.entries, wire.cc);
+fn label_state_from_wire(
+    wire: WireLabelStateV1,
+    stamp: Stamp,
+    path: &Path,
+    line: JsonlLineContext,
+    bead_id: &BeadId,
+) -> LabelState {
+    let (set, normalization) = OrSet::normalize_for_import(wire.entries, wire.cc);
+    if normalization.changed() {
+        tracing::debug!(
+            path = %path.display(),
+            line = line.line_no,
+            namespace = %line.namespace,
+            bead_id = %bead_id.as_str(),
+            normalized_cc = normalization.normalized_cc,
+            pruned_dots = normalization.pruned_dots,
+            removed_empty_entries = normalization.removed_empty_entries,
+            resolved_collisions = normalization.resolved_collisions,
+            "normalized label OR-Set during checkpoint import"
+        );
+    }
     LabelState::from_parts(set, Some(stamp))
 }
 
@@ -851,7 +882,19 @@ fn dep_store_from_wire(
             });
         }
     }
-    let set = OrSet::from_parts(entries, wire.cc.clone());
+    let (set, normalization) = OrSet::normalize_for_import(entries, wire.cc.clone());
+    if normalization.changed() {
+        tracing::debug!(
+            path = %path.display(),
+            line = line.line_no,
+            namespace = %line.namespace,
+            normalized_cc = normalization.normalized_cc,
+            pruned_dots = normalization.pruned_dots,
+            removed_empty_entries = normalization.removed_empty_entries,
+            resolved_collisions = normalization.resolved_collisions,
+            "normalized dep OR-Set during checkpoint import"
+        );
+    }
     let stamp = wire
         .stamp
         .as_ref()

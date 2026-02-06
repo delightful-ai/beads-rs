@@ -8,17 +8,16 @@ use thiserror::Error;
 use super::bead::{Bead, BeadCore, BeadFields};
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
-use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
-use super::event::{EventBody, EventKindV1, TxnV1};
+use super::event::{
+    ValidatedBeadPatch, ValidatedDepAdd, ValidatedDepRemove, ValidatedEventBody,
+    ValidatedEventKindV1, ValidatedTombstone, ValidatedTxnOpV1, ValidatedTxnV1,
+};
 use super::identity::{ActorId, BeadId, NoteId};
 use super::state::{CanonicalState, bead_collision_cmp, note_collision_cmp};
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
-use super::wire_bead::{
-    TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireLabelAddV1, WireLabelRemoveV1,
-    WireNoteV1, WirePatch, WireTombstoneV1,
-};
+use super::wire_bead::{WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WirePatch};
 
 #[cfg(test)]
 use super::event::sha256_bytes;
@@ -48,36 +47,45 @@ pub enum ApplyError {
     InvalidDependency { reason: String },
 }
 
+/// ```compile_fail
+/// use beads_core::{apply_event, CanonicalState, EventBody};
+///
+/// fn main() {
+///     let mut state = CanonicalState::new();
+///     let body: EventBody = todo!();
+///     apply_event(&mut state, &body);
+/// }
+/// ```
 pub fn apply_event(
     state: &mut CanonicalState,
-    body: &EventBody,
+    body: &ValidatedEventBody,
 ) -> Result<ApplyOutcome, ApplyError> {
-    let EventKindV1::TxnV1(txn) = &body.kind;
+    let ValidatedEventKindV1::TxnV1(txn) = body.kind();
 
     let stamp = event_stamp(body, txn);
     let mut outcome = ApplyOutcome::default();
 
     for op in txn.delta.iter() {
         match op {
-            TxnOpV1::BeadUpsert(patch) => {
+            ValidatedTxnOpV1::BeadUpsert(patch) => {
                 apply_bead_upsert(state, patch, &stamp, &mut outcome)?;
             }
-            TxnOpV1::BeadDelete(delete) => {
+            ValidatedTxnOpV1::BeadDelete(delete) => {
                 apply_bead_delete(state, delete, &mut outcome)?;
             }
-            TxnOpV1::LabelAdd(op) => {
+            ValidatedTxnOpV1::LabelAdd(op) => {
                 apply_label_add(state, op, &stamp, &mut outcome)?;
             }
-            TxnOpV1::LabelRemove(op) => {
+            ValidatedTxnOpV1::LabelRemove(op) => {
                 apply_label_remove(state, op, &stamp, &mut outcome)?;
             }
-            TxnOpV1::DepAdd(dep) => {
+            ValidatedTxnOpV1::DepAdd(dep) => {
                 apply_dep_add(state, dep, &stamp, &mut outcome)?;
             }
-            TxnOpV1::DepRemove(dep) => {
+            ValidatedTxnOpV1::DepRemove(dep) => {
                 apply_dep_remove(state, dep, &stamp, &mut outcome)?;
             }
-            TxnOpV1::NoteAppend(append) => {
+            ValidatedTxnOpV1::NoteAppend(append) => {
                 apply_note_append(
                     state,
                     append.bead_id.clone(),
@@ -92,7 +100,7 @@ pub fn apply_event(
     Ok(outcome)
 }
 
-fn event_stamp(body: &EventBody, txn: &TxnV1) -> Stamp {
+fn event_stamp(body: &ValidatedEventBody, txn: &ValidatedTxnV1) -> Stamp {
     let hlc = &txn.hlc_max;
     Stamp::new(
         WriteStamp::new(body.event_time_ms, hlc.logical),
@@ -100,7 +108,7 @@ fn event_stamp(body: &EventBody, txn: &TxnV1) -> Stamp {
     )
 }
 
-fn creation_stamp(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<Stamp, ApplyError> {
+fn creation_stamp(patch: &ValidatedBeadPatch, event_stamp: &Stamp) -> Result<Stamp, ApplyError> {
     match (patch.created_at, patch.created_by.as_ref()) {
         (Some(at), Some(by)) => Ok(Stamp::new(WriteStamp::new(at.0, at.1), by.clone())),
         (None, None) => Ok(event_stamp.clone()),
@@ -112,14 +120,11 @@ fn creation_stamp(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<Stamp, A
 
 fn apply_bead_upsert(
     state: &mut CanonicalState,
-    patch: &WireBeadPatch,
+    patch: &ValidatedBeadPatch,
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let id = patch.id.clone();
-    if patch.created_at.is_some() ^ patch.created_by.is_some() {
-        return Err(ApplyError::MissingCreationStamp { id: id.clone() });
-    }
 
     if let Some(existing) = state.get_live(&id).cloned() {
         if let (Some(at), Some(by)) = (patch.created_at, patch.created_by.as_ref()) {
@@ -195,7 +200,7 @@ fn apply_bead_upsert(
 
 fn apply_bead_delete(
     state: &mut CanonicalState,
-    delete: &WireTombstoneV1,
+    delete: &ValidatedTombstone,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let id = delete.id.clone();
@@ -283,12 +288,11 @@ fn apply_label_remove(
 
 fn apply_dep_add(
     state: &mut CanonicalState,
-    dep: &WireDepAddV1,
+    dep: &ValidatedDepAdd,
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
-        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
+    let key = dep.key.clone();
     let dot = dep.dot.into();
     let change = state.apply_dep_add(key.clone(), dot, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -299,12 +303,11 @@ fn apply_dep_add(
 
 fn apply_dep_remove(
     state: &mut CanonicalState,
-    dep: &WireDepRemoveV1,
+    dep: &ValidatedDepRemove,
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = DepKey::new(dep.from.clone(), dep.to.clone(), dep.kind)
-        .map_err(|e| ApplyError::InvalidDependency { reason: e.reason })?;
+    let key = dep.key.clone();
     let ctx = (&dep.ctx).into();
     let change = state.apply_dep_remove(&key, &ctx, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -313,7 +316,10 @@ fn apply_dep_remove(
     Ok(())
 }
 
-fn fields_from_patch(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<BeadFields, ApplyError> {
+fn fields_from_patch(
+    patch: &ValidatedBeadPatch,
+    event_stamp: &Stamp,
+) -> Result<BeadFields, ApplyError> {
     let mut fields = default_fields(event_stamp.clone());
 
     if let Some(title) = &patch.title {
@@ -389,7 +395,7 @@ fn fields_from_patch(patch: &WireBeadPatch, event_stamp: &Stamp) -> Result<BeadF
 
 fn apply_patch_to_bead(
     bead: &mut super::Bead,
-    patch: &WireBeadPatch,
+    patch: &ValidatedBeadPatch,
     event_stamp: &Stamp,
     _outcome: &mut ApplyOutcome,
 ) -> Result<bool, ApplyError> {
@@ -640,14 +646,18 @@ fn default_fields(stamp: Stamp) -> BeadFields {
 mod tests {
     use super::*;
     use crate::collections::Label;
+    use crate::dep::DepKey;
     use crate::domain::DepKind;
-    use crate::event::{EventKindV1, HlcMax};
+    use crate::event::{EventKindV1, HlcMax, ValidatedEventBody};
     use crate::identity::{
         ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
     };
     use crate::namespace::NamespaceId;
-    use crate::wire_bead::{WireDotV1, WireDvvV1, WireLineageStamp, WireStamp};
-    use crate::{Seq1, TxnDeltaV1};
+    use crate::wire_bead::{
+        WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1,
+        WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WireStamp, WireTombstoneV1,
+    };
+    use crate::{EventBody, Limits, Seq1, TxnDeltaV1, TxnOpV1, TxnV1};
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -655,7 +665,7 @@ mod tests {
         ActorId::new(actor).unwrap()
     }
 
-    fn sample_event(note_content: &str) -> EventBody {
+    fn sample_event_raw(note_content: &str) -> EventBody {
         let store = StoreIdentity::new(
             StoreId::new(Uuid::from_bytes([1u8; 16])),
             StoreEpoch::new(1),
@@ -712,14 +722,22 @@ mod tests {
         }
     }
 
-    fn event_with_delta(delta: TxnDeltaV1, wall_ms: u64) -> EventBody {
-        let mut event = sample_event("note");
+    fn sample_event(note_content: &str) -> ValidatedEventBody {
+        sample_event_raw(note_content)
+            .into_validated(&Limits::default())
+            .expect("valid event fixture")
+    }
+
+    fn event_with_delta(delta: TxnDeltaV1, wall_ms: u64) -> ValidatedEventBody {
+        let mut event = sample_event_raw("note");
         let EventKindV1::TxnV1(txn) = &mut event.kind;
         txn.delta = delta;
         txn.hlc_max.physical_ms = wall_ms;
         txn.hlc_max.logical = 0;
         event.event_time_ms = wall_ms;
         event
+            .into_validated(&Limits::default())
+            .expect("valid delta event")
     }
 
     fn bead_upsert_event(
@@ -728,7 +746,7 @@ mod tests {
         created_by: ActorId,
         title: &str,
         wall_ms: u64,
-    ) -> EventBody {
+    ) -> ValidatedEventBody {
         let mut patch = WireBeadPatch::new(bead_id);
         patch.created_at = Some(created_at);
         patch.created_by = Some(created_by);
@@ -948,9 +966,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
                 ctx: WireDvvV1 {
                     max: std::collections::BTreeMap::from([(replica_id, 10)]),
                     dots: Vec::new(),
@@ -964,9 +980,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
                 dot: WireDotV1 {
                     replica: replica_id,
                     counter: 5,
@@ -980,9 +994,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                from: from.clone(),
-                to: to.clone(),
-                kind: DepKind::Blocks,
+                key: DepKey::new(from, to, DepKind::Blocks).unwrap(),
                 dot: WireDotV1 {
                     replica: replica_id,
                     counter: 20,
