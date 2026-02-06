@@ -117,8 +117,8 @@ fn receipt_survives_restart() {
 
     receipt::assert_receipt_identity(&receipt_before, &receipt_after);
     assert_ne!(
-        receipt_before.durability_proof.local_fsync.at_ms,
-        receipt_after.durability_proof.local_fsync.at_ms
+        receipt_before.durability_proof().local_fsync.at_ms,
+        receipt_after.durability_proof().local_fsync.at_ms
     );
 }
 

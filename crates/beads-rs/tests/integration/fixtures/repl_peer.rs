@@ -8,9 +8,14 @@ use beads_rs::core::{
     ReplicaId, Seq0, Seq1, Sha256, StoreIdentity, Watermark,
 };
 use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
+use beads_rs::daemon::repl::proto::WatermarkState;
+use beads_rs::daemon::repl::session::{
+    Inbound, InboundConnecting, Outbound, OutboundConnecting, SessionState, handle_inbound_message,
+    handle_outbound_message,
+};
 use beads_rs::daemon::repl::{
-    Ack, Events, IngestOutcome, ReplError, Session, SessionAction, SessionConfig, SessionPhase,
-    SessionRole, SessionStore, Want, WatermarkHeads, WatermarkMap, WatermarkSnapshot,
+    Ack, Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionPhase,
+    SessionStore, Want, WatermarkSnapshot,
 };
 use beads_rs::daemon::wal::ReplicaDurabilityRole;
 
@@ -25,48 +30,25 @@ pub struct MockStore {
     applied: WatermarkState<Applied>,
 }
 
-type WatermarkState<K> = BTreeMap<NamespaceId, BTreeMap<ReplicaId, Watermark<K>>>;
-
 impl MockStore {
     pub fn has_event(&self, eid: &EventId) -> bool {
         self.lookup.contains_key(eid)
     }
 
     fn snapshot_for(&self, namespaces: &[NamespaceId]) -> WatermarkSnapshot {
-        let mut durable: WatermarkMap = BTreeMap::new();
-        let mut durable_heads: WatermarkHeads = BTreeMap::new();
-        let mut applied: WatermarkMap = BTreeMap::new();
-        let mut applied_heads: WatermarkHeads = BTreeMap::new();
+        let mut durable = WatermarkState::new();
+        let mut applied = WatermarkState::new();
 
         for ns in namespaces {
             if let Some(origins) = self.durable.get(ns) {
-                let ns_map = durable.entry(ns.clone()).or_default();
-                let ns_heads = durable_heads.entry(ns.clone()).or_default();
-                for (origin, wm) in origins {
-                    ns_map.insert(*origin, wm.seq());
-                    if let HeadStatus::Known(head) = wm.head() {
-                        ns_heads.insert(*origin, Sha256(head));
-                    }
-                }
+                durable.insert(ns.clone(), origins.clone());
             }
             if let Some(origins) = self.applied.get(ns) {
-                let ns_map = applied.entry(ns.clone()).or_default();
-                let ns_heads = applied_heads.entry(ns.clone()).or_default();
-                for (origin, wm) in origins {
-                    ns_map.insert(*origin, wm.seq());
-                    if let HeadStatus::Known(head) = wm.head() {
-                        ns_heads.insert(*origin, Sha256(head));
-                    }
-                }
+                applied.insert(ns.clone(), origins.clone());
             }
         }
 
-        WatermarkSnapshot {
-            durable,
-            durable_heads,
-            applied,
-            applied_heads,
-        }
+        WatermarkSnapshot { durable, applied }
     }
 }
 
@@ -131,14 +113,14 @@ pub struct MockPeerOutput {
     pub closed: Option<beads_rs::ErrorPayload>,
 }
 
-pub struct MockPeer {
-    session: Session,
+pub struct MockPeer<R> {
+    session: Option<SessionState<R>>,
     store: MockStore,
     endpoint: ChannelEndpoint,
     now_ms: u64,
 }
 
-impl MockPeer {
+impl MockPeer<Inbound> {
     pub fn new_inbound(
         endpoint: ChannelEndpoint,
         identity: StoreIdentity,
@@ -149,15 +131,17 @@ impl MockPeer {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
         let admission = AdmissionController::new(&limits);
-        let session = Session::new(SessionRole::Inbound, config, limits, admission);
+        let session = InboundConnecting::new(config, limits, admission);
         Self {
-            session,
+            session: Some(SessionState::Connecting(session)),
             store: MockStore::default(),
             endpoint,
             now_ms: 0,
         }
     }
+}
 
+impl MockPeer<Outbound> {
     pub fn new_outbound(
         endpoint: ChannelEndpoint,
         identity: StoreIdentity,
@@ -168,42 +152,23 @@ impl MockPeer {
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
         let admission = AdmissionController::new(&limits);
-        let session = Session::new(SessionRole::Outbound, config, limits, admission);
+        let session = OutboundConnecting::new(config, limits, admission);
         Self {
-            session,
+            session: Some(SessionState::Connecting(session)),
             store: MockStore::default(),
             endpoint,
             now_ms: 0,
         }
     }
+}
 
+impl<R> MockPeer<R> {
     pub fn phase(&self) -> SessionPhase {
-        self.session.phase()
+        self.session.as_ref().expect("session").phase()
     }
 
     pub fn store(&self) -> &MockStore {
         &self.store
-    }
-
-    pub fn start_handshake(&mut self) -> MockPeerOutput {
-        let mut output = MockPeerOutput::default();
-        if let Some(action) = self.session.begin_handshake(&self.store, self.now_ms) {
-            self.apply_action(action, &mut output);
-        }
-        output
-    }
-
-    pub fn drain(&mut self) -> MockPeerOutput {
-        let mut output = MockPeerOutput::default();
-        while let Some(envelope) = self.endpoint.try_recv_message() {
-            let actions =
-                self.session
-                    .handle_message(envelope.message, &mut self.store, self.now_ms);
-            for action in actions {
-                self.apply_action(action, &mut output);
-            }
-        }
-        output
     }
 
     pub fn send_events(&self, events: Vec<EventFrameV1>) {
@@ -226,6 +191,50 @@ impl MockPeer {
             SessionAction::PeerError(err) => output.peer_errors.push(err),
             SessionAction::Close { error } => output.closed = error,
         }
+    }
+}
+
+impl MockPeer<Outbound> {
+    pub fn start_handshake(&mut self) -> MockPeerOutput {
+        let mut output = MockPeerOutput::default();
+        let session = self.session.take().expect("session");
+        let SessionState::Connecting(session) = session else {
+            panic!("outbound session not connecting");
+        };
+        let (session, action) = session.begin_handshake(&self.store, self.now_ms);
+        self.session = Some(SessionState::Handshaking(session));
+        self.apply_action(action, &mut output);
+        output
+    }
+
+    pub fn drain(&mut self) -> MockPeerOutput {
+        let mut output = MockPeerOutput::default();
+        while let Some(envelope) = self.endpoint.try_recv_message() {
+            let session = self.session.take().expect("session");
+            let (session, actions) =
+                handle_outbound_message(session, envelope.message, &mut self.store, self.now_ms);
+            self.session = Some(session);
+            for action in actions {
+                self.apply_action(action, &mut output);
+            }
+        }
+        output
+    }
+}
+
+impl MockPeer<Inbound> {
+    pub fn drain(&mut self) -> MockPeerOutput {
+        let mut output = MockPeerOutput::default();
+        while let Some(envelope) = self.endpoint.try_recv_message() {
+            let session = self.session.take().expect("session");
+            let (session, actions) =
+                handle_inbound_message(session, envelope.message, &mut self.store, self.now_ms);
+            self.session = Some(session);
+            for action in actions {
+                self.apply_action(action, &mut output);
+            }
+        }
+        output
     }
 }
 

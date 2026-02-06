@@ -704,6 +704,7 @@ fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
                     let pending_receipt = DurabilityCoordinator::pending_receipt(
                         waiter.wait.response.receipt,
                         requested,
+                        acked_by,
                     );
                     let err = OpError::DurabilityTimeout {
                         requested,
@@ -1122,7 +1123,7 @@ mod tests {
 
     use crate::core::replica_roster::ReplicaEntry;
     use crate::core::{
-        ActorId, Applied, BeadId, BeadType, DurabilityClass, DurabilityOutcome, DurabilityReceipt,
+        ActorId, Applied, BeadId, BeadType, DurabilityClass, DurabilityReceipt, Durable,
         EventBytes, EventId, HeadStatus, NamespaceId, NamespacePolicy, Opaque, Priority,
         ReplicaRole, ReplicaRoster, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
         Watermark, Watermarks,
@@ -1132,8 +1133,7 @@ mod tests {
     use crate::daemon::ipc::OpResponse;
     use crate::daemon::ops::OpResult;
     use crate::daemon::repl::PeerAckTable;
-    use crate::daemon::repl::proto::WatermarkHeads;
-    use crate::daemon::repl::proto::WatermarkMap;
+    use crate::daemon::repl::proto::WatermarkState;
 
     struct TestEnv {
         _temp: TempDir,
@@ -1612,25 +1612,20 @@ mod tests {
         let coordinator =
             DurabilityCoordinator::new(local, policies, Some(roster), Arc::clone(&peer_acks));
 
-        let mut durable = WatermarkMap::new();
-        durable
-            .entry(namespace.clone())
-            .or_default()
-            .insert(local, Seq0::new(2));
-        let mut durable_heads = WatermarkHeads::new();
-        durable_heads
-            .entry(namespace.clone())
-            .or_default()
-            .insert(local, crate::core::Sha256([2u8; 32]));
+        let mut durable: WatermarkState<Durable> = BTreeMap::new();
+        durable.entry(namespace.clone()).or_default().insert(
+            local,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
         peer_acks
             .lock()
             .unwrap()
-            .update_peer(peer_a, &durable, Some(&durable_heads), None, None, 10)
+            .update_peer(peer_a, &durable, None, 10)
             .unwrap();
         peer_acks
             .lock()
             .unwrap()
-            .update_peer(peer_b, &durable, Some(&durable_heads), None, None, 12)
+            .update_peer(peer_b, &durable, None, 12)
             .unwrap();
 
         let store = StoreIdentity::new(StoreId::new(Uuid::from_u128(10)), StoreEpoch::ZERO);
@@ -1679,31 +1674,25 @@ mod tests {
             panic!("expected op response");
         };
 
-        match op.receipt.outcome {
-            DurabilityOutcome::Achieved {
-                requested,
-                achieved,
-            } => {
-                assert_eq!(
-                    requested,
-                    DurabilityClass::ReplicatedFsync {
-                        k: NonZeroU32::new(2).unwrap()
-                    }
-                );
-                assert_eq!(
-                    achieved,
-                    DurabilityClass::ReplicatedFsync {
-                        k: NonZeroU32::new(2).unwrap()
-                    }
-                );
+        assert!(op.receipt.outcome().is_achieved());
+        assert_eq!(
+            op.receipt.outcome().requested(),
+            DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).unwrap()
             }
-            other => panic!("unexpected outcome: {other:?}"),
-        }
+        );
+        assert_eq!(
+            op.receipt.outcome().achieved(),
+            Some(DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).unwrap()
+            })
+        );
 
         let proof = op
             .receipt
-            .durability_proof
+            .durability_proof()
             .replicated
+            .as_ref()
             .expect("replicated proof");
         assert_eq!(proof.k.get(), 2);
         assert_eq!(proof.acked_by.len(), 2);
@@ -1789,6 +1778,6 @@ mod tests {
             .receipt_as::<DurabilityReceipt>()
             .unwrap()
             .expect("receipt");
-        assert!(matches!(receipt.outcome, DurabilityOutcome::Pending { .. }));
+        assert!(receipt.outcome().is_pending());
     }
 }

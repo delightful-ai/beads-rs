@@ -124,23 +124,106 @@ impl DurabilityProofV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurabilityOutcome {
-    Achieved {
-        requested: DurabilityClass,
-        achieved: DurabilityClass,
-    },
-    Pending {
-        requested: DurabilityClass,
-    },
+    Achieved(AchievedOutcome),
+    Pending(PendingOutcome),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AchievedOutcome {
+    requested: DurabilityClass,
+    achieved: DurabilityClass,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOutcome {
+    requested: DurabilityClass,
+}
+
+impl DurabilityOutcome {
+    pub fn requested(&self) -> DurabilityClass {
+        match self {
+            DurabilityOutcome::Achieved(inner) => inner.requested,
+            DurabilityOutcome::Pending(inner) => inner.requested,
+        }
+    }
+
+    pub fn achieved(&self) -> Option<DurabilityClass> {
+        match self {
+            DurabilityOutcome::Achieved(inner) => Some(inner.achieved),
+            DurabilityOutcome::Pending(_) => None,
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, DurabilityOutcome::Pending(_))
+    }
+
+    pub fn is_achieved(&self) -> bool {
+        matches!(self, DurabilityOutcome::Achieved(_))
+    }
+
+    pub(crate) fn pending(requested: DurabilityClass) -> Self {
+        DurabilityOutcome::Pending(PendingOutcome { requested })
+    }
+
+    pub(crate) fn build_achieved(requested: DurabilityClass, achieved: DurabilityClass) -> Self {
+        DurabilityOutcome::Achieved(AchievedOutcome {
+            requested,
+            achieved,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "DurabilityReceiptWire", into = "DurabilityReceiptWire")]
 pub struct DurabilityReceipt {
-    pub store: StoreIdentity,
-    pub txn_id: TxnId,
-    pub event_ids: Vec<EventId>,
-    pub durability_proof: DurabilityProofV1,
-    pub outcome: DurabilityOutcome,
-    pub min_seen: Watermarks<Applied>,
+    store: StoreIdentity,
+    txn_id: TxnId,
+    event_ids: Vec<EventId>,
+    durability_proof: DurabilityProofV1,
+    outcome: DurabilityOutcome,
+    min_seen: Watermarks<Applied>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct DurabilityReceiptWire {
+    store: StoreIdentity,
+    txn_id: TxnId,
+    event_ids: Vec<EventId>,
+    durability_proof: DurabilityProofV1,
+    outcome: DurabilityOutcome,
+    min_seen: Watermarks<Applied>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ReceiptBuildError {
+    #[error("pending outcome requires replicated durability, got {requested:?}")]
+    PendingRequiresReplicated { requested: DurabilityClass },
+
+    #[error("achieved durability {achieved:?} weaker than requested {requested:?}")]
+    AchievedWeaker {
+        requested: DurabilityClass,
+        achieved: DurabilityClass,
+    },
+
+    #[error("replicated proof missing for requested {requested:?}")]
+    MissingReplicatedProof { requested: DurabilityClass },
+
+    #[error("replicated proof present for local durability")]
+    UnexpectedReplicatedProof,
+
+    #[error("replicated achievement {achieved:?} for local request")]
+    UnexpectedReplicatedAchievement { achieved: DurabilityClass },
+
+    #[error("replicated proof k {proof_k} does not match expected {expected_k}")]
+    ReplicatedProofMismatch {
+        expected_k: NonZeroU32,
+        proof_k: NonZeroU32,
+    },
+
+    #[error("replicated acks {acked} below required {required}")]
+    ReplicatedAckedByTooSmall { required: NonZeroU32, acked: usize },
+    // Pending receipts may carry partial or even complete ack sets; outcome is authoritative.
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -168,9 +251,77 @@ pub enum ReceiptMergeError {
 
     #[error(transparent)]
     Watermark(#[from] WatermarkError),
+
+    #[error(transparent)]
+    InvalidReceipt(#[from] ReceiptBuildError),
+}
+
+impl TryFrom<DurabilityReceiptWire> for DurabilityReceipt {
+    type Error = ReceiptBuildError;
+
+    fn try_from(value: DurabilityReceiptWire) -> Result<Self, Self::Error> {
+        Self::new_checked(
+            value.store,
+            value.txn_id,
+            value.event_ids,
+            value.durability_proof,
+            value.outcome,
+            value.min_seen,
+        )
+    }
+}
+
+impl From<DurabilityReceipt> for DurabilityReceiptWire {
+    fn from(value: DurabilityReceipt) -> Self {
+        Self {
+            store: value.store,
+            txn_id: value.txn_id,
+            event_ids: value.event_ids,
+            durability_proof: value.durability_proof,
+            outcome: value.outcome,
+            min_seen: value.min_seen,
+        }
+    }
+}
+
+impl From<&DurabilityReceipt> for DurabilityReceiptWire {
+    fn from(value: &DurabilityReceipt) -> Self {
+        Self {
+            store: value.store,
+            txn_id: value.txn_id,
+            event_ids: value.event_ids.clone(),
+            durability_proof: value.durability_proof.clone(),
+            outcome: value.outcome.clone(),
+            min_seen: value.min_seen.clone(),
+        }
+    }
 }
 
 impl DurabilityReceipt {
+    pub fn store(&self) -> StoreIdentity {
+        self.store
+    }
+
+    pub fn txn_id(&self) -> TxnId {
+        self.txn_id
+    }
+
+    pub fn event_ids(&self) -> &[EventId] {
+        &self.event_ids
+    }
+
+    pub fn durability_proof(&self) -> &DurabilityProofV1 {
+        &self.durability_proof
+    }
+
+    pub fn outcome(&self) -> &DurabilityOutcome {
+        &self.outcome
+    }
+
+    pub fn min_seen(&self) -> &Watermarks<Applied> {
+        &self.min_seen
+    }
+
     pub fn local_fsync(
         store: StoreIdentity,
         txn_id: TxnId,
@@ -184,19 +335,20 @@ impl DurabilityReceipt {
             local_fsync,
             replicated: None,
         };
-        let outcome = DurabilityOutcome::Achieved {
-            requested: DurabilityClass::LocalFsync,
-            achieved: DurabilityClass::LocalFsync,
-        };
+        let outcome = DurabilityOutcome::build_achieved(
+            DurabilityClass::LocalFsync,
+            DurabilityClass::LocalFsync,
+        );
 
-        Self {
+        Self::new_checked(
             store,
             txn_id,
             event_ids,
             durability_proof,
             outcome,
             min_seen,
-        }
+        )
+        .expect("local fsync receipt is valid")
     }
 
     pub fn local_fsync_defaults(
@@ -212,6 +364,56 @@ impl DurabilityReceipt {
             at_ms,
             Watermarks::new(),
             Watermarks::new(),
+        )
+    }
+
+    pub fn with_replicated_pending(
+        self,
+        requested: NonZeroU32,
+        acked_by: Vec<ReplicaId>,
+    ) -> Result<Self, ReceiptBuildError> {
+        let durability_proof = DurabilityProofV1 {
+            local_fsync: self.durability_proof.local_fsync,
+            replicated: Some(ReplicatedProof {
+                k: requested,
+                acked_by,
+            }),
+        };
+        let outcome = DurabilityOutcome::pending(DurabilityClass::ReplicatedFsync { k: requested });
+        Self::new_checked(
+            self.store,
+            self.txn_id,
+            self.event_ids,
+            durability_proof,
+            outcome,
+            self.min_seen,
+        )
+    }
+
+    pub fn with_replicated_achieved(
+        self,
+        requested: NonZeroU32,
+        achieved: NonZeroU32,
+        acked_by: Vec<ReplicaId>,
+    ) -> Result<Self, ReceiptBuildError> {
+        let durability_proof = DurabilityProofV1 {
+            local_fsync: self.durability_proof.local_fsync,
+            replicated: Some(ReplicatedProof {
+                k: achieved,
+                acked_by,
+            }),
+        };
+        let outcome = DurabilityOutcome::build_achieved(
+            DurabilityClass::ReplicatedFsync { k: requested },
+            DurabilityClass::ReplicatedFsync { k: achieved },
+        );
+        Self::new_checked(
+            self.store,
+            self.txn_id,
+            self.event_ids,
+            durability_proof,
+            outcome,
+            self.min_seen,
         )
     }
 
@@ -241,10 +443,29 @@ impl DurabilityReceipt {
         let mut min_seen = self.min_seen.clone();
         min_seen.merge_at_least(&other.min_seen)?;
 
+        Ok(Self::new_checked(
+            self.store,
+            self.txn_id,
+            self.event_ids.clone(),
+            durability_proof,
+            outcome,
+            min_seen,
+        )?)
+    }
+
+    fn new_checked(
+        store: StoreIdentity,
+        txn_id: TxnId,
+        event_ids: Vec<EventId>,
+        durability_proof: DurabilityProofV1,
+        outcome: DurabilityOutcome,
+        min_seen: Watermarks<Applied>,
+    ) -> Result<Self, ReceiptBuildError> {
+        validate_receipt(&durability_proof, &outcome)?;
         Ok(Self {
-            store: self.store,
-            txn_id: self.txn_id,
-            event_ids: self.event_ids.clone(),
+            store,
+            txn_id,
+            event_ids,
             durability_proof,
             outcome,
             min_seen,
@@ -256,8 +477,8 @@ fn merge_outcome(
     left: &DurabilityOutcome,
     right: &DurabilityOutcome,
 ) -> Result<DurabilityOutcome, ReceiptMergeError> {
-    let requested_left = requested_durability(left);
-    let requested_right = requested_durability(right);
+    let requested_left = left.requested();
+    let requested_right = right.requested();
     if requested_left != requested_right {
         return Err(ReceiptMergeError::RequestedMismatch {
             expected: requested_left,
@@ -266,31 +487,94 @@ fn merge_outcome(
     }
 
     let requested = requested_left;
-    let outcome = match (left, right) {
-        (
-            DurabilityOutcome::Achieved { achieved: a, .. },
-            DurabilityOutcome::Achieved { achieved: b, .. },
-        ) => DurabilityOutcome::Achieved {
-            requested,
-            achieved: max_durability_class(*a, *b),
-        },
-        (DurabilityOutcome::Achieved { achieved, .. }, _)
-        | (_, DurabilityOutcome::Achieved { achieved, .. }) => DurabilityOutcome::Achieved {
-            requested,
-            achieved: *achieved,
-        },
-        (DurabilityOutcome::Pending { .. }, DurabilityOutcome::Pending { .. }) => {
-            DurabilityOutcome::Pending { requested }
+    let outcome = match (left.achieved(), right.achieved()) {
+        (Some(left), Some(right)) => {
+            DurabilityOutcome::build_achieved(requested, max_durability_class(left, right))
         }
+        (Some(achieved), None) | (None, Some(achieved)) => {
+            DurabilityOutcome::build_achieved(requested, achieved)
+        }
+        (None, None) => DurabilityOutcome::pending(requested),
     };
 
     Ok(outcome)
 }
 
-fn requested_durability(outcome: &DurabilityOutcome) -> DurabilityClass {
-    match outcome {
-        DurabilityOutcome::Achieved { requested, .. } => *requested,
-        DurabilityOutcome::Pending { requested } => *requested,
+fn validate_receipt(
+    proof: &DurabilityProofV1,
+    outcome: &DurabilityOutcome,
+) -> Result<(), ReceiptBuildError> {
+    let requested = outcome.requested();
+
+    match outcome.achieved() {
+        Some(achieved) => {
+            if durability_strength(achieved) < durability_strength(requested) {
+                return Err(ReceiptBuildError::AchievedWeaker {
+                    requested,
+                    achieved,
+                });
+            }
+            match (requested, achieved) {
+                (DurabilityClass::LocalFsync, DurabilityClass::LocalFsync) => {
+                    if proof.replicated.is_some() {
+                        return Err(ReceiptBuildError::UnexpectedReplicatedProof);
+                    }
+                    Ok(())
+                }
+                (DurabilityClass::LocalFsync, _) => {
+                    if proof.replicated.is_some() {
+                        return Err(ReceiptBuildError::UnexpectedReplicatedProof);
+                    }
+                    Err(ReceiptBuildError::UnexpectedReplicatedAchievement { achieved })
+                }
+                (
+                    DurabilityClass::ReplicatedFsync { k: requested_k },
+                    DurabilityClass::ReplicatedFsync { k: achieved_k },
+                ) => {
+                    let replicated = proof.replicated.as_ref().ok_or(
+                        ReceiptBuildError::MissingReplicatedProof {
+                            requested: DurabilityClass::ReplicatedFsync { k: requested_k },
+                        },
+                    )?;
+                    if replicated.k != achieved_k {
+                        return Err(ReceiptBuildError::ReplicatedProofMismatch {
+                            expected_k: achieved_k,
+                            proof_k: replicated.k,
+                        });
+                    }
+                    let acked = replicated.acked_by.len();
+                    if acked < achieved_k.get() as usize {
+                        return Err(ReceiptBuildError::ReplicatedAckedByTooSmall {
+                            required: achieved_k,
+                            acked,
+                        });
+                    }
+                    Ok(())
+                }
+                (DurabilityClass::ReplicatedFsync { .. }, DurabilityClass::LocalFsync) => {
+                    Err(ReceiptBuildError::AchievedWeaker {
+                        requested,
+                        achieved,
+                    })
+                }
+            }
+        }
+        None => {
+            let DurabilityClass::ReplicatedFsync { k } = requested else {
+                return Err(ReceiptBuildError::PendingRequiresReplicated { requested });
+            };
+            let replicated = proof
+                .replicated
+                .as_ref()
+                .ok_or(ReceiptBuildError::MissingReplicatedProof { requested })?;
+            if replicated.k != k {
+                return Err(ReceiptBuildError::ReplicatedProofMismatch {
+                    expected_k: k,
+                    proof_k: replicated.k,
+                });
+            }
+            Ok(())
+        }
     }
 }
 
@@ -343,9 +627,9 @@ mod tests {
 
     #[test]
     fn durability_outcome_serde_roundtrip() {
-        let outcome = DurabilityOutcome::Pending {
-            requested: DurabilityClass::LocalFsync,
-        };
+        let outcome = DurabilityOutcome::pending(DurabilityClass::ReplicatedFsync {
+            k: NonZeroU32::new(1).unwrap(),
+        });
         let json = serde_json::to_string(&outcome).unwrap();
         let parsed: DurabilityOutcome = serde_json::from_str(&json).unwrap();
         assert_eq!(outcome, parsed);
@@ -364,27 +648,89 @@ mod tests {
             .observe_at_least(&ns, &origin, Seq0::new(1), HeadStatus::Known([7u8; 32]))
             .unwrap();
 
-        let receipt = DurabilityReceipt {
+        let receipt = DurabilityReceipt::local_fsync(
+            store,
+            txn_id,
+            vec![event_id],
+            1_726_000_000_000,
+            Watermarks::<Durable>::new(),
+            min_seen,
+        );
+
+        let json = serde_json::to_string(&receipt).unwrap();
+        let parsed: DurabilityReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(receipt, parsed);
+    }
+
+    #[test]
+    fn durability_receipt_rejects_missing_replicated_proof() {
+        let ns = NamespaceId::parse("core").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
+        let event_id = EventId::new(origin, ns, Seq1::from_u64(1).unwrap());
+        let store =
+            StoreIdentity::new(StoreId::new(Uuid::from_bytes([13u8; 16])), StoreEpoch::ZERO);
+        let txn_id = TxnId::new(Uuid::from_bytes([14u8; 16]));
+
+        let wire = DurabilityReceiptWire {
             store,
             txn_id,
             event_ids: vec![event_id],
             durability_proof: DurabilityProofV1 {
                 local_fsync: LocalFsyncProof {
-                    at_ms: 1_726_000_000_000,
+                    at_ms: 100,
                     durable_seq: Watermarks::<Durable>::new(),
                 },
                 replicated: None,
             },
-            outcome: DurabilityOutcome::Achieved {
-                requested: DurabilityClass::LocalFsync,
-                achieved: DurabilityClass::LocalFsync,
-            },
-            min_seen,
+            outcome: DurabilityOutcome::pending(DurabilityClass::ReplicatedFsync {
+                k: NonZeroU32::new(2).unwrap(),
+            }),
+            min_seen: Watermarks::<Applied>::new(),
         };
 
-        let json = serde_json::to_string(&receipt).unwrap();
-        let parsed: DurabilityReceipt = serde_json::from_str(&json).unwrap();
-        assert_eq!(receipt, parsed);
+        let err = DurabilityReceipt::try_from(wire).unwrap_err();
+        assert!(matches!(
+            err,
+            ReceiptBuildError::MissingReplicatedProof { .. }
+        ));
+    }
+
+    #[test]
+    fn durability_receipt_rejects_achieved_without_quorum() {
+        let ns = NamespaceId::parse("core").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([15u8; 16]));
+        let event_id = EventId::new(origin, ns, Seq1::from_u64(1).unwrap());
+        let store =
+            StoreIdentity::new(StoreId::new(Uuid::from_bytes([16u8; 16])), StoreEpoch::ZERO);
+        let txn_id = TxnId::new(Uuid::from_bytes([17u8; 16]));
+
+        let k = NonZeroU32::new(2).unwrap();
+        let wire = DurabilityReceiptWire {
+            store,
+            txn_id,
+            event_ids: vec![event_id],
+            durability_proof: DurabilityProofV1 {
+                local_fsync: LocalFsyncProof {
+                    at_ms: 200,
+                    durable_seq: Watermarks::<Durable>::new(),
+                },
+                replicated: Some(ReplicatedProof {
+                    k,
+                    acked_by: vec![origin],
+                }),
+            },
+            outcome: DurabilityOutcome::build_achieved(
+                DurabilityClass::ReplicatedFsync { k },
+                DurabilityClass::ReplicatedFsync { k },
+            ),
+            min_seen: Watermarks::<Applied>::new(),
+        };
+
+        let err = DurabilityReceipt::try_from(wire).unwrap_err();
+        assert!(matches!(
+            err,
+            ReceiptBuildError::ReplicatedAckedByTooSmall { .. }
+        ));
     }
 
     #[test]
@@ -443,63 +789,43 @@ mod tests {
             StoreIdentity::new(StoreId::new(Uuid::from_bytes([10u8; 16])), StoreEpoch::ZERO);
         let txn_id = TxnId::new(Uuid::from_bytes([11u8; 16]));
 
-        let pending = DurabilityReceipt {
+        let pending = DurabilityReceipt::local_fsync(
             store,
             txn_id,
-            event_ids: vec![event_id.clone()],
-            durability_proof: DurabilityProofV1 {
-                local_fsync: LocalFsyncProof {
-                    at_ms: 10,
-                    durable_seq: Watermarks::<Durable>::new(),
-                },
-                replicated: Some(ReplicatedProof {
-                    k: NonZeroU32::new(2).unwrap(),
-                    acked_by: vec![origin],
-                }),
-            },
-            outcome: DurabilityOutcome::Pending {
-                requested: DurabilityClass::ReplicatedFsync {
-                    k: NonZeroU32::new(2).unwrap(),
-                },
-            },
-            min_seen: Watermarks::<Applied>::new(),
-        };
+            vec![event_id.clone()],
+            10,
+            Watermarks::<Durable>::new(),
+            Watermarks::<Applied>::new(),
+        )
+        .with_replicated_pending(NonZeroU32::new(2).unwrap(), vec![origin])
+        .expect("pending receipt");
 
         let mut min_seen = Watermarks::<Applied>::new();
         min_seen
             .observe_at_least(&ns, &origin, Seq0::new(1), HeadStatus::Known([1u8; 32]))
             .unwrap();
 
-        let achieved = DurabilityReceipt {
+        let achieved = DurabilityReceipt::local_fsync(
             store,
             txn_id,
-            event_ids: vec![event_id],
-            durability_proof: DurabilityProofV1 {
-                local_fsync: LocalFsyncProof {
-                    at_ms: 20,
-                    durable_seq: Watermarks::<Durable>::new(),
-                },
-                replicated: Some(ReplicatedProof {
-                    k: NonZeroU32::new(2).unwrap(),
-                    acked_by: vec![origin, other_replica],
-                }),
-            },
-            outcome: DurabilityOutcome::Achieved {
-                requested: DurabilityClass::ReplicatedFsync {
-                    k: NonZeroU32::new(2).unwrap(),
-                },
-                achieved: DurabilityClass::ReplicatedFsync {
-                    k: NonZeroU32::new(2).unwrap(),
-                },
-            },
+            vec![event_id],
+            20,
+            Watermarks::<Durable>::new(),
             min_seen,
-        };
+        )
+        .with_replicated_achieved(
+            NonZeroU32::new(2).unwrap(),
+            NonZeroU32::new(2).unwrap(),
+            vec![origin, other_replica],
+        )
+        .expect("achieved receipt");
 
         let merged = pending.merge(&achieved).unwrap();
-        assert!(matches!(merged.outcome, DurabilityOutcome::Achieved { .. }));
+        assert!(merged.outcome().is_achieved());
         let replicated = merged
-            .durability_proof
+            .durability_proof()
             .replicated
+            .as_ref()
             .expect("replicated proof");
         assert_eq!(replicated.k.get(), 2);
         assert!(replicated.acked_by.contains(&origin));

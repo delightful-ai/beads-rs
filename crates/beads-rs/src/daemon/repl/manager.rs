@@ -15,8 +15,8 @@ use std::sync::OnceLock;
 
 use crate::core::error::details::{BootstrapRequiredDetails, SnapshotRangeReason};
 use crate::core::{
-    ErrorPayload, EventFrameV1, NamespaceId, NamespacePolicy, ProtocolErrorCode, ReplicaId,
-    ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
+    Durable, ErrorPayload, EventFrameV1, NamespaceId, NamespacePolicy, ProtocolErrorCode,
+    ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
 };
 use crate::daemon::admission::AdmissionController;
 use crate::daemon::broadcast::{
@@ -26,12 +26,17 @@ use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
-use crate::daemon::repl::proto::{Ack, Events, PROTOCOL_VERSION_V1, Want, WatermarkMap};
+#[cfg(test)]
+use crate::daemon::repl::proto::PROTOCOL_VERSION_V1;
+use crate::daemon::repl::proto::{Ack, Events, Want, WatermarkState};
+use crate::daemon::repl::session::{
+    Outbound, OutboundConnecting, Session, SessionState, SessionWire, Streaming,
+    handle_outbound_message,
+};
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
-    FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, Session, SessionAction,
-    SessionConfig, SessionPhase, SessionRole, SessionStore, SharedSessionStore, WalRangeReader,
-    decode_envelope, encode_envelope,
+    FrameError, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, SessionAction, SessionConfig,
+    SessionStore, SharedSessionStore, WalRangeReader, decode_envelope, encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
 
@@ -414,17 +419,14 @@ where
     config.requested_namespaces = plan.requested_namespaces.clone();
     config.offered_namespaces = plan.offered_namespaces.clone();
 
-    let mut session = Session::new(SessionRole::Outbound, config, limits.clone(), admission);
+    let session = OutboundConnecting::new(config, limits.clone(), admission);
     let mut keepalive = KeepaliveTracker::new(&limits, now_ms());
-    let mut last_hello_at_ms = None;
 
-    if let Some(action) = session.begin_handshake(&store, now_ms()) {
-        apply_action(&mut writer, &session, action, &mut keepalive)?;
-        last_hello_at_ms = Some(now_ms());
-    }
+    let (session, action) = session.begin_handshake(&store, now_ms());
+    let mut session = SessionState::Handshaking(session);
+    apply_action(&mut writer, &session, action, &mut keepalive)?;
+    let mut last_hello_at_ms = Some(now_ms());
 
-    let mut accepted_set = BTreeSet::new();
-    let mut streaming = false;
     let mut sent_hot_cache = false;
     let mut handshake_at_ms = None;
     let mut pending_events =
@@ -447,7 +449,9 @@ where
                     InboundMessage::Message(msg) => {
                         let now_ms = now_ms();
                         keepalive.note_recv(now_ms);
-                        let actions = session.handle_message(msg, &mut store, now_ms);
+                        let (next_session, actions) =
+                            handle_outbound_message(session, msg, &mut store, now_ms);
+                        session = next_session;
                         for action in actions {
                             if let SessionAction::PeerAck(ack) = &action
                                 && let Err(err) =
@@ -468,13 +472,22 @@ where
                             }
 
                             if let SessionAction::PeerWant(want) = &action {
+                                let SessionState::Streaming(streaming_session) = &session else {
+                                    continue;
+                                };
+                                let allowed_set = streaming_session
+                                    .peer()
+                                    .accepted_namespaces
+                                    .iter()
+                                    .cloned()
+                                    .collect::<BTreeSet<_>>();
                                 let mut ctx = WantContext {
                                     writer: &mut writer,
-                                    session: &session,
+                                    session: streaming_session,
                                     broadcaster: &broadcaster,
                                     wal_reader: runtime.wal_reader.as_ref(),
                                     limits: &limits,
-                                    allowed_set: Some(&accepted_set),
+                                    allowed_set: Some(&allowed_set),
                                     keepalive: &mut keepalive,
                                 };
                                 if let Err(err) = handle_want(want, &mut ctx) {
@@ -505,7 +518,7 @@ where
                     Err(_) => break,
                 };
 
-                if !streaming {
+                let SessionState::Streaming(streaming_session) = &session else {
                     let drop = pending_events.push(event);
                     if drop.dropped_any() {
                         let dropped_events = drop.total_events();
@@ -526,28 +539,40 @@ where
                         );
                     }
                     continue;
-                }
-                if !accepted_set.contains(&event.namespace) {
+                };
+                if !streaming_session
+                    .peer()
+                    .accepted_namespaces
+                    .contains(&event.namespace)
+                {
                     continue;
                 }
                 let frame = broadcast_to_frame(event);
-                send_events(&mut writer, &session, vec![frame], &limits, &mut keepalive)?;
+                send_events(
+                    &mut writer,
+                    streaming_session,
+                    vec![frame],
+                    &limits,
+                    &mut keepalive,
+                )?;
             }
             recv(tick) -> _ => {}
         }
 
-        if !streaming && session.phase() == SessionPhase::Streaming {
-            streaming = true;
-            let now_ms = now_ms();
-            handshake_at_ms = Some(now_ms);
-            last_hello_at_ms = None;
-            if let Err(err) =
-                store.update_replica_liveness(plan.replica_id, now_ms, now_ms, plan.durability_role)
-            {
-                tracing::warn!("replica liveness update failed: {err}");
-            }
-            if let Some(peer) = session.peer() {
-                accepted_set = peer.accepted_namespaces.iter().cloned().collect();
+        if let SessionState::Streaming(streaming_session) = &session {
+            if handshake_at_ms.is_none() {
+                let now_ms = now_ms();
+                handshake_at_ms = Some(now_ms);
+                last_hello_at_ms = None;
+                if let Err(err) = store.update_replica_liveness(
+                    plan.replica_id,
+                    now_ms,
+                    now_ms,
+                    plan.durability_role,
+                ) {
+                    tracing::warn!("replica liveness update failed: {err}");
+                }
+                let peer = streaming_session.peer();
                 tracing::info!(
                     target: "repl",
                     direction = "outbound",
@@ -561,42 +586,52 @@ where
                     "replication handshake accepted"
                 );
             }
-        }
-        if streaming && !pending_events.is_empty() {
-            let frames = pending_events
-                .drain()
-                .filter(|event| accepted_set.contains(&event.namespace))
-                .map(broadcast_to_frame)
-                .collect::<Vec<_>>();
-            send_events(&mut writer, &session, frames, &limits, &mut keepalive)?;
-        }
-        if streaming && !sent_hot_cache {
-            send_hot_cache(
-                &mut writer,
-                &session,
-                &broadcaster,
-                &accepted_set,
-                &limits,
-                &mut keepalive,
-            )?;
-            sent_hot_cache = true;
+
+            if !pending_events.is_empty() {
+                let peer = streaming_session.peer();
+                let frames = pending_events
+                    .drain()
+                    .filter(|event| peer.accepted_namespaces.contains(&event.namespace))
+                    .map(broadcast_to_frame)
+                    .collect::<Vec<_>>();
+                send_events(
+                    &mut writer,
+                    streaming_session,
+                    frames,
+                    &limits,
+                    &mut keepalive,
+                )?;
+            }
+            if !sent_hot_cache {
+                let peer = streaming_session.peer();
+                send_hot_cache(
+                    &mut writer,
+                    streaming_session,
+                    &broadcaster,
+                    &peer.accepted_namespaces,
+                    &limits,
+                    &mut keepalive,
+                )?;
+                sent_hot_cache = true;
+            }
         }
 
-        if session.phase() == SessionPhase::Handshaking {
+        if let SessionState::Handshaking(session) = &mut session {
             let now_ms = now_ms();
             let retry_after_ms = limits.keepalive_ms;
             if retry_after_ms > 0 {
                 let should_retry = last_hello_at_ms
                     .map(|last| now_ms.saturating_sub(last) >= retry_after_ms)
                     .unwrap_or(true);
-                if should_retry && let Some(action) = session.resend_handshake(&store, now_ms) {
-                    apply_action(&mut writer, &session, action, &mut keepalive)?;
+                if should_retry {
+                    let action = session.resend_handshake(&store, now_ms);
+                    apply_action(&mut writer, session, action, &mut keepalive)?;
                     last_hello_at_ms = Some(now_ms);
                 }
             }
         }
 
-        if session.phase() == SessionPhase::Streaming {
+        if matches!(session, SessionState::Streaming(_)) {
             let now_ms = now_ms();
             if let Some(decision) = keepalive.poll(now_ms) {
                 match decision {
@@ -703,9 +738,9 @@ fn run_event_forwarder(
     }
 }
 
-fn apply_action(
+fn apply_action<S: SessionWire>(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
+    session: &S,
     action: SessionAction,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<bool, PeerError> {
@@ -726,26 +761,23 @@ fn apply_action(
     }
 }
 
-fn send_payload(
+fn send_payload<S: SessionWire>(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
+    session: &S,
     message: ReplMessage,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<(), PeerError> {
-    let version = session
-        .peer()
-        .map(|peer| peer.protocol_version)
-        .unwrap_or(PROTOCOL_VERSION_V1);
+    let version = SessionWire::wire_version(session);
     let envelope = ReplEnvelope { version, message };
     let bytes = encode_envelope(&envelope)?;
-    writer.write_frame_with_limit(&bytes, session.negotiated_max_frame_bytes())?;
+    writer.write_frame_with_limit(&bytes, SessionWire::frame_limit(session))?;
     keepalive.note_send(now_ms());
     Ok(())
 }
 
-fn send_events(
+fn send_events<R>(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
+    session: &Session<R, Streaming>,
     frames: Vec<EventFrameV1>,
     limits: &crate::core::Limits,
     keepalive: &mut KeepaliveTracker,
@@ -815,11 +847,11 @@ fn send_events(
     Ok(())
 }
 
-fn events_envelope_len(session: &Session, batch: &[EventFrameV1]) -> Result<usize, PeerError> {
-    let version = session
-        .peer()
-        .map(|peer| peer.protocol_version)
-        .unwrap_or(PROTOCOL_VERSION_V1);
+fn events_envelope_len<R>(
+    session: &Session<R, Streaming>,
+    batch: &[EventFrameV1],
+) -> Result<usize, PeerError> {
+    let version = session.peer().protocol_version;
     let envelope = ReplEnvelope {
         version,
         message: ReplMessage::Events(Events {
@@ -832,9 +864,9 @@ fn events_envelope_len(session: &Session, batch: &[EventFrameV1]) -> Result<usiz
 
 fn send_hot_cache(
     writer: &mut FrameWriter<TcpStream>,
-    session: &Session,
+    session: &Session<Outbound, Streaming>,
     broadcaster: &EventBroadcaster,
-    allowed_set: &BTreeSet<NamespaceId>,
+    allowed_set: &[NamespaceId],
     limits: &crate::core::Limits,
     keepalive: &mut KeepaliveTracker,
 ) -> Result<(), PeerError> {
@@ -855,30 +887,23 @@ fn update_peer_ack(
 ) -> Result<(), Box<crate::daemon::repl::PeerAckError>> {
     let now_ms = now_ms();
     let mut table = peer_acks.lock().expect("peer ack lock poisoned");
-    table.update_peer(
-        peer,
-        &ack.durable,
-        ack.durable_heads.as_ref(),
-        ack.applied.as_ref(),
-        ack.applied_heads.as_ref(),
-        now_ms,
-    )?;
+    table.update_peer(peer, &ack.durable, ack.applied.as_ref(), now_ms)?;
     let namespaces: Vec<NamespaceId> = ack.durable.keys().cloned().collect();
     let snapshot = store.watermark_snapshot(&namespaces);
     emit_peer_lag(peer, &snapshot.durable, &ack.durable);
     Ok(())
 }
 
-fn emit_peer_lag(peer: ReplicaId, local: &WatermarkMap, ack: &WatermarkMap) {
+fn emit_peer_lag(peer: ReplicaId, local: &WatermarkState<Durable>, ack: &WatermarkState<Durable>) {
     for (namespace, origins) in local {
         let mut max_lag = 0u64;
         let acked = ack.get(namespace);
-        for (origin, local_seq) in origins {
+        for (origin, local_wm) in origins {
             let acked_seq = acked
                 .and_then(|map| map.get(origin))
-                .copied()
+                .map(|wm| wm.seq())
                 .unwrap_or(Seq0::ZERO);
-            let lag = local_seq.get().saturating_sub(acked_seq.get());
+            let lag = local_wm.seq().get().saturating_sub(acked_seq.get());
             max_lag = max_lag.max(lag);
         }
         metrics::set_repl_peer_lag(peer, namespace, max_lag);
@@ -887,7 +912,7 @@ fn emit_peer_lag(peer: ReplicaId, local: &WatermarkMap, ack: &WatermarkMap) {
 
 struct WantContext<'a> {
     writer: &'a mut FrameWriter<TcpStream>,
-    session: &'a Session,
+    session: &'a Session<Outbound, Streaming>,
     broadcaster: &'a EventBroadcaster,
     wal_reader: Option<&'a WalRangeReader>,
     limits: &'a crate::core::Limits,
@@ -993,7 +1018,7 @@ mod tests {
         Watermark,
     };
     use crate::daemon::repl::keepalive::KeepaliveTracker;
-    use crate::daemon::repl::proto::{WatermarkHeads, WatermarkMap, Welcome};
+    use crate::daemon::repl::proto::Welcome;
     use crate::daemon::repl::{IngestOutcome, ReplError, WatermarkSnapshot};
 
     #[derive(Default)]
@@ -1002,10 +1027,8 @@ mod tests {
     impl SessionStore for TestStore {
         fn watermark_snapshot(&self, _namespaces: &[NamespaceId]) -> WatermarkSnapshot {
             WatermarkSnapshot {
-                durable: WatermarkMap::new(),
-                durable_heads: WatermarkHeads::new(),
-                applied: WatermarkMap::new(),
-                applied_heads: WatermarkHeads::new(),
+                durable: BTreeMap::new(),
+                applied: BTreeMap::new(),
             }
         }
 
@@ -1111,15 +1134,19 @@ mod tests {
                         );
                         config.offered_namespaces = hello.requested_namespaces.clone();
                         config.requested_namespaces = hello.offered_namespaces.clone();
-                        let mut session = Session::new(
-                            SessionRole::Inbound,
+                        let session = crate::daemon::repl::session::InboundConnecting::new(
                             config,
                             crate::core::Limits::default(),
                             AdmissionController::new(&crate::core::Limits::default()),
                         );
                         let mut store = TestStore;
-                        let actions =
-                            session.handle_message(ReplMessage::Hello(hello), &mut store, now_ms());
+                        let (_session, actions) =
+                            crate::daemon::repl::session::handle_inbound_message(
+                                SessionState::Connecting(session),
+                                ReplMessage::Hello(hello),
+                                &mut store,
+                                now_ms(),
+                            );
                         for action in actions {
                             if let SessionAction::Send(message) = action {
                                 let mut message = message;
@@ -1297,14 +1324,11 @@ mod tests {
         let mut config = SessionConfig::new(local_store, local_replica, &limits);
         config.requested_namespaces = vec![NamespaceId::core()];
         config.offered_namespaces = vec![NamespaceId::core()];
-        let mut session = Session::new(
-            SessionRole::Outbound,
-            config,
-            limits.clone(),
-            AdmissionController::new(&limits),
-        );
+        let session =
+            OutboundConnecting::new(config, limits.clone(), AdmissionController::new(&limits));
         let mut store = TestStore;
-        let _ = session.begin_handshake(&store, now_ms());
+        let (session, _action) = session.begin_handshake(&store, now_ms());
+        let session = SessionState::Handshaking(session);
         let welcome = Welcome {
             protocol_version: PROTOCOL_VERSION_V1,
             store_id: local_store.store_id,
@@ -1312,15 +1336,16 @@ mod tests {
             receiver_replica_id: peer_replica,
             welcome_nonce: 1,
             accepted_namespaces: vec![NamespaceId::core()],
-            receiver_seen_durable: WatermarkMap::new(),
-            receiver_seen_durable_heads: None,
+            receiver_seen_durable: BTreeMap::new(),
             receiver_seen_applied: None,
-            receiver_seen_applied_heads: None,
             live_stream_enabled: true,
             max_frame_bytes: 200,
         };
-        session.handle_message(ReplMessage::Welcome(welcome), &mut store, now_ms());
-        assert!(matches!(session.phase(), SessionPhase::Streaming));
+        let (session, _actions) =
+            handle_outbound_message(session, ReplMessage::Welcome(welcome), &mut store, now_ms());
+        let SessionState::Streaming(session) = session else {
+            panic!("expected streaming session");
+        };
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");

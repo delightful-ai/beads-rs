@@ -6,18 +6,18 @@ use uuid::Uuid;
 
 use beads_rs::core::error::details as error_details;
 use beads_rs::daemon::admission::AdmissionController;
-use beads_rs::daemon::repl::{
-    Events, ReplMessage, Session, SessionAction, SessionConfig, SessionPhase, SessionRole,
-    WalRangeReader,
+use beads_rs::daemon::repl::session::{
+    Inbound, InboundConnecting, SessionState, handle_inbound_message,
 };
+use beads_rs::daemon::repl::{Events, ReplMessage, SessionAction, SessionConfig, WalRangeReader};
 use beads_rs::daemon::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
 };
 use beads_rs::paths;
 use beads_rs::{
-    ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax, Limits,
+    ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HeadStatus, HlcMax, Limits,
     NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
-    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
+    StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, Watermark,
     encode_event_body_canonical, hash_event_body,
 };
 
@@ -27,7 +27,7 @@ use crate::fixtures::repl_peer::MockStore;
 use crate::fixtures::store_dir::TempStoreDir;
 use crate::fixtures::wal::record_for_seq;
 
-fn inbound_session() -> (Session, MockStore, StoreIdentity) {
+fn inbound_session() -> (SessionState<Inbound>, MockStore, StoreIdentity) {
     let limits = Limits::default();
     let identity = identity::store_identity_with_epoch(1, 1);
     let local_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
@@ -35,13 +35,18 @@ fn inbound_session() -> (Session, MockStore, StoreIdentity) {
     config.requested_namespaces = vec![NamespaceId::core()];
     config.offered_namespaces = vec![NamespaceId::core()];
     let admission = AdmissionController::new(&limits);
-    let mut session = Session::new(SessionRole::Inbound, config, limits, admission);
+    let session = InboundConnecting::new(config, limits, admission);
     let mut store = MockStore::default();
 
     let peer_replica = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
     let hello = repl_frames::hello(identity, peer_replica);
-    session.handle_message(ReplMessage::Hello(hello), &mut store, 0);
-    assert!(matches!(session.phase(), SessionPhase::Streaming));
+    let (session, _) = handle_inbound_message(
+        SessionState::Connecting(session),
+        ReplMessage::Hello(hello),
+        &mut store,
+        0,
+    );
+    assert!(matches!(session, SessionState::Streaming(_)));
 
     (session, store, identity)
 }
@@ -89,14 +94,15 @@ fn event_frame_with_txn(
 
 #[test]
 fn repl_ack_advances_watermarks() {
-    let (mut session, mut store, identity) = inbound_session();
+    let (session, mut store, identity) = inbound_session();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
     let e2 = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(e1.sha256));
 
-    let actions = session.handle_message(
+    let (_session, actions) = handle_inbound_message(
+        session,
         ReplMessage::Events(Events {
             events: vec![e1, e2.clone()],
         }),
@@ -112,22 +118,14 @@ fn repl_ack_advances_watermarks() {
         })
         .expect("ack");
 
-    let seq = ack
+    let watermark = ack
         .durable
         .get(&namespace)
         .and_then(|m| m.get(&origin))
         .copied()
-        .unwrap_or(Seq0::ZERO);
-    assert_eq!(seq, Seq0::new(2));
-
-    let head = ack
-        .durable_heads
-        .as_ref()
-        .and_then(|heads| heads.get(&namespace))
-        .and_then(|m| m.get(&origin))
-        .copied()
-        .expect("head");
-    assert_eq!(head, e2.sha256);
+        .unwrap_or_else(Watermark::genesis);
+    assert_eq!(watermark.seq(), Seq0::new(2));
+    assert_eq!(watermark.head(), HeadStatus::Known(e2.sha256.0));
 
     let event_id = EventId::new(origin, namespace.clone(), Seq1::from_u64(2).expect("seq1"));
     assert!(store.has_event(&event_id));
@@ -135,14 +133,15 @@ fn repl_ack_advances_watermarks() {
 
 #[test]
 fn repl_gap_triggers_want() {
-    let (mut session, mut store, identity) = inbound_session();
+    let (session, mut store, identity) = inbound_session();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
     let e3 = repl_frames::event_frame(identity, namespace.clone(), origin, 3, Some(e1.sha256));
 
-    let actions = session.handle_message(
+    let (_session, actions) = handle_inbound_message(
+        session,
         ReplMessage::Events(Events { events: vec![e3] }),
         &mut store,
         10,
@@ -167,19 +166,21 @@ fn repl_gap_triggers_want() {
 
 #[test]
 fn repl_equivocation_errors() {
-    let (mut session, mut store, identity) = inbound_session();
+    let (session, mut store, identity) = inbound_session();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([5u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
-    session.handle_message(
+    let (session, _) = handle_inbound_message(
+        session,
         ReplMessage::Events(Events { events: vec![e1] }),
         &mut store,
         10,
     );
 
     let e1_alt = event_frame_with_txn(identity, namespace.clone(), origin, 1, None, 7);
-    let actions = session.handle_message(
+    let (_session, actions) = handle_inbound_message(
+        session,
         ReplMessage::Events(Events {
             events: vec![e1_alt],
         }),
@@ -200,13 +201,14 @@ fn repl_equivocation_errors() {
 
 #[test]
 fn repl_prev_sha_mismatch_rejects() {
-    let (mut session, mut store, identity) = inbound_session();
+    let (session, mut store, identity) = inbound_session();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
 
     let e1 = repl_frames::event_frame(identity, namespace.clone(), origin, 1, None);
     let expected_prev = e1.sha256;
-    session.handle_message(
+    let (session, _) = handle_inbound_message(
+        session,
         ReplMessage::Events(Events { events: vec![e1] }),
         &mut store,
         10,
@@ -214,7 +216,8 @@ fn repl_prev_sha_mismatch_rejects() {
 
     let bad_prev = Sha256([9u8; 32]);
     let e2_bad = repl_frames::event_frame(identity, namespace.clone(), origin, 2, Some(bad_prev));
-    let actions = session.handle_message(
+    let (_session, actions) = handle_inbound_message(
+        session,
         ReplMessage::Events(Events {
             events: vec![e2_bad],
         }),
