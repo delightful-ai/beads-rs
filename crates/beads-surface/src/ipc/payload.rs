@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use beads_api::{AdminFingerprintMode, AdminFingerprintSample};
-use beads_core::{BeadId, BeadType, BranchName, DepKind, NamespaceId, Priority};
+use beads_core::{BeadId, BeadType, BranchName, DepKind, NamespaceId, Priority, StoreId};
 
 use crate::ops::BeadPatch;
 use crate::query::Filters;
@@ -194,6 +194,25 @@ pub struct AdminFingerprintPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminMaintenanceModePayload {
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminStoreFsckPayload {
+    pub store_id: StoreId,
+    #[serde(default)]
+    pub repair: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminStoreLockInfoPayload {
+    pub store_id: StoreId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminStoreUnlockPayload {
+    pub store_id: StoreId,
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[cfg(test)]

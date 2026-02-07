@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use beads_core::StoreId;
 use crossbeam::channel::Sender;
 
 use crate::core::{
@@ -27,6 +28,11 @@ use beads_api::{
     AdminReplicaLiveness, AdminReplicationNamespace, AdminReplicationPeer,
     AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminWalGrowth,
     AdminWalNamespace, AdminWalSegment, AdminWalWarning, AdminWalWarningKind,
+};
+use beads_api::{
+    AdminFsckOutput, AdminStoreLockInfoOutput, AdminStoreUnlockOutput, FsckCheck, FsckCheckId,
+    FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRepairKind, FsckRisk, FsckSeverity, FsckStats,
+    FsckStatus, FsckSummary, StoreLockMetaOutput, UnlockAction,
 };
 
 use super::core::Daemon;
@@ -588,6 +594,311 @@ impl Daemon {
         Response::ok(ResponsePayload::query(QueryResult::AdminRebuildIndex(
             output,
         )))
+    }
+
+    // =========================================================================
+    // Store-level admin ops (no repo context required)
+    // =========================================================================
+
+    pub fn admin_store_fsck(&self, store_id: StoreId, repair: bool) -> Response {
+        // Repair modifies WAL files (truncate, quarantine, rebuild index).
+        // Reject when running inside the daemon to avoid races with live writes.
+        // Users must stop the daemon first: `bd daemon stop && bd store fsck --repair`.
+        if repair {
+            return Response::err_from(OpError::InvalidRequest {
+                field: Some("repair".into()),
+                reason:
+                    "fsck --repair cannot run while the daemon is active; stop the daemon first"
+                        .to_string(),
+            });
+        }
+        let config = crate::config::load_or_init();
+        let options = crate::daemon::wal::fsck::FsckOptions::new(false, config.limits);
+        let report = match crate::daemon::wal::fsck::fsck_store(store_id, options) {
+            Ok(report) => report,
+            Err(err) => {
+                return Response::err_from(OpError::InvalidRequest {
+                    field: Some("store-id".into()),
+                    reason: err.to_string(),
+                });
+            }
+        };
+        let output = fsck_report_to_output(report);
+        Response::ok(ResponsePayload::query(QueryResult::AdminFsck(output)))
+    }
+
+    pub fn admin_store_lock_info(&self, store_id: StoreId) -> Response {
+        let lock_path = crate::paths::store_lock_path(store_id);
+        let meta = match crate::daemon::store::lock::read_lock_meta(store_id) {
+            Ok(meta) => meta,
+            Err(err) => {
+                return Response::err_from(OpError::StoreRuntime(Box::new(
+                    StoreRuntimeError::Lock(err),
+                )));
+            }
+        };
+        let output = AdminStoreLockInfoOutput {
+            store_id,
+            lock_path,
+            meta: meta.map(lock_meta_to_api),
+        };
+        Response::ok(ResponsePayload::query(QueryResult::AdminStoreLockInfo(
+            output,
+        )))
+    }
+
+    pub fn admin_store_unlock(&self, store_id: StoreId, force: bool) -> Response {
+        let lock_path = crate::paths::store_lock_path(store_id);
+        let meta = match crate::daemon::store::lock::read_lock_meta(store_id) {
+            Ok(meta) => meta,
+            Err(err) => {
+                return Response::err_from(OpError::StoreRuntime(Box::new(
+                    StoreRuntimeError::Lock(err),
+                )));
+            }
+        };
+        let our_pid = std::process::id();
+        let Some(lock_meta) = meta else {
+            return unlock_ok(store_id, lock_path, None, our_pid, UnlockAction::NoLock);
+        };
+
+        let lock_is_ours = lock_meta.pid == our_pid;
+
+        // Check PID liveness for foreign locks to avoid removing an active lock.
+        let lock_pid_alive = if lock_is_ours {
+            true // We're running, so obviously alive.
+        } else {
+            pid_is_alive(lock_meta.pid)
+        };
+
+        // Active lock (ours or foreign alive PID) requires --force.
+        if lock_pid_alive && !force {
+            let reason = if lock_is_ours {
+                "lock held by this daemon"
+            } else {
+                "lock PID is still alive"
+            };
+            return Response::err_from(OpError::InvalidRequest {
+                field: Some("force".into()),
+                reason: reason.to_string(),
+            });
+        }
+
+        // Remove: either forced or stale (dead PID).
+        if let Err(err) = crate::daemon::store::lock::remove_lock_file(store_id) {
+            return Response::err_from(OpError::StoreRuntime(Box::new(StoreRuntimeError::Lock(
+                err,
+            ))));
+        }
+
+        let action = if !lock_pid_alive {
+            UnlockAction::RemovedStale
+        } else {
+            UnlockAction::RemovedForced
+        };
+        unlock_ok(
+            store_id,
+            lock_path,
+            Some(lock_meta_to_api(lock_meta)),
+            our_pid,
+            action,
+        )
+    }
+}
+
+fn unlock_ok(
+    store_id: StoreId,
+    lock_path: PathBuf,
+    meta: Option<StoreLockMetaOutput>,
+    daemon_pid: u32,
+    action: UnlockAction,
+) -> Response {
+    let output = AdminStoreUnlockOutput {
+        store_id,
+        lock_path,
+        meta,
+        daemon_pid: Some(daemon_pid),
+        action,
+    };
+    Response::ok(ResponsePayload::query(QueryResult::AdminStoreUnlock(
+        output,
+    )))
+}
+
+/// Check if a PID is alive using `kill(pid, 0)`.
+fn pid_is_alive(pid: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    matches!(
+        kill(Pid::from_raw(pid as i32), None),
+        Ok(()) | Err(Errno::EPERM)
+    )
+}
+
+fn lock_meta_to_api(meta: crate::daemon::store::lock::StoreLockMeta) -> StoreLockMetaOutput {
+    StoreLockMetaOutput {
+        store_id: meta.store_id,
+        replica_id: meta.replica_id,
+        pid: meta.pid,
+        started_at_ms: meta.started_at_ms,
+        daemon_version: meta.daemon_version,
+        last_heartbeat_ms: meta.last_heartbeat_ms,
+    }
+}
+
+pub(crate) fn fsck_report_to_output(
+    report: crate::daemon::wal::fsck::FsckReport,
+) -> AdminFsckOutput {
+    AdminFsckOutput {
+        store_id: report.store_id,
+        checked_at_ms: report.checked_at_ms,
+        stats: FsckStats {
+            namespaces: report.stats.namespaces,
+            segments: report.stats.segments,
+            records: report.stats.records,
+        },
+        checks: report.checks.into_iter().map(fsck_check_to_api).collect(),
+        summary: FsckSummary {
+            risk: fsck_risk_to_api(report.summary.risk),
+            safe_to_accept_writes: report.summary.safe_to_accept_writes,
+            safe_to_prune_wal: report.summary.safe_to_prune_wal,
+            safe_to_rebuild_index: report.summary.safe_to_rebuild_index,
+        },
+        repairs: report.repairs.into_iter().map(fsck_repair_to_api).collect(),
+    }
+}
+
+fn fsck_check_to_api(check: crate::daemon::wal::fsck::FsckCheck) -> FsckCheck {
+    FsckCheck {
+        id: fsck_check_id_to_api(check.id),
+        status: fsck_status_to_api(check.status),
+        severity: fsck_severity_to_api(check.severity),
+        evidence: check
+            .evidence
+            .into_iter()
+            .map(fsck_evidence_to_api)
+            .collect(),
+        suggested_actions: check.suggested_actions,
+    }
+}
+
+fn fsck_evidence_to_api(e: crate::daemon::wal::fsck::FsckEvidence) -> FsckEvidence {
+    FsckEvidence {
+        code: fsck_evidence_code_to_api(e.code),
+        message: e.message,
+        path: e.path,
+        namespace: e.namespace,
+        origin: e.origin,
+        seq: e.seq,
+        offset: e.offset,
+    }
+}
+
+fn fsck_repair_to_api(r: crate::daemon::wal::fsck::FsckRepair) -> FsckRepair {
+    FsckRepair {
+        kind: match r.kind {
+            crate::daemon::wal::fsck::FsckRepairKind::TruncateTail => FsckRepairKind::TruncateTail,
+            crate::daemon::wal::fsck::FsckRepairKind::QuarantineSegment => {
+                FsckRepairKind::QuarantineSegment
+            }
+            crate::daemon::wal::fsck::FsckRepairKind::RebuildIndex => FsckRepairKind::RebuildIndex,
+        },
+        path: r.path,
+        detail: r.detail,
+    }
+}
+
+fn fsck_status_to_api(s: crate::daemon::wal::fsck::FsckStatus) -> FsckStatus {
+    match s {
+        crate::daemon::wal::fsck::FsckStatus::Pass => FsckStatus::Pass,
+        crate::daemon::wal::fsck::FsckStatus::Warn => FsckStatus::Warn,
+        crate::daemon::wal::fsck::FsckStatus::Fail => FsckStatus::Fail,
+    }
+}
+
+fn fsck_severity_to_api(s: crate::daemon::wal::fsck::FsckSeverity) -> FsckSeverity {
+    match s {
+        crate::daemon::wal::fsck::FsckSeverity::Low => FsckSeverity::Low,
+        crate::daemon::wal::fsck::FsckSeverity::Medium => FsckSeverity::Medium,
+        crate::daemon::wal::fsck::FsckSeverity::High => FsckSeverity::High,
+        crate::daemon::wal::fsck::FsckSeverity::Critical => FsckSeverity::Critical,
+    }
+}
+
+fn fsck_risk_to_api(r: crate::daemon::wal::fsck::FsckRisk) -> FsckRisk {
+    match r {
+        crate::daemon::wal::fsck::FsckRisk::Low => FsckRisk::Low,
+        crate::daemon::wal::fsck::FsckRisk::Medium => FsckRisk::Medium,
+        crate::daemon::wal::fsck::FsckRisk::High => FsckRisk::High,
+        crate::daemon::wal::fsck::FsckRisk::Critical => FsckRisk::Critical,
+    }
+}
+
+fn fsck_check_id_to_api(id: crate::daemon::wal::fsck::FsckCheckId) -> FsckCheckId {
+    match id {
+        crate::daemon::wal::fsck::FsckCheckId::SegmentHeaders => FsckCheckId::SegmentHeaders,
+        crate::daemon::wal::fsck::FsckCheckId::SegmentFrames => FsckCheckId::SegmentFrames,
+        crate::daemon::wal::fsck::FsckCheckId::RecordHashes => FsckCheckId::RecordHashes,
+        crate::daemon::wal::fsck::FsckCheckId::OriginContiguity => FsckCheckId::OriginContiguity,
+        crate::daemon::wal::fsck::FsckCheckId::IndexOffsets => FsckCheckId::IndexOffsets,
+        crate::daemon::wal::fsck::FsckCheckId::CheckpointCache => FsckCheckId::CheckpointCache,
+    }
+}
+
+fn fsck_evidence_code_to_api(c: crate::daemon::wal::fsck::FsckEvidenceCode) -> FsckEvidenceCode {
+    match c {
+        crate::daemon::wal::fsck::FsckEvidenceCode::SegmentHeaderInvalid => {
+            FsckEvidenceCode::SegmentHeaderInvalid
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::SegmentHeaderMismatch => {
+            FsckEvidenceCode::SegmentHeaderMismatch
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::SegmentHeaderSymlink => {
+            FsckEvidenceCode::SegmentHeaderSymlink
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::FrameHeaderInvalid => {
+            FsckEvidenceCode::FrameHeaderInvalid
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::FrameCrcMismatch => {
+            FsckEvidenceCode::FrameCrcMismatch
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::FrameTruncated => {
+            FsckEvidenceCode::FrameTruncated
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::RecordDecodeInvalid => {
+            FsckEvidenceCode::RecordDecodeInvalid
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::RecordHeaderMismatch => {
+            FsckEvidenceCode::RecordHeaderMismatch
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::RecordShaMismatch => {
+            FsckEvidenceCode::RecordShaMismatch
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::PrevShaMismatch => {
+            FsckEvidenceCode::PrevShaMismatch
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::NonContiguousSeq => {
+            FsckEvidenceCode::NonContiguousSeq
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::SealedSegmentLenMismatch => {
+            FsckEvidenceCode::SealedSegmentLenMismatch
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::IndexOffsetOutOfBounds => {
+            FsckEvidenceCode::IndexOffsetOutOfBounds
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::IndexMissingSegment => {
+            FsckEvidenceCode::IndexMissingSegment
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::IndexBehindWal => {
+            FsckEvidenceCode::IndexBehindWal
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::IndexOpenFailed => {
+            FsckEvidenceCode::IndexOpenFailed
+        }
+        crate::daemon::wal::fsck::FsckEvidenceCode::CheckpointCacheInvalid => {
+            FsckEvidenceCode::CheckpointCacheInvalid
+        }
     }
 }
 

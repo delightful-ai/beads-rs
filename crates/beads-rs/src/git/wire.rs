@@ -98,12 +98,10 @@ impl WireBeadFullCompat {
                     ));
                 }
             }
-        } else {
-            if assignee_present || assignee_expires_present || self.assignee_at.is_some() {
-                return Err(WireError::InvalidValue(
-                    "assignee_at/expires present without assignee".to_string(),
-                ));
-            }
+        } else if assignee_present || assignee_expires_present || self.assignee_at.is_some() {
+            return Err(WireError::InvalidValue(
+                "assignee_at/expires present without assignee".to_string(),
+            ));
         }
 
         Ok(())
@@ -847,7 +845,8 @@ mod tests {
         obj.remove("closed_by");
         lines[0] = serde_json::to_string(&value).unwrap();
 
-        let parsed = parse_state(&join_jsonl(&lines)).expect("legacy closed fields remain readable");
+        let parsed =
+            parse_state(&join_jsonl(&lines)).expect("legacy closed fields remain readable");
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].fields.workflow.value.is_closed());
     }
@@ -879,7 +878,12 @@ mod tests {
     fn parse_state_rejects_partial_closed_redundant_fields() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
         let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
-        let bead = make_bead_with(&bead_id("bd-partial-closed"), &stamp, workflow, Claim::default());
+        let bead = make_bead_with(
+            &bead_id("bd-partial-closed"),
+            &stamp,
+            workflow,
+            Claim::default(),
+        );
         let mut state = CanonicalState::new();
         state.insert(bead).unwrap();
 
@@ -928,8 +932,14 @@ mod tests {
         obj.insert("assignee_expires".to_string(), serde_json::json!(12345));
         lines[0] = serde_json::to_string(&value).unwrap();
 
+        // Rejected at the serde level (WireClaimSnapshot deserializer) before
+        // validate_redundant_fields gets a chance, so the error is Json not InvalidValue.
         let err = parse_state(&join_jsonl(&lines)).expect_err("expected invalid claim data");
-        assert!(matches!(err, WireError::InvalidValue(_)));
+        assert!(
+            err.to_string()
+                .contains("assignee_expires requires assignee"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -38,9 +38,9 @@ use super::repl::{
     SharedSessionStore, WalRangeReader,
 };
 use super::scheduler::SyncScheduler;
-use super::store::{ResolvedStore, StoreCaches};
 #[cfg(any(test, feature = "test-harness"))]
-use super::store::{StoreIdResolution, StoreIdSource};
+use super::store::discovery::{StoreIdResolution, StoreIdSource};
+use super::store::{ResolvedStore, StoreCaches};
 use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,

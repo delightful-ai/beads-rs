@@ -35,7 +35,7 @@ crates/beads-rs/src/
 ```bash
 cargo check                      # typecheck (run compulsively)
 cargo fmt --all                  # format
-cargo clippy -- -D warnings      # lint (CI treats warnings as errors)
+cargo clippy --all-features -- -D warnings  # lint (CI uses --all-features)
 cargo test                       # unit tests
 cargo test --features slow-tests # slow tests (CI runs these separately)
 ```

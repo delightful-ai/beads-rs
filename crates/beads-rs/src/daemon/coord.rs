@@ -608,6 +608,15 @@ impl Daemon {
                 AdminOp::RebuildIndex { ctx, .. } => {
                     self.admin_rebuild_index(&ctx.path, git_tx).into()
                 }
+                AdminOp::StoreFsck { payload } => self
+                    .admin_store_fsck(payload.store_id, payload.repair)
+                    .into(),
+                AdminOp::StoreLockInfo { payload } => {
+                    self.admin_store_lock_info(payload.store_id).into()
+                }
+                AdminOp::StoreUnlock { payload } => self
+                    .admin_store_unlock(payload.store_id, payload.force)
+                    .into(),
             },
 
             Request::Validate { ctx, .. } => {

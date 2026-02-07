@@ -321,7 +321,7 @@ fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Result<Option
         return Ok(None);
     };
     let parsed = DurabilityClass::parse(&raw).map_err(|err| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
+        Error::Op(crate::OpError::ValidationFailed {
             field: "durability".into(),
             reason: err.to_string(),
         })
@@ -336,7 +336,7 @@ pub(super) fn resolve_description(
     match (description, body) {
         (Some(d), Some(b)) => {
             if d != b {
-                return Err(Error::Op(crate::daemon::OpError::ValidationFailed {
+                return Err(Error::Op(crate::OpError::ValidationFailed {
                     field: "description".into(),
                     reason: format!(
                         "cannot specify both --description and --body with different values (--description={d:?}, --body={b:?})"
@@ -356,7 +356,7 @@ fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied
         return Ok(None);
     };
     serde_json::from_str(raw).map(Some).map_err(|err| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
+        Error::Op(crate::OpError::ValidationFailed {
             field: "require_min_seen".into(),
             reason: err.to_string(),
         })
@@ -365,7 +365,7 @@ fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied
 
 fn validate_actor_id(raw: &str) -> Result<ActorId> {
     ValidatedActorId::parse(raw).map(Into::into).map_err(|e| {
-        Error::Op(crate::daemon::OpError::ValidationFailed {
+        Error::Op(crate::OpError::ValidationFailed {
             field: "actor".into(),
             reason: e.to_string(),
         })
@@ -500,6 +500,9 @@ fn render_query(q: &QueryResult) -> String {
         }
         QueryResult::AdminMaintenanceMode(out) => commands::admin::render_admin_maintenance(out),
         QueryResult::AdminRebuildIndex(out) => commands::admin::render_admin_rebuild_index(out),
+        QueryResult::AdminFsck(out) => commands::store::render_admin_fsck(out),
+        QueryResult::AdminStoreUnlock(out) => commands::store::render_admin_store_unlock(out),
+        QueryResult::AdminStoreLockInfo(out) => commands::store::render_admin_store_lock_info(out),
         QueryResult::Validation { warnings } => {
             if warnings.is_empty() {
                 "ok".into()
@@ -625,9 +628,9 @@ mod tests {
         normalize_optional_namespace,
     };
     use super::*;
+    use crate::OpError;
     use crate::config::DefaultsConfig;
     use crate::core::{DurabilityClass, HeadStatus, ReplicaId, Seq0};
-    use crate::daemon::OpError;
     use std::num::NonZeroU32;
     use std::path::PathBuf;
     use uuid::Uuid;

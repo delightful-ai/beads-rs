@@ -211,7 +211,7 @@ mod tests {
         })
         .unwrap_err();
         match err {
-            Error::Op(crate::daemon::OpError::ValidationFailed { field, .. }) => {
+            Error::Op(crate::OpError::ValidationFailed { field, .. }) => {
                 assert_eq!(field, "label");
             }
             other => panic!("expected validation error, got {other:?}"),

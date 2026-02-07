@@ -26,6 +26,7 @@ pub mod telemetry;
 pub mod test_harness;
 pub mod upgrade;
 
+pub use daemon::OpError;
 pub use error::{Effect, Error, Transience};
 pub type Result<T> = std::result::Result<T, Error>;
 

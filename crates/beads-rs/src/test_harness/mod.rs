@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
 use crate::core::{
     ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, Limits,
-    NamespaceId, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, Seq0,
-    Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEventFrame, Watermark,
+    NamespaceId, NamespaceSet, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRoster, Seq0,
+    Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEventFrame,
 };
 use crate::daemon::Clock;
 use crate::daemon::admission::AdmissionController;
@@ -944,8 +944,8 @@ fn new_outbound_session(
     limits: &Limits,
 ) -> SessionState<Outbound> {
     let mut config = SessionConfig::new(identity, replica, limits);
-    config.requested_namespaces = vec![NamespaceId::core()];
-    config.offered_namespaces = vec![NamespaceId::core()];
+    config.requested_namespaces = NamespaceSet::from(vec![NamespaceId::core()]);
+    config.offered_namespaces = NamespaceSet::from(vec![NamespaceId::core()]);
     let admission = AdmissionController::new(limits);
     SessionState::Connecting(OutboundConnecting::new(config, limits.clone(), admission))
 }
@@ -956,8 +956,8 @@ fn new_inbound_session(
     limits: &Limits,
 ) -> SessionState<Inbound> {
     let mut config = SessionConfig::new(identity, replica, limits);
-    config.requested_namespaces = vec![NamespaceId::core()];
-    config.offered_namespaces = vec![NamespaceId::core()];
+    config.requested_namespaces = NamespaceSet::from(vec![NamespaceId::core()]);
+    config.offered_namespaces = NamespaceSet::from(vec![NamespaceId::core()]);
     let admission = AdmissionController::new(limits);
     SessionState::Connecting(InboundConnecting::new(config, limits.clone(), admission))
 }
@@ -1111,12 +1111,12 @@ impl RigLink {
                     let inbound_seq = inbound_ns
                         .and_then(|m| m.get(origin))
                         .copied()
-                        .unwrap_or(Seq0::ZERO);
-                    if outbound_seq.get() > inbound_seq.get() {
+                        .unwrap_or_default();
+                    if outbound_seq.seq() > inbound_seq.seq() {
                         want_map
                             .entry(NamespaceId::core())
                             .or_default()
-                            .insert(*origin, inbound_seq);
+                            .insert(*origin, inbound_seq.seq());
                     }
                 }
             }

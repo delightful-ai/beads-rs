@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::daemon::OpError;
+use crate::OpError;
 use crate::repo;
 use crate::{Error, Result};
 
