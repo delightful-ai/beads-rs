@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::api::{AdminFingerprintKind, AdminFingerprintShard, AdminNamespaceFingerprint};
 use crate::core::{ContentHash, NamespaceId, sha256_bytes};
-use crate::daemon::store_runtime::StoreRuntime;
+use crate::daemon::store::runtime::StoreRuntime;
 use crate::git::checkpoint::CheckpointSnapshotError;
 use crate::git::checkpoint::layout::{CheckpointFileKind, SHARD_COUNT, ShardName};
 

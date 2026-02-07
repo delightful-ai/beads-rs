@@ -536,7 +536,7 @@ fn build_workflow(
         super::wire_bead::WorkflowStatus::Closed => {
             let (existing_reason, existing_branch) = match existing {
                 Workflow::Closed(c) => (c.reason.clone(), c.on_branch.clone()),
-                _ => (None, None),
+                Workflow::Open | Workflow::InProgress => (None, None),
             };
             let reason = apply_patch_option(closed_reason, existing_reason);
             let branch = apply_patch_option(closed_on_branch, existing_branch);

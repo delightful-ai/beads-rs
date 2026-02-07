@@ -13,11 +13,12 @@ pub use crate::core::{
     ReplicaId, Seq0, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1, VerifiedEvent,
     VerifiedEventAny, encode_event_body_canonical, hash_event_body, verify_event_frame,
 };
-pub use crate::daemon::repl::gap_buffer::{
-    BufferedEventSnapshot, BufferedPrevSnapshot, GapBufferByNsOriginSnapshot, GapBufferSnapshot,
-    HeadSnapshot, OriginStreamSnapshot, WatermarkSnapshot,
+pub use beads_daemon_core::durability::{DurabilityCoordinator, ReplicatedPoll};
+pub use beads_daemon_core::repl::{
+    BufferedEventSnapshot, BufferedPrevSnapshot, ContiguousBatch, GapBufferByNsOrigin,
+    GapBufferByNsOriginSnapshot, GapBufferSnapshot, HeadSnapshot, IngestDecision,
+    OriginStreamSnapshot, OriginStreamState, PeerAckTable, WatermarkSnapshot,
 };
-pub use crate::daemon::repl::{
-    ContiguousBatch, GapBufferByNsOrigin, IngestDecision, OriginStreamState, PeerAckTable,
+pub use beads_daemon_core::wal::{
+    ClientRequestEventIds, MemoryWalIndex, MemoryWalIndexSnapshot, WalIndex,
 };
-pub use crate::daemon::wal::{MemoryWalIndex, MemoryWalIndexSnapshot};

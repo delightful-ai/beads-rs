@@ -349,7 +349,10 @@ fn canon_value(value: Value) -> Value {
             Value::Object(canon)
         }
         Value::Array(values) => Value::Array(values.into_iter().map(canon_value).collect()),
-        other => other,
+        Value::Null => Value::Null,
+        Value::Bool(value) => Value::Bool(value),
+        Value::Number(value) => Value::Number(value),
+        Value::String(value) => Value::String(value),
     }
 }
 

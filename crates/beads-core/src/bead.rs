@@ -324,7 +324,7 @@ impl From<&BeadView> for BeadProjection {
                     closure.reason.clone(),
                     closure.on_branch.clone(),
                 ),
-                _ => (None, None, None, None),
+                Workflow::Open | Workflow::InProgress => (None, None, None, None),
             };
 
         Self {

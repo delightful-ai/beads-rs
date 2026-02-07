@@ -19,16 +19,18 @@ use beads_rs::api::{AdminStatusOutput, QueryResult};
 use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_rs::core::error::CliErrorCode;
 use beads_rs::core::{
-    Applied, BeadId, BeadType, ErrorPayload, NamespaceId, Priority, ProtocolErrorCode,
-    ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster, StoreEpoch,
-    StoreMeta, Watermarks,
+    Applied, BeadId, BeadType, ErrorPayload, IntoErrorPayload, NamespaceId, Priority,
+    ProtocolErrorCode, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster,
+    StoreEpoch, StoreMeta, Watermarks,
 };
-use beads_rs::daemon::ipc::{
-    AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, MutationCtx,
-    MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
+use beads_rs::surface::ipc::{
+    AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, IpcError,
+    MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response,
+    ResponsePayload,
 };
-use beads_rs::daemon::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
+use beads_rs::surface::ops::OpResult;
 
+use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::store_lock::unlock_store;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
@@ -83,6 +85,8 @@ impl Default for ReplRigOptions {
         }
     }
 }
+
+const ADMIN_READY_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub struct ReplRig {
     _root: Option<TempDir>,
@@ -184,12 +188,13 @@ impl ReplRig {
             .expect("write user replication config");
         }
 
+        // Start proxies before daemons so configured peer addresses are already listening
+        // when replication managers come up and reload.
+        let proxies = spawn_proxies(proxy_specs);
         for node in &nodes {
             node.start_daemon();
             node.reload_replication();
         }
-
-        let proxies = spawn_proxies(proxy_specs);
 
         Self {
             _root: root_guard,
@@ -233,6 +238,10 @@ impl ReplRig {
         self.nodes[idx].unlock_store(self.store_id);
         self.nodes[idx].reset_ipc_connections();
         self.nodes[idx].start_daemon();
+    }
+
+    pub fn wait_for_admin_ready(&self, idx: usize, timeout: Duration) {
+        self.nodes[idx].wait_for_admin_ready(timeout);
     }
 
     pub fn shutdown_node(&self, idx: usize) {
@@ -583,7 +592,7 @@ impl Node {
             Response::Ok { ok } => match ok {
                 ResponsePayload::Op(op) => {
                     let id = match op.result {
-                        beads_rs::daemon::ops::OpResult::Created { id } => id,
+                        OpResult::Created { id } => id,
                         other => panic!("unexpected create result: {other:?}"),
                     };
                     let id_str = id.as_str().to_string();
@@ -642,6 +651,35 @@ impl Node {
         }
     }
 
+    fn wait_for_admin_ready(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                panic!(
+                    "admin status did not become ready under {} within {timeout:?}",
+                    self.repo_dir.display()
+                );
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let read = ReadConsistency {
+                wait_timeout_ms: Some(wait_timeout_ms(std::cmp::min(
+                    remaining,
+                    ADMIN_READY_POLL_TIMEOUT,
+                ))),
+                ..ReadConsistency::default()
+            };
+            match self.admin_status_with_read(read) {
+                Ok(_) => return,
+                Err(_) => {
+                    std::thread::sleep(backoff);
+                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
+                }
+            }
+        }
+    }
+
     pub fn admin_status(&self) -> AdminStatusOutput {
         match self.admin_status_with_read(ReadConsistency::default()) {
             Ok(status) => status,
@@ -680,7 +718,7 @@ impl Node {
         });
         let response = self
             .send_admin_request(&request)
-            .map_err(|e| beads_rs::daemon::ipc::IntoErrorPayload::into_error_payload(e))?;
+            .map_err(IntoErrorPayload::into_error_payload)?;
         match response {
             Response::Ok { ok } => match ok {
                 ResponsePayload::Query(QueryResult::AdminStatus(status)) => Ok(status),
@@ -704,10 +742,7 @@ impl Node {
         guard.get(issue_id).cloned()
     }
 
-    fn send_admin_request(
-        &self,
-        request: &Request,
-    ) -> Result<Response, beads_rs::daemon::ipc::IpcError> {
+    fn send_admin_request(&self, request: &Request) -> Result<Response, IpcError> {
         let mut guard = self.admin_conn.lock().expect("admin conn lock");
         if guard.is_none() {
             let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
@@ -717,7 +752,7 @@ impl Node {
         guard.as_mut().expect("admin conn").send_request(request)
     }
 
-    fn send_request(&self, request: &Request) -> Result<Response, beads_rs::daemon::ipc::IpcError> {
+    fn send_request(&self, request: &Request) -> Result<Response, IpcError> {
         let mut guard = self.ipc_conn.lock().expect("ipc conn lock");
         if guard.is_none() {
             let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
@@ -1194,6 +1229,10 @@ fn run_git(args: &[&str], cwd: &Path) -> Result<(), String> {
         "git {:?} failed (status {}): stdout: {stdout} stderr: {stderr}",
         args, output.status
     ))
+}
+
+fn wait_timeout_ms(timeout: Duration) -> u64 {
+    timeout.as_millis().clamp(1, u128::from(u64::MAX)) as u64
 }
 
 fn poll_until<F>(timeout: Duration, mut condition: F) -> bool

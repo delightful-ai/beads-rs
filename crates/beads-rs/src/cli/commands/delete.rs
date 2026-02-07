@@ -1,10 +1,10 @@
 use clap::Args;
 use serde::Serialize;
 
-use super::super::validation::normalize_bead_ids;
 use super::super::{Ctx, print_json, print_line, send};
 use crate::Result;
-use crate::daemon::ipc::{DeletePayload, Request};
+use beads_cli::validation::normalize_bead_ids;
+use beads_surface::ipc::{DeletePayload, Request};
 
 #[derive(Debug, Clone, Serialize)]
 struct DeleteResult {

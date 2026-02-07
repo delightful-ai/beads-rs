@@ -1,15 +1,25 @@
 #![allow(dead_code)]
 
-use beads_rs::daemon::ipc::{
+use beads_rs::surface::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
     IdPayload, LabelsPayload, LeasePayload, ParentPayload, UpdatePayload,
 };
-use beads_rs::daemon::mutation_engine::{MutationContext, MutationEngine, ParsedMutationRequest};
-use beads_rs::daemon::ops::{BeadPatch, OpError, Patch};
-use beads_rs::{ActorId, BeadId, BeadType, DepKind, Limits, NamespaceId, Priority, TraceId};
+use beads_rs::surface::ops::{BeadPatch, Patch};
+use beads_rs::{
+    ActorId, BeadId, BeadType, ClientRequestId, DepKind, NamespaceId, Priority, TraceId,
+    sha256_bytes,
+};
 use uuid::Uuid;
 
 use super::identity;
+
+#[derive(Clone, Debug)]
+pub struct MutationContext {
+    pub namespace: NamespaceId,
+    pub actor_id: ActorId,
+    pub client_request_id: Option<ClientRequestId>,
+    pub trace_id: TraceId,
+}
 
 pub fn default_context() -> MutationContext {
     MutationContext {
@@ -51,58 +61,14 @@ pub enum MutationPayload {
     ExtendClaim(LeasePayload),
 }
 
-impl MutationPayload {
-    fn parse(&self, actor: &ActorId) -> Result<ParsedMutationRequest, OpError> {
-        match self {
-            MutationPayload::Create(payload) => {
-                ParsedMutationRequest::parse_create(payload.clone(), actor)
-            }
-            MutationPayload::Update(payload) => {
-                ParsedMutationRequest::parse_update(payload.clone())
-            }
-            MutationPayload::AddLabels(payload) => {
-                ParsedMutationRequest::parse_add_labels(payload.clone())
-            }
-            MutationPayload::RemoveLabels(payload) => {
-                ParsedMutationRequest::parse_remove_labels(payload.clone())
-            }
-            MutationPayload::SetParent(payload) => {
-                ParsedMutationRequest::parse_set_parent(payload.clone())
-            }
-            MutationPayload::Close(payload) => ParsedMutationRequest::parse_close(payload.clone()),
-            MutationPayload::Reopen(payload) => {
-                ParsedMutationRequest::parse_reopen(payload.clone())
-            }
-            MutationPayload::Delete(payload) => {
-                ParsedMutationRequest::parse_delete(payload.clone())
-            }
-            MutationPayload::AddDep(payload) => {
-                ParsedMutationRequest::parse_add_dep(payload.clone())
-            }
-            MutationPayload::RemoveDep(payload) => {
-                ParsedMutationRequest::parse_remove_dep(payload.clone())
-            }
-            MutationPayload::AddNote(payload) => {
-                ParsedMutationRequest::parse_add_note(payload.clone())
-            }
-            MutationPayload::Claim(payload) => ParsedMutationRequest::parse_claim(payload.clone()),
-            MutationPayload::Unclaim(payload) => {
-                ParsedMutationRequest::parse_unclaim(payload.clone())
-            }
-            MutationPayload::ExtendClaim(payload) => {
-                ParsedMutationRequest::parse_extend_claim(payload.clone())
-            }
-        }
-    }
-}
-
 pub fn request_sha256(
     ctx: &MutationContext,
     request: &MutationPayload,
-) -> Result<[u8; 32], OpError> {
-    let engine = MutationEngine::new(Limits::default());
-    let parsed = request.parse(&ctx.actor_id)?;
-    engine.request_sha256_for(ctx, &parsed)
+) -> beads_rs::Result<[u8; 32]> {
+    // Tests only need deterministic request identity for idempotency mapping checks.
+    // Use a stable textual digest over typed context + payload fields.
+    let canonical = format!("{ctx:?}|{request:?}");
+    Ok(sha256_bytes(canonical.as_bytes()).0)
 }
 
 pub fn create_request(title: impl Into<String>) -> MutationPayload {

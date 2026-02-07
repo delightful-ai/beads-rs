@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::core::{
     Limits, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreMeta, decode_event_body,
 };
-use crate::daemon::store_runtime::store_index_durability_mode;
+use crate::daemon::store::runtime::store_index_durability_mode;
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use crate::daemon::wal::record::{RecordVerifyError, UnverifiedRecord};
 use crate::daemon::wal::{
@@ -64,7 +64,7 @@ pub enum FsckError {
         source: std::io::Error,
     },
     #[error("store config error: {0}")]
-    StoreConfig(Box<crate::daemon::store_runtime::StoreRuntimeError>),
+    StoreConfig(Box<crate::daemon::store::runtime::StoreRuntimeError>),
     #[error(transparent)]
     WalReplay(#[from] Box<WalReplayError>),
     #[error(transparent)]

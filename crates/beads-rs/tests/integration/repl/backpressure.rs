@@ -2,7 +2,7 @@
 
 use uuid::Uuid;
 
-use beads_rs::daemon::admission::AdmissionController;
+use beads_daemon::admission::AdmissionController;
 use beads_rs::daemon::repl::session::{
     Inbound, InboundConnecting, SessionState, handle_inbound_message,
 };

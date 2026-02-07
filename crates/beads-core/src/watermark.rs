@@ -212,13 +212,13 @@ fn validate_head(seq: Seq0, head: HeadStatus) -> Result<(), WatermarkError> {
     if seq.get() == 0 {
         return match head {
             HeadStatus::Genesis => Ok(()),
-            _ => Err(WatermarkError::UnexpectedHead { seq }),
+            HeadStatus::Known(_) => Err(WatermarkError::UnexpectedHead { seq }),
         };
     }
 
     match head {
         HeadStatus::Known(_) => Ok(()),
-        _ => Err(WatermarkError::MissingHead { seq }),
+        HeadStatus::Genesis => Err(WatermarkError::MissingHead { seq }),
     }
 }
 

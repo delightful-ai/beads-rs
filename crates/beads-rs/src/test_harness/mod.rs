@@ -18,7 +18,6 @@ use crate::core::{
     Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEventFrame,
 };
 use crate::daemon::Clock;
-use crate::daemon::admission::AdmissionController;
 use crate::daemon::core::{Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal};
 use crate::daemon::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use crate::daemon::executor::DurabilityWait;
@@ -26,11 +25,6 @@ use crate::daemon::ipc::{
     CreatePayload, MutationCtx, MutationMeta, Request, Response, ResponseExt, ResponsePayload,
 };
 use crate::daemon::ops::OpError;
-use crate::daemon::remote::RemoteUrl;
-use crate::daemon::repl::frame::{FrameLimitState, FrameReader, encode_frame};
-use crate::daemon::repl::proto::{
-    PROTOCOL_VERSION_V1, ReplEnvelope, WireReplEnvelope, decode_envelope, encode_envelope,
-};
 use crate::daemon::repl::session::{
     Inbound, InboundConnecting, Outbound, OutboundConnecting, SessionState, handle_inbound_message,
     handle_outbound_message,
@@ -44,6 +38,12 @@ use crate::daemon::wal::{
     rebuild_index,
 };
 use crate::paths;
+use beads_daemon::admission::AdmissionController;
+use beads_daemon::remote::RemoteUrl;
+use beads_daemon_core::repl::frame::{FrameLimitState, FrameReader, encode_frame};
+use beads_daemon_core::repl::proto::{
+    PROTOCOL_VERSION_V1, ReplEnvelope, WireReplEnvelope, decode_envelope, encode_envelope,
+};
 use std::io::Cursor;
 
 #[derive(Clone)]
@@ -77,7 +77,7 @@ impl WallClockSource for TestClock {
     }
 }
 
-impl crate::daemon::clock::TimeSource for TestClock {
+impl beads_daemon::clock::TimeSource for TestClock {
     fn now_ms(&self) -> u64 {
         self.now_ms()
     }
@@ -263,7 +263,7 @@ impl TestNode {
             Box::new(clock.clone()),
             options.limits.hlc_max_forward_drift_ms,
         );
-        let remote = RemoteUrl(format!("test://{store_id}"));
+        let remote = RemoteUrl::new(&format!("test://{store_id}"));
 
         let (git_tx, git_rx) = unbounded();
         {
@@ -358,7 +358,7 @@ impl TestNode {
         );
 
         let (git_tx, git_rx) = unbounded();
-        let remote = RemoteUrl(format!("test://{store_id}"));
+        let remote = RemoteUrl::new(&format!("test://{store_id}"));
 
         let mut inner = self.inner.borrow_mut();
         let _old = std::mem::replace(&mut inner.daemon, daemon);
@@ -1275,9 +1275,7 @@ mod tests {
 }
 
 fn ensure_tmp_root() -> PathBuf {
-    let root = PathBuf::from("./tmp");
-    std::fs::create_dir_all(&root).expect("create ./tmp");
-    root
+    beads_daemon::test_utils::ensure_relative_tmp_root()
 }
 
 #[derive(Clone)]

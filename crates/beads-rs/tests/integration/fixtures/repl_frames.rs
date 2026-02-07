@@ -6,17 +6,17 @@ use std::io::Cursor;
 use bytes::Bytes;
 use uuid::Uuid;
 
+use beads_daemon_core::repl::frame::{FrameLimitState, FrameReader, encode_frame};
+use beads_daemon_core::repl::proto::{
+    Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplEnvelope, ReplMessage, Want,
+    WatermarkMap, WatermarkState, Welcome, WireReplEnvelope, WireReplMessage, decode_envelope,
+    encode_envelope,
+};
 use beads_rs::Limits;
 use beads_rs::core::{
     ActorId, Durable, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax,
     NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
     VerifiedEventFrame, encode_event_body_canonical, hash_event_body,
-};
-use beads_rs::daemon::repl::frame::{FrameLimitState, FrameReader, encode_frame};
-use beads_rs::daemon::repl::proto::{
-    Ack, Capabilities, Events, Hello, PROTOCOL_VERSION_V1, ReplEnvelope, ReplMessage, Want,
-    WatermarkMap, WatermarkState, Welcome, WireReplEnvelope, WireReplMessage, decode_envelope,
-    encode_envelope,
 };
 
 use super::identity;

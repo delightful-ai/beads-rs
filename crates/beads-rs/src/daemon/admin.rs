@@ -10,11 +10,10 @@ use crossbeam::channel::Sender;
 use crate::core::{
     Limits, NamespaceId, NamespacePolicies, NamespacePolicy, ReplicaId, WallClock, Watermarks,
 };
-use crate::daemon::clock::{ClockAnomaly, ClockAnomalyKind};
 use crate::daemon::fingerprint::{FingerprintError, FingerprintMode, fingerprint_namespaces};
 use crate::daemon::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::daemon::scrubber::{ScrubOptions, scrub_store};
-use crate::daemon::store_runtime::{StoreRuntimeError, load_replica_roster};
+use crate::daemon::store::runtime::{StoreRuntimeError, load_replica_roster};
 use crate::daemon::wal::{ReplayStats, rebuild_index};
 use crate::git::checkpoint::layout::SHARD_COUNT;
 use crate::paths;
@@ -34,6 +33,7 @@ use beads_api::{
     FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRepairKind, FsckRisk, FsckSeverity, FsckStats,
     FsckStatus, FsckSummary, StoreLockMetaOutput, UnlockAction,
 };
+use beads_daemon::clock::{ClockAnomaly, ClockAnomalyKind};
 
 use super::core::Daemon;
 use super::ipc::{ReadConsistency, ResponseExt};
@@ -612,35 +612,17 @@ impl Daemon {
                         .to_string(),
             });
         }
-        let config = crate::config::load_or_init();
-        let options = crate::daemon::wal::fsck::FsckOptions::new(false, config.limits);
-        let report = match crate::daemon::wal::fsck::fsck_store(store_id, options) {
-            Ok(report) => report,
-            Err(err) => {
-                return Response::err_from(OpError::InvalidRequest {
-                    field: Some("store-id".into()),
-                    reason: err.to_string(),
-                });
-            }
+        let output = match offline_store_fsck_output(store_id, false) {
+            Ok(output) => output,
+            Err(err) => return Response::err_from(err),
         };
-        let output = fsck_report_to_output(report);
         Response::ok(ResponsePayload::query(QueryResult::AdminFsck(output)))
     }
 
     pub fn admin_store_lock_info(&self, store_id: StoreId) -> Response {
-        let lock_path = crate::paths::store_lock_path(store_id);
-        let meta = match crate::daemon::store::lock::read_lock_meta(store_id) {
-            Ok(meta) => meta,
-            Err(err) => {
-                return Response::err_from(OpError::StoreRuntime(Box::new(
-                    StoreRuntimeError::Lock(err),
-                )));
-            }
-        };
-        let output = AdminStoreLockInfoOutput {
-            store_id,
-            lock_path,
-            meta: meta.map(lock_meta_to_api),
+        let output = match offline_store_lock_info_output(store_id) {
+            Ok(output) => output,
+            Err(err) => return Response::err_from(err),
         };
         Response::ok(ResponsePayload::query(QueryResult::AdminStoreLockInfo(
             output,
@@ -704,6 +686,233 @@ impl Daemon {
             action,
         )
     }
+}
+
+pub(crate) fn offline_store_fsck_output(
+    store_id: StoreId,
+    repair: bool,
+) -> Result<AdminFsckOutput, OpError> {
+    let config = crate::config::load_or_init();
+    let options = crate::daemon::wal::fsck::FsckOptions::new(repair, config.limits);
+    let report = crate::daemon::wal::fsck::fsck_store(store_id, options).map_err(|err| {
+        OpError::InvalidRequest {
+            field: Some("store-id".into()),
+            reason: err.to_string(),
+        }
+    })?;
+    Ok(fsck_report_to_output(report))
+}
+
+pub(crate) fn offline_store_lock_info_output(
+    store_id: StoreId,
+) -> Result<AdminStoreLockInfoOutput, OpError> {
+    let lock_path = crate::paths::store_lock_path(store_id);
+    let meta = crate::daemon::store::lock::read_lock_meta(store_id).map_err(store_lock_op_error)?;
+    Ok(AdminStoreLockInfoOutput {
+        store_id,
+        lock_path,
+        meta: meta.map(lock_meta_to_api),
+    })
+}
+
+pub(crate) fn offline_store_unlock_output(
+    store_id: StoreId,
+    force: bool,
+    daemon_pid: Option<u32>,
+) -> Result<AdminStoreUnlockOutput, OpError> {
+    offline_store_unlock_with_pid_check(store_id, force, daemon_pid, pid_state_for_unlock)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfflinePidState {
+    Missing,
+    Alive,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfflineUnlockReason {
+    PidMissing,
+    PidReuse,
+    LiveDaemon,
+    PidUnknown,
+}
+
+impl OfflineUnlockReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            OfflineUnlockReason::PidMissing => "pid_missing",
+            OfflineUnlockReason::PidReuse => "pid_reuse",
+            OfflineUnlockReason::LiveDaemon => "live_daemon",
+            OfflineUnlockReason::PidUnknown => "pid_unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfflineUnlockAction {
+    Removed {
+        forced: bool,
+        reason: OfflineUnlockReason,
+        removed: bool,
+    },
+    RequireForce {
+        reason: OfflineUnlockReason,
+    },
+}
+
+impl OfflineUnlockAction {
+    fn describe(self) -> String {
+        match self {
+            OfflineUnlockAction::Removed {
+                forced,
+                reason,
+                removed,
+            } => {
+                let mut out = if removed {
+                    "removed".to_string()
+                } else {
+                    "already removed".to_string()
+                };
+                if forced {
+                    out.push_str(" (forced)");
+                }
+                out.push_str(&format!(" [reason={}]", reason.as_str()));
+                out
+            }
+            OfflineUnlockAction::RequireForce { reason } => {
+                format!("requires --force [reason={}]", reason.as_str())
+            }
+        }
+    }
+}
+
+fn offline_store_unlock_with_pid_check<F>(
+    store_id: StoreId,
+    force: bool,
+    daemon_pid: Option<u32>,
+    check_pid: F,
+) -> Result<AdminStoreUnlockOutput, OpError>
+where
+    F: FnOnce(u32) -> OfflinePidState,
+{
+    let lock_path = crate::paths::store_lock_path(store_id);
+    let meta = crate::daemon::store::lock::read_lock_meta(store_id).map_err(store_lock_op_error)?;
+    let Some(meta) = meta else {
+        return Ok(AdminStoreUnlockOutput {
+            store_id,
+            lock_path,
+            meta: None,
+            daemon_pid,
+            action: UnlockAction::NoLock,
+        });
+    };
+
+    let pid_state = check_pid(meta.pid);
+    let mut action = decide_offline_unlock(pid_state, daemon_pid, meta.pid, force);
+    let forced = matches!(action, OfflineUnlockAction::Removed { forced: true, .. });
+    if let OfflineUnlockAction::Removed { removed, .. } = &mut action {
+        *removed =
+            crate::daemon::store::lock::remove_lock_file(store_id).map_err(store_lock_op_error)?;
+        tracing::info!(
+            store_id = %store_id,
+            lock_path = %lock_path.display(),
+            pid = meta.pid,
+            forced,
+            reason = %action.describe(),
+            "store lock removed"
+        );
+    }
+
+    match action {
+        OfflineUnlockAction::RequireForce { reason } => Err(OpError::InvalidRequest {
+            field: Some("force".into()),
+            reason: format!("lock appears active ({})", reason.as_str()),
+        }),
+        OfflineUnlockAction::Removed { forced: true, .. } => Ok(AdminStoreUnlockOutput {
+            store_id,
+            lock_path,
+            meta: Some(lock_meta_to_api(meta)),
+            daemon_pid,
+            action: UnlockAction::RemovedForced,
+        }),
+        OfflineUnlockAction::Removed { forced: false, .. } => Ok(AdminStoreUnlockOutput {
+            store_id,
+            lock_path,
+            meta: Some(lock_meta_to_api(meta)),
+            daemon_pid,
+            action: UnlockAction::RemovedStale,
+        }),
+    }
+}
+
+fn decide_offline_unlock(
+    pid_state: OfflinePidState,
+    daemon_pid: Option<u32>,
+    lock_pid: u32,
+    force: bool,
+) -> OfflineUnlockAction {
+    match pid_state {
+        OfflinePidState::Missing => OfflineUnlockAction::Removed {
+            forced: false,
+            reason: OfflineUnlockReason::PidMissing,
+            removed: false,
+        },
+        OfflinePidState::Alive => {
+            if daemon_pid == Some(lock_pid) {
+                if force {
+                    OfflineUnlockAction::Removed {
+                        forced: true,
+                        reason: OfflineUnlockReason::LiveDaemon,
+                        removed: false,
+                    }
+                } else {
+                    OfflineUnlockAction::RequireForce {
+                        reason: OfflineUnlockReason::LiveDaemon,
+                    }
+                }
+            } else {
+                OfflineUnlockAction::Removed {
+                    forced: false,
+                    reason: OfflineUnlockReason::PidReuse,
+                    removed: false,
+                }
+            }
+        }
+        OfflinePidState::Unknown => {
+            if force {
+                OfflineUnlockAction::Removed {
+                    forced: true,
+                    reason: OfflineUnlockReason::PidUnknown,
+                    removed: false,
+                }
+            } else {
+                OfflineUnlockAction::RequireForce {
+                    reason: OfflineUnlockReason::PidUnknown,
+                }
+            }
+        }
+    }
+}
+
+fn pid_state_for_unlock(pid: u32) -> OfflinePidState {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let nix_pid = Pid::from_raw(pid as i32);
+    match kill(nix_pid, None) {
+        Ok(()) | Err(Errno::EPERM) => OfflinePidState::Alive,
+        Err(Errno::ESRCH) => OfflinePidState::Missing,
+        Err(err) => {
+            tracing::debug!(%err, pid, "pid check returned unexpected error");
+            OfflinePidState::Unknown
+        }
+    }
+}
+
+fn store_lock_op_error(err: crate::daemon::store::lock::StoreLockError) -> OpError {
+    OpError::StoreRuntime(Box::new(StoreRuntimeError::Lock(err)))
 }
 
 fn unlock_ok(
@@ -902,7 +1111,9 @@ fn fsck_evidence_code_to_api(c: crate::daemon::wal::fsck::FsckEvidenceCode) -> F
     }
 }
 
-fn collect_namespaces(store: &crate::daemon::store_runtime::StoreRuntime) -> BTreeSet<NamespaceId> {
+fn collect_namespaces(
+    store: &crate::daemon::store::runtime::StoreRuntime,
+) -> BTreeSet<NamespaceId> {
     let mut namespaces = BTreeSet::new();
     namespaces.extend(store.policies.keys().cloned());
     namespaces.extend(store.watermarks_applied.namespaces().cloned());
@@ -922,7 +1133,7 @@ struct WalSegmentStats {
 }
 
 fn build_wal_status(
-    store: &crate::daemon::store_runtime::StoreRuntime,
+    store: &crate::daemon::store::runtime::StoreRuntime,
     namespaces: &BTreeSet<NamespaceId>,
     limits: &Limits,
     now_ms: u64,
@@ -1096,7 +1307,7 @@ fn resolve_segment_path(store_dir: &Path, segment_path: &Path) -> PathBuf {
 }
 
 fn build_replication_status(
-    store: &crate::daemon::store_runtime::StoreRuntime,
+    store: &crate::daemon::store::runtime::StoreRuntime,
     namespaces: &BTreeSet<NamespaceId>,
 ) -> Vec<AdminReplicationPeer> {
     let local_replica = store.meta.replica_id;
@@ -1143,7 +1354,7 @@ fn build_replication_status(
 }
 
 fn build_replica_liveness(
-    store: &crate::daemon::store_runtime::StoreRuntime,
+    store: &crate::daemon::store::runtime::StoreRuntime,
 ) -> Vec<AdminReplicaLiveness> {
     let mut rows = match store.wal_index.reader().load_replica_liveness() {
         Ok(rows) => rows,
@@ -1463,9 +1674,17 @@ fn clock_anomaly_output(anomaly: Option<ClockAnomaly>) -> Option<AdminClockAnoma
 
 #[cfg(test)]
 mod tests {
-    use super::{WalSegmentStats, build_wal_growth, wal_guardrail_warnings};
-    use crate::core::{Limits, NamespaceId};
-    use beads_api::AdminWalWarningKind;
+    use super::{
+        OfflinePidState, WalSegmentStats, build_wal_growth, offline_store_lock_info_output,
+        offline_store_unlock_with_pid_check, wal_guardrail_warnings,
+    };
+    use crate::core::{Limits, NamespaceId, ReplicaId, StoreId};
+    use crate::daemon::OpError;
+    use crate::paths;
+    use beads_api::{AdminWalWarningKind, UnlockAction};
+    use std::path::Path;
+    use tempfile::TempDir;
+    use uuid::Uuid;
 
     #[test]
     fn wal_guardrails_warn_on_limits() {
@@ -1524,5 +1743,84 @@ mod tests {
             growth_warning.window_ms,
             Some(limits.wal_guardrail_growth_window_ms)
         );
+    }
+
+    #[test]
+    fn offline_lock_info_returns_none_when_missing() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
+            let output = offline_store_lock_info_output(store_id).unwrap();
+            assert_eq!(output.store_id, store_id);
+            assert!(output.meta.is_none());
+        });
+    }
+
+    #[test]
+    fn offline_unlock_removes_stale_lock_file() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([2u8; 16]));
+            let lock_path = paths::store_lock_path(store_id);
+            let meta = crate::daemon::store::lock::StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([3u8; 16])),
+                pid: 4242,
+                started_at_ms: 1,
+                daemon_version: "test".to_string(),
+                last_heartbeat_ms: Some(2),
+            };
+            write_lock_meta(&lock_path, &meta);
+
+            let output = offline_store_unlock_with_pid_check(store_id, false, None, |_| {
+                OfflinePidState::Missing
+            })
+            .unwrap();
+            assert_eq!(output.action, UnlockAction::RemovedStale);
+            assert!(!lock_path.exists());
+        });
+    }
+
+    #[test]
+    fn offline_unlock_requires_force_for_live_daemon() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([4u8; 16]));
+            let lock_path = paths::store_lock_path(store_id);
+            let meta = crate::daemon::store::lock::StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([5u8; 16])),
+                pid: 5151,
+                started_at_ms: 1,
+                daemon_version: "test".to_string(),
+                last_heartbeat_ms: Some(2),
+            };
+            write_lock_meta(&lock_path, &meta);
+
+            let err = offline_store_unlock_with_pid_check(store_id, false, Some(5151), |_| {
+                OfflinePidState::Alive
+            })
+            .unwrap_err();
+            match err {
+                OpError::InvalidRequest { field, reason } => {
+                    assert_eq!(field.as_deref(), Some("force"));
+                    assert!(reason.contains("live_daemon"));
+                }
+                other => panic!("unexpected error: {other}"),
+            }
+            assert!(lock_path.exists());
+        });
+    }
+
+    fn with_test_data_dir<F>(f: F)
+    where
+        F: FnOnce(&TempDir),
+    {
+        let temp = TempDir::new().unwrap();
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+        f(&temp);
+    }
+
+    fn write_lock_meta(path: &Path, meta: &crate::daemon::store::lock::StoreLockMeta) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let data = serde_json::to_vec(meta).unwrap();
+        std::fs::write(path, data).unwrap();
     }
 }

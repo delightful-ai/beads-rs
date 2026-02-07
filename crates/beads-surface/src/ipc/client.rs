@@ -4,6 +4,7 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -367,11 +368,27 @@ fn should_autostart(err: &std::io::Error) -> bool {
     )
 }
 
-fn maybe_remove_stale_lock(lock_path: &PathBuf) {
+const AUTOSTART_CONNECT_TIMEOUT_SECS: u64 = 30;
+const AUTOSTART_CONNECT_TIMEOUT_TEST_FAST_SECS: u64 = 5;
+const AUTOSTART_LOCK_STALE_GRACE_SECS: u64 = 5;
+
+fn autostart_connect_timeout() -> Duration {
+    if std::env::var_os("BD_TEST_FAST").is_some() {
+        Duration::from_secs(AUTOSTART_CONNECT_TIMEOUT_TEST_FAST_SECS)
+    } else {
+        Duration::from_secs(AUTOSTART_CONNECT_TIMEOUT_SECS)
+    }
+}
+
+fn autostart_lock_stale_age(connect_timeout: Duration) -> Duration {
+    connect_timeout.saturating_add(Duration::from_secs(AUTOSTART_LOCK_STALE_GRACE_SECS))
+}
+
+fn maybe_remove_stale_lock(lock_path: &PathBuf, max_age: Duration) {
     if let Ok(meta) = fs::metadata(lock_path)
         && let Ok(modified) = meta.modified()
         && let Ok(age) = modified.elapsed()
-        && age > Duration::from_secs(10)
+        && age > max_age
     {
         let _ = fs::remove_file(lock_path);
     }
@@ -399,6 +416,38 @@ fn daemon_command_override(program: Option<&Path>, args: &[OsString]) -> Command
     daemon_command()
 }
 
+fn prepare_daemon_spawn_command(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // The daemon should not inherit arbitrary file descriptors from the autostarting
+    // client process (for example, test harness capture pipes). Leaked descriptors can
+    // keep IPC/output pipes open and cause command hangs in concurrent lifecycle tests.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            close_non_stdio_fds();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(unix)]
+fn close_non_stdio_fds() {
+    let max_fd = unsafe { nix::libc::sysconf(nix::libc::_SC_OPEN_MAX) };
+    let upper = if max_fd > 0 && max_fd <= i32::MAX as i64 {
+        max_fd as i32
+    } else {
+        1024
+    };
+    for fd in 3..upper {
+        unsafe {
+            nix::libc::close(fd);
+        }
+    }
+}
+
 fn connect_with_autostart(
     socket: &PathBuf,
     autostart_program: Option<&Path>,
@@ -408,9 +457,11 @@ fn connect_with_autostart(
         Ok(stream) => Ok(stream),
         Err(e) if should_autostart(&e) => {
             // Try to autostart daemon with a simple lock to avoid herds.
+            let connect_timeout = autostart_connect_timeout();
+            let stale_lock_age = autostart_lock_stale_age(connect_timeout);
             let dir = ensure_socket_dir()?;
             let lock_path = dir.join("daemon.lock");
-            maybe_remove_stale_lock(&lock_path);
+            maybe_remove_stale_lock(&lock_path, stale_lock_age);
 
             let mut we_spawned = OpenOptions::new()
                 .write(true)
@@ -420,15 +471,13 @@ fn connect_with_autostart(
 
             if we_spawned {
                 let mut cmd = daemon_command_override(autostart_program, autostart_args);
-                cmd.stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
+                prepare_daemon_spawn_command(&mut cmd);
                 cmd.spawn().map_err(|e| {
                     IpcError::DaemonUnavailable(format!("failed to spawn daemon: {}", e))
                 })?;
             }
 
-            let deadline = SystemTime::now() + Duration::from_secs(30);
+            let deadline = SystemTime::now() + connect_timeout;
             let mut backoff = Duration::from_millis(50);
 
             loop {
@@ -442,7 +491,7 @@ fn connect_with_autostart(
                     Err(e) if should_autostart(&e) => {
                         if !we_spawned {
                             // If the lock disappeared (spawner died), try to take over.
-                            maybe_remove_stale_lock(&lock_path);
+                            maybe_remove_stale_lock(&lock_path, stale_lock_age);
                             if OpenOptions::new()
                                 .write(true)
                                 .create_new(true)
@@ -452,9 +501,7 @@ fn connect_with_autostart(
                                 we_spawned = true;
                                 let mut cmd =
                                     daemon_command_override(autostart_program, autostart_args);
-                                cmd.stdin(Stdio::null())
-                                    .stdout(Stdio::null())
-                                    .stderr(Stdio::null());
+                                prepare_daemon_spawn_command(&mut cmd);
                                 if let Err(e) = cmd.spawn() {
                                     let _ = fs::remove_file(&lock_path);
                                     return Err(IpcError::DaemonUnavailable(format!(
@@ -468,9 +515,10 @@ fn connect_with_autostart(
                             if we_spawned {
                                 let _ = fs::remove_file(&lock_path);
                             }
-                            return Err(IpcError::DaemonUnavailable(
-                                "timed out waiting for daemon socket".into(),
-                            ));
+                            return Err(IpcError::DaemonUnavailable(format!(
+                                "timed out waiting for daemon socket after {}s",
+                                connect_timeout.as_secs()
+                            )));
                         }
                         std::thread::sleep(backoff);
                         backoff = std::cmp::min(backoff * 2, Duration::from_millis(200));
@@ -778,7 +826,14 @@ fn subscribe_stream_at_with_options(
                     std::thread::sleep(backoff);
                     continue;
                 }
-                _ => return Err(err),
+                IpcError::Parse(_)
+                | IpcError::Io(_)
+                | IpcError::InvalidId(_)
+                | IpcError::InvalidRequest { .. }
+                | IpcError::Disconnected
+                | IpcError::DaemonUnavailable(_)
+                | IpcError::DaemonVersionMismatch { .. }
+                | IpcError::FrameTooLarge { .. } => return Err(err),
             }
         }
 

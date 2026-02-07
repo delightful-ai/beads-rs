@@ -4,13 +4,16 @@ use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
 use super::git::{init_bare_repo, init_repo_with_origin};
+use beads_daemon::test_utils::poll_until;
 use beads_rs::api::QueryResult;
-use beads_rs::daemon::ipc::{EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload};
+use beads_rs::surface::ipc::{
+    EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload,
+};
 
 pub struct RealtimeFixture {
     runtime_dir: TempDir,
@@ -130,20 +133,4 @@ fn ping_daemon(client: &IpcClient) -> bool {
             ok: ResponsePayload::Query(QueryResult::DaemonInfo(_)),
         })
     )
-}
-
-fn poll_until<F>(timeout: Duration, mut condition: F) -> bool
-where
-    F: FnMut() -> bool,
-{
-    let deadline = Instant::now() + timeout;
-    let mut backoff = Duration::from_millis(10);
-    while Instant::now() < deadline {
-        if condition() {
-            return true;
-        }
-        std::thread::sleep(backoff);
-        backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
-    }
-    condition()
 }

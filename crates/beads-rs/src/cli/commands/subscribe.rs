@@ -3,7 +3,7 @@ use clap::Args;
 use super::super::{Ctx, print_ok};
 use crate::Result;
 use crate::core::ErrorPayload;
-use crate::daemon::ipc::{EmptyPayload, Request, Response, subscribe_stream};
+use beads_surface::ipc::{EmptyPayload, Request, Response, subscribe_stream};
 
 #[derive(Args, Debug, Default)]
 pub struct SubscribeArgs {}

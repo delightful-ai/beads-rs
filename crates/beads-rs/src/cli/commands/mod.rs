@@ -2,11 +2,9 @@ use clap::Subcommand;
 use std::sync::LazyLock;
 
 pub(super) mod admin;
-pub(super) mod blocked;
 pub(super) mod claim;
 pub(super) mod close;
 pub(super) mod comments;
-pub(super) mod count;
 pub(super) mod create;
 pub(super) mod daemon;
 pub(super) mod delete;
@@ -15,16 +13,9 @@ pub(super) mod dep;
 pub(super) mod epic;
 pub(super) mod init;
 pub(super) mod label;
-pub(super) mod list;
 pub(super) mod migrate;
-pub(super) mod onboard;
-pub(super) mod prime;
-pub(super) mod ready;
 pub(super) mod reopen;
-pub(super) mod search;
-pub(super) mod setup;
 pub(super) mod show;
-pub(super) mod stale;
 pub(super) mod status;
 pub(super) mod store;
 pub(super) mod subscribe;
@@ -110,22 +101,22 @@ pub enum Command {
 
     /// List beads.
     #[command(alias = "ls")]
-    List(list::ListArgs),
+    List(beads_cli::commands::list::ListArgs),
 
     /// Search beads by text (alias for list QUERY).
-    Search(search::SearchArgs),
+    Search(beads_cli::commands::search::SearchArgs),
 
     /// List beads that are ready to work on.
-    Ready(ready::ReadyArgs),
+    Ready(beads_cli::commands::ready::ReadyArgs),
 
     /// Show blocked issues.
     Blocked,
 
     /// Show stale issues (not updated recently).
-    Stale(stale::StaleArgs),
+    Stale(beads_cli::commands::stale::StaleArgs),
 
     /// Count issues matching filters.
-    Count(count::CountArgs),
+    Count(beads_cli::commands::count::CountArgs),
 
     /// Show deleted (tombstoned) issues.
     Deleted(deleted::DeletedArgs),
@@ -203,12 +194,12 @@ pub enum Command {
     Prime,
 
     /// Display instructions for configuring AGENTS.md.
-    Onboard(onboard::OnboardArgs),
+    Onboard(beads_cli::commands::onboard::OnboardArgs),
 
     /// Setup integration with AI editors.
     Setup {
         #[command(subcommand)]
-        cmd: setup::SetupCmd,
+        cmd: beads_cli::commands::setup::SetupCmd,
     },
 
     /// Internal migration tooling (hidden from global help).
@@ -222,7 +213,7 @@ pub enum Command {
     #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
-        cmd: daemon::DaemonCmd,
+        cmd: beads_cli::commands::daemon::DaemonCmd,
     },
 }
 
@@ -326,11 +317,11 @@ fn maintenance_cmd_name(cmd: &admin::AdminMaintenanceCmd) -> &'static str {
     }
 }
 
-fn setup_cmd_name(cmd: &setup::SetupCmd) -> &'static str {
+fn setup_cmd_name(cmd: &beads_cli::commands::setup::SetupCmd) -> &'static str {
     match cmd {
-        setup::SetupCmd::Claude(_) => "claude",
-        setup::SetupCmd::Cursor(_) => "cursor",
-        setup::SetupCmd::Aider(_) => "aider",
+        beads_cli::commands::setup::SetupCmd::Claude(_) => "claude",
+        beads_cli::commands::setup::SetupCmd::Cursor(_) => "cursor",
+        beads_cli::commands::setup::SetupCmd::Aider(_) => "aider",
     }
 }
 
@@ -342,8 +333,8 @@ fn migrate_cmd_name(cmd: &migrate::MigrateCmd) -> &'static str {
     }
 }
 
-fn daemon_cmd_name(cmd: &daemon::DaemonCmd) -> &'static str {
+fn daemon_cmd_name(cmd: &beads_cli::commands::daemon::DaemonCmd) -> &'static str {
     match cmd {
-        daemon::DaemonCmd::Run => "run",
+        beads_cli::commands::daemon::DaemonCmd::Run => "run",
     }
 }

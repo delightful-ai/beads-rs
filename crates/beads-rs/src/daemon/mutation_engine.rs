@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use super::ops::{MapLiveError, OpError, ValidatedSurfaceBeadPatch};
-use super::remote::RemoteUrl;
 use crate::core::limits::LimitViolation;
 use crate::core::{
     ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
@@ -23,6 +22,7 @@ use crate::daemon::ipc::{
     IdPayload, LabelsPayload, LeasePayload, ParentPayload, UpdatePayload,
 };
 use crate::daemon::wal::record::RECORD_HEADER_BASE_LEN;
+use beads_daemon::remote::RemoteUrl;
 use beads_surface::ops::{OpenInProgress, Patch};
 
 #[derive(Clone, Debug)]
@@ -2074,7 +2074,7 @@ mod tests {
         let stamped = make_stamped_context(ctx, stamp);
         let id_ctx = IdContext {
             root_slug: None,
-            remote_url: RemoteUrl("github.com/example/beads".to_string()),
+            remote_url: RemoteUrl::new("github.com/example/beads"),
         };
         let req = ParsedMutationRequest::parse_create(
             CreatePayload {

@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use beads_rs::api::AdminStatusOutput;
 use beads_rs::api::QueryResult;
-use beads_rs::daemon::ipc::{
+use beads_rs::surface::ipc::{
     AdminOp, EmptyPayload, IpcClient, IpcConnection, IpcError, ReadConsistency, ReadCtx, Request,
     Response, ResponsePayload,
 };

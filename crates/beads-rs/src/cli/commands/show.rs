@@ -1,14 +1,14 @@
 use clap::Args;
 
-use super::super::validation::normalize_bead_id;
 use super::super::{Ctx, print_line, print_ok, send};
 use super::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
 use crate::Result;
 use crate::api::IssueSummary;
 use crate::api::QueryResult;
 use crate::core::{BeadId, BeadType, WorkflowStatus};
-use crate::daemon::Filters;
-use crate::daemon::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
+use beads_cli::validation::normalize_bead_id;
+use beads_surface::Filters;
+use beads_surface::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Args, Debug)]

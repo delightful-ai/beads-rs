@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use beads_rs::daemon::ipc::{EmptyPayload, IpcError, ReadConsistency, ReadCtx, Request, Response};
+use beads_rs::surface::ipc::{EmptyPayload, IpcError, ReadConsistency, ReadCtx, Request, Response};
 use beads_rs::{
     Applied, CliErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, Watermarks,
 };
@@ -173,7 +173,7 @@ fn run_load(
     repo: PathBuf,
     total: usize,
     namespace: &NamespaceId,
-    client: beads_rs::daemon::ipc::IpcClient,
+    client: beads_rs::surface::ipc::IpcClient,
 ) -> LoadReport {
     let mut generator = LoadGenerator::with_client(repo, client);
     let config = generator.config_mut();
@@ -187,7 +187,7 @@ fn run_load(
 fn current_origin_seq(
     repo: &PathBuf,
     namespace: &NamespaceId,
-    client: beads_rs::daemon::ipc::IpcClient,
+    client: beads_rs::surface::ipc::IpcClient,
 ) -> (beads_rs::ReplicaId, u64) {
     let mut collector = StatusCollector::with_client(repo.clone(), client);
     let status = collector.sample().expect("admin status");
@@ -224,7 +224,7 @@ fn collect_origin_seqs(
     total: usize,
     repo: &PathBuf,
     read: &ReadConsistency,
-    ipc_client: &beads_rs::daemon::ipc::IpcClient,
+    ipc_client: &beads_rs::surface::ipc::IpcClient,
 ) -> Vec<u64> {
     const MAX_RECONNECTS: usize = 3;
     const MAX_WAIT: Duration = Duration::from_secs(30);

@@ -18,13 +18,13 @@ use crate::core::{
     Seq0, Seq1, Sha256, StoreId, decode_event_body,
 };
 use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
-use crate::daemon::repl::proto::WatermarkState;
 use crate::daemon::repl::{ContiguousBatch, IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
     EventWalError, FrameReader, IndexedRangeItem, ReplicaDurabilityRole, ReplicaLivenessRow,
     VerifiedRecord, WalIndex, WalIndexError, open_segment_reader,
 };
 use crate::paths;
+use beads_daemon_core::repl::proto::WatermarkState;
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 100;
 

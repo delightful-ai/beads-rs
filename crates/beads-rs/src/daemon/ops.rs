@@ -2,10 +2,11 @@
 //!
 //! Provides:
 //! - `OpError` - Operation errors
-//! - `BeadPatchDaemonExt` - Daemon-only patch validation and application
+//! - `BeadPatchDaemonExt` - Daemon-only patch application helpers
 
 use std::path::PathBuf;
 
+use beads_surface::ops::BeadPatchValidationError;
 use thiserror::Error;
 
 use crate::core::error::details as error_details;
@@ -15,11 +16,11 @@ use crate::core::{
     DurabilityReceipt, ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId, Lww, NamespaceId,
     ProtocolErrorCode, ReplicaId, Stamp, StoreId, WallClock, Watermarks, WorkflowStatus,
 };
-use crate::daemon::admission::AdmissionRejection;
-use crate::daemon::store_runtime::StoreRuntimeError;
+use crate::daemon::store::runtime::StoreRuntimeError;
 use crate::daemon::wal::EventWalError;
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
+use beads_daemon::admission::AdmissionRejection;
 
 pub use beads_surface::ops::{BeadPatch, OpResult, Patch};
 
@@ -678,7 +679,8 @@ impl TryFrom<BeadPatch> for ValidatedSurfaceBeadPatch {
 
 impl BeadPatchDaemonExt for BeadPatch {
     fn validate_for_daemon(&self) -> Result<(), OpError> {
-        validate_surface_patch(self)
+        self.validate_for_update()
+            .map_err(map_surface_patch_validation_error)
     }
 
     fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError> {
@@ -728,52 +730,22 @@ impl BeadPatchDaemonExt for BeadPatch {
     }
 }
 
-fn validate_surface_patch(patch: &BeadPatch) -> Result<(), OpError> {
-    validate_required_patch_field("title", &patch.title)?;
-    validate_required_patch_field("description", &patch.description)?;
-    Ok(())
-}
-
 fn normalize_required_patch(patch: &mut BeadPatch) -> Result<(), OpError> {
-    normalize_required_patch_field("title", &mut patch.title)?;
-    normalize_required_patch_field("description", &mut patch.description)?;
-    Ok(())
+    patch
+        .normalize_for_update()
+        .map_err(map_surface_patch_validation_error)
 }
 
-fn validate_required_patch_field(field: &str, patch: &Patch<String>) -> Result<(), OpError> {
-    match patch {
-        Patch::Clear => Err(OpError::ValidationFailed {
-            field: field.to_string(),
+fn map_surface_patch_validation_error(err: BeadPatchValidationError) -> OpError {
+    match err {
+        BeadPatchValidationError::RequiredFieldCleared { field } => OpError::ValidationFailed {
+            field: field.as_str().to_string(),
             reason: "cannot clear required field".into(),
-        }),
-        Patch::Set(value) if value.trim().is_empty() => Err(OpError::ValidationFailed {
-            field: field.to_string(),
+        },
+        BeadPatchValidationError::RequiredFieldEmpty { field } => OpError::ValidationFailed {
+            field: field.as_str().to_string(),
             reason: "cannot set required field to empty".into(),
-        }),
-        _ => Ok(()),
-    }
-}
-
-fn normalize_required_patch_field(field: &str, patch: &mut Patch<String>) -> Result<(), OpError> {
-    match patch {
-        Patch::Set(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Err(OpError::ValidationFailed {
-                    field: field.to_string(),
-                    reason: "cannot set required field to empty".into(),
-                });
-            }
-            if trimmed.len() != value.len() {
-                *value = trimmed.to_string();
-            }
-            Ok(())
-        }
-        Patch::Clear => Err(OpError::ValidationFailed {
-            field: field.to_string(),
-            reason: "cannot clear required field".into(),
-        }),
-        Patch::Keep => Ok(()),
+        },
     }
 }
 

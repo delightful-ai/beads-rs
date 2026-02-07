@@ -250,7 +250,7 @@ impl OriginStreamState {
                     batch.push(ev2);
                     next += 1;
                 }
-                other => {
+                other @ VerifiedEventAny::Deferred(_) => {
                     self.gap.buffered_bytes += bytes_len;
                     self.gap.buffered.insert(s, other);
                     break;

@@ -1,9 +1,9 @@
 use clap::Args;
 
-use super::super::validation::normalize_bead_id;
 use super::super::{Ctx, print_ok, send};
 use crate::Result;
-use crate::daemon::ipc::{IdPayload, Request};
+use beads_cli::validation::normalize_bead_id;
+use beads_surface::ipc::{IdPayload, Request};
 
 #[derive(Args, Debug)]
 pub struct ReopenArgs {

@@ -10,11 +10,11 @@ use crate::api::{
     AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
 };
 use crate::core::{HeadStatus, ReplicaRole, Watermarks};
-use crate::daemon::ipc::{
+use crate::{Result, WallClock};
+use beads_surface::ipc::{
     AdminDoctorPayload, AdminFingerprintPayload, AdminFlushPayload, AdminMaintenanceModePayload,
     AdminOp, AdminScrubPayload, EmptyPayload, Request,
 };
-use crate::{Result, WallClock};
 
 #[derive(Subcommand, Debug)]
 pub enum AdminCmd {

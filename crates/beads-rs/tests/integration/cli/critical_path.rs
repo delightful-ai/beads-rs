@@ -36,6 +36,13 @@ fn bd_with_runtime(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command 
 }
 
 #[cfg(feature = "slow-tests")]
+fn bd_with_runtime_sync_enabled(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command {
+    let mut cmd = bd_with_runtime(repo, runtime_dir, data_dir);
+    cmd.env("BD_TEST_DISABLE_GIT_SYNC", "0");
+    cmd
+}
+
+#[cfg(feature = "slow-tests")]
 fn socket_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("beads").join("daemon.sock")
 }
@@ -43,7 +50,7 @@ fn socket_path(runtime_dir: &Path) -> PathBuf {
 #[cfg(feature = "slow-tests")]
 fn daemon_pid(runtime_dir: &Path) -> u32 {
     use beads_rs::api::QueryResult;
-    use beads_rs::daemon::ipc::{Request, Response, ResponsePayload};
+    use beads_rs::surface::ipc::{Request, Response, ResponsePayload};
 
     let socket = socket_path(runtime_dir);
     let mut stream =
@@ -67,7 +74,7 @@ fn daemon_pid(runtime_dir: &Path) -> u32 {
 }
 
 #[cfg(feature = "slow-tests")]
-fn parse_response_payload(bytes: &[u8]) -> beads_rs::daemon::ipc::ResponsePayload {
+fn parse_response_payload(bytes: &[u8]) -> beads_rs::surface::ipc::ResponsePayload {
     serde_json::from_slice(bytes).expect("parse response payload")
 }
 
@@ -90,11 +97,60 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(feature = "slow-tests")]
-fn store_id_from_remote_path(remote: &Path) -> beads_rs::StoreId {
-    let remote_str = remote.to_str().expect("remote path");
-    let normalized = beads_rs::daemon::remote::normalize_url(remote_str);
-    let store_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, normalized.as_bytes());
-    beads_rs::StoreId::new(store_uuid)
+fn store_id_from_data_dir(data_dir: &Path) -> beads_rs::StoreId {
+    let stores_dir = data_dir.join("stores");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut entries: Vec<PathBuf> = match fs::read_dir(&stores_dir) {
+            Ok(read_dir) => read_dir.flatten().map(|entry| entry.path()).collect(),
+            Err(_) => Vec::new(),
+        };
+        entries.sort();
+        if entries.len() == 1 {
+            let meta_path = entries.remove(0).join("meta.json");
+            let contents = fs::read_to_string(&meta_path).expect("read store meta");
+            let meta: beads_rs::StoreMeta =
+                serde_json::from_str(&contents).expect("parse store meta");
+            return meta.store_id();
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "expected exactly one store dir under {}, found {}",
+                stores_dir.display(),
+                entries.len()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(feature = "slow-tests")]
+fn wal_segments(wal_dir: &Path) -> Vec<PathBuf> {
+    let mut entries: Vec<PathBuf> = match fs::read_dir(wal_dir) {
+        Ok(read_dir) => read_dir
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "wal"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    entries.sort();
+    entries
+}
+
+#[cfg(feature = "slow-tests")]
+fn wait_for_wal_segments(wal_dir: &Path, timeout: Duration) -> Vec<PathBuf> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let entries = wal_segments(wal_dir);
+        if !entries.is_empty() {
+            return entries;
+        }
+        if Instant::now() >= deadline {
+            return entries;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Test fixture: working repo + bare remote.
@@ -1114,19 +1170,25 @@ fn test_stale_command() {
 #[test]
 fn test_sync_command() {
     let repo = TestRepo::new();
-    repo.bd().arg("init").assert().success();
+    bd_with_runtime_sync_enabled(repo.path(), repo.runtime_dir.path(), &repo.data_dir)
+        .arg("init")
+        .assert()
+        .success();
 
     // Create an issue to have something to sync
-    repo.bd()
+    bd_with_runtime_sync_enabled(repo.path(), repo.runtime_dir.path(), &repo.data_dir)
         .args(["create", "Test sync", "--type=task", "--json"])
         .assert()
         .success();
 
     // Sync should succeed
-    repo.bd().arg("sync").assert().success();
+    bd_with_runtime_sync_enabled(repo.path(), repo.runtime_dir.path(), &repo.data_dir)
+        .arg("sync")
+        .assert()
+        .success();
 
     // List should still work after sync
-    repo.bd()
+    bd_with_runtime_sync_enabled(repo.path(), repo.runtime_dir.path(), &repo.data_dir)
         .args(["list", "--json"])
         .assert()
         .success()
@@ -2173,15 +2235,15 @@ fn test_parent_deps_reject_cycles() {
         .unwrap()
         .to_string();
 
-    // A's parent is B
+    // A's parent is B.
     repo.bd()
-        .args(["dep", "add", &id_a, &id_b, "--kind=parent"])
+        .args(["update", &id_a, "--parent", &id_b, "--json"])
         .assert()
         .success();
 
-    // B's parent is A - should fail (cycles rejected for parent)
+    // B's parent is A - should fail (cycles rejected for parent).
     repo.bd()
-        .args(["dep", "add", &id_b, &id_a, "--kind=parent"])
+        .args(["update", &id_b, "--parent", &id_a, "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("circular").or(predicate::str::contains("cycle")));
@@ -3628,22 +3690,16 @@ fn test_show_with_all_optional_fields() {
 #[test]
 fn test_crash_recovery_replays_wal() {
     use beads_rs::api::QueryResult;
-    use beads_rs::daemon::ipc::ResponsePayload;
-    use beads_rs::daemon::ops::OpResult;
     use beads_rs::git::sync::read_state_at_oid;
+    use beads_rs::surface::ipc::ResponsePayload;
+    use beads_rs::surface::ops::OpResult;
     use git2::Repository;
 
     let repo = TestRepo::new();
     let runtime_dir = TempDir::new().expect("failed to create runtime dir");
     let data_dir = data_dir_for_runtime(runtime_dir.path());
-    let store_id = store_id_from_remote_path(repo.remote_dir.path());
-    let wal_dir = data_dir
-        .join("stores")
-        .join(store_id.to_string())
-        .join("wal")
-        .join(beads_rs::core::NamespaceId::core().as_str());
 
-    let output = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
+    let output = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
         .args(["create", "Crash recovery", "--json"])
         .output()
         .expect("run bd create");
@@ -3661,11 +3717,13 @@ fn test_crash_recovery_replays_wal() {
         other => panic!("unexpected create payload: {other:?}"),
     };
 
-    let wal_entries: Vec<_> = std::fs::read_dir(&wal_dir)
-        .expect("read wal dir")
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "wal"))
-        .collect();
+    let store_id = store_id_from_data_dir(&data_dir);
+    let wal_dir = data_dir
+        .join("stores")
+        .join(store_id.to_string())
+        .join("wal")
+        .join(beads_rs::core::NamespaceId::core().as_str());
+    let wal_entries = wait_for_wal_segments(&wal_dir, Duration::from_secs(2));
     assert!(!wal_entries.is_empty(), "expected WAL entry before crash");
 
     let pid = daemon_pid(runtime_dir.path());
@@ -3675,13 +3733,13 @@ fn test_crash_recovery_replays_wal() {
     wait_for_exit(pid, Duration::from_secs(1));
 
     let store_id_arg = store_id.to_string();
-    let unlock_out = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
+    let unlock_out = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
         .args(["store", "unlock", "--store-id", store_id_arg.as_str()])
         .output()
         .expect("run bd store unlock");
     assert!(unlock_out.status.success());
 
-    let list_out = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
+    let list_out = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
         .args(["list", "--json"])
         .output()
         .expect("run bd list");
@@ -3695,7 +3753,7 @@ fn test_crash_recovery_replays_wal() {
         "expected recovered issue to appear after restart"
     );
 
-    let sync_out = bd_with_runtime(repo.path(), runtime_dir.path(), &data_dir)
+    let sync_out = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
         .args(["sync", "--json"])
         .output()
         .expect("run bd sync");

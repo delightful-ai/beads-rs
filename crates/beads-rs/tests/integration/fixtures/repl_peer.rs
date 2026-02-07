@@ -2,23 +2,19 @@
 
 use std::collections::BTreeMap;
 
+use beads_daemon_core::repl::proto::{ReplMessage, WatermarkState};
 use beads_rs::Limits;
 use beads_rs::core::{
     Applied, Durable, EventId, EventShaLookupError, HeadStatus, NamespaceId, ReplicaId, Seq0, Seq1,
     Sha256, StoreIdentity, VerifiedEventFrame, Watermark,
 };
-use beads_rs::daemon::admission::{AdmissionController, AdmissionPermit};
-use beads_rs::daemon::repl::proto::WatermarkState;
-use beads_rs::daemon::repl::session::{
-    Inbound, InboundConnecting, Outbound, OutboundConnecting, SessionState, handle_inbound_message,
-    handle_outbound_message,
-};
-use beads_rs::daemon::repl::{
-    ContiguousBatch, Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionPhase,
-    SessionStore, ValidatedAck, Want, WatermarkSnapshot,
-};
-use beads_rs::daemon::wal::ReplicaDurabilityRole;
 
+use super::daemon_boundary::repl::{
+    AdmissionController, AdmissionPermit, ContiguousBatch, Events, Inbound, InboundConnecting,
+    IngestOutcome, Outbound, OutboundConnecting, ReplError, ReplicaDurabilityRole, SessionAction,
+    SessionConfig, SessionPhase, SessionState, SessionStore, ValidatedAck, WalIndexError, Want,
+    WatermarkSnapshot, handle_inbound_message, handle_outbound_message,
+};
 use super::identity;
 use super::repl_frames;
 use super::repl_transport::ChannelEndpoint;
@@ -99,14 +95,14 @@ impl SessionStore for MockStore {
         _last_seen_ms: u64,
         _last_handshake_ms: u64,
         _role: ReplicaDurabilityRole,
-    ) -> Result<(), beads_rs::daemon::wal::WalIndexError> {
+    ) -> Result<(), WalIndexError> {
         Ok(())
     }
 }
 
 #[derive(Debug, Default)]
 pub struct MockPeerOutput {
-    pub sent: Vec<beads_rs::daemon::repl::ReplMessage>,
+    pub sent: Vec<ReplMessage>,
     pub peer_acks: Vec<ValidatedAck>,
     pub peer_wants: Vec<Want>,
     pub peer_errors: Vec<beads_rs::ErrorPayload>,
@@ -172,11 +168,11 @@ impl<R> MockPeer<R> {
     }
 
     pub fn send_events(&self, events: Vec<VerifiedEventFrame>) {
-        let message = beads_rs::daemon::repl::ReplMessage::Events(Events { events });
+        let message = ReplMessage::Events(Events { events });
         self.endpoint.send_message(&message);
     }
 
-    pub fn send_message(&self, message: &beads_rs::daemon::repl::ReplMessage) {
+    pub fn send_message(&self, message: &ReplMessage) {
         self.endpoint.send_message(message);
     }
 

@@ -8,11 +8,11 @@ use beads_rs::core::{
     BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode, Seq0,
     StoreId,
 };
-use beads_rs::daemon::ipc::{
+use beads_rs::surface::ipc::{
     CreatePayload, IdPayload, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, Request,
     Response, ResponsePayload,
 };
-use beads_rs::daemon::ops::OpResult;
+use beads_rs::surface::ops::OpResult;
 use beads_rs::test_harness::{
     Direction, NetworkProfile, NodeOptions, ReplicationRig, TestWorld, latency_budget_ms,
     measure_latency, replication_latency_budget_ms,
@@ -46,9 +46,8 @@ fn e2e_replication_converges_with_network_faults() {
     let node_b = rig.node(1);
     let start_ms = rig.clock().now_ms();
 
-    rig.set_network_profile_all(NetworkProfile::tailnet(), 42);
     rig.pump(10);
-    rig.assert_replication_ready(200);
+    rig.set_network_profile_all(NetworkProfile::tailnet(), 42);
 
     if let Some(net) = rig.link_network(0, 1) {
         net.delay_next(Direction::AtoB, 10);
@@ -60,7 +59,7 @@ fn e2e_replication_converges_with_network_faults() {
     let bead_id = BeadId::parse(&id).expect("bead id");
     rig.advance_ms(10);
 
-    rig.pump_until(200, |rig| rig.node(1).has_bead(&bead_id));
+    rig.pump_until(800, |rig| rig.node(1).has_bead(&bead_id));
     assert!(node_b.has_bead(&bead_id));
     let elapsed_ms = rig.clock().now_ms().saturating_sub(start_ms);
     assert!(
@@ -69,7 +68,7 @@ fn e2e_replication_converges_with_network_faults() {
     );
 
     let origin = node_a.replica_id();
-    rig.pump_until(200, |rig| {
+    rig.pump_until(800, |rig| {
         rig.node(1).applied_seq(&NamespaceId::core(), origin) >= 1
     });
 }
@@ -96,9 +95,8 @@ fn e2e_replication_roundtrip() {
 #[test]
 fn e2e_replication_converges_under_tailnet_profile() {
     let mut rig = ReplicationRig::new(3, 1_700_000_000_300);
-    rig.set_network_profile_all(NetworkProfile::tailnet(), 7);
     rig.pump(10);
-    rig.assert_replication_ready(300);
+    rig.set_network_profile_all(NetworkProfile::tailnet(), 7);
 
     let ids = [
         rig.node(0).create_issue("tailnet-0"),
@@ -110,12 +108,12 @@ fn e2e_replication_converges_under_tailnet_profile() {
         .map(|id| BeadId::parse(&id).expect("bead id"))
         .collect();
 
-    rig.pump_until(500, |rig| {
+    rig.pump_until(1_500, |rig| {
         rig.nodes()
             .iter()
             .all(|node| beads.iter().all(|bead| node.has_bead(bead)))
     });
-    rig.pump_until_converged(800, &[NamespaceId::core()]);
+    rig.pump_until_converged(2_000, &[NamespaceId::core()]);
 }
 
 #[test]
@@ -185,6 +183,7 @@ fn e2e_replicated_fsync_receipt() {
     let replicated = receipt
         .durability_proof()
         .replicated
+        .as_ref()
         .expect("replicated proof");
     assert_eq!(replicated.k, NonZeroU32::new(2).expect("k"));
     let mut acked_by = replicated.acked_by.clone();

@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::config::PathsConfig;
 use crate::core::{NamespaceId, StoreId};
+use beads_cli::paths as moved;
 
 // =============================================================================
 // Config-based path overrides (from beads.toml)
@@ -56,40 +57,17 @@ pub(crate) fn data_dir() -> PathBuf {
         return dir;
     }
 
-    if let Ok(dir) = std::env::var("BD_DATA_DIR")
-        && !dir.trim().is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-
-    if let Some(dir) = config_data_dir_override() {
-        return dir;
-    }
-
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".local")
-                .join("share")
-        })
-        .join("beads-rs")
+    let env_data_dir = std::env::var("BD_DATA_DIR").ok();
+    let config_override = config_data_dir_override();
+    moved::resolve_data_dir(env_data_dir.as_deref(), config_override.as_deref())
 }
 
 /// Base directory for log files.
 ///
 /// Uses `BD_LOG_DIR` if set, otherwise `<data_dir>/logs`.
 pub(crate) fn log_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BD_LOG_DIR")
-        && !dir.trim().is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-
-    data_dir().join("logs")
+    let env_log_dir = std::env::var("BD_LOG_DIR").ok();
+    moved::resolve_log_dir(env_log_dir.as_deref(), &data_dir())
 }
 
 #[doc(hidden)]
@@ -155,57 +133,57 @@ static TEST_DATA_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Base directory for store data.
 pub fn stores_dir() -> PathBuf {
-    data_dir().join("stores")
+    moved::stores_dir(&data_dir())
 }
 
 /// Store root directory for a specific store.
 pub fn store_dir(store_id: StoreId) -> PathBuf {
-    stores_dir().join(store_id.to_string())
+    moved::store_dir(&data_dir(), store_id)
 }
 
 /// Store metadata path (meta.json).
 pub fn store_meta_path(store_id: StoreId) -> PathBuf {
-    store_dir(store_id).join("meta.json")
+    moved::store_meta_path(&data_dir(), store_id)
 }
 
 /// Store lock file path.
 pub fn store_lock_path(store_id: StoreId) -> PathBuf {
-    store_dir(store_id).join("store.lock")
+    moved::store_lock_path(&data_dir(), store_id)
 }
 
 /// Namespace policy path for a store (namespaces.toml).
 pub fn namespaces_path(store_id: StoreId) -> PathBuf {
-    store_dir(store_id).join("namespaces.toml")
+    moved::namespaces_path(&data_dir(), store_id)
 }
 
 /// Replica roster path for a store (replicas.toml).
 pub fn replicas_path(store_id: StoreId) -> PathBuf {
-    store_dir(store_id).join("replicas.toml")
+    moved::replicas_path(&data_dir(), store_id)
 }
 
 /// Store configuration path (store_config.toml).
 pub fn store_config_path(store_id: StoreId) -> PathBuf {
-    store_dir(store_id).join("store_config.toml")
+    moved::store_config_path(&data_dir(), store_id)
 }
 
 /// Root WAL directory for a store.
 pub fn wal_dir(store_id: StoreId) -> PathBuf {
-    store_dir(store_id).join("wal")
+    moved::wal_dir(&data_dir(), store_id)
 }
 
 /// Namespace WAL directory for a store.
 pub fn wal_namespace_dir(store_id: StoreId, namespace: &NamespaceId) -> PathBuf {
-    wal_dir(store_id).join(namespace.as_str())
+    moved::wal_namespace_dir(&data_dir(), store_id, namespace)
 }
 
 /// WAL index path for a store.
 pub fn wal_index_path(store_id: StoreId) -> PathBuf {
-    store_dir(store_id).join("index").join("wal.sqlite")
+    moved::wal_index_path(&data_dir(), store_id)
 }
 
 /// Checkpoint cache root directory for a store.
 pub fn checkpoint_cache_dir(store_id: StoreId) -> PathBuf {
-    store_dir(store_id).join("checkpoint_cache")
+    moved::checkpoint_cache_dir(&data_dir(), store_id)
 }
 
 /// Base directory for configuration files.
@@ -214,22 +192,8 @@ pub fn checkpoint_cache_dir(store_id: StoreId) -> PathBuf {
 /// `~/.config/beads-rs`.
 #[allow(dead_code)]
 pub(crate) fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BD_CONFIG_DIR")
-        && !dir.trim().is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".config")
-        })
-        .join("beads-rs")
+    let env_config_dir = std::env::var("BD_CONFIG_DIR").ok();
+    moved::resolve_config_dir(env_config_dir.as_deref())
 }
 
 #[cfg(test)]

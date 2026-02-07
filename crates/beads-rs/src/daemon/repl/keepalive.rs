@@ -2,7 +2,7 @@
 
 use crate::core::Limits;
 
-use super::proto::Ping;
+use beads_daemon_core::repl::proto::Ping;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum KeepaliveDecision {

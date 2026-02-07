@@ -15,7 +15,6 @@ use super::ipc::{
     AdminOp, ErrorPayload, MutationMeta, Request, Response, ResponseExt, ResponsePayload,
 };
 use super::ops::OpError;
-use super::remote::RemoteUrl;
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
@@ -23,8 +22,18 @@ use crate::core::{
     ProtocolErrorCode, TraceId, WallClock,
 };
 use crate::git::{SyncError, SyncOutcome};
+use beads_daemon::remote::RemoteUrl;
 
 const REFRESH_TTL: Duration = Duration::from_millis(1000);
+const INIT_TIMEOUT_SECS: u64 = 30;
+
+fn init_timeout() -> Duration {
+    let override_secs = std::env::var("BD_LOAD_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|v| *v > 0);
+    Duration::from_secs(override_secs.unwrap_or(INIT_TIMEOUT_SECS))
+}
 
 impl Daemon {
     /// Get the next scheduled sync deadline for a remote, if any.
@@ -136,14 +145,14 @@ impl Daemon {
                 repo_state.last_fetch_error =
                     fresh
                         .fetch_error
-                        .map(|message| super::git_lane::FetchErrorRecord {
+                        .map(|message| beads_daemon::git_lane::FetchErrorRecord {
                             message,
                             wall_ms: now_wall_ms,
                         });
                 repo_state.last_divergence =
                     fresh
                         .divergence
-                        .map(|divergence| super::git_lane::DivergenceRecord {
+                        .map(|divergence| beads_daemon::git_lane::DivergenceRecord {
                             local_oid: divergence.local_oid.to_string(),
                             remote_oid: divergence.remote_oid.to_string(),
                             wall_ms: now_wall_ms,
@@ -151,7 +160,7 @@ impl Daemon {
                 repo_state.last_force_push =
                     fresh
                         .force_push
-                        .map(|force_push| super::git_lane::ForcePushRecord {
+                        .map(|force_push| beads_daemon::git_lane::ForcePushRecord {
                             previous_remote_oid: force_push.previous_remote_oid.to_string(),
                             remote_oid: force_push.remote_oid.to_string(),
                             wall_ms: now_wall_ms,
@@ -266,7 +275,7 @@ impl Daemon {
                 repo_state.last_divergence =
                     outcome
                         .divergence
-                        .map(|divergence| super::git_lane::DivergenceRecord {
+                        .map(|divergence| beads_daemon::git_lane::DivergenceRecord {
                             local_oid: divergence.local_oid.to_string(),
                             remote_oid: divergence.remote_oid.to_string(),
                             wall_ms: now_wall_ms,
@@ -274,7 +283,7 @@ impl Daemon {
                 repo_state.last_force_push =
                     outcome
                         .force_push
-                        .map(|force_push| super::git_lane::ForcePushRecord {
+                        .map(|force_push| beads_daemon::git_lane::ForcePushRecord {
                             previous_remote_oid: force_push.previous_remote_oid.to_string(),
                             remote_oid: force_push.remote_oid.to_string(),
                             wall_ms: now_wall_ms,
@@ -658,6 +667,7 @@ impl Daemon {
 
             Request::Init { ctx, .. } => {
                 let repo = ctx.path;
+                let timeout = init_timeout();
                 let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
                 if git_tx
                     .send(GitOp::Init {
@@ -674,7 +684,7 @@ impl Daemon {
                     .into();
                 }
 
-                match respond_rx.recv() {
+                match respond_rx.recv_timeout(timeout) {
                     Ok(Ok(())) => match self.ensure_repo_loaded(&repo, git_tx) {
                         Ok(_) => Response::ok(ResponsePayload::initialized()),
                         Err(e) => Response::err_from(e),
@@ -684,11 +694,12 @@ impl Daemon {
                         &e.to_string(),
                         false,
                     )),
-                    Err(_) => Response::err_from(error_payload(
-                        CliErrorCode::Internal.into(),
-                        "git thread died",
-                        false,
-                    )),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => Response::err_from(
+                        error_payload(CliErrorCode::Internal.into(), "git init timed out", true),
+                    ),
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => Response::err_from(
+                        error_payload(CliErrorCode::Internal.into(), "git thread died", false),
+                    ),
                 }
                 .into()
             }

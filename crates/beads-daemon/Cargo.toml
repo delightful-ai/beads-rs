@@ -1,0 +1,20 @@
+[package]
+name = "beads-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Daemon runtime crate for beads-rs"
+
+[dependencies]
+beads-core = { path = "../beads-core" }
+beads-api = { path = "../beads-api" }
+beads-surface = { path = "../beads-surface" }
+crossbeam = "0.8"
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+uuid.workspace = true

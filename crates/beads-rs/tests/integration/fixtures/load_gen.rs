@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use beads_rs::daemon::ipc::{
+use beads_rs::surface::ipc::{
     CreatePayload, IpcClient, IpcError, MutationCtx, MutationMeta, Request, Response,
 };
 use beads_rs::{ActorId, BeadType, NamespaceId, Priority};

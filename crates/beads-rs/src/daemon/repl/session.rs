@@ -17,15 +17,15 @@ use crate::core::{
     ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
     Watermark, hash_event_body, verify_event_frame,
 };
-use crate::daemon::admission::{AdmissionController, AdmissionRejection};
 use crate::daemon::metrics;
 use crate::daemon::wal::{ReplicaDurabilityRole, WalIndexError};
+use beads_daemon::admission::{AdmissionController, AdmissionRejection};
 
 use super::ContiguousBatch;
 use super::error::{ReplError, ReplErrorDetails};
-use super::frame::NegotiatedFrameLimit;
 use super::gap_buffer::{DrainError, GapBufferByNsOrigin, IngestDecision};
-use super::proto::{
+use beads_daemon_core::repl::frame::NegotiatedFrameLimit;
+use beads_daemon_core::repl::proto::{
     Ack, Capabilities, Hello, NamespaceSet, PROTOCOL_VERSION_V1, Ping, Pong, ReplMessage, Want,
     WatermarkMap, WatermarkState, WireEvents, WireReplMessage,
 };
@@ -850,7 +850,7 @@ where
 impl Session<Outbound, Handshaking> {
     fn handle_welcome(
         mut self,
-        welcome: super::proto::Welcome,
+        welcome: beads_daemon_core::repl::proto::Welcome,
         store: &mut impl SessionStore,
         _now_ms: u64,
     ) -> (SessionState<Outbound>, Vec<SessionAction>) {
@@ -915,7 +915,7 @@ where
 {
     fn handle_welcome_replay(
         self,
-        welcome: super::proto::Welcome,
+        welcome: beads_daemon_core::repl::proto::Welcome,
     ) -> (SessionState<Outbound>, Vec<SessionAction>) {
         let peer = self.peer().clone();
         if let Err(error) = self.validate_peer_store(
@@ -1228,10 +1228,10 @@ impl<R, P> Session<R, P> {
         hello: &Hello,
         snapshot: WatermarkSnapshot,
         accepted_namespaces: NamespaceSet,
-    ) -> super::proto::Welcome {
+    ) -> beads_daemon_core::repl::proto::Welcome {
         let live_stream_enabled = self.config.capabilities.supports_live_stream
             && hello.capabilities.supports_live_stream;
-        super::proto::Welcome {
+        beads_daemon_core::repl::proto::Welcome {
             protocol_version,
             store_id: hello.store_id,
             store_epoch: hello.store_epoch,
@@ -1792,8 +1792,8 @@ mod tests {
         Seq0, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,
         encode_event_body_canonical, hash_event_body,
     };
-    use crate::daemon::repl::proto;
-    use crate::daemon::repl::proto::NamespaceSet;
+    use beads_daemon_core::repl::proto;
+    use beads_daemon_core::repl::proto::NamespaceSet;
 
     #[derive(Clone, Debug)]
     struct TestStore {

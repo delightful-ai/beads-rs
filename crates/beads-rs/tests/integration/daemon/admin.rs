@@ -19,12 +19,12 @@ use beads_rs::api::{
 };
 use beads_rs::api::{AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample};
 use beads_rs::core::BeadType;
-use beads_rs::daemon::ipc::{
+use beads_rs::surface::ipc::{
     AdminDoctorPayload, AdminFingerprintPayload, AdminMaintenanceModePayload, AdminOp,
     AdminScrubPayload, CreatePayload, EmptyPayload, IpcClient, MutationCtx, MutationMeta,
     ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
-use beads_rs::daemon::ops::OpResult;
+use beads_rs::surface::ops::OpResult;
 use beads_rs::{
     Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, Priority, ReplicaId,
     ReplicateMode, StoreId, Watermarks,

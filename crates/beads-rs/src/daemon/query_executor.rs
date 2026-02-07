@@ -8,19 +8,19 @@ use std::time::Instant;
 use crossbeam::channel::Sender;
 
 use super::core::{Daemon, ReadScope};
-use super::git_lane::GitLaneState;
 use super::git_worker::GitOp;
 use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
-use super::remote::RemoteUrl;
-use super::store_runtime::StoreRuntime;
+use super::store::runtime::StoreRuntime;
 use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
 use beads_api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
     IssueSummary, Note, ReadyResult, StatusOutput, StatusSummary, SyncStatus, SyncWarning,
     Tombstone,
 };
+use beads_daemon::git_lane::GitLaneState;
+use beads_daemon::remote::RemoteUrl;
 
 struct ReadCtx<'a> {
     remote: RemoteUrl,

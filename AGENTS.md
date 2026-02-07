@@ -35,6 +35,7 @@ crates/beads-rs/src/
 ```bash
 cargo check                      # typecheck (run compulsively)
 cargo fmt --all                  # format
+just dylint                      # required boundary gate (CLI/daemon layering)
 cargo clippy --all-features -- -D warnings  # lint (CI uses --all-features)
 cargo test                       # unit tests
 cargo test --features slow-tests # slow tests (CI runs these separately)
@@ -96,6 +97,12 @@ jj new
 jj describe "bd-xyz: tests for Foo validation"
 jj new
 # ---
+
+# required verification gate before close
+cargo fmt --all
+just dylint                       # required boundary gate (crate layering)
+cargo clippy --all-features -- -D warnings
+cargo test
 
 bd close bd-xyz            # bead done, all acceptance criteria met
 bd ready                    # next bead

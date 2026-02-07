@@ -10,14 +10,14 @@ use crate::core::{
     Applied, ErrorPayload, EventFrameV1, Limits, NamespaceId, ProtocolErrorCode, ReplicaId, Seq0,
     Watermark, Watermarks,
 };
-use crate::daemon::broadcast::{
-    BroadcastError, BroadcastEvent, EventSubscription, SubscriberLimits,
-};
 use crate::daemon::core::Daemon;
 use crate::daemon::git_worker::GitOp;
 use crate::daemon::ipc::{IntoErrorPayload, ReadConsistency, Response, ResponsePayload};
 use crate::daemon::ops::OpError;
 use crate::daemon::repl::{WalRangeError, WalRangeReader};
+use beads_daemon::broadcast::{
+    BroadcastError, BroadcastEvent, EventSubscription, SubscriberLimits,
+};
 
 pub struct SubscribeReply {
     pub ack: Response,

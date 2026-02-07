@@ -1,11 +1,11 @@
 use clap::{Args, Subcommand};
 
-use super::super::validation::{normalize_bead_id, validation_error};
 use super::super::{Ctx, print_ok, send};
 use crate::Result;
-use crate::cli::parsers::{parse_dep_edge, parse_dep_kind};
 use crate::core::DepKind;
-use crate::daemon::ipc::{DepPayload, EmptyPayload, IdPayload, Request};
+use beads_cli::parsers::{parse_dep_edge, parse_dep_kind};
+use beads_cli::validation::{normalize_bead_id, validation_error};
+use beads_surface::ipc::{DepPayload, EmptyPayload, IdPayload, Request};
 
 #[derive(Subcommand, Debug)]
 pub enum DepCmd {
@@ -41,7 +41,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
     match cmd {
         DepCmd::Add(args) => {
             let (kind, from, to) = parse_dep_edge(args.kind, &args.from, &args.to)
-                .map_err(|msg| validation_error("dep", msg))?;
+                .map_err(|err| validation_error("dep", err.to_string()))?;
             let req = Request::AddDep {
                 ctx: ctx.mutation_ctx(),
                 payload: DepPayload { from, to, kind },
@@ -51,7 +51,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
         }
         DepCmd::Rm(args) => {
             let (kind, from, to) = parse_dep_edge(args.kind, &args.from, &args.to)
-                .map_err(|msg| validation_error("dep", msg))?;
+                .map_err(|err| validation_error("dep", err.to_string()))?;
             let req = Request::RemoveDep {
                 ctx: ctx.mutation_ctx(),
                 payload: DepPayload { from, to, kind },

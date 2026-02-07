@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: cargo test --all-features
 
   test-slow:
     name: Test (slow)
@@ -34,9 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --features slow-tests
-      - run: cargo check
-        working-directory: beads_stateright_models
+      - run: cargo test --all-features --features slow-tests
 
   lint:
     name: Lint
@@ -47,5 +45,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-dylint dylint-link --locked
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-features -- -D warnings
+      - run: cargo dylint --path lints --pattern beads_lints --all
+      - run: cargo clippy --all-features -- -D warnings -D clippy::match_wildcard_for_single_variants -D clippy::wildcard_in_or_patterns
+      - run: cargo clippy -p beads-core -p beads-api -p beads-surface -p beads-cli -p beads-daemon -p beads-daemon-core --all-features -- -D warnings -D clippy::wildcard_enum_match_arm -D clippy::match_wildcard_for_single_variants -D clippy::wildcard_in_or_patterns

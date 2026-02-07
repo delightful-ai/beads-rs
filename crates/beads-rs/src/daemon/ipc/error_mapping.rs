@@ -25,8 +25,8 @@ mod tests {
     };
     use crate::daemon::ipc::{IpcError, Request, Response, decode_request_with_limits};
     use crate::daemon::ops::OpError;
-    use crate::daemon::store_lock::{StoreLockError, StoreLockOperation};
-    use crate::daemon::store_runtime::StoreRuntimeError;
+    use crate::daemon::store::lock::{StoreLockError, StoreLockOperation};
+    use crate::daemon::store::runtime::StoreRuntimeError;
     use crate::daemon::wal::{EventWalError, RecordShaMismatchInfo, WalIndexError, WalReplayError};
     use std::io;
     use uuid::Uuid;

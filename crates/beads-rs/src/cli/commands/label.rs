@@ -1,13 +1,13 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::validation::{normalize_bead_id, validation_error};
 use super::super::{Ctx, fetch_issue, print_json, print_line, send};
 use crate::Result;
 use crate::api::QueryResult;
 use crate::core::BeadId;
-use crate::daemon::ipc::{LabelsPayload, ListPayload, Request, ResponsePayload};
-use crate::daemon::query::Filters;
+use beads_cli::validation::{normalize_bead_id, validation_error};
+use beads_surface::Filters;
+use beads_surface::ipc::{LabelsPayload, ListPayload, Request, ResponsePayload};
 
 #[derive(Subcommand, Debug)]
 pub enum LabelCmd {
@@ -185,7 +185,7 @@ fn render_label_removed(label: &str, issue_id: &str) -> String {
 
 fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {
     if batch.args.len() < 2 {
-        return Err(validation_error("label", "expected: <issue-id...> <label>"));
+        return Err(validation_error("label", "expected: <issue-id...> <label>").into());
     }
     let mut parts = batch.args;
     let label = parts

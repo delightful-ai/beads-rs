@@ -1,0 +1,452 @@
+//! Durability coordination for replication ACKs.
+
+use std::collections::BTreeSet;
+use std::num::NonZeroU32;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use thiserror::Error;
+
+use crate::core::{
+    DurabilityClass, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRole,
+    ReplicaRoster, ReplicateMode, Seq0, Seq1,
+};
+use crate::repl::{PeerAckTable, QuorumOutcome};
+
+#[derive(Clone, Debug)]
+pub struct DurabilityCoordinator {
+    local_replica_id: ReplicaId,
+    policies: std::collections::BTreeMap<NamespaceId, NamespacePolicy>,
+    roster: Option<ReplicaRoster>,
+    peer_acks: Arc<Mutex<PeerAckTable>>,
+}
+
+#[derive(Debug)]
+pub enum ReplicatedPoll {
+    Satisfied {
+        acked_by: Vec<ReplicaId>,
+    },
+    Pending {
+        acked_by: Vec<ReplicaId>,
+        eligible: BTreeSet<ReplicaId>,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum DurabilityError {
+    #[error("durability timeout after {waited_ms}ms for {requested}")]
+    DurabilityTimeout {
+        requested: DurabilityClass,
+        waited_ms: u64,
+        pending_replica_ids: Option<Vec<ReplicaId>>,
+        receipt: Box<DurabilityReceipt>,
+    },
+
+    #[error("durability unavailable for {requested} (eligible={eligible_total})")]
+    DurabilityUnavailable {
+        requested: DurabilityClass,
+        eligible_total: u32,
+        eligible_replica_ids: Option<Vec<ReplicaId>>,
+    },
+}
+
+impl DurabilityCoordinator {
+    pub fn new(
+        local_replica_id: ReplicaId,
+        policies: std::collections::BTreeMap<NamespaceId, NamespacePolicy>,
+        roster: Option<ReplicaRoster>,
+        peer_acks: Arc<Mutex<PeerAckTable>>,
+    ) -> Self {
+        Self {
+            local_replica_id,
+            policies,
+            roster,
+            peer_acks,
+        }
+    }
+
+    pub fn ensure_available(
+        &self,
+        namespace: &NamespaceId,
+        requested: DurabilityClass,
+    ) -> Result<(), DurabilityError> {
+        let DurabilityClass::ReplicatedFsync { k } = requested else {
+            return Ok(());
+        };
+
+        let eligible = self.eligible_replicas(namespace);
+        {
+            let mut table = self.peer_acks.lock().expect("peer ack lock poisoned");
+            table.set_eligibility(namespace.clone(), eligible.clone());
+        }
+
+        if eligible.len() < k.get() as usize {
+            return Err(DurabilityError::DurabilityUnavailable {
+                requested,
+                eligible_total: eligible.len() as u32,
+                eligible_replica_ids: Some(eligible.into_iter().collect()),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn await_durability(
+        &self,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        requested: DurabilityClass,
+        receipt: DurabilityReceipt,
+        wait_timeout: Duration,
+    ) -> Result<DurabilityReceipt, DurabilityError> {
+        let DurabilityClass::ReplicatedFsync { k } = requested else {
+            return Ok(receipt);
+        };
+
+        let start = Instant::now();
+        let mut backoff = Duration::from_millis(5);
+
+        loop {
+            match self.poll_replicated(namespace, origin, seq, k) {
+                Ok(ReplicatedPoll::Satisfied { acked_by }) => {
+                    return Ok(Self::achieved_receipt(receipt, requested, k, acked_by));
+                }
+                Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
+                    let elapsed = start.elapsed();
+                    if wait_timeout.is_zero() || elapsed >= wait_timeout {
+                        let pending = Self::pending_replica_ids(&eligible, &acked_by);
+                        let pending_receipt =
+                            Self::pending_receipt(receipt, requested, acked_by.clone());
+                        return Err(DurabilityError::DurabilityTimeout {
+                            requested,
+                            waited_ms: elapsed.as_millis() as u64,
+                            pending_replica_ids: Some(pending),
+                            receipt: Box::new(pending_receipt),
+                        });
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+
+            let elapsed = start.elapsed();
+            if elapsed >= wait_timeout {
+                continue;
+            }
+            let remaining = wait_timeout - elapsed;
+            let sleep_for = std::cmp::min(backoff, remaining);
+            std::thread::sleep(sleep_for);
+            backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(50));
+        }
+    }
+
+    pub fn poll_replicated(
+        &self,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        k: NonZeroU32,
+    ) -> Result<ReplicatedPoll, DurabilityError> {
+        let eligible = self.eligible_replicas(namespace);
+        {
+            let mut table = self.peer_acks.lock().expect("peer ack lock poisoned");
+            table.set_eligibility(namespace.clone(), eligible.clone());
+        }
+
+        let outcome = {
+            let table = self.peer_acks.lock().expect("peer ack lock poisoned");
+            table.satisfied_k(namespace, &origin, Seq0::new(seq.get()), k.get())
+        };
+
+        match outcome {
+            QuorumOutcome::Satisfied { acked_by, .. } => Ok(ReplicatedPoll::Satisfied { acked_by }),
+            QuorumOutcome::Pending { acked_by, .. } => {
+                Ok(ReplicatedPoll::Pending { acked_by, eligible })
+            }
+            QuorumOutcome::InsufficientEligible { eligible_total, .. } => {
+                Err(DurabilityError::DurabilityUnavailable {
+                    requested: DurabilityClass::ReplicatedFsync { k },
+                    eligible_total: eligible_total as u32,
+                    eligible_replica_ids: Some(eligible.iter().copied().collect()),
+                })
+            }
+        }
+    }
+
+    fn eligible_replicas(&self, namespace: &NamespaceId) -> BTreeSet<ReplicaId> {
+        let Some(roster) = &self.roster else {
+            return BTreeSet::new();
+        };
+        let Some(policy) = self.policies.get(namespace) else {
+            return BTreeSet::new();
+        };
+
+        let mut eligible = BTreeSet::new();
+        for entry in &roster.replicas {
+            if entry.replica_id == self.local_replica_id {
+                continue;
+            }
+            if !entry.durability_eligible() {
+                continue;
+            }
+            if !role_allows_policy(entry.role(), policy.replicate_mode) {
+                continue;
+            }
+            if let Some(allowed) = &entry.allowed_namespaces
+                && !allowed.contains(namespace)
+            {
+                continue;
+            }
+            eligible.insert(entry.replica_id);
+        }
+
+        eligible
+    }
+
+    pub fn pending_receipt(
+        receipt: DurabilityReceipt,
+        requested: DurabilityClass,
+        acked_by: Vec<ReplicaId>,
+    ) -> DurabilityReceipt {
+        let DurabilityClass::ReplicatedFsync { k } = requested else {
+            return receipt;
+        };
+        receipt
+            .with_replicated_pending(k, acked_by)
+            .expect("pending receipt invariants")
+    }
+
+    pub fn achieved_receipt(
+        receipt: DurabilityReceipt,
+        requested: DurabilityClass,
+        k: NonZeroU32,
+        acked_by: Vec<ReplicaId>,
+    ) -> DurabilityReceipt {
+        let DurabilityClass::ReplicatedFsync { k: requested_k } = requested else {
+            return receipt;
+        };
+        receipt
+            .with_replicated_achieved(requested_k, k, acked_by)
+            .expect("achieved receipt invariants")
+    }
+
+    pub fn pending_replica_ids(
+        eligible: &BTreeSet<ReplicaId>,
+        acked_by: &[ReplicaId],
+    ) -> Vec<ReplicaId> {
+        let acked: BTreeSet<ReplicaId> = acked_by.iter().copied().collect();
+        eligible
+            .iter()
+            .filter(|replica_id| !acked.contains(replica_id))
+            .copied()
+            .collect()
+    }
+}
+
+fn role_allows_policy(role: ReplicaRole, mode: ReplicateMode) -> bool {
+    match mode {
+        ReplicateMode::None => false,
+        ReplicateMode::Anchors => role == ReplicaRole::Anchor,
+        ReplicateMode::Peers => matches!(role, ReplicaRole::Anchor | ReplicaRole::Peer),
+        ReplicateMode::P2p => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{
+        Durable, HeadStatus, NamespaceId, ReplicaDurabilityRole, Seq0, StoreEpoch, StoreId,
+        StoreIdentity, Watermark,
+    };
+    use crate::repl::WatermarkState;
+    use uuid::Uuid;
+
+    fn replica(seed: u128) -> ReplicaId {
+        ReplicaId::new(Uuid::from_u128(seed))
+    }
+
+    fn roster(entries: Vec<ReplicaEntry>) -> ReplicaRoster {
+        ReplicaRoster { replicas: entries }
+    }
+
+    fn policy_peers() -> std::collections::BTreeMap<NamespaceId, NamespacePolicy> {
+        let mut policies = std::collections::BTreeMap::new();
+        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        policies
+    }
+
+    fn receipt_for(store: StoreIdentity) -> DurabilityReceipt {
+        DurabilityReceipt::local_fsync_defaults(
+            store,
+            crate::core::TxnId::new(Uuid::from_u128(42)),
+            Vec::new(),
+            1,
+        )
+    }
+
+    use crate::core::replica_roster::ReplicaEntry;
+
+    #[test]
+    fn replicated_fsync_succeeds_after_k_acks() {
+        let namespace = NamespaceId::core();
+        let local = replica(1);
+        let peer_a = replica(2);
+        let peer_b = replica(3);
+        let roster = roster(vec![
+            ReplicaEntry {
+                replica_id: local,
+                name: "local".to_string(),
+                role: ReplicaDurabilityRole::anchor(true),
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+            ReplicaEntry {
+                replica_id: peer_a,
+                name: "peer-a".to_string(),
+                role: ReplicaDurabilityRole::peer(true),
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+            ReplicaEntry {
+                replica_id: peer_b,
+                name: "peer-b".to_string(),
+                role: ReplicaDurabilityRole::peer(true),
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+        ]);
+
+        let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
+        let coordinator =
+            DurabilityCoordinator::new(local, policy_peers(), Some(roster), peer_acks.clone());
+
+        let mut durable: WatermarkState<Durable> = std::collections::BTreeMap::new();
+        durable.entry(namespace.clone()).or_default().insert(
+            local,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        peer_acks
+            .lock()
+            .unwrap()
+            .update_peer(peer_a, &durable, None, 10)
+            .unwrap();
+        peer_acks
+            .lock()
+            .unwrap()
+            .update_peer(peer_b, &durable, None, 12)
+            .unwrap();
+
+        let poll = coordinator
+            .poll_replicated(
+                &namespace,
+                local,
+                Seq1::from_u64(2).unwrap(),
+                NonZeroU32::new(2).unwrap(),
+            )
+            .unwrap();
+
+        match poll {
+            ReplicatedPoll::Satisfied { acked_by } => {
+                assert_eq!(acked_by.len(), 2);
+                assert!(acked_by.contains(&peer_a));
+                assert!(acked_by.contains(&peer_b));
+            }
+            _ => panic!("expected satisfied"),
+        }
+    }
+
+    #[test]
+    fn unavailable_when_not_enough_eligible() {
+        let namespace = NamespaceId::core();
+        let local = replica(10);
+        let peer = replica(11);
+        let roster = roster(vec![ReplicaEntry {
+            replica_id: peer,
+            name: "observer".to_string(),
+            role: ReplicaDurabilityRole::observer(),
+            allowed_namespaces: None,
+            expire_after_ms: None,
+        }]);
+
+        let coordinator = DurabilityCoordinator::new(
+            local,
+            policy_peers(),
+            Some(roster),
+            Arc::new(Mutex::new(PeerAckTable::new())),
+        );
+
+        let err = coordinator
+            .ensure_available(
+                &namespace,
+                DurabilityClass::ReplicatedFsync {
+                    k: NonZeroU32::new(1).unwrap(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            DurabilityError::DurabilityUnavailable {
+                eligible_total: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn timeout_returns_pending_receipt() {
+        let namespace = NamespaceId::core();
+        let local = replica(20);
+        let peer = replica(21);
+        let roster = roster(vec![ReplicaEntry {
+            replica_id: peer,
+            name: "peer".to_string(),
+            role: ReplicaDurabilityRole::peer(true),
+            allowed_namespaces: None,
+            expire_after_ms: None,
+        }]);
+
+        let coordinator = DurabilityCoordinator::new(
+            local,
+            policy_peers(),
+            Some(roster),
+            Arc::new(Mutex::new(PeerAckTable::new())),
+        );
+
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_u128(7)), StoreEpoch::new(1));
+        let receipt = receipt_for(store);
+        let requested = DurabilityClass::ReplicatedFsync {
+            k: NonZeroU32::new(1).unwrap(),
+        };
+        let err = coordinator
+            .await_durability(
+                &namespace,
+                local,
+                Seq1::from_u64(1).unwrap(),
+                requested,
+                receipt,
+                Duration::from_millis(1),
+            )
+            .unwrap_err();
+
+        match err {
+            DurabilityError::DurabilityTimeout {
+                pending_replica_ids,
+                receipt,
+                ..
+            } => {
+                assert_eq!(pending_replica_ids.unwrap(), vec![peer]);
+                let replicated = receipt
+                    .durability_proof()
+                    .replicated
+                    .as_ref()
+                    .expect("replicated proof present");
+                assert_eq!(replicated.acked_by.len(), 0);
+                assert_eq!(replicated.k.get(), 1);
+                assert!(receipt.outcome().is_pending());
+            }
+            _ => panic!("expected timeout"),
+        }
+    }
+}

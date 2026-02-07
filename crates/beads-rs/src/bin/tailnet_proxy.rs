@@ -16,8 +16,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use beads_rs::core::Limits;
-use beads_rs::daemon::repl::frame::{FrameError, FrameLimitState, FrameReader, FrameWriter};
+use beads_core::Limits;
+use beads_daemon_core::repl::frame::{FrameError, FrameLimitState, FrameReader, FrameWriter};
 
 #[derive(Parser, Debug)]
 #[command(name = "tailnet_proxy")]

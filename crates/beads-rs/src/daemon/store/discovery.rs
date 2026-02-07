@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::core::StoreId;
 use crate::daemon::ops::OpError;
-use crate::daemon::remote::{RemoteUrl, normalize_url};
+use beads_daemon::remote::RemoteUrl;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreIdVerification {
@@ -107,7 +107,7 @@ impl StoreCaches {
         if let Ok(url) = std::env::var("BD_REMOTE_URL")
             && !url.trim().is_empty()
         {
-            return Ok(RemoteUrl(normalize_url(&url)));
+            return Ok(RemoteUrl::new(&url));
         }
 
         if let Some(remote) = self.path_to_remote.get(repo_path) {
@@ -123,7 +123,7 @@ impl StoreCaches {
             .url()
             .ok_or_else(|| OpError::NoRemote(repo_path.to_owned()))?;
 
-        let remote = RemoteUrl(normalize_url(url));
+        let remote = RemoteUrl::new(url);
         self.path_to_remote
             .insert(repo_path.to_owned(), remote.clone());
         Ok(remote)
@@ -474,7 +474,7 @@ mod tests {
         write_store_meta(&repo, meta_id);
         write_store_ref(&repo, refs_id);
 
-        let remote = RemoteUrl(normalize_url("https://example.com/repo.git"));
+        let remote = RemoteUrl::new("https://example.com/repo.git");
         let mut caches = StoreCaches::new();
         let err = caches.resolve_store_id(dir.path(), &remote).unwrap_err();
 

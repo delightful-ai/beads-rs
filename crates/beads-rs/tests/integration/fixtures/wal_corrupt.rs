@@ -7,7 +7,7 @@ use std::path::Path;
 use beads_rs::core::NamespaceId;
 use crc32c::crc32c;
 
-use beads_rs::daemon::wal::{
+use super::daemon_boundary::wal::{
     EventWalError, EventWalResult, FRAME_CRC_OFFSET, FRAME_HEADER_LEN, RecordHeader,
 };
 

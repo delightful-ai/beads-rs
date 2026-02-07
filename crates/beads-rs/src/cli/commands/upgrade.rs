@@ -1,12 +1,11 @@
 //! `bd upgrade` - install latest binary and restart daemon.
 
+use beads_cli::backend::{CliHostBackend, UpgradeMethod, UpgradeOutcome, UpgradeRequest};
 use clap::Args;
 use serde::Serialize;
 
 use super::super::{print_json, print_line};
 use crate::Result;
-use crate::config::load_or_init;
-use crate::upgrade::{UpgradeMethod, UpgradeOutcome, run_upgrade};
 
 #[derive(Args, Debug)]
 pub struct UpgradeArgs {
@@ -24,9 +23,11 @@ struct UpgradeJson<'a> {
     method: &'a str,
 }
 
-pub(crate) fn handle(json: bool, background: bool) -> Result<()> {
-    let cfg = load_or_init();
-    let outcome = run_upgrade(cfg, background)?;
+pub(crate) fn handle<B>(json: bool, background: bool, backend: &B) -> Result<()>
+where
+    B: CliHostBackend<Error = crate::Error>,
+{
+    let outcome = backend.run_upgrade(UpgradeRequest { background })?;
     if json {
         let payload = UpgradeJson {
             updated: outcome.updated,

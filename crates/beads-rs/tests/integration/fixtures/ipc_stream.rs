@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use beads_rs::NamespaceId;
 use beads_rs::api::{StreamEvent, SubscribeInfo};
-use beads_rs::daemon::ipc::{
+use beads_rs::surface::ipc::{
     EmptyPayload, IpcClient, IpcError, ReadConsistency, ReadCtx, Request, Response,
     ResponsePayload, SubscriptionStream,
 };
@@ -133,7 +133,7 @@ mod tests {
     use super::*;
 
     use beads_rs::api::EventBody;
-    use beads_rs::daemon::ipc::ResponsePayload;
+    use beads_rs::surface::ipc::ResponsePayload;
     use beads_rs::{
         EventId, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1,
         TxnId,

@@ -21,11 +21,8 @@ use crate::core::{
     StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Transience, WatermarkError,
     Watermarks, WriteStamp,
 };
-use crate::daemon::admission::AdmissionController;
-use crate::daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
-use crate::daemon::remote::RemoteUrl;
 use crate::daemon::repl::PeerAckTable;
-use crate::daemon::store_lock::{StoreLock, StoreLockError};
+use crate::daemon::store::lock::{StoreLock, StoreLockError};
 use crate::daemon::wal::{
     EventWal, HlcRow, IndexDurabilityMode, ReplayStats, SqliteWalIndex, WalIndex, WalIndexError,
     WalReplayError, catch_up_index, rebuild_index,
@@ -36,6 +33,9 @@ use crate::git::checkpoint::{
     shard_for_dep, shard_for_tombstone,
 };
 use crate::paths;
+use beads_daemon::admission::AdmissionController;
+use beads_daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
+use beads_daemon::remote::RemoteUrl;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1278,11 +1278,11 @@ mod tests {
     use crate::core::{
         ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark,
     };
-    use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{
         IndexDurabilityMode, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
     };
     use crate::paths;
+    use beads_daemon::remote::RemoteUrl;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use uuid::Uuid;
@@ -1328,7 +1328,7 @@ mod tests {
             .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
-            RemoteUrl("example.com/test/repo".to_string()),
+            RemoteUrl::new("example.com/test/repo"),
             now_ms + 1,
             "test",
             &Limits::default(),
@@ -1395,7 +1395,7 @@ mod tests {
             .namespaces;
         let result = StoreRuntime::open(
             store_id,
-            RemoteUrl("example.com/test/repo".to_string()),
+            RemoteUrl::new("example.com/test/repo"),
             now_ms + 1,
             "test",
             &Limits::default(),
@@ -1432,7 +1432,7 @@ mod tests {
             .namespaces;
         let err = StoreRuntime::open(
             store_id,
-            RemoteUrl("example.com/test/repo".to_string()),
+            RemoteUrl::new("example.com/test/repo"),
             now_ms + 1,
             "test",
             &Limits::default(),
@@ -1460,7 +1460,7 @@ mod tests {
             .namespaces;
         let mut runtime = StoreRuntime::open(
             store_id,
-            RemoteUrl("example.com/test/repo".to_string()),
+            RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
             "test",
             &Limits::default(),
@@ -1492,7 +1492,7 @@ mod tests {
             .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
-            RemoteUrl("example.com/test/repo".to_string()),
+            RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
             "test",
             &Limits::default(),
@@ -1530,7 +1530,7 @@ mod tests {
             .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
-            RemoteUrl("example.com/test/repo".to_string()),
+            RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
             "test",
             &Limits::default(),
@@ -1556,7 +1556,7 @@ mod tests {
             .namespaces;
         let mut runtime = StoreRuntime::open(
             store_id,
-            RemoteUrl("example.com/test/repo".to_string()),
+            RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
             "test",
             &Limits::default(),
@@ -1666,7 +1666,7 @@ durability_eligible = true
             .namespaces;
         let runtime = StoreRuntime::open(
             store_id,
-            RemoteUrl("example.com/test/repo".to_string()),
+            RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
             "test",
             &Limits::default(),
