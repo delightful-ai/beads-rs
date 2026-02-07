@@ -230,9 +230,20 @@ fn handle_unlock(json: bool, args: StoreUnlockArgs) -> Result<()> {
             return Ok(());
         }
         Ok(Response::Err { err }) => {
-            // If daemon returned require_force, propagate as error.
+            // Extract field from details when the daemon returns an InvalidRequest
+            // (e.g. --force required). For other error types (StoreRuntime, etc.)
+            // propagate the message without assuming a field.
+            let field = if err.code.as_str() == "invalid_request" {
+                err.details
+                    .as_ref()
+                    .and_then(|d| d.get("field"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            } else {
+                None
+            };
             return Err(Error::Op(OpError::InvalidRequest {
-                field: Some("force".into()),
+                field,
                 reason: err.message,
             }));
         }

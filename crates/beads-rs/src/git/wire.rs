@@ -934,8 +934,14 @@ mod tests {
         obj.insert("assignee_expires".to_string(), serde_json::json!(12345));
         lines[0] = serde_json::to_string(&value).unwrap();
 
+        // Rejected at the serde level (WireClaimSnapshot deserializer) before
+        // validate_redundant_fields gets a chance, so the error is Json not InvalidValue.
         let err = parse_state(&join_jsonl(&lines)).expect_err("expected invalid claim data");
-        assert!(matches!(err, WireError::InvalidValue(_)));
+        assert!(
+            err.to_string()
+                .contains("assignee_expires requires assignee"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

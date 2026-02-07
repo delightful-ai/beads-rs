@@ -653,25 +653,37 @@ impl Daemon {
 
         let lock_is_ours = lock_meta.pid == our_pid;
 
-        // Lock is ours and no --force: reject.
-        if lock_is_ours && !force {
+        // Check PID liveness for foreign locks to avoid removing an active lock.
+        let lock_pid_alive = if lock_is_ours {
+            true // We're running, so obviously alive.
+        } else {
+            pid_is_alive(lock_meta.pid)
+        };
+
+        // Active lock (ours or foreign alive PID) requires --force.
+        if lock_pid_alive && !force {
+            let reason = if lock_is_ours {
+                "lock held by this daemon"
+            } else {
+                "lock PID is still alive"
+            };
             return Response::err_from(OpError::InvalidRequest {
                 field: Some("force".into()),
-                reason: "lock appears active (live daemon)".to_string(),
+                reason: reason.to_string(),
             });
         }
 
-        // Either forced (ours + --force) or stale (different pid). Remove it.
+        // Remove: either forced or stale (dead PID).
         if let Err(err) = crate::daemon::store::lock::remove_lock_file(store_id) {
             return Response::err_from(OpError::StoreRuntime(Box::new(StoreRuntimeError::Lock(
                 err,
             ))));
         }
 
-        let action = if lock_is_ours {
-            UnlockAction::RemovedForced
-        } else {
+        let action = if !lock_pid_alive {
             UnlockAction::RemovedStale
+        } else {
+            UnlockAction::RemovedForced
         };
         unlock_ok(
             store_id,
@@ -700,6 +712,17 @@ fn unlock_ok(
     Response::ok(ResponsePayload::query(QueryResult::AdminStoreUnlock(
         output,
     )))
+}
+
+/// Check if a PID is alive using `kill(pid, 0)`.
+fn pid_is_alive(pid: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    matches!(
+        kill(Pid::from_raw(pid as i32), None),
+        Ok(()) | Err(Errno::EPERM)
+    )
 }
 
 fn lock_meta_to_api(meta: crate::daemon::store::lock::StoreLockMeta) -> StoreLockMetaOutput {
