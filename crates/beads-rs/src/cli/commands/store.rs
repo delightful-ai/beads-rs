@@ -81,8 +81,17 @@ fn handle_fsck(json: bool, args: StoreFsckArgs) -> Result<()> {
             return Ok(());
         }
         Ok(Response::Err { err }) => {
+            let field = if err.code.as_str() == "invalid_request" {
+                err.details
+                    .as_ref()
+                    .and_then(|d| d.get("field"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            } else {
+                None
+            };
             return Err(Error::Op(OpError::InvalidRequest {
-                field: Some("store-id".into()),
+                field,
                 reason: err.message,
             }));
         }

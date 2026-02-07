@@ -601,8 +601,19 @@ impl Daemon {
     // =========================================================================
 
     pub fn admin_store_fsck(&self, store_id: StoreId, repair: bool) -> Response {
+        // Repair modifies WAL files (truncate, quarantine, rebuild index).
+        // Reject when running inside the daemon to avoid races with live writes.
+        // Users must stop the daemon first: `bd daemon stop && bd store fsck --repair`.
+        if repair {
+            return Response::err_from(OpError::InvalidRequest {
+                field: Some("repair".into()),
+                reason:
+                    "fsck --repair cannot run while the daemon is active; stop the daemon first"
+                        .to_string(),
+            });
+        }
         let config = crate::config::load_or_init();
-        let options = crate::daemon::wal::fsck::FsckOptions::new(repair, config.limits);
+        let options = crate::daemon::wal::fsck::FsckOptions::new(false, config.limits);
         let report = match crate::daemon::wal::fsck::fsck_store(store_id, options) {
             Ok(report) => report,
             Err(err) => {

@@ -98,12 +98,10 @@ impl WireBeadFullCompat {
                     ));
                 }
             }
-        } else {
-            if assignee_present || assignee_expires_present || self.assignee_at.is_some() {
-                return Err(WireError::InvalidValue(
-                    "assignee_at/expires present without assignee".to_string(),
-                ));
-            }
+        } else if assignee_present || assignee_expires_present || self.assignee_at.is_some() {
+            return Err(WireError::InvalidValue(
+                "assignee_at/expires present without assignee".to_string(),
+            ));
         }
 
         Ok(())
