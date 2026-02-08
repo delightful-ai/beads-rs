@@ -18,7 +18,7 @@ pub fn shutdown_daemon(runtime_dir: &Path) {
     let meta = daemon_meta_path(runtime_dir);
     let mut candidates = candidate_daemon_candidates(runtime_dir);
     let _ = poll_until_with_backoff(
-        Duration::from_millis(200),
+        Duration::from_secs(2),
         Duration::from_millis(5),
         Duration::from_millis(50),
         || socket.exists() || meta.exists(),
@@ -168,22 +168,12 @@ fn terminate_process(candidate: &DaemonCandidate, timeout: Duration) {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
-    if !process_alive(candidate.pid)
-        || !matches!(
-            pid_matches_started_at(candidate.pid, candidate.started_at_ms),
-            Some(true)
-        )
-    {
+    if !candidate_matches_running_process(candidate) {
         return;
     }
     let _ = kill(Pid::from_raw(candidate.pid as i32), Signal::SIGTERM);
     wait_for_exit(candidate.pid, timeout);
-    if process_alive(candidate.pid)
-        && matches!(
-            pid_matches_started_at(candidate.pid, candidate.started_at_ms),
-            Some(true)
-        )
-    {
+    if candidate_matches_running_process(candidate) {
         let _ = kill(Pid::from_raw(candidate.pid as i32), Signal::SIGKILL);
         wait_for_exit(candidate.pid, timeout);
     }
@@ -193,16 +183,23 @@ fn force_kill(candidate: &DaemonCandidate, timeout: Duration) {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
-    if !process_alive(candidate.pid)
-        || !matches!(
-            pid_matches_started_at(candidate.pid, candidate.started_at_ms),
-            Some(true)
-        )
-    {
+    if !candidate_matches_running_process(candidate) {
         return;
     }
     let _ = kill(Pid::from_raw(candidate.pid as i32), Signal::SIGKILL);
     wait_for_exit(candidate.pid, timeout);
+}
+
+fn candidate_matches_running_process(candidate: &DaemonCandidate) -> bool {
+    if !process_alive(candidate.pid) {
+        return false;
+    }
+
+    match pid_matches_started_at(candidate.pid, candidate.started_at_ms) {
+        Some(true) => true,
+        Some(false) => false,
+        None => matches!(process_looks_like_bd_daemon(candidate.pid), Some(true)),
+    }
 }
 
 fn wait_for_exit(pid: u32, timeout: Duration) {
