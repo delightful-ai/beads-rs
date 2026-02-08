@@ -4,16 +4,24 @@ use beads_surface::ipc::{IpcError, ResponsePayload};
 use beads_surface::ops::OpResult;
 
 pub mod blocked;
+pub mod claim;
+pub mod close;
 pub mod common;
 pub mod count;
 pub mod daemon;
+pub mod delete;
+pub mod init;
 pub mod list;
 pub mod onboard;
 pub mod prime;
 pub mod ready;
+pub mod reopen;
 pub mod search;
 pub mod setup;
 pub mod stale;
+pub mod status;
+pub mod sync;
+pub mod unclaim;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {

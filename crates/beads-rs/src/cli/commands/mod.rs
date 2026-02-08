@@ -71,22 +71,6 @@ pub(super) fn fmt_wall_ms(ms: u64) -> String {
     }
 }
 
-pub(super) fn fmt_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        return format!("{ms}ms");
-    }
-    let secs = ms as f64 / 1000.0;
-    if secs < 60.0 {
-        return format!("{secs:.1}s");
-    }
-    let mins = secs / 60.0;
-    if mins < 60.0 {
-        return format!("{mins:.1}m");
-    }
-    let hours = mins / 60.0;
-    format!("{hours:.1}h")
-}
-
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Initialize beads store in this repo.

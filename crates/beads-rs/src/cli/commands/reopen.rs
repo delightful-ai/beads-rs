@@ -1,25 +1,7 @@
-use clap::Args;
-
-use super::super::{Ctx, print_ok, send};
+use super::super::Ctx;
 use crate::Result;
-use beads_cli::validation::normalize_bead_id;
-use beads_surface::ipc::{IdPayload, Request};
-
-#[derive(Args, Debug)]
-pub struct ReopenArgs {
-    pub id: String,
-}
+pub use beads_cli::commands::reopen::{ReopenArgs, render_reopened};
 
 pub(crate) fn handle(ctx: &Ctx, args: ReopenArgs) -> Result<()> {
-    let id = normalize_bead_id(&args.id)?;
-    let req = Request::Reopen {
-        ctx: ctx.mutation_ctx(),
-        payload: IdPayload { id },
-    };
-    let ok = send(&req)?;
-    print_ok(&ok, ctx.json)
-}
-
-pub(crate) fn render_reopened(id: &str) -> String {
-    format!("↻ Reopened {id}")
+    beads_cli::commands::reopen::handle(ctx, args).map_err(Into::into)
 }
