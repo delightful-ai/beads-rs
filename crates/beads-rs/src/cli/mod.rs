@@ -5,36 +5,33 @@
 //! - Extensible command tree + thin handlers
 //! - LLM-robust parsing (aliases, boolish flags, case/dash tolerance)
 
-use std::cell::RefCell;
 use std::ffi::OsString;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Parser, builder::BoolishValueParser};
 
 use crate::api::QueryResult;
 use crate::config::{Config, apply_env_overrides, load_for_repo};
-use crate::core::{
-    ActorId, Applied, BeadId, ClientRequestId, DurabilityClass, NamespaceId, ValidatedActorId,
-    Watermarks,
-};
-use crate::daemon::ipc::{
-    IdPayload, IpcClient, IpcConnection, MutationCtx, MutationMeta, ReadConsistency, ReadCtx,
-    RepoCtx, Request, Response, ResponsePayload,
-};
+use crate::core::{ActorId, Applied, BeadId, DurabilityClass, NamespaceId, Watermarks};
 use crate::{Error, Result};
+use beads_cli::commands::onboard::{generate_guide, render_instructions};
+use beads_cli::commands::prime::write_context_if;
+use beads_cli::commands::setup::{SetupCmd, handle_aider, handle_claude, handle_cursor};
+use beads_cli::runtime::{
+    CliRuntimeCtx, resolve_description as cli_resolve_description, send as cli_send,
+    send_raw as cli_send_raw, validate_actor_id as cli_validate_actor_id,
+};
+use beads_cli::validation::{normalize_optional_client_request_id, normalize_optional_namespace};
+use beads_surface::ipc::{
+    EmptyPayload, IdPayload, RepoCtx, Request, Response, ResponsePayload, send_request,
+};
 
+pub use beads_cli::commands::daemon::DaemonCmd;
 pub use commands::Command;
-pub use commands::daemon::DaemonCmd;
-pub(super) use filters::CommonFilterArgs;
 
+mod backend;
 mod commands;
-mod filters;
-mod parsers;
-mod validation;
-
-thread_local! {
-    static COMMAND_CONNECTION: RefCell<Option<IpcConnection>> = const { RefCell::new(None) };
-}
 
 // =============================================================================
 // Entry + global options
@@ -132,56 +129,60 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 
     let actor_override = resolve_actor_override(cli.actor.as_deref())?;
+    let backend = backend::BeadsRsCliBackend;
 
     match cli.command {
         Command::Daemon { cmd } => match cmd {
-            commands::daemon::DaemonCmd::Run => crate::daemon::run_daemon(),
+            beads_cli::commands::daemon::DaemonCmd::Run => crate::run_daemon_command(),
         },
         // Prime is special: doesn't require repo, silently succeeds if not in beads project
-        Command::Prime => commands::prime::handle(),
+        Command::Prime => handle_prime(),
         // Setup doesn't require an initialized beads repo
-        Command::Setup { cmd } => match cmd {
-            commands::setup::SetupCmd::Claude(args) => {
-                commands::setup::handle_claude(args.project, args.check, args.remove)
-            }
-            commands::setup::SetupCmd::Cursor(args) => {
-                commands::setup::handle_cursor(args.check, args.remove)
-            }
-            commands::setup::SetupCmd::Aider(args) => {
-                commands::setup::handle_aider(args.check, args.remove)
-            }
-        },
+        Command::Setup { cmd } => handle_setup(cmd),
         // Onboard doesn't require an initialized beads repo
-        Command::Onboard(args) => commands::onboard::handle(args.output.as_deref()),
+        Command::Onboard(args) => handle_onboard(args.output.as_deref()),
         // Store operations are global (no repo required).
-        Command::Store { cmd } => commands::store::handle(cli.json, cmd),
-        Command::Upgrade(args) => commands::upgrade::handle(cli.json, args.background),
+        Command::Store { cmd } => commands::store::handle(cli.json, cmd, &backend),
+        Command::Upgrade(args) => commands::upgrade::handle(cli.json, args.background, &backend),
         cmd => {
             let repo = resolve_repo(cli.repo)?;
             let config = load_cli_config(&repo);
-            let ctx = Ctx {
-                repo,
-                json: cli.json,
-                namespace: resolve_namespace(cli.namespace.as_deref(), &config)?,
-                durability: resolve_durability(cli.durability.as_deref(), &config)?,
-                client_request_id: validation::normalize_optional_client_request_id(
-                    cli.client_request_id.as_deref(),
-                )?,
-                require_min_seen: parse_require_min_seen(cli.require_min_seen.as_deref())?,
-                wait_timeout_ms: cli.wait_timeout_ms,
-                actor_id: actor_override.clone(),
-            };
+            let ctx = Ctx::new(
+                CliRuntimeCtx {
+                    repo,
+                    json: cli.json,
+                    namespace: resolve_namespace(cli.namespace.as_deref(), &config)?,
+                    durability: resolve_durability(cli.durability.as_deref(), &config)?,
+                    client_request_id: normalize_optional_client_request_id(
+                        cli.client_request_id.as_deref(),
+                    )?,
+                    require_min_seen: parse_require_min_seen(cli.require_min_seen.as_deref())?,
+                    wait_timeout_ms: cli.wait_timeout_ms,
+                    actor_id: actor_override.clone(),
+                },
+                backend,
+            );
 
             match cmd {
                 Command::Init => commands::init::handle(&ctx),
                 Command::Create(args) => commands::create::handle(&ctx, args),
                 Command::Show(args) => commands::show::handle(&ctx, args),
-                Command::List(args) => commands::list::handle_list(&ctx, args),
-                Command::Search(args) => commands::search::handle(&ctx, args),
-                Command::Ready(args) => commands::ready::handle(&ctx, args),
-                Command::Blocked => commands::blocked::handle(&ctx),
-                Command::Stale(args) => commands::stale::handle(&ctx, args),
-                Command::Count(args) => commands::count::handle(&ctx, args),
+                Command::List(args) => {
+                    beads_cli::commands::list::handle_list(&ctx, args).map_err(Into::into)
+                }
+                Command::Search(args) => {
+                    beads_cli::commands::search::handle(&ctx, args).map_err(Into::into)
+                }
+                Command::Ready(args) => {
+                    beads_cli::commands::ready::handle(&ctx, args).map_err(Into::into)
+                }
+                Command::Blocked => beads_cli::commands::blocked::handle(&ctx).map_err(Into::into),
+                Command::Stale(args) => {
+                    beads_cli::commands::stale::handle(&ctx, args).map_err(Into::into)
+                }
+                Command::Count(args) => {
+                    beads_cli::commands::count::handle(&ctx, args).map_err(Into::into)
+                }
                 Command::Deleted(args) => commands::deleted::handle(&ctx, args),
                 Command::Sync => commands::sync::handle(&ctx),
                 Command::Subscribe(args) => commands::subscribe::handle(&ctx, args),
@@ -211,61 +212,84 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
+fn handle_prime() -> Result<()> {
+    let in_beads_repo = match crate::repo::discover() {
+        Ok((repo, _)) => repo.refname_to_id("refs/heads/beads/store").is_ok(),
+        Err(_) => false,
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = write_context_if(&mut stdout, in_beads_repo)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(beads_surface::IpcError::from(e).into());
+    }
+
+    Ok(())
+}
+
+fn handle_setup(cmd: SetupCmd) -> Result<()> {
+    match cmd {
+        SetupCmd::Claude(args) => {
+            handle_claude(args.project, args.check, args.remove).map_err(Into::into)
+        }
+        SetupCmd::Cursor(args) => handle_cursor(args.check, args.remove).map_err(Into::into),
+        SetupCmd::Aider(args) => handle_aider(args.check, args.remove).map_err(Into::into),
+    }
+}
+
+fn handle_onboard(output: Option<&Path>) -> Result<()> {
+    let init_result = try_init();
+
+    if let Some(path) = output {
+        generate_guide(path);
+        print_line(&format!("Generated {}", path.display()))?;
+        print_line("This file is auto-generated - do not edit manually")?;
+    } else {
+        render_instructions(init_result);
+    }
+    Ok(())
+}
+
+fn try_init() -> bool {
+    if let Ok((_repo, path)) = crate::repo::discover() {
+        let req = Request::Init {
+            ctx: RepoCtx::new(path),
+            payload: EmptyPayload {},
+        };
+        matches!(send_request(&req), Ok(Response::Ok { .. }))
+    } else {
+        false
+    }
+}
+
 // =============================================================================
 // Context + helpers
 // =============================================================================
 
-#[derive(Clone)]
-struct Ctx {
-    repo: PathBuf,
-    json: bool,
-    namespace: Option<NamespaceId>,
-    durability: Option<DurabilityClass>,
-    client_request_id: Option<ClientRequestId>,
-    require_min_seen: Option<Watermarks<Applied>>,
-    wait_timeout_ms: Option<u64>,
-    actor_id: Option<ActorId>,
+type Ctx = CliCtx<backend::BeadsRsCliBackend>;
+
+#[derive(Debug, Clone)]
+struct CliCtx<B> {
+    runtime: CliRuntimeCtx,
+    backend: B,
 }
 
-impl Ctx {
-    fn mutation_meta(&self) -> MutationMeta {
-        MutationMeta {
-            namespace: self.namespace.clone(),
-            durability: self.durability,
-            client_request_id: self.client_request_id,
-            actor_id: self.actor_id.clone(),
-        }
+impl<B> CliCtx<B> {
+    fn new(runtime: CliRuntimeCtx, backend: B) -> Self {
+        Self { runtime, backend }
     }
 
-    fn mutation_ctx(&self) -> MutationCtx {
-        MutationCtx::new(self.repo.clone(), self.mutation_meta())
+    fn backend(&self) -> &B {
+        &self.backend
     }
+}
 
-    fn read_consistency(&self) -> ReadConsistency {
-        ReadConsistency {
-            namespace: self.namespace.clone(),
-            require_min_seen: self.require_min_seen.clone(),
-            wait_timeout_ms: self.wait_timeout_ms,
-        }
-    }
+impl<B> Deref for CliCtx<B> {
+    type Target = CliRuntimeCtx;
 
-    fn read_ctx(&self) -> ReadCtx {
-        ReadCtx::new(self.repo.clone(), self.read_consistency())
-    }
-
-    fn repo_ctx(&self) -> RepoCtx {
-        RepoCtx::new(self.repo.clone())
-    }
-
-    fn actor_id(&self) -> Result<ActorId> {
-        self.actor_id
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(current_actor_id)
-    }
-
-    fn actor_string(&self) -> Result<String> {
-        Ok(self.actor_id()?.as_str().to_string())
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
     }
 }
 
@@ -281,7 +305,7 @@ fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
         p
     } else {
         let cwd = std::env::current_dir().map_err(|e| {
-            Error::Ipc(crate::daemon::IpcError::DaemonUnavailable(format!(
+            Error::Ipc(beads_surface::IpcError::DaemonUnavailable(format!(
                 "failed to get cwd: {e}"
             )))
         })?;
@@ -307,7 +331,7 @@ fn load_cli_config(repo: &Path) -> Config {
 
 fn resolve_namespace(cli_value: Option<&str>, config: &Config) -> Result<Option<NamespaceId>> {
     if let Some(raw) = cli_value {
-        validation::normalize_optional_namespace(Some(raw))
+        normalize_optional_namespace(Some(raw)).map_err(Into::into)
     } else {
         Ok(config.defaults.namespace.clone())
     }
@@ -333,22 +357,7 @@ pub(super) fn resolve_description(
     description: Option<String>,
     body: Option<String>,
 ) -> Result<Option<String>> {
-    match (description, body) {
-        (Some(d), Some(b)) => {
-            if d != b {
-                return Err(Error::Op(crate::OpError::ValidationFailed {
-                    field: "description".into(),
-                    reason: format!(
-                        "cannot specify both --description and --body with different values (--description={d:?}, --body={b:?})"
-                    ),
-                }));
-            }
-            Ok(Some(d))
-        }
-        (Some(d), None) => Ok(Some(d)),
-        (None, Some(b)) => Ok(Some(b)),
-        (None, None) => Ok(None),
-    }
+    cli_resolve_description(description, body).map_err(Into::into)
 }
 
 fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied>>> {
@@ -364,12 +373,7 @@ fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied
 }
 
 fn validate_actor_id(raw: &str) -> Result<ActorId> {
-    ValidatedActorId::parse(raw).map(Into::into).map_err(|e| {
-        Error::Op(crate::OpError::ValidationFailed {
-            field: "actor".into(),
-            reason: e.to_string(),
-        })
-    })
+    cli_validate_actor_id(raw).map_err(Into::into)
 }
 
 fn resolve_actor_override(raw: Option<&str>) -> Result<Option<ActorId>> {
@@ -377,17 +381,6 @@ fn resolve_actor_override(raw: Option<&str>) -> Result<Option<ActorId>> {
         return Ok(None);
     };
     validate_actor_id(raw).map(Some)
-}
-
-pub(super) fn current_actor_id() -> Result<ActorId> {
-    if let Ok(actor) = std::env::var("BD_ACTOR")
-        && !actor.trim().is_empty()
-    {
-        return validate_actor_id(&actor);
-    }
-    let username = whoami::username();
-    let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
-    validate_actor_id(&format!("{}@{}", username, hostname))
 }
 
 fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
@@ -404,7 +397,7 @@ pub(super) fn print_line(line: &str) -> Result<()> {
     if let Err(e) = writeln!(stdout, "{line}")
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
-        return Err(crate::daemon::IpcError::from(e).into());
+        return Err(beads_surface::IpcError::from(e).into());
     }
     Ok(())
 }
@@ -426,37 +419,29 @@ fn render_human(payload: &ResponsePayload) -> String {
     }
 }
 
-fn render_op(op: &crate::daemon::ops::OpResult) -> String {
+fn render_op(op: &beads_surface::OpResult) -> String {
     match op {
-        crate::daemon::ops::OpResult::Created { id } => {
-            commands::create::render_created(id.as_str())
-        }
-        crate::daemon::ops::OpResult::Updated { id } => {
-            commands::update::render_updated(id.as_str())
-        }
-        crate::daemon::ops::OpResult::Closed { id } => commands::close::render_closed(id.as_str()),
-        crate::daemon::ops::OpResult::Reopened { id } => {
-            commands::reopen::render_reopened(id.as_str())
-        }
-        crate::daemon::ops::OpResult::Deleted { id } => {
-            commands::delete::render_deleted_op(id.as_str())
-        }
-        crate::daemon::ops::OpResult::DepAdded { from, to } => {
+        beads_surface::OpResult::Created { id } => commands::create::render_created(id.as_str()),
+        beads_surface::OpResult::Updated { id } => commands::update::render_updated(id.as_str()),
+        beads_surface::OpResult::Closed { id } => commands::close::render_closed(id.as_str()),
+        beads_surface::OpResult::Reopened { id } => commands::reopen::render_reopened(id.as_str()),
+        beads_surface::OpResult::Deleted { id } => commands::delete::render_deleted_op(id.as_str()),
+        beads_surface::OpResult::DepAdded { from, to } => {
             commands::dep::render_dep_added(from.as_str(), to.as_str())
         }
-        crate::daemon::ops::OpResult::DepRemoved { from, to } => {
+        beads_surface::OpResult::DepRemoved { from, to } => {
             commands::dep::render_dep_removed(from.as_str(), to.as_str())
         }
-        crate::daemon::ops::OpResult::NoteAdded { bead_id, .. } => {
+        beads_surface::OpResult::NoteAdded { bead_id, .. } => {
             commands::comments::render_comment_added(bead_id.as_str())
         }
-        crate::daemon::ops::OpResult::Claimed { id, expires } => {
+        beads_surface::OpResult::Claimed { id, expires } => {
             commands::claim::render_claimed(id.as_str(), expires.0)
         }
-        crate::daemon::ops::OpResult::Unclaimed { id } => {
+        beads_surface::OpResult::Unclaimed { id } => {
             commands::unclaim::render_unclaimed(id.as_str())
         }
-        crate::daemon::ops::OpResult::ClaimExtended { id, expires } => {
+        beads_surface::OpResult::ClaimExtended { id, expires } => {
             commands::claim::render_claim_extended(id.as_str(), expires.0)
         }
     }
@@ -465,7 +450,9 @@ fn render_op(op: &crate::daemon::ops::OpResult) -> String {
 fn render_query(q: &QueryResult) -> String {
     match q {
         QueryResult::Issue(issue) => commands::show::render_issue_detail(issue),
-        QueryResult::Issues(views) => commands::list::render_issue_list_opts(views, false),
+        QueryResult::Issues(views) => {
+            beads_cli::commands::list::render_issue_list_opts(views, false)
+        }
         QueryResult::DepTree { root, edges } => {
             commands::dep::render_dep_tree(root.as_str(), edges)
         }
@@ -473,12 +460,16 @@ fn render_query(q: &QueryResult) -> String {
         QueryResult::DepCycles(out) => commands::dep::render_dep_cycles(out),
         QueryResult::Notes(notes) => commands::comments::render_notes(notes),
         QueryResult::Status(out) => commands::status::render_status(out),
-        QueryResult::Blocked(blocked) => commands::blocked::render_blocked(blocked),
-        QueryResult::Ready(result) => {
-            commands::ready::render_ready(&result.issues, result.blocked_count, result.closed_count)
+        QueryResult::Blocked(blocked) => beads_cli::commands::blocked::render_blocked(blocked),
+        QueryResult::Ready(result) => beads_cli::commands::ready::render_ready(
+            &result.issues,
+            result.blocked_count,
+            result.closed_count,
+        ),
+        QueryResult::Stale(issues) => {
+            beads_cli::commands::list::render_issue_list_opts(issues, false)
         }
-        QueryResult::Stale(issues) => commands::list::render_issue_list_opts(issues, false),
-        QueryResult::Count(result) => commands::count::render_count(result),
+        QueryResult::Count(result) => beads_cli::commands::count::render_count(result),
         QueryResult::Deleted(tombs) => commands::deleted::render_deleted(tombs),
         QueryResult::DeletedLookup(out) => commands::deleted::render_deleted_lookup(out),
         QueryResult::EpicStatus(statuses) => commands::epic::render_epic_statuses(statuses),
@@ -516,53 +507,21 @@ fn render_query(q: &QueryResult) -> String {
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
-    serde_json::to_writer_pretty(&mut stdout, value).map_err(crate::daemon::IpcError::from)?;
+    serde_json::to_writer_pretty(&mut stdout, value).map_err(beads_surface::IpcError::from)?;
     if let Err(e) = writeln!(stdout)
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
-        return Err(crate::daemon::IpcError::from(e).into());
+        return Err(beads_surface::IpcError::from(e).into());
     }
     Ok(())
 }
 
 fn send_raw(req: &Request) -> Result<Response> {
-    let response = send_raw_once(req).or_else(|err| {
-        if err.transience().is_retryable() {
-            COMMAND_CONNECTION.with(|conn| {
-                *conn.borrow_mut() = None;
-            });
-            send_raw_once(req)
-        } else {
-            Err(err)
-        }
-    })?;
-    Ok(response)
-}
-
-fn send_raw_once(req: &Request) -> std::result::Result<Response, crate::daemon::ipc::IpcError> {
-    COMMAND_CONNECTION.with(|conn| {
-        let mut conn = conn.borrow_mut();
-        if conn.is_none() {
-            let client = IpcClient::new();
-            *conn = Some(client.connect()?);
-        }
-        conn.as_mut()
-            .expect("command connection initialized")
-            .send_request(req)
-    })
+    cli_send_raw(req).map_err(Error::from)
 }
 
 fn send(req: &Request) -> Result<ResponsePayload> {
-    match send_raw(req)? {
-        Response::Ok { ok } => Ok(ok),
-        Response::Err { err } => {
-            tracing::error!("error: {} - {}", err.code, err.message);
-            if let Some(details) = err.details {
-                tracing::error!("details: {}", details);
-            }
-            std::process::exit(1);
-        }
-    }
+    cli_send(req).map_err(Error::from)
 }
 
 fn fetch_issue(ctx: &Ctx, id: &BeadId) -> Result<crate::api::Issue> {
@@ -572,7 +531,7 @@ fn fetch_issue(ctx: &Ctx, id: &BeadId) -> Result<crate::api::Issue> {
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
-        other => Err(Error::Ipc(crate::daemon::IpcError::DaemonUnavailable(
+        other => Err(Error::Ipc(beads_surface::IpcError::DaemonUnavailable(
             format!("unexpected response for show: {other:?}"),
         ))),
     }
@@ -623,14 +582,14 @@ fn canonical_flag(flag: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::validation::{
-        normalize_bead_id, normalize_bead_slug_for, normalize_optional_client_request_id,
-        normalize_optional_namespace,
-    };
     use super::*;
     use crate::OpError;
     use crate::config::DefaultsConfig;
     use crate::core::{DurabilityClass, HeadStatus, ReplicaId, Seq0};
+    use beads_cli::validation::{
+        normalize_bead_id, normalize_bead_slug_for, normalize_optional_client_request_id,
+        normalize_optional_namespace,
+    };
     use std::num::NonZeroU32;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -646,7 +605,7 @@ mod tests {
 
     #[test]
     fn normalize_bead_id_rejects_empty() {
-        let err = normalize_bead_id("").unwrap_err();
+        let err: Error = normalize_bead_id("").unwrap_err().into();
         assert_validation_failed(err, "id");
     }
 
@@ -658,13 +617,17 @@ mod tests {
 
     #[test]
     fn normalize_bead_slug_rejects_invalid() {
-        let err = normalize_bead_slug_for("root_slug", "-bad-").unwrap_err();
+        let err: Error = normalize_bead_slug_for("root_slug", "-bad-")
+            .unwrap_err()
+            .into();
         assert_validation_failed(err, "root_slug");
     }
 
     #[test]
     fn normalize_optional_namespace_rejects_empty() {
-        let err = normalize_optional_namespace(Some("   ")).unwrap_err();
+        let err: Error = normalize_optional_namespace(Some("   "))
+            .unwrap_err()
+            .into();
         assert_validation_failed(err, "namespace");
     }
 
@@ -676,7 +639,9 @@ mod tests {
 
     #[test]
     fn normalize_optional_namespace_rejects_invalid_chars() {
-        let err = normalize_optional_namespace(Some("core name")).unwrap_err();
+        let err: Error = normalize_optional_namespace(Some("core name"))
+            .unwrap_err()
+            .into();
         assert_validation_failed(err, "namespace");
     }
 
@@ -729,7 +694,9 @@ mod tests {
 
     #[test]
     fn normalize_optional_client_request_id_rejects_empty() {
-        let err = normalize_optional_client_request_id(Some("")).unwrap_err();
+        let err: Error = normalize_optional_client_request_id(Some(""))
+            .unwrap_err()
+            .into();
         assert_validation_failed(err, "client_request_id");
     }
 
@@ -755,16 +722,19 @@ mod tests {
     #[test]
     fn mutation_meta_includes_actor_override() {
         let actor = ActorId::new("alice@example.com").unwrap();
-        let ctx = Ctx {
-            repo: PathBuf::from("/tmp/beads"),
-            json: false,
-            namespace: None,
-            durability: None,
-            client_request_id: None,
-            require_min_seen: None,
-            wait_timeout_ms: None,
-            actor_id: Some(actor.clone()),
-        };
+        let ctx = Ctx::new(
+            CliRuntimeCtx {
+                repo: PathBuf::from("/tmp/beads"),
+                json: false,
+                namespace: None,
+                durability: None,
+                client_request_id: None,
+                require_min_seen: None,
+                wait_timeout_ms: None,
+                actor_id: Some(actor.clone()),
+            },
+            backend::BeadsRsCliBackend,
+        );
         let meta = ctx.mutation_meta();
         assert_eq!(meta.actor_id, Some(actor));
     }
@@ -805,16 +775,19 @@ mod tests {
                 HeadStatus::Known([2u8; 32]),
             )
             .expect("watermark");
-        let ctx = Ctx {
-            repo: PathBuf::from("/tmp/beads"),
-            json: false,
-            namespace: None,
-            durability: None,
-            client_request_id: None,
-            require_min_seen: Some(watermarks.clone()),
-            wait_timeout_ms: Some(50),
-            actor_id: None,
-        };
+        let ctx = Ctx::new(
+            CliRuntimeCtx {
+                repo: PathBuf::from("/tmp/beads"),
+                json: false,
+                namespace: None,
+                durability: None,
+                client_request_id: None,
+                require_min_seen: Some(watermarks.clone()),
+                wait_timeout_ms: Some(50),
+                actor_id: None,
+            },
+            backend::BeadsRsCliBackend,
+        );
         let read = ctx.read_consistency();
         assert_eq!(read.require_min_seen, Some(watermarks));
         assert_eq!(read.wait_timeout_ms, Some(50));

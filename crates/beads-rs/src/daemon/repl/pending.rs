@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::daemon::broadcast::BroadcastEvent;
+use beads_daemon::broadcast::BroadcastEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PendingDrop {

@@ -1,11 +1,11 @@
 use clap::Args;
 
-use super::super::validation::{normalize_bead_id, validation_error};
 use super::super::{Ctx, print_line, print_ok, send};
 use super::fmt_wall_ms;
 use crate::Result;
 use crate::api::QueryResult;
-use crate::daemon::ipc::{DeletedPayload, Request, ResponsePayload};
+use beads_cli::validation::{normalize_bead_id, validation_error};
+use beads_surface::ipc::{DeletedPayload, Request, ResponsePayload};
 
 #[derive(Args, Debug)]
 pub struct DeletedArgs {
@@ -184,5 +184,6 @@ fn parse_since_ms(s: &str) -> Result<u64> {
     Err(validation_error(
         "since",
         format!("invalid --since value {s:?} (try 7d, 30d, 2w)"),
-    ))
+    )
+    .into())
 }

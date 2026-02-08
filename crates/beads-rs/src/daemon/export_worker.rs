@@ -8,7 +8,7 @@ use crossbeam::channel::{Receiver, Sender};
 
 use crate::compat::{ExportContext, ensure_symlinks, export_jsonl};
 use crate::core::CanonicalState;
-use crate::daemon::remote::RemoteUrl;
+use beads_daemon::remote::RemoteUrl;
 
 pub(crate) struct ExportJob {
     pub(crate) remote: RemoteUrl,
@@ -128,7 +128,7 @@ mod tests {
         let mut known_paths = HashSet::new();
         known_paths.insert(clone_path.clone());
 
-        let remote = RemoteUrl("git@example.com:test.git".to_string());
+        let remote = RemoteUrl::new("git@example.com:test.git");
         worker
             .enqueue(ExportJob {
                 remote: remote.clone(),

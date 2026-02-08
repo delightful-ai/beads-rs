@@ -20,6 +20,9 @@ beads-core = { path = "../beads-core" }
 beads-api = { path = "../beads-api" }
 beads-surface = { path = "../beads-surface" }
 beads-macros = { path = "../beads-macros" }
+beads-cli = { path = "../beads-cli" }
+beads-daemon = { path = "../beads-daemon" }
+beads-daemon-core = { path = "../beads-daemon-core" }
 clap = { version = "4", features = ["derive"], optional = true }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
@@ -55,7 +58,7 @@ rusqlite = "0.31"
 default = ["cli"]
 cli = ["clap"]
 slow-tests = []
-test-harness = []
+test-harness = ["beads-core/test-harness"]
 e2e-tests = ["test-harness"]
 model-testing = []
 

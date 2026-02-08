@@ -1,6 +1,6 @@
 use super::super::{Ctx, print_ok, send};
 use crate::Result;
-use crate::daemon::ipc::{EmptyPayload, Request};
+use beads_surface::ipc::{EmptyPayload, Request};
 
 pub(crate) fn handle(ctx: &Ctx) -> Result<()> {
     let req = Request::SyncWait {

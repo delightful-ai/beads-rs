@@ -5,9 +5,22 @@ members = [
     "crates/beads-core",
     "crates/beads-api",
     "crates/beads-surface",
+    "crates/beads-cli",
+    "crates/beads-daemon",
+    "crates/beads-daemon-core",
     "crates/beads-rs",
     "crates/beads_stateright_models",
     "crates/fuzz",
+]
+default-members = [
+    "crates/beads-macros",
+    "crates/beads-core",
+    "crates/beads-api",
+    "crates/beads-surface",
+    "crates/beads-cli",
+    "crates/beads-daemon",
+    "crates/beads-daemon-core",
+    "crates/beads-rs",
 ]
 
 # Shared dependencies for workspace inheritance

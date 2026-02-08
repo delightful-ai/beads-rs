@@ -10,7 +10,6 @@ use std::time::Instant;
 use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
-use super::remote::RemoteUrl;
 use crate::core::{ActorId, BeadSlug, CanonicalState, StoreId, WriteStamp};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
@@ -21,6 +20,7 @@ use crate::git::checkpoint::{
 };
 use crate::git::error::SyncError;
 use crate::git::sync::{DivergenceInfo, SyncOutcome, SyncProcess, init_beads_ref, sync_with_retry};
+use beads_daemon::remote::RemoteUrl;
 
 /// Result of a sync operation.
 pub type SyncResult = Result<SyncOutcome, SyncError>;

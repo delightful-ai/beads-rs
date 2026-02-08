@@ -2,6 +2,12 @@
 
 Version control with jj, issue tracking with bd.
 
+## Crate DAG Policy
+
+Canonical target crate DAG and forbidden dependency edges live in:
+
+- `docs/CRATE_DAG.md`
+
 ## Version Control (jj)
 
 We use `jj` (jujutsu), not git directly. jj has different mental model—internalize it.
@@ -67,6 +73,12 @@ jj describe "bd-xyz: tests for Foo validation"
 jj new
 # edit: ...
 # ---
+
+# required verification gate before close
+cargo fmt --all
+just dylint                       # required boundary gate (crate layering)
+cargo clippy --all-features -- -D warnings
+cargo test
 
 bd close bd-xyz            # bead done, all acceptance criteria met
 bd ready                    # next bead
@@ -138,4 +150,4 @@ Be proactive about dependencies. When creating related beads, think: "Can these 
 - Use Conventional Commits: `feat(scope): ...`, `fix: ...`, `test(scope): ...`, `chore: ...`.
 - Include the tracker reference: `bd-abc123` or `(#123)`.
 - PRs should explain "why" and "what", link relevant issues/spec changes.
-- Before merge: `cargo fmt`, `cargo clippy`, `cargo test`.
+- Before merge: `cargo fmt --all`, `just dylint` (required boundary gate), `cargo clippy --all-features -- -D warnings`, `cargo test`.

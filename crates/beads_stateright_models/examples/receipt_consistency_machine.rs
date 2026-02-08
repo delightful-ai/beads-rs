@@ -6,8 +6,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use beads_rs::daemon::wal::{ClientRequestEventIds, WalIndex};
-use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot};
+use beads_rs::model::{ClientRequestEventIds, MemoryWalIndex, MemoryWalIndexSnapshot, WalIndex};
 use beads_rs::{
     Applied, ClientRequestId, DurabilityReceipt, EventId, NamespaceId, ReplicaId, StoreEpoch,
     StoreId, StoreIdentity, TxnId, Watermarks,

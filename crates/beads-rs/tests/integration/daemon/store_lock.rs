@@ -5,7 +5,7 @@ use std::fs;
 use crate::fixtures::store_dir::TempStoreDir;
 use uuid::Uuid;
 
-use beads_rs::daemon::store_lock::{StoreLock, StoreLockError, read_lock_meta};
+use beads_rs::daemon::{StoreLock, StoreLockError, read_lock_meta};
 use beads_rs::{NamespaceId, ReplicaId, StoreId};
 
 #[test]

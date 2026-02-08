@@ -80,7 +80,7 @@ fn run_load(
     repo: PathBuf,
     total: usize,
     namespace: &NamespaceId,
-    client: beads_rs::daemon::ipc::IpcClient,
+    client: beads_rs::surface::ipc::IpcClient,
 ) -> LoadReport {
     let mut generator = LoadGenerator::with_client(repo, client);
     let config = generator.config_mut();

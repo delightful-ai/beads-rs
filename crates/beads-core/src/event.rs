@@ -602,11 +602,13 @@ impl VerifiedEventFrame {
     pub fn try_from_frame(frame: EventFrameV1, limits: &Limits) -> Result<Self, EventFrameError> {
         validate_frame_prev_seq(&frame.eid, frame.prev_sha256)?;
 
-        let (_, body) =
-            decode_event_body(frame.bytes().as_ref(), limits).map_err(|err| match err {
-                DecodeError::Validation(source) => EventFrameError::Validation(source),
-                other => EventFrameError::Decode(other),
-            })?;
+        let (_, body) = decode_event_body(frame.bytes().as_ref(), limits).map_err(|err| {
+            if let DecodeError::Validation(source) = err {
+                EventFrameError::Validation(source)
+            } else {
+                EventFrameError::Decode(err)
+            }
+        })?;
 
         if body.origin_replica_id != frame.eid().origin_replica_id
             || body.namespace != frame.eid().namespace
@@ -2472,17 +2474,19 @@ fn decode_wire_patch_str(
     dec: &mut Decoder,
     limits: &Limits,
 ) -> Result<WirePatch<String>, DecodeError> {
-    match dec.datatype()? {
-        Type::Null => {
-            dec.null()?;
-            Ok(WirePatch::Clear)
-        }
-        Type::StringIndef => Err(DecodeError::IndefiniteLength),
-        Type::String => Ok(WirePatch::Set(decode_text(dec, limits)?.to_string())),
-        other => Err(DecodeError::InvalidField {
+    let ty = dec.datatype()?;
+    if matches!(ty, Type::Null) {
+        dec.null()?;
+        Ok(WirePatch::Clear)
+    } else if matches!(ty, Type::StringIndef) {
+        Err(DecodeError::IndefiniteLength)
+    } else if matches!(ty, Type::String) {
+        Ok(WirePatch::Set(decode_text(dec, limits)?.to_string()))
+    } else {
+        Err(DecodeError::InvalidField {
             field: "patch",
-            reason: format!("expected null or string, got {other:?}"),
-        }),
+            reason: format!("expected null or string, got {ty:?}"),
+        })
     }
 }
 
@@ -2491,20 +2495,20 @@ fn decode_wire_patch_branch(
     limits: &Limits,
     field: &'static str,
 ) -> Result<WirePatch<BranchName>, DecodeError> {
-    match dec.datatype()? {
-        Type::Null => {
-            dec.null()?;
-            Ok(WirePatch::Clear)
-        }
-        Type::StringIndef => Err(DecodeError::IndefiniteLength),
-        Type::String => {
-            let raw = decode_text(dec, limits)?;
-            Ok(WirePatch::Set(parse_branch_name(raw, field)?))
-        }
-        other => Err(DecodeError::InvalidField {
+    let ty = dec.datatype()?;
+    if matches!(ty, Type::Null) {
+        dec.null()?;
+        Ok(WirePatch::Clear)
+    } else if matches!(ty, Type::StringIndef) {
+        Err(DecodeError::IndefiniteLength)
+    } else if matches!(ty, Type::String) {
+        let raw = decode_text(dec, limits)?;
+        Ok(WirePatch::Set(parse_branch_name(raw, field)?))
+    } else {
+        Err(DecodeError::InvalidField {
             field,
-            reason: format!("expected null or string, got {other:?}"),
-        }),
+            reason: format!("expected null or string, got {ty:?}"),
+        })
     }
 }
 
@@ -2512,12 +2516,12 @@ fn decode_wire_patch_u32(
     dec: &mut Decoder,
     _limits: &Limits,
 ) -> Result<WirePatch<u32>, DecodeError> {
-    match dec.datatype()? {
-        Type::Null => {
-            dec.null()?;
-            Ok(WirePatch::Clear)
-        }
-        _ => Ok(WirePatch::Set(decode_u32(dec, "patch")?)),
+    let ty = dec.datatype()?;
+    if matches!(ty, Type::Null) {
+        dec.null()?;
+        Ok(WirePatch::Clear)
+    } else {
+        Ok(WirePatch::Set(decode_u32(dec, "patch")?))
     }
 }
 
@@ -2525,15 +2529,15 @@ fn decode_wire_patch_wallclock(
     dec: &mut Decoder,
     _limits: &Limits,
 ) -> Result<WirePatch<super::time::WallClock>, DecodeError> {
-    match dec.datatype()? {
-        Type::Null => {
-            dec.null()?;
-            Ok(WirePatch::Clear)
-        }
-        _ => Ok(WirePatch::Set(super::time::WallClock(decode_u64(
+    let ty = dec.datatype()?;
+    if matches!(ty, Type::Null) {
+        dec.null()?;
+        Ok(WirePatch::Clear)
+    } else {
+        Ok(WirePatch::Set(super::time::WallClock(decode_u64(
             dec,
             "patch.wallclock",
-        )?))),
+        )?)))
     }
 }
 
@@ -2541,20 +2545,20 @@ fn decode_wire_patch_actor(
     dec: &mut Decoder,
     limits: &Limits,
 ) -> Result<WirePatch<ActorId>, DecodeError> {
-    match dec.datatype()? {
-        Type::Null => {
-            dec.null()?;
-            Ok(WirePatch::Clear)
-        }
-        Type::StringIndef => Err(DecodeError::IndefiniteLength),
-        Type::String => {
-            let raw = decode_text(dec, limits)?;
-            Ok(WirePatch::Set(parse_actor_id(raw, "assignee")?))
-        }
-        other => Err(DecodeError::InvalidField {
+    let ty = dec.datatype()?;
+    if matches!(ty, Type::Null) {
+        dec.null()?;
+        Ok(WirePatch::Clear)
+    } else if matches!(ty, Type::StringIndef) {
+        Err(DecodeError::IndefiniteLength)
+    } else if matches!(ty, Type::String) {
+        let raw = decode_text(dec, limits)?;
+        Ok(WirePatch::Set(parse_actor_id(raw, "assignee")?))
+    } else {
+        Err(DecodeError::InvalidField {
             field: "patch",
-            reason: format!("expected null or string, got {other:?}"),
-        }),
+            reason: format!("expected null or string, got {ty:?}"),
+        })
     }
 }
 
@@ -2781,22 +2785,23 @@ fn non_canonical_integer(field: &'static str) -> DecodeError {
 
 fn decode_u64(dec: &mut Decoder, field: &'static str) -> Result<u64, DecodeError> {
     let first = current_byte(dec)?;
-    match dec.datatype()? {
-        Type::U8 | Type::U16 | Type::U32 | Type::U64 => {
-            let value = dec.u64()?;
-            if !canonical_unsigned(first, value) {
-                return Err(non_canonical_integer(field));
-            }
-            Ok(value)
+    let ty = dec.datatype()?;
+    if matches!(ty, Type::U8 | Type::U16 | Type::U32 | Type::U64) {
+        let value = dec.u64()?;
+        if !canonical_unsigned(first, value) {
+            return Err(non_canonical_integer(field));
         }
-        Type::Tag => Err(DecodeError::InvalidField {
+        Ok(value)
+    } else if matches!(ty, Type::Tag) {
+        Err(DecodeError::InvalidField {
             field,
             reason: "tagged integer not allowed".into(),
-        }),
-        other => Err(DecodeError::InvalidField {
+        })
+    } else {
+        Err(DecodeError::InvalidField {
             field,
-            reason: format!("expected unsigned integer, got {other:?}"),
-        }),
+            reason: format!("expected unsigned integer, got {ty:?}"),
+        })
     }
 }
 
@@ -2810,39 +2815,43 @@ fn decode_u32(dec: &mut Decoder, field: &'static str) -> Result<u32, DecodeError
 
 fn decode_canonical_int(dec: &mut Decoder, field: &'static str) -> Result<(), DecodeError> {
     let first = current_byte(dec)?;
-    match dec.datatype()? {
+    let ty = dec.datatype()?;
+    if matches!(
+        ty,
         Type::U8
-        | Type::U16
-        | Type::U32
-        | Type::U64
-        | Type::I8
-        | Type::I16
-        | Type::I32
-        | Type::I64
-        | Type::Int => {
-            let value = dec.int()?;
-            let value = i128::from(value);
-            if value >= 0 {
-                let value = u64::try_from(value).expect("positive int fits in u64");
-                if !canonical_unsigned(first, value) {
-                    return Err(non_canonical_integer(field));
-                }
-            } else {
-                let n = (-1i128 - value) as u64;
-                if !canonical_negative(first, n) {
-                    return Err(non_canonical_integer(field));
-                }
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::Int
+    ) {
+        let value = dec.int()?;
+        let value = i128::from(value);
+        if value >= 0 {
+            let value = u64::try_from(value).expect("positive int fits in u64");
+            if !canonical_unsigned(first, value) {
+                return Err(non_canonical_integer(field));
             }
-            Ok(())
+        } else {
+            let n = (-1i128 - value) as u64;
+            if !canonical_negative(first, n) {
+                return Err(non_canonical_integer(field));
+            }
         }
-        Type::Tag => Err(DecodeError::InvalidField {
+        Ok(())
+    } else if matches!(ty, Type::Tag) {
+        Err(DecodeError::InvalidField {
             field,
             reason: "tagged integer not allowed".into(),
-        }),
-        other => Err(DecodeError::InvalidField {
+        })
+    } else {
+        Err(DecodeError::InvalidField {
             field,
-            reason: format!("expected integer, got {other:?}"),
-        }),
+            reason: format!("expected integer, got {ty:?}"),
+        })
     }
 }
 
@@ -3317,9 +3326,12 @@ pub fn verify_event_frame(
     expected_prev_head: Option<Sha256>,
     lookup: &dyn EventShaLookup,
 ) -> Result<VerifiedEventAny, EventFrameError> {
-    let (_, body) = decode_event_body(frame.bytes().as_ref(), limits).map_err(|err| match err {
-        DecodeError::Validation(source) => EventFrameError::Validation(source),
-        other => EventFrameError::Decode(other),
+    let (_, body) = decode_event_body(frame.bytes().as_ref(), limits).map_err(|err| {
+        if let DecodeError::Validation(source) = err {
+            EventFrameError::Validation(source)
+        } else {
+            EventFrameError::Decode(err)
+        }
     })?;
     let canonical = encode_event_body_canonical(body.as_ref())?;
 

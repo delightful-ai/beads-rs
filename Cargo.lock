@@ -139,6 +139,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "beads-cli"
+version = "0.2.0-alpha"
+dependencies = [
+ "beads-api",
+ "beads-core",
+ "beads-surface",
+ "clap",
+ "dirs",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tracing",
+ "ureq",
+ "uuid",
+ "whoami",
+]
+
+[[package]]
 name = "beads-core"
 version = "0.2.0-alpha"
 dependencies = [
@@ -156,6 +177,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "beads-daemon"
+version = "0.2.0-alpha"
+dependencies = [
+ "beads-api",
+ "beads-core",
+ "beads-surface",
+ "bytes",
+ "crossbeam",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "beads-daemon-core"
+version = "0.2.0-alpha"
+dependencies = [
+ "beads-core",
+ "bytes",
+ "crc32c",
+ "minicbor",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "beads-macros"
 version = "0.2.0-alpha"
 
@@ -165,7 +213,10 @@ version = "0.2.0-alpha"
 dependencies = [
  "assert_cmd",
  "beads-api",
+ "beads-cli",
  "beads-core",
+ "beads-daemon",
+ "beads-daemon-core",
  "beads-macros",
  "beads-surface",
  "bytes",

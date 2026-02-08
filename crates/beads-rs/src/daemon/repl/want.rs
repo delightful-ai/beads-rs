@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::core::{EventFrameV1, Limits, NamespaceId, ReplicaId, Seq0, Seq1};
-use crate::daemon::broadcast::BroadcastEvent;
-use crate::daemon::repl::proto::Want;
 use crate::daemon::repl::runtime::{WalRangeError, WalRangeReader};
+use beads_daemon::broadcast::BroadcastEvent;
+use beads_daemon_core::repl::proto::Want;
 
 type WantKey = (NamespaceId, ReplicaId);
 
@@ -139,7 +139,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{EventBytes, EventId, Opaque, Seq0, Seq1, Sha256};
-    use crate::daemon::repl::proto::WatermarkMap;
+    use beads_daemon_core::repl::proto::WatermarkMap;
 
     fn make_event(namespace: NamespaceId, origin: ReplicaId, seq: u64) -> BroadcastEvent {
         let seq1 = Seq1::from_u64(seq).expect("seq1");

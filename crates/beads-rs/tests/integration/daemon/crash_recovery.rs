@@ -11,7 +11,7 @@ use crate::fixtures::realtime::RealtimeFixture;
 use crate::fixtures::store_lock::unlock_store;
 use beads_rs::api::QueryResult;
 use beads_rs::core::{BeadId, BeadType, NamespaceId, Priority, StoreId, StoreMeta};
-use beads_rs::daemon::ipc::{
+use beads_rs::surface::ipc::{
     CreatePayload, IpcClient, MutationCtx, MutationMeta, Request, Response, ResponsePayload,
 };
 

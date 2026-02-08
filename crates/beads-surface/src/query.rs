@@ -167,7 +167,7 @@ impl Filters {
         if let Some(ref assignee) = self.assignee {
             match &bead.fields.claim.value {
                 Claim::Claimed { assignee: a, .. } if a == assignee => {}
-                _ => return false,
+                Claim::Claimed { .. } | Claim::Unclaimed => return false,
             }
         }
 

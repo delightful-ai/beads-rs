@@ -10,7 +10,7 @@ use crate::fixtures::identity::{
 use crate::fixtures::store_dir::TempStoreDir;
 use uuid::Uuid;
 
-use beads_rs::daemon::remote::normalize_url;
+use beads_daemon::remote::normalize_url;
 use beads_rs::{NamespaceId, StoreId, StoreMeta};
 
 fn write_store_meta(path: &Path, meta: &StoreMeta) -> io::Result<()> {

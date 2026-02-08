@@ -8,7 +8,7 @@ use crate::core::{
     Applied, Durable, HeadStatus, NamespaceId, ReplicaId, Seq0, WatermarkError, Watermarks,
 };
 
-use super::proto::WatermarkState;
+use beads_daemon_core::repl::proto::WatermarkState;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct PeerAckTable {

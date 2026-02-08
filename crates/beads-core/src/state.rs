@@ -650,14 +650,14 @@ impl CanonicalState {
     pub fn iter_live(&self) -> impl Iterator<Item = (&BeadId, &Bead)> {
         self.beads.iter().filter_map(|(id, entry)| match entry {
             BeadEntry::Live(bead) => Some((id, bead.as_ref())),
-            _ => None,
+            BeadEntry::Tombstone(_) => None,
         })
     }
 
     pub fn iter_tombstones(&self) -> impl Iterator<Item = (TombstoneKey, &Tombstone)> {
         let globals = self.beads.iter().filter_map(|(id, entry)| match entry {
             BeadEntry::Tombstone(tomb) => Some((TombstoneKey::global(id.clone()), tomb.as_ref())),
-            _ => None,
+            BeadEntry::Live(_) => None,
         });
         let collisions = self
             .collision_tombstones
@@ -1003,7 +1003,7 @@ impl CanonicalState {
             .iter()
             .filter_map(|(id, entry)| match entry {
                 BeadEntry::Live(_) => self.updated_stamp_for(id).map(|s| s.at.clone()),
-                _ => None,
+                BeadEntry::Tombstone(_) => None,
             })
             .max()
     }
@@ -1269,7 +1269,7 @@ impl CanonicalState {
         let before = self.tombstone_count();
         self.beads.retain(|_, entry| match entry {
             BeadEntry::Tombstone(tomb) => tomb.deleted.at.wall_ms + ttl_ms > now.0,
-            _ => true,
+            BeadEntry::Live(_) => true,
         });
         self.collision_tombstones
             .retain(|_, tomb| tomb.deleted.at.wall_ms + ttl_ms > now.0);

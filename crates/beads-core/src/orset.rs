@@ -532,7 +532,8 @@ fn collision_cmp<V: OrSetValue>(dot: Dot, left: &V, right: &V) -> Ordering {
             let right_hash = dot_value_hash(dot, right);
             left_hash.cmp(&right_hash)
         }
-        other => other,
+        Ordering::Less => Ordering::Less,
+        Ordering::Greater => Ordering::Greater,
     }
 }
 

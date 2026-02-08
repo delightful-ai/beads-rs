@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam::channel::{Receiver, Sender, unbounded};
 
+use beads_daemon_core::repl::proto::{ReplMessage, WireReplEnvelope};
 use beads_rs::Limits;
-use beads_rs::daemon::repl::proto::{ReplMessage, WireReplEnvelope};
 
 use super::repl_frames;
 
@@ -284,7 +284,7 @@ mod tests {
         let received = transport.b.try_recv_message().expect("message");
         assert_eq!(
             received.message,
-            beads_rs::daemon::repl::proto::WireReplMessage::Hello(hello)
+            beads_daemon_core::repl::proto::WireReplMessage::Hello(hello)
         );
     }
 

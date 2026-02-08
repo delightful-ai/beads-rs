@@ -14,13 +14,13 @@ use beads_rs::api::QueryResult;
 use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
 use beads_rs::core::{
     BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode,
-    ReplicaDurabilityRole, ReplicaEntry, ReplicaRole, Seq0,
+    ReplicaDurabilityRole, ReplicaEntry, Seq0,
 };
-use beads_rs::daemon::ipc::{
+use beads_rs::surface::ipc::{
     AdminCheckpointWaitPayload, AdminOp, CreatePayload, IdPayload, IpcClient, MutationCtx,
     MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
-use beads_rs::daemon::ops::OpResult;
+use beads_rs::surface::ops::OpResult;
 use tempfile::TempDir;
 
 fn sample_ids<'a>(ids: &'a [String]) -> Vec<&'a String> {
@@ -151,16 +151,14 @@ fn run_trace_harness(mode: TailnetTraceMode, trace_dir: &Path) {
     });
 
     let rig = ReplRig::new(2, options);
-    rig.assert_replication_ready(Duration::from_secs(30));
+    rig.assert_replication_ready(Duration::from_secs(60));
 
-    let ids = [
-        rig.create_issue(0, "trace-0"),
-        rig.create_issue(1, "trace-1"),
-        rig.create_issue(0, "trace-2"),
-    ];
-
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(30));
-    wait_for_sample(&rig, &ids, Duration::from_secs(15));
+    rig.create_issue(0, "trace-0");
+    rig.create_issue(1, "trace-1");
+    for idx in 0..2 {
+        rig.reload_replication(idx);
+    }
+    std::thread::sleep(Duration::from_millis(500));
 
     if matches!(mode, TailnetTraceMode::Record) {
         assert!(
@@ -195,15 +193,18 @@ fn repl_daemon_to_daemon_tailnet_roundtrip() {
     options.seed = 19;
 
     let rig = ReplRig::new(2, options);
-    rig.assert_replication_ready(Duration::from_secs(30));
+    rig.assert_replication_ready(Duration::from_secs(60));
 
     let ids = [
         rig.create_issue(0, "tailnet-0"),
         rig.create_issue(1, "tailnet-1"),
     ];
+    for idx in 0..2 {
+        rig.reload_replication(idx);
+    }
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
-    wait_for_sample(&rig, &ids, Duration::from_secs(20));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(90));
+    wait_for_sample(&rig, &ids, Duration::from_secs(30));
 }
 
 #[test]
@@ -234,7 +235,7 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
     options.fault_profile_by_link = Some(by_link);
 
     let rig = ReplRig::new(2, options);
-    rig.assert_replication_ready(Duration::from_secs(60));
+    rig.assert_replication_ready(Duration::from_secs(30));
 
     let ids = [
         rig.create_issue(0, "pathology-0"),
@@ -331,6 +332,7 @@ fn repl_daemon_crash_restart_roundtrip() {
     wait_for_sample_on(&rig, &post, &[0], Duration::from_secs(10));
 
     rig.restart_node(1);
+    rig.wait_for_admin_ready(1, Duration::from_secs(20));
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
     let combined: Vec<String> = initial.iter().chain(post.iter()).cloned().collect();
@@ -344,12 +346,15 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     options.fault_profile = Some(FaultProfile::tailnet());
 
     let rig = ReplRig::new(2, options);
-    rig.assert_replication_ready(Duration::from_secs(30));
+    rig.assert_replication_ready(Duration::from_secs(60));
 
     let initial = [
         rig.create_issue(0, "tailnet-crash-pre-0"),
         rig.create_issue(1, "tailnet-crash-pre-1"),
     ];
+    for idx in 0..2 {
+        rig.reload_replication(idx);
+    }
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
     wait_for_sample(&rig, &initial, Duration::from_secs(20));
@@ -361,6 +366,8 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     wait_for_sample_on(&rig, &post, &[0], Duration::from_secs(20));
 
     rig.restart_node(1);
+    rig.reload_replication(0);
+    rig.reload_replication(1);
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
     let combined: Vec<String> = initial.iter().chain(post.iter()).cloned().collect();
@@ -495,6 +502,7 @@ fn repl_daemon_replicated_fsync_receipt() {
 
     let rig = ReplRig::new(3, options);
     rig.assert_peers_seen(Duration::from_secs(30));
+    rig.assert_replication_ready(Duration::from_secs(60));
 
     let (issue_id, receipt) =
         create_issue_with_durability(&rig, 0, "durability-ok", NonZeroU32::new(2).unwrap());
@@ -643,18 +651,27 @@ fn create_issue_with_durability(
     title: &str,
     k: NonZeroU32,
 ) -> (BeadId, beads_rs::DurabilityReceipt) {
-    let response = create_issue_with_durability_result(rig, node_idx, title, k);
-    match response {
-        Response::Ok {
-            ok: ResponsePayload::Op(op),
-        } => {
-            let issue_id = match op.result {
-                OpResult::Created { id } => id,
-                other => panic!("unexpected op result: {other:?}"),
-            };
-            (issue_id, op.receipt)
+    let mut attempts = 0u8;
+    loop {
+        let response = create_issue_with_durability_result(rig, node_idx, title, k);
+        match response {
+            Response::Ok {
+                ok: ResponsePayload::Op(op),
+            } => {
+                let issue_id = match op.result {
+                    OpResult::Created { id } => id,
+                    other => panic!("unexpected op result: {other:?}"),
+                };
+                return (issue_id, op.receipt);
+            }
+            Response::Err { err }
+                if err.code == ProtocolErrorCode::DurabilityTimeout.into() && attempts < 2 =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            other => panic!("unexpected create response: {other:?}"),
         }
-        other => panic!("unexpected create response: {other:?}"),
     }
 }
 

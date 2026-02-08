@@ -9,9 +9,11 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use beads_rs::daemon::repl::proto::WatermarkState;
-use beads_rs::daemon::wal::{ClientRequestEventIds, WalIndex};
-use beads_rs::model::{MemoryWalIndex, MemoryWalIndexSnapshot, PeerAckTable, durability};
+use beads_rs::daemon::repl::WatermarkState;
+use beads_rs::model::{
+    ClientRequestEventIds, DurabilityCoordinator, MemoryWalIndex, MemoryWalIndexSnapshot,
+    PeerAckTable, ReplicatedPoll, WalIndex, durability,
+};
 use beads_rs::{
     Applied, ClientRequestId, DurabilityClass, DurabilityReceipt, Durable, EventId, HeadStatus,
     NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
@@ -424,14 +426,12 @@ fn handle_submit(
                 k,
             )?;
             match poll {
-                beads_rs::daemon::durability_coordinator::ReplicatedPoll::Satisfied {
-                    acked_by,
-                } => {
+                ReplicatedPoll::Satisfied { acked_by } => {
                     let achieved =
                         durability::achieved_receipt(receipt, durability.to_class(), k, acked_by);
                     send_receipt(o, request_id, achieved, ResponseKind::Ok);
                 }
-                beads_rs::daemon::durability_coordinator::ReplicatedPoll::Pending { .. } => {
+                ReplicatedPoll::Pending { .. } => {
                     state.pending = Some(PendingRequest {
                         request_id,
                         durability,
@@ -494,9 +494,7 @@ fn resolve_pending(
                     k,
                 )?;
                 match poll {
-                    beads_rs::daemon::durability_coordinator::ReplicatedPoll::Satisfied {
-                        acked_by,
-                    } => {
+                    ReplicatedPoll::Satisfied { acked_by } => {
                         let achieved = durability::achieved_receipt(
                             receipt,
                             pending.durability.to_class(),
@@ -505,9 +503,7 @@ fn resolve_pending(
                         );
                         send_receipt(o, pending.request_id, achieved, ResponseKind::Ok);
                     }
-                    beads_rs::daemon::durability_coordinator::ReplicatedPoll::Pending {
-                        ..
-                    } => {
+                    ReplicatedPoll::Pending { .. } => {
                         state.pending = Some(pending);
                         o.set_timer(Timer::DurabilityWait, model_timeout());
                     }
@@ -561,8 +557,13 @@ fn build_receipt(
         if row.request_sha256 != request_sha {
             return Err(());
         }
-        let max_seq = row.event_ids.max_seq();
-        (row.txn_id, row.event_ids, row.created_at_ms, max_seq)
+        let event_ids = row.event_ids;
+        let max_seq = event_ids
+            .event_ids()
+            .last()
+            .map(|id| id.origin_seq)
+            .ok_or(())?;
+        (row.txn_id, event_ids, row.created_at_ms, max_seq)
     } else {
         let mut txn = index.writer().begin_txn().map_err(|_| ())?;
         let seq = txn
@@ -627,9 +628,9 @@ fn poll_replicated(
     origin: ReplicaId,
     seq: Seq1,
     k: NonZeroU32,
-) -> Result<beads_rs::daemon::durability_coordinator::ReplicatedPoll, ()> {
+) -> Result<ReplicatedPoll, ()> {
     let arc = Arc::new(Mutex::new(peer_acks.clone()));
-    let coordinator = beads_rs::daemon::durability_coordinator::DurabilityCoordinator::new(
+    let coordinator = DurabilityCoordinator::new(
         cfg.local_replica,
         cfg.policies.clone(),
         Some(cfg.roster.clone()),

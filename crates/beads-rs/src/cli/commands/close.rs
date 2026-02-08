@@ -1,9 +1,9 @@
 use clap::Args;
 
-use super::super::validation::normalize_bead_id;
 use super::super::{Ctx, print_line, print_ok, send};
 use crate::Result;
-use crate::daemon::ipc::{ClosePayload, Request};
+use beads_cli::validation::normalize_bead_id;
+use beads_surface::ipc::{ClosePayload, Request};
 
 #[derive(Args, Debug)]
 pub struct CloseArgs {

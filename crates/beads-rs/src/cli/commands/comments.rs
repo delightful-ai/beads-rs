@@ -1,11 +1,11 @@
 use clap::{Args, Subcommand};
 
-use super::super::validation::{normalize_bead_id, validation_error};
 use super::super::{Ctx, print_line, print_ok, send};
 use super::fmt_wall_ms;
 use crate::Result;
 use crate::api::QueryResult;
-use crate::daemon::ipc::{AddNotePayload, IdPayload, Request, ResponsePayload};
+use beads_cli::validation::{normalize_bead_id, validation_error};
+use beads_surface::ipc::{AddNotePayload, IdPayload, Request, ResponsePayload};
 
 #[derive(Args, Debug)]
 pub struct CommentsArgs {
@@ -71,7 +71,7 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
         let mut s = String::new();
         std::io::stdin()
             .read_to_string(&mut s)
-            .map_err(crate::daemon::IpcError::from)?;
+            .map_err(beads_surface::IpcError::from)?;
         s.trim().to_string()
     };
 

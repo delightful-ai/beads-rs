@@ -1,20 +1,19 @@
 use clap::Args;
 
-use super::super::validation::{
-    normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
-};
 use super::super::{Ctx, fetch_issue, print_line, print_ok, resolve_description, send};
 use crate::Result;
 use crate::api::QueryResult;
-use crate::cli::parsers::{parse_bead_type, parse_priority, parse_status as parse_status_arg};
 use crate::core::{BeadType, Priority};
 use crate::core::{DepKind, WorkflowStatus};
-use crate::daemon::ipc::{
+use beads_cli::parsers::{parse_bead_type, parse_priority};
+use beads_cli::validation::{
+    normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
+};
+use beads_surface::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, DepPayload, IdPayload, LabelsPayload,
     ParentPayload, Request, ResponsePayload, UpdatePayload,
 };
-use crate::daemon::ops::BeadPatchDaemonExt;
-use beads_surface::ops::{BeadPatch, OpenInProgress, Patch};
+use beads_surface::ops::{BeadPatch, BeadPatchValidationError, OpenInProgress, Patch};
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -103,10 +102,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     let remove_labels = std::mem::take(&mut args.remove_label);
 
     if close_reason.is_some() && !status_closed {
-        return Err(validation_error(
-            "reason",
-            "--reason requires --status=closed",
-        ));
+        return Err(validation_error("reason", "--reason requires --status=closed").into());
     }
 
     let parent_action = if args.no_parent {
@@ -170,7 +166,9 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     }
 
     if !patch.is_empty() {
-        patch.validate_for_daemon()?;
+        patch
+            .validate_for_update()
+            .map_err(map_patch_validation_error)?;
         let req = Request::Update {
             ctx: ctx.mutation_ctx(),
             payload: UpdatePayload {
@@ -264,7 +262,8 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
                 return Err(validation_error(
                     "assignee",
                     "cannot assign other actors; run bd as that actor",
-                ));
+                )
+                .into());
             }
             let req = Request::Claim {
                 ctx: ctx.mutation_ctx(),
@@ -318,7 +317,23 @@ fn normalize_reason(reason: Option<String>) -> Option<String> {
     })
 }
 
+fn map_patch_validation_error(err: BeadPatchValidationError) -> crate::Error {
+    match err {
+        BeadPatchValidationError::RequiredFieldCleared { field } => {
+            validation_error(field.as_str(), "cannot clear required field").into()
+        }
+        BeadPatchValidationError::RequiredFieldEmpty { field } => {
+            validation_error(field.as_str(), "cannot set required field to empty").into()
+        }
+    }
+}
+
 fn parse_status(raw: &str) -> Result<WorkflowStatus> {
     WorkflowStatus::parse(raw)
         .ok_or_else(|| validation_error("status", format!("unknown status {raw:?}")))
+        .map_err(Into::into)
+}
+
+fn parse_status_arg(raw: &str) -> std::result::Result<String, String> {
+    Ok(beads_cli::parsers::parse_status(raw))
 }

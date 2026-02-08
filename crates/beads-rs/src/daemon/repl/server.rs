@@ -20,15 +20,10 @@ use crate::core::{
     ProtocolErrorCode, ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
     VerifiedEventFrame,
 };
-use crate::daemon::admission::AdmissionController;
-use crate::daemon::broadcast::{
-    BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
-};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
-use crate::daemon::repl::proto::{Events, PROTOCOL_VERSION_V1, Want, WatermarkState};
 use crate::daemon::repl::session::{
     Inbound, InboundConnecting, Session, SessionState, SessionWire, Streaming, StreamingLive,
     handle_inbound_message,
@@ -40,6 +35,11 @@ use crate::daemon::repl::{
     WireReplMessage, decode_envelope, decode_envelope_with_version, encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
+use beads_daemon::admission::AdmissionController;
+use beads_daemon::broadcast::{
+    BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
+};
+use beads_daemon_core::repl::proto::{Events, PROTOCOL_VERSION_V1, Want, WatermarkState};
 
 #[derive(Clone)]
 pub struct ReplicationServerConfig {
@@ -173,7 +173,7 @@ enum ConnectionError {
     #[error("frame error: {0}")]
     Frame(#[from] FrameError),
     #[error("encode error: {0}")]
-    Encode(#[from] crate::daemon::repl::proto::ProtoEncodeError),
+    Encode(#[from] beads_daemon_core::repl::proto::ProtoEncodeError),
     #[error("event frame error: {0}")]
     EventFrame(#[from] EventFrameError),
     #[error("broadcast error: {0}")]
@@ -1273,9 +1273,9 @@ mod tests {
         Applied, Durable, EventId, HeadStatus, NamespacePolicy, Seq0, Sha256, StoreEpoch, StoreId,
         Watermark,
     };
-    use crate::daemon::broadcast::BroadcasterLimits;
-    use crate::daemon::repl::proto::{Capabilities, Hello};
     use crate::daemon::repl::{ContiguousBatch, IngestOutcome, ReplError, WatermarkSnapshot};
+    use beads_daemon::broadcast::BroadcasterLimits;
+    use beads_daemon_core::repl::proto::{Capabilities, Hello};
 
     #[derive(Default)]
     struct TestStore;

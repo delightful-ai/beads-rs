@@ -1,12 +1,12 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::validation::normalize_bead_id;
 use super::super::{Ctx, print_json, print_line, print_ok, send};
 use super::fmt_issue_ref;
 use crate::Result;
 use crate::api::QueryResult;
-use crate::daemon::ipc::{ClosePayload, EpicStatusPayload, Request, ResponsePayload};
+use beads_cli::validation::normalize_bead_id;
+use beads_surface::ipc::{ClosePayload, EpicStatusPayload, Request, ResponsePayload};
 
 #[derive(Subcommand, Debug)]
 pub enum EpicCmd {

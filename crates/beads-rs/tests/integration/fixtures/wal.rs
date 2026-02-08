@@ -7,16 +7,15 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+use super::daemon_boundary::wal::{
+    EventWalError, EventWalResult, FRAME_HEADER_LEN, IndexDurabilityMode, RecordHeader,
+    RequestProof, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentWriter,
+    SqliteWalIndex, VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError, encode_frame,
+};
 use beads_rs::core::{
     ActorId, Canonical, ClientRequestId, EventBody, EventBytes, EventKindV1, HlcMax, Limits,
     NamespaceId, ReplicaId, Seq1, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnDeltaV1,
     TxnId, TxnV1, ValidatedEventBody, encode_event_body_canonical,
-};
-use beads_rs::daemon::wal::frame::encode_frame;
-use beads_rs::daemon::wal::{
-    EventWalError, EventWalResult, FRAME_HEADER_LEN, IndexDurabilityMode, RecordHeader,
-    RequestProof, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentWriter,
-    SqliteWalIndex, VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError,
 };
 
 use super::identity;

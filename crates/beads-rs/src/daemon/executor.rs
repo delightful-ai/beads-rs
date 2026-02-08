@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::Sender;
 
-use super::broadcast::BroadcastEvent;
 use super::core::{Daemon, HandleOutcome, ParsedMutationMeta, detect_clock_skew};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::git_worker::GitOp;
@@ -28,7 +27,7 @@ use super::mutation_engine::{
     SequencedEvent, StampedContext,
 };
 use super::ops::OpError;
-use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
+use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
     SegmentRow, VerifiedRecord, WalIndex, WalIndexError, WalIndexTxn, WalReplayError,
@@ -45,6 +44,7 @@ use crate::core::{
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
 use crate::paths;
+use beads_daemon::broadcast::BroadcastEvent;
 use beads_surface::ops::OpResult;
 
 #[derive(Debug)]
@@ -519,7 +519,7 @@ impl Daemon {
                     Err(err) => return Err(err),
                 }
             }
-            _ => MutationOutcome::Immediate(response),
+            DurabilityClass::LocalFsync => MutationOutcome::Immediate(response),
         };
 
         tracing::info!("mutation committed");
@@ -936,7 +936,7 @@ fn try_reuse_idempotent_response(
                 Err(err) => return Err(err),
             }
         }
-        _ => MutationOutcome::Immediate(response),
+        DurabilityClass::LocalFsync => MutationOutcome::Immediate(response),
     };
 
     let span = tracing::info_span!(
@@ -1170,10 +1170,10 @@ mod tests {
     use crate::daemon::Daemon;
     use crate::daemon::core::{HandleOutcome, insert_store_for_tests};
     use crate::daemon::ipc::{MutationMeta, Request};
-    use crate::daemon::remote::RemoteUrl;
     use crate::daemon::wal::{
         IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
     };
+    use beads_daemon::remote::RemoteUrl;
     use tracing::Subscriber;
     use tracing::field::{Field, Visit};
     use tracing_subscriber::layer::{Context, SubscriberExt};
@@ -1214,7 +1214,7 @@ mod tests {
         now: Arc<AtomicU64>,
     }
 
-    impl crate::daemon::clock::TimeSource for FixedTimeSource {
+    impl beads_daemon::clock::TimeSource for FixedTimeSource {
         fn now_ms(&self) -> u64 {
             self.now.load(Ordering::SeqCst)
         }
@@ -1361,7 +1361,7 @@ mod tests {
 
         let mut daemon = Daemon::new(actor_id("trace@test"));
         let store_id = StoreId::new(Uuid::from_bytes([5u8; 16]));
-        let remote = RemoteUrl("example.com/test/repo".into());
+        let remote = RemoteUrl::new("example.com/test/repo");
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
 
         let spans = Arc::new(Mutex::new(Vec::new()));

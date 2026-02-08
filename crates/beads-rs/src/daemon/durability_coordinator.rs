@@ -240,7 +240,7 @@ mod tests {
         Durable, HeadStatus, NamespaceId, ReplicaDurabilityRole, Seq0, StoreEpoch, StoreId,
         StoreIdentity, Watermark,
     };
-    use crate::daemon::repl::proto::WatermarkState;
+    use beads_daemon_core::repl::proto::WatermarkState;
     use uuid::Uuid;
 
     fn replica(seed: u128) -> ReplicaId {

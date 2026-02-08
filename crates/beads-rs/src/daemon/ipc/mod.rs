@@ -12,4 +12,4 @@ pub use beads_core::{ErrorCode, ErrorPayload, IntoErrorPayload};
 
 // Daemon-only additions.
 mod error_mapping;
-pub use error_mapping::ResponseExt;
+pub(crate) use error_mapping::ResponseExt;

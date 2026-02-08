@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use beads_core::{BeadId, BeadType, Priority, WallClock, WorkflowStatus};
 
@@ -93,6 +94,32 @@ impl From<OpenInProgress> for WorkflowStatus {
 // BeadPatch - Partial update for bead fields
 // =============================================================================
 
+/// Required `BeadPatch` fields that may be updated but never cleared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequiredPatchField {
+    Title,
+    Description,
+}
+
+impl RequiredPatchField {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RequiredPatchField::Title => "title",
+            RequiredPatchField::Description => "description",
+        }
+    }
+}
+
+/// Typed validation failures for update patch semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum BeadPatchValidationError {
+    #[error("cannot clear required field")]
+    RequiredFieldCleared { field: RequiredPatchField },
+
+    #[error("cannot set required field to empty")]
+    RequiredFieldEmpty { field: RequiredPatchField },
+}
+
 /// Partial update for bead fields.
 ///
 /// All fields default to `Keep`, meaning no change.
@@ -144,6 +171,53 @@ impl BeadPatch {
             && self.source_repo.is_keep()
             && self.estimated_minutes.is_keep()
             && self.status.is_keep()
+    }
+
+    /// Validate patch semantics for update operations.
+    pub fn validate_for_update(&self) -> Result<(), BeadPatchValidationError> {
+        validate_required_patch_field(RequiredPatchField::Title, &self.title)?;
+        validate_required_patch_field(RequiredPatchField::Description, &self.description)?;
+        Ok(())
+    }
+
+    /// Normalize required string fields by trimming whitespace.
+    pub fn normalize_for_update(&mut self) -> Result<(), BeadPatchValidationError> {
+        normalize_required_patch_field(RequiredPatchField::Title, &mut self.title)?;
+        normalize_required_patch_field(RequiredPatchField::Description, &mut self.description)?;
+        Ok(())
+    }
+}
+
+fn validate_required_patch_field(
+    field: RequiredPatchField,
+    patch: &Patch<String>,
+) -> Result<(), BeadPatchValidationError> {
+    match patch {
+        Patch::Clear => Err(BeadPatchValidationError::RequiredFieldCleared { field }),
+        Patch::Set(value) if value.trim().is_empty() => {
+            Err(BeadPatchValidationError::RequiredFieldEmpty { field })
+        }
+        Patch::Set(_) | Patch::Keep => Ok(()),
+    }
+}
+
+fn normalize_required_patch_field(
+    field: RequiredPatchField,
+    patch: &mut Patch<String>,
+) -> Result<(), BeadPatchValidationError> {
+    match patch {
+        Patch::Set(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(BeadPatchValidationError::RequiredFieldEmpty { field });
+            }
+            if trimmed.len() != value.len() {
+                *value = trimmed.to_string();
+            }
+            Ok(())
+        }
+        Patch::Clear => Err(BeadPatchValidationError::RequiredFieldCleared { field }),
+        Patch::Keep => Ok(()),
     }
 }
 
@@ -208,6 +282,98 @@ mod tests {
         assert_eq!(
             Patch::Set("new".to_string()).apply(current),
             Some("new".to_string())
+        );
+    }
+
+    #[test]
+    fn bead_patch_validation_rejects_required_field_clear() {
+        let mut patch = BeadPatch::default();
+        patch.title = Patch::Clear;
+
+        assert_eq!(
+            patch.validate_for_update(),
+            Err(BeadPatchValidationError::RequiredFieldCleared {
+                field: RequiredPatchField::Title
+            })
+        );
+    }
+
+    #[test]
+    fn bead_patch_validation_rejects_required_field_empty() {
+        let mut patch = BeadPatch::default();
+        patch.description = Patch::Set("   ".to_string());
+
+        assert_eq!(
+            patch.validate_for_update(),
+            Err(BeadPatchValidationError::RequiredFieldEmpty {
+                field: RequiredPatchField::Description
+            })
+        );
+    }
+
+    #[test]
+    fn bead_patch_validation_rejects_description_clear() {
+        let mut patch = BeadPatch::default();
+        patch.description = Patch::Clear;
+
+        assert_eq!(
+            patch.validate_for_update(),
+            Err(BeadPatchValidationError::RequiredFieldCleared {
+                field: RequiredPatchField::Description
+            })
+        );
+    }
+
+    #[test]
+    fn bead_patch_validation_allows_optional_field_clear() {
+        let patch = BeadPatch {
+            design: Patch::Clear,
+            acceptance_criteria: Patch::Set("done".to_string()),
+            ..BeadPatch::default()
+        };
+
+        assert_eq!(patch.validate_for_update(), Ok(()));
+    }
+
+    #[test]
+    fn bead_patch_normalization_trims_required_fields() {
+        let mut patch = BeadPatch {
+            title: Patch::Set("  title  ".to_string()),
+            description: Patch::Set("\tdesc\t".to_string()),
+            ..BeadPatch::default()
+        };
+
+        patch
+            .normalize_for_update()
+            .expect("normalization succeeds");
+
+        assert_eq!(patch.title, Patch::Set("title".to_string()));
+        assert_eq!(patch.description, Patch::Set("desc".to_string()));
+    }
+
+    #[test]
+    fn bead_patch_normalization_rejects_required_field_clear() {
+        let mut patch = BeadPatch::default();
+        patch.title = Patch::Clear;
+
+        assert_eq!(
+            patch.normalize_for_update(),
+            Err(BeadPatchValidationError::RequiredFieldCleared {
+                field: RequiredPatchField::Title
+            })
+        );
+    }
+
+    #[test]
+    fn bead_patch_normalization_rejects_whitespace_only_required_field() {
+        let mut patch = BeadPatch::default();
+        patch.title = Patch::Set(" \t ".to_string());
+
+        assert_eq!(
+            patch.normalize_for_update(),
+            Err(BeadPatchValidationError::RequiredFieldEmpty {
+                field: RequiredPatchField::Title
+            })
         );
     }
 }

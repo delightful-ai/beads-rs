@@ -83,7 +83,7 @@ impl Claim {
             Self::Claimed {
                 expires: Some(exp), ..
             } => *exp < now,
-            _ => false,
+            Self::Claimed { expires: None, .. } | Self::Unclaimed => false,
         }
     }
 
@@ -138,7 +138,7 @@ impl Workflow {
     pub fn closure(&self) -> Option<&Closure> {
         match self {
             Self::Closed(c) => Some(c),
-            _ => None,
+            Self::Open | Self::InProgress => None,
         }
     }
 

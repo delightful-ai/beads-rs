@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command as StdCommand;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
@@ -56,10 +57,18 @@ impl DaemonFixture {
     }
 
     fn store_id(&self) -> beads_rs::StoreId {
-        let remote_str = self.remote_dir.path().to_str().expect("remote path");
-        let normalized = beads_rs::daemon::remote::normalize_url(remote_str);
-        let store_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, normalized.as_bytes());
-        beads_rs::StoreId::new(store_uuid)
+        let stores_dir = self.data_dir().join("stores");
+        let mut entries: Vec<PathBuf> = fs::read_dir(&stores_dir)
+            .expect("read stores dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        entries.sort();
+        assert_eq!(entries.len(), 1, "expected exactly one store dir");
+        let meta_path = entries.remove(0).join("meta.json");
+        let contents = fs::read_to_string(&meta_path).expect("read store meta");
+        let meta: beads_rs::StoreMeta = serde_json::from_str(&contents).expect("parse store meta");
+        meta.store_id()
     }
 
     fn data_dir(&self) -> PathBuf {
@@ -272,6 +281,7 @@ fn test_concurrent_restart_safety() {
     let runtime_path = fixture.runtime_dir.path().to_path_buf();
     let repo_path = fixture.repo_dir.path().to_path_buf();
     let data_path = fixture.data_dir();
+    let bd_bin = PathBuf::from(assert_cmd::cargo::cargo_bin!("bd"));
 
     let handles: Vec<_> = (0..n_clients)
         .map(|_| {
@@ -279,20 +289,29 @@ fn test_concurrent_restart_safety() {
             let runtime_path = runtime_path.clone();
             let repo_path = repo_path.clone();
             let data_path = data_path.clone();
+            let bd_bin = bd_bin.clone();
             std::thread::spawn(move || {
                 barrier.wait(); // Start all at once
-                let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-                cmd.current_dir(&repo_path);
-                cmd.env("XDG_RUNTIME_DIR", &runtime_path);
-                cmd.env("BD_WAL_DIR", &runtime_path);
-                cmd.env("BD_DATA_DIR", &data_path);
-                cmd.env("BD_NO_AUTO_UPGRADE", "1");
-                cmd.env("BD_TESTING", "1");
-                cmd.env("BD_TEST_FAST", "1");
-                cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
-                cmd.env("BD_WAL_SYNC_MODE", "none");
-                cmd.args(["status"]).assert().success();
+                let output = StdCommand::new(&bd_bin)
+                    .current_dir(&repo_path)
+                    .env("XDG_RUNTIME_DIR", &runtime_path)
+                    .env("BD_WAL_DIR", &runtime_path)
+                    .env("BD_DATA_DIR", &data_path)
+                    .env("BD_NO_AUTO_UPGRADE", "1")
+                    .env("BD_TESTING", "1")
+                    .env("BD_TEST_FAST", "1")
+                    .env("BD_TEST_DISABLE_GIT_SYNC", "1")
+                    .env("BD_TEST_DISABLE_CHECKPOINTS", "1")
+                    .env("BD_WAL_SYNC_MODE", "none")
+                    .arg("status")
+                    .output()
+                    .expect("spawn bd status");
+                assert!(
+                    output.status.success(),
+                    "bd status failed: stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
             })
         })
         .collect();
@@ -319,6 +338,7 @@ fn test_thundering_herd_single_daemon() {
     let runtime_path = fixture.runtime_dir.path().to_path_buf();
     let repo_path = fixture.repo_dir.path().to_path_buf();
     let data_path = fixture.data_dir();
+    let bd_bin = PathBuf::from(assert_cmd::cargo::cargo_bin!("bd"));
 
     // All clients try to start at once
     let handles: Vec<_> = (0..n_clients)
@@ -327,20 +347,29 @@ fn test_thundering_herd_single_daemon() {
             let runtime_path = runtime_path.clone();
             let repo_path = repo_path.clone();
             let data_path = data_path.clone();
+            let bd_bin = bd_bin.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-                cmd.current_dir(&repo_path);
-                cmd.env("XDG_RUNTIME_DIR", &runtime_path);
-                cmd.env("BD_WAL_DIR", &runtime_path);
-                cmd.env("BD_DATA_DIR", &data_path);
-                cmd.env("BD_NO_AUTO_UPGRADE", "1");
-                cmd.env("BD_TESTING", "1");
-                cmd.env("BD_TEST_FAST", "1");
-                cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
-                cmd.env("BD_WAL_SYNC_MODE", "none");
-                cmd.arg("init").assert().success();
+                let output = StdCommand::new(&bd_bin)
+                    .current_dir(&repo_path)
+                    .env("XDG_RUNTIME_DIR", &runtime_path)
+                    .env("BD_WAL_DIR", &runtime_path)
+                    .env("BD_DATA_DIR", &data_path)
+                    .env("BD_NO_AUTO_UPGRADE", "1")
+                    .env("BD_TESTING", "1")
+                    .env("BD_TEST_FAST", "1")
+                    .env("BD_TEST_DISABLE_GIT_SYNC", "1")
+                    .env("BD_TEST_DISABLE_CHECKPOINTS", "1")
+                    .env("BD_WAL_SYNC_MODE", "none")
+                    .arg("init")
+                    .output()
+                    .expect("spawn bd init");
+                assert!(
+                    output.status.success(),
+                    "bd init failed: stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
             })
         })
         .collect();

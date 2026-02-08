@@ -3,20 +3,24 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::Duration;
 
-use beads_rs::daemon::ipc::{Request, Response};
+use beads_daemon::test_utils::{daemon_meta_path, daemon_socket_path, poll_until_with_backoff};
+use beads_rs::surface::ipc::{Request, Response};
 
 /// Best-effort daemon shutdown for tests.
 ///
 /// Idempotent: missing socket or meta -> Ok.
 pub fn shutdown_daemon(runtime_dir: &Path) {
-    let socket = socket_path(runtime_dir);
-    let meta = meta_path(runtime_dir);
-    let _ = poll_until(Duration::from_millis(200), || {
-        socket.exists() || meta.exists()
-    });
+    let socket = daemon_socket_path(runtime_dir);
+    let meta = daemon_meta_path(runtime_dir);
+    let _ = poll_until_with_backoff(
+        Duration::from_millis(200),
+        Duration::from_millis(5),
+        Duration::from_millis(50),
+        || socket.exists() || meta.exists(),
+    );
 
     if socket.exists() {
         if let Ok(mut stream) = UnixStream::connect(&socket) {
@@ -50,22 +54,19 @@ pub fn crash_daemon(runtime_dir: &Path) {
     }
 }
 
-fn socket_path(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join("beads").join("daemon.sock")
-}
-
-fn meta_path(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join("beads").join("daemon.meta.json")
-}
-
 fn daemon_pid(runtime_dir: &Path) -> Option<u32> {
-    let contents = fs::read_to_string(meta_path(runtime_dir)).ok()?;
+    let contents = fs::read_to_string(daemon_meta_path(runtime_dir)).ok()?;
     let meta: serde_json::Value = serde_json::from_str(&contents).ok()?;
     meta["pid"].as_u64().map(|pid| pid as u32)
 }
 
 fn wait_for_socket_removal(socket: &Path, timeout: Duration) {
-    let _ = poll_until(timeout, || !socket.exists());
+    let _ = poll_until_with_backoff(
+        timeout,
+        Duration::from_millis(5),
+        Duration::from_millis(50),
+        || !socket.exists(),
+    );
 }
 
 fn terminate_process(pid: u32, timeout: Duration) {
@@ -89,27 +90,16 @@ fn force_kill(pid: u32, timeout: Duration) {
 }
 
 fn wait_for_exit(pid: u32, timeout: Duration) {
-    let _ = poll_until(timeout, || !process_alive(pid));
+    let _ = poll_until_with_backoff(
+        timeout,
+        Duration::from_millis(5),
+        Duration::from_millis(50),
+        || !process_alive(pid),
+    );
 }
 
 fn process_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid as i32), None).is_ok()
-}
-
-fn poll_until<F>(timeout: Duration, mut condition: F) -> bool
-where
-    F: FnMut() -> bool,
-{
-    let deadline = Instant::now() + timeout;
-    let mut backoff = Duration::from_millis(5);
-    while Instant::now() < deadline {
-        if condition() {
-            return true;
-        }
-        std::thread::sleep(backoff);
-        backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(50));
-    }
-    condition()
 }

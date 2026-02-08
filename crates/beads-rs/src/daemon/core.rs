@@ -17,35 +17,35 @@ use git2::{ErrorCode as GitErrorCode, ObjectType, Oid, Repository, TreeWalkMode,
 use thiserror::Error;
 
 use super::Clock;
-use super::broadcast::BroadcastEvent;
 use super::checkpoint_scheduler::{
     CheckpointGroupConfig, CheckpointGroupKey, CheckpointGroupSnapshot, CheckpointScheduler,
 };
 use super::executor::DurabilityWait;
 use super::export_worker::{ExportJob, ExportWorkerHandle};
-use super::git_lane::{
-    ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, GitLaneState,
-};
 use super::git_worker::{GitOp, LoadResult};
 use super::ipc::{ReadConsistency, Response};
 use super::metrics;
 use super::ops::OpError;
-use super::remote::RemoteUrl;
 use super::repl::{
     BackoffPolicy, ContiguousBatch, IngestOutcome, PeerConfig, ReplError, ReplErrorDetails,
     ReplIngestRequest, ReplSessionStore, ReplicationManager, ReplicationManagerConfig,
     ReplicationManagerHandle, ReplicationServer, ReplicationServerConfig, ReplicationServerHandle,
     SharedSessionStore, WalRangeReader,
 };
-use super::scheduler::SyncScheduler;
 #[cfg(any(test, feature = "test-harness"))]
 use super::store::discovery::{StoreIdResolution, StoreIdSource};
+use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::store::{ResolvedStore, StoreCaches};
-use super::store_runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,
     WalIndex, WalIndexError, WalReplayError, open_segment_reader,
 };
+use beads_daemon::broadcast::BroadcastEvent;
+use beads_daemon::git_lane::{
+    ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, GitLaneState,
+};
+use beads_daemon::remote::RemoteUrl;
+use beads_daemon::scheduler::SyncScheduler;
 
 use crate::compat::ExportContext;
 use crate::config::CheckpointGroupConfig as ConfigCheckpointGroup;
@@ -773,6 +773,7 @@ impl Daemon {
             self.git_lanes.insert(store_id, GitLaneState::new());
             self.register_default_checkpoint_groups(store_id)?;
 
+            let timeout = load_timeout();
             let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
             git_tx
                 .send(GitOp::LoadLocal {
@@ -781,13 +782,12 @@ impl Daemon {
                 })
                 .map_err(|_| OpError::Internal("git thread not responding"))?;
 
-            match respond_rx.recv() {
+            match respond_rx.recv_timeout(timeout) {
                 Ok(Ok(loaded)) => {
                     self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
                 }
                 Ok(Err(SyncError::NoLocalRef(_))) => {
                     // No cached refs; attempt a bounded fetch to discover remote state.
-                    let timeout = load_timeout();
                     let (fetch_tx, fetch_rx) = crossbeam::channel::bounded(1);
                     git_tx
                         .send(GitOp::Load {
@@ -817,7 +817,12 @@ impl Daemon {
                     }
                 }
                 Ok(Err(e)) => return Err(OpError::from(e)),
-                Err(_) => return Err(OpError::Internal("git thread died")),
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                    return Err(OpError::Internal("git thread load-local timed out"));
+                }
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                    return Err(OpError::Internal("git thread died"));
+                }
             }
         } else if let Some(store) = self.stores.get_mut(&store_id) {
             if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
@@ -2725,8 +2730,8 @@ mod tests {
     };
     use crate::daemon::git_worker::LoadResult;
     use crate::daemon::ops::OpResult;
-    use crate::daemon::store_lock::read_lock_meta;
-    use crate::daemon::store_runtime::StoreRuntime;
+    use crate::daemon::store::lock::read_lock_meta;
+    use crate::daemon::store::runtime::StoreRuntime;
     use crate::daemon::wal::frame::encode_frame;
     use crate::daemon::wal::{HlcRow, RecordHeader, RequestProof, SegmentHeader, VerifiedRecord};
     use crate::git::checkpoint::{
@@ -2741,7 +2746,7 @@ mod tests {
     }
 
     fn test_remote() -> RemoteUrl {
-        RemoteUrl("example.com/test/repo".into())
+        RemoteUrl::new("example.com/test/repo")
     }
 
     #[derive(Clone)]
@@ -2990,7 +2995,7 @@ mod tests {
         std::fs::create_dir_all(&repo_path).expect("create repo dir");
 
         let store_id = StoreId::new(Uuid::from_bytes([55u8; 16]));
-        let remote = RemoteUrl("example.com/test/repo".into());
+        let remote = RemoteUrl::new("example.com/test/repo");
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
 
         let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
@@ -3388,7 +3393,7 @@ mod tests {
     fn complete_refresh_unknown_remote_is_noop() {
         let _tmp = test_store_dir();
         let mut daemon = Daemon::new(test_actor());
-        let unknown = RemoteUrl("unknown.com/repo".into());
+        let unknown = RemoteUrl::new("unknown.com/repo");
 
         // Should not panic on unknown remote
         let result = Ok(LoadResult {

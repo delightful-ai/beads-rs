@@ -19,17 +19,10 @@ use crate::core::{
     ProtocolErrorCode, ReplicaId, ReplicaRole, ReplicaRoster, ReplicateMode, Seq0, StoreIdentity,
     VerifiedEventFrame,
 };
-use crate::daemon::admission::AdmissionController;
-use crate::daemon::broadcast::{
-    BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
-};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::daemon::repl::keepalive::{KeepaliveDecision, KeepaliveTracker};
 use crate::daemon::repl::pending::PendingEvents;
-#[cfg(test)]
-use crate::daemon::repl::proto::PROTOCOL_VERSION_V1;
-use crate::daemon::repl::proto::{Events, Want, WatermarkState};
 use crate::daemon::repl::session::{
     Outbound, OutboundConnecting, Session, SessionState, SessionWire, Streaming, StreamingLive,
     handle_outbound_message,
@@ -41,6 +34,13 @@ use crate::daemon::repl::{
     WireReplMessage, decode_envelope, decode_envelope_with_version, encode_envelope,
 };
 use crate::daemon::wal::ReplicaDurabilityRole;
+use beads_daemon::admission::AdmissionController;
+use beads_daemon::broadcast::{
+    BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
+};
+#[cfg(test)]
+use beads_daemon_core::repl::proto::PROTOCOL_VERSION_V1;
+use beads_daemon_core::repl::proto::{Events, Want, WatermarkState};
 
 #[derive(Clone, Debug)]
 pub struct PeerConfig {
@@ -361,7 +361,7 @@ enum PeerError {
     #[error("frame error: {0}")]
     Frame(#[from] FrameError),
     #[error("encode error: {0}")]
-    Encode(#[from] crate::daemon::repl::proto::ProtoEncodeError),
+    Encode(#[from] beads_daemon_core::repl::proto::ProtoEncodeError),
     #[error("event frame error: {0}")]
     EventFrame(#[from] EventFrameError),
     #[error("broadcast error: {0}")]
@@ -1191,8 +1191,8 @@ mod tests {
         Watermark, WireNoteV1, WireStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::daemon::repl::keepalive::KeepaliveTracker;
-    use crate::daemon::repl::proto::Welcome;
     use crate::daemon::repl::{ContiguousBatch, IngestOutcome, ReplError, WatermarkSnapshot};
+    use beads_daemon_core::repl::proto::Welcome;
 
     #[derive(Default)]
     struct TestStore;
@@ -1374,7 +1374,7 @@ mod tests {
             local_store,
             local_replica_id: local_replica,
             admission: AdmissionController::new(&test_limits()),
-            broadcaster: EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+            broadcaster: EventBroadcaster::new(beads_daemon::broadcast::BroadcasterLimits {
                 max_subscribers: 4,
                 hot_cache_max_events: 16,
                 hot_cache_max_bytes: 1024,
@@ -1416,7 +1416,7 @@ mod tests {
         let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, None, None);
         let addr = addr.to_string();
 
-        let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+        let broadcaster = EventBroadcaster::new(beads_daemon::broadcast::BroadcasterLimits {
             max_subscribers: 4,
             hot_cache_max_events: 16,
             hot_cache_max_bytes: 1024,
@@ -1485,7 +1485,7 @@ mod tests {
         let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, None, Some(false));
         let addr = addr.to_string();
 
-        let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+        let broadcaster = EventBroadcaster::new(beads_daemon::broadcast::BroadcasterLimits {
             max_subscribers: 4,
             hot_cache_max_events: 16,
             hot_cache_max_bytes: 1024,
@@ -1744,7 +1744,7 @@ mod tests {
         let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, accepted, None);
         let addr = addr.to_string();
 
-        let broadcaster = EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+        let broadcaster = EventBroadcaster::new(beads_daemon::broadcast::BroadcasterLimits {
             max_subscribers: 4,
             hot_cache_max_events: 16,
             hot_cache_max_bytes: 1024,
@@ -1817,7 +1817,7 @@ mod tests {
             local_store,
             local_replica_id: local_replica,
             admission: AdmissionController::new(&test_limits()),
-            broadcaster: EventBroadcaster::new(crate::daemon::broadcast::BroadcasterLimits {
+            broadcaster: EventBroadcaster::new(beads_daemon::broadcast::BroadcasterLimits {
                 max_subscribers: 4,
                 hot_cache_max_events: 16,
                 hot_cache_max_bytes: 1024,

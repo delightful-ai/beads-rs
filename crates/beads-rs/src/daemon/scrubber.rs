@@ -13,7 +13,7 @@ use crate::api::{
 use crate::core::{Limits, NamespaceId, ReplicaId, SegmentId, Seq0, decode_event_body};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
-use crate::daemon::store_runtime::StoreRuntime;
+use crate::daemon::store::runtime::StoreRuntime;
 use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use crate::daemon::wal::record::{RecordVerifyError, UnverifiedRecord};
 use crate::daemon::wal::segment::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
@@ -1144,7 +1144,7 @@ impl ScrubReportBuilder {
                     AdminHealthCheckId::IndexOffsets => {
                         safe_to_prune_wal = false;
                     }
-                    _ => {}
+                    AdminHealthCheckId::CheckpointCache => {}
                 }
             }
             if check.status != AdminHealthStatus::Pass {

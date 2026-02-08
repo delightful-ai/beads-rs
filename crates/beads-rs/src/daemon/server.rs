@@ -16,7 +16,6 @@ use crossbeam::channel::{Receiver, Sender};
 use tracing::Span;
 
 use super::QueryResult;
-use super::broadcast::{BroadcastEvent, DropReason};
 use super::core::{Daemon, HandleOutcome, ReadGateStatus, ReadScope};
 use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 use super::executor::DurabilityWait;
@@ -26,7 +25,6 @@ use super::ipc::{
     decode_request_with_limits, encode_response, send_response,
 };
 use super::ops::OpError;
-use super::remote::RemoteUrl;
 use super::subscription::{SubscribeReply, prepare_subscription, subscriber_limits};
 use crate::api::{AdminCheckpointGroup, AdminCheckpointOutput};
 use crate::core::error::details as error_details;
@@ -34,6 +32,8 @@ use crate::core::{
     CliErrorCode, DurabilityClass, ErrorPayload, EventFrameV1, EventId, Limits, NamespaceId,
     ProtocolErrorCode, ReplicaId, Sha256, StoreId, decode_event_body,
 };
+use beads_daemon::broadcast::{BroadcastEvent, DropReason};
+use beads_daemon::remote::RemoteUrl;
 
 /// Message sent from socket handlers to state thread.
 pub enum ServerReply {
@@ -1133,7 +1133,7 @@ mod tests {
     use crate::daemon::ipc::OpResponse;
     use crate::daemon::ops::OpResult;
     use crate::daemon::repl::PeerAckTable;
-    use crate::daemon::repl::proto::WatermarkState;
+    use beads_daemon_core::repl::proto::WatermarkState;
 
     struct TestEnv {
         _temp: TempDir,
@@ -1154,7 +1154,7 @@ mod tests {
             let repo_path = temp.path().join("repo");
             std::fs::create_dir_all(&repo_path).unwrap();
             let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
-            let remote = RemoteUrl("example.com/test/repo".into());
+            let remote = RemoteUrl::new("example.com/test/repo");
             insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
             let (git_tx, _git_rx) = crossbeam::channel::unbounded();
 

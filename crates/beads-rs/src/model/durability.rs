@@ -3,8 +3,9 @@
 use std::num::NonZeroU32;
 
 use crate::core::{DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, Seq1};
-use crate::daemon::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
-use crate::daemon::ops::OpError;
+use beads_daemon_core::durability::{DurabilityCoordinator, DurabilityError, ReplicatedPoll};
+
+pub type OpError = DurabilityError;
 
 pub fn poll_replicated(
     coordinator: &DurabilityCoordinator,

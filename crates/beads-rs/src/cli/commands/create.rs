@@ -1,17 +1,17 @@
 use std::io::{BufRead, Write};
 
+use beads_cli::parsers::{parse_bead_type, parse_priority};
+use beads_cli::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
 use clap::Args;
 
-use super::super::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
 use super::super::{
     Ctx, fetch_issue, print_json, print_line, print_ok, resolve_description, send, send_raw,
 };
 use crate::Result;
 use crate::api::QueryResult;
-use crate::cli::parsers::{parse_bead_type, parse_priority};
 use crate::core::{BeadType, Priority};
-use crate::daemon::ipc::{CreatePayload, Request, Response, ResponsePayload};
-use crate::daemon::ops::OpResult;
+use beads_surface::OpResult;
+use beads_surface::ipc::{CreatePayload, Request, Response, ResponsePayload};
 
 #[derive(Args, Debug)]
 pub struct CreateArgs {
@@ -95,10 +95,9 @@ pub struct CreateArgs {
 pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     if let Some(path) = args.file.take() {
         if args.title.is_some() || args.title_flag.is_some() {
-            return Err(validation_error(
-                "create",
-                "cannot specify both title and --file flag",
-            ));
+            return Err(
+                validation_error("create", "cannot specify both title and --file flag").into(),
+            );
         }
         return handle_from_markdown_file(ctx, &path);
     }
@@ -226,7 +225,8 @@ fn resolve_title(positional: Option<String>, flag: Option<String>) -> Result<Str
                     format!(
                         "cannot specify different titles as both positional argument and --title flag (positional={p:?}, --title={f:?})"
                     ),
-                ));
+                )
+                .into());
             }
             Ok(p)
         }
@@ -235,14 +235,15 @@ fn resolve_title(positional: Option<String>, flag: Option<String>) -> Result<Str
         (None, None) => Err(validation_error(
             "title",
             "title required (or use --file to create from markdown)",
-        )),
+        )
+        .into()),
     }
 }
 
 fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     let templates = parse_markdown_file(path)?;
     if templates.is_empty() {
-        return Err(validation_error("file", "no issues found in markdown file"));
+        return Err(validation_error("file", "no issues found in markdown file").into());
     }
 
     let mut created = Vec::new();
@@ -372,7 +373,7 @@ struct CreatedSummary {
 fn parse_markdown_file(path: &std::path::Path) -> Result<Vec<MarkdownIssue>> {
     validate_markdown_path(path)?;
 
-    let file = std::fs::File::open(path).map_err(crate::daemon::IpcError::from)?;
+    let file = std::fs::File::open(path).map_err(beads_surface::IpcError::from)?;
     let reader = std::io::BufReader::new(file);
 
     let mut issues: Vec<MarkdownIssue> = Vec::new();
@@ -381,7 +382,7 @@ fn parse_markdown_file(path: &std::path::Path) -> Result<Vec<MarkdownIssue>> {
     let mut section_buf: Vec<String> = Vec::new();
 
     for line in reader.lines() {
-        let line = line.map_err(crate::daemon::IpcError::from)?;
+        let line = line.map_err(beads_surface::IpcError::from)?;
         let trimmed = line.trim_end();
 
         if let Some(rest) = trimmed.strip_prefix("### ") {
@@ -499,10 +500,9 @@ fn validate_markdown_path(path: &std::path::Path) -> Result<()> {
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
     {
-        return Err(validation_error(
-            "file",
-            "invalid file path: directory traversal not allowed",
-        ));
+        return Err(
+            validation_error("file", "invalid file path: directory traversal not allowed").into(),
+        );
     }
 
     let ext = clean
@@ -514,12 +514,13 @@ fn validate_markdown_path(path: &std::path::Path) -> Result<()> {
         return Err(validation_error(
             "file",
             "invalid file type: only .md and .markdown are supported",
-        ));
+        )
+        .into());
     }
 
-    let meta = std::fs::metadata(&clean).map_err(crate::daemon::IpcError::from)?;
+    let meta = std::fs::metadata(&clean).map_err(beads_surface::IpcError::from)?;
     if meta.is_dir() {
-        return Err(validation_error("file", "path is a directory, not a file"));
+        return Err(validation_error("file", "path is a directory, not a file").into());
     }
 
     Ok(())

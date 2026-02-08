@@ -284,7 +284,7 @@ impl WalIndexError {
                 retryable,
             )
             .with_details(error_details::IndexCorruptDetails { reason: message }),
-            _ => ErrorPayload::new(code, message, retryable),
+            WalIndexError::Io { .. } => ErrorPayload::new(code, message, retryable),
         }
     }
 }

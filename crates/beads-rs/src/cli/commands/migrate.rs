@@ -1,10 +1,10 @@
 use clap::{Args, Subcommand};
 
-use super::super::validation::{normalize_bead_slug_for, validation_error};
 use super::super::{Ctx, print_json};
 use crate::Result;
 use crate::core::FormatVersion;
-use crate::daemon::ipc::{EmptyPayload, Request, send_request};
+use beads_cli::backend::{CliHostBackend, MigrateRefreshRequest};
+use beads_cli::validation::{normalize_bead_slug_for, validation_error};
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
@@ -83,7 +83,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 "migration to format {} not implemented yet (dry_run={}, force={}, no_push={})",
                 args.to, args.dry_run, args.force, args.no_push
             ),
-        )),
+        )
+        .into()),
         MigrateCmd::FromGo(args) => {
             use crate::git::SyncProcess;
 
@@ -94,7 +95,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 .map(|slug| normalize_bead_slug_for("root_slug", slug))
                 .transpose()?;
             let (imported, report) =
-                crate::migrate::import_go_export(&args.input, &actor, root_slug)?;
+                beads_cli::migrate::import_go_export(&args.input, &actor, root_slug)?;
 
             if args.dry_run {
                 let payload = serde_json::json!({
@@ -117,7 +118,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
                 return Err(validation_error(
                     "migrate",
                     "beads/store already exists; use --force to overwrite via merge",
-                ));
+                )
+                .into());
             }
 
             let committed = SyncProcess::new(ctx.repo.clone())
@@ -141,10 +143,9 @@ pub(crate) fn handle(ctx: &Ctx, cmd: MigrateCmd) -> Result<()> {
 
             // Notify daemon to refresh its cached state (if running).
             // Ignore errors - daemon may not be running.
-            let _ = send_request(&Request::Refresh {
-                ctx: ctx.repo_ctx(),
-                payload: EmptyPayload {},
-            });
+            let _ = ctx
+                .backend()
+                .notify_migrate_refresh(MigrateRefreshRequest::new(ctx.repo_ctx()));
 
             let payload = serde_json::json!({
                 "dry_run": false,
