@@ -32,7 +32,6 @@ lint: dylint
         -p beads-daemon-core \
         --all-features -- \
         -D warnings \
-        -D clippy::wildcard_enum_match_arm \
         -D clippy::match_wildcard_for_single_variants \
         -D clippy::wildcard_in_or_patterns
 
