@@ -82,6 +82,7 @@ dependencies = [
  "dylint_testing",
  "rustc-hash",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

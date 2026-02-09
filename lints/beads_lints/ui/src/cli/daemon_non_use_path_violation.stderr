@@ -1,7 +1,8 @@
 warning: CLI reference `crate::daemon::ipc::Request` bypasses the CLI/daemon boundary
-  --> $DIR/daemon_import_violation.rs:LL:CC
+  --> $DIR/daemon_non_use_path_violation.rs:LL:CC
    |
-LL | use crate::daemon::ipc::Request;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL |     let _ = core::mem::size_of::<crate::daemon::ipc::Request>();
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: Import IPC contracts from `beads_surface::ipc` and call transport through a CLI wrapper.
+

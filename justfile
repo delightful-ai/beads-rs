@@ -16,6 +16,7 @@ fmt-check:
 # Run custom dylint lints
 dylint:
     cargo dylint --path lints --pattern beads_lints --all
+    cd lints && cargo test -p beads_lints --test crate_dag_policy
 
 # Run clippy lints
 lint: dylint

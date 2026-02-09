@@ -7,7 +7,11 @@ extern crate rustc_session;
 extern crate rustc_span;
 
 use clippy_utils::diagnostics::span_lint_and_help;
-use rustc_hir::{Item, ItemKind, PathSegment, UseKind};
+use clippy_utils::diagnostics::span_lint_hir_and_then;
+use clippy_utils::source::snippet_opt;
+use rustc_hir::{
+    AmbigArg, Expr, ExprKind, HirId, Item, ItemKind, PathSegment, QPath, Ty, TyKind, UseKind,
+};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::{symbol::kw, Span};
 use std::collections::HashSet;
@@ -30,6 +34,7 @@ rustc_session::impl_lint_pass!(CliDaemonBoundary => [CLI_DAEMON_BOUNDARY]);
 #[derive(Default)]
 pub struct CliDaemonBoundary {
     emitted_at: HashSet<String>,
+    emitted_hir: HashSet<HirId>,
 }
 
 #[unsafe(no_mangle)]
@@ -49,28 +54,91 @@ impl<'tcx> LateLintPass<'tcx> for CliDaemonBoundary {
             return;
         }
 
-        self.maybe_lint_use(cx, path.span, path.segments);
+        self.maybe_lint_use(cx, item.hir_id(), path.span, path.segments);
+    }
+
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        let ExprKind::Path(qpath) = &expr.kind else {
+            return;
+        };
+        self.maybe_lint_qpath(cx, expr.hir_id, expr.span, qpath);
+    }
+
+    fn check_ty(&mut self, cx: &LateContext<'tcx>, ty: &'tcx Ty<'tcx, AmbigArg>) {
+        let TyKind::Path(qpath) = &ty.kind else {
+            return;
+        };
+        self.maybe_lint_qpath(cx, ty.hir_id, ty.span, qpath);
     }
 }
 
 impl CliDaemonBoundary {
-    fn maybe_lint_use(&mut self, cx: &LateContext<'_>, span: Span, segments: &[PathSegment<'_>]) {
+    fn maybe_lint_use(
+        &mut self,
+        cx: &LateContext<'_>,
+        hir_id: HirId,
+        span: Span,
+        segments: &[PathSegment<'_>],
+    ) {
+        self.maybe_lint_path(cx, Some(hir_id), span, segments, true);
+    }
+
+    fn maybe_lint_qpath(
+        &mut self,
+        cx: &LateContext<'_>,
+        hir_id: HirId,
+        span: Span,
+        qpath: &QPath<'_>,
+    ) {
+        let QPath::Resolved(_, path) = qpath else {
+            return;
+        };
+        self.maybe_lint_path(cx, Some(hir_id), span, path.segments, false);
+    }
+
+    fn maybe_lint_path(
+        &mut self,
+        cx: &LateContext<'_>,
+        hir_id: Option<HirId>,
+        span: Span,
+        segments: &[PathSegment<'_>],
+        allow_bare_daemon: bool,
+    ) {
         let (filename, line, column) = file_line_col(cx, span);
         if !is_cli_filename(&filename) {
             return;
         }
+
         let segment_names = segment_names(segments);
-        if !is_daemon_import_path(&segment_names) {
+        let Some((root, child)) = daemon_boundary_match(&segment_names, allow_bare_daemon) else {
+            return;
+        };
+
+        if let Some(hir_id) = hir_id
+            && !self.emitted_hir.insert(hir_id)
+        {
             return;
         }
+
         let key = format!("{filename}:{line}:{column}");
         if !self.emitted_at.insert(key) {
             return;
         }
-        let import_path = segment_names.join("::");
-        let message = format!("CLI import `{import_path}` bypasses the CLI/daemon boundary");
-        let help = daemon_boundary_help(daemon_child_segment(&segment_names));
-        span_lint_and_help(cx, CLI_DAEMON_BOUNDARY, span, message, None, help);
+
+        let import_path = snippet_opt(cx, span)
+            .map(|snippet| snippet.trim().to_owned())
+            .filter(|snippet| !snippet.is_empty())
+            .unwrap_or_else(|| segment_names.join("::"));
+        let message = format!("CLI reference `{import_path}` bypasses the CLI/daemon boundary");
+        let help = daemon_boundary_help(root, child);
+
+        if let Some(hir_id) = hir_id {
+            span_lint_hir_and_then(cx, CLI_DAEMON_BOUNDARY, hir_id, span, message, |diag| {
+                diag.help(help);
+            });
+        } else {
+            span_lint_and_help(cx, CLI_DAEMON_BOUNDARY, span, message, None, help);
+        }
     }
 }
 
@@ -105,33 +173,72 @@ fn is_cli_filename(filename: &str) -> bool {
         || filename.contains("\\crates\\beads-cli\\src\\")
 }
 
+#[cfg(test)]
 fn is_daemon_import_path(segment_names: &[String]) -> bool {
-    daemon_root_index(segment_names).is_some()
+    daemon_boundary_match(segment_names, true).is_some()
 }
 
-fn daemon_root_index(segment_names: &[String]) -> Option<usize> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundaryRoot {
+    Daemon,
+    BeadsDaemon,
+    BeadsDaemonCore,
+}
+
+fn daemon_boundary_match(
+    segment_names: &[String],
+    allow_bare_daemon: bool,
+) -> Option<(BoundaryRoot, Option<&str>)> {
+    let (root, daemon_index) = daemon_root_index(segment_names, allow_bare_daemon)?;
+    let child = segment_names.get(daemon_index + 1).map(String::as_str);
+    Some((root, child))
+}
+
+fn daemon_root_index(
+    segment_names: &[String],
+    allow_bare_daemon: bool,
+) -> Option<(BoundaryRoot, usize)> {
     match segment_names {
-        [first, second, ..] if first == "crate" && second == "daemon" => Some(1),
-        [first, ..] if first == "daemon" => Some(0),
+        [first, second, ..] if first == "crate" && second == "daemon" => {
+            Some((BoundaryRoot::Daemon, 1))
+        }
+        [first, ..] if allow_bare_daemon && first == "daemon" => Some((BoundaryRoot::Daemon, 0)),
+        [first, second, ..] if first == "crate" && second == "beads_daemon" => {
+            Some((BoundaryRoot::BeadsDaemon, 1))
+        }
+        [first, ..] if first == "beads_daemon" => Some((BoundaryRoot::BeadsDaemon, 0)),
+        [first, second, ..] if first == "crate" && second == "beads_daemon_core" => {
+            Some((BoundaryRoot::BeadsDaemonCore, 1))
+        }
+        [first, ..] if first == "beads_daemon_core" => Some((BoundaryRoot::BeadsDaemonCore, 0)),
         _ => None,
     }
 }
 
+#[cfg(test)]
 fn daemon_child_segment(segment_names: &[String]) -> Option<&str> {
-    let daemon_index = daemon_root_index(segment_names)?;
+    let (_, daemon_index) = daemon_root_index(segment_names, true)?;
     segment_names.get(daemon_index + 1).map(String::as_str)
 }
 
-fn daemon_boundary_help(daemon_child: Option<&str>) -> &'static str {
-    match daemon_child {
-        Some("ipc") => {
-            "Import IPC contracts from `beads_surface::ipc` and call transport through a CLI wrapper."
+fn daemon_boundary_help(root: BoundaryRoot, daemon_child: Option<&str>) -> &'static str {
+    match root {
+        BoundaryRoot::BeadsDaemonCore => {
+            "Import protocol/frame contracts from `beads_surface` boundary APIs; CLI must not depend on `beads_daemon_core` directly."
         }
-        Some("query") => "Import query/filter types from `beads_surface::query`.",
-        Some("ops") => "Import operation/result types from `beads_surface::ops`.",
-        _ => {
-            "Replace direct daemon imports with `beads_surface` boundary types or a dedicated CLI wrapper."
+        BoundaryRoot::BeadsDaemon => {
+            "Import daemon-facing contracts from `beads_surface` or `beads_api`; CLI must not depend on `beads_daemon` directly."
         }
+        BoundaryRoot::Daemon => match daemon_child {
+            Some("ipc") => {
+                "Import IPC contracts from `beads_surface::ipc` and call transport through a CLI wrapper."
+            }
+            Some("query") => "Import query/filter types from `beads_surface::query`.",
+            Some("ops") => "Import operation/result types from `beads_surface::ops`.",
+            _ => {
+                "Replace direct daemon imports with `beads_surface` boundary types or a dedicated CLI wrapper."
+            }
+        },
     }
 }
 
@@ -159,6 +266,26 @@ mod tests {
         assert!(is_daemon_import_path(&names(&[
             "daemon", "ops", "OpResult"
         ])));
+        assert!(is_daemon_import_path(&names(&[
+            "beads_daemon",
+            "remote",
+            "RemoteUrl",
+        ])));
+        assert!(is_daemon_import_path(&names(&[
+            "beads_daemon_core",
+            "repl",
+            "proto",
+        ])));
+        assert!(is_daemon_import_path(&names(&[
+            "crate",
+            "beads_daemon",
+            "remote",
+        ])));
+        assert!(is_daemon_import_path(&names(&[
+            "crate",
+            "beads_daemon_core",
+            "repl",
+        ])));
     }
 
     #[test]
@@ -168,6 +295,9 @@ mod tests {
         ])));
         assert!(!is_daemon_import_path(&names(&["self", "daemon", "ipc"])));
         assert!(!is_daemon_import_path(&names(&["super", "daemon", "ipc"])));
+        assert!(!is_daemon_import_path(&names(&[
+            "commands", "daemon", "DaemonCmd"
+        ])));
     }
 
     #[test]
@@ -200,13 +330,17 @@ mod tests {
 
     #[test]
     fn help_text_points_to_surface_or_wrapper() {
-        let ipc_help = daemon_boundary_help(Some("ipc"));
-        let query_help = daemon_boundary_help(Some("query"));
-        let fallback_help = daemon_boundary_help(None);
+        let ipc_help = daemon_boundary_help(BoundaryRoot::Daemon, Some("ipc"));
+        let query_help = daemon_boundary_help(BoundaryRoot::Daemon, Some("query"));
+        let fallback_help = daemon_boundary_help(BoundaryRoot::Daemon, None);
+        let daemon_help = daemon_boundary_help(BoundaryRoot::BeadsDaemon, None);
+        let daemon_core_help = daemon_boundary_help(BoundaryRoot::BeadsDaemonCore, None);
 
         assert!(ipc_help.contains("beads_surface::ipc"));
         assert!(query_help.contains("beads_surface::query"));
         assert!(fallback_help.contains("beads_surface"));
         assert!(fallback_help.contains("wrapper"));
+        assert!(daemon_help.contains("beads_daemon"));
+        assert!(daemon_core_help.contains("beads_daemon_core"));
     }
 }
