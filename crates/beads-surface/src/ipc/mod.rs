@@ -2,6 +2,7 @@ pub mod client;
 pub mod codec;
 pub mod ctx;
 pub mod payload;
+mod spawn_sanitizer;
 pub mod types;
 
 use beads_api::DaemonInfo;

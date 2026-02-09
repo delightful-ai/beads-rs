@@ -1,46 +1,64 @@
-use super::super::{Ctx, print_ok, send};
-use super::{fmt_duration_ms, fmt_wall_ms};
-use crate::Result;
-use beads_surface::ipc::{EmptyPayload, Request};
+use beads_api::{QueryResult, StatusOutput, SyncWarning};
+use beads_surface::ipc::{EmptyPayload, Request, ResponsePayload};
 
-pub(crate) fn handle(ctx: &Ctx) -> Result<()> {
+use super::common::fmt_wall_ms;
+use super::{CommandResult, print_ok};
+use crate::render::print_line;
+use crate::runtime::{CliRuntimeCtx, send};
+
+pub fn handle(ctx: &CliRuntimeCtx) -> CommandResult<()> {
     let req = Request::Status {
         ctx: ctx.read_ctx(),
         payload: EmptyPayload {},
     };
     let ok = send(&req)?;
+    if !ctx.json
+        && let ResponsePayload::Query(QueryResult::Status(out)) = &ok
+    {
+        print_line(&render_status(out))?;
+        return Ok(());
+    }
     print_ok(&ok, ctx.json)
 }
 
-pub(crate) fn render_status(out: &crate::api::StatusOutput) -> String {
-    let s = &out.summary;
+pub fn render_status(out: &StatusOutput) -> String {
+    let summary = &out.summary;
     let mut buf = String::new();
     buf.push_str("\nIssue Database Status\n=====================\n\nSummary:\n");
-    buf.push_str(&format!("  Total Issues:      {}\n", s.total_issues));
-    buf.push_str(&format!("  Open:              {}\n", s.open_issues));
-    buf.push_str(&format!("  In Progress:       {}\n", s.in_progress_issues));
-    buf.push_str(&format!("  Blocked:           {}\n", s.blocked_issues));
-    buf.push_str(&format!("  Closed:            {}\n", s.closed_issues));
-    buf.push_str(&format!("  Ready to Work:     {}\n", s.ready_issues));
-    if let Some(t) = s.tombstone_issues
-        && t > 0
+    buf.push_str(&format!("  Total Issues:      {}\n", summary.total_issues));
+    buf.push_str(&format!("  Open:              {}\n", summary.open_issues));
+    buf.push_str(&format!(
+        "  In Progress:       {}\n",
+        summary.in_progress_issues
+    ));
+    buf.push_str(&format!(
+        "  Blocked:           {}\n",
+        summary.blocked_issues
+    ));
+    buf.push_str(&format!("  Closed:            {}\n", summary.closed_issues));
+    buf.push_str(&format!("  Ready to Work:     {}\n", summary.ready_issues));
+    if let Some(tombstones) = summary.tombstone_issues
+        && tombstones > 0
     {
-        buf.push_str(&format!("  Deleted:           {} (tombstones)\n", t));
+        buf.push_str(&format!(
+            "  Deleted:           {} (tombstones)\n",
+            tombstones
+        ));
     }
-    if let Some(e) = s.epics_eligible_for_closure
-        && e > 0
+    if let Some(epics) = summary.epics_eligible_for_closure
+        && epics > 0
     {
-        buf.push_str(&format!("  Epics Ready to Close: {}\n", e));
+        buf.push_str(&format!("  Epics Ready to Close: {}\n", epics));
     }
     if let Some(sync) = &out.sync {
-        let last = sync
+        let last_sync = sync
             .last_sync_wall_ms
             .map(fmt_wall_ms)
-            .unwrap_or_else(|| "never".into());
+            .unwrap_or_else(|| "never".to_string());
         buf.push_str("\nSync:\n");
         buf.push_str(&format!("  dirty:             {}\n", sync.dirty));
         buf.push_str(&format!("  in_progress:       {}\n", sync.sync_in_progress));
-        buf.push_str(&format!("  last_sync:         {}\n", last));
+        buf.push_str(&format!("  last_sync:         {}\n", last_sync));
         if let Some(next_retry) = sync.next_retry_wall_ms {
             let mut line = format!("  next_retry:       {}", fmt_wall_ms(next_retry));
             if let Some(in_ms) = sync.next_retry_in_ms {
@@ -57,7 +75,7 @@ pub(crate) fn render_status(out: &crate::api::StatusOutput) -> String {
             buf.push_str("  warnings:\n");
             for warning in &sync.warnings {
                 match warning {
-                    crate::api::SyncWarning::Fetch {
+                    SyncWarning::Fetch {
                         message,
                         at_wall_ms,
                     } => {
@@ -67,7 +85,7 @@ pub(crate) fn render_status(out: &crate::api::StatusOutput) -> String {
                             fmt_wall_ms(*at_wall_ms)
                         ));
                     }
-                    crate::api::SyncWarning::Diverged {
+                    SyncWarning::Diverged {
                         local_oid,
                         remote_oid,
                         at_wall_ms,
@@ -79,7 +97,7 @@ pub(crate) fn render_status(out: &crate::api::StatusOutput) -> String {
                             fmt_wall_ms(*at_wall_ms)
                         ));
                     }
-                    crate::api::SyncWarning::ForcePush {
+                    SyncWarning::ForcePush {
                         previous_remote_oid,
                         remote_oid,
                         at_wall_ms,
@@ -91,7 +109,7 @@ pub(crate) fn render_status(out: &crate::api::StatusOutput) -> String {
                             fmt_wall_ms(*at_wall_ms)
                         ));
                     }
-                    crate::api::SyncWarning::ClockSkew {
+                    SyncWarning::ClockSkew {
                         delta_ms,
                         at_wall_ms,
                     } => {
@@ -104,7 +122,7 @@ pub(crate) fn render_status(out: &crate::api::StatusOutput) -> String {
                             fmt_wall_ms(*at_wall_ms)
                         ));
                     }
-                    crate::api::SyncWarning::WalTailTruncated {
+                    SyncWarning::WalTailTruncated {
                         namespace,
                         segment_id,
                         truncated_from_offset,
@@ -127,4 +145,20 @@ pub(crate) fn render_status(out: &crate::api::StatusOutput) -> String {
     }
     buf.push('\n');
     buf
+}
+
+fn fmt_duration_ms(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let secs = ms as f64 / 1000.0;
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let mins = secs / 60.0;
+    if mins < 60.0 {
+        return format!("{mins:.1}m");
+    }
+    let hours = mins / 60.0;
+    format!("{hours:.1}h")
 }

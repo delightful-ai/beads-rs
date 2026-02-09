@@ -1,9 +1,10 @@
-use super::super::{Ctx, print_ok, send};
-use crate::Result;
 use beads_surface::ipc::{EmptyPayload, Request};
 
-pub(crate) fn handle(ctx: &Ctx) -> Result<()> {
-    let req = Request::SyncWait {
+use super::{CommandResult, print_ok};
+use crate::runtime::{CliRuntimeCtx, send};
+
+pub fn handle(ctx: &CliRuntimeCtx) -> CommandResult<()> {
+    let req = Request::Init {
         ctx: ctx.repo_ctx(),
         payload: EmptyPayload {},
     };

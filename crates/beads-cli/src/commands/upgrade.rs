@@ -1,11 +1,11 @@
 //! `bd upgrade` - install latest binary and restart daemon.
 
-use beads_cli::backend::{CliHostBackend, UpgradeMethod, UpgradeOutcome, UpgradeRequest};
 use clap::Args;
 use serde::Serialize;
 
-use super::super::{print_json, print_line};
-use crate::Result;
+use super::CommandError;
+use crate::backend::{CliHostBackend, UpgradeMethod, UpgradeOutcome, UpgradeRequest};
+use crate::render::{print_json, print_line};
 
 #[derive(Args, Debug)]
 pub struct UpgradeArgs {
@@ -23,9 +23,10 @@ struct UpgradeJson<'a> {
     method: &'a str,
 }
 
-pub(crate) fn handle<B>(json: bool, background: bool, backend: &B) -> Result<()>
+pub fn handle<B>(json: bool, background: bool, backend: &B) -> std::result::Result<(), B::Error>
 where
-    B: CliHostBackend<Error = crate::Error>,
+    B: CliHostBackend,
+    B::Error: From<CommandError>,
 {
     let outcome = backend.run_upgrade(UpgradeRequest { background })?;
     if json {
@@ -36,7 +37,7 @@ where
             install_path: outcome.install_path.to_str().unwrap_or(""),
             method: method_str(outcome.method),
         };
-        print_json(&payload)?;
+        print_json(&payload).map_err(|err| B::Error::from(CommandError::from(err)))?;
         return Ok(());
     }
 
@@ -44,10 +45,10 @@ where
         return Ok(());
     }
 
-    render_human(&outcome)
+    render_human(&outcome).map_err(|err| B::Error::from(CommandError::from(err)))
 }
 
-fn render_human(outcome: &UpgradeOutcome) -> Result<()> {
+fn render_human(outcome: &UpgradeOutcome) -> crate::Result<()> {
     if !outcome.updated {
         return print_line(&format!(
             "bd is up to date (version {}).",

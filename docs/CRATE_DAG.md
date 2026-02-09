@@ -66,3 +66,9 @@ just dylint
 ```
 
 `just dylint` runs the boundary lint and must fail if CLI daemon imports are reintroduced.
+
+## CLI Ownership Invariant
+
+- `beads-cli` owns the CLI parse/dispatch surface and command mapping.
+- `beads-rs` CLI code is limited to host orchestration hooks (repo/config/runtime resolution and daemon entrypoint wiring).
+- Do not reintroduce parallel command trees under `crates/beads-rs/src/cli/commands/**`.

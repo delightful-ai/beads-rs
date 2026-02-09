@@ -4,14 +4,14 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use beads_api::QueryResult;
 
+use super::spawn_sanitizer::prepare_daemon_spawn_command;
 use crate::ipc::IpcError;
 use crate::ipc::{IPC_PROTOCOL_VERSION, Request, Response, ResponsePayload};
 
@@ -414,38 +414,6 @@ fn daemon_command_override(program: Option<&Path>, args: &[OsString]) -> Command
     }
 
     daemon_command()
-}
-
-fn prepare_daemon_spawn_command(cmd: &mut Command) {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    // The daemon should not inherit arbitrary file descriptors from the autostarting
-    // client process (for example, test harness capture pipes). Leaked descriptors can
-    // keep IPC/output pipes open and cause command hangs in concurrent lifecycle tests.
-    #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            close_non_stdio_fds();
-            Ok(())
-        });
-    }
-}
-
-#[cfg(unix)]
-fn close_non_stdio_fds() {
-    let max_fd = unsafe { nix::libc::sysconf(nix::libc::_SC_OPEN_MAX) };
-    let upper = if max_fd > 0 && max_fd <= i32::MAX as i64 {
-        max_fd as i32
-    } else {
-        1024
-    };
-    for fd in 3..upper {
-        unsafe {
-            nix::libc::close(fd);
-        }
-    }
 }
 
 fn connect_with_autostart(

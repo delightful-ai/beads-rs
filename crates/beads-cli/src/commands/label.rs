@@ -1,11 +1,13 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::{Ctx, fetch_issue, print_json, print_line, send};
-use crate::Result;
-use crate::api::QueryResult;
-use crate::core::BeadId;
-use beads_cli::validation::{normalize_bead_id, validation_error};
+use super::CommandResult;
+use super::common::fetch_issue;
+use crate::render::{print_json, print_line};
+use crate::runtime::{CliRuntimeCtx, send};
+use crate::validation::{normalize_bead_id, validation_error};
+use beads_api::QueryResult;
+use beads_core::BeadId;
 use beads_surface::Filters;
 use beads_surface::ipc::{LabelsPayload, ListPayload, Request, ResponsePayload};
 
@@ -42,7 +44,7 @@ struct LabelCount {
     count: usize,
 }
 
-pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, cmd: LabelCmd) -> CommandResult<()> {
     match cmd {
         LabelCmd::Add(batch) => {
             let (ids, label) = split_label_batch(batch)?;
@@ -70,8 +72,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 return Ok(());
             }
 
-            for r in results {
-                print_line(&render_label_added(&r.label, &r.issue_id))?;
+            for result in results {
+                print_line(&render_label_added(&result.label, &result.issue_id))?;
             }
             Ok(())
         }
@@ -101,8 +103,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 return Ok(());
             }
 
-            for r in results {
-                print_line(&render_label_removed(&r.label, &r.issue_id))?;
+            for result in results {
+                print_line(&render_label_removed(&result.label, &result.issue_id))?;
             }
             Ok(())
         }
@@ -113,7 +115,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 print_json(&issue.labels)?;
                 return Ok(());
             }
-            print_line(&render_label_list(&issue.id, &issue.labels))
+            print_line(&render_label_list(&issue.id, &issue.labels))?;
+            Ok(())
         }
         LabelCmd::ListAll => {
             let req = Request::List {
@@ -125,9 +128,9 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
             let ok = send(&req)?;
             let mut counts = std::collections::BTreeMap::<String, usize>::new();
             if let ResponsePayload::Query(QueryResult::Issues(views)) = ok {
-                for v in views {
-                    for l in v.labels {
-                        *counts.entry(l).or_insert(0) += 1;
+                for view in views {
+                    for label in view.labels {
+                        *counts.entry(label).or_insert(0) += 1;
                     }
                 }
             }
@@ -143,24 +146,25 @@ pub(crate) fn handle(ctx: &Ctx, cmd: LabelCmd) -> Result<()> {
                 print_json(&out)?;
                 return Ok(());
             }
-            print_line(&render_label_list_all(&counts))
+            print_line(&render_label_list_all(&counts))?;
+            Ok(())
         }
     }
 }
 
-pub(crate) fn render_label_list(issue_id: &str, labels: &[String]) -> String {
+pub fn render_label_list(issue_id: &str, labels: &[String]) -> String {
     if labels.is_empty() {
         return format!("\n{issue_id} has no labels\n");
     }
     let mut out = format!("\n🏷 Labels for {issue_id}:\n");
-    for l in labels {
-        out.push_str(&format!("  - {l}\n"));
+    for label in labels {
+        out.push_str(&format!("  - {label}\n"));
     }
     out.push('\n');
     out
 }
 
-pub(crate) fn render_label_list_all(counts: &std::collections::BTreeMap<String, usize>) -> String {
+pub fn render_label_list_all(counts: &std::collections::BTreeMap<String, usize>) -> String {
     if counts.is_empty() {
         return "\nNo labels found in database".into();
     }
@@ -175,15 +179,15 @@ pub(crate) fn render_label_list_all(counts: &std::collections::BTreeMap<String, 
     out
 }
 
-fn render_label_added(label: &str, issue_id: &str) -> String {
+pub fn render_label_added(label: &str, issue_id: &str) -> String {
     format!("✓ Added label '{label}' to {issue_id}")
 }
 
-fn render_label_removed(label: &str, issue_id: &str) -> String {
+pub fn render_label_removed(label: &str, issue_id: &str) -> String {
     format!("✓ Removed label '{label}' from {issue_id}")
 }
 
-fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {
+fn split_label_batch(batch: LabelBatchArgs) -> CommandResult<(Vec<BeadId>, String)> {
     if batch.args.len() < 2 {
         return Err(validation_error("label", "expected: <issue-id...> <label>").into());
     }
@@ -193,7 +197,7 @@ fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {
         .ok_or_else(|| validation_error("label", "expected: <issue-id...> <label>"))?;
     let mut ids = Vec::with_capacity(parts.len());
     for raw in parts {
-        let parsed = BeadId::parse(&raw).map_err(|e| validation_error("id", e.to_string()))?;
+        let parsed = BeadId::parse(&raw).map_err(|err| validation_error("id", err.to_string()))?;
         ids.push(parsed);
     }
     Ok((ids, label))
@@ -202,16 +206,16 @@ fn split_label_batch(batch: LabelBatchArgs) -> Result<(Vec<BeadId>, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Error;
+    use crate::validation::ValidationError;
 
     #[test]
     fn split_label_batch_requires_label() {
         let err = split_label_batch(LabelBatchArgs {
             args: vec!["bd-123".into()],
         })
-        .unwrap_err();
+        .expect_err("validation error");
         match err {
-            Error::Op(crate::OpError::ValidationFailed { field, .. }) => {
+            super::super::CommandError::Validation(ValidationError::Field { field, .. }) => {
                 assert_eq!(field, "label");
             }
             other => panic!("expected validation error, got {other:?}"),
@@ -223,7 +227,7 @@ mod tests {
         let (ids, label) = split_label_batch(LabelBatchArgs {
             args: vec!["bd-1".into(), "bd-2".into(), "bug".into()],
         })
-        .unwrap();
+        .expect("split");
         assert_eq!(label, "bug");
         let ids = ids
             .into_iter()

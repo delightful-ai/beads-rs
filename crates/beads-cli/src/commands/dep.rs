@@ -1,10 +1,11 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, print_ok, send};
-use crate::Result;
-use crate::core::DepKind;
-use beads_cli::parsers::{parse_dep_edge, parse_dep_kind};
-use beads_cli::validation::{normalize_bead_id, validation_error};
+use super::{CommandResult, print_ok};
+use crate::parsers::{parse_dep_edge, parse_dep_kind};
+use crate::runtime::{CliRuntimeCtx, send};
+use crate::validation::{normalize_bead_id, validation_error};
+use beads_api::{DepCycles, DepEdge};
+use beads_core::DepKind;
 use beads_surface::ipc::{DepPayload, EmptyPayload, IdPayload, Request};
 
 #[derive(Subcommand, Debug)]
@@ -37,7 +38,7 @@ pub struct DepRmArgs {
     pub kind: Option<DepKind>,
 }
 
-pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, cmd: DepCmd) -> CommandResult<()> {
     match cmd {
         DepCmd::Add(args) => {
             let (kind, from, to) = parse_dep_edge(args.kind, &args.from, &args.to)
@@ -79,7 +80,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: DepCmd) -> Result<()> {
     }
 }
 
-pub(crate) fn render_dep_tree(root: &str, edges: &[crate::api::DepEdge]) -> String {
+pub fn render_dep_tree(root: &str, edges: &[DepEdge]) -> String {
     if edges.is_empty() {
         return format!("\n{root} has no dependencies\n");
     }
@@ -91,10 +92,7 @@ pub(crate) fn render_dep_tree(root: &str, edges: &[crate::api::DepEdge]) -> Stri
     out
 }
 
-pub(crate) fn render_deps(
-    incoming: &[crate::api::DepEdge],
-    outgoing: &[crate::api::DepEdge],
-) -> String {
+pub fn render_deps(incoming: &[DepEdge], outgoing: &[DepEdge]) -> String {
     let mut out = String::new();
     if !outgoing.is_empty() {
         out.push_str(&format!("\nDepends on ({}):\n", outgoing.len()));
@@ -115,7 +113,7 @@ pub(crate) fn render_deps(
     }
 }
 
-pub(crate) fn render_dep_cycles(out: &crate::api::DepCycles) -> String {
+pub fn render_dep_cycles(out: &DepCycles) -> String {
     if out.cycles.is_empty() {
         return "no dependency cycles found".into();
     }
@@ -126,10 +124,10 @@ pub(crate) fn render_dep_cycles(out: &crate::api::DepCycles) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn render_dep_added(from: &str, to: &str) -> String {
+pub fn render_dep_added(from: &str, to: &str) -> String {
     format!("✓ Added dependency: {from} depends on {to}")
 }
 
-pub(crate) fn render_dep_removed(from: &str, to: &str) -> String {
+pub fn render_dep_removed(from: &str, to: &str) -> String {
     format!("✓ Removed dependency: {from} no longer depends on {to}")
 }

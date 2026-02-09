@@ -1,16 +1,16 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, print_ok, send};
-use super::{fmt_metric_labels, fmt_wall_ms};
-use crate::api::{
+use super::common::{fmt_metric_labels, fmt_wall_ms};
+use super::{CommandResult, print_ok};
+use crate::runtime::{CliRuntimeCtx, send};
+use beads_api::{
     AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintKind, AdminFingerprintMode,
     AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput, AdminHealthReport,
     AdminHealthStatus, AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
     AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
     AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
 };
-use crate::core::{HeadStatus, ReplicaRole, Watermarks};
-use crate::{Result, WallClock};
+use beads_core::{HeadStatus, ReplicaRole, WallClock, Watermarks};
 use beads_surface::ipc::{
     AdminDoctorPayload, AdminFingerprintPayload, AdminFlushPayload, AdminMaintenanceModePayload,
     AdminOp, AdminScrubPayload, EmptyPayload, Request,
@@ -92,7 +92,7 @@ pub struct AdminFingerprintArgs {
     pub nonce: Option<String>,
 }
 
-pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, cmd: AdminCmd) -> CommandResult<()> {
     match cmd {
         AdminCmd::Status => {
             let req = Request::Admin(AdminOp::Status {
@@ -207,7 +207,7 @@ pub(crate) fn handle(ctx: &Ctx, cmd: AdminCmd) -> Result<()> {
     }
 }
 
-pub(crate) fn render_admin_status(status: &AdminStatusOutput) -> String {
+pub fn render_admin_status(status: &AdminStatusOutput) -> String {
     let mut out = String::new();
     out.push_str("Admin Status\n============\n\n");
     out.push_str(&format!("Store:   {}\n", status.store_id));
@@ -337,7 +337,7 @@ pub(crate) fn render_admin_status(status: &AdminStatusOutput) -> String {
     out.trim_end().into()
 }
 
-pub(crate) fn render_admin_metrics(metrics: &AdminMetricsOutput) -> String {
+pub fn render_admin_metrics(metrics: &AdminMetricsOutput) -> String {
     let mut out = String::new();
     out.push_str("Admin Metrics\n=============\n");
 
@@ -396,15 +396,15 @@ pub(crate) fn render_admin_metrics(metrics: &AdminMetricsOutput) -> String {
     out.trim_end().into()
 }
 
-pub(crate) fn render_admin_doctor(out: &AdminDoctorOutput) -> String {
+pub fn render_admin_doctor(out: &AdminDoctorOutput) -> String {
     render_admin_health("Admin Doctor", &out.report)
 }
 
-pub(crate) fn render_admin_scrub(out: &AdminScrubOutput) -> String {
+pub fn render_admin_scrub(out: &AdminScrubOutput) -> String {
     render_admin_health("Admin Scrub", &out.report)
 }
 
-pub(crate) fn render_admin_flush(out: &AdminFlushOutput) -> String {
+pub fn render_admin_flush(out: &AdminFlushOutput) -> String {
     let mut out_str = String::new();
     out_str.push_str("Admin Flush\n");
     out_str.push_str("===========\n\n");
@@ -436,7 +436,7 @@ pub(crate) fn render_admin_flush(out: &AdminFlushOutput) -> String {
     out_str.trim_end().into()
 }
 
-pub(crate) fn render_admin_checkpoint(out: &AdminCheckpointOutput) -> String {
+pub fn render_admin_checkpoint(out: &AdminCheckpointOutput) -> String {
     let mut out_str = String::new();
     out_str.push_str("Admin Checkpoint\n");
     out_str.push_str("================\n\n");
@@ -459,7 +459,7 @@ pub(crate) fn render_admin_checkpoint(out: &AdminCheckpointOutput) -> String {
     out_str.trim_end().into()
 }
 
-pub(crate) fn render_admin_fingerprint(out: &AdminFingerprintOutput) -> String {
+pub fn render_admin_fingerprint(out: &AdminFingerprintOutput) -> String {
     let mut out_str = String::new();
     out_str.push_str("Admin Fingerprint\n");
     out_str.push_str("=================\n\n");
@@ -510,7 +510,7 @@ pub(crate) fn render_admin_fingerprint(out: &AdminFingerprintOutput) -> String {
     out_str.trim_end().into()
 }
 
-pub(crate) fn render_admin_reload_policies(out: &AdminReloadPoliciesOutput) -> String {
+pub fn render_admin_reload_policies(out: &AdminReloadPoliciesOutput) -> String {
     let mut out_str = String::new();
     out_str.push_str("Admin Reload Policies\n");
     out_str.push_str("=====================\n\n");
@@ -545,7 +545,7 @@ pub(crate) fn render_admin_reload_policies(out: &AdminReloadPoliciesOutput) -> S
     out_str.trim_end().into()
 }
 
-pub(crate) fn render_admin_reload_replication(out: &AdminReloadReplicationOutput) -> String {
+pub fn render_admin_reload_replication(out: &AdminReloadReplicationOutput) -> String {
     let mut out_str = String::new();
     out_str.push_str("Admin Reload Replication\n");
     out_str.push_str("========================\n\n");
@@ -557,7 +557,7 @@ pub(crate) fn render_admin_reload_replication(out: &AdminReloadReplicationOutput
     out_str.trim_end().into()
 }
 
-pub(crate) fn render_admin_reload_limits(out: &AdminReloadLimitsOutput) -> String {
+pub fn render_admin_reload_limits(out: &AdminReloadLimitsOutput) -> String {
     let mut out_str = String::new();
     out_str.push_str("Admin Reload Limits\n");
     out_str.push_str("===================\n\n");
@@ -577,14 +577,14 @@ pub(crate) fn render_admin_reload_limits(out: &AdminReloadLimitsOutput) -> Strin
     out_str.trim_end().into()
 }
 
-pub(crate) fn render_admin_rotate_replica_id(out: &AdminRotateReplicaIdOutput) -> String {
+pub fn render_admin_rotate_replica_id(out: &AdminRotateReplicaIdOutput) -> String {
     format!(
         "replica_id rotated: {} -> {}",
         out.old_replica_id, out.new_replica_id
     )
 }
 
-pub(crate) fn render_admin_maintenance(out: &AdminMaintenanceModeOutput) -> String {
+pub fn render_admin_maintenance(out: &AdminMaintenanceModeOutput) -> String {
     if out.enabled {
         "maintenance mode enabled".to_string()
     } else {
@@ -592,7 +592,7 @@ pub(crate) fn render_admin_maintenance(out: &AdminMaintenanceModeOutput) -> Stri
     }
 }
 
-pub(crate) fn render_admin_rebuild_index(out: &AdminRebuildIndexOutput) -> String {
+pub fn render_admin_rebuild_index(out: &AdminRebuildIndexOutput) -> String {
     let stats = &out.stats;
     let mut out = String::new();
     out.push_str("rebuild index complete\n");
@@ -674,11 +674,11 @@ fn replica_role_str(role: ReplicaRole) -> &'static str {
     }
 }
 
-fn wal_warning_kind_str(kind: crate::api::AdminWalWarningKind) -> &'static str {
+fn wal_warning_kind_str(kind: beads_api::AdminWalWarningKind) -> &'static str {
     match kind {
-        crate::api::AdminWalWarningKind::TotalBytesExceeded => "total_bytes",
-        crate::api::AdminWalWarningKind::SegmentCountExceeded => "segment_count",
-        crate::api::AdminWalWarningKind::GrowthBytesExceeded => "growth_bytes",
+        beads_api::AdminWalWarningKind::TotalBytesExceeded => "total_bytes",
+        beads_api::AdminWalWarningKind::SegmentCountExceeded => "segment_count",
+        beads_api::AdminWalWarningKind::GrowthBytesExceeded => "growth_bytes",
     }
 }
 
@@ -775,7 +775,7 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    use crate::core::{Applied, Durable, NamespaceId, ReplicaId, Seq0, StoreId};
+    use beads_core::{Applied, Durable, NamespaceId, ReplicaId, Seq0, StoreId};
 
     #[test]
     fn render_admin_status_includes_watermarks() {

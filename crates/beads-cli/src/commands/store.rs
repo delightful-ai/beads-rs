@@ -6,12 +6,11 @@ use beads_api::{
     AdminFsckOutput, AdminStoreLockInfoOutput, AdminStoreUnlockOutput, FsckStatus,
     StoreLockMetaOutput,
 };
-use beads_cli::backend::{CliHostBackend, StoreFsckRequest, StoreUnlockRequest};
+use beads_core::StoreId;
 
-use crate::core::StoreId;
-use crate::{Error, Result};
-
-use super::super::print_json;
+use super::CommandError;
+use crate::backend::{CliHostBackend, StoreFsckRequest, StoreUnlockRequest};
+use crate::render::print_json;
 
 #[derive(Subcommand, Debug)]
 pub enum StoreCmd {
@@ -43,9 +42,10 @@ pub struct StoreFsckArgs {
     pub repair: bool,
 }
 
-pub(crate) fn handle<B>(json: bool, cmd: StoreCmd, backend: &B) -> Result<()>
+pub fn handle<B>(json: bool, cmd: StoreCmd, backend: &B) -> std::result::Result<(), B::Error>
 where
-    B: CliHostBackend<Error = Error>,
+    B: CliHostBackend,
+    B::Error: From<CommandError>,
 {
     match cmd {
         StoreCmd::Unlock(args) => handle_unlock(json, args, backend),
@@ -53,24 +53,24 @@ where
     }
 }
 
-// =============================================================================
-// Fsck
-// =============================================================================
-
-fn handle_fsck<B>(json: bool, args: StoreFsckArgs, backend: &B) -> Result<()>
+fn handle_fsck<B>(json: bool, args: StoreFsckArgs, backend: &B) -> std::result::Result<(), B::Error>
 where
-    B: CliHostBackend<Error = Error>,
+    B: CliHostBackend,
+    B::Error: From<CommandError>,
 {
-    let store_id = StoreId::parse_str(&args.store_id)?;
+    let store_id = StoreId::parse_str(&args.store_id)
+        .map_err(|err| B::Error::from(CommandError::from(err)))?;
     let output = backend.run_store_fsck(StoreFsckRequest {
         store_id,
         repair: args.repair,
     })?;
 
     if json {
-        return print_json(&output);
+        return print_json(&output).map_err(|err| B::Error::from(CommandError::from(err)));
     }
-    write_stdout(&render_admin_fsck(&output))?;
+
+    write_stdout(&render_admin_fsck(&output))
+        .map_err(|err| B::Error::from(CommandError::from(err)))?;
     Ok(())
 }
 
@@ -156,24 +156,27 @@ pub fn render_admin_fsck(output: &AdminFsckOutput) -> String {
     out
 }
 
-// =============================================================================
-// Unlock
-// =============================================================================
-
-fn handle_unlock<B>(json: bool, args: StoreUnlockArgs, backend: &B) -> Result<()>
+fn handle_unlock<B>(
+    json: bool,
+    args: StoreUnlockArgs,
+    backend: &B,
+) -> std::result::Result<(), B::Error>
 where
-    B: CliHostBackend<Error = Error>,
+    B: CliHostBackend,
+    B::Error: From<CommandError>,
 {
-    let store_id = StoreId::parse_str(&args.store_id)?;
+    let store_id = StoreId::parse_str(&args.store_id)
+        .map_err(|err| B::Error::from(CommandError::from(err)))?;
     let output = backend.run_store_unlock(StoreUnlockRequest {
         store_id,
         force: args.force,
     })?;
 
     if json {
-        return print_json(&output);
+        return print_json(&output).map_err(|err| B::Error::from(CommandError::from(err)));
     }
-    write_stdout(&render_admin_store_unlock(&output))?;
+    write_stdout(&render_admin_store_unlock(&output))
+        .map_err(|err| B::Error::from(CommandError::from(err)))?;
     Ok(())
 }
 
@@ -189,10 +192,6 @@ pub fn render_admin_store_unlock(output: &AdminStoreUnlockOutput) -> String {
     out.push_str(&format!("  action: {}\n", output.action));
     out
 }
-
-// =============================================================================
-// Lock info
-// =============================================================================
 
 pub fn render_admin_store_lock_info(output: &AdminStoreLockInfoOutput) -> String {
     let mut out = String::new();
@@ -219,12 +218,12 @@ fn render_lock_meta_output(out: &mut String, meta: Option<&StoreLockMetaOutput>)
     }
 }
 
-fn write_stdout(text: &str) -> Result<()> {
+fn write_stdout(text: &str) -> crate::Result<()> {
     let mut stdout = std::io::stdout().lock();
-    if let Err(e) = writeln!(stdout, "{text}")
-        && e.kind() != std::io::ErrorKind::BrokenPipe
+    if let Err(err) = writeln!(stdout, "{text}")
+        && err.kind() != std::io::ErrorKind::BrokenPipe
     {
-        return Err(beads_surface::IpcError::from(e).into());
+        return Err(beads_surface::ipc::IpcError::from(err));
     }
     Ok(())
 }
@@ -232,11 +231,11 @@ fn write_stdout(text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{NamespaceId, ReplicaId};
     use beads_api::{
         FsckCheck, FsckCheckId, FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRepairKind,
         FsckRisk, FsckSeverity, FsckStats, FsckSummary,
     };
+    use beads_core::{NamespaceId, ReplicaId};
     use std::path::PathBuf;
     use uuid::Uuid;
 

@@ -1,14 +1,15 @@
 use clap::Args;
 
-use super::super::{Ctx, fetch_issue, print_line, print_ok, resolve_description, send};
-use crate::Result;
-use crate::api::QueryResult;
-use crate::core::{BeadType, Priority};
-use crate::core::{DepKind, WorkflowStatus};
-use beads_cli::parsers::{parse_bead_type, parse_priority};
-use beads_cli::validation::{
+use super::common::fetch_issue;
+use super::{CommandError, CommandResult, print_ok};
+use crate::parsers::{parse_bead_type, parse_priority};
+use crate::render::print_line;
+use crate::runtime::{CliRuntimeCtx, resolve_description, send};
+use crate::validation::{
     normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
 };
+use beads_api::QueryResult;
+use beads_core::{BeadType, DepKind, Priority, WorkflowStatus};
 use beads_surface::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, DepPayload, IdPayload, LabelsPayload,
     ParentPayload, Request, ResponsePayload, UpdatePayload,
@@ -88,7 +89,7 @@ pub struct UpdateArgs {
     pub deps: Vec<String>,
 }
 
-pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
     let id = normalize_bead_id(&args.id)?;
     let id_str = id.as_str().to_string();
     let mut patch = BeadPatch::default();
@@ -298,7 +299,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn render_updated(id: &str) -> String {
+pub fn render_updated(id: &str) -> String {
     format!("✓ Updated issue: {id}")
 }
 
@@ -317,7 +318,7 @@ fn normalize_reason(reason: Option<String>) -> Option<String> {
     })
 }
 
-fn map_patch_validation_error(err: BeadPatchValidationError) -> crate::Error {
+fn map_patch_validation_error(err: BeadPatchValidationError) -> CommandError {
     match err {
         BeadPatchValidationError::RequiredFieldCleared { field } => {
             validation_error(field.as_str(), "cannot clear required field").into()
@@ -328,12 +329,12 @@ fn map_patch_validation_error(err: BeadPatchValidationError) -> crate::Error {
     }
 }
 
-fn parse_status(raw: &str) -> Result<WorkflowStatus> {
+fn parse_status(raw: &str) -> CommandResult<WorkflowStatus> {
     WorkflowStatus::parse(raw)
         .ok_or_else(|| validation_error("status", format!("unknown status {raw:?}")))
         .map_err(Into::into)
 }
 
 fn parse_status_arg(raw: &str) -> std::result::Result<String, String> {
-    Ok(beads_cli::parsers::parse_status(raw))
+    Ok(crate::parsers::parse_status(raw))
 }

@@ -1,10 +1,11 @@
+use beads_surface::ipc::{DeletePayload, Request};
 use clap::Args;
 use serde::Serialize;
 
-use super::super::{Ctx, print_json, print_line, send};
-use crate::Result;
-use beads_cli::validation::normalize_bead_ids;
-use beads_surface::ipc::{DeletePayload, Request};
+use super::CommandResult;
+use crate::render::{print_json, print_line};
+use crate::runtime::{CliRuntimeCtx, send};
+use crate::validation::normalize_bead_ids;
 
 #[derive(Debug, Clone, Serialize)]
 struct DeleteResult {
@@ -22,24 +23,22 @@ pub struct DeleteArgs {
     pub reason: Option<String>,
 }
 
-pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, args: DeleteArgs) -> CommandResult<()> {
     let mut results: Vec<DeleteResult> = Vec::new();
-
     let ids = normalize_bead_ids(args.ids)?;
     for id in ids {
-        let id_str = id.as_str().to_string();
+        let issue_id = id.as_str().to_string();
         let req = Request::Delete {
             ctx: ctx.mutation_ctx(),
             payload: DeletePayload {
-                id: id.clone(),
+                id,
                 reason: args.reason.clone(),
             },
         };
         let _ = send(&req)?;
-
         results.push(DeleteResult {
             status: "deleted",
-            issue_id: id_str,
+            issue_id,
         });
     }
 
@@ -48,12 +47,12 @@ pub(crate) fn handle(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
         return Ok(());
     }
 
-    for r in results {
-        print_line(&render_deleted_op(&r.issue_id))?;
+    for result in results {
+        print_line(&render_deleted_op(&result.issue_id))?;
     }
     Ok(())
 }
 
-pub(crate) fn render_deleted_op(id: &str) -> String {
+pub fn render_deleted_op(id: &str) -> String {
     format!("✓ Deleted {id}")
 }

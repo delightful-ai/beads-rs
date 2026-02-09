@@ -1,10 +1,11 @@
 use clap::Args;
 
-use super::super::{Ctx, print_line, print_ok, send};
-use super::fmt_wall_ms;
-use crate::Result;
-use crate::api::QueryResult;
-use beads_cli::validation::{normalize_bead_id, validation_error};
+use super::common::fmt_wall_ms;
+use super::{CommandResult, print_ok};
+use crate::render::print_line;
+use crate::runtime::{CliRuntimeCtx, send};
+use crate::validation::{normalize_bead_id, validation_error};
+use beads_api::{DeletedLookup, QueryResult, Tombstone};
 use beads_surface::ipc::{DeletedPayload, Request, ResponsePayload};
 
 #[derive(Args, Debug)]
@@ -22,7 +23,7 @@ pub struct DeletedArgs {
     pub all: bool,
 }
 
-pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, args: DeletedArgs) -> CommandResult<()> {
     let since_ms = if args.all {
         None
     } else {
@@ -41,17 +42,14 @@ pub(crate) fn handle(ctx: &Ctx, args: DeletedArgs) -> Result<()> {
 
     match ok {
         ResponsePayload::Query(QueryResult::Deleted(tombs)) => {
-            print_line(&render_deleted_list(&tombs, &args.since, args.all))
+            print_line(&render_deleted_list(&tombs, &args.since, args.all))?;
+            Ok(())
         }
         other => print_ok(&other, false),
     }
 }
 
-pub(crate) fn render_deleted_list(
-    tombs: &[crate::api::Tombstone],
-    since: &str,
-    all: bool,
-) -> String {
+pub fn render_deleted_list(tombs: &[Tombstone], since: &str, all: bool) -> String {
     if tombs.is_empty() {
         if all {
             return "\n✨ No deletions tracked\n".into();
@@ -68,9 +66,9 @@ pub(crate) fn render_deleted_list(
         )
     };
 
-    for t in tombs {
-        let ts = fmt_wall_ms(t.deleted_at.wall_ms);
-        let reason = t.reason.as_deref().unwrap_or("");
+    for tombstone in tombs {
+        let ts = fmt_wall_ms(tombstone.deleted_at.wall_ms);
+        let reason = tombstone.reason.as_deref().unwrap_or("");
         let reason = if reason.is_empty() {
             "".to_string()
         } else {
@@ -78,35 +76,38 @@ pub(crate) fn render_deleted_list(
         };
         out.push_str(&format!(
             "  {:<12}  {}  {:<12}{}\n",
-            t.id, ts, t.deleted_by, reason
+            tombstone.id, ts, tombstone.deleted_by, reason
         ));
     }
 
     out.trim_end().into()
 }
 
-pub(crate) fn render_deleted(tombs: &[crate::api::Tombstone]) -> String {
+pub fn render_deleted(tombs: &[Tombstone]) -> String {
     if tombs.is_empty() {
         return "\n✨ No deletions tracked\n".into();
     }
 
     let mut out = format!("\n🗑️ Deleted issues ({}):\n\n", tombs.len());
-    for t in tombs {
-        let ts = fmt_wall_ms(t.deleted_at.wall_ms);
-        let reason = t.reason.as_deref().unwrap_or("");
+    for tombstone in tombs {
+        let ts = fmt_wall_ms(tombstone.deleted_at.wall_ms);
+        let reason = tombstone.reason.as_deref().unwrap_or("");
         if reason.is_empty() {
-            out.push_str(&format!("  {:<12}  {}  {}\n", t.id, ts, t.deleted_by));
+            out.push_str(&format!(
+                "  {:<12}  {}  {}\n",
+                tombstone.id, ts, tombstone.deleted_by
+            ));
         } else {
             out.push_str(&format!(
                 "  {:<12}  {}  {}  {}\n",
-                t.id, ts, t.deleted_by, reason
+                tombstone.id, ts, tombstone.deleted_by, reason
             ));
         }
     }
     out.trim_end().into()
 }
 
-pub(crate) fn render_deleted_lookup(out: &crate::api::DeletedLookup) -> String {
+pub fn render_deleted_lookup(out: &DeletedLookup) -> String {
     if !out.found {
         return format!(
             "Issue {} not found in tombstones\n(This could mean the issue was never deleted, or the record was pruned)",
@@ -114,7 +115,7 @@ pub(crate) fn render_deleted_lookup(out: &crate::api::DeletedLookup) -> String {
         );
     }
     let record = match &out.record {
-        Some(r) => r,
+        Some(record) => record,
         None => {
             return format!(
                 "Issue {} not found in tombstones\n(This could mean the issue was never deleted, or the record was pruned)",
@@ -139,7 +140,7 @@ pub(crate) fn render_deleted_lookup(out: &crate::api::DeletedLookup) -> String {
     buf
 }
 
-fn parse_since_ms(s: &str) -> Result<u64> {
+fn parse_since_ms(s: &str) -> CommandResult<u64> {
     let s = s.trim().to_lowercase();
     if s.is_empty() {
         return Ok(7 * 24 * 60 * 60 * 1000);

@@ -1,12 +1,12 @@
 use clap::Args;
 
-use super::super::{Ctx, print_line, print_ok, send};
-use super::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
-use crate::Result;
-use crate::api::IssueSummary;
-use crate::api::QueryResult;
-use crate::core::{BeadId, BeadType, WorkflowStatus};
-use beads_cli::validation::normalize_bead_id;
+use super::common::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
+use super::{CommandResult, print_ok};
+use crate::render::print_line;
+use crate::runtime::{CliRuntimeCtx, send};
+use crate::validation::normalize_bead_id;
+use beads_api::{Issue, IssueSummary, Note, QueryResult};
+use beads_core::{BeadId, BeadType, WorkflowStatus};
 use beads_surface::Filters;
 use beads_surface::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use std::collections::{BTreeSet, HashMap};
@@ -20,7 +20,7 @@ pub struct ShowArgs {
     pub children: bool,
 }
 
-pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, args: ShowArgs) -> CommandResult<()> {
     let id = normalize_bead_id(&args.id)?;
     let req = Request::Show {
         ctx: ctx.read_ctx(),
@@ -106,13 +106,17 @@ pub(crate) fn handle(ctx: &Ctx, args: ShowArgs) -> Result<()> {
                 discovered,
             };
 
-            print_line(&render_show(&view, &outgoing_views, &incoming, &notes))
+            print_line(&render_show(&view, &outgoing_views, &incoming, &notes))?;
+            Ok(())
         }
         other => print_ok(&other, false),
     }
 }
 
-fn fetch_summary_map(ctx: &Ctx, ids: &BTreeSet<String>) -> Result<HashMap<String, IssueSummary>> {
+fn fetch_summary_map(
+    ctx: &CliRuntimeCtx,
+    ids: &BTreeSet<String>,
+) -> CommandResult<HashMap<String, IssueSummary>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -146,18 +150,18 @@ fn summaries_for(
         .collect()
 }
 
-pub(crate) struct IncomingGroups {
-    pub(crate) children: Vec<IssueSummary>,
-    pub(crate) blocks: Vec<IssueSummary>,
-    pub(crate) related: Vec<IssueSummary>,
-    pub(crate) discovered: Vec<IssueSummary>,
+pub struct IncomingGroups {
+    pub children: Vec<IssueSummary>,
+    pub blocks: Vec<IssueSummary>,
+    pub related: Vec<IssueSummary>,
+    pub discovered: Vec<IssueSummary>,
 }
 
 fn render_show(
-    bead: &crate::api::Issue,
+    bead: &Issue,
     outgoing: &[IssueSummary],
     incoming: &IncomingGroups,
-    notes: &[crate::api::Note],
+    notes: &[Note],
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -279,7 +283,7 @@ fn render_show(
     out
 }
 
-pub(crate) fn render_issue_detail(v: &crate::api::Issue) -> String {
+pub fn render_issue_detail(v: &Issue) -> String {
     // Default detail renderer (used for `show --json=false` fallback).
     let mut out = String::new();
     out.push_str(&format!(
@@ -406,10 +410,10 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{BeadType, NamespaceId, WorkflowStatus, WriteStamp};
+    use beads_core::{BeadType, NamespaceId, WorkflowStatus, WriteStamp};
 
-    fn sample_issue(namespace: &str, id: &str) -> crate::api::Issue {
-        crate::api::Issue {
+    fn sample_issue(namespace: &str, id: &str) -> Issue {
+        Issue {
             id: id.to_string(),
             namespace: NamespaceId::parse(namespace).expect("namespace"),
             title: "Title".to_string(),

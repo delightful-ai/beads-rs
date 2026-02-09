@@ -1,10 +1,11 @@
 use clap::{Args, Subcommand};
 
-use super::super::{Ctx, print_line, print_ok, send};
-use super::fmt_wall_ms;
-use crate::Result;
-use crate::api::QueryResult;
-use beads_cli::validation::{normalize_bead_id, validation_error};
+use super::common::fmt_wall_ms;
+use super::{CommandResult, print_ok};
+use crate::render::print_line;
+use crate::runtime::{CliRuntimeCtx, send};
+use crate::validation::{normalize_bead_id, validation_error};
+use beads_api::{Note, QueryResult};
 use beads_surface::ipc::{AddNotePayload, IdPayload, Request, ResponsePayload};
 
 #[derive(Args, Debug)]
@@ -33,7 +34,7 @@ pub struct CommentAddArgs {
     pub content: Vec<String>,
 }
 
-pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
+pub fn handle_comments(ctx: &CliRuntimeCtx, args: CommentsArgs) -> CommandResult<()> {
     match args.cmd {
         Some(CommentsCmd::Add(add)) => handle_comment_add(ctx, add),
         None => {
@@ -53,7 +54,6 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
             }
             match ok {
                 ResponsePayload::Query(QueryResult::Notes(notes)) => {
-                    // Render like beads-go: "Comments on <id>:" + entries.
                     print_line(&render_comments_list(id_for_render.as_str(), &notes))?;
                     Ok(())
                 }
@@ -63,7 +63,7 @@ pub(crate) fn handle_comments(ctx: &Ctx, args: CommentsArgs) -> Result<()> {
     }
 }
 
-pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> {
+pub fn handle_comment_add(ctx: &CliRuntimeCtx, args: CommentAddArgs) -> CommandResult<()> {
     let content = if !args.content.is_empty() {
         args.content.join(" ")
     } else {
@@ -71,7 +71,7 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
         let mut s = String::new();
         std::io::stdin()
             .read_to_string(&mut s)
-            .map_err(beads_surface::IpcError::from)?;
+            .map_err(beads_surface::ipc::IpcError::from)?;
         s.trim().to_string()
     };
 
@@ -87,7 +87,7 @@ pub(crate) fn handle_comment_add(ctx: &Ctx, args: CommentAddArgs) -> Result<()> 
     print_ok(&ok, ctx.json)
 }
 
-pub(crate) fn render_comments_list(issue_id: &str, notes: &[crate::api::Note]) -> String {
+pub fn render_comments_list(issue_id: &str, notes: &[Note]) -> String {
     if notes.is_empty() {
         return format!("No comments on {issue_id}");
     }
@@ -104,7 +104,7 @@ pub(crate) fn render_comments_list(issue_id: &str, notes: &[crate::api::Note]) -
     out.trim_end().into()
 }
 
-pub(crate) fn render_notes(notes: &[crate::api::Note]) -> String {
+pub fn render_notes(notes: &[Note]) -> String {
     if notes.is_empty() {
         return "No comments".into();
     }
@@ -121,6 +121,6 @@ pub(crate) fn render_notes(notes: &[crate::api::Note]) -> String {
     out.trim_end().into()
 }
 
-pub(crate) fn render_comment_added(issue_id: &str) -> String {
+pub fn render_comment_added(issue_id: &str) -> String {
     format!("Comment added to {issue_id}")
 }

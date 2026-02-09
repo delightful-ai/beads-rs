@@ -1,14 +1,15 @@
 use clap::Args;
 
-use super::super::{Ctx, print_ok};
-use crate::Result;
-use crate::core::ErrorPayload;
+use super::CommandResult;
+use super::print_ok;
+use crate::runtime::CliRuntimeCtx;
+use beads_core::ErrorPayload;
 use beads_surface::ipc::{EmptyPayload, Request, Response, subscribe_stream};
 
 #[derive(Args, Debug, Default)]
 pub struct SubscribeArgs {}
 
-pub(crate) fn handle(ctx: &Ctx, _args: SubscribeArgs) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, _args: SubscribeArgs) -> CommandResult<()> {
     let req = Request::Subscribe {
         ctx: ctx.read_ctx(),
         payload: EmptyPayload {},
@@ -31,7 +32,7 @@ pub(crate) fn handle(ctx: &Ctx, _args: SubscribeArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_response(response: Response, json: bool) -> Result<bool> {
+fn handle_response(response: Response, json: bool) -> CommandResult<bool> {
     match response {
         Response::Ok { ok } => {
             print_ok(&ok, json)?;

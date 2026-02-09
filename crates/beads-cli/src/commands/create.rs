@@ -1,15 +1,15 @@
 use std::io::{BufRead, Write};
 
-use beads_cli::parsers::{parse_bead_type, parse_priority};
-use beads_cli::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
+use crate::parsers::{parse_bead_type, parse_priority};
+use crate::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
 use clap::Args;
 
-use super::super::{
-    Ctx, fetch_issue, print_json, print_line, print_ok, resolve_description, send, send_raw,
-};
-use crate::Result;
-use crate::api::QueryResult;
-use crate::core::{BeadType, Priority};
+use super::common::fetch_issue;
+use super::{CommandResult, print_ok};
+use crate::render::{print_json, print_line};
+use crate::runtime::{CliRuntimeCtx, resolve_description, send, send_raw};
+use beads_api::{Issue, QueryResult};
+use beads_core::{BeadType, Priority};
 use beads_surface::OpResult;
 use beads_surface::ipc::{CreatePayload, Request, Response, ResponsePayload};
 
@@ -87,12 +87,12 @@ pub struct CreateArgs {
     #[arg(short = 'e', long)]
     pub estimate: Option<u32>,
 
-    /// No-op (compat). beads-rs doesn't require forcing.
+    /// No-op (compat). `bd` doesn't require forcing.
     #[arg(long)]
     pub force: bool,
 }
 
-pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, mut args: CreateArgs) -> CommandResult<()> {
     if let Some(path) = args.file.take() {
         if args.title.is_some() || args.title_flag.is_some() {
             return Err(
@@ -112,7 +112,7 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     labels.extend(args.label);
 
     if args.force && !ctx.json {
-        tracing::warn!("note: --force is ignored in beads-rs (not required)");
+        tracing::warn!("note: --force is ignored in bd (not required)");
     }
 
     // Warn if creating without description (unless title contains "test")
@@ -185,11 +185,11 @@ pub(crate) fn handle(ctx: &Ctx, mut args: CreateArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn render_created(id: &str) -> String {
+pub fn render_created(id: &str) -> String {
     format!("✓ Created issue: {id}")
 }
 
-fn render_create(issue: &crate::api::Issue) -> String {
+fn render_create(issue: &Issue) -> String {
     let mut out = String::new();
     out.push_str(&format!("✓ Created issue: {}\n", issue.id));
     out.push_str(&format!("  Title: {}\n", issue.title));
@@ -216,7 +216,7 @@ fn render_created_from_markdown(created_summaries: &[CreatedSummary], file_label
     out.trim_end().into()
 }
 
-fn resolve_title(positional: Option<String>, flag: Option<String>) -> Result<String> {
+fn resolve_title(positional: Option<String>, flag: Option<String>) -> CommandResult<String> {
     match (positional, flag) {
         (Some(p), Some(f)) => {
             if p != f {
@@ -240,7 +240,7 @@ fn resolve_title(positional: Option<String>, flag: Option<String>) -> Result<Str
     }
 }
 
-fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
+fn handle_from_markdown_file(ctx: &CliRuntimeCtx, path: &std::path::Path) -> CommandResult<()> {
     let templates = parse_markdown_file(path)?;
     if templates.is_empty() {
         return Err(validation_error("file", "no issues found in markdown file").into());
@@ -346,7 +346,8 @@ fn handle_from_markdown_file(ctx: &Ctx, path: &std::path::Path) -> Result<()> {
     print_line(&render_created_from_markdown(
         &created_summaries,
         &file_label.to_string(),
-    ))
+    ))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -356,7 +357,7 @@ struct MarkdownIssue {
     design: Option<String>,
     acceptance_criteria: Option<String>,
     bead_type: BeadType,
-    priority: crate::core::Priority,
+    priority: Priority,
     assignee: Option<String>,
     labels: Vec<String>,
     dependencies: Vec<String>,
@@ -366,11 +367,11 @@ struct MarkdownIssue {
 struct CreatedSummary {
     id: String,
     title: String,
-    priority: crate::core::Priority,
+    priority: Priority,
     bead_type: BeadType,
 }
 
-fn parse_markdown_file(path: &std::path::Path) -> Result<Vec<MarkdownIssue>> {
+fn parse_markdown_file(path: &std::path::Path) -> CommandResult<Vec<MarkdownIssue>> {
     validate_markdown_path(path)?;
 
     let file = std::fs::File::open(path).map_err(beads_surface::IpcError::from)?;
@@ -407,7 +408,7 @@ fn parse_markdown_file(path: &std::path::Path) -> Result<Vec<MarkdownIssue>> {
                 design: None,
                 acceptance_criteria: None,
                 bead_type: BeadType::Task,
-                priority: crate::core::Priority::default(),
+                priority: Priority::default(),
                 assignee: None,
                 labels: Vec::new(),
                 dependencies: Vec::new(),
@@ -448,7 +449,7 @@ fn flush_md_section(
     issue: &mut MarkdownIssue,
     current_section: &mut Option<String>,
     section_buf: &mut Vec<String>,
-) -> Result<()> {
+) -> CommandResult<()> {
     let Some(section) = current_section.take() else {
         return Ok(());
     };
@@ -494,7 +495,7 @@ fn flush_md_section(
     Ok(())
 }
 
-fn validate_markdown_path(path: &std::path::Path) -> Result<()> {
+fn validate_markdown_path(path: &std::path::Path) -> CommandResult<()> {
     let clean = std::path::PathBuf::from(path);
     if clean
         .components()
@@ -526,12 +527,12 @@ fn validate_markdown_path(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn parse_md_priority(s: &str) -> crate::core::Priority {
+fn parse_md_priority(s: &str) -> Priority {
     let t = s.trim().trim_start_matches('p').trim_start_matches('P');
     if let Ok(n) = t.parse::<u8>() {
-        return crate::core::Priority::new(n).unwrap_or_default();
+        return Priority::new(n).unwrap_or_default();
     }
-    crate::core::Priority::default()
+    Priority::default()
 }
 
 fn parse_md_type(s: &str) -> BeadType {

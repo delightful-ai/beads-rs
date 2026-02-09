@@ -1,11 +1,12 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::super::{Ctx, print_json, print_line, print_ok, send};
-use super::fmt_issue_ref;
-use crate::Result;
-use crate::api::QueryResult;
-use beads_cli::validation::normalize_bead_id;
+use super::common::fmt_issue_ref;
+use super::{CommandResult, print_ok};
+use crate::render::{print_json, print_line};
+use crate::runtime::{CliRuntimeCtx, send};
+use crate::validation::normalize_bead_id;
+use beads_api::{EpicStatus, QueryResult};
 use beads_surface::ipc::{ClosePayload, EpicStatusPayload, Request, ResponsePayload};
 
 #[derive(Subcommand, Debug)]
@@ -37,7 +38,7 @@ struct EpicCloseResult {
     count: usize,
 }
 
-pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
+pub fn handle(ctx: &CliRuntimeCtx, cmd: EpicCmd) -> CommandResult<()> {
     match cmd {
         EpicCmd::Status(args) => {
             let req = Request::EpicStatus {
@@ -52,7 +53,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
             }
             match ok {
                 ResponsePayload::Query(QueryResult::EpicStatus(statuses)) => {
-                    print_line(&render_epic_statuses(&statuses))
+                    print_line(&render_epic_statuses(&statuses))?;
+                    Ok(())
                 }
                 other => print_ok(&other, false),
             }
@@ -88,7 +90,6 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
 
             if args.dry_run {
                 if ctx.json {
-                    // Match go UX: dry-run prints the eligible list.
                     print_ok(
                         &ResponsePayload::Query(QueryResult::EpicStatus(statuses)),
                         true,
@@ -100,8 +101,8 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
             }
 
             let mut closed = Vec::new();
-            for s in &statuses {
-                let epic_id = normalize_bead_id(&s.epic.id)?;
+            for status in &statuses {
+                let epic_id = normalize_bead_id(&status.epic.id)?;
                 let req = Request::Close {
                     ctx: ctx.mutation_ctx(),
                     payload: ClosePayload {
@@ -128,29 +129,33 @@ pub(crate) fn handle(ctx: &Ctx, cmd: EpicCmd) -> Result<()> {
     }
 }
 
-pub(crate) fn render_epic_statuses(statuses: &[crate::api::EpicStatus]) -> String {
+pub fn render_epic_statuses(statuses: &[EpicStatus]) -> String {
     if statuses.is_empty() {
         return "No open epics found".into();
     }
 
     let mut out = String::new();
-    for s in statuses {
-        let pct = s
+    for status in statuses {
+        let pct = status
             .closed_children
             .saturating_mul(100)
-            .checked_div(s.total_children)
+            .checked_div(status.total_children)
             .unwrap_or(0);
-        let icon = if s.eligible_for_close { "✓" } else { "○" };
+        let icon = if status.eligible_for_close {
+            "✓"
+        } else {
+            "○"
+        };
         out.push_str(&format!(
             "{icon} {} {}\n",
-            fmt_issue_ref(&s.epic.namespace, &s.epic.id),
-            s.epic.title
+            fmt_issue_ref(&status.epic.namespace, &status.epic.id),
+            status.epic.title
         ));
         out.push_str(&format!(
             "   Progress: {}/{} children closed ({}%)\n",
-            s.closed_children, s.total_children, pct
+            status.closed_children, status.total_children, pct
         ));
-        if s.eligible_for_close {
+        if status.eligible_for_close {
             out.push_str("   Eligible for closure\n");
         }
         out.push('\n');
@@ -159,19 +164,19 @@ pub(crate) fn render_epic_statuses(statuses: &[crate::api::EpicStatus]) -> Strin
     out.trim_end().into()
 }
 
-pub(crate) fn render_epic_close_dry_run(statuses: &[crate::api::EpicStatus]) -> String {
+pub fn render_epic_close_dry_run(statuses: &[EpicStatus]) -> String {
     let mut out = format!("Would close {} epic(s):\n", statuses.len());
-    for s in statuses {
+    for status in statuses {
         out.push_str(&format!(
             "  - {}: {}\n",
-            fmt_issue_ref(&s.epic.namespace, &s.epic.id),
-            s.epic.title
+            fmt_issue_ref(&status.epic.namespace, &status.epic.id),
+            status.epic.title
         ));
     }
     out
 }
 
-pub(crate) fn render_epic_close_result(closed: &[String]) -> String {
+pub fn render_epic_close_result(closed: &[String]) -> String {
     let mut out = format!("✓ Closed {} epic(s)\n", closed.len());
     for id in closed {
         out.push_str(&format!("  - {id}\n"));

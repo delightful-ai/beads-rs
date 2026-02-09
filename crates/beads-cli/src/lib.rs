@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backend;
+pub mod cli;
 pub mod commands;
 pub mod filters;
 pub mod migrate;
