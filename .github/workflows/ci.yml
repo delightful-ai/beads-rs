@@ -49,4 +49,3 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo dylint --path lints --pattern beads_lints --all
       - run: cargo clippy --all-features -- -D warnings -D clippy::match_wildcard_for_single_variants -D clippy::wildcard_in_or_patterns
-      - run: cargo clippy -p beads-core -p beads-api -p beads-surface -p beads-cli -p beads-daemon -p beads-daemon-core --all-features -- -D warnings -D clippy::match_wildcard_for_single_variants -D clippy::wildcard_in_or_patterns
