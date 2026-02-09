@@ -13,7 +13,7 @@ use clap::{ArgAction, Parser, builder::BoolishValueParser};
 
 use crate::api::QueryResult;
 use crate::config::{Config, apply_env_overrides, load_for_repo};
-use crate::core::{ActorId, Applied, BeadId, DurabilityClass, NamespaceId, Watermarks};
+use crate::core::{ActorId, Applied, DurabilityClass, NamespaceId, Watermarks};
 use crate::{Error, Result};
 use beads_cli::commands::onboard::{generate_guide, render_instructions};
 use beads_cli::commands::prime::write_context_if;
@@ -22,9 +22,7 @@ use beads_cli::runtime::{
     CliRuntimeCtx, send as cli_send, validate_actor_id as cli_validate_actor_id,
 };
 use beads_cli::validation::{normalize_optional_client_request_id, normalize_optional_namespace};
-use beads_surface::ipc::{
-    EmptyPayload, IdPayload, RepoCtx, Request, Response, ResponsePayload, send_request,
-};
+use beads_surface::ipc::{EmptyPayload, RepoCtx, Request, Response, ResponsePayload, send_request};
 
 pub use beads_cli::commands::daemon::DaemonCmd;
 pub use commands::Command;
@@ -510,19 +508,6 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
 
 fn send(req: &Request) -> Result<ResponsePayload> {
     cli_send(req).map_err(Error::from)
-}
-
-fn fetch_issue(ctx: &Ctx, id: &BeadId) -> Result<crate::api::Issue> {
-    let req = Request::Show {
-        ctx: ctx.read_ctx(),
-        payload: IdPayload { id: id.clone() },
-    };
-    match send(&req)? {
-        ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
-        other => Err(Error::Ipc(beads_surface::IpcError::DaemonUnavailable(
-            format!("unexpected response for show: {other:?}"),
-        ))),
-    }
 }
 
 // =============================================================================

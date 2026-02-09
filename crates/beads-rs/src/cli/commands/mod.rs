@@ -24,10 +24,6 @@ pub(super) mod unclaim;
 pub(super) mod update;
 pub(super) mod upgrade;
 
-pub(super) fn fmt_issue_ref(namespace: &crate::core::NamespaceId, id: &str) -> String {
-    format!("{}/{}", namespace.as_str(), id)
-}
-
 pub(super) fn fmt_metric_labels(labels: &[crate::api::AdminMetricLabel]) -> String {
     if labels.is_empty() {
         return String::new();
