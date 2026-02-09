@@ -3,6 +3,7 @@ use beads_core::CoreError;
 use beads_surface::ipc::{IpcError, ResponsePayload};
 use beads_surface::ops::OpResult;
 
+pub mod admin;
 pub mod blocked;
 pub mod claim;
 pub mod close;
@@ -18,6 +19,7 @@ pub mod epic;
 pub mod init;
 pub mod label;
 pub mod list;
+pub mod migrate;
 pub mod onboard;
 pub mod prime;
 pub mod ready;
@@ -27,10 +29,12 @@ pub mod setup;
 pub mod show;
 pub mod stale;
 pub mod status;
+pub mod store;
 pub mod subscribe;
 pub mod sync;
 pub mod unclaim;
 pub mod update;
+pub mod upgrade;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
@@ -146,23 +150,55 @@ pub(crate) fn print_ok(payload: &ResponsePayload, json: bool) -> CommandResult<(
                     crate::render::print_line(&warnings.join("\n"))?
                 }
             }
-            QueryResult::DaemonInfo(_)
-            | QueryResult::AdminStatus(_)
-            | QueryResult::AdminMetrics(_)
-            | QueryResult::AdminDoctor(_)
-            | QueryResult::AdminScrub(_)
-            | QueryResult::AdminFlush(_)
-            | QueryResult::AdminCheckpoint(_)
-            | QueryResult::AdminFingerprint(_)
-            | QueryResult::AdminReloadPolicies(_)
-            | QueryResult::AdminRotateReplicaId(_)
-            | QueryResult::AdminReloadReplication(_)
-            | QueryResult::AdminReloadLimits(_)
-            | QueryResult::AdminMaintenanceMode(_)
-            | QueryResult::AdminRebuildIndex(_)
-            | QueryResult::AdminFsck(_)
-            | QueryResult::AdminStoreUnlock(_)
-            | QueryResult::AdminStoreLockInfo(_) => crate::render::print_json(payload)?,
+            QueryResult::DaemonInfo(_) => crate::render::print_json(payload)?,
+            QueryResult::AdminStatus(status) => {
+                crate::render::print_line(&admin::render_admin_status(status))?
+            }
+            QueryResult::AdminMetrics(metrics) => {
+                crate::render::print_line(&admin::render_admin_metrics(metrics))?
+            }
+            QueryResult::AdminDoctor(out) => {
+                crate::render::print_line(&admin::render_admin_doctor(out))?
+            }
+            QueryResult::AdminScrub(out) => {
+                crate::render::print_line(&admin::render_admin_scrub(out))?
+            }
+            QueryResult::AdminFlush(out) => {
+                crate::render::print_line(&admin::render_admin_flush(out))?
+            }
+            QueryResult::AdminCheckpoint(out) => {
+                crate::render::print_line(&admin::render_admin_checkpoint(out))?
+            }
+            QueryResult::AdminFingerprint(out) => {
+                crate::render::print_line(&admin::render_admin_fingerprint(out))?
+            }
+            QueryResult::AdminReloadPolicies(out) => {
+                crate::render::print_line(&admin::render_admin_reload_policies(out))?
+            }
+            QueryResult::AdminRotateReplicaId(out) => {
+                crate::render::print_line(&admin::render_admin_rotate_replica_id(out))?
+            }
+            QueryResult::AdminReloadReplication(out) => {
+                crate::render::print_line(&admin::render_admin_reload_replication(out))?
+            }
+            QueryResult::AdminReloadLimits(out) => {
+                crate::render::print_line(&admin::render_admin_reload_limits(out))?
+            }
+            QueryResult::AdminMaintenanceMode(out) => {
+                crate::render::print_line(&admin::render_admin_maintenance(out))?
+            }
+            QueryResult::AdminRebuildIndex(out) => {
+                crate::render::print_line(&admin::render_admin_rebuild_index(out))?
+            }
+            QueryResult::AdminFsck(out) => {
+                crate::render::print_line(&store::render_admin_fsck(out))?
+            }
+            QueryResult::AdminStoreUnlock(out) => {
+                crate::render::print_line(&store::render_admin_store_unlock(out))?
+            }
+            QueryResult::AdminStoreLockInfo(out) => {
+                crate::render::print_line(&store::render_admin_store_lock_info(out))?
+            }
         },
     }
 

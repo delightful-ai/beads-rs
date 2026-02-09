@@ -11,18 +11,15 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Parser, builder::BoolishValueParser};
 
-use crate::api::QueryResult;
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{ActorId, Applied, DurabilityClass, NamespaceId, Watermarks};
 use crate::{Error, Result};
 use beads_cli::commands::onboard::{generate_guide, render_instructions};
 use beads_cli::commands::prime::write_context_if;
 use beads_cli::commands::setup::{SetupCmd, handle_aider, handle_claude, handle_cursor};
-use beads_cli::runtime::{
-    CliRuntimeCtx, send as cli_send, validate_actor_id as cli_validate_actor_id,
-};
+use beads_cli::runtime::{CliRuntimeCtx, validate_actor_id as cli_validate_actor_id};
 use beads_cli::validation::{normalize_optional_client_request_id, normalize_optional_namespace};
-use beads_surface::ipc::{EmptyPayload, RepoCtx, Request, Response, ResponsePayload, send_request};
+use beads_surface::ipc::{EmptyPayload, RepoCtx, Request, Response, send_request};
 
 pub use beads_cli::commands::daemon::DaemonCmd;
 pub use commands::Command;
@@ -373,14 +370,6 @@ fn resolve_actor_override(raw: Option<&str>) -> Result<Option<ActorId>> {
     validate_actor_id(raw).map(Some)
 }
 
-fn print_ok(payload: &ResponsePayload, json: bool) -> Result<()> {
-    if json {
-        return print_json(payload);
-    }
-    let s = render_human(payload);
-    print_line(&s)
-}
-
 pub(super) fn print_line(line: &str) -> Result<()> {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
@@ -390,124 +379,6 @@ pub(super) fn print_line(line: &str) -> Result<()> {
         return Err(beads_surface::IpcError::from(e).into());
     }
     Ok(())
-}
-
-fn render_human(payload: &ResponsePayload) -> String {
-    match payload {
-        ResponsePayload::Op(op) => render_op(&op.result),
-        ResponsePayload::Query(q) => render_query(q),
-        ResponsePayload::Synced(_) => "synced".into(),
-        ResponsePayload::Refreshed(_) => "refreshed".into(),
-        ResponsePayload::Initialized(_) => "initialized".into(),
-        ResponsePayload::ShuttingDown(_) => "shutting down".into(),
-        ResponsePayload::Subscribed(sub) => {
-            format!("subscribed to {}", sub.subscribed.namespace.as_str())
-        }
-        ResponsePayload::Event(ev) => {
-            format!("event {}", ev.event.event_id.origin_seq.get())
-        }
-    }
-}
-
-fn render_op(op: &beads_surface::OpResult) -> String {
-    match op {
-        beads_surface::OpResult::Created { id } => commands::create::render_created(id.as_str()),
-        beads_surface::OpResult::Updated { id } => commands::update::render_updated(id.as_str()),
-        beads_surface::OpResult::Closed { id } => commands::close::render_closed(id.as_str()),
-        beads_surface::OpResult::Reopened { id } => commands::reopen::render_reopened(id.as_str()),
-        beads_surface::OpResult::Deleted { id } => commands::delete::render_deleted_op(id.as_str()),
-        beads_surface::OpResult::DepAdded { from, to } => {
-            commands::dep::render_dep_added(from.as_str(), to.as_str())
-        }
-        beads_surface::OpResult::DepRemoved { from, to } => {
-            commands::dep::render_dep_removed(from.as_str(), to.as_str())
-        }
-        beads_surface::OpResult::NoteAdded { bead_id, .. } => {
-            commands::comments::render_comment_added(bead_id.as_str())
-        }
-        beads_surface::OpResult::Claimed { id, expires } => {
-            commands::claim::render_claimed(id.as_str(), expires.0)
-        }
-        beads_surface::OpResult::Unclaimed { id } => {
-            commands::unclaim::render_unclaimed(id.as_str())
-        }
-        beads_surface::OpResult::ClaimExtended { id, expires } => {
-            commands::claim::render_claim_extended(id.as_str(), expires.0)
-        }
-    }
-}
-
-fn render_query(q: &QueryResult) -> String {
-    match q {
-        QueryResult::Issue(issue) => commands::show::render_issue_detail(issue),
-        QueryResult::Issues(views) => {
-            beads_cli::commands::list::render_issue_list_opts(views, false)
-        }
-        QueryResult::DepTree { root, edges } => {
-            commands::dep::render_dep_tree(root.as_str(), edges)
-        }
-        QueryResult::Deps { incoming, outgoing } => commands::dep::render_deps(incoming, outgoing),
-        QueryResult::DepCycles(out) => commands::dep::render_dep_cycles(out),
-        QueryResult::Notes(notes) => commands::comments::render_notes(notes),
-        QueryResult::Status(out) => commands::status::render_status(out),
-        QueryResult::Blocked(blocked) => beads_cli::commands::blocked::render_blocked(blocked),
-        QueryResult::Ready(result) => beads_cli::commands::ready::render_ready(
-            &result.issues,
-            result.blocked_count,
-            result.closed_count,
-        ),
-        QueryResult::Stale(issues) => {
-            beads_cli::commands::list::render_issue_list_opts(issues, false)
-        }
-        QueryResult::Count(result) => beads_cli::commands::count::render_count(result),
-        QueryResult::Deleted(tombs) => commands::deleted::render_deleted(tombs),
-        QueryResult::DeletedLookup(out) => commands::deleted::render_deleted_lookup(out),
-        QueryResult::EpicStatus(statuses) => commands::epic::render_epic_statuses(statuses),
-        QueryResult::DaemonInfo(info) => commands::daemon::render_daemon_info(info),
-        QueryResult::AdminStatus(status) => commands::admin::render_admin_status(status),
-        QueryResult::AdminMetrics(metrics) => commands::admin::render_admin_metrics(metrics),
-        QueryResult::AdminDoctor(out) => commands::admin::render_admin_doctor(out),
-        QueryResult::AdminScrub(out) => commands::admin::render_admin_scrub(out),
-        QueryResult::AdminFlush(out) => commands::admin::render_admin_flush(out),
-        QueryResult::AdminCheckpoint(out) => commands::admin::render_admin_checkpoint(out),
-        QueryResult::AdminFingerprint(out) => commands::admin::render_admin_fingerprint(out),
-        QueryResult::AdminReloadPolicies(out) => commands::admin::render_admin_reload_policies(out),
-        QueryResult::AdminReloadReplication(out) => {
-            commands::admin::render_admin_reload_replication(out)
-        }
-        QueryResult::AdminReloadLimits(out) => commands::admin::render_admin_reload_limits(out),
-        QueryResult::AdminRotateReplicaId(out) => {
-            commands::admin::render_admin_rotate_replica_id(out)
-        }
-        QueryResult::AdminMaintenanceMode(out) => commands::admin::render_admin_maintenance(out),
-        QueryResult::AdminRebuildIndex(out) => commands::admin::render_admin_rebuild_index(out),
-        QueryResult::AdminFsck(out) => commands::store::render_admin_fsck(out),
-        QueryResult::AdminStoreUnlock(out) => commands::store::render_admin_store_unlock(out),
-        QueryResult::AdminStoreLockInfo(out) => commands::store::render_admin_store_lock_info(out),
-        QueryResult::Validation { warnings } => {
-            if warnings.is_empty() {
-                "ok".into()
-            } else {
-                warnings.join("\n")
-            }
-        }
-    }
-}
-
-fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
-    use std::io::Write;
-    let mut stdout = std::io::stdout().lock();
-    serde_json::to_writer_pretty(&mut stdout, value).map_err(beads_surface::IpcError::from)?;
-    if let Err(e) = writeln!(stdout)
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(beads_surface::IpcError::from(e).into());
-    }
-    Ok(())
-}
-
-fn send(req: &Request) -> Result<ResponsePayload> {
-    cli_send(req).map_err(Error::from)
 }
 
 // =============================================================================

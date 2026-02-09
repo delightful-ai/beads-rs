@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use beads_api::{AdminFsckOutput, AdminStoreUnlockOutput};
-use beads_core::StoreId;
+use beads_core::{CanonicalState, StoreId};
 use beads_surface::ipc::RepoCtx;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,25 @@ impl MigrateRefreshRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateDetectRequest {
+    pub repo: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct MigrateApplyImportRequest {
+    pub repo: PathBuf,
+    pub imported: CanonicalState,
+    pub force: bool,
+    pub no_push: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateApplyImportOutcome {
+    pub commit_oid: String,
+    pub pushed: bool,
+}
+
 pub trait CliHostBackend {
     type Error;
 
@@ -65,6 +84,16 @@ pub trait CliHostBackend {
         &self,
         request: StoreUnlockRequest,
     ) -> std::result::Result<AdminStoreUnlockOutput, Self::Error>;
+
+    fn run_migrate_detect(
+        &self,
+        request: MigrateDetectRequest,
+    ) -> std::result::Result<u32, Self::Error>;
+
+    fn run_migrate_apply_import(
+        &self,
+        request: MigrateApplyImportRequest,
+    ) -> std::result::Result<MigrateApplyImportOutcome, Self::Error>;
 
     fn notify_migrate_refresh(
         &self,

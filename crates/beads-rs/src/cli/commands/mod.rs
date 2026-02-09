@@ -1,5 +1,4 @@
 use clap::Subcommand;
-use std::sync::LazyLock;
 
 pub(super) mod admin;
 pub(super) mod claim;
@@ -23,37 +22,6 @@ pub(super) mod sync;
 pub(super) mod unclaim;
 pub(super) mod update;
 pub(super) mod upgrade;
-
-pub(super) fn fmt_metric_labels(labels: &[crate::api::AdminMetricLabel]) -> String {
-    if labels.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from(" {");
-    for (i, label) in labels.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(label.key.as_str());
-        out.push('=');
-        out.push_str(label.value.as_str());
-    }
-    out.push('}');
-    out
-}
-
-static WALL_MS_FORMAT: LazyLock<Option<Vec<time::format_description::FormatItem<'static>>>> =
-    LazyLock::new(|| time::format_description::parse("[year]-[month]-[day] [hour]:[minute]").ok());
-
-pub(super) fn fmt_wall_ms(ms: u64) -> String {
-    use time::OffsetDateTime;
-
-    let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    match WALL_MS_FORMAT.as_deref() {
-        Some(fmt) => dt.format(fmt).unwrap_or_else(|_| ms.to_string()),
-        None => ms.to_string(),
-    }
-}
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
