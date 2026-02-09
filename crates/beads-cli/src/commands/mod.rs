@@ -150,7 +150,9 @@ pub(crate) fn print_ok(payload: &ResponsePayload, json: bool) -> CommandResult<(
                     crate::render::print_line(&warnings.join("\n"))?
                 }
             }
-            QueryResult::DaemonInfo(_) => crate::render::print_json(payload)?,
+            QueryResult::DaemonInfo(info) => {
+                crate::render::print_line(&daemon::render_daemon_info(info))?
+            }
             QueryResult::AdminStatus(status) => {
                 crate::render::print_line(&admin::render_admin_status(status))?
             }
