@@ -28,18 +28,6 @@ pub(super) fn fmt_issue_ref(namespace: &crate::core::NamespaceId, id: &str) -> S
     format!("{}/{}", namespace.as_str(), id)
 }
 
-pub(super) fn fmt_labels(labels: &[String]) -> String {
-    let mut out = String::from("[");
-    for (i, l) in labels.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(l);
-    }
-    out.push(']');
-    out
-}
-
 pub(super) fn fmt_metric_labels(labels: &[crate::api::AdminMetricLabel]) -> String {
     if labels.is_empty() {
         return String::new();

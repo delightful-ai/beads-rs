@@ -19,8 +19,7 @@ use beads_cli::commands::onboard::{generate_guide, render_instructions};
 use beads_cli::commands::prime::write_context_if;
 use beads_cli::commands::setup::{SetupCmd, handle_aider, handle_claude, handle_cursor};
 use beads_cli::runtime::{
-    CliRuntimeCtx, resolve_description as cli_resolve_description, send as cli_send,
-    send_raw as cli_send_raw, validate_actor_id as cli_validate_actor_id,
+    CliRuntimeCtx, send as cli_send, validate_actor_id as cli_validate_actor_id,
 };
 use beads_cli::validation::{normalize_optional_client_request_id, normalize_optional_namespace};
 use beads_surface::ipc::{
@@ -353,13 +352,6 @@ fn resolve_durability(cli_value: Option<&str>, config: &Config) -> Result<Option
     Ok(Some(parsed))
 }
 
-pub(super) fn resolve_description(
-    description: Option<String>,
-    body: Option<String>,
-) -> Result<Option<String>> {
-    cli_resolve_description(description, body).map_err(Into::into)
-}
-
 fn parse_require_min_seen(raw: Option<&str>) -> Result<Option<Watermarks<Applied>>> {
     let Some(raw) = raw else {
         return Ok(None);
@@ -514,10 +506,6 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
         return Err(beads_surface::IpcError::from(e).into());
     }
     Ok(())
-}
-
-fn send_raw(req: &Request) -> Result<Response> {
-    cli_send_raw(req).map_err(Error::from)
 }
 
 fn send(req: &Request) -> Result<ResponsePayload> {

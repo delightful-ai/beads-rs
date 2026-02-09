@@ -1,0 +1,353 @@
+use clap::Args;
+
+use super::{CommandError, CommandResult, print_ok};
+use crate::parsers::{parse_bead_type, parse_priority};
+use crate::render::print_line;
+use crate::runtime::{CliRuntimeCtx, resolve_description, send};
+use crate::validation::{
+    normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
+};
+use beads_api::{Issue, QueryResult};
+use beads_core::{BeadType, DepKind, Priority, WorkflowStatus};
+use beads_surface::ipc::{
+    AddNotePayload, ClaimPayload, ClosePayload, DepPayload, IdPayload, LabelsPayload,
+    ParentPayload, Request, ResponsePayload, UpdatePayload,
+};
+use beads_surface::ops::{BeadPatch, BeadPatchValidationError, OpenInProgress, Patch};
+
+#[derive(Args, Debug)]
+pub struct UpdateArgs {
+    pub id: String,
+
+    /// Reparent the bead (adds/removes `parent` dependency).
+    #[arg(long)]
+    pub parent: Option<String>,
+
+    /// Remove any existing parent relationship.
+    #[arg(long = "no-parent", conflicts_with = "parent")]
+    pub no_parent: bool,
+
+    #[arg(long)]
+    pub title: Option<String>,
+
+    #[arg(short = 'd', long, allow_hyphen_values = true)]
+    pub description: Option<String>,
+
+    /// Alias for --description (GitHub CLI convention).
+    #[arg(long = "body", hide = true, allow_hyphen_values = true)]
+    pub body: Option<String>,
+
+    #[arg(long, allow_hyphen_values = true)]
+    pub design: Option<String>,
+
+    #[arg(
+        long = "acceptance",
+        alias = "acceptance-criteria",
+        allow_hyphen_values = true
+    )]
+    pub acceptance: Option<String>,
+
+    /// External reference (e.g., "gh-9", "jira-ABC").
+    #[arg(long = "external-ref")]
+    pub external_ref: Option<String>,
+
+    /// Time estimate in minutes.
+    #[arg(short = 'e', long)]
+    pub estimate: Option<u32>,
+
+    #[arg(short = 's', long, value_parser = parse_status_arg)]
+    pub status: Option<String>,
+
+    /// Close reason (only valid with --status=closed).
+    #[arg(long, allow_hyphen_values = true)]
+    pub reason: Option<String>,
+
+    #[arg(short = 'p', long, value_parser = parse_priority)]
+    pub priority: Option<Priority>,
+
+    /// Change the issue type (bug, feature, task, epic, chore).
+    #[arg(short = 't', long = "type", alias = "issue-type", value_parser = parse_bead_type)]
+    pub bead_type: Option<BeadType>,
+
+    /// Compat: assignee/claim.
+    #[arg(short = 'a', long)]
+    pub assignee: Option<String>,
+
+    #[arg(long = "add-label", alias = "add_label", value_delimiter = ',', num_args = 0..)]
+    pub add_label: Vec<String>,
+
+    #[arg(long = "remove-label", alias = "remove_label", value_delimiter = ',', num_args = 0..)]
+    pub remove_label: Vec<String>,
+
+    /// Add a note.
+    #[arg(long = "notes", alias = "note", allow_hyphen_values = true)]
+    pub notes: Option<String>,
+
+    /// Dependencies to add (repeat or comma-separated): "type:id" or "id" (defaults to blocks).
+    #[arg(long = "deps", value_delimiter = ',', num_args = 0..)]
+    pub deps: Vec<String>,
+}
+
+pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
+    let id = normalize_bead_id(&args.id)?;
+    let id_str = id.as_str().to_string();
+    let mut patch = BeadPatch::default();
+    let close_reason = normalize_reason(args.reason);
+    let status = match args.status.as_deref() {
+        Some(raw) => Some(parse_status(raw)?),
+        None => None,
+    };
+    let status_closed = matches!(status, Some(WorkflowStatus::Closed));
+    let add_labels = std::mem::take(&mut args.add_label);
+    let remove_labels = std::mem::take(&mut args.remove_label);
+
+    if close_reason.is_some() && !status_closed {
+        return Err(validation_error("reason", "--reason requires --status=closed").into());
+    }
+
+    let parent_action = if args.no_parent {
+        Some(None)
+    } else if let Some(p) = &args.parent {
+        let v = p.trim();
+        if v.is_empty()
+            || v == "-"
+            || v.eq_ignore_ascii_case("none")
+            || v.eq_ignore_ascii_case("null")
+        {
+            Some(None)
+        } else {
+            Some(Some(normalize_bead_id_for("parent", v)?))
+        }
+    } else {
+        None
+    };
+
+    if let Some(title) = args.title {
+        patch.title = Patch::Set(title);
+    }
+    if let Some(desc) = resolve_description(args.description, args.body)? {
+        patch.description = Patch::Set(desc);
+    }
+    if let Some(design) = args.design {
+        patch.design = Patch::Set(design);
+    }
+    if let Some(acc) = args.acceptance {
+        patch.acceptance_criteria = Patch::Set(acc);
+    }
+    if let Some(external_ref) = args.external_ref {
+        let v = external_ref.trim();
+        if v.is_empty() || v == "-" || v.eq_ignore_ascii_case("none") {
+            patch.external_ref = Patch::Clear;
+        } else {
+            patch.external_ref = Patch::Set(v.to_string());
+        }
+    }
+    if let Some(m) = args.estimate {
+        patch.estimated_minutes = Patch::Set(m);
+    }
+    if let Some(priority) = args.priority {
+        patch.priority = Patch::Set(priority);
+    }
+    if let Some(bead_type) = args.bead_type {
+        patch.bead_type = Patch::Set(bead_type);
+    }
+    if let Some(status) = status {
+        match status {
+            WorkflowStatus::Closed => {
+                // Close via explicit close op to preserve reason/branch semantics.
+            }
+            WorkflowStatus::Open => {
+                patch.status = Patch::Set(OpenInProgress::Open);
+            }
+            WorkflowStatus::InProgress => {
+                patch.status = Patch::Set(OpenInProgress::InProgress);
+            }
+        }
+    }
+
+    if !patch.is_empty() {
+        patch
+            .validate_for_update()
+            .map_err(map_patch_validation_error)?;
+        let req = Request::Update {
+            ctx: ctx.mutation_ctx(),
+            payload: UpdatePayload {
+                id: id.clone(),
+                patch,
+                cas: None,
+            },
+        };
+        let _ = send(&req)?;
+    }
+
+    if !add_labels.is_empty() {
+        let req = Request::AddLabels {
+            ctx: ctx.mutation_ctx(),
+            payload: LabelsPayload {
+                id: id.clone(),
+                labels: add_labels,
+            },
+        };
+        let _ = send(&req)?;
+    }
+
+    if !remove_labels.is_empty() {
+        let req = Request::RemoveLabels {
+            ctx: ctx.mutation_ctx(),
+            payload: LabelsPayload {
+                id: id.clone(),
+                labels: remove_labels,
+            },
+        };
+        let _ = send(&req)?;
+    }
+
+    // Parent relationship (child -> parent edge).
+    if let Some(new_parent) = parent_action {
+        let req = Request::SetParent {
+            ctx: ctx.mutation_ctx(),
+            payload: ParentPayload {
+                id: id.clone(),
+                parent: new_parent,
+            },
+        };
+        let _ = send(&req)?;
+    }
+
+    // Add dependencies
+    if !args.deps.is_empty() {
+        let dep_specs = normalize_dep_specs(args.deps)?;
+        for spec in dep_specs {
+            let (kind, to_raw) = if let Some((k, i)) = spec.split_once(':') {
+                (DepKind::parse(k).unwrap_or(DepKind::Blocks), i)
+            } else {
+                (DepKind::Blocks, spec.as_str())
+            };
+            let to = normalize_bead_id_for("deps", to_raw)?;
+            let _ = send(&Request::AddDep {
+                ctx: ctx.mutation_ctx(),
+                payload: DepPayload {
+                    from: id.clone(),
+                    to,
+                    kind,
+                },
+            })?;
+        }
+    }
+
+    // Notes
+    if let Some(content) = args.notes {
+        let note = Request::AddNote {
+            ctx: ctx.mutation_ctx(),
+            payload: AddNotePayload {
+                id: id.clone(),
+                content,
+            },
+        };
+        let _ = send(&note)?;
+    }
+
+    // Assignee compat
+    if let Some(assignee) = args.assignee {
+        if assignee == "none" || assignee == "-" || assignee == "unassigned" {
+            let req = Request::Unclaim {
+                ctx: ctx.mutation_ctx(),
+                payload: IdPayload { id: id.clone() },
+            };
+            let _ = send(&req)?;
+        } else {
+            let current = ctx.actor_string()?;
+            if !assignee.is_empty() && assignee != "me" && assignee != "self" && assignee != current
+            {
+                return Err(validation_error(
+                    "assignee",
+                    "cannot assign other actors; run bd as that actor",
+                )
+                .into());
+            }
+            let req = Request::Claim {
+                ctx: ctx.mutation_ctx(),
+                payload: ClaimPayload {
+                    id: id.clone(),
+                    lease_secs: 3600,
+                },
+            };
+            let _ = send(&req)?;
+        }
+    }
+
+    if status_closed {
+        let req = Request::Close {
+            ctx: ctx.mutation_ctx(),
+            payload: ClosePayload {
+                id: id.clone(),
+                reason: close_reason,
+                on_branch: None,
+            },
+        };
+        let _ = send(&req)?;
+    }
+
+    // Emit updated view / summary.
+    if ctx.json {
+        let issue = fetch_issue(ctx, &id)?;
+        print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
+    } else {
+        print_line(&render_updated(&id_str))?;
+    }
+    Ok(())
+}
+
+pub fn render_updated(id: &str) -> String {
+    format!("✓ Updated issue: {id}")
+}
+
+fn normalize_reason(reason: Option<String>) -> Option<String> {
+    reason.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed == "-"
+            || trimmed.eq_ignore_ascii_case("none")
+            || trimmed.eq_ignore_ascii_case("null")
+        {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn map_patch_validation_error(err: BeadPatchValidationError) -> CommandError {
+    match err {
+        BeadPatchValidationError::RequiredFieldCleared { field } => {
+            validation_error(field.as_str(), "cannot clear required field").into()
+        }
+        BeadPatchValidationError::RequiredFieldEmpty { field } => {
+            validation_error(field.as_str(), "cannot set required field to empty").into()
+        }
+    }
+}
+
+fn parse_status(raw: &str) -> CommandResult<WorkflowStatus> {
+    WorkflowStatus::parse(raw)
+        .ok_or_else(|| validation_error("status", format!("unknown status {raw:?}")))
+        .map_err(Into::into)
+}
+
+fn parse_status_arg(raw: &str) -> std::result::Result<String, String> {
+    Ok(crate::parsers::parse_status(raw))
+}
+
+fn fetch_issue(ctx: &CliRuntimeCtx, id: &beads_core::BeadId) -> CommandResult<Issue> {
+    let req = Request::Show {
+        ctx: ctx.read_ctx(),
+        payload: IdPayload { id: id.clone() },
+    };
+    match send(&req)? {
+        ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
+        other => Err(beads_surface::ipc::IpcError::DaemonUnavailable(format!(
+            "unexpected response for show: {other:?}"
+        ))
+        .into()),
+    }
+}

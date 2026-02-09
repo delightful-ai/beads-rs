@@ -8,6 +8,7 @@ pub mod claim;
 pub mod close;
 pub mod common;
 pub mod count;
+pub mod create;
 pub mod daemon;
 pub mod delete;
 pub mod init;
@@ -18,10 +19,12 @@ pub mod ready;
 pub mod reopen;
 pub mod search;
 pub mod setup;
+pub mod show;
 pub mod stale;
 pub mod status;
 pub mod sync;
 pub mod unclaim;
+pub mod update;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
