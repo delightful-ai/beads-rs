@@ -2,6 +2,9 @@
 
 Date: 2026-02-08
 
+Follow-on closeout: see `docs/architecture/cli-ownership-closeout.md` (`bd-atsg.5`, 2026-02-09)
+for final parse/dispatch ownership and shim cleanup after the phased migration.
+
 ## Final State
 
 - `beads-cli`, `beads-daemon`, and `beads-daemon-core` are workspace crates.
