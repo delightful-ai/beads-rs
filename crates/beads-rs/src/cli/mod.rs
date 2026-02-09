@@ -1,290 +1,70 @@
 //! CLI surface for beads-rs.
 //!
-//! Goal:
-//! - Beads-go parity for the "main set" commands we care about now
-//! - Extensible command tree + thin handlers
-//! - LLM-robust parsing (aliases, boolish flags, case/dash tolerance)
+//! `beads-rs` keeps host-specific orchestration (repo/config/daemon hooks) while
+//! `beads-cli` owns top-level parse and dispatch.
 
-use std::ffi::OsString;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
-
-use clap::{ArgAction, Parser, builder::BoolishValueParser};
 
 use crate::config::{Config, apply_env_overrides, load_for_repo};
 use crate::core::{ActorId, Applied, DurabilityClass, NamespaceId, Watermarks};
 use crate::{Error, Result};
-use beads_cli::commands::onboard::{generate_guide, render_instructions};
-use beads_cli::commands::prime::write_context_if;
-use beads_cli::commands::setup::{SetupCmd, handle_aider, handle_claude, handle_cursor};
+use beads_cli::cli::{CliHost, RuntimeBuildArgs};
 use beads_cli::runtime::{CliRuntimeCtx, validate_actor_id as cli_validate_actor_id};
 use beads_cli::validation::{normalize_optional_client_request_id, normalize_optional_namespace};
-use beads_surface::ipc::{EmptyPayload, RepoCtx, Request, Response, send_request};
 
+pub use beads_cli::cli::{Cli, Command, command_name, parse_from};
 pub use beads_cli::commands::daemon::DaemonCmd;
-pub use commands::Command;
 
 mod backend;
-mod commands;
 
-// =============================================================================
-// Entry + global options
-// =============================================================================
+#[derive(Debug, Clone, Copy, Default)]
+struct BeadsRsCliHost;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "bd",
-    version,
-    about = "Beads distributed issue tracker",
-    infer_subcommands = true,
-    infer_long_args = true,
-    arg_required_else_help = true
-)]
-pub struct Cli {
-    /// Machine-readable JSON output (default: false; use `--json` for scripting).
-    #[arg(
-        long,
-        global = true,
-        default_value_t = false,
-        num_args = 0..=1,
-        value_parser = BoolishValueParser::new()
-    )]
-    pub json: bool,
+impl CliHost for BeadsRsCliHost {
+    type Error = Error;
 
-    /// Repository path (default: discover from cwd).
-    #[arg(long, global = true, value_name = "PATH")]
-    pub repo: Option<PathBuf>,
+    fn maybe_spawn_auto_upgrade(&self) {
+        crate::upgrade::maybe_spawn_auto_upgrade();
+    }
 
-    /// Actor identity (overrides BD_ACTOR for this invocation).
-    #[arg(long, global = true, value_name = "ACTOR")]
-    pub actor: Option<String>,
+    fn run_daemon_command(&self) -> Result<()> {
+        crate::run_daemon_command()
+    }
 
-    /// Namespace for mutation and query requests (default: core).
-    #[arg(long, global = true, value_name = "NAMESPACE")]
-    pub namespace: Option<String>,
+    fn build_runtime(&self, args: RuntimeBuildArgs) -> Result<CliRuntimeCtx> {
+        let repo = resolve_repo(args.repo)?;
+        let config = load_cli_config(&repo);
+        Ok(CliRuntimeCtx {
+            repo,
+            json: args.json,
+            namespace: resolve_namespace(args.namespace.as_deref(), &config)?,
+            durability: resolve_durability(args.durability.as_deref(), &config)?,
+            client_request_id: normalize_optional_client_request_id(
+                args.client_request_id.as_deref(),
+            )?,
+            require_min_seen: parse_require_min_seen(args.require_min_seen.as_deref())?,
+            wait_timeout_ms: args.wait_timeout_ms,
+            actor_id: resolve_actor_override(args.actor.as_deref())?,
+        })
+    }
 
-    /// Durability class for mutation requests (default: local_fsync).
-    #[arg(long, global = true, value_name = "DURABILITY")]
-    pub durability: Option<String>,
+    fn in_beads_repo(&self) -> bool {
+        match crate::repo::discover() {
+            Ok((repo, _)) => repo.refname_to_id("refs/heads/beads/store").is_ok(),
+            Err(_) => false,
+        }
+    }
 
-    /// Client request id (UUID) for idempotency on retries.
-    #[arg(long, global = true, value_name = "UUID")]
-    pub client_request_id: Option<String>,
-
-    /// Require applied watermarks before serving reads (JSON).
-    #[arg(long = "require-min-seen", global = true, value_name = "JSON")]
-    pub require_min_seen: Option<String>,
-
-    /// Optional wait timeout for require-min-seen (ms).
-    #[arg(long = "wait-timeout-ms", global = true, value_name = "MS")]
-    pub wait_timeout_ms: Option<u64>,
-
-    /// Errors only.
-    #[arg(
-        short = 'q',
-        long,
-        global = true,
-        default_value_t = false,
-        num_args = 0..=1,
-        value_parser = BoolishValueParser::new()
-    )]
-    pub quiet: bool,
-
-    /// Debug output (repeat for more).
-    #[arg(short = 'v', long, global = true, action = ArgAction::Count)]
-    pub verbose: u8,
-
-    #[command(subcommand)]
-    pub command: commands::Command,
-}
-
-// =============================================================================
-// Public API
-// =============================================================================
-
-/// Parse CLI from raw args, applying normalization for LLM robustness.
-pub fn parse_from<I, T>(args: I) -> Cli
-where
-    I: IntoIterator<Item = T>,
-    T: Into<OsString> + Clone,
-{
-    let raw: Vec<OsString> = args.into_iter().map(|t| t.into()).collect();
-    Cli::parse_from(normalize_args(raw))
-}
-
-pub fn command_name(command: &Command) -> String {
-    commands::command_name(command)
+    fn discover_repo(&self) -> Option<PathBuf> {
+        crate::repo::discover().ok().map(|(_, path)| path)
+    }
 }
 
 /// Run the CLI (used by bin).
 pub fn run(cli: Cli) -> Result<()> {
-    if !matches!(cli.command, Command::Daemon { .. } | Command::Upgrade(_)) {
-        crate::upgrade::maybe_spawn_auto_upgrade();
-    }
-
-    let actor_override = resolve_actor_override(cli.actor.as_deref())?;
     let backend = backend::BeadsRsCliBackend;
-
-    match cli.command {
-        Command::Daemon { cmd } => match cmd {
-            beads_cli::commands::daemon::DaemonCmd::Run => crate::run_daemon_command(),
-        },
-        // Prime is special: doesn't require repo, silently succeeds if not in beads project
-        Command::Prime => handle_prime(),
-        // Setup doesn't require an initialized beads repo
-        Command::Setup { cmd } => handle_setup(cmd),
-        // Onboard doesn't require an initialized beads repo
-        Command::Onboard(args) => handle_onboard(args.output.as_deref()),
-        // Store operations are global (no repo required).
-        Command::Store { cmd } => commands::store::handle(cli.json, cmd, &backend),
-        Command::Upgrade(args) => commands::upgrade::handle(cli.json, args.background, &backend),
-        cmd => {
-            let repo = resolve_repo(cli.repo)?;
-            let config = load_cli_config(&repo);
-            let ctx = Ctx::new(
-                CliRuntimeCtx {
-                    repo,
-                    json: cli.json,
-                    namespace: resolve_namespace(cli.namespace.as_deref(), &config)?,
-                    durability: resolve_durability(cli.durability.as_deref(), &config)?,
-                    client_request_id: normalize_optional_client_request_id(
-                        cli.client_request_id.as_deref(),
-                    )?,
-                    require_min_seen: parse_require_min_seen(cli.require_min_seen.as_deref())?,
-                    wait_timeout_ms: cli.wait_timeout_ms,
-                    actor_id: actor_override.clone(),
-                },
-                backend,
-            );
-
-            match cmd {
-                Command::Init => commands::init::handle(&ctx),
-                Command::Create(args) => commands::create::handle(&ctx, args),
-                Command::Show(args) => commands::show::handle(&ctx, args),
-                Command::List(args) => {
-                    beads_cli::commands::list::handle_list(&ctx, args).map_err(Into::into)
-                }
-                Command::Search(args) => {
-                    beads_cli::commands::search::handle(&ctx, args).map_err(Into::into)
-                }
-                Command::Ready(args) => {
-                    beads_cli::commands::ready::handle(&ctx, args).map_err(Into::into)
-                }
-                Command::Blocked => beads_cli::commands::blocked::handle(&ctx).map_err(Into::into),
-                Command::Stale(args) => {
-                    beads_cli::commands::stale::handle(&ctx, args).map_err(Into::into)
-                }
-                Command::Count(args) => {
-                    beads_cli::commands::count::handle(&ctx, args).map_err(Into::into)
-                }
-                Command::Deleted(args) => commands::deleted::handle(&ctx, args),
-                Command::Sync => commands::sync::handle(&ctx),
-                Command::Subscribe(args) => commands::subscribe::handle(&ctx, args),
-                Command::Update(args) => commands::update::handle(&ctx, args),
-                Command::Close(args) => commands::close::handle(&ctx, args),
-                Command::Reopen(args) => commands::reopen::handle(&ctx, args),
-                Command::Delete(args) => commands::delete::handle(&ctx, args),
-                Command::Claim(args) => commands::claim::handle(&ctx, args),
-                Command::Unclaim(args) => commands::unclaim::handle(&ctx, args),
-                Command::Comments(args) => commands::comments::handle_comments(&ctx, args),
-                Command::Comment(args) => commands::comments::handle_comment_add(&ctx, args),
-                Command::Dep { cmd } => commands::dep::handle(&ctx, cmd),
-                Command::Label { cmd } => commands::label::handle(&ctx, cmd),
-                Command::Epic { cmd } => commands::epic::handle(&ctx, cmd),
-                Command::Status => commands::status::handle(&ctx),
-                Command::Admin { cmd } => commands::admin::handle(&ctx, cmd),
-                Command::Migrate { cmd } => commands::migrate::handle(&ctx, cmd),
-                // Daemon, Prime, Setup, Onboard, and Upgrade handled above.
-                Command::Daemon { .. }
-                | Command::Prime
-                | Command::Setup { .. }
-                | Command::Onboard(_)
-                | Command::Store { .. }
-                | Command::Upgrade(_) => Ok(()),
-            }
-        }
-    }
-}
-
-fn handle_prime() -> Result<()> {
-    let in_beads_repo = match crate::repo::discover() {
-        Ok((repo, _)) => repo.refname_to_id("refs/heads/beads/store").is_ok(),
-        Err(_) => false,
-    };
-
-    let mut stdout = std::io::stdout().lock();
-    if let Err(e) = write_context_if(&mut stdout, in_beads_repo)
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(beads_surface::IpcError::from(e).into());
-    }
-
-    Ok(())
-}
-
-fn handle_setup(cmd: SetupCmd) -> Result<()> {
-    match cmd {
-        SetupCmd::Claude(args) => {
-            handle_claude(args.project, args.check, args.remove).map_err(Into::into)
-        }
-        SetupCmd::Cursor(args) => handle_cursor(args.check, args.remove).map_err(Into::into),
-        SetupCmd::Aider(args) => handle_aider(args.check, args.remove).map_err(Into::into),
-    }
-}
-
-fn handle_onboard(output: Option<&Path>) -> Result<()> {
-    let init_result = try_init();
-
-    if let Some(path) = output {
-        generate_guide(path);
-        print_line(&format!("Generated {}", path.display()))?;
-        print_line("This file is auto-generated - do not edit manually")?;
-    } else {
-        render_instructions(init_result);
-    }
-    Ok(())
-}
-
-fn try_init() -> bool {
-    if let Ok((_repo, path)) = crate::repo::discover() {
-        let req = Request::Init {
-            ctx: RepoCtx::new(path),
-            payload: EmptyPayload {},
-        };
-        matches!(send_request(&req), Ok(Response::Ok { .. }))
-    } else {
-        false
-    }
-}
-
-// =============================================================================
-// Context + helpers
-// =============================================================================
-
-type Ctx = CliCtx<backend::BeadsRsCliBackend>;
-
-#[derive(Debug, Clone)]
-struct CliCtx<B> {
-    runtime: CliRuntimeCtx,
-    backend: B,
-}
-
-impl<B> CliCtx<B> {
-    fn new(runtime: CliRuntimeCtx, backend: B) -> Self {
-        Self { runtime, backend }
-    }
-
-    fn backend(&self) -> &B {
-        &self.backend
-    }
-}
-
-impl<B> Deref for CliCtx<B> {
-    type Target = CliRuntimeCtx;
-
-    fn deref(&self) -> &Self::Target {
-        &self.runtime
-    }
+    let host = BeadsRsCliHost;
+    beads_cli::cli::run(cli, &host, &backend)
 }
 
 fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
@@ -298,9 +78,9 @@ fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
     let abs = if p.is_absolute() {
         p
     } else {
-        let cwd = std::env::current_dir().map_err(|e| {
+        let cwd = std::env::current_dir().map_err(|err| {
             Error::Ipc(beads_surface::IpcError::DaemonUnavailable(format!(
-                "failed to get cwd: {e}"
+                "failed to get cwd: {err}"
             )))
         })?;
         cwd.join(p)
@@ -370,66 +150,12 @@ fn resolve_actor_override(raw: Option<&str>) -> Result<Option<ActorId>> {
     validate_actor_id(raw).map(Some)
 }
 
-pub(super) fn print_line(line: &str) -> Result<()> {
-    use std::io::Write;
-    let mut stdout = std::io::stdout().lock();
-    if let Err(e) = writeln!(stdout, "{line}")
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(beads_surface::IpcError::from(e).into());
-    }
-    Ok(())
-}
-
-// =============================================================================
-// Parsing helpers (LLM robust)
-// =============================================================================
-
-fn normalize_args(mut raw: Vec<OsString>) -> Vec<OsString> {
-    if raw.is_empty() {
-        return raw;
-    }
-
-    let mut out = Vec::with_capacity(raw.len());
-    out.push(raw.remove(0)); // program name
-
-    for arg in raw {
-        let s = arg.to_string_lossy();
-        if s.starts_with("--") {
-            let mut pieces = s.splitn(2, '=');
-            let flag = pieces.next().unwrap_or("");
-            let val = pieces.next();
-            let mut canon = flag.to_lowercase().replace('_', "-");
-            canon = canonical_flag(&canon).to_string();
-            if let Some(v) = val {
-                out.push(OsString::from(format!("{canon}={v}")));
-            } else {
-                out.push(OsString::from(canon));
-            }
-        } else {
-            out.push(arg);
-        }
-    }
-    out
-}
-
-fn canonical_flag(flag: &str) -> &str {
-    match flag {
-        "--issue-type" | "--bead-type" => "--type",
-        "--prio" => "--priority",
-        "--acceptance-criteria" => "--acceptance",
-        "--addlabel" => "--add-label",
-        "--removelabel" => "--remove-label",
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::OpError;
     use crate::config::DefaultsConfig;
-    use crate::core::{DurabilityClass, HeadStatus, ReplicaId, Seq0};
+    use crate::core::{HeadStatus, ReplicaId, Seq0};
     use beads_cli::validation::{
         normalize_bead_id, normalize_bead_slug_for, normalize_optional_client_request_id,
         normalize_optional_namespace,
@@ -566,19 +292,16 @@ mod tests {
     #[test]
     fn mutation_meta_includes_actor_override() {
         let actor = ActorId::new("alice@example.com").unwrap();
-        let ctx = Ctx::new(
-            CliRuntimeCtx {
-                repo: PathBuf::from("/tmp/beads"),
-                json: false,
-                namespace: None,
-                durability: None,
-                client_request_id: None,
-                require_min_seen: None,
-                wait_timeout_ms: None,
-                actor_id: Some(actor.clone()),
-            },
-            backend::BeadsRsCliBackend,
-        );
+        let ctx = CliRuntimeCtx {
+            repo: PathBuf::from("/tmp/beads"),
+            json: false,
+            namespace: None,
+            durability: None,
+            client_request_id: None,
+            require_min_seen: None,
+            wait_timeout_ms: None,
+            actor_id: Some(actor.clone()),
+        };
         let meta = ctx.mutation_meta();
         assert_eq!(meta.actor_id, Some(actor));
     }
@@ -619,19 +342,16 @@ mod tests {
                 HeadStatus::Known([2u8; 32]),
             )
             .expect("watermark");
-        let ctx = Ctx::new(
-            CliRuntimeCtx {
-                repo: PathBuf::from("/tmp/beads"),
-                json: false,
-                namespace: None,
-                durability: None,
-                client_request_id: None,
-                require_min_seen: Some(watermarks.clone()),
-                wait_timeout_ms: Some(50),
-                actor_id: None,
-            },
-            backend::BeadsRsCliBackend,
-        );
+        let ctx = CliRuntimeCtx {
+            repo: PathBuf::from("/tmp/beads"),
+            json: false,
+            namespace: None,
+            durability: None,
+            client_request_id: None,
+            require_min_seen: Some(watermarks.clone()),
+            wait_timeout_ms: Some(50),
+            actor_id: None,
+        };
         let read = ctx.read_consistency();
         assert_eq!(read.require_min_seen, Some(watermarks));
         assert_eq!(read.wait_timeout_ms, Some(50));
