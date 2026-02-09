@@ -4,13 +4,14 @@ use crate::parsers::{parse_bead_type, parse_priority};
 use crate::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
 use clap::Args;
 
+use super::common::fetch_issue;
 use super::{CommandResult, print_ok};
 use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, resolve_description, send, send_raw};
 use beads_api::{Issue, QueryResult};
-use beads_core::{BeadId, BeadType, Priority};
+use beads_core::{BeadType, Priority};
 use beads_surface::OpResult;
-use beads_surface::ipc::{CreatePayload, IdPayload, Request, Response, ResponsePayload};
+use beads_surface::ipc::{CreatePayload, Request, Response, ResponsePayload};
 
 #[derive(Args, Debug)]
 pub struct CreateArgs {
@@ -556,18 +557,4 @@ fn parse_md_list(content: &str) -> Vec<String> {
             }
         })
         .collect()
-}
-
-fn fetch_issue(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<Issue> {
-    let req = Request::Show {
-        ctx: ctx.read_ctx(),
-        payload: IdPayload { id: id.clone() },
-    };
-    match send(&req)? {
-        ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
-        other => Err(beads_surface::ipc::IpcError::DaemonUnavailable(format!(
-            "unexpected response for show: {other:?}"
-        ))
-        .into()),
-    }
 }

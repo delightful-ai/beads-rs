@@ -1,7 +1,6 @@
 use clap::Args;
-use std::sync::LazyLock;
 
-use super::common::{fmt_issue_ref, fmt_labels};
+use super::common::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
 use super::{CommandResult, print_ok};
 use crate::render::print_line;
 use crate::runtime::{CliRuntimeCtx, send};
@@ -11,9 +10,6 @@ use beads_core::{BeadId, BeadType, WorkflowStatus};
 use beads_surface::Filters;
 use beads_surface::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use std::collections::{BTreeSet, HashMap};
-
-static WALL_MS_FORMAT: LazyLock<Option<Vec<time::format_description::FormatItem<'static>>>> =
-    LazyLock::new(|| time::format_description::parse("[year]-[month]-[day] [hour]:[minute]").ok());
 
 #[derive(Args, Debug)]
 pub struct ShowArgs {
@@ -408,17 +404,6 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
                 child.title
             ));
         }
-    }
-}
-
-fn fmt_wall_ms(ms: u64) -> String {
-    use time::OffsetDateTime;
-
-    let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    match WALL_MS_FORMAT.as_deref() {
-        Some(format) => dt.format(format).unwrap_or_else(|_| ms.to_string()),
-        None => ms.to_string(),
     }
 }
 

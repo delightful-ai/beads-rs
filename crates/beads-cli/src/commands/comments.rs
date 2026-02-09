@@ -1,5 +1,6 @@
 use clap::{Args, Subcommand};
 
+use super::common::fmt_wall_ms;
 use super::{CommandResult, print_ok};
 use crate::render::print_line;
 use crate::runtime::{CliRuntimeCtx, send};
@@ -122,21 +123,4 @@ pub fn render_notes(notes: &[Note]) -> String {
 
 pub fn render_comment_added(issue_id: &str) -> String {
     format!("Comment added to {issue_id}")
-}
-
-fn fmt_wall_ms(ms: u64) -> String {
-    use std::sync::LazyLock;
-    use time::OffsetDateTime;
-
-    static WALL_MS_FORMAT: LazyLock<Option<Vec<time::format_description::FormatItem<'static>>>> =
-        LazyLock::new(|| {
-            time::format_description::parse("[year]-[month]-[day] [hour]:[minute]").ok()
-        });
-
-    let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    match WALL_MS_FORMAT.as_deref() {
-        Some(fmt) => dt.format(fmt).unwrap_or_else(|_| ms.to_string()),
-        None => ms.to_string(),
-    }
 }

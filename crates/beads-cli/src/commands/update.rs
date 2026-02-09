@@ -1,5 +1,6 @@
 use clap::Args;
 
+use super::common::fetch_issue;
 use super::{CommandError, CommandResult, print_ok};
 use crate::parsers::{parse_bead_type, parse_priority};
 use crate::render::print_line;
@@ -7,7 +8,7 @@ use crate::runtime::{CliRuntimeCtx, resolve_description, send};
 use crate::validation::{
     normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
 };
-use beads_api::{Issue, QueryResult};
+use beads_api::QueryResult;
 use beads_core::{BeadType, DepKind, Priority, WorkflowStatus};
 use beads_surface::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, DepPayload, IdPayload, LabelsPayload,
@@ -336,18 +337,4 @@ fn parse_status(raw: &str) -> CommandResult<WorkflowStatus> {
 
 fn parse_status_arg(raw: &str) -> std::result::Result<String, String> {
     Ok(crate::parsers::parse_status(raw))
-}
-
-fn fetch_issue(ctx: &CliRuntimeCtx, id: &beads_core::BeadId) -> CommandResult<Issue> {
-    let req = Request::Show {
-        ctx: ctx.read_ctx(),
-        payload: IdPayload { id: id.clone() },
-    };
-    match send(&req)? {
-        ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
-        other => Err(beads_surface::ipc::IpcError::DaemonUnavailable(format!(
-            "unexpected response for show: {other:?}"
-        ))
-        .into()),
-    }
 }

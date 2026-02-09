@@ -1,14 +1,15 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::{CommandError, CommandResult};
+use super::CommandResult;
+use super::common::fetch_issue;
 use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{normalize_bead_id, validation_error};
-use beads_api::{Issue, QueryResult};
+use beads_api::QueryResult;
 use beads_core::BeadId;
 use beads_surface::Filters;
-use beads_surface::ipc::{IpcError, LabelsPayload, ListPayload, Request, ResponsePayload};
+use beads_surface::ipc::{LabelsPayload, ListPayload, Request, ResponsePayload};
 
 #[derive(Subcommand, Debug)]
 pub enum LabelCmd {
@@ -202,19 +203,6 @@ fn split_label_batch(batch: LabelBatchArgs) -> CommandResult<(Vec<BeadId>, Strin
     Ok((ids, label))
 }
 
-fn fetch_issue(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<Issue> {
-    let req = Request::Show {
-        ctx: ctx.read_ctx(),
-        payload: beads_surface::ipc::IdPayload { id: id.clone() },
-    };
-    match send(&req)? {
-        ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
-        other => Err(CommandError::Ipc(IpcError::DaemonUnavailable(format!(
-            "unexpected response for show: {other:?}"
-        )))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,7 +215,7 @@ mod tests {
         })
         .expect_err("validation error");
         match err {
-            CommandError::Validation(ValidationError::Field { field, .. }) => {
+            super::super::CommandError::Validation(ValidationError::Field { field, .. }) => {
                 assert_eq!(field, "label");
             }
             other => panic!("expected validation error, got {other:?}"),

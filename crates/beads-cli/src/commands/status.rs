@@ -1,14 +1,10 @@
-use std::sync::LazyLock;
-
 use beads_api::{QueryResult, StatusOutput, SyncWarning};
 use beads_surface::ipc::{EmptyPayload, Request, ResponsePayload};
 
+use super::common::fmt_wall_ms;
 use super::{CommandResult, print_ok};
 use crate::render::print_line;
 use crate::runtime::{CliRuntimeCtx, send};
-
-static WALL_MS_FORMAT: LazyLock<Option<Vec<time::format_description::FormatItem<'static>>>> =
-    LazyLock::new(|| time::format_description::parse("[year]-[month]-[day] [hour]:[minute]").ok());
 
 pub fn handle(ctx: &CliRuntimeCtx) -> CommandResult<()> {
     let req = Request::Status {
@@ -149,17 +145,6 @@ pub fn render_status(out: &StatusOutput) -> String {
     }
     buf.push('\n');
     buf
-}
-
-fn fmt_wall_ms(ms: u64) -> String {
-    use time::OffsetDateTime;
-
-    let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    match WALL_MS_FORMAT.as_deref() {
-        Some(format) => dt.format(format).unwrap_or_else(|_| ms.to_string()),
-        None => ms.to_string(),
-    }
 }
 
 fn fmt_duration_ms(ms: u64) -> String {

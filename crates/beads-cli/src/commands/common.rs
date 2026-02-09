@@ -1,4 +1,8 @@
-use beads_core::NamespaceId;
+use super::{CommandError, CommandResult};
+use crate::runtime::{CliRuntimeCtx, send};
+use beads_api::{Issue, QueryResult};
+use beads_core::{BeadId, NamespaceId};
+use beads_surface::ipc::{IdPayload, IpcError, Request, ResponsePayload};
 use std::sync::LazyLock;
 
 pub(crate) fn fmt_issue_ref(namespace: &NamespaceId, id: &str) -> String {
@@ -45,5 +49,18 @@ pub(crate) fn fmt_wall_ms(ms: u64) -> String {
     match WALL_MS_FORMAT.as_deref() {
         Some(fmt) => dt.format(fmt).unwrap_or_else(|_| ms.to_string()),
         None => ms.to_string(),
+    }
+}
+
+pub(crate) fn fetch_issue(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<Issue> {
+    let req = Request::Show {
+        ctx: ctx.read_ctx(),
+        payload: IdPayload { id: id.clone() },
+    };
+    match send(&req)? {
+        ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(issue),
+        other => Err(CommandError::Ipc(IpcError::DaemonUnavailable(format!(
+            "unexpected response for show: {other:?}"
+        )))),
     }
 }
