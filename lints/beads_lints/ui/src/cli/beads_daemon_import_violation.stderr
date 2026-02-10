@@ -2,7 +2,7 @@ warning: CLI reference `crate::beads_daemon::remote::RemoteUrl` bypasses the CLI
   --> $DIR/beads_daemon_import_violation.rs:LL:CC
    |
 LL | use crate::beads_daemon::remote::RemoteUrl;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: Import daemon-facing contracts from `beads_surface` or `beads_api`; CLI must not depend on `beads_daemon` directly.
 

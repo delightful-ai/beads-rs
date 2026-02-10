@@ -5,3 +5,4 @@ LL | use crate::daemon::ipc::Request;
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: Import IPC contracts from `beads_surface::ipc` and call transport through a CLI wrapper.
+

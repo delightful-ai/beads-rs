@@ -2,7 +2,7 @@ warning: CLI reference `crate::beads_daemon_core::repl::proto::Welcome` bypasses
   --> $DIR/beads_daemon_core_import_violation.rs:LL:CC
    |
 LL | use crate::beads_daemon_core::repl::proto::Welcome;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: Import protocol/frame contracts from `beads_surface` boundary APIs; CLI must not depend on `beads_daemon_core` directly.
 
