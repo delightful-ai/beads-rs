@@ -1681,8 +1681,8 @@ mod tests {
     use super::*;
     use crate::collections::Label;
     use crate::composite::Note;
-    use crate::dep::{AcyclicDepKey, DepAddKey, NoCycleProof, ParentEdge};
     use crate::crdt::Lww;
+    use crate::dep::{AcyclicDepKey, DepAddKey, NoCycleProof, ParentEdge};
     use crate::identity::{ActorId, NoteId, ReplicaId};
     use crate::orset::Dot;
     use crate::time::{Stamp, WriteStamp};
