@@ -21,6 +21,10 @@ use super::error::SyncError;
 use super::wire;
 use crate::core::{BeadId, BeadSlug, CanonicalState, WallClock, WriteStamp};
 
+const BACKUP_REF_PREFIX: &str = "refs/beads/backup/";
+const BACKUP_REFS_GLOB: &str = "refs/beads/backup/*";
+const MAX_BACKUP_REFS: usize = 64;
+
 // =============================================================================
 // Phase markers (zero-sized types for typestate)
 // =============================================================================
@@ -308,6 +312,8 @@ impl SyncProcess<Idle> {
             config,
             phase: _,
         } = self;
+        // Keep backup refs bounded even when this fetch path does not create a new backup.
+        prune_backup_refs(repo, MAX_BACKUP_REFS, Oid::zero())?;
         let mut fetch_error = None;
         let prev_remote_oid_opt = refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?;
         // Fetch from origin
@@ -1079,11 +1085,64 @@ fn update_ref(repo: &Repository, name: &str, oid: Oid, message: &str) -> Result<
 }
 
 fn ensure_backup_ref(repo: &Repository, oid: Oid) -> Result<(), SyncError> {
-    let name = format!("refs/beads/backup/{}", oid);
-    if repo.refname_to_id(&name).is_ok() {
+    let name = format!("{BACKUP_REF_PREFIX}{oid}");
+    let created = match repo.refname_to_id(&name) {
+        Ok(_) => false,
+        Err(err) if err.code() == ErrorCode::NotFound => {
+            repo.reference(&name, oid, false, "beads sync: backup local ref")?;
+            true
+        }
+        Err(err) => return Err(SyncError::Git(err)),
+    };
+    if created {
+        prune_backup_refs(repo, MAX_BACKUP_REFS, oid)?;
+    }
+    Ok(())
+}
+
+fn prune_backup_refs(repo: &Repository, keep: usize, protected_oid: Oid) -> Result<(), SyncError> {
+    let refs = repo.references_glob(BACKUP_REFS_GLOB)?;
+
+    let mut protected = false;
+    let mut candidates: Vec<(String, i64)> = Vec::new();
+    for reference in refs {
+        let reference = reference?;
+        let Some(name) = reference.name().map(str::to_owned) else {
+            continue;
+        };
+        let Some(target) = reference.target() else {
+            continue;
+        };
+        if target == protected_oid {
+            protected = true;
+            continue;
+        }
+        let commit_time = repo
+            .find_commit(target)
+            .map(|commit| commit.time().seconds())
+            .unwrap_or(i64::MIN);
+        candidates.push((name, commit_time));
+    }
+
+    let total_refs = candidates.len() + usize::from(protected);
+    if total_refs <= keep {
         return Ok(());
     }
-    repo.reference(&name, oid, false, "beads sync: backup local ref")?;
+
+    let keep_candidates = if protected {
+        keep.saturating_sub(1)
+    } else {
+        keep
+    };
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+
+    for (name, _) in candidates.into_iter().skip(keep_candidates) {
+        match repo.find_reference(&name) {
+            Ok(mut reference) => reference.delete()?,
+            Err(err) if err.code() == ErrorCode::NotFound => {}
+            Err(err) => return Err(SyncError::Git(err)),
+        }
+    }
     Ok(())
 }
 
@@ -1612,6 +1671,68 @@ mod tests {
         let backup_ref = format!("refs/beads/backup/{}", local_oid);
         let backup_oid = local_repo.refname_to_id(&backup_ref).unwrap();
         assert_eq!(backup_oid, local_oid);
+    }
+
+    #[test]
+    fn ensure_backup_ref_prunes_to_max_and_keeps_latest() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+
+        let mut parent = None;
+        let mut latest = Oid::zero();
+        for i in 0..(MAX_BACKUP_REFS + 10) {
+            let oid = write_store_commit(&repo, parent, &format!("commit-{i}"));
+            parent = Some(oid);
+            ensure_backup_ref(&repo, oid).unwrap();
+            latest = oid;
+        }
+
+        let backup_ref_count = repo
+            .references_glob(BACKUP_REFS_GLOB)
+            .unwrap()
+            .filter_map(Result::ok)
+            .count();
+        assert!(backup_ref_count <= MAX_BACKUP_REFS);
+
+        let latest_ref = format!("{BACKUP_REF_PREFIX}{latest}");
+        let latest_oid = repo.refname_to_id(&latest_ref).unwrap();
+        assert_eq!(latest_oid, latest);
+    }
+
+    #[test]
+    fn fetch_prunes_existing_backup_refs() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+
+        let mut parent = None;
+        let mut backup_oids = Vec::new();
+        for i in 0..(MAX_BACKUP_REFS + 10) {
+            let oid = write_store_commit(&repo, parent, &format!("commit-{i}"));
+            parent = Some(oid);
+            backup_oids.push(oid);
+        }
+        for oid in backup_oids {
+            let name = format!("{BACKUP_REF_PREFIX}{oid}");
+            repo.reference(&name, oid, false, "test backup").unwrap();
+        }
+
+        let backup_ref_count_before = repo
+            .references_glob(BACKUP_REFS_GLOB)
+            .unwrap()
+            .filter_map(Result::ok)
+            .count();
+        assert!(backup_ref_count_before > MAX_BACKUP_REFS);
+
+        let _fetched = SyncProcess::new(tmp.path().to_path_buf())
+            .fetch(&repo)
+            .unwrap();
+
+        let backup_ref_count_after = repo
+            .references_glob(BACKUP_REFS_GLOB)
+            .unwrap()
+            .filter_map(Result::ok)
+            .count();
+        assert!(backup_ref_count_after <= MAX_BACKUP_REFS);
     }
 
     #[test]

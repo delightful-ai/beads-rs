@@ -339,7 +339,7 @@ fn read_store_id_from_git_meta(repo: &Repository) -> Result<Option<StoreId>, Sto
 fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, StoreDiscoveryError> {
     let mut ids = BTreeSet::new();
     let refs = repo
-        .references_glob("refs/beads/*")
+        .references_glob("refs/beads/*-*-*-*-*/*")
         .map_err(|source| StoreDiscoveryError::RefList { source })?;
 
     for reference in refs {
@@ -347,9 +347,6 @@ fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, Sto
         let Some(name) = reference.name() else {
             continue;
         };
-        if name == "refs/beads/meta" {
-            continue;
-        }
         let Some(rest) = name.strip_prefix("refs/beads/") else {
             continue;
         };
@@ -357,13 +354,8 @@ fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, Sto
         if store_id_raw.is_empty() {
             continue;
         }
-        match StoreId::parse_str(store_id_raw) {
-            Ok(id) => {
-                ids.insert(id);
-            }
-            Err(_) => {
-                tracing::warn!("ignoring invalid store id ref {}", name);
-            }
+        if let Ok(id) = StoreId::parse_str(store_id_raw) {
+            ids.insert(id);
         }
     }
 
@@ -461,6 +453,20 @@ mod tests {
         let head = repo.head().unwrap().target().unwrap();
         let name = format!("refs/beads/{store_id}/head");
         repo.reference(&name, head, true, "store ref").unwrap();
+    }
+
+    #[test]
+    fn discover_store_id_ignores_backup_refs() {
+        let (_dir, repo) = init_repo();
+        let store_id = StoreId::new(Uuid::from_bytes([3u8; 16]));
+        write_store_meta(&repo, store_id);
+        write_store_ref(&repo, store_id);
+
+        let head = repo.head().unwrap().target().unwrap();
+        let backup_ref = format!("refs/beads/backup/{head}");
+        repo.reference(&backup_ref, head, true, "backup").unwrap();
+
+        assert_eq!(discover_store_id_from_refs(&repo).unwrap(), Some(store_id));
     }
 
     #[test]
