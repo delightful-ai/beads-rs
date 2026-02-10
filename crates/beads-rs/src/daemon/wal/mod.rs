@@ -20,9 +20,9 @@ pub mod record;
 pub mod replay;
 pub mod segment;
 
+pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 pub use event_wal::{EventWal, SegmentSnapshot};
 pub use frame::{FRAME_CRC_OFFSET, FRAME_HEADER_LEN, FrameReader, FrameWriter};
-pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 pub use index::{
     ClientRequestEventIds, ClientRequestEventIdsError, ClientRequestRow, HlcRow,
     IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow, SegmentRow, SqliteWalIndex,

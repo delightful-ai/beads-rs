@@ -1,6 +1,6 @@
 //! Lightweight WAL index primitives shared with model adapters.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -8,9 +8,10 @@ use thiserror::Error;
 use crate::core::error::details as error_details;
 use crate::core::{
     ActorId, Applied, CliErrorCode, ClientRequestId, Durable, ErrorCode, ErrorPayload, EventId,
-    HeadStatus, IntoErrorPayload, NamespaceId, ProtocolErrorCode, ReplicaDurabilityRole, ReplicaId,
-    SegmentId, Seq0, Seq1, StoreId, Transience, TxnId, Watermark,
+    HeadStatus, IntoErrorPayload, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId, Seq0, Seq1,
+    StoreId, Transience, TxnId, Watermark,
 };
+pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 
 pub mod memory_index;
 
@@ -564,8 +565,8 @@ pub struct ReplicaLivenessRow {
     pub role: ReplicaDurabilityRole,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IndexDurabilityMode {
     Cache,
     Durable,

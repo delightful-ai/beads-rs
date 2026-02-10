@@ -20,8 +20,8 @@ use crate::daemon::store::runtime::StoreRuntimeError;
 use crate::daemon::wal::EventWalError;
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
-use beads_daemon_core::durability::DurabilityError;
 use beads_daemon::admission::AdmissionRejection;
+use beads_daemon_core::durability::DurabilityError;
 
 pub use beads_surface::ops::{BeadPatch, OpResult, Patch};
 

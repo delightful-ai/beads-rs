@@ -7,21 +7,21 @@ use std::time::Duration;
 
 use minicbor::{Decoder, Encoder};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::core::{
     ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId, ReplicaId,
-    ReplicaRole, SegmentId, Seq0, Seq1, StoreId, StoreMeta, StoreMetaVersions, TxnId, Watermark,
-    ReplicaDurabilityRole, ReplicaDurabilityRoleError,
+    ReplicaRole, SegmentId, Seq0, Seq1, StoreMeta, StoreMetaVersions, TxnId, Watermark,
 };
 
 pub use beads_daemon_core::wal::{
     ClientRequestEventIds, ClientRequestEventIdsError, ClientRequestRow, HlcRow,
-    IndexDurabilityMode, IndexedRangeItem,
-    ReplicaLivenessRow, SegmentRow, WalIndex, WalIndexError, WalIndexReader, WalIndexTxn,
-    WalIndexWriter, WatermarkRow,
+    IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow, SegmentRow, WalIndex, WalIndexError,
+    WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
 };
+
+// Re-export for compatibility if needed, but usage should ideally migrate
+pub use beads_daemon_core::wal::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
 const BUSY_TIMEOUT_MS: u64 = 5_000;
@@ -340,8 +340,10 @@ impl WalIndexTxn for SqliteWalIndexTxn {
     ) -> Result<(), WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
-        let applied_blob = head_sha_from_status(applied.head()).map(|value: [u8; 32]| value.to_vec());
-        let durable_blob = head_sha_from_status(durable.head()).map(|value: [u8; 32]| value.to_vec());
+        let applied_blob =
+            head_sha_from_status(applied.head()).map(|value: [u8; 32]| value.to_vec());
+        let durable_blob =
+            head_sha_from_status(durable.head()).map(|value: [u8; 32]| value.to_vec());
 
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
@@ -369,12 +371,15 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             WalIndexError::HlcRowDecode("last_physical_ms out of range".to_string())
         })?;
         let last_logical = i64::from(hlc.last_logical);
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO hlc (actor_id, last_physical_ms, last_logical) VALUES (?1, ?2, ?3) \
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "INSERT INTO hlc (actor_id, last_physical_ms, last_logical) VALUES (?1, ?2, ?3) \
              ON CONFLICT(actor_id) DO UPDATE SET \
                last_physical_ms = excluded.last_physical_ms, \
                last_logical = excluded.last_logical",
-        ).map_err(map_sqlite_error)?;
+            )
+            .map_err(map_sqlite_error)?;
         stmt.execute(params![
             hlc.actor_id.as_str(),
             last_physical_ms,
@@ -450,10 +455,13 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             .map_err(map_sqlite_error)?
         };
         if inserted == 0 {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT request_sha256 FROM client_requests \
+            let mut stmt = self
+                .conn
+                .prepare_cached(
+                    "SELECT request_sha256 FROM client_requests \
                  WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
-            ).map_err(map_sqlite_error)?;
+                )
+                .map_err(map_sqlite_error)?;
             let existing = stmt
                 .query_row(params![namespace, &origin_blob, &client_blob], |row| {
                     row.get::<_, Vec<u8>>(0)
@@ -511,7 +519,9 @@ impl WalIndexTxn for SqliteWalIndexTxn {
     }
 
     fn commit(mut self: Box<Self>) -> Result<(), WalIndexError> {
-        self.conn.execute_batch("COMMIT").map_err(map_sqlite_error)?;
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(map_sqlite_error)?;
         self.committed = true;
         Ok(())
     }
@@ -687,8 +697,8 @@ impl WalIndexReader for SqliteWalIndexReader {
 
     fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError> {
         self.with_conn(|conn| {
-            let mut stmt =
-                conn.prepare_cached("SELECT actor_id, last_physical_ms, last_logical FROM hlc")
+            let mut stmt = conn
+                .prepare_cached("SELECT actor_id, last_physical_ms, last_logical FROM hlc")
                 .map_err(map_sqlite_error)?;
             let mut rows = stmt.query([]).map_err(map_sqlite_error)?;
             let mut hlc_rows = Vec::new();
@@ -718,10 +728,12 @@ impl WalIndexReader for SqliteWalIndexReader {
 
     fn load_replica_liveness(&self) -> Result<Vec<ReplicaLivenessRow>, WalIndexError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare_cached(
-                "SELECT replica_id, last_seen_ms, last_handshake_ms, role, durability_eligible \
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT replica_id, last_seen_ms, last_handshake_ms, role, durability_eligible \
                  FROM replica_liveness",
-            ).map_err(map_sqlite_error)?;
+                )
+                .map_err(map_sqlite_error)?;
             let mut rows = stmt.query([]).map_err(map_sqlite_error)?;
             let mut out = Vec::new();
             while let Some(row) = rows.next().map_err(map_sqlite_error)? {
@@ -743,8 +755,11 @@ impl WalIndexReader for SqliteWalIndexReader {
                 })?;
                 let role = parse_replica_role(&role)?;
                 let durability_eligible = durability_eligible != 0;
-                let role = ReplicaDurabilityRole::try_from((role, durability_eligible))
-                    .map_err(|err| WalIndexError::ReplicaLivenessRowDecode(err.to_string()))?;
+                let role = ReplicaDurabilityRole::try_from((role, durability_eligible)).map_err(
+                    |err: ReplicaDurabilityRoleError| {
+                        WalIndexError::ReplicaLivenessRowDecode(err.to_string())
+                    },
+                )?;
 
                 out.push(ReplicaLivenessRow {
                     replica_id: ReplicaId::new(replica_uuid),
@@ -839,10 +854,12 @@ impl WalIndexReader for SqliteWalIndexReader {
             let origin_blob = uuid_blob(origin.as_uuid());
             let client_blob = uuid_blob(client_request_id.as_uuid());
 
-            let mut stmt = conn.prepare_cached(
-                "SELECT request_sha256, txn_id, event_ids, created_at_ms FROM client_requests \
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT request_sha256, txn_id, event_ids, created_at_ms FROM client_requests \
                  WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
-            ).map_err(map_sqlite_error)?;
+                )
+                .map_err(map_sqlite_error)?;
             let row = stmt
                 .query_row(params![namespace, origin_blob, client_blob], |row| {
                     Ok((
@@ -974,7 +991,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), WalIndexError> {
            role TEXT NOT NULL,
            durability_eligible INTEGER NOT NULL
          );",
-    ).map_err(map_sqlite_error)?;
+    )
+    .map_err(map_sqlite_error)?;
     Ok(())
 }
 
@@ -1073,11 +1091,13 @@ fn require_meta(conn: &Connection, key: &'static str) -> Result<String, WalIndex
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, WalIndexError> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        params![name],
-        |row| row.get(0),
-    ).map_err(map_sqlite_error)?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .map_err(map_sqlite_error)?;
     Ok(count > 0)
 }
 
@@ -1120,16 +1140,21 @@ fn open_connection(
     }
     let conn = Connection::open_with_flags(path, flags).map_err(map_sqlite_error)?;
     apply_pragmas(&conn, mode)?;
-    conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS)).map_err(map_sqlite_error)?;
+    conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+        .map_err(map_sqlite_error)?;
     conn.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
     Ok(conn)
 }
 
 fn apply_pragmas(conn: &Connection, mode: IndexDurabilityMode) -> Result<(), WalIndexError> {
-    conn.pragma_update(None, "journal_mode", "WAL").map_err(map_sqlite_error)?;
-    conn.pragma_update(None, "synchronous", mode.synchronous_value()).map_err(map_sqlite_error)?;
-    conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sqlite_error)?;
-    conn.pragma_update(None, "cache_size", CACHE_SIZE_KB).map_err(map_sqlite_error)?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(map_sqlite_error)?;
+    conn.pragma_update(None, "synchronous", mode.synchronous_value())
+        .map_err(map_sqlite_error)?;
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(map_sqlite_error)?;
+    conn.pragma_update(None, "cache_size", CACHE_SIZE_KB)
+        .map_err(map_sqlite_error)?;
     Ok(())
 }
 
@@ -1175,7 +1200,8 @@ pub(crate) fn encode_event_ids(
 ) -> Result<Vec<u8>, WalIndexError> {
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
-    enc.array(event_ids.len() as u64).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
+    enc.array(event_ids.len() as u64)
+        .map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
     for seq in event_ids.seqs() {
         encode_event_id(&mut enc, event_ids.origin(), event_ids.namespace(), *seq)?;
     }
@@ -1188,34 +1214,50 @@ fn encode_event_id(
     namespace: &NamespaceId,
     origin_seq: Seq1,
 ) -> Result<(), WalIndexError> {
-    enc.array(3).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
-    enc.bytes(origin.as_uuid().as_bytes()).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
-    enc.str(namespace.as_str()).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
-    enc.u64(origin_seq.get()).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
+    enc.array(3)
+        .map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
+    enc.bytes(origin.as_uuid().as_bytes())
+        .map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
+    enc.str(namespace.as_str())
+        .map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
+    enc.u64(origin_seq.get())
+        .map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
     Ok(())
 }
 
 fn decode_event_ids(bytes: &[u8]) -> Result<ClientRequestEventIds, WalIndexError> {
     let mut dec = Decoder::new(bytes);
-    let len = dec.array().map_err(|e| WalIndexError::CborDecode(e.to_string()))?.ok_or_else(|| {
-        WalIndexError::EventIdDecode("event_ids CBOR must be definite".to_string())
-    })?;
+    let len = dec
+        .array()
+        .map_err(|e| WalIndexError::CborDecode(e.to_string()))?
+        .ok_or_else(|| {
+            WalIndexError::EventIdDecode("event_ids CBOR must be definite".to_string())
+        })?;
     let mut ids = Vec::with_capacity(len as usize);
     for _ in 0..len {
-        let item_len = dec.array().map_err(|e| WalIndexError::CborDecode(e.to_string()))?.ok_or_else(|| {
-            WalIndexError::EventIdDecode("event_ids entry must be definite".to_string())
-        })?;
+        let item_len = dec
+            .array()
+            .map_err(|e| WalIndexError::CborDecode(e.to_string()))?
+            .ok_or_else(|| {
+                WalIndexError::EventIdDecode("event_ids entry must be definite".to_string())
+            })?;
         if item_len != 3 {
             return Err(WalIndexError::EventIdDecode(
                 "event_ids entry must be len 3".to_string(),
             ));
         }
-        let replica_bytes = dec.bytes().map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
+        let replica_bytes = dec
+            .bytes()
+            .map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
         let replica_uuid = blob_uuid(replica_bytes.to_vec())?;
-        let namespace = dec.str().map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
+        let namespace = dec
+            .str()
+            .map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
         let namespace = NamespaceId::parse(namespace)
             .map_err(|err| WalIndexError::EventIdDecode(err.to_string()))?;
-        let seq = dec.u64().map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
+        let seq = dec
+            .u64()
+            .map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
         let origin_seq = Seq1::from_u64(seq)
             .ok_or_else(|| WalIndexError::EventIdDecode("origin_seq must be >=1".to_string()))?;
         ids.push(EventId::new(
