@@ -114,6 +114,21 @@ impl BeadFields {
         }
     }
 
+    /// In-place LWW merge.
+    pub fn absorb(&mut self, other: Self) {
+        self.title.absorb(other.title);
+        self.description.absorb(other.description);
+        self.design.absorb(other.design);
+        self.acceptance_criteria.absorb(other.acceptance_criteria);
+        self.priority.absorb(other.priority);
+        self.bead_type.absorb(other.bead_type);
+        self.external_ref.absorb(other.external_ref);
+        self.source_repo.absorb(other.source_repo);
+        self.estimated_minutes.absorb(other.estimated_minutes);
+        self.workflow.absorb(other.workflow);
+        self.claim.absorb(other.claim);
+    }
+
     /// Collect all stamps for computing updated_stamp.
     pub fn all_stamps(&self) -> impl Iterator<Item = &Stamp> {
         [
@@ -180,6 +195,18 @@ impl Bead {
 
     pub fn bead_type(&self) -> BeadType {
         self.fields.bead_type.value
+    }
+
+    /// In-place merge of fields if lineage matches.
+    pub fn absorb(&mut self, other: Self) -> Result<(), CoreError> {
+        if self.core.id != other.core.id || self.core.created() != other.core.created() {
+            return Err(CollisionError {
+                id: self.core.id.as_str().to_string(),
+            }
+            .into());
+        }
+        self.fields.absorb(other.fields);
+        Ok(())
     }
 }
 

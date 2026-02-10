@@ -471,7 +471,7 @@ struct LoadResultInputs {
 
 fn build_load_result(inputs: LoadResultInputs) -> Result<LoadResult, SyncError> {
     let LoadResultInputs {
-        local_state,
+        mut local_state,
         local_slug,
         local_meta_stamp,
         remote_state,
@@ -481,19 +481,26 @@ fn build_load_result(inputs: LoadResultInputs) -> Result<LoadResult, SyncError> 
         divergence,
         force_push,
     } = inputs;
-    let merged = CanonicalState::join(&local_state, &remote_state)
-        .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
 
     let root_slug = local_slug.or(remote_slug);
+
+    let remote_live_count = remote_state.live_count();
+    let remote_tombstone_count = remote_state.tombstone_count();
+    let remote_dep_count = remote_state.dep_count();
+
+    local_state
+        .absorb(remote_state)
+        .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
+    let merged = local_state;
 
     // Check if local has changes that remote doesn't.
     // Simple heuristic: if merged has more items than remote, local had new data.
     // This catches the common case of local-only commits. False negatives are
     // acceptable (sync will happen eventually), false positives just trigger
     // an extra sync that finds nothing to push.
-    let needs_sync = merged.live_count() > remote_state.live_count()
-        || merged.tombstone_count() > remote_state.tombstone_count()
-        || merged.dep_count() > remote_state.dep_count();
+    let needs_sync = merged.live_count() > remote_live_count
+        || merged.tombstone_count() > remote_tombstone_count
+        || merged.dep_count() > remote_dep_count;
 
     let merged_stamp = merged.max_write_stamp();
     let meta_stamp = max_write_stamp(local_meta_stamp, remote_meta_stamp);

@@ -74,6 +74,11 @@ impl LabelState {
             stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
         }
     }
+
+    pub fn absorb(&mut self, other: Self) {
+        self.set.absorb(other.set);
+        self.stamp = max_stamp(self.stamp.as_ref(), other.stamp.as_ref());
+    }
 }
 
 impl Default for LabelState {
@@ -163,6 +168,20 @@ impl LabelStore {
             }
         }
         merged
+    }
+
+    pub fn absorb(&mut self, other: Self) {
+        for (id, other_lineages) in other.by_bead {
+            let self_lineages = self.by_bead.entry(id).or_default();
+            for (lineage, other_state) in other_lineages {
+                match self_lineages.get_mut(&lineage) {
+                    Some(self_state) => self_state.absorb(other_state),
+                    None => {
+                        self_lineages.insert(lineage, other_state);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -281,6 +300,11 @@ impl DepStore {
             stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
         }
     }
+
+    pub fn absorb(&mut self, other: Self) {
+        self.set.absorb(other.set);
+        self.stamp = max_stamp(self.stamp.as_ref(), other.stamp.as_ref());
+    }
 }
 
 impl Default for DepStore {
@@ -396,6 +420,27 @@ impl NoteStore {
         }
 
         merged
+    }
+
+    pub fn absorb(&mut self, other: Self) {
+        for (id, other_lineages) in other.by_bead {
+            let self_lineages = self.by_bead.entry(id).or_default();
+            for (lineage, other_notes) in other_lineages {
+                let self_notes = self_lineages.entry(lineage).or_default();
+                for (note_id, other_note) in other_notes {
+                    match self_notes.get(&note_id) {
+                        None => {
+                            self_notes.insert(note_id, other_note);
+                        }
+                        Some(existing) => {
+                            if note_collision_cmp(existing, &other_note) == Ordering::Less {
+                                self_notes.insert(note_id, other_note);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1489,6 +1534,106 @@ impl CanonicalState {
         }
         self.collision_tombstones.keys().any(|k| &k.id == id)
     }
+
+    /// Merge other state into this one in-place.
+    ///
+    /// Performance: This avoids cloning `self` (O(N) allocations) which `join` does.
+    /// It consumes `other`, moving its data into `self` where possible.
+    /// Useful for merging small updates into a large state.
+    pub fn absorb(&mut self, other: Self) -> Result<(), Vec<CoreError>> {
+        let errors = Vec::new();
+
+        // Merge collision tombstones
+        for (key, tomb) in other.collision_tombstones {
+            self.collision_tombstones
+                .entry(key)
+                .and_modify(|t| *t = Tombstone::join(t, &tomb))
+                .or_insert(tomb);
+        }
+
+        self.labels.absorb(other.labels);
+        self.dep_store.absorb(other.dep_store);
+        self.notes.absorb(other.notes);
+
+        for (id, other_entry) in other.beads {
+            let self_entry = self.beads.remove(&id);
+
+            let (a_bead, a_tomb) = match self_entry {
+                Some(BeadEntry::Live(bead)) => (Some(*bead), None),
+                Some(BeadEntry::Tombstone(tomb)) => (None, Some(*tomb)),
+                None => (None, None),
+            };
+            let (b_bead, b_tomb) = match other_entry {
+                BeadEntry::Live(bead) => (Some(*bead), None),
+                BeadEntry::Tombstone(tomb) => (None, Some(*tomb)),
+            };
+
+            let merged_bead = match (a_bead, b_bead) {
+                (Some(mut ab), Some(bb)) => match ab.absorb(bb.clone()) {
+                    Ok(_) => Some(ab),
+                    Err(_) => {
+                        let ordering = bead_collision_cmp(self, &ab, &bb);
+                        let (winner, loser_stamp) = if ordering == Ordering::Less {
+                            (bb.clone(), ab.core.created().clone())
+                        } else {
+                            (ab.clone(), bb.core.created().clone())
+                        };
+                        let deleted =
+                            std::cmp::max(ab.core.created().clone(), bb.core.created().clone());
+                        self.insert_tombstone(Tombstone::new_collision(
+                            id.clone(),
+                            deleted,
+                            loser_stamp,
+                            None,
+                        ));
+                        Some(winner)
+                    }
+                },
+                (Some(b), None) | (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+
+            let merged_tomb = match (a_tomb, b_tomb) {
+                (Some(at), Some(bt)) => Some(Tombstone::join(&at, &bt)),
+                (Some(t), None) | (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
+
+            let mut final_bead = merged_bead;
+            let mut final_tomb = merged_tomb;
+
+            if let Some(bead) = final_bead.as_ref() {
+                let collision_key = TombstoneKey::lineage(id.clone(), bead.core.created().clone());
+                if self.collision_tombstones.contains_key(&collision_key) {
+                    final_bead = None;
+                }
+            }
+
+            if let (Some(bead), Some(tomb)) = (final_bead.as_ref(), final_tomb.as_ref()) {
+                let updated = self.updated_stamp_for_merge(&id, bead);
+                if updated > tomb.deleted {
+                    final_tomb = None;
+                } else {
+                    final_bead = None;
+                }
+            }
+
+            if let Some(bead) = final_bead {
+                self.beads.insert(id, BeadEntry::Live(Box::new(bead)));
+            } else if let Some(tomb) = final_tomb {
+                self.beads.insert(id, BeadEntry::Tombstone(Box::new(tomb)));
+            }
+        }
+
+        self.prune_collision_lineages();
+        self.rebuild_dep_indexes();
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
 }
 
 fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
@@ -1537,6 +1682,7 @@ mod tests {
     use crate::collections::Label;
     use crate::composite::Note;
     use crate::dep::{AcyclicDepKey, DepAddKey, NoCycleProof, ParentEdge};
+    use crate::crdt::Lww;
     use crate::identity::{ActorId, NoteId, ReplicaId};
     use crate::orset::Dot;
     use crate::time::{Stamp, WriteStamp};
@@ -2495,5 +2641,40 @@ mod tests {
         let kinds: std::collections::HashSet<_> = out.iter().map(|(_, k)| *k).collect();
         assert!(kinds.contains(&DepKind::Blocks));
         assert!(kinds.contains(&DepKind::Related));
+    }
+
+    #[test]
+    fn absorb_matches_join_behavior() {
+        let id = bead_id("bd-absorb");
+        let stamp_a = make_stamp(1000, 0, "alice");
+        let stamp_b = make_stamp(2000, 0, "bob");
+
+        let mut a = CanonicalState::new();
+        a.insert(make_bead(&id, &stamp_a)).unwrap();
+
+        let mut b = CanonicalState::new();
+        let mut bead_b = make_bead(&id, &stamp_a); // Same lineage
+        bead_b.fields.title = Lww::new("updated".to_string(), stamp_b.clone());
+        b.insert(bead_b).unwrap();
+
+        // Join
+        let joined = CanonicalState::join(&a, &b).expect("join");
+
+        // Absorb
+        let mut absorbed = a.clone();
+        absorbed.absorb(b).expect("absorb");
+
+        // Verify beads
+        let joined_bead = joined.get_live(&id).expect("joined bead");
+        let absorbed_bead = absorbed.get_live(&id).expect("absorbed bead");
+
+        assert_eq!(joined_bead.fields.title.value, "updated");
+        assert_eq!(absorbed_bead.fields.title.value, "updated");
+        assert_eq!(joined_bead.fields.title.stamp, stamp_b);
+        assert_eq!(absorbed_bead.fields.title.stamp, stamp_b);
+
+        let joined_json = serde_json::to_string(&joined).unwrap();
+        let absorbed_json = serde_json::to_string(&absorbed).unwrap();
+        assert_eq!(joined_json, absorbed_json);
     }
 }

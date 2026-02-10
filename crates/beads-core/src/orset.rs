@@ -360,6 +360,17 @@ impl<V: OrSetValue> OrSet<V> {
         OrSetChange::from_diff_with_change(before, after, internal_changed)
     }
 
+    pub fn absorb(&mut self, other: Self) {
+        for (value, dots) in other.entries {
+            self.entries.entry(value).or_default().extend(dots);
+        }
+
+        self.cc.merge(&other.cc);
+
+        self.prune_dominated();
+        self.resolve_all_collisions();
+    }
+
     fn membership_set(&self) -> BTreeSet<V> {
         self.entries.keys().cloned().collect()
     }
@@ -808,5 +819,20 @@ mod tests {
 
         let set = OrSet::try_from_parts(entries, cc).expect("dominated duplicates should prune");
         assert!(set.is_empty());
+    }
+
+    #[test]
+    fn orset_absorb_behaves_like_join() {
+        let mut a = OrSet::new();
+        a.apply_add(dot(1, 1), "a".to_string());
+        let a_clone = a.clone();
+
+        let mut b = OrSet::new();
+        b.apply_add(dot(2, 1), "b".to_string());
+
+        a.absorb(b.clone());
+        let joined = OrSet::join(&a_clone, &b);
+
+        assert_eq!(a, joined);
     }
 }

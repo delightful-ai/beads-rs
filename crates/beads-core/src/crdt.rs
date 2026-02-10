@@ -20,6 +20,12 @@ impl<T> Lww<T> {
     pub fn new(value: T, stamp: Stamp) -> Self {
         Self { value, stamp }
     }
+
+    pub fn absorb(&mut self, other: Self) {
+        if other.stamp > self.stamp {
+            *self = other;
+        }
+    }
 }
 
 impl<T: Clone> Lww<T> {
