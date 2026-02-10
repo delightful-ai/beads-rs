@@ -153,9 +153,12 @@ fn check_claude() -> Result<()> {
     let home = home_dir()?;
     let global_settings = home.join(".claude/settings.json");
     let project_settings = PathBuf::from(".claude/settings.local.json");
+    check_claude_at(&global_settings, &project_settings)
+}
 
-    let global_hooks = has_beads_hooks(&global_settings);
-    let project_hooks = has_beads_hooks(&project_settings);
+fn check_claude_at(global_settings: &Path, project_settings: &Path) -> Result<()> {
+    let global_hooks = has_beads_hooks(global_settings);
+    let project_hooks = has_beads_hooks(project_settings);
 
     if global_hooks {
         print_line(&format!(
@@ -172,7 +175,10 @@ fn check_claude() -> Result<()> {
     } else {
         print_line("✗ No hooks installed")?;
         print_line("  Run: bd setup claude")?;
-        std::process::exit(1);
+        Err(validation_error(
+            "setup",
+            "claude integration not installed",
+        ))
     }
 }
 
@@ -403,7 +409,10 @@ fn install_cursor() -> Result<()> {
 
 fn check_cursor() -> Result<()> {
     let rules_path = PathBuf::from(".cursor/rules/beads.mdc");
+    check_cursor_at(&rules_path)
+}
 
+fn check_cursor_at(rules_path: &Path) -> Result<()> {
     if rules_path.exists() {
         print_line(&format!(
             "✓ Cursor integration installed: {}",
@@ -413,7 +422,10 @@ fn check_cursor() -> Result<()> {
     } else {
         print_line("✗ Cursor integration not installed")?;
         print_line("  Run: bd setup cursor")?;
-        std::process::exit(1);
+        Err(validation_error(
+            "setup",
+            "cursor integration not installed",
+        ))
     }
 }
 
@@ -627,7 +639,10 @@ fn install_aider() -> Result<()> {
 
 fn check_aider() -> Result<()> {
     let config_path = PathBuf::from(".aider.conf.yml");
+    check_aider_at(&config_path)
+}
 
+fn check_aider_at(config_path: &Path) -> Result<()> {
     if config_path.exists() {
         print_line(&format!(
             "✓ Aider integration installed: {}",
@@ -637,7 +652,7 @@ fn check_aider() -> Result<()> {
     } else {
         print_line("✗ Aider integration not installed")?;
         print_line("  Run: bd setup aider")?;
-        std::process::exit(1);
+        Err(validation_error("setup", "aider integration not installed"))
     }
 }
 
@@ -723,6 +738,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn cursor_rules_contains_beads() {
@@ -734,5 +750,30 @@ mod tests {
     fn aider_instructions_contains_beads() {
         assert!(AIDER_INSTRUCTIONS.contains("Beads"));
         assert!(AIDER_INSTRUCTIONS.contains("bd ready"));
+    }
+
+    #[test]
+    fn check_claude_returns_error_when_not_installed() {
+        let dir = tempdir().expect("temp dir");
+        let global_path = dir.path().join("global.json");
+        let project_path = dir.path().join("project.json");
+        let err = check_claude_at(&global_path, &project_path).expect_err("expected missing hooks");
+        assert!(matches!(err, SetupError::Validation { .. }));
+    }
+
+    #[test]
+    fn check_cursor_returns_error_when_not_installed() {
+        let dir = tempdir().expect("temp dir");
+        let rules_path = dir.path().join("beads.mdc");
+        let err = check_cursor_at(&rules_path).expect_err("expected missing rules");
+        assert!(matches!(err, SetupError::Validation { .. }));
+    }
+
+    #[test]
+    fn check_aider_returns_error_when_not_installed() {
+        let dir = tempdir().expect("temp dir");
+        let config_path = dir.path().join(".aider.conf.yml");
+        let err = check_aider_at(&config_path).expect_err("expected missing config");
+        assert!(matches!(err, SetupError::Validation { .. }));
     }
 }

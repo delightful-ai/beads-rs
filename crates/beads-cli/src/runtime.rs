@@ -1,8 +1,10 @@
 use std::cell::RefCell;
+use std::fmt;
 use std::path::PathBuf;
 
 use beads_core::{
-    ActorId, Applied, ClientRequestId, DurabilityClass, NamespaceId, ValidatedActorId, Watermarks,
+    ActorId, Applied, ClientRequestId, DurabilityClass, ErrorPayload, NamespaceId,
+    ValidatedActorId, Watermarks,
 };
 use beads_surface::ipc::{
     IpcClient, IpcConnection, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx,
@@ -12,6 +14,52 @@ use beads_surface::ipc::{
 use crate::validation::{self, ValidationError};
 
 pub type ValidationResult<T> = std::result::Result<T, ValidationError>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DaemonResponseError {
+    payload: Box<ErrorPayload>,
+}
+
+impl DaemonResponseError {
+    pub fn new(payload: ErrorPayload) -> Self {
+        Self {
+            payload: Box::new(payload),
+        }
+    }
+
+    pub fn payload(&self) -> &ErrorPayload {
+        self.payload.as_ref()
+    }
+
+    pub fn into_payload(self) -> ErrorPayload {
+        *self.payload
+    }
+}
+
+impl fmt::Display for DaemonResponseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let payload = self.payload.as_ref();
+        if let Some(details) = &payload.details {
+            write!(
+                f,
+                "{} - {} (details: {})",
+                payload.code, payload.message, details
+            )
+        } else {
+            write!(f, "{} - {}", payload.code, payload.message)
+        }
+    }
+}
+
+impl std::error::Error for DaemonResponseError {}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeError {
+    #[error(transparent)]
+    Ipc(#[from] beads_surface::ipc::IpcError),
+    #[error(transparent)]
+    Daemon(#[from] DaemonResponseError),
+}
 
 /// Typed CLI runtime context shared by command handlers.
 #[derive(Clone, Debug)]
@@ -138,23 +186,24 @@ fn send_raw_once(req: &Request) -> std::result::Result<Response, beads_surface::
     })
 }
 
-pub fn send(req: &Request) -> crate::Result<ResponsePayload> {
-    match send_raw(req)? {
+fn response_payload(response: Response) -> std::result::Result<ResponsePayload, RuntimeError> {
+    match response {
         Response::Ok { ok } => Ok(ok),
-        Response::Err { err } => {
-            tracing::error!("error: {} - {}", err.code, err.message);
-            if let Some(details) = err.details {
-                tracing::error!("details: {}", details);
-            }
-            std::process::exit(1);
-        }
+        Response::Err { err } => Err(RuntimeError::Daemon(DaemonResponseError::new(err))),
     }
+}
+
+pub fn send(req: &Request) -> std::result::Result<ResponsePayload, RuntimeError> {
+    let response = send_raw(req)?;
+    response_payload(response)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beads_core::{HeadStatus, ReplicaId, Seq0};
+    use beads_core::{CliErrorCode, HeadStatus, ReplicaId, Seq0};
+    use beads_surface::ipc::ResponsePayload;
+    use serde_json::json;
     use uuid::Uuid;
 
     #[test]
@@ -211,5 +260,42 @@ mod tests {
         let read = ctx.read_consistency();
         assert_eq!(read.require_min_seen, Some(watermarks));
         assert_eq!(read.wait_timeout_ms, Some(50));
+    }
+
+    #[test]
+    fn response_payload_returns_ok_payload() {
+        let payload = ResponsePayload::synced();
+        let out = response_payload(Response::Ok {
+            ok: payload.clone(),
+        })
+        .expect("ok payload");
+        assert!(matches!(out, ResponsePayload::Synced(_)));
+        assert!(matches!(payload, ResponsePayload::Synced(_)));
+    }
+
+    #[test]
+    fn response_payload_returns_daemon_error_payload() {
+        let payload = ErrorPayload::new(CliErrorCode::Internal.into(), "boom", false)
+            .with_details(json!({"component":"cli"}));
+        let err = response_payload(Response::Err {
+            err: payload.clone(),
+        })
+        .expect_err("daemon response should error");
+        match err {
+            RuntimeError::Daemon(daemon) => assert_eq!(daemon.payload(), &payload),
+            RuntimeError::Ipc(other) => panic!("unexpected ipc error: {other}"),
+        }
+    }
+
+    #[test]
+    fn daemon_response_error_display_includes_code_message_and_details() {
+        let payload = ErrorPayload::new(CliErrorCode::Internal.into(), "boom", false)
+            .with_details(json!({"component":"cli"}));
+        let code = payload.code.to_string();
+        let err = DaemonResponseError::new(payload);
+        let rendered = err.to_string();
+        assert!(rendered.contains(&code));
+        assert!(rendered.contains("boom"));
+        assert!(rendered.contains("details:"));
     }
 }

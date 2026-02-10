@@ -7,6 +7,7 @@ use beads_cli::commands::CommandError;
 use beads_cli::commands::setup::SetupError;
 use beads_cli::filters::FilterError;
 use beads_cli::migrate::GoImportError;
+use beads_cli::runtime::RuntimeError;
 use beads_cli::validation::ValidationError;
 use beads_core::ErrorPayload;
 
@@ -146,8 +147,72 @@ impl From<CommandError> for Error {
         match err {
             CommandError::Core(err) => Error::Core(err),
             CommandError::Ipc(err) => Error::Ipc(err),
+            CommandError::Runtime(err) => match err {
+                RuntimeError::Ipc(err) => Error::Ipc(err),
+                RuntimeError::Daemon(err) => {
+                    let payload = err.into_payload();
+                    let transience = if payload.retryable {
+                        Transience::Retryable
+                    } else {
+                        Transience::Permanent
+                    };
+                    let message = payload.message.clone();
+                    Error::Op(OpError::Daemon {
+                        message,
+                        payload,
+                        transience,
+                        effect: Effect::Unknown,
+                    })
+                }
+            },
             CommandError::Validation(err) => Error::from(err),
             CommandError::Filter(err) => Error::from(err),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beads_cli::runtime::{DaemonResponseError, RuntimeError};
+    use beads_core::CliErrorCode;
+    use serde_json::json;
+
+    #[test]
+    fn command_runtime_daemon_error_maps_to_op_daemon_preserving_payload() {
+        let payload =
+            ErrorPayload::new(CliErrorCode::DaemonUnavailable.into(), "daemon down", true)
+                .with_details(json!({"socket":"missing"}));
+        let mapped = Error::from(CommandError::Runtime(RuntimeError::Daemon(
+            DaemonResponseError::new(payload.clone()),
+        )));
+        match mapped {
+            Error::Op(OpError::Daemon {
+                message,
+                payload: mapped_payload,
+                transience,
+                effect,
+            }) => {
+                assert_eq!(message, payload.message);
+                assert_eq!(mapped_payload, payload);
+                assert_eq!(transience, Transience::Retryable);
+                assert_eq!(effect, Effect::Unknown);
+            }
+            other => panic!("unexpected mapped error: {other}"),
+        }
+    }
+
+    #[test]
+    fn command_runtime_daemon_non_retryable_maps_to_permanent() {
+        let payload = ErrorPayload::new(CliErrorCode::Internal.into(), "fatal", false);
+        let mapped = Error::from(CommandError::Runtime(RuntimeError::Daemon(
+            DaemonResponseError::new(payload),
+        )));
+        match mapped {
+            Error::Op(OpError::Daemon { transience, .. }) => {
+                assert_eq!(transience, Transience::Permanent);
+            }
+            other => panic!("unexpected mapped error: {other}"),
         }
     }
 }

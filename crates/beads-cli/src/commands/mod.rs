@@ -1,7 +1,13 @@
-use beads_api::QueryResult;
+use beads_api::{
+    AdminCheckpointOutput, AdminDoctorOutput, AdminFingerprintOutput, AdminFlushOutput,
+    AdminFsckOutput, AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
+    AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
+    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminStoreLockInfoOutput,
+    AdminStoreUnlockOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepCycles,
+    DepEdge, EpicStatus, Issue, IssueSummary, Note, ReadyResult, StatusOutput, Tombstone,
+};
 use beads_core::CoreError;
 use beads_surface::ipc::{IpcError, ResponsePayload};
-use beads_surface::ops::OpResult;
 
 pub mod admin;
 pub mod blocked;
@@ -36,6 +42,175 @@ pub mod unclaim;
 pub mod update;
 pub mod upgrade;
 
+#[derive(Debug, Clone, Copy, Default)]
+struct CliCommandRenderer;
+
+impl crate::render::HumanRenderer for CliCommandRenderer {
+    fn render_created(&self, id: &str) -> String {
+        create::render_created(id)
+    }
+
+    fn render_updated(&self, id: &str) -> String {
+        update::render_updated(id)
+    }
+
+    fn render_closed(&self, id: &str) -> String {
+        close::render_closed(id)
+    }
+
+    fn render_reopened(&self, id: &str) -> String {
+        reopen::render_reopened(id)
+    }
+
+    fn render_deleted_op(&self, id: &str) -> String {
+        delete::render_deleted_op(id)
+    }
+
+    fn render_dep_added(&self, from: &str, to: &str) -> String {
+        dep::render_dep_added(from, to)
+    }
+
+    fn render_dep_removed(&self, from: &str, to: &str) -> String {
+        dep::render_dep_removed(from, to)
+    }
+
+    fn render_note_added(&self, bead_id: &str) -> String {
+        comments::render_comment_added(bead_id)
+    }
+
+    fn render_claimed(&self, id: &str, expires: u64) -> String {
+        claim::render_claimed(id, expires)
+    }
+
+    fn render_unclaimed(&self, id: &str) -> String {
+        unclaim::render_unclaimed(id)
+    }
+
+    fn render_claim_extended(&self, id: &str, expires: u64) -> String {
+        claim::render_claim_extended(id, expires)
+    }
+
+    fn render_issue(&self, issue: &Issue) -> String {
+        show::render_issue_detail(issue)
+    }
+
+    fn render_issues(&self, issues: &[IssueSummary]) -> String {
+        list::render_issue_list_opts(issues, false)
+    }
+
+    fn render_dep_tree(&self, root: &str, edges: &[DepEdge]) -> String {
+        dep::render_dep_tree(root, edges)
+    }
+
+    fn render_deps(&self, incoming: &[DepEdge], outgoing: &[DepEdge]) -> String {
+        dep::render_deps(incoming, outgoing)
+    }
+
+    fn render_dep_cycles(&self, out: &DepCycles) -> String {
+        dep::render_dep_cycles(out)
+    }
+
+    fn render_notes(&self, notes: &[Note]) -> String {
+        comments::render_notes(notes)
+    }
+
+    fn render_status(&self, out: &StatusOutput) -> String {
+        status::render_status(out)
+    }
+
+    fn render_blocked(&self, blocked: &[BlockedIssue]) -> String {
+        crate::commands::blocked::render_blocked(blocked)
+    }
+
+    fn render_ready(&self, result: &ReadyResult) -> String {
+        ready::render_ready(&result.issues, result.blocked_count, result.closed_count)
+    }
+
+    fn render_count(&self, result: &CountResult) -> String {
+        count::render_count(result)
+    }
+
+    fn render_deleted_list(&self, tombs: &[Tombstone]) -> String {
+        deleted::render_deleted(tombs)
+    }
+
+    fn render_deleted_lookup(&self, out: &DeletedLookup) -> String {
+        deleted::render_deleted_lookup(out)
+    }
+
+    fn render_epic_status(&self, statuses: &[EpicStatus]) -> String {
+        epic::render_epic_statuses(statuses)
+    }
+
+    fn render_daemon_info(&self, info: &DaemonInfo) -> String {
+        daemon::render_daemon_info(info)
+    }
+
+    fn render_admin_status(&self, status: &AdminStatusOutput) -> String {
+        admin::render_admin_status(status)
+    }
+
+    fn render_admin_metrics(&self, metrics: &AdminMetricsOutput) -> String {
+        admin::render_admin_metrics(metrics)
+    }
+
+    fn render_admin_doctor(&self, out: &AdminDoctorOutput) -> String {
+        admin::render_admin_doctor(out)
+    }
+
+    fn render_admin_scrub(&self, out: &AdminScrubOutput) -> String {
+        admin::render_admin_scrub(out)
+    }
+
+    fn render_admin_flush(&self, out: &AdminFlushOutput) -> String {
+        admin::render_admin_flush(out)
+    }
+
+    fn render_admin_checkpoint(&self, out: &AdminCheckpointOutput) -> String {
+        admin::render_admin_checkpoint(out)
+    }
+
+    fn render_admin_fingerprint(&self, out: &AdminFingerprintOutput) -> String {
+        admin::render_admin_fingerprint(out)
+    }
+
+    fn render_admin_reload_policies(&self, out: &AdminReloadPoliciesOutput) -> String {
+        admin::render_admin_reload_policies(out)
+    }
+
+    fn render_admin_reload_replication(&self, out: &AdminReloadReplicationOutput) -> String {
+        admin::render_admin_reload_replication(out)
+    }
+
+    fn render_admin_reload_limits(&self, out: &AdminReloadLimitsOutput) -> String {
+        admin::render_admin_reload_limits(out)
+    }
+
+    fn render_admin_rotate_replica_id(&self, out: &AdminRotateReplicaIdOutput) -> String {
+        admin::render_admin_rotate_replica_id(out)
+    }
+
+    fn render_admin_maintenance_mode(&self, out: &AdminMaintenanceModeOutput) -> String {
+        admin::render_admin_maintenance(out)
+    }
+
+    fn render_admin_rebuild_index(&self, out: &AdminRebuildIndexOutput) -> String {
+        admin::render_admin_rebuild_index(out)
+    }
+
+    fn render_admin_fsck(&self, out: &AdminFsckOutput) -> String {
+        store::render_admin_fsck(out)
+    }
+
+    fn render_admin_store_unlock(&self, out: &AdminStoreUnlockOutput) -> String {
+        store::render_admin_store_unlock(out)
+    }
+
+    fn render_admin_store_lock_info(&self, out: &AdminStoreLockInfoOutput) -> String {
+        store::render_admin_store_lock_info(out)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
     #[error(transparent)]
@@ -43,6 +218,9 @@ pub enum CommandError {
 
     #[error(transparent)]
     Ipc(#[from] IpcError),
+
+    #[error(transparent)]
+    Runtime(#[from] crate::runtime::RuntimeError),
 
     #[error(transparent)]
     Validation(#[from] crate::validation::ValidationError),
@@ -53,156 +231,87 @@ pub enum CommandError {
 
 pub type CommandResult<T> = std::result::Result<T, CommandError>;
 
+fn render_ok_human(payload: &ResponsePayload) -> String {
+    crate::render::render_human(payload, &CliCommandRenderer)
+}
+
 pub(crate) fn print_ok(payload: &ResponsePayload, json: bool) -> CommandResult<()> {
     if json {
         crate::render::print_json(payload)?;
         return Ok(());
     }
+    crate::render::print_line(&render_ok_human(payload))?;
+    Ok(())
+}
 
-    match payload {
-        ResponsePayload::Synced(_) => crate::render::print_line("synced")?,
-        ResponsePayload::Refreshed(_) => crate::render::print_line("refreshed")?,
-        ResponsePayload::Initialized(_) => crate::render::print_line("initialized")?,
-        ResponsePayload::ShuttingDown(_) => crate::render::print_line("shutting down")?,
-        ResponsePayload::Subscribed(sub) => crate::render::print_line(&format!(
-            "subscribed to {}",
-            sub.subscribed.namespace.as_str()
-        ))?,
-        ResponsePayload::Event(ev) => {
-            crate::render::print_line(&format!("event {}", ev.event.event_id.origin_seq.get()))?
-        }
-        ResponsePayload::Op(op) => match &op.result {
-            OpResult::Created { id } => {
-                crate::render::print_line(&create::render_created(id.as_str()))?
-            }
-            OpResult::Updated { id } => {
-                crate::render::print_line(&update::render_updated(id.as_str()))?
-            }
-            OpResult::Closed { id } => {
-                crate::render::print_line(&close::render_closed(id.as_str()))?
-            }
-            OpResult::Reopened { id } => {
-                crate::render::print_line(&reopen::render_reopened(id.as_str()))?
-            }
-            OpResult::Deleted { id } => {
-                crate::render::print_line(&delete::render_deleted_op(id.as_str()))?
-            }
-            OpResult::DepAdded { from, to } => {
-                crate::render::print_line(&dep::render_dep_added(from.as_str(), to.as_str()))?
-            }
-            OpResult::DepRemoved { from, to } => {
-                crate::render::print_line(&dep::render_dep_removed(from.as_str(), to.as_str()))?
-            }
-            OpResult::NoteAdded { bead_id, .. } => {
-                crate::render::print_line(&comments::render_comment_added(bead_id.as_str()))?
-            }
-            OpResult::Claimed { id, expires } => {
-                crate::render::print_line(&claim::render_claimed(id.as_str(), expires.0))?
-            }
-            OpResult::Unclaimed { id } => {
-                crate::render::print_line(&unclaim::render_unclaimed(id.as_str()))?
-            }
-            OpResult::ClaimExtended { id, expires } => {
-                crate::render::print_line(&claim::render_claim_extended(id.as_str(), expires.0))?
-            }
-        },
-        ResponsePayload::Query(query) => match query {
-            QueryResult::Issue(issue) => {
-                crate::render::print_line(&show::render_issue_detail(issue))?
-            }
-            QueryResult::Issues(views) => {
-                crate::render::print_line(&list::render_issue_list_opts(views, false))?
-            }
-            QueryResult::DepTree { root, edges } => {
-                crate::render::print_line(&dep::render_dep_tree(root.as_str(), edges))?
-            }
-            QueryResult::Deps { incoming, outgoing } => {
-                crate::render::print_line(&dep::render_deps(incoming, outgoing))?
-            }
-            QueryResult::DepCycles(out) => crate::render::print_line(&dep::render_dep_cycles(out))?,
-            QueryResult::Notes(notes) => crate::render::print_line(&comments::render_notes(notes))?,
-            QueryResult::Status(out) => crate::render::print_line(&status::render_status(out))?,
-            QueryResult::Blocked(blocked) => {
-                crate::render::print_line(&blocked::render_blocked(blocked))?
-            }
-            QueryResult::Ready(result) => crate::render::print_line(&ready::render_ready(
-                &result.issues,
-                result.blocked_count,
-                result.closed_count,
-            ))?,
-            QueryResult::Stale(issues) => {
-                crate::render::print_line(&list::render_issue_list_opts(issues, false))?
-            }
-            QueryResult::Count(result) => crate::render::print_line(&count::render_count(result))?,
-            QueryResult::Deleted(tombs) => {
-                crate::render::print_line(&deleted::render_deleted(tombs))?
-            }
-            QueryResult::DeletedLookup(out) => {
-                crate::render::print_line(&deleted::render_deleted_lookup(out))?
-            }
-            QueryResult::EpicStatus(statuses) => {
-                crate::render::print_line(&epic::render_epic_statuses(statuses))?
-            }
-            QueryResult::Validation { warnings } => {
-                if warnings.is_empty() {
-                    crate::render::print_line("ok")?
-                } else {
-                    crate::render::print_line(&warnings.join("\n"))?
-                }
-            }
-            QueryResult::DaemonInfo(info) => {
-                crate::render::print_line(&daemon::render_daemon_info(info))?
-            }
-            QueryResult::AdminStatus(status) => {
-                crate::render::print_line(&admin::render_admin_status(status))?
-            }
-            QueryResult::AdminMetrics(metrics) => {
-                crate::render::print_line(&admin::render_admin_metrics(metrics))?
-            }
-            QueryResult::AdminDoctor(out) => {
-                crate::render::print_line(&admin::render_admin_doctor(out))?
-            }
-            QueryResult::AdminScrub(out) => {
-                crate::render::print_line(&admin::render_admin_scrub(out))?
-            }
-            QueryResult::AdminFlush(out) => {
-                crate::render::print_line(&admin::render_admin_flush(out))?
-            }
-            QueryResult::AdminCheckpoint(out) => {
-                crate::render::print_line(&admin::render_admin_checkpoint(out))?
-            }
-            QueryResult::AdminFingerprint(out) => {
-                crate::render::print_line(&admin::render_admin_fingerprint(out))?
-            }
-            QueryResult::AdminReloadPolicies(out) => {
-                crate::render::print_line(&admin::render_admin_reload_policies(out))?
-            }
-            QueryResult::AdminRotateReplicaId(out) => {
-                crate::render::print_line(&admin::render_admin_rotate_replica_id(out))?
-            }
-            QueryResult::AdminReloadReplication(out) => {
-                crate::render::print_line(&admin::render_admin_reload_replication(out))?
-            }
-            QueryResult::AdminReloadLimits(out) => {
-                crate::render::print_line(&admin::render_admin_reload_limits(out))?
-            }
-            QueryResult::AdminMaintenanceMode(out) => {
-                crate::render::print_line(&admin::render_admin_maintenance(out))?
-            }
-            QueryResult::AdminRebuildIndex(out) => {
-                crate::render::print_line(&admin::render_admin_rebuild_index(out))?
-            }
-            QueryResult::AdminFsck(out) => {
-                crate::render::print_line(&store::render_admin_fsck(out))?
-            }
-            QueryResult::AdminStoreUnlock(out) => {
-                crate::render::print_line(&store::render_admin_store_unlock(out))?
-            }
-            QueryResult::AdminStoreLockInfo(out) => {
-                crate::render::print_line(&store::render_admin_store_lock_info(out))?
-            }
-        },
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beads_api::QueryResult;
+    use beads_core::{BeadId, DurabilityReceipt, StoreEpoch, StoreId, StoreIdentity, TxnId};
+    use beads_surface::ipc::OpResponse;
+    use beads_surface::ops::OpResult;
+    use uuid::Uuid;
+
+    fn created_op_payload() -> ResponsePayload {
+        let receipt = DurabilityReceipt::local_fsync_defaults(
+            StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), StoreEpoch::ZERO),
+            TxnId::new(Uuid::from_bytes([2u8; 16])),
+            Vec::new(),
+            0,
+        );
+        ResponsePayload::Op(OpResponse::new(
+            OpResult::Created {
+                id: BeadId::parse("bd-123").expect("valid bead id"),
+            },
+            receipt,
+        ))
     }
 
-    Ok(())
+    #[test]
+    fn render_ok_human_renders_basic_status_payloads() {
+        assert_eq!(render_ok_human(&ResponsePayload::synced()), "synced");
+        assert_eq!(render_ok_human(&ResponsePayload::refreshed()), "refreshed");
+        assert_eq!(
+            render_ok_human(&ResponsePayload::initialized()),
+            "initialized"
+        );
+        assert_eq!(
+            render_ok_human(&ResponsePayload::shutting_down()),
+            "shutting down"
+        );
+    }
+
+    #[test]
+    fn render_ok_human_renders_validation_query() {
+        assert_eq!(
+            render_ok_human(&ResponsePayload::Query(QueryResult::Validation {
+                warnings: Vec::new()
+            })),
+            "ok"
+        );
+        assert_eq!(
+            render_ok_human(&ResponsePayload::Query(QueryResult::Validation {
+                warnings: vec!["a".to_string(), "b".to_string()]
+            })),
+            "a\nb"
+        );
+    }
+
+    #[test]
+    fn render_ok_human_renders_op_and_query_variants() {
+        let op_payload = created_op_payload();
+        assert_eq!(
+            render_ok_human(&op_payload),
+            create::render_created("bd-123")
+        );
+
+        let issue_summaries: Vec<IssueSummary> = Vec::new();
+        assert_eq!(
+            render_ok_human(&ResponsePayload::Query(QueryResult::Issues(
+                issue_summaries.clone()
+            ))),
+            list::render_issue_list_opts(&issue_summaries, false)
+        );
+    }
 }

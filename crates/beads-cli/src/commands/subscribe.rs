@@ -1,8 +1,8 @@
 use clap::Args;
 
-use super::CommandResult;
 use super::print_ok;
-use crate::runtime::CliRuntimeCtx;
+use super::{CommandError, CommandResult};
+use crate::runtime::{CliRuntimeCtx, DaemonResponseError, RuntimeError};
 use beads_core::ErrorPayload;
 use beads_surface::ipc::{EmptyPayload, Request, Response, subscribe_stream};
 
@@ -43,7 +43,9 @@ fn handle_response(response: Response, json: bool) -> CommandResult<bool> {
             if err.retryable {
                 Ok(false)
             } else {
-                std::process::exit(1);
+                Err(CommandError::Runtime(RuntimeError::Daemon(
+                    DaemonResponseError::new(err),
+                )))
             }
         }
     }
@@ -62,5 +64,35 @@ fn print_error(err: &ErrorPayload, json: bool) {
     eprintln!("error: {} - {}", err.code, err.message);
     if let Some(details) = &err.details {
         eprintln!("details: {details}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beads_core::CliErrorCode;
+
+    #[test]
+    fn handle_response_stops_stream_on_retryable_error() {
+        let response = Response::Err {
+            err: ErrorPayload::new(CliErrorCode::DaemonUnavailable.into(), "temp", true),
+        };
+        let outcome = handle_response(response, false).expect("retryable errors stop stream");
+        assert!(!outcome);
+    }
+
+    #[test]
+    fn handle_response_returns_error_on_non_retryable_error() {
+        let payload = ErrorPayload::new(CliErrorCode::Internal.into(), "fatal", false);
+        let response = Response::Err {
+            err: payload.clone(),
+        };
+        let err = handle_response(response, false).expect_err("non-retryable should error");
+        match err {
+            CommandError::Runtime(RuntimeError::Daemon(daemon)) => {
+                assert_eq!(daemon.payload(), &payload);
+            }
+            other => panic!("unexpected error variant: {other}"),
+        }
     }
 }
