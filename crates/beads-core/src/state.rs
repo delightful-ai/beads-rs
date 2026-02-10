@@ -1543,12 +1543,20 @@ impl CanonicalState {
     pub fn absorb(&mut self, other: Self) -> Result<(), Vec<CoreError>> {
         let errors = Vec::new();
 
-        // Merge collision tombstones
+        // Merge collision tombstones and check if they kill any existing live beads
         for (key, tomb) in other.collision_tombstones {
             self.collision_tombstones
-                .entry(key)
+                .entry(key.clone())
                 .and_modify(|t| *t = Tombstone::join(t, &tomb))
                 .or_insert(tomb);
+
+            if let Some(lineage) = &key.lineage {
+                if let Some(BeadEntry::Live(bead)) = self.beads.get(&key.id) {
+                    if bead.core.created() == lineage {
+                        self.beads.remove(&key.id);
+                    }
+                }
+            }
         }
 
         self.labels.absorb(other.labels);
