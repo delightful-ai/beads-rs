@@ -182,6 +182,7 @@ version = "0.2.0-alpha"
 dependencies = [
  "beads-api",
  "beads-core",
+ "beads-daemon-core",
  "beads-surface",
  "bytes",
  "crossbeam",
@@ -197,7 +198,9 @@ dependencies = [
  "beads-core",
  "bytes",
  "crc32c",
+ "hex",
  "minicbor",
+ "serde",
  "serde_json",
  "thiserror 1.0.69",
  "uuid",

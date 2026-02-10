@@ -1008,8 +1008,8 @@ fn remove_wal_index_files(store_id: StoreId) -> Result<(), StoreRuntimeError> {
         if path.exists() {
             fs::remove_file(&path).map_err(|source| {
                 StoreRuntimeError::WalIndex(WalIndexError::Io {
-                    path: path.clone(),
-                    source,
+                    path: Some(path.clone()),
+                    reason: source.to_string(),
                 })
             })?;
         }

@@ -8,14 +8,19 @@ use std::time::Duration;
 use minicbor::{Decoder, Encoder};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use uuid::Uuid;
 
-use crate::core::error::details as error_details;
 use crate::core::{
-    ActorId, Applied, CliErrorCode, ClientRequestId, Durable, ErrorCode, ErrorPayload, EventId,
-    HeadStatus, IntoErrorPayload, NamespaceId, ProtocolErrorCode, ReplicaId, ReplicaRole,
-    SegmentId, Seq0, Seq1, StoreId, StoreMeta, StoreMetaVersions, Transience, TxnId, Watermark,
+    ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId, ReplicaId,
+    ReplicaRole, SegmentId, Seq0, Seq1, StoreId, StoreMeta, StoreMetaVersions, TxnId, Watermark,
+    ReplicaDurabilityRole, ReplicaDurabilityRoleError,
+};
+
+pub use beads_daemon_core::wal::{
+    ClientRequestEventIds, ClientRequestEventIdsError, ClientRequestRow, HlcRow,
+    IndexDurabilityMode, IndexedRangeItem,
+    ReplicaLivenessRow, SegmentRow, WalIndex, WalIndexError, WalIndexReader, WalIndexTxn,
+    WalIndexWriter, WatermarkRow,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
@@ -23,752 +28,6 @@ const BUSY_TIMEOUT_MS: u64 = 5_000;
 const CACHE_SIZE_KB: i64 = -16_000;
 const MAX_IDLE_CONNECTIONS: usize = 8;
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum ClientRequestEventIdsError {
-    #[error("event_ids must be non-empty")]
-    Empty,
-    #[error("event_ids namespace mismatch (expected {expected}, got {got})")]
-    MixedNamespace {
-        expected: NamespaceId,
-        got: NamespaceId,
-    },
-    #[error("event_ids origin mismatch (expected {expected}, got {got})")]
-    MixedOrigin { expected: ReplicaId, got: ReplicaId },
-    #[error("event_ids must be strictly increasing (prev {prev}, next {next})")]
-    NonIncreasing { prev: Seq1, next: Seq1 },
-}
-
-#[derive(Debug, Error)]
-pub enum WalIndexError {
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("io error at {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("path is a symlink: {path:?}")]
-    Symlink { path: PathBuf },
-    #[error("index schema version mismatch: expected {expected}, got {got}")]
-    SchemaVersionMismatch { expected: u32, got: u32 },
-    #[error("missing meta key: {key}")]
-    MetaMissing { key: &'static str },
-    #[error("meta mismatch for {key}: expected {expected}, got {got}")]
-    MetaMismatch {
-        key: &'static str,
-        expected: String,
-        got: String,
-        store_id: StoreId,
-    },
-    #[error("event id encode failed: {0}")]
-    CborEncode(#[from] minicbor::encode::Error<std::convert::Infallible>),
-    #[error("event id decode failed: {0}")]
-    CborDecode(#[from] minicbor::decode::Error),
-    #[error("event id decode invalid: {0}")]
-    EventIdDecode(String),
-    #[error("client request event ids invalid: {0}")]
-    ClientRequestEventIds(#[from] ClientRequestEventIdsError),
-    #[error("origin_seq overflow for {namespace} {origin}")]
-    OriginSeqOverflow {
-        namespace: String,
-        origin: ReplicaId,
-    },
-    #[error("wal index txn conflict: expected version {expected}, got {got}")]
-    ConcurrentWrite { expected: u64, got: u64 },
-    #[error("equivocation for {namespace} {origin} seq {seq}")]
-    Equivocation {
-        namespace: NamespaceId,
-        origin: ReplicaId,
-        seq: u64,
-        existing_sha256: [u8; 32],
-        new_sha256: [u8; 32],
-    },
-    #[error("client_request_id reuse mismatch for {namespace} {origin} {client_request_id}")]
-    ClientRequestIdReuseMismatch {
-        namespace: NamespaceId,
-        origin: ReplicaId,
-        client_request_id: ClientRequestId,
-        expected_request_sha256: [u8; 32],
-        got_request_sha256: [u8; 32],
-    },
-    #[error("hlc row decode failed: {0}")]
-    HlcRowDecode(String),
-    #[error("segment row decode failed: {0}")]
-    SegmentRowDecode(String),
-    #[error("watermark row decode failed: {0}")]
-    WatermarkRowDecode(String),
-    #[error("replica liveness row decode failed: {0}")]
-    ReplicaLivenessRowDecode(String),
-}
-
-impl WalIndexError {
-    pub fn code(&self) -> ErrorCode {
-        match self {
-            WalIndexError::SchemaVersionMismatch { .. } => {
-                ProtocolErrorCode::IndexRebuildRequired.into()
-            }
-            WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
-            WalIndexError::ClientRequestIdReuseMismatch { .. } => {
-                ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
-            }
-            WalIndexError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
-            WalIndexError::MetaMismatch { key, .. } => match *key {
-                "store_id" => ProtocolErrorCode::WrongStore.into(),
-                "store_epoch" => ProtocolErrorCode::StoreEpochMismatch.into(),
-                _ => ProtocolErrorCode::IndexCorrupt.into(),
-            },
-            WalIndexError::MetaMissing { .. }
-            | WalIndexError::EventIdDecode(_)
-            | WalIndexError::ClientRequestEventIds(_)
-            | WalIndexError::HlcRowDecode(_)
-            | WalIndexError::SegmentRowDecode(_)
-            | WalIndexError::WatermarkRowDecode(_)
-            | WalIndexError::ReplicaLivenessRowDecode(_)
-            | WalIndexError::CborDecode(_)
-            | WalIndexError::CborEncode(_)
-            | WalIndexError::ConcurrentWrite { .. }
-            | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
-            WalIndexError::Sqlite(_) => ProtocolErrorCode::IndexCorrupt.into(),
-            WalIndexError::Io { source, .. } => {
-                if source.kind() == std::io::ErrorKind::PermissionDenied {
-                    ProtocolErrorCode::PermissionDenied.into()
-                } else {
-                    CliErrorCode::IoError.into()
-                }
-            }
-        }
-    }
-
-    pub fn transience(&self) -> Transience {
-        match self {
-            WalIndexError::Symlink { .. } => Transience::Permanent,
-            WalIndexError::SchemaVersionMismatch { .. } => Transience::Retryable,
-            WalIndexError::Io { source, .. } => {
-                if source.kind() == std::io::ErrorKind::PermissionDenied {
-                    Transience::Permanent
-                } else {
-                    Transience::Retryable
-                }
-            }
-            WalIndexError::MetaMismatch {
-                key: "store_id" | "store_epoch",
-                ..
-            } => Transience::Permanent,
-            WalIndexError::MetaMismatch { .. } => Transience::Retryable,
-            WalIndexError::Equivocation { .. }
-            | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
-            WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
-            _ => Transience::Retryable,
-        }
-    }
-
-    pub(crate) fn into_payload_with_context(
-        self,
-        message: String,
-        retryable: bool,
-    ) -> ErrorPayload {
-        let code = self.code();
-        match self {
-            WalIndexError::Symlink { path } => ErrorPayload::new(
-                ProtocolErrorCode::PathSymlinkRejected.into(),
-                message,
-                retryable,
-            )
-            .with_details(error_details::PathSymlinkRejectedDetails {
-                path: path.display().to_string(),
-            }),
-            WalIndexError::SchemaVersionMismatch { expected, got } => ErrorPayload::new(
-                ProtocolErrorCode::IndexRebuildRequired.into(),
-                message,
-                retryable,
-            )
-            .with_details(error_details::IndexRebuildRequiredDetails {
-                namespace: None,
-                reason: format!("index schema version mismatch: expected {expected}, got {got}"),
-            }),
-            WalIndexError::Equivocation {
-                namespace,
-                origin,
-                seq,
-                existing_sha256,
-                new_sha256,
-            } => ErrorPayload::new(ProtocolErrorCode::Equivocation.into(), message, retryable)
-                .with_details(error_details::EquivocationDetails {
-                    eid: error_details::EventIdDetails {
-                        namespace: namespace.clone(),
-                        origin_replica_id: origin,
-                        origin_seq: seq,
-                    },
-                    existing_sha256: hex::encode(existing_sha256),
-                    new_sha256: hex::encode(new_sha256),
-                }),
-            WalIndexError::ClientRequestIdReuseMismatch {
-                namespace,
-                client_request_id,
-                expected_request_sha256,
-                got_request_sha256,
-                ..
-            } => ErrorPayload::new(
-                ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
-                message,
-                retryable,
-            )
-            .with_details(error_details::ClientRequestIdReuseMismatchDetails {
-                namespace: namespace.clone(),
-                client_request_id,
-                expected_request_sha256: hex::encode(expected_request_sha256),
-                got_request_sha256: hex::encode(got_request_sha256),
-            }),
-            WalIndexError::MetaMismatch {
-                key: "store_id",
-                expected,
-                got,
-                ..
-            } => {
-                let expected = StoreId::parse_str(&expected).ok();
-                let got = StoreId::parse_str(&got).ok();
-                if let (Some(expected), Some(got)) = (expected, got) {
-                    ErrorPayload::new(ProtocolErrorCode::WrongStore.into(), message, retryable)
-                        .with_details(error_details::WrongStoreDetails {
-                            expected_store_id: expected,
-                            got_store_id: got,
-                        })
-                } else {
-                    let reason = message.clone();
-                    ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
-                        .with_details(error_details::IndexCorruptDetails { reason })
-                }
-            }
-            WalIndexError::MetaMismatch {
-                key: "store_epoch",
-                expected,
-                got,
-                store_id,
-            } => {
-                let expected_epoch = expected.parse::<u64>().ok();
-                let got_epoch = got.parse::<u64>().ok();
-                if let (Some(expected_epoch), Some(got_epoch)) = (expected_epoch, got_epoch) {
-                    ErrorPayload::new(
-                        ProtocolErrorCode::StoreEpochMismatch.into(),
-                        message,
-                        retryable,
-                    )
-                    .with_details(error_details::StoreEpochMismatchDetails {
-                        store_id,
-                        expected_epoch,
-                        got_epoch,
-                    })
-                } else {
-                    let reason = message.clone();
-                    ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
-                        .with_details(error_details::IndexCorruptDetails { reason })
-                }
-            }
-            WalIndexError::MetaMismatch { .. }
-            | WalIndexError::MetaMissing { .. }
-            | WalIndexError::EventIdDecode(_)
-            | WalIndexError::ClientRequestEventIds(_)
-            | WalIndexError::HlcRowDecode(_)
-            | WalIndexError::SegmentRowDecode(_)
-            | WalIndexError::WatermarkRowDecode(_)
-            | WalIndexError::ReplicaLivenessRowDecode(_)
-            | WalIndexError::CborDecode(_)
-            | WalIndexError::CborEncode(_)
-            | WalIndexError::ConcurrentWrite { .. }
-            | WalIndexError::OriginSeqOverflow { .. }
-            | WalIndexError::Sqlite(_) => ErrorPayload::new(
-                ProtocolErrorCode::IndexCorrupt.into(),
-                message.clone(),
-                retryable,
-            )
-            .with_details(error_details::IndexCorruptDetails { reason: message }),
-            WalIndexError::Io { .. } => ErrorPayload::new(code, message, retryable),
-        }
-    }
-}
-
-impl IntoErrorPayload for WalIndexError {
-    fn into_error_payload(self) -> ErrorPayload {
-        let message = self.to_string();
-        let retryable = self.transience().is_retryable();
-        self.into_payload_with_context(message, retryable)
-    }
-}
-
-pub trait WalIndex: Send + Sync {
-    fn writer(&self) -> Box<dyn WalIndexWriter>;
-    fn reader(&self) -> Box<dyn WalIndexReader>;
-    fn durability_mode(&self) -> IndexDurabilityMode;
-    fn checkpoint_truncate(&self) -> Result<(), WalIndexError>;
-}
-
-pub trait WalIndexWriter {
-    fn begin_txn(&self) -> Result<Box<dyn WalIndexTxn>, WalIndexError>;
-}
-
-pub trait WalIndexTxn {
-    fn next_origin_seq(
-        &mut self,
-        ns: &NamespaceId,
-        origin: &ReplicaId,
-    ) -> Result<Seq1, WalIndexError>;
-    fn set_next_origin_seq(
-        &mut self,
-        ns: &NamespaceId,
-        origin: &ReplicaId,
-        next_seq: Seq1,
-    ) -> Result<(), WalIndexError>;
-    #[allow(clippy::too_many_arguments)]
-    fn record_event(
-        &mut self,
-        ns: &NamespaceId,
-        eid: &EventId,
-        sha: [u8; 32],
-        prev_sha: Option<[u8; 32]>,
-        segment_id: SegmentId,
-        offset: u64,
-        len: u32,
-        event_time_ms: u64,
-        txn_id: TxnId,
-        client_request_id: Option<ClientRequestId>,
-    ) -> Result<(), WalIndexError>;
-    fn update_watermark(
-        &mut self,
-        ns: &NamespaceId,
-        origin: &ReplicaId,
-        applied: Watermark<Applied>,
-        durable: Watermark<Durable>,
-    ) -> Result<(), WalIndexError>;
-    fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalIndexError>;
-    fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError>;
-    #[allow(clippy::too_many_arguments)]
-    fn upsert_client_request(
-        &mut self,
-        ns: &NamespaceId,
-        origin: &ReplicaId,
-        client_request_id: ClientRequestId,
-        request_sha256: [u8; 32],
-        txn_id: TxnId,
-        event_ids: &ClientRequestEventIds,
-        created_at_ms: u64,
-    ) -> Result<(), WalIndexError>;
-    fn upsert_replica_liveness(&mut self, row: &ReplicaLivenessRow) -> Result<(), WalIndexError>;
-    fn commit(self: Box<Self>) -> Result<(), WalIndexError>;
-    fn rollback(self: Box<Self>) -> Result<(), WalIndexError>;
-}
-
-pub trait WalIndexReader {
-    fn lookup_event_sha(
-        &self,
-        ns: &NamespaceId,
-        eid: &EventId,
-    ) -> Result<Option<[u8; 32]>, WalIndexError>;
-    fn list_segments(&self, ns: &NamespaceId) -> Result<Vec<SegmentRow>, WalIndexError>;
-    fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError>;
-    fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError>;
-    fn load_replica_liveness(&self) -> Result<Vec<ReplicaLivenessRow>, WalIndexError>;
-    fn iter_from(
-        &self,
-        ns: &NamespaceId,
-        origin: &ReplicaId,
-        from_seq_excl: Seq0,
-        max_bytes: usize,
-    ) -> Result<Vec<IndexedRangeItem>, WalIndexError>;
-    fn lookup_client_request(
-        &self,
-        ns: &NamespaceId,
-        origin: &ReplicaId,
-        client_request_id: ClientRequestId,
-    ) -> Result<Option<ClientRequestRow>, WalIndexError>;
-    fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<Seq0, WalIndexError>;
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ClientRequestEventIds {
-    namespace: NamespaceId,
-    origin: ReplicaId,
-    seqs: Vec<Seq1>,
-}
-
-impl ClientRequestEventIds {
-    pub fn new(event_ids: Vec<EventId>) -> Result<Self, ClientRequestEventIdsError> {
-        let mut iter = event_ids.into_iter();
-        let first = iter.next().ok_or(ClientRequestEventIdsError::Empty)?;
-        let namespace = first.namespace.clone();
-        let origin = first.origin_replica_id;
-        let mut seqs = Vec::with_capacity(iter.size_hint().0 + 1);
-        let mut prev = first.origin_seq;
-        seqs.push(prev);
-        for id in iter {
-            let EventId {
-                origin_replica_id,
-                namespace: id_namespace,
-                origin_seq,
-            } = id;
-            if id_namespace != namespace {
-                return Err(ClientRequestEventIdsError::MixedNamespace {
-                    expected: namespace,
-                    got: id_namespace,
-                });
-            }
-            if origin_replica_id != origin {
-                return Err(ClientRequestEventIdsError::MixedOrigin {
-                    expected: origin,
-                    got: origin_replica_id,
-                });
-            }
-            if origin_seq <= prev {
-                return Err(ClientRequestEventIdsError::NonIncreasing {
-                    prev,
-                    next: origin_seq,
-                });
-            }
-            prev = origin_seq;
-            seqs.push(prev);
-        }
-        Ok(Self {
-            namespace,
-            origin,
-            seqs,
-        })
-    }
-
-    pub fn single(event_id: EventId) -> Self {
-        Self {
-            namespace: event_id.namespace,
-            origin: event_id.origin_replica_id,
-            seqs: vec![event_id.origin_seq],
-        }
-    }
-
-    pub fn namespace(&self) -> &NamespaceId {
-        &self.namespace
-    }
-
-    pub fn origin(&self) -> ReplicaId {
-        self.origin
-    }
-
-    pub fn ensure_matches(
-        &self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-    ) -> Result<(), ClientRequestEventIdsError> {
-        if &self.namespace != namespace {
-            return Err(ClientRequestEventIdsError::MixedNamespace {
-                expected: namespace.clone(),
-                got: self.namespace.clone(),
-            });
-        }
-        if &self.origin != origin {
-            return Err(ClientRequestEventIdsError::MixedOrigin {
-                expected: *origin,
-                got: self.origin,
-            });
-        }
-        Ok(())
-    }
-
-    pub fn seqs(&self) -> &[Seq1] {
-        &self.seqs
-    }
-
-    pub fn len(&self) -> usize {
-        self.seqs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.seqs.is_empty()
-    }
-
-    pub fn max_seq(&self) -> Seq1 {
-        self.seqs
-            .last()
-            .copied()
-            .expect("ClientRequestEventIds is non-empty")
-    }
-
-    pub fn first_event_id(&self) -> EventId {
-        EventId::new(self.origin, self.namespace.clone(), self.seqs[0])
-    }
-
-    pub fn event_ids(&self) -> Vec<EventId> {
-        self.seqs
-            .iter()
-            .map(|seq| EventId::new(self.origin, self.namespace.clone(), *seq))
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ClientRequestRow {
-    pub request_sha256: [u8; 32],
-    pub txn_id: TxnId,
-    pub event_ids: ClientRequestEventIds,
-    pub created_at_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct IndexedRangeItem {
-    pub event_id: EventId,
-    pub sha: [u8; 32],
-    pub prev_sha: Option<[u8; 32]>,
-    pub segment_id: SegmentId,
-    pub offset: u64,
-    pub len: u32,
-    pub event_time_ms: u64,
-    pub txn_id: TxnId,
-    pub client_request_id: Option<ClientRequestId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum SegmentRow {
-    Open {
-        namespace: NamespaceId,
-        segment_id: SegmentId,
-        segment_path: PathBuf,
-        created_at_ms: u64,
-        last_indexed_offset: u64,
-    },
-    Sealed {
-        namespace: NamespaceId,
-        segment_id: SegmentId,
-        segment_path: PathBuf,
-        created_at_ms: u64,
-        last_indexed_offset: u64,
-        final_len: u64,
-    },
-}
-
-impl SegmentRow {
-    pub fn open(
-        namespace: NamespaceId,
-        segment_id: SegmentId,
-        segment_path: PathBuf,
-        created_at_ms: u64,
-        last_indexed_offset: u64,
-    ) -> Self {
-        Self::Open {
-            namespace,
-            segment_id,
-            segment_path,
-            created_at_ms,
-            last_indexed_offset,
-        }
-    }
-
-    pub fn sealed(
-        namespace: NamespaceId,
-        segment_id: SegmentId,
-        segment_path: PathBuf,
-        created_at_ms: u64,
-        last_indexed_offset: u64,
-        final_len: u64,
-    ) -> Self {
-        Self::Sealed {
-            namespace,
-            segment_id,
-            segment_path,
-            created_at_ms,
-            last_indexed_offset,
-            final_len,
-        }
-    }
-
-    pub fn namespace(&self) -> &NamespaceId {
-        match self {
-            SegmentRow::Open { namespace, .. } | SegmentRow::Sealed { namespace, .. } => namespace,
-        }
-    }
-
-    pub fn segment_id(&self) -> SegmentId {
-        match self {
-            SegmentRow::Open { segment_id, .. } | SegmentRow::Sealed { segment_id, .. } => {
-                *segment_id
-            }
-        }
-    }
-
-    pub fn segment_path(&self) -> &Path {
-        match self {
-            SegmentRow::Open { segment_path, .. } | SegmentRow::Sealed { segment_path, .. } => {
-                segment_path.as_path()
-            }
-        }
-    }
-
-    pub fn created_at_ms(&self) -> u64 {
-        match self {
-            SegmentRow::Open { created_at_ms, .. } | SegmentRow::Sealed { created_at_ms, .. } => {
-                *created_at_ms
-            }
-        }
-    }
-
-    pub fn last_indexed_offset(&self) -> u64 {
-        match self {
-            SegmentRow::Open {
-                last_indexed_offset,
-                ..
-            }
-            | SegmentRow::Sealed {
-                last_indexed_offset,
-                ..
-            } => *last_indexed_offset,
-        }
-    }
-
-    pub fn is_sealed(&self) -> bool {
-        matches!(self, SegmentRow::Sealed { .. })
-    }
-
-    pub fn final_len(&self) -> Option<u64> {
-        match self {
-            SegmentRow::Open { .. } => None,
-            SegmentRow::Sealed { final_len, .. } => Some(*final_len),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct WatermarkRow {
-    pub namespace: NamespaceId,
-    pub origin: ReplicaId,
-    pub applied: Watermark<Applied>,
-    pub durable: Watermark<Durable>,
-}
-
-impl WatermarkRow {
-    pub fn applied_seq(&self) -> u64 {
-        self.applied.seq().get()
-    }
-
-    pub fn durable_seq(&self) -> u64 {
-        self.durable.seq().get()
-    }
-
-    pub fn applied_head_sha(&self) -> Option<[u8; 32]> {
-        head_sha_from_status(self.applied.head())
-    }
-
-    pub fn durable_head_sha(&self) -> Option<[u8; 32]> {
-        head_sha_from_status(self.durable.head())
-    }
-}
-
-fn head_sha_from_status(head: HeadStatus) -> Option<[u8; 32]> {
-    match head {
-        HeadStatus::Known(sha) => Some(sha),
-        HeadStatus::Genesis => None,
-    }
-}
-
-fn watermark_from_columns<K>(
-    seq: u64,
-    head_sha: Option<[u8; 32]>,
-) -> Result<Watermark<K>, WalIndexError> {
-    let seq0 = Seq0::new(seq);
-    let head = match head_sha {
-        Some(sha) => HeadStatus::Known(sha),
-        None => HeadStatus::Genesis,
-    };
-    Watermark::new(seq0, head).map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct HlcRow {
-    pub actor_id: ActorId,
-    pub last_physical_ms: u64,
-    pub last_logical: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ReplicaDurabilityRole {
-    Anchor { eligible: bool },
-    Peer { eligible: bool },
-    Observer,
-}
-
-impl ReplicaDurabilityRole {
-    pub fn anchor(eligible: bool) -> Self {
-        Self::Anchor { eligible }
-    }
-
-    pub fn peer(eligible: bool) -> Self {
-        Self::Peer { eligible }
-    }
-
-    pub fn observer() -> Self {
-        Self::Observer
-    }
-
-    pub fn role(&self) -> ReplicaRole {
-        match self {
-            Self::Anchor { .. } => ReplicaRole::Anchor,
-            Self::Peer { .. } => ReplicaRole::Peer,
-            Self::Observer => ReplicaRole::Observer,
-        }
-    }
-
-    pub fn durability_eligible(&self) -> bool {
-        match self {
-            Self::Anchor { eligible } | Self::Peer { eligible } => *eligible,
-            Self::Observer => false,
-        }
-    }
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error("durability eligibility {eligible} invalid for role {role:?}")]
-pub struct ReplicaDurabilityRoleError {
-    pub role: ReplicaRole,
-    pub eligible: bool,
-}
-
-impl TryFrom<(ReplicaRole, bool)> for ReplicaDurabilityRole {
-    type Error = ReplicaDurabilityRoleError;
-
-    fn try_from(value: (ReplicaRole, bool)) -> Result<Self, Self::Error> {
-        let (role, eligible) = value;
-        match role {
-            ReplicaRole::Anchor => Ok(Self::Anchor { eligible }),
-            ReplicaRole::Peer => Ok(Self::Peer { eligible }),
-            ReplicaRole::Observer => {
-                if eligible {
-                    Err(ReplicaDurabilityRoleError { role, eligible })
-                } else {
-                    Ok(Self::Observer)
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ReplicaLivenessRow {
-    pub replica_id: ReplicaId,
-    pub last_seen_ms: u64,
-    pub last_handshake_ms: u64,
-    pub role: ReplicaDurabilityRole,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IndexDurabilityMode {
-    Cache,
-    Durable,
-}
-
-impl IndexDurabilityMode {
-    fn synchronous_value(self) -> &'static str {
-        match self {
-            IndexDurabilityMode::Cache => "NORMAL",
-            IndexDurabilityMode::Durable => "FULL",
-        }
-    }
-}
 
 struct SqliteConnectionPool {
     db_path: PathBuf,
@@ -861,8 +120,8 @@ impl SqliteWalIndex {
         let index_dir = store_dir.join("index");
         reject_symlink(&index_dir)?;
         std::fs::create_dir_all(&index_dir).map_err(|source| WalIndexError::Io {
-            path: index_dir.clone(),
-            source,
+            path: Some(index_dir.clone()),
+            reason: source.to_string(),
         })?;
         reject_symlink(&index_dir)?;
         let db_path = index_dir.join("wal.sqlite");
@@ -896,7 +155,8 @@ impl SqliteWalIndex {
             let _: i64 = row.get(1)?;
             let _: i64 = row.get(2)?;
             Ok(())
-        })?;
+        })
+        .map_err(map_sqlite_error)?;
         Ok(())
     }
 }
@@ -930,7 +190,8 @@ struct SqliteWalIndexWriter {
 impl WalIndexWriter for SqliteWalIndexWriter {
     fn begin_txn(&self) -> Result<Box<dyn WalIndexTxn>, WalIndexError> {
         let conn = self.pool.get()?;
-        conn.execute_batch("BEGIN IMMEDIATE")?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(map_sqlite_error)?;
         Ok(Box::new(SqliteWalIndexTxn {
             conn,
             committed: false,
@@ -951,12 +212,16 @@ impl WalIndexTxn for SqliteWalIndexTxn {
     ) -> Result<Seq1, WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT next_seq FROM origin_seq WHERE namespace = ?1 AND origin_replica_id = ?2",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT next_seq FROM origin_seq WHERE namespace = ?1 AND origin_replica_id = ?2",
+            )
+            .map_err(map_sqlite_error)?;
         let next_seq: Option<u64> = stmt
             .query_row(params![namespace, origin_blob], |row| row.get::<_, u64>(0))
-            .optional()?;
+            .optional()
+            .map_err(map_sqlite_error)?;
 
         let next_raw = next_seq.unwrap_or(1);
         let updated = next_raw
@@ -970,8 +235,9 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO origin_seq (namespace, origin_replica_id, next_seq) VALUES (?1, ?2, ?3) \
              ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET next_seq = excluded.next_seq",
-        )?;
-        stmt.execute(params![namespace, origin_blob, updated])?;
+        ).map_err(map_sqlite_error)?;
+        stmt.execute(params![namespace, origin_blob, updated])
+            .map_err(map_sqlite_error)?;
         Ok(next)
     }
 
@@ -986,8 +252,9 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO origin_seq (namespace, origin_replica_id, next_seq) VALUES (?1, ?2, ?3) \
              ON CONFLICT(namespace, origin_replica_id) DO UPDATE SET next_seq = excluded.next_seq",
-        )?;
-        stmt.execute(params![namespace, origin_blob, next_seq.get() as i64])?;
+        ).map_err(map_sqlite_error)?;
+        stmt.execute(params![namespace, origin_blob, next_seq.get() as i64])
+            .map_err(map_sqlite_error)?;
         Ok(())
     }
 
@@ -1008,7 +275,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let origin_blob = uuid_blob(eid.origin_replica_id.as_uuid());
         let eid_seq = eid.origin_seq.get() as i64;
         let sha_blob = sha.to_vec();
-        let prev_sha_blob = prev_sha.map(|value| value.to_vec());
+        let prev_sha_blob = prev_sha.map(|value: [u8; 32]| value.to_vec());
         let segment_blob = uuid_blob(segment_id.as_uuid());
         let txn_blob = uuid_blob(txn_id.as_uuid());
         let client_blob = client_request_id.map(|id| uuid_blob(id.as_uuid()));
@@ -1018,7 +285,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 "INSERT OR IGNORE INTO events \
                  (namespace, origin_replica_id, origin_seq, sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            )?;
+            ).map_err(map_sqlite_error)?;
             stmt.execute(params![
                 namespace,
                 origin_blob,
@@ -1031,17 +298,19 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 event_time_ms as i64,
                 txn_blob,
                 client_blob,
-            ])?
+            ])
+            .map_err(map_sqlite_error)?
         };
         if inserted == 0 {
             let mut stmt = self.conn.prepare_cached(
                 "SELECT sha FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
-            )?;
+            ).map_err(map_sqlite_error)?;
             let existing: Option<Vec<u8>> = stmt
                 .query_row(params![namespace, origin_blob, eid_seq], |row| {
                     row.get::<_, Vec<u8>>(0)
                 })
-                .optional()?;
+                .optional()
+                .map_err(map_sqlite_error)?;
             if let Some(existing) = existing {
                 let existing_sha = blob_32(existing)?;
                 if existing_sha == sha {
@@ -1071,8 +340,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
     ) -> Result<(), WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
-        let applied_blob = head_sha_from_status(applied.head()).map(|value| value.to_vec());
-        let durable_blob = head_sha_from_status(durable.head()).map(|value| value.to_vec());
+        let applied_blob = head_sha_from_status(applied.head()).map(|value: [u8; 32]| value.to_vec());
+        let durable_blob = head_sha_from_status(durable.head()).map(|value: [u8; 32]| value.to_vec());
 
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
@@ -1082,7 +351,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                durable_seq = excluded.durable_seq, \
                applied_head_sha = excluded.applied_head_sha, \
                durable_head_sha = excluded.durable_head_sha",
-        )?;
+        ).map_err(map_sqlite_error)?;
         stmt.execute(params![
             namespace,
             origin_blob,
@@ -1090,7 +359,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             u64::from(durable.seq()) as i64,
             applied_blob,
             durable_blob,
-        ])?;
+        ])
+        .map_err(map_sqlite_error)?;
         Ok(())
     }
 
@@ -1104,12 +374,13 @@ impl WalIndexTxn for SqliteWalIndexTxn {
              ON CONFLICT(actor_id) DO UPDATE SET \
                last_physical_ms = excluded.last_physical_ms, \
                last_logical = excluded.last_logical",
-        )?;
+        ).map_err(map_sqlite_error)?;
         stmt.execute(params![
             hlc.actor_id.as_str(),
             last_physical_ms,
             last_logical
-        ])?;
+        ])
+        .map_err(map_sqlite_error)?;
         Ok(())
     }
 
@@ -1128,7 +399,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                last_indexed_offset = excluded.last_indexed_offset, \
                sealed = excluded.sealed, \
                final_len = excluded.final_len",
-        )?;
+        ).map_err(map_sqlite_error)?;
         stmt.execute(params![
             namespace,
             segment_blob,
@@ -1137,7 +408,8 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             segment.last_indexed_offset() as i64,
             sealed,
             final_len,
-        ])?;
+        ])
+        .map_err(map_sqlite_error)?;
         Ok(())
     }
 
@@ -1165,7 +437,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 "INSERT INTO client_requests (namespace, origin_replica_id, client_request_id, created_at_ms, request_sha256, txn_id, event_ids) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                  ON CONFLICT(namespace, origin_replica_id, client_request_id) DO NOTHING",
-            )?;
+            ).map_err(map_sqlite_error)?;
             stmt.execute(params![
                 namespace,
                 &origin_blob,
@@ -1174,18 +446,20 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 &request_blob,
                 &txn_blob,
                 &event_ids_blob,
-            ])?
+            ])
+            .map_err(map_sqlite_error)?
         };
         if inserted == 0 {
             let mut stmt = self.conn.prepare_cached(
                 "SELECT request_sha256 FROM client_requests \
                  WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
-            )?;
+            ).map_err(map_sqlite_error)?;
             let existing = stmt
                 .query_row(params![namespace, &origin_blob, &client_blob], |row| {
                     row.get::<_, Vec<u8>>(0)
                 })
-                .optional()?;
+                .optional()
+                .map_err(map_sqlite_error)?;
             let Some(existing_sha) = existing else {
                 return Err(WalIndexError::EventIdDecode(
                     "client_request_id conflict without row".to_string(),
@@ -1224,25 +498,28 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                last_handshake_ms = MAX(replica_liveness.last_handshake_ms, excluded.last_handshake_ms), \
                role = excluded.role, \
                durability_eligible = excluded.durability_eligible",
-        )?;
+        ).map_err(map_sqlite_error)?;
         stmt.execute(params![
             replica_blob,
             last_seen_ms,
             last_handshake_ms,
             role,
             durability_eligible,
-        ])?;
+        ])
+        .map_err(map_sqlite_error)?;
         Ok(())
     }
 
     fn commit(mut self: Box<Self>) -> Result<(), WalIndexError> {
-        self.conn.execute_batch("COMMIT")?;
+        self.conn.execute_batch("COMMIT").map_err(map_sqlite_error)?;
         self.committed = true;
         Ok(())
     }
 
     fn rollback(mut self: Box<Self>) -> Result<(), WalIndexError> {
-        self.conn.execute_batch("ROLLBACK")?;
+        self.conn
+            .execute_batch("ROLLBACK")
+            .map_err(map_sqlite_error)?;
         self.committed = true;
         Ok(())
     }
@@ -1282,12 +559,13 @@ impl WalIndexReader for SqliteWalIndexReader {
             let origin_seq = eid.origin_seq.get() as i64;
             let mut stmt = conn.prepare_cached(
                 "SELECT sha FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
-            )?;
+            ).map_err(map_sqlite_error)?;
             let row: Option<Vec<u8>> = stmt
                 .query_row(params![namespace, origin_blob, origin_seq], |row| {
                     row.get::<_, Vec<u8>>(0)
                 })
-                .optional()?;
+                .optional()
+                .map_err(map_sqlite_error)?;
             row.map(blob_32).transpose()
         })
     }
@@ -1298,16 +576,16 @@ impl WalIndexReader for SqliteWalIndexReader {
             let mut stmt = conn.prepare_cached(
                 "SELECT segment_id, segment_path, created_at_ms, last_indexed_offset, sealed, final_len \
                  FROM segments WHERE namespace = ?1 ORDER BY created_at_ms ASC, segment_id ASC",
-            )?;
-            let mut rows = stmt.query(params![namespace])?;
+            ).map_err(map_sqlite_error)?;
+            let mut rows = stmt.query(params![namespace]).map_err(map_sqlite_error)?;
             let mut segments = Vec::new();
-            while let Some(row) = rows.next()? {
-                let segment_id: Vec<u8> = row.get(0)?;
-                let segment_path: String = row.get(1)?;
-                let created_at_ms: i64 = row.get(2)?;
-                let last_indexed_offset: i64 = row.get(3)?;
-                let sealed: i64 = row.get(4)?;
-                let final_len: Option<i64> = row.get(5)?;
+            while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                let segment_id: Vec<u8> = row.get(0).map_err(map_sqlite_error)?;
+                let segment_path: String = row.get(1).map_err(map_sqlite_error)?;
+                let created_at_ms: i64 = row.get(2).map_err(map_sqlite_error)?;
+                let last_indexed_offset: i64 = row.get(3).map_err(map_sqlite_error)?;
+                let sealed: i64 = row.get(4).map_err(map_sqlite_error)?;
+                let final_len: Option<i64> = row.get(5).map_err(map_sqlite_error)?;
 
                 let created_at_ms = u64::try_from(created_at_ms).map_err(|_| {
                     WalIndexError::SegmentRowDecode("created_at_ms out of range".to_string())
@@ -1329,21 +607,21 @@ impl WalIndexReader for SqliteWalIndexReader {
                 let segment_path = PathBuf::from(segment_path);
                 let sealed = sealed != 0;
                 let segment_row = match (sealed, final_len) {
-                    (false, None) => SegmentRow::open(
+                    (false, None) => SegmentRow::Open {
                         namespace,
                         segment_id,
                         segment_path,
                         created_at_ms,
                         last_indexed_offset,
-                    ),
-                    (true, Some(final_len)) => SegmentRow::sealed(
+                    },
+                    (true, Some(final_len)) => SegmentRow::Sealed {
                         namespace,
                         segment_id,
                         segment_path,
                         created_at_ms,
                         last_indexed_offset,
                         final_len,
-                    ),
+                    },
                     (true, None) => {
                         return Err(WalIndexError::SegmentRowDecode(
                             "sealed segment missing final_len".to_string(),
@@ -1366,16 +644,16 @@ impl WalIndexReader for SqliteWalIndexReader {
             let mut stmt = conn.prepare_cached(
                 "SELECT namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha \
                  FROM watermarks",
-            )?;
-            let mut rows = stmt.query([])?;
+            ).map_err(map_sqlite_error)?;
+            let mut rows = stmt.query([]).map_err(map_sqlite_error)?;
             let mut watermarks = Vec::new();
-            while let Some(row) = rows.next()? {
-                let namespace: String = row.get(0)?;
-                let origin_blob: Vec<u8> = row.get(1)?;
-                let applied_seq: i64 = row.get(2)?;
-                let durable_seq: i64 = row.get(3)?;
-                let applied_head_sha: Option<Vec<u8>> = row.get(4)?;
-                let durable_head_sha: Option<Vec<u8>> = row.get(5)?;
+            while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                let namespace: String = row.get(0).map_err(map_sqlite_error)?;
+                let origin_blob: Vec<u8> = row.get(1).map_err(map_sqlite_error)?;
+                let applied_seq: i64 = row.get(2).map_err(map_sqlite_error)?;
+                let durable_seq: i64 = row.get(3).map_err(map_sqlite_error)?;
+                let applied_head_sha: Option<Vec<u8>> = row.get(4).map_err(map_sqlite_error)?;
+                let durable_head_sha: Option<Vec<u8>> = row.get(5).map_err(map_sqlite_error)?;
 
                 let namespace = NamespaceId::parse(&namespace)
                     .map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))?;
@@ -1410,13 +688,14 @@ impl WalIndexReader for SqliteWalIndexReader {
     fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError> {
         self.with_conn(|conn| {
             let mut stmt =
-                conn.prepare_cached("SELECT actor_id, last_physical_ms, last_logical FROM hlc")?;
-            let mut rows = stmt.query([])?;
+                conn.prepare_cached("SELECT actor_id, last_physical_ms, last_logical FROM hlc")
+                .map_err(map_sqlite_error)?;
+            let mut rows = stmt.query([]).map_err(map_sqlite_error)?;
             let mut hlc_rows = Vec::new();
-            while let Some(row) = rows.next()? {
-                let actor_id: String = row.get(0)?;
-                let last_physical_ms: i64 = row.get(1)?;
-                let last_logical: i64 = row.get(2)?;
+            while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                let actor_id: String = row.get(0).map_err(map_sqlite_error)?;
+                let last_physical_ms: i64 = row.get(1).map_err(map_sqlite_error)?;
+                let last_logical: i64 = row.get(2).map_err(map_sqlite_error)?;
 
                 let actor_id = ActorId::new(actor_id)
                     .map_err(|err| WalIndexError::HlcRowDecode(err.to_string()))?;
@@ -1442,15 +721,15 @@ impl WalIndexReader for SqliteWalIndexReader {
             let mut stmt = conn.prepare_cached(
                 "SELECT replica_id, last_seen_ms, last_handshake_ms, role, durability_eligible \
                  FROM replica_liveness",
-            )?;
-            let mut rows = stmt.query([])?;
+            ).map_err(map_sqlite_error)?;
+            let mut rows = stmt.query([]).map_err(map_sqlite_error)?;
             let mut out = Vec::new();
-            while let Some(row) = rows.next()? {
-                let replica_id: Vec<u8> = row.get(0)?;
-                let last_seen_ms: i64 = row.get(1)?;
-                let last_handshake_ms: i64 = row.get(2)?;
-                let role: String = row.get(3)?;
-                let durability_eligible: i64 = row.get(4)?;
+            while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                let replica_id: Vec<u8> = row.get(0).map_err(map_sqlite_error)?;
+                let last_seen_ms: i64 = row.get(1).map_err(map_sqlite_error)?;
+                let last_handshake_ms: i64 = row.get(2).map_err(map_sqlite_error)?;
+                let role: String = row.get(3).map_err(map_sqlite_error)?;
+                let durability_eligible: i64 = row.get(4).map_err(map_sqlite_error)?;
 
                 let replica_uuid = blob_uuid(replica_id)
                     .map_err(|err| WalIndexError::ReplicaLivenessRowDecode(err.to_string()))?;
@@ -1492,20 +771,20 @@ impl WalIndexReader for SqliteWalIndexReader {
                 "SELECT origin_seq, sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id \
                  FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq > ?3 \
                  ORDER BY origin_seq ASC",
-            )?;
-            let mut rows = stmt.query(params![namespace, origin_blob, from_seq_excl.get() as i64])?;
+            ).map_err(map_sqlite_error)?;
+            let mut rows = stmt.query(params![namespace, origin_blob, from_seq_excl.get() as i64]).map_err(map_sqlite_error)?;
             let mut items = Vec::new();
             let mut bytes_accum = 0usize;
-            while let Some(row) = rows.next()? {
-                let origin_seq: i64 = row.get(0)?;
-                let sha: Vec<u8> = row.get(1)?;
-                let prev_sha: Option<Vec<u8>> = row.get(2)?;
-                let segment_id: Vec<u8> = row.get(3)?;
-                let segment_offset: i64 = row.get(4)?;
-                let len: i64 = row.get(5)?;
-                let event_time_ms: i64 = row.get(6)?;
-                let txn_id: Vec<u8> = row.get(7)?;
-                let client_request_id: Option<Vec<u8>> = row.get(8)?;
+            while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                let origin_seq: i64 = row.get(0).map_err(map_sqlite_error)?;
+                let sha: Vec<u8> = row.get(1).map_err(map_sqlite_error)?;
+                let prev_sha: Option<Vec<u8>> = row.get(2).map_err(map_sqlite_error)?;
+                let segment_id: Vec<u8> = row.get(3).map_err(map_sqlite_error)?;
+                let segment_offset: i64 = row.get(4).map_err(map_sqlite_error)?;
+                let len: i64 = row.get(5).map_err(map_sqlite_error)?;
+                let event_time_ms: i64 = row.get(6).map_err(map_sqlite_error)?;
+                let txn_id: Vec<u8> = row.get(7).map_err(map_sqlite_error)?;
+                let client_request_id: Option<Vec<u8>> = row.get(8).map_err(map_sqlite_error)?;
 
                 let len_u32 = u32::try_from(len).map_err(|_| {
                     WalIndexError::EventIdDecode("event len out of range".to_string())
@@ -1563,7 +842,7 @@ impl WalIndexReader for SqliteWalIndexReader {
             let mut stmt = conn.prepare_cached(
                 "SELECT request_sha256, txn_id, event_ids, created_at_ms FROM client_requests \
                  WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
-            )?;
+            ).map_err(map_sqlite_error)?;
             let row = stmt
                 .query_row(params![namespace, origin_blob, client_blob], |row| {
                     Ok((
@@ -1573,7 +852,8 @@ impl WalIndexReader for SqliteWalIndexReader {
                         row.get::<_, i64>(3)?,
                     ))
                 })
-                .optional()?;
+                .optional()
+                .map_err(map_sqlite_error)?;
 
             match row {
                 Some((request_sha, txn_id, event_ids, created_at_ms)) => {
@@ -1597,10 +877,10 @@ impl WalIndexReader for SqliteWalIndexReader {
             let origin_blob = uuid_blob(origin.as_uuid());
             let mut stmt = conn.prepare_cached(
                 "SELECT MAX(origin_seq) FROM events WHERE namespace = ?1 AND origin_replica_id = ?2",
-            )?;
+            ).map_err(map_sqlite_error)?;
             let max_seq: Option<i64> = stmt.query_row(params![namespace, origin_blob], |row| {
                 row.get::<_, Option<i64>>(0)
-            })?;
+            }).map_err(map_sqlite_error)?;
             match max_seq {
                 Some(seq) => {
                     let raw = u64::try_from(seq).map_err(|_| {
@@ -1611,6 +891,12 @@ impl WalIndexReader for SqliteWalIndexReader {
                 None => Ok(Seq0::ZERO),
             }
         })
+    }
+}
+
+fn map_sqlite_error(err: rusqlite::Error) -> WalIndexError {
+    WalIndexError::Sql {
+        message: err.to_string(),
     }
 }
 
@@ -1688,7 +974,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), WalIndexError> {
            role TEXT NOT NULL,
            durability_eligible INTEGER NOT NULL
          );",
-    )?;
+    ).map_err(map_sqlite_error)?;
     Ok(())
 }
 
@@ -1770,7 +1056,7 @@ fn set_meta(conn: &Connection, key: &'static str, value: String) -> Result<(), W
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
-    )?;
+    ).map_err(map_sqlite_error)?;
     Ok(())
 }
 
@@ -1781,7 +1067,8 @@ fn require_meta(conn: &Connection, key: &'static str) -> Result<String, WalIndex
             params![key],
             |row| row.get::<_, String>(0),
         )
-        .optional()?;
+        .optional()
+        .map_err(map_sqlite_error)?;
     value.ok_or(WalIndexError::MetaMissing { key })
 }
 
@@ -1790,7 +1077,7 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, WalIndexError> {
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
         params![name],
         |row| row.get(0),
-    )?;
+    ).map_err(map_sqlite_error)?;
     Ok(count > 0)
 }
 
@@ -1800,8 +1087,8 @@ fn ensure_permissions(path: &Path) -> Result<(), WalIndexError> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
             |source| WalIndexError::Io {
-                path: path.to_path_buf(),
-                source,
+                path: Some(path.to_path_buf()),
+                reason: source.to_string(),
             },
         )?;
     }
@@ -1816,8 +1103,8 @@ fn reject_symlink(path: &Path) -> Result<(), WalIndexError> {
         Ok(_) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(WalIndexError::Io {
-            path: path.to_path_buf(),
-            source: err,
+            path: Some(path.to_path_buf()),
+            reason: err.to_string(),
         }),
     }
 }
@@ -1831,18 +1118,18 @@ fn open_connection(
     if create {
         flags |= OpenFlags::SQLITE_OPEN_CREATE;
     }
-    let conn = Connection::open_with_flags(path, flags)?;
+    let conn = Connection::open_with_flags(path, flags).map_err(map_sqlite_error)?;
     apply_pragmas(&conn, mode)?;
-    conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
+    conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS)).map_err(map_sqlite_error)?;
     conn.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
     Ok(conn)
 }
 
 fn apply_pragmas(conn: &Connection, mode: IndexDurabilityMode) -> Result<(), WalIndexError> {
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", mode.synchronous_value())?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "cache_size", CACHE_SIZE_KB)?;
+    conn.pragma_update(None, "journal_mode", "WAL").map_err(map_sqlite_error)?;
+    conn.pragma_update(None, "synchronous", mode.synchronous_value()).map_err(map_sqlite_error)?;
+    conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sqlite_error)?;
+    conn.pragma_update(None, "cache_size", CACHE_SIZE_KB).map_err(map_sqlite_error)?;
     Ok(())
 }
 
@@ -1888,7 +1175,7 @@ pub(crate) fn encode_event_ids(
 ) -> Result<Vec<u8>, WalIndexError> {
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
-    enc.array(event_ids.len() as u64)?;
+    enc.array(event_ids.len() as u64).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
     for seq in event_ids.seqs() {
         encode_event_id(&mut enc, event_ids.origin(), event_ids.namespace(), *seq)?;
     }
@@ -1901,21 +1188,21 @@ fn encode_event_id(
     namespace: &NamespaceId,
     origin_seq: Seq1,
 ) -> Result<(), WalIndexError> {
-    enc.array(3)?;
-    enc.bytes(origin.as_uuid().as_bytes())?;
-    enc.str(namespace.as_str())?;
-    enc.u64(origin_seq.get())?;
+    enc.array(3).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
+    enc.bytes(origin.as_uuid().as_bytes()).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
+    enc.str(namespace.as_str()).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
+    enc.u64(origin_seq.get()).map_err(|e| WalIndexError::CborEncode(e.to_string()))?;
     Ok(())
 }
 
 fn decode_event_ids(bytes: &[u8]) -> Result<ClientRequestEventIds, WalIndexError> {
     let mut dec = Decoder::new(bytes);
-    let len = dec.array()?.ok_or_else(|| {
+    let len = dec.array().map_err(|e| WalIndexError::CborDecode(e.to_string()))?.ok_or_else(|| {
         WalIndexError::EventIdDecode("event_ids CBOR must be definite".to_string())
     })?;
     let mut ids = Vec::with_capacity(len as usize);
     for _ in 0..len {
-        let item_len = dec.array()?.ok_or_else(|| {
+        let item_len = dec.array().map_err(|e| WalIndexError::CborDecode(e.to_string()))?.ok_or_else(|| {
             WalIndexError::EventIdDecode("event_ids entry must be definite".to_string())
         })?;
         if item_len != 3 {
@@ -1923,12 +1210,12 @@ fn decode_event_ids(bytes: &[u8]) -> Result<ClientRequestEventIds, WalIndexError
                 "event_ids entry must be len 3".to_string(),
             ));
         }
-        let replica_bytes = dec.bytes()?;
+        let replica_bytes = dec.bytes().map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
         let replica_uuid = blob_uuid(replica_bytes.to_vec())?;
-        let namespace = dec.str()?;
+        let namespace = dec.str().map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
         let namespace = NamespaceId::parse(namespace)
             .map_err(|err| WalIndexError::EventIdDecode(err.to_string()))?;
-        let seq = dec.u64()?;
+        let seq = dec.u64().map_err(|e| WalIndexError::CborDecode(e.to_string()))?;
         let origin_seq = Seq1::from_u64(seq)
             .ok_or_else(|| WalIndexError::EventIdDecode("origin_seq must be >=1".to_string()))?;
         ids.push(EventId::new(
@@ -2685,4 +1972,23 @@ mod tests {
             .unwrap();
         count > 0
     }
+}
+
+fn head_sha_from_status(head: HeadStatus) -> Option<[u8; 32]> {
+    match head {
+        HeadStatus::Known(sha) => Some(sha),
+        HeadStatus::Genesis => None,
+    }
+}
+
+fn watermark_from_columns<K>(
+    seq: u64,
+    head_sha: Option<[u8; 32]>,
+) -> Result<Watermark<K>, WalIndexError> {
+    let seq0 = Seq0::new(seq);
+    let head = match head_sha {
+        Some(sha) => HeadStatus::Known(sha),
+        None => HeadStatus::Genesis,
+    };
+    Watermark::new(seq0, head).map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))
 }
