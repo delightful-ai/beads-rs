@@ -884,12 +884,9 @@ impl CanonicalState {
         kind: DepKind,
     ) -> Result<NoCycleProof, InvalidDependency> {
         if !kind.requires_dag() {
-            return Err(InvalidDependency {
-                reason: format!(
-                    "dependency kind {} does not require DAG proof",
-                    kind.as_str()
-                ),
-            });
+            return Err(InvalidDependency::KindDoesNotRequireDag(
+                kind.as_str().to_string(),
+            ));
         }
 
         let mut visited = HashSet::new();
@@ -897,11 +894,9 @@ impl CanonicalState {
 
         while let Some(current) = queue.pop() {
             if &current == from {
-                return Err(InvalidDependency {
-                    reason: format!(
-                        "circular dependency: {} already depends on {} (directly or transitively)",
-                        to, from
-                    ),
+                return Err(InvalidDependency::CycleDetected {
+                    from: from.to_string(),
+                    to: to.to_string(),
                 });
             }
             if !visited.insert(current.clone()) {
@@ -1561,13 +1556,13 @@ mod tests {
     fn apply_dep_add_checked(state: &mut CanonicalState, key: DepKey, dot: Dot, stamp: Stamp) {
         let key = state
             .check_dep_add_key(key)
-            .unwrap_or_else(|err| panic!("dep key invalid: {}", err.reason));
+            .unwrap_or_else(|err| panic!("dep key invalid: {}", err));
         state.apply_dep_add(key, dot, stamp);
     }
 
     fn apply_dep_add_unchecked(state: &mut CanonicalState, key: DepKey, dot: Dot, stamp: Stamp) {
         let key = AcyclicDepKey::from_dep_key(key, NoCycleProof::new())
-            .unwrap_or_else(|err| panic!("dep key invalid: {}", err.reason));
+            .unwrap_or_else(|err| panic!("dep key invalid: {}", err));
         state.apply_dep_add(DepAddKey::Acyclic(key), dot, stamp);
     }
 
@@ -1978,11 +1973,11 @@ mod tests {
         }
 
         let ab = DepKey::new(a.clone(), b.clone(), DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
         let bc = DepKey::new(b.clone(), c.clone(), DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
         let ca = DepKey::new(c.clone(), a.clone(), DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
 
         let replica = ReplicaId::from(Uuid::from_bytes([2u8; 16]));
         apply_dep_add_unchecked(
@@ -2171,9 +2166,9 @@ mod tests {
         let c = bead_id("bd-ccc");
 
         let ab = DepKey::new(a, b.clone(), DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
         let bc = DepKey::new(b, c, DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
 
         let replica = ReplicaId::from(Uuid::from_bytes([3u8; 16]));
         apply_dep_add_checked(

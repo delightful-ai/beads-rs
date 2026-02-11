@@ -26,9 +26,7 @@ impl DepSpec {
     /// Create a new dependency spec.
     pub fn new(kind: DepKind, id: BeadId) -> Result<Self, InvalidDependency> {
         if kind == DepKind::Parent {
-            return Err(InvalidDependency {
-                reason: "parent edges must use parent-specific operations".to_string(),
-            });
+            return Err(InvalidDependency::ParentKindNotAllowed);
         }
         Ok(Self { kind, id })
     }
@@ -192,9 +190,7 @@ impl ParentEdge {
     /// Returns an error if `child == parent`.
     pub fn new(child: BeadId, parent: BeadId) -> Result<Self, InvalidDependency> {
         if child == parent {
-            return Err(InvalidDependency {
-                reason: format!("cannot create self-parent edge on {}", child),
-            });
+            return Err(InvalidDependency::SelfDependency(child.to_string()));
         }
         Ok(Self { child, parent })
     }
@@ -221,9 +217,9 @@ impl TryFrom<DepKey> for ParentEdge {
 
     fn try_from(key: DepKey) -> Result<Self, Self::Error> {
         if key.kind() != DepKind::Parent {
-            return Err(InvalidDependency {
-                reason: format!("expected parent dependency, got {}", key.kind().as_str()),
-            });
+            return Err(InvalidDependency::NotParentKind(
+                key.kind().as_str().to_string(),
+            ));
         }
         ParentEdge::new(key.from.clone(), key.to.clone())
     }
@@ -270,9 +266,7 @@ impl DepKey {
     /// Returns an error if `from == to` (self-dependency).
     pub fn new(from: BeadId, to: BeadId, kind: DepKind) -> Result<Self, InvalidDependency> {
         if from == to {
-            return Err(InvalidDependency {
-                reason: format!("cannot create self-dependency on {}", from),
-            });
+            return Err(InvalidDependency::SelfDependency(from.to_string()));
         }
         Ok(Self { from, to, kind })
     }
@@ -335,12 +329,9 @@ impl AcyclicDepKey {
         _proof: NoCycleProof,
     ) -> Result<Self, InvalidDependency> {
         if !kind.requires_dag() {
-            return Err(InvalidDependency {
-                reason: format!(
-                    "dependency kind {} does not require DAG proof",
-                    kind.as_str()
-                ),
-            });
+            return Err(InvalidDependency::KindDoesNotRequireDag(
+                kind.as_str().to_string(),
+            ));
         }
         Ok(Self {
             key: DepKey::new(from, to, kind)?,
@@ -349,12 +340,9 @@ impl AcyclicDepKey {
 
     pub fn from_dep_key(key: DepKey, _proof: NoCycleProof) -> Result<Self, InvalidDependency> {
         if !key.kind().requires_dag() {
-            return Err(InvalidDependency {
-                reason: format!(
-                    "dependency kind {} does not require DAG proof",
-                    key.kind().as_str()
-                ),
-            });
+            return Err(InvalidDependency::KindDoesNotRequireDag(
+                key.kind().as_str().to_string(),
+            ));
         }
         Ok(Self { key })
     }
@@ -387,9 +375,9 @@ pub struct FreeDepKey {
 impl FreeDepKey {
     pub fn new(from: BeadId, to: BeadId, kind: DepKind) -> Result<Self, InvalidDependency> {
         if kind.requires_dag() {
-            return Err(InvalidDependency {
-                reason: format!("dependency kind {} requires DAG proof", kind.as_str()),
-            });
+            return Err(InvalidDependency::KindRequiresDag(
+                kind.as_str().to_string(),
+            ));
         }
         Ok(Self {
             key: DepKey::new(from, to, kind)?,
@@ -398,9 +386,9 @@ impl FreeDepKey {
 
     pub fn from_dep_key(key: DepKey) -> Result<Self, InvalidDependency> {
         if key.kind().requires_dag() {
-            return Err(InvalidDependency {
-                reason: format!("dependency kind {} requires DAG proof", key.kind().as_str()),
-            });
+            return Err(InvalidDependency::KindRequiresDag(
+                key.kind().as_str().to_string(),
+            ));
         }
         Ok(Self { key })
     }
@@ -492,7 +480,7 @@ mod tests {
         let result = DepKey::new(id.clone(), id, DepKind::Blocks);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.reason.contains("self-dependency"));
+        assert!(matches!(err, InvalidDependency::SelfDependency(_)));
     }
 
     #[test]
@@ -551,10 +539,7 @@ mod tests {
     fn dep_spec_rejects_parent_kind() {
         let id = BeadId::parse("bd-abc").unwrap();
         let err = DepSpec::new(DepKind::Parent, id).unwrap_err();
-        assert!(
-            err.reason
-                .contains("parent edges must use parent-specific operations")
-        );
+        assert!(matches!(err, InvalidDependency::ParentKindNotAllowed));
     }
 
     #[test]
@@ -582,6 +567,6 @@ mod tests {
     fn parent_edge_rejects_self_parent() {
         let id = BeadId::parse("bd-abc").unwrap();
         let err = ParentEdge::new(id.clone(), id).unwrap_err();
-        assert!(err.reason.contains("self-parent"));
+        assert!(matches!(err, InvalidDependency::SelfDependency(_)));
     }
 }

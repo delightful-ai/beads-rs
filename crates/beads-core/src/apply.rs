@@ -46,8 +46,8 @@ pub enum ApplyError {
     MissingCreationStamp { id: BeadId },
     #[error("invalid claim patch for {id}: {reason}")]
     InvalidClaimPatch { id: BeadId, reason: String },
-    #[error("invalid dependency: {reason}")]
-    InvalidDependency { reason: String },
+    #[error(transparent)]
+    InvalidDependency(#[from] super::error::InvalidDependency),
 }
 
 /// ```compile_fail
@@ -301,9 +301,7 @@ fn apply_dep_add(
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = state
-        .check_dep_add_key(dep.key.clone())
-        .map_err(|err| ApplyError::InvalidDependency { reason: err.reason })?;
+    let key = state.check_dep_add_key(dep.key.clone())?;
     let dot = dep.dot.into();
     let change = state.apply_dep_add(key, dot, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -333,9 +331,7 @@ fn apply_parent_add(
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = state
-        .check_dep_add_key(op.edge().to_dep_key())
-        .map_err(|err| ApplyError::InvalidDependency { reason: err.reason })?;
+    let key = state.check_dep_add_key(op.edge().to_dep_key())?;
     let dot = op.dot.into();
     let change = state.apply_dep_add(key, dot, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -1137,10 +1133,10 @@ mod tests {
 
         let err = apply_event(&mut state, &event_with_delta(delta, 23)).unwrap_err();
         match err {
-            ApplyError::InvalidDependency { reason } => {
-                assert!(reason.contains("circular dependency"));
-            }
-            other => panic!("expected InvalidDependency, got {other:?}"),
+            ApplyError::InvalidDependency(crate::error::InvalidDependency::CycleDetected {
+                ..
+            }) => {}
+            other => panic!("expected InvalidDependency::CycleDetected, got {other:?}"),
         }
     }
 
