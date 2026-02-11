@@ -343,7 +343,7 @@ pub fn import_go_export(
                 "skipping dependency {} -> {}: {}",
                 key.from(),
                 key.to(),
-                err.reason
+                err
             )),
         }
     }

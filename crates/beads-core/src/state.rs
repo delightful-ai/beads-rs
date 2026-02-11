@@ -2167,8 +2167,8 @@ mod tests {
 
         let ab = DepKey::new(a, b.clone(), DepKind::Blocks)
             .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
-        let bc = DepKey::new(b, c, DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
+        let bc =
+            DepKey::new(b, c, DepKind::Blocks).unwrap_or_else(|e| panic!("dep key invalid: {}", e));
 
         let replica = ReplicaId::from(Uuid::from_bytes([3u8; 16]));
         apply_dep_add_checked(
