@@ -68,10 +68,29 @@ pub struct CollisionError {
 }
 
 /// Invalid dependency edge.
-#[derive(Debug, Error, Clone)]
-#[error("invalid dependency: {reason}")]
-pub struct InvalidDependency {
-    pub reason: String,
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InvalidDependency {
+    #[error("cannot create self-dependency on {0}")]
+    SelfDependency(String),
+
+    #[error("circular dependency: {to} already depends on {from} (directly or transitively)")]
+    CycleDetected { from: String, to: String },
+
+    #[error("dependency kind {0} requires DAG proof")]
+    KindRequiresDag(String),
+
+    #[error("dependency kind {0} does not require DAG proof")]
+    KindDoesNotRequireDag(String),
+
+    #[error("expected parent dependency, got {0}")]
+    NotParentKind(String),
+
+    #[error("parent edges must use parent-specific operations")]
+    ParentKindNotAllowed,
+
+    #[error("invalid dependency: {reason}")]
+    Other { reason: String },
 }
 
 /// Invalid dependency kind string.
@@ -1192,7 +1211,27 @@ impl IntoErrorPayload for CollisionError {
 impl IntoErrorPayload for InvalidDependency {
     fn into_error_payload(self) -> ErrorPayload {
         let message = self.to_string();
-        let InvalidDependency { reason } = self;
+        let reason = match &self {
+            InvalidDependency::SelfDependency(id) => {
+                format!("cannot create self-dependency on {id}")
+            }
+            InvalidDependency::CycleDetected { from, to } => {
+                format!("circular dependency: {to} already depends on {from}")
+            }
+            InvalidDependency::KindRequiresDag(kind) => {
+                format!("dependency kind {kind} requires DAG proof")
+            }
+            InvalidDependency::KindDoesNotRequireDag(kind) => {
+                format!("dependency kind {kind} does not require DAG proof")
+            }
+            InvalidDependency::NotParentKind(kind) => {
+                format!("expected parent dependency, got {kind}")
+            }
+            InvalidDependency::ParentKindNotAllowed => {
+                "parent edges must use parent-specific operations".to_string()
+            }
+            InvalidDependency::Other { reason } => reason.clone(),
+        };
         validation_payload(message, "dependency", reason)
     }
 }

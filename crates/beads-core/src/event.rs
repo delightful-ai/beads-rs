@@ -529,8 +529,8 @@ pub enum EventValidationError {
     InvalidTombstoneLineage { id: BeadId, reason: String },
     #[error("invalid bead patch for {id}: {reason}")]
     InvalidBeadPatch { id: BeadId, reason: String },
-    #[error("invalid dependency: {reason}")]
-    InvalidDependency { reason: String },
+    #[error(transparent)]
+    InvalidDependency(#[from] super::error::InvalidDependency),
     #[error("limit violation: {reason}")]
     LimitViolation { reason: String },
 }
@@ -3100,9 +3100,7 @@ impl TryFrom<WireDepAddV1> for ValidatedDepAdd {
 
     fn try_from(dep: WireDepAddV1) -> Result<Self, Self::Error> {
         if dep.kind() == DepKind::Parent {
-            return Err(EventValidationError::InvalidDependency {
-                reason: "parent edges must use parent-specific operations".to_string(),
-            });
+            return Err(super::error::InvalidDependency::ParentKindNotAllowed.into());
         }
         Ok(Self { inner: dep })
     }
@@ -3142,9 +3140,7 @@ impl TryFrom<WireDepRemoveV1> for ValidatedDepRemove {
 
     fn try_from(dep: WireDepRemoveV1) -> Result<Self, Self::Error> {
         if dep.kind() == DepKind::Parent {
-            return Err(EventValidationError::InvalidDependency {
-                reason: "parent edges must use parent-specific operations".to_string(),
-            });
+            return Err(super::error::InvalidDependency::ParentKindNotAllowed.into());
         }
         Ok(Self { inner: dep })
     }
@@ -3191,8 +3187,7 @@ impl TryFrom<WireDepAddV1> for ValidatedParentAdd {
     type Error = EventValidationError;
 
     fn try_from(dep: WireDepAddV1) -> Result<Self, Self::Error> {
-        let edge = ParentEdge::try_from(dep.key)
-            .map_err(|err| EventValidationError::InvalidDependency { reason: err.reason })?;
+        let edge = ParentEdge::try_from(dep.key)?;
         Ok(Self {
             inner: WireParentAddV1 { edge, dot: dep.dot },
         })
@@ -3240,8 +3235,7 @@ impl TryFrom<WireDepRemoveV1> for ValidatedParentRemove {
     type Error = EventValidationError;
 
     fn try_from(dep: WireDepRemoveV1) -> Result<Self, Self::Error> {
-        let edge = ParentEdge::try_from(dep.key)
-            .map_err(|err| EventValidationError::InvalidDependency { reason: err.reason })?;
+        let edge = ParentEdge::try_from(dep.key)?;
         Ok(Self {
             inner: WireParentRemoveV1 { edge, ctx: dep.ctx },
         })

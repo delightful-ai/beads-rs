@@ -732,7 +732,7 @@ impl MutationEngine {
             DepKey::new(id.clone(), spec.id().clone(), spec.kind()).map_err(|e| {
                 OpError::ValidationFailed {
                     field: "dependency".into(),
-                    reason: e.reason,
+                    reason: e.to_string(),
                 }
             })?;
         }
@@ -796,7 +796,7 @@ impl MutationEngine {
             let edge =
                 ParentEdge::new(id.clone(), parent_id).map_err(|e| OpError::ValidationFailed {
                     field: "parent".into(),
-                    reason: e.reason,
+                    reason: e.to_string(),
                 })?;
             delta
                 .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
@@ -1043,13 +1043,13 @@ impl MutationEngine {
         }
         let key = DepKey::new(from, to, kind).map_err(|e| OpError::ValidationFailed {
             field: "dependency".into(),
-            reason: e.reason,
+            reason: e.to_string(),
         })?;
         state
             .check_dep_add_key(key)
             .map_err(|err| OpError::ValidationFailed {
                 field: "dependency".into(),
-                reason: err.reason,
+                reason: err.to_string(),
             })
     }
 
@@ -1112,7 +1112,7 @@ impl MutationEngine {
         let key =
             DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
                 field: "dependency".into(),
-                reason: e.reason,
+                reason: e.to_string(),
             })?;
 
         let mut delta = TxnDeltaV1::new();
@@ -1143,7 +1143,7 @@ impl MutationEngine {
                 let edge = ParentEdge::new(id.clone(), parent_id.clone()).map_err(|e| {
                     OpError::ValidationFailed {
                         field: "parent".into(),
-                        reason: e.reason,
+                        reason: e.to_string(),
                     }
                 })?;
                 if state.get_live(parent_id).is_none() {
@@ -1153,7 +1153,7 @@ impl MutationEngine {
                 {
                     return Err(OpError::ValidationFailed {
                         field: "parent".into(),
-                        reason: err.reason,
+                        reason: err.to_string(),
                     });
                 }
                 Some(edge)

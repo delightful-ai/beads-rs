@@ -607,7 +607,7 @@ mod tests {
     fn apply_dep_add_checked(state: &mut CanonicalState, key: DepKey, dot: Dot, stamp: Stamp) {
         let key = state
             .check_dep_add_key(key)
-            .unwrap_or_else(|err| panic!("dep key invalid: {}", err.reason));
+            .unwrap_or_else(|err| panic!("dep key invalid: {}", err));
         state.apply_dep_add(key, dot, stamp);
     }
 
@@ -660,7 +660,7 @@ mod tests {
             })
             .prop_map(|(from, to, kind, dot, stamp)| {
                 let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
-                    .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+                    .unwrap_or_else(|err| panic!("dep key invalid: {}", err));
                 (key, dot, stamp)
             });
 
@@ -676,7 +676,7 @@ mod tests {
             )
             .prop_map(|(child, parent, dot, stamp)| {
                 let edge = ParentEdge::new(bead_id(&child), bead_id(&parent))
-                    .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason));
+                    .unwrap_or_else(|e| panic!("parent edge invalid: {}", e));
                 (edge.to_dep_key(), dot, stamp)
             });
 
@@ -1305,7 +1305,7 @@ mod tests {
         let key_discovered =
             DepKey::new(from.clone(), to.clone(), DepKind::DiscoveredFrom).unwrap();
         let key_parent = ParentEdge::new(from.clone(), to.clone())
-            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason))
+            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e))
             .to_dep_key();
         let key_related = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
 
@@ -1383,7 +1383,7 @@ mod tests {
     #[test]
     fn legacy_deps_parse_then_serialize_is_deterministic() {
         let key_parent = ParentEdge::new(bead_id("bd-legacy-a"), bead_id("bd-legacy-b"))
-            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason))
+            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e))
             .to_dep_key();
         let key_blocks = DepKey::new(
             bead_id("bd-legacy-a"),

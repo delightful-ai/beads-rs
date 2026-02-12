@@ -107,7 +107,7 @@ fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
         })
         .prop_map(|(from, to, kind, dot, stamp)| {
             let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
-                .unwrap_or_else(|e| panic!("dep key invalid: {}", e.reason));
+                .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
             (key, dot, stamp)
         });
 
@@ -123,7 +123,7 @@ fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
         )
         .prop_map(|(child, parent, dot, stamp)| {
             let edge = ParentEdge::new(bead_id(&child), bead_id(&parent))
-                .unwrap_or_else(|e| panic!("parent edge invalid: {}", e.reason));
+                .unwrap_or_else(|e| panic!("parent edge invalid: {}", e));
             (edge.to_dep_key(), dot, stamp)
         });
 
