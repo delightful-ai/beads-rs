@@ -7,6 +7,7 @@ This repo includes a first-class benchmark harness for CLI + daemon hotpaths:
 - just recipes:
   - `just bench-hotpaths`
   - `just bench-compare <baseline_dir> <candidate_dir>`
+  - `just bench-guard <baseline_dir> <candidate_dir>`
 
 ## Quick Start
 
@@ -55,6 +56,20 @@ This prints:
 - write latency delta per workflow
 - store-identity mean latency deltas (when available)
 - candidate `ipc_request_duration` histogram breakdowns
+
+## Regression Guardrail
+
+```bash
+just bench-guard tmp/perf/hotpaths-<baseline> tmp/perf/hotpaths-<candidate>
+```
+
+This enforces threshold checks and exits non-zero on regression:
+- Critical read paths (`ready`, `list --status open`, `show`, `show --json`, `status`): max +25% mean latency
+- Write workflows (create/claim-close/comment/label/dep/scenario): max +35% mean latency
+
+Thresholds are configurable:
+- `READ_THRESHOLD_PCT` (default `25`)
+- `WRITE_THRESHOLD_PCT` (default `35`)
 
 ## Environment Knobs
 

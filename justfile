@@ -175,6 +175,14 @@ bench-hotpaths:
 bench-compare BASE NEW:
     ./scripts/compare-hotpaths.sh {{BASE}} {{NEW}}
 
+# Fail the run if critical hotpaths regress above threshold.
+# Usage: just bench-guard tmp/perf/hotpaths-old tmp/perf/hotpaths-new
+# Optional env overrides:
+# - READ_THRESHOLD_PCT=25
+# - WRITE_THRESHOLD_PCT=35
+bench-guard BASE NEW:
+    ./scripts/check-hotpaths-regression.sh {{BASE}} {{NEW}}
+
 # Clean build artifacts
 clean:
     cargo clean
