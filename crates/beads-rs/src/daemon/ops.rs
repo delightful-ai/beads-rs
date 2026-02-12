@@ -21,6 +21,7 @@ use crate::daemon::wal::EventWalError;
 use crate::error::{Effect, Transience};
 use crate::git::SyncError;
 use beads_daemon::admission::AdmissionRejection;
+use beads_daemon_core::durability::DurabilityError;
 
 pub use beads_surface::ops::{BeadPatch, OpResult, Patch};
 
@@ -760,5 +761,32 @@ mod tests {
 
         patch.title = Patch::Clear;
         assert!(patch.validate_for_daemon().is_err());
+    }
+}
+
+impl From<DurabilityError> for OpError {
+    fn from(err: DurabilityError) -> Self {
+        match err {
+            DurabilityError::DurabilityTimeout {
+                requested,
+                waited_ms,
+                pending_replica_ids,
+                receipt,
+            } => OpError::DurabilityTimeout {
+                requested,
+                waited_ms,
+                pending_replica_ids,
+                receipt,
+            },
+            DurabilityError::DurabilityUnavailable {
+                requested,
+                eligible_total,
+                eligible_replica_ids,
+            } => OpError::DurabilityUnavailable {
+                requested,
+                eligible_total,
+                eligible_replica_ids,
+            },
+        }
     }
 }

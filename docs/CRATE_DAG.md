@@ -28,6 +28,7 @@ Only the directed edges below are allowed:
 - `beads-daemon -> beads-surface`
 - `beads-daemon -> beads-api`
 - `beads-daemon -> beads-core`
+- beads-daemon -> beads-daemon-core
 - `beads-daemon-core -> beads-core`
 - `beads-rs -> beads-core`
 - `beads-rs -> beads-api`

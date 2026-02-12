@@ -9,6 +9,7 @@ description = "Daemon runtime crate for beads-rs"
 
 [dependencies]
 beads-core = { path = "../beads-core" }
+beads-daemon-core = { path = "../beads-daemon-core" }
 beads-api = { path = "../beads-api" }
 beads-surface = { path = "../beads-surface" }
 crossbeam = "0.8"

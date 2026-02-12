@@ -1,13 +1,17 @@
 //! Lightweight WAL index primitives shared with model adapters.
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::core::error::details as error_details;
 use crate::core::{
-    ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId,
-    ReplicaDurabilityRole, ReplicaId, SegmentId, Seq0, Seq1, TxnId, Watermark,
+    ActorId, Applied, CliErrorCode, ClientRequestId, Durable, ErrorCode, ErrorPayload, EventId,
+    HeadStatus, IntoErrorPayload, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId, Seq0, Seq1,
+    StoreId, Transience, TxnId, Watermark,
 };
+pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 
 pub mod memory_index;
 
@@ -28,8 +32,32 @@ pub enum ClientRequestEventIdsError {
     NonIncreasing { prev: Seq1, next: Seq1 },
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum WalIndexError {
+    #[error("sqlite error: {message}")]
+    Sql { message: String },
+    #[error("io error at {path:?}: {reason}")]
+    Io {
+        path: Option<PathBuf>,
+        reason: String,
+    },
+    #[error("path is a symlink: {path:?}")]
+    Symlink { path: PathBuf },
+    #[error("index schema version mismatch: expected {expected}, got {got}")]
+    SchemaVersionMismatch { expected: u32, got: u32 },
+    #[error("missing meta key: {key}")]
+    MetaMissing { key: &'static str },
+    #[error("meta mismatch for {key}: expected {expected}, got {got}")]
+    MetaMismatch {
+        key: &'static str,
+        expected: String,
+        got: String,
+        store_id: StoreId,
+    },
+    #[error("event id encode failed: {0}")]
+    CborEncode(String),
+    #[error("event id decode failed: {0}")]
+    CborDecode(String),
     #[error("event id decode invalid: {0}")]
     EventIdDecode(String),
     #[error("client request event ids invalid: {0}")]
@@ -39,6 +67,8 @@ pub enum WalIndexError {
         namespace: String,
         origin: ReplicaId,
     },
+    #[error("wal index txn conflict: expected version {expected}, got {got}")]
+    ConcurrentWrite { expected: u64, got: u64 },
     #[error("equivocation for {namespace} {origin} seq {seq}")]
     Equivocation {
         namespace: NamespaceId,
@@ -55,6 +85,191 @@ pub enum WalIndexError {
         expected_request_sha256: [u8; 32],
         got_request_sha256: [u8; 32],
     },
+    #[error("hlc row decode failed: {0}")]
+    HlcRowDecode(String),
+    #[error("segment row decode failed: {0}")]
+    SegmentRowDecode(String),
+    #[error("watermark row decode failed: {0}")]
+    WatermarkRowDecode(String),
+    #[error("replica liveness row decode failed: {0}")]
+    ReplicaLivenessRowDecode(String),
+}
+
+impl WalIndexError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            WalIndexError::SchemaVersionMismatch { .. } => {
+                ProtocolErrorCode::IndexRebuildRequired.into()
+            }
+            WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
+            WalIndexError::ClientRequestIdReuseMismatch { .. } => {
+                ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
+            }
+            WalIndexError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            WalIndexError::MetaMismatch { key, .. } => match *key {
+                "store_id" => ProtocolErrorCode::WrongStore.into(),
+                "store_epoch" => ProtocolErrorCode::StoreEpochMismatch.into(),
+                _ => ProtocolErrorCode::IndexCorrupt.into(),
+            },
+            WalIndexError::MetaMissing { .. }
+            | WalIndexError::EventIdDecode(_)
+            | WalIndexError::ClientRequestEventIds(_)
+            | WalIndexError::HlcRowDecode(_)
+            | WalIndexError::SegmentRowDecode(_)
+            | WalIndexError::WatermarkRowDecode(_)
+            | WalIndexError::ReplicaLivenessRowDecode(_)
+            | WalIndexError::CborDecode(_)
+            | WalIndexError::CborEncode(_)
+            | WalIndexError::ConcurrentWrite { .. }
+            | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
+            WalIndexError::Sql { .. } => ProtocolErrorCode::IndexCorrupt.into(),
+            WalIndexError::Io { .. } => CliErrorCode::IoError.into(),
+        }
+    }
+
+    pub fn transience(&self) -> Transience {
+        match self {
+            WalIndexError::Symlink { .. } => Transience::Permanent,
+            WalIndexError::SchemaVersionMismatch { .. } => Transience::Retryable,
+            WalIndexError::MetaMismatch {
+                key: "store_id" | "store_epoch",
+                ..
+            } => Transience::Permanent,
+            WalIndexError::MetaMismatch { .. } => Transience::Retryable,
+            WalIndexError::Equivocation { .. }
+            | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
+            WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
+            _ => Transience::Retryable,
+        }
+    }
+
+    pub fn into_payload_with_context(self, message: String, retryable: bool) -> ErrorPayload {
+        let code = self.code();
+        match self {
+            WalIndexError::Symlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            WalIndexError::SchemaVersionMismatch { expected, got } => ErrorPayload::new(
+                ProtocolErrorCode::IndexRebuildRequired.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::IndexRebuildRequiredDetails {
+                namespace: None,
+                reason: format!("index schema version mismatch: expected {expected}, got {got}"),
+            }),
+            WalIndexError::Equivocation {
+                namespace,
+                origin,
+                seq,
+                existing_sha256,
+                new_sha256,
+            } => ErrorPayload::new(ProtocolErrorCode::Equivocation.into(), message, retryable)
+                .with_details(error_details::EquivocationDetails {
+                    eid: error_details::EventIdDetails {
+                        namespace: namespace.clone(),
+                        origin_replica_id: origin,
+                        origin_seq: seq,
+                    },
+                    existing_sha256: hex::encode(existing_sha256),
+                    new_sha256: hex::encode(new_sha256),
+                }),
+            WalIndexError::ClientRequestIdReuseMismatch {
+                namespace,
+                client_request_id,
+                expected_request_sha256,
+                got_request_sha256,
+                ..
+            } => ErrorPayload::new(
+                ProtocolErrorCode::ClientRequestIdReuseMismatch.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::ClientRequestIdReuseMismatchDetails {
+                namespace: namespace.clone(),
+                client_request_id,
+                expected_request_sha256: hex::encode(expected_request_sha256),
+                got_request_sha256: hex::encode(got_request_sha256),
+            }),
+            WalIndexError::MetaMismatch {
+                key: "store_id",
+                expected,
+                got,
+                ..
+            } => {
+                let expected = StoreId::parse_str(&expected).ok();
+                let got = StoreId::parse_str(&got).ok();
+                if let (Some(expected), Some(got)) = (expected, got) {
+                    ErrorPayload::new(ProtocolErrorCode::WrongStore.into(), message, retryable)
+                        .with_details(error_details::WrongStoreDetails {
+                            expected_store_id: expected,
+                            got_store_id: got,
+                        })
+                } else {
+                    let reason = message.clone();
+                    ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                        .with_details(error_details::IndexCorruptDetails { reason })
+                }
+            }
+            WalIndexError::MetaMismatch {
+                key: "store_epoch",
+                expected,
+                got,
+                store_id,
+            } => {
+                let expected_epoch = expected.parse::<u64>().ok();
+                let got_epoch = got.parse::<u64>().ok();
+                if let (Some(expected_epoch), Some(got_epoch)) = (expected_epoch, got_epoch) {
+                    ErrorPayload::new(
+                        ProtocolErrorCode::StoreEpochMismatch.into(),
+                        message,
+                        retryable,
+                    )
+                    .with_details(error_details::StoreEpochMismatchDetails {
+                        store_id,
+                        expected_epoch,
+                        got_epoch,
+                    })
+                } else {
+                    let reason = message.clone();
+                    ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                        .with_details(error_details::IndexCorruptDetails { reason })
+                }
+            }
+            WalIndexError::MetaMismatch { .. }
+            | WalIndexError::MetaMissing { .. }
+            | WalIndexError::EventIdDecode(_)
+            | WalIndexError::ClientRequestEventIds(_)
+            | WalIndexError::HlcRowDecode(_)
+            | WalIndexError::SegmentRowDecode(_)
+            | WalIndexError::WatermarkRowDecode(_)
+            | WalIndexError::ReplicaLivenessRowDecode(_)
+            | WalIndexError::CborDecode(_)
+            | WalIndexError::CborEncode(_)
+            | WalIndexError::ConcurrentWrite { .. }
+            | WalIndexError::OriginSeqOverflow { .. }
+            | WalIndexError::Sql { .. } => ErrorPayload::new(
+                ProtocolErrorCode::IndexCorrupt.into(),
+                message.clone(),
+                retryable,
+            )
+            .with_details(error_details::IndexCorruptDetails { reason: message }),
+            WalIndexError::Io { .. } => ErrorPayload::new(code, message, retryable),
+        }
+    }
+}
+
+impl IntoErrorPayload for WalIndexError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        self.into_payload_with_context(message, retryable)
+    }
 }
 
 pub trait WalIndex: Send + Sync {
@@ -350,8 +565,113 @@ pub struct ReplicaLivenessRow {
     pub role: ReplicaDurabilityRole,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IndexDurabilityMode {
     Cache,
     Durable,
+}
+
+impl SegmentRow {
+    pub fn open(
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+    ) -> Self {
+        Self::Open {
+            namespace,
+            segment_id,
+            segment_path,
+            created_at_ms,
+            last_indexed_offset,
+        }
+    }
+
+    pub fn sealed(
+        namespace: NamespaceId,
+        segment_id: SegmentId,
+        segment_path: PathBuf,
+        created_at_ms: u64,
+        last_indexed_offset: u64,
+        final_len: u64,
+    ) -> Self {
+        Self::Sealed {
+            namespace,
+            segment_id,
+            segment_path,
+            created_at_ms,
+            last_indexed_offset,
+            final_len,
+        }
+    }
+
+    pub fn last_indexed_offset(&self) -> u64 {
+        match self {
+            SegmentRow::Open {
+                last_indexed_offset,
+                ..
+            }
+            | SegmentRow::Sealed {
+                last_indexed_offset,
+                ..
+            } => *last_indexed_offset,
+        }
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, SegmentRow::Sealed { .. })
+    }
+
+    pub fn final_len(&self) -> Option<u64> {
+        match self {
+            SegmentRow::Open { .. } => None,
+            SegmentRow::Sealed { final_len, .. } => Some(*final_len),
+        }
+    }
+}
+
+impl ClientRequestEventIds {
+    pub fn namespace(&self) -> &NamespaceId {
+        &self.namespace
+    }
+
+    pub fn origin(&self) -> ReplicaId {
+        self.origin
+    }
+
+    pub fn seqs(&self) -> &[Seq1] {
+        &self.seqs
+    }
+
+    pub fn len(&self) -> usize {
+        self.seqs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seqs.is_empty()
+    }
+}
+
+impl IndexDurabilityMode {
+    pub fn synchronous_value(self) -> &'static str {
+        match self {
+            IndexDurabilityMode::Cache => "NORMAL",
+            IndexDurabilityMode::Durable => "FULL",
+        }
+    }
+}
+
+impl ClientRequestEventIds {
+    pub fn max_seq(&self) -> Seq1 {
+        self.seqs
+            .last()
+            .copied()
+            .expect("ClientRequestEventIds is non-empty")
+    }
+
+    pub fn first_event_id(&self) -> EventId {
+        EventId::new(self.origin, self.namespace.clone(), self.seqs[0])
+    }
 }
