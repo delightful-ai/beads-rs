@@ -81,56 +81,62 @@ impl BeadCore {
 }
 
 /// All mutable fields wrapped in Lww for per-field merge.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BeadFields {
-    pub title: Lww<String>,
-    pub description: Lww<String>,
-    pub design: Lww<Option<String>>,
-    pub acceptance_criteria: Lww<Option<String>>,
-    pub priority: Lww<Priority>,
-    pub bead_type: Lww<BeadType>,
-    pub external_ref: Lww<Option<String>>,
-    pub source_repo: Lww<Option<String>>,
-    pub estimated_minutes: Lww<Option<u32>>,
-    pub workflow: Lww<Workflow>,
-    pub claim: Lww<Claim>,
+macro_rules! define_bead_fields {
+    (
+        $(pub $name:ident : $type:ty),* $(,)?
+    ) => {
+        #[derive(Clone, Debug, Serialize, Deserialize)]
+        pub struct BeadFields {
+            $(pub $name: Lww<$type>),*
+        }
+
+        impl BeadFields {
+            /// Per-field LWW merge.
+            pub fn join(a: &Self, b: &Self) -> Self {
+                Self {
+                    $($name: Lww::join(&a.$name, &b.$name)),*
+                }
+            }
+
+            /// Collect all stamps for computing updated_stamp.
+            pub fn all_stamps(&self) -> impl Iterator<Item = &Stamp> {
+                [
+                    $(&self.$name.stamp),*
+                ]
+                .into_iter()
+            }
+        }
+
+        #[cfg(test)]
+        impl BeadFields {
+            pub fn field_names() -> &'static [&'static str] {
+                &[
+                    $(stringify!($name)),*
+                ]
+            }
+
+            pub fn mutate_field(&mut self, name: &str) {
+                match name {
+                    $(stringify!($name) => self.$name.value.mutate_for_test(),)*
+                    _ => panic!("unknown field: {}", name),
+                }
+            }
+        }
+    };
 }
 
-impl BeadFields {
-    /// Per-field LWW merge.
-    pub fn join(a: &Self, b: &Self) -> Self {
-        Self {
-            title: Lww::join(&a.title, &b.title),
-            description: Lww::join(&a.description, &b.description),
-            design: Lww::join(&a.design, &b.design),
-            acceptance_criteria: Lww::join(&a.acceptance_criteria, &b.acceptance_criteria),
-            priority: Lww::join(&a.priority, &b.priority),
-            bead_type: Lww::join(&a.bead_type, &b.bead_type),
-            external_ref: Lww::join(&a.external_ref, &b.external_ref),
-            source_repo: Lww::join(&a.source_repo, &b.source_repo),
-            estimated_minutes: Lww::join(&a.estimated_minutes, &b.estimated_minutes),
-            workflow: Lww::join(&a.workflow, &b.workflow),
-            claim: Lww::join(&a.claim, &b.claim),
-        }
-    }
-
-    /// Collect all stamps for computing updated_stamp.
-    pub fn all_stamps(&self) -> impl Iterator<Item = &Stamp> {
-        [
-            &self.title.stamp,
-            &self.description.stamp,
-            &self.design.stamp,
-            &self.acceptance_criteria.stamp,
-            &self.priority.stamp,
-            &self.bead_type.stamp,
-            &self.external_ref.stamp,
-            &self.source_repo.stamp,
-            &self.estimated_minutes.stamp,
-            &self.workflow.stamp,
-            &self.claim.stamp,
-        ]
-        .into_iter()
-    }
+define_bead_fields! {
+    pub title: String,
+    pub description: String,
+    pub design: Option<String>,
+    pub acceptance_criteria: Option<String>,
+    pub priority: Priority,
+    pub bead_type: BeadType,
+    pub external_ref: Option<String>,
+    pub source_repo: Option<String>,
+    pub estimated_minutes: Option<u32>,
+    pub workflow: Workflow,
+    pub claim: Claim,
 }
 
 /// The Bead - core + scalar fields.
@@ -348,6 +354,85 @@ impl From<&BeadView> for BeadProjection {
 }
 
 #[cfg(test)]
+trait MutateForTest {
+    fn mutate_for_test(&mut self);
+}
+
+#[cfg(test)]
+impl MutateForTest for String {
+    fn mutate_for_test(&mut self) {
+        self.push_str(" changed");
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for Option<String> {
+    fn mutate_for_test(&mut self) {
+        *self = match self.take() {
+            Some(s) => Some(s + " changed"),
+            None => Some("new".to_string()),
+        };
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for Option<u32> {
+    fn mutate_for_test(&mut self) {
+        *self = match self.take() {
+            Some(v) => Some(v + 1),
+            None => Some(10),
+        };
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for Priority {
+    fn mutate_for_test(&mut self) {
+        // Cycle priority
+        let next = (self.value() + 1) % 5;
+        *self = Priority::try_from(next).unwrap();
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for BeadType {
+    fn mutate_for_test(&mut self) {
+        // Cycle types
+        *self = match self {
+            BeadType::Bug => BeadType::Feature,
+            BeadType::Feature => BeadType::Task,
+            BeadType::Task => BeadType::Epic,
+            BeadType::Epic => BeadType::Chore,
+            BeadType::Chore => BeadType::Bug,
+        };
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for Workflow {
+    fn mutate_for_test(&mut self) {
+        *self = match self {
+            Workflow::Open => Workflow::InProgress,
+            Workflow::InProgress => Workflow::Closed(super::composite::Closure::new(
+                Some("done".to_string()),
+                None,
+            )),
+            Workflow::Closed(_) => Workflow::Open,
+        };
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for Claim {
+    fn mutate_for_test(&mut self) {
+        *self = match self {
+            Claim::Unclaimed => Claim::claimed(ActorId::new("test").unwrap(), None),
+            Claim::Claimed { .. } => Claim::Unclaimed,
+        };
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::collections::Label;
@@ -471,6 +556,30 @@ mod tests {
         assert_eq!(projection.label_stamp.as_ref(), Some(&label_stamp));
         assert_eq!(projection.updated_at(), &label_stamp.at);
         assert_eq!(projection.updated_by(), &label_stamp.by);
+    }
+
+    #[test]
+    fn content_hash_depends_on_all_fields() {
+        let base_stamp = stamp(1000, 0, "alice");
+        let base_bead = bead("bd-hash-test", base_stamp.clone());
+        let labels = Labels::new();
+        let notes = Vec::new();
+
+        let base_hash = compute_content_hash(&base_bead, &labels, &notes);
+
+        for field_name in BeadFields::field_names() {
+            let mut bead = base_bead.clone();
+            // Mutate the field
+            bead.fields.mutate_field(field_name);
+
+            // Hash should change
+            let new_hash = compute_content_hash(&bead, &labels, &notes);
+            assert_ne!(
+                base_hash, new_hash,
+                "Changing field '{}' did not change content hash. Is it missing from compute_content_hash?",
+                field_name
+            );
+        }
     }
 }
 
@@ -625,6 +734,12 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
     // source_repo
     if let Some(repo) = bead.fields.source_repo.value.as_ref() {
         h.update(repo.as_bytes());
+    }
+    h.update([0]);
+
+    // estimated_minutes
+    if let Some(est) = bead.fields.estimated_minutes.value {
+        h.update(est.to_string().as_bytes());
     }
     h.update([0]);
 
