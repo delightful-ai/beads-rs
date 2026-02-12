@@ -151,7 +151,19 @@ impl StoreCaches {
         let mapped = load_store_id_for_path(repo_path)
             .map(|store_id| StoreIdResolution::unverified(store_id, StoreIdSource::PathMap));
 
-        if let Some(resolution) = cached.or(mapped) {
+        if let Some(resolution) = cached {
+            if resolution.is_verified() {
+                return Ok(resolution);
+            }
+            if let Ok(repo) = Repository::open(repo_path)
+                && let Some(resolution) = resolve_verified_store_id(&repo)?
+            {
+                return Ok(resolution);
+            }
+            return Ok(resolution);
+        }
+
+        if let Some(resolution) = mapped {
             if let Ok(repo) = Repository::open(repo_path)
                 && let Some(resolution) = resolve_verified_store_id(&repo)?
             {
@@ -417,6 +429,8 @@ pub(crate) fn store_id_from_remote(remote: &RemoteUrl) -> StoreId {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::core::StoreEpoch;
     use git2::{Repository, Signature};
@@ -515,5 +529,27 @@ mod tests {
             store_id_from_remote(&resolved.remote)
         );
         assert!(!store_path_map_path().exists());
+    }
+
+    #[test]
+    fn resolve_store_id_uses_cached_verified_without_opening_repo() {
+        assert!(std::env::var("BD_STORE_ID").is_err());
+        assert!(std::env::var("BD_REMOTE_URL").is_err());
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("not-a-repo");
+        fs::create_dir_all(&path).unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([9u8; 16]));
+
+        let mut caches = StoreCaches::new();
+        caches.path_to_store.insert(
+            path.clone(),
+            StoreIdResolution::verified(store_id, StoreIdSource::PathMap),
+        );
+
+        let remote = RemoteUrl::new("https://example.com/repo.git");
+        let resolution = caches.resolve_store_id(&path, &remote).unwrap();
+        assert_eq!(resolution.store_id, store_id);
+        assert!(resolution.is_verified());
     }
 }

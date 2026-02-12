@@ -875,6 +875,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_state_accepts_legacy_labels_array() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let id = bead_id("bd-legacy-labels");
+        let mut state = CanonicalState::new();
+        state.insert(make_bead(&id, &stamp)).unwrap();
+        let label_value = "legacy".to_string();
+        let label = Label::parse(&label_value).unwrap();
+        state.apply_label_add(id.clone(), label, dot(1, 1), stamp.clone(), stamp.clone());
+
+        let state_bytes = serialize_state(&state).expect("serialize_state");
+        let tomb_bytes = serialize_tombstones(&state).expect("serialize_tombstones");
+        let deps_bytes = serialize_deps(&state).expect("serialize_deps");
+        let notes_bytes = serialize_notes(&state).expect("serialize_notes");
+
+        let mut lines = jsonl_lines(&state_bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.insert(
+            "labels".to_string(),
+            serde_json::json!([label_value.clone()]),
+        );
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let parsed =
+            parse_legacy_state(&join_jsonl(&lines), &tomb_bytes, &deps_bytes, &notes_bytes)
+                .expect("legacy labels array should parse");
+
+        assert!(parsed.labels_for(&id).contains(label_value.as_str()));
+    }
+
+    #[test]
     fn parse_state_rejects_partial_closed_redundant_fields() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
         let workflow = Workflow::Closed(crate::core::Closure::new(None, None));

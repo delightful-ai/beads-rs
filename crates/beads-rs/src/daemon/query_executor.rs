@@ -16,8 +16,8 @@ use super::store::runtime::StoreRuntime;
 use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
 use beads_api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
-    IssueSummary, Note, ReadyResult, StatusOutput, StatusSummary, SyncStatus, SyncWarning,
-    Tombstone,
+    IssueSummary, Note, ReadyResult, ShowDetails, StatusOutput, StatusSummary, SyncStatus,
+    SyncWarning, Tombstone,
 };
 use beads_daemon::git_lane::GitLaneState;
 use beads_daemon::remote::RemoteUrl;
@@ -167,6 +167,58 @@ impl Daemon {
             }
 
             Ok(ResponsePayload::query(QueryResult::Issues(summaries)))
+        })
+    }
+
+    /// Get a single bead with dependency edges and dependency summaries.
+    pub fn query_show_details(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            ctx.state.require_live(id).map_live_err(id)?;
+
+            let view = ctx.state.bead_view(id).expect("live bead should have view");
+            let mut issue = Issue::from_view(ctx.read.namespace(), &view);
+
+            let mut incoming = Vec::new();
+            let mut outgoing = Vec::new();
+            let mut related_ids = std::collections::BTreeSet::new();
+
+            for (to, kind) in ctx.state.dep_indexes().out_edges(id) {
+                if let Ok(key) = DepKey::new(id.clone(), to.clone(), *kind) {
+                    outgoing.push(DepEdge::from(&key));
+                    related_ids.insert(to.clone());
+                }
+            }
+
+            for (from, kind) in ctx.state.dep_indexes().in_edges(id) {
+                if let Ok(key) = DepKey::new(from.clone(), id.clone(), *kind) {
+                    incoming.push(DepEdge::from(&key));
+                    related_ids.insert(from.clone());
+                }
+            }
+
+            issue.deps_incoming = incoming.clone();
+            issue.deps_outgoing = outgoing.clone();
+
+            let mut summaries = Vec::with_capacity(related_ids.len());
+            for related_id in related_ids {
+                if let Some(dep_view) = ctx.state.bead_view(&related_id) {
+                    summaries.push(IssueSummary::from_view(ctx.read.namespace(), &dep_view));
+                }
+            }
+
+            let details = ShowDetails {
+                issue,
+                incoming,
+                outgoing,
+                summaries,
+            };
+            Ok(ResponsePayload::query(QueryResult::ShowDetails(details)))
         })
     }
 

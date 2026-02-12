@@ -12,6 +12,7 @@
 //! - Meaningful commit messages: "beads(store): +2 created, ~1 updated"
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -1088,10 +1089,7 @@ fn ensure_backup_ref(repo: &Repository, oid: Oid) -> Result<(), SyncError> {
     let name = format!("{BACKUP_REF_PREFIX}{oid}");
     let created = match repo.refname_to_id(&name) {
         Ok(_) => false,
-        Err(err) if err.code() == ErrorCode::NotFound => {
-            repo.reference(&name, oid, false, "beads sync: backup local ref")?;
-            true
-        }
+        Err(err) if err.code() == ErrorCode::NotFound => create_backup_reference(repo, &name, oid)?,
         Err(err) => return Err(SyncError::Git(err)),
     };
     if created {
@@ -1137,13 +1135,134 @@ fn prune_backup_refs(repo: &Repository, keep: usize, protected_oid: Oid) -> Resu
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
 
     for (name, _) in candidates.into_iter().skip(keep_candidates) {
-        match repo.find_reference(&name) {
-            Ok(mut reference) => reference.delete()?,
-            Err(err) if err.code() == ErrorCode::NotFound => {}
-            Err(err) => return Err(SyncError::Git(err)),
-        }
+        delete_backup_reference(repo, &name)?;
     }
     Ok(())
+}
+
+fn create_backup_reference(repo: &Repository, name: &str, oid: Oid) -> Result<bool, SyncError> {
+    match repo.reference(name, oid, false, "beads sync: backup local ref") {
+        Ok(_) => Ok(true),
+        Err(err)
+            if err.code() == ErrorCode::Locked && recover_backup_ref_lock(repo, name, &err) =>
+        {
+            match repo.reference(name, oid, false, "beads sync: backup local ref") {
+                Ok(_) => Ok(true),
+                Err(retry_err) if retry_err.code() == ErrorCode::Locked => {
+                    tracing::warn!(
+                        reference = %name,
+                        error = %retry_err,
+                        "backup ref create skipped due lock contention"
+                    );
+                    Ok(false)
+                }
+                Err(retry_err) => Err(SyncError::Git(retry_err)),
+            }
+        }
+        Err(err) if err.code() == ErrorCode::Locked => {
+            tracing::warn!(
+                reference = %name,
+                error = %err,
+                "backup ref create skipped due lock contention"
+            );
+            Ok(false)
+        }
+        Err(err) => Err(SyncError::Git(err)),
+    }
+}
+
+fn delete_backup_reference(repo: &Repository, name: &str) -> Result<(), SyncError> {
+    match repo.find_reference(name) {
+        Ok(mut reference) => match reference.delete() {
+            Ok(()) => Ok(()),
+            Err(err)
+                if err.code() == ErrorCode::Locked && recover_backup_ref_lock(repo, name, &err) =>
+            {
+                match repo.find_reference(name) {
+                    Ok(mut retry_reference) => match retry_reference.delete() {
+                        Ok(()) => Ok(()),
+                        Err(retry_err) if retry_err.code() == ErrorCode::Locked => {
+                            tracing::warn!(
+                                reference = %name,
+                                error = %retry_err,
+                                "backup ref delete skipped due lock contention"
+                            );
+                            Ok(())
+                        }
+                        Err(retry_err) => Err(SyncError::Git(retry_err)),
+                    },
+                    Err(retry_err) if retry_err.code() == ErrorCode::NotFound => Ok(()),
+                    Err(retry_err) => Err(SyncError::Git(retry_err)),
+                }
+            }
+            Err(err) if err.code() == ErrorCode::Locked => {
+                tracing::warn!(
+                    reference = %name,
+                    error = %err,
+                    "backup ref delete skipped due lock contention"
+                );
+                Ok(())
+            }
+            Err(err) => Err(SyncError::Git(err)),
+        },
+        Err(err) if err.code() == ErrorCode::NotFound => Ok(()),
+        Err(err) => Err(SyncError::Git(err)),
+    }
+}
+
+fn recover_backup_ref_lock(repo: &Repository, reference_name: &str, err: &git2::Error) -> bool {
+    if err.code() != ErrorCode::Locked {
+        return false;
+    }
+    let expected_lock = backup_ref_lock_path(repo, reference_name);
+    let lock_path = match lock_path_from_error(err) {
+        Some(path) if path == expected_lock => path,
+        Some(path) => {
+            tracing::warn!(
+                reference = %reference_name,
+                lock_path = %path.display(),
+                expected_lock = %expected_lock.display(),
+                "skipping backup lock cleanup: lock path mismatch"
+            );
+            return false;
+        }
+        None => expected_lock,
+    };
+    match fs::remove_file(&lock_path) {
+        Ok(()) => {
+            tracing::warn!(
+                reference = %reference_name,
+                lock_path = %lock_path.display(),
+                "removed stale backup ref lock"
+            );
+            true
+        }
+        Err(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => true,
+        Err(io_err) => {
+            tracing::warn!(
+                reference = %reference_name,
+                lock_path = %lock_path.display(),
+                error = %io_err,
+                "failed to remove stale backup ref lock"
+            );
+            false
+        }
+    }
+}
+
+fn backup_ref_lock_path(repo: &Repository, reference_name: &str) -> PathBuf {
+    let lock_ref = format!("{reference_name}.lock");
+    repo.path().join(lock_ref)
+}
+
+fn lock_path_from_error(err: &git2::Error) -> Option<PathBuf> {
+    if err.code() != ErrorCode::Locked {
+        return None;
+    }
+    err.message()
+        .split('\'')
+        .find(|segment| segment.ends_with(".lock"))
+        .map(PathBuf::from)
 }
 
 /// Initialize the beads ref if it doesn't exist.
@@ -1700,6 +1819,24 @@ mod tests {
     }
 
     #[test]
+    fn ensure_backup_ref_recovers_from_stale_lockfile() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let oid = write_store_commit(&repo, None, "commit");
+        let backup_ref = format!("{BACKUP_REF_PREFIX}{oid}");
+        let lock_path = backup_ref_lock_path(&repo, &backup_ref);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&lock_path, b"lock").unwrap();
+
+        ensure_backup_ref(&repo, oid).unwrap();
+
+        assert_eq!(repo.refname_to_id(&backup_ref).unwrap(), oid);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
     fn fetch_prunes_existing_backup_refs() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
@@ -1733,6 +1870,30 @@ mod tests {
             .filter_map(Result::ok)
             .count();
         assert!(backup_ref_count_after <= MAX_BACKUP_REFS);
+    }
+
+    #[test]
+    fn prune_backup_refs_recovers_from_stale_lockfile() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let oid = write_store_commit(&repo, None, "commit");
+        let backup_ref = format!("{BACKUP_REF_PREFIX}{oid}");
+        repo.reference(&backup_ref, oid, false, "test backup")
+            .unwrap();
+        let lock_path = backup_ref_lock_path(&repo, &backup_ref);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&lock_path, b"lock").unwrap();
+
+        prune_backup_refs(&repo, 0, Oid::zero()).unwrap();
+
+        let err = repo
+            .refname_to_id(&backup_ref)
+            .err()
+            .expect("expected ref to be pruned");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(!lock_path.exists());
     }
 
     #[test]

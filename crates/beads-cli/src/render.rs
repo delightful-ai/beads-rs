@@ -95,6 +95,7 @@ pub fn render_op<R: HumanRenderer>(op: &OpResult, renderer: &R) -> String {
 pub fn render_query<R: HumanRenderer>(q: &QueryResult, renderer: &R) -> String {
     match q {
         QueryResult::Issue(issue) => renderer.render_issue(issue),
+        QueryResult::ShowDetails(details) => renderer.render_issue(&details.issue),
         QueryResult::Issues(views) => renderer.render_issues(views),
         QueryResult::DepTree { root, edges } => renderer.render_dep_tree(root.as_str(), edges),
         QueryResult::Deps { incoming, outgoing } => renderer.render_deps(incoming, outgoing),

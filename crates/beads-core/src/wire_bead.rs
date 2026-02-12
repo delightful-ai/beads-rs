@@ -9,7 +9,9 @@ use std::fmt;
 
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::bead::{BeadCore, BeadFields};
 use super::collections::Label;
@@ -437,6 +439,7 @@ pub struct WireBeadFull {
     pub priority: Priority,
     #[serde(rename = "type")]
     pub bead_type: BeadType,
+    #[serde(deserialize_with = "deserialize_wire_labels")]
     pub labels: WireLabelStateV1,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
@@ -464,6 +467,40 @@ pub struct WireBeadFull {
     pub by: ActorId,
     #[serde(rename = "_v", skip_serializing_if = "Option::is_none")]
     pub v: Option<BTreeMap<String, WireFieldStamp>>,
+}
+
+fn deserialize_wire_labels<'de, D>(deserializer: D) -> Result<WireLabelStateV1, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Value::deserialize(deserializer)?;
+    if raw.is_array() {
+        let labels = Vec::<Label>::deserialize(raw).map_err(de::Error::custom)?;
+        return Ok(legacy_labels_to_wire(labels));
+    }
+    serde_json::from_value(raw).map_err(de::Error::custom)
+}
+
+fn legacy_labels_to_wire(labels: Vec<Label>) -> WireLabelStateV1 {
+    let replica = legacy_labels_replica();
+    let mut entries: BTreeMap<Label, BTreeSet<Dot>> = BTreeMap::new();
+    let unique_labels: BTreeSet<Label> = labels.into_iter().collect();
+    for (idx, label) in unique_labels.into_iter().enumerate() {
+        let mut dots = BTreeSet::new();
+        dots.insert(Dot {
+            replica,
+            counter: idx as u64 + 1,
+        });
+        entries.insert(label, dots);
+    }
+    WireLabelStateV1 {
+        entries,
+        cc: Dvv::default(),
+    }
+}
+
+fn legacy_labels_replica() -> ReplicaId {
+    ReplicaId::from(Uuid::from_u128(0))
 }
 
 /// Canonical bead snapshot wire format (v1).

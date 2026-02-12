@@ -32,6 +32,7 @@ use crate::core::{
     CliErrorCode, DurabilityClass, ErrorPayload, EventFrameV1, EventId, Limits, NamespaceId,
     ProtocolErrorCode, ReplicaId, Sha256, StoreId, decode_event_body,
 };
+use crate::daemon::metrics;
 use beads_daemon::broadcast::{BroadcastEvent, DropReason};
 use beads_daemon::remote::RemoteUrl;
 
@@ -105,6 +106,14 @@ fn request_span(info: &RequestInfo<'_>) -> Span {
     span
 }
 
+fn record_ipc_request_metric(
+    request_type: &'static str,
+    started_at: Instant,
+    outcome: &'static str,
+) {
+    metrics::ipc_request_completed(request_type, outcome, started_at.elapsed());
+}
+
 struct ReadGateWaiter {
     request: Request,
     respond: Sender<ServerReply>,
@@ -134,6 +143,12 @@ struct CheckpointWaiter {
 enum RequestOutcome {
     Continue,
     Shutdown,
+}
+
+struct RequestWaiters<'a> {
+    sync_waiters: &'a mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
+    checkpoint_waiters: &'a mut Vec<CheckpointWaiter>,
+    durability_waiters: &'a mut Vec<DurabilityWaiter>,
 }
 
 /// Run the state thread loop.
@@ -196,7 +211,7 @@ pub fn run_state_loop(
             recv(req_rx) -> msg => {
                 match msg {
                     Ok(RequestMessage { request, respond }) => {
-                        let (span, read_gate) = {
+                        let (span, read_gate, request_type) = {
                             let info = request.info();
                             let span = request_span(&info);
                             let read_gate = if info.op == "dep_cycles" {
@@ -209,8 +224,9 @@ pub fn run_state_loop(
                                     )
                                 })
                             };
-                            (span, read_gate)
+                            (span, read_gate, info.op)
                         };
+                        let request_started_at = Instant::now();
                         let _guard = span.enter();
 
                         if let Some((Some(repo), read)) = read_gate {
@@ -218,6 +234,11 @@ pub fn run_state_loop(
                                 Ok(loaded) => loaded,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
+                                    record_ipc_request_metric(
+                                        request_type,
+                                        request_started_at,
+                                        "err",
+                                    );
                                     continue;
                                 }
                             };
@@ -225,6 +246,11 @@ pub fn run_state_loop(
                                 Ok(read) => read,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
+                                    record_ipc_request_metric(
+                                        request_type,
+                                        request_started_at,
+                                        "err",
+                                    );
                                     continue;
                                 }
                             };
@@ -242,6 +268,11 @@ pub fn run_state_loop(
                                                 current_applied: Box::new(current_applied),
                                             };
                                             let _ = respond.send(ServerReply::Response(Response::err_from(err)));
+                                            record_ipc_request_metric(
+                                                request_type,
+                                                request_started_at,
+                                                "err",
+                                            );
                                             continue;
                                         }
 
@@ -258,24 +289,39 @@ pub fn run_state_loop(
                                             started_at,
                                             deadline,
                                         });
+                                        record_ipc_request_metric(
+                                            request_type,
+                                            request_started_at,
+                                            "wait",
+                                        );
                                         continue;
                                     }
                                     Err(err) => {
                                         let _ = respond.send(ServerReply::Response(Response::err_from(err)));
+                                        record_ipc_request_metric(
+                                            request_type,
+                                            request_started_at,
+                                            "err",
+                                        );
                                         continue;
                                     }
                                 }
                             }
                         }
 
+                        let mut request_waiters = RequestWaiters {
+                            sync_waiters: &mut sync_waiters,
+                            checkpoint_waiters: &mut checkpoint_waiters,
+                            durability_waiters: &mut durability_waiters,
+                        };
                         let outcome = process_request_message(
                             &mut daemon,
                             request,
                             respond,
                             &git_tx,
-                            &mut sync_waiters,
-                            &mut checkpoint_waiters,
-                            &mut durability_waiters,
+                            &mut request_waiters,
+                            request_type,
+                            request_started_at,
                         );
 
                         if matches!(outcome, RequestOutcome::Shutdown) {
@@ -455,9 +501,9 @@ fn process_request_message(
     request: Request,
     respond: Sender<ServerReply>,
     git_tx: &Sender<GitOp>,
-    sync_waiters: &mut HashMap<RemoteUrl, Vec<Sender<ServerReply>>>,
-    checkpoint_waiters: &mut Vec<CheckpointWaiter>,
-    durability_waiters: &mut Vec<DurabilityWaiter>,
+    waiters: &mut RequestWaiters<'_>,
+    request_type: &'static str,
+    request_started_at: Instant,
 ) -> RequestOutcome {
     // Sync barrier: wait until repo is clean.
     if let Request::SyncWait { ctx, .. } = request {
@@ -470,15 +516,19 @@ fn process_request_message(
                     let _ = respond.send(ServerReply::Response(Response::ok(
                         super::ipc::ResponsePayload::synced(),
                     )));
+                    record_ipc_request_metric(request_type, request_started_at, "ok");
                 } else {
-                    sync_waiters
+                    waiters
+                        .sync_waiters
                         .entry(loaded.remote().clone())
                         .or_default()
                         .push(respond);
+                    record_ipc_request_metric(request_type, request_started_at, "wait");
                 }
             }
             Err(e) => {
                 let _ = respond.send(ServerReply::Response(Response::err_from(e)));
+                record_ipc_request_metric(request_type, request_started_at, "err");
             }
         }
         return RequestOutcome::Continue;
@@ -489,6 +539,7 @@ fn process_request_message(
             Ok(proof) => proof,
             Err(err) => {
                 let _ = respond.send(ServerReply::Response(Response::err_from(err)));
+                record_ipc_request_metric(request_type, request_started_at, "err");
                 return RequestOutcome::Continue;
             }
         };
@@ -496,6 +547,7 @@ fn process_request_message(
             Ok(namespace) => namespace,
             Err(err) => {
                 let _ = respond.send(ServerReply::Response(Response::err_from(err)));
+                record_ipc_request_metric(request_type, request_started_at, "err");
                 return RequestOutcome::Continue;
             }
         };
@@ -510,6 +562,7 @@ fn process_request_message(
                     reason: format!("no checkpoint groups scheduled for namespace {namespace}",),
                 },
             )));
+            record_ipc_request_metric(request_type, request_started_at, "err");
             return RequestOutcome::Continue;
         }
 
@@ -524,18 +577,21 @@ fn process_request_message(
                 let _ = respond.send(ServerReply::Response(Response::ok(ResponsePayload::query(
                     QueryResult::AdminCheckpoint(output),
                 ))));
+                record_ipc_request_metric(request_type, request_started_at, "ok");
             }
             Ok(None) => {
-                checkpoint_waiters.push(CheckpointWaiter {
+                waiters.checkpoint_waiters.push(CheckpointWaiter {
                     respond,
                     store_id,
                     namespace,
                     min_checkpoint_wall_ms,
                     groups,
                 });
+                record_ipc_request_metric(request_type, request_started_at, "wait");
             }
             Err(err) => {
                 let _ = respond.send(ServerReply::Response(Response::err_from(err)));
+                record_ipc_request_metric(request_type, request_started_at, "err");
             }
         }
 
@@ -546,9 +602,11 @@ fn process_request_message(
         match prepare_subscription(daemon, &ctx.repo.path, ctx.read, git_tx) {
             Ok(reply) => {
                 let _ = respond.send(ServerReply::Subscribe(reply));
+                record_ipc_request_metric(request_type, request_started_at, "ok");
             }
             Err(err) => {
                 let _ = respond.send(ServerReply::Response(Response::err_from(*err)));
+                record_ipc_request_metric(request_type, request_started_at, "err");
             }
         }
         return RequestOutcome::Continue;
@@ -559,7 +617,13 @@ fn process_request_message(
     let outcome = daemon.handle_request(request, git_tx);
     match outcome {
         HandleOutcome::Response(response) => {
+            let metric_outcome = if matches!(response, Response::Err { .. }) {
+                "err"
+            } else {
+                "ok"
+            };
             let _ = respond.send(ServerReply::Response(response));
+            record_ipc_request_metric(request_type, request_started_at, metric_outcome);
         }
         HandleOutcome::DurabilityWait(wait) => {
             let started_at = Instant::now();
@@ -567,13 +631,14 @@ fn process_request_message(
                 .checked_add(wait.wait_timeout)
                 .unwrap_or(started_at);
             let span = tracing::Span::current();
-            durability_waiters.push(DurabilityWaiter {
+            waiters.durability_waiters.push(DurabilityWaiter {
                 respond,
                 wait,
                 span,
                 started_at,
                 deadline,
             });
+            record_ipc_request_metric(request_type, request_started_at, "wait");
         }
     }
 
@@ -615,14 +680,21 @@ fn flush_read_gate_waiters(
         drop(loaded);
         match status {
             Ok(ReadGateStatus::Satisfied) => {
+                let request_type = waiter.request.info().op;
+                let request_started_at = waiter.started_at;
+                let mut request_waiters = RequestWaiters {
+                    sync_waiters,
+                    checkpoint_waiters,
+                    durability_waiters,
+                };
                 let _ = process_request_message(
                     daemon,
                     waiter.request,
                     waiter.respond,
                     git_tx,
-                    sync_waiters,
-                    checkpoint_waiters,
-                    durability_waiters,
+                    &mut request_waiters,
+                    request_type,
+                    request_started_at,
                 );
             }
             Ok(ReadGateStatus::Unsatisfied {

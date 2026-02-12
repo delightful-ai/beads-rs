@@ -325,6 +325,14 @@ pub enum Request {
         payload: IdsPayload,
     },
 
+    /// Show a bead with dependency edges and dependency summaries.
+    ShowDetails {
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: IdPayload,
+    },
+
     /// List beads.
     List {
         #[serde(flatten)]
@@ -510,6 +518,7 @@ impl Request {
             Request::ExtendClaim { ctx, .. } => info_from_mutation("extend_claim", ctx),
             Request::Show { ctx, .. } => info_from_read("show", ctx),
             Request::ShowMultiple { ctx, .. } => info_from_read("show_multiple", ctx),
+            Request::ShowDetails { ctx, .. } => info_from_read("show_details", ctx),
             Request::List { ctx, .. } => info_from_read("list", ctx),
             Request::Ready { ctx, .. } => info_from_read("ready", ctx),
             Request::DepTree { ctx, .. } => info_from_read("dep_tree", ctx),
@@ -873,6 +882,27 @@ mod tests {
             Request::ShowMultiple { payload, .. } => {
                 assert_eq!(payload.ids.len(), 2);
                 assert_eq!(payload.ids[0], BeadId::parse("bd-abc").expect("bead id"));
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn show_details_roundtrip() {
+        let req = Request::ShowDetails {
+            ctx: ReadCtx::new(PathBuf::from("/test"), ReadConsistency::default()),
+            payload: IdPayload {
+                id: BeadId::parse("bd-abc").expect("bead id"),
+            },
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("show_details"));
+
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Request::ShowDetails { payload, .. } => {
+                assert_eq!(payload.id, BeadId::parse("bd-abc").expect("bead id"));
             }
             _ => panic!("wrong request type"),
         }

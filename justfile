@@ -157,6 +157,24 @@ build-release:
 run *ARGS:
     cargo run --bin bd -- {{ARGS}}
 
+# Benchmark common CLI/daemon hotpaths with reproducible artifacts.
+# Env knobs:
+# - BD_BIN=./target/debug/bd (default)
+# - RUNS=15 WARMUP=3 HOTPATH_ITERS=20
+bench-hotpaths:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BD_BIN="${BD_BIN:-./target/debug/bd}"
+    if [[ "$BD_BIN" == "./target/debug/bd" && ! -x "$BD_BIN" ]]; then
+        cargo build --bin bd
+    fi
+    BD_BIN="$BD_BIN" LOG="${LOG:-error}" HOTPATH_ITERS="${HOTPATH_ITERS:-20}" ./scripts/profile-hotpaths.sh
+
+# Compare two hotpath benchmark artifact directories.
+# Usage: just bench-compare tmp/perf/hotpaths-old tmp/perf/hotpaths-new
+bench-compare BASE NEW:
+    ./scripts/compare-hotpaths.sh {{BASE}} {{NEW}}
+
 # Clean build artifacts
 clean:
     cargo clean

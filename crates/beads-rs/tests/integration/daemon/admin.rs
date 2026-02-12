@@ -340,6 +340,29 @@ fn admin_metrics_includes_counters() {
 }
 
 #[test]
+fn admin_metrics_includes_ipc_request_histograms() {
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("admin metrics ipc request");
+
+    let metrics = fixture.admin_metrics();
+    assert!(metrics.histograms.iter().any(|histogram| {
+        histogram.name == "ipc_request_duration"
+            && histogram
+                .labels
+                .iter()
+                .any(|label| label.key == "request_type")
+    }));
+    assert!(metrics.counters.iter().any(|counter| {
+        counter.name == "ipc_request_total"
+            && counter
+                .labels
+                .iter()
+                .any(|label| label.key == "request_type")
+    }));
+}
+
+#[test]
 fn admin_doctor_includes_checks() {
     let fixture = AdminFixture::new();
     fixture.start_daemon();

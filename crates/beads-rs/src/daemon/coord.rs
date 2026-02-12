@@ -462,6 +462,13 @@ impl Daemon {
                     .into()
             }
 
+            Request::ShowDetails { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_show_details(&repo, &payload.id, read, git_tx)
+                    .into()
+            }
+
             Request::List { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;

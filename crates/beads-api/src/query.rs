@@ -16,6 +16,15 @@ use crate::issues::{
 };
 use beads_core::BeadId;
 
+/// Aggregated payload for rich `show` views.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShowDetails {
+    pub issue: Issue,
+    pub incoming: Vec<DepEdge>,
+    pub outgoing: Vec<DepEdge>,
+    pub summaries: Vec<IssueSummary>,
+}
+
 /// Result of a query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
@@ -23,6 +32,9 @@ use beads_core::BeadId;
 pub enum QueryResult {
     /// Single issue result.
     Issue(Issue),
+
+    /// Aggregated show details (issue + deps + dependency summaries).
+    ShowDetails(ShowDetails),
 
     /// List of issues (summaries).
     Issues(Vec<IssueSummary>),

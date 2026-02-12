@@ -63,6 +63,25 @@ impl StoreLock {
         started_at_ms: u64,
         daemon_version: impl Into<String>,
     ) -> Result<Self, StoreLockError> {
+        Self::acquire_with_pid_check(
+            store_id,
+            replica_id,
+            started_at_ms,
+            daemon_version,
+            pid_state_for_lock,
+        )
+    }
+
+    fn acquire_with_pid_check<F>(
+        store_id: StoreId,
+        replica_id: ReplicaId,
+        started_at_ms: u64,
+        daemon_version: impl Into<String>,
+        check_pid: F,
+    ) -> Result<Self, StoreLockError>
+    where
+        F: FnOnce(u32) -> LockPidState,
+    {
         ensure_dir(&paths::stores_dir())?;
         let store_dir = paths::store_dir(store_id);
         ensure_dir(&store_dir)?;
@@ -77,16 +96,56 @@ impl StoreLock {
             Err(StoreLockError::Io { source, .. })
                 if source.kind() == io::ErrorKind::AlreadyExists =>
             {
-                let (meta, meta_error) = match read_metadata(&path) {
+                let (held_meta, held_meta_error) = match read_metadata(&path) {
                     Ok(meta) => (Some(meta), None),
                     Err(err) => (None, Some(err.to_string())),
                 };
-                return Err(StoreLockError::Held {
-                    store_id,
-                    path: Box::new(path),
-                    meta: meta.map(Box::new),
-                    meta_error,
-                });
+                let Some(held_meta) = held_meta else {
+                    return Err(StoreLockError::Held {
+                        store_id,
+                        path: Box::new(path),
+                        meta: None,
+                        meta_error: held_meta_error,
+                    });
+                };
+
+                match check_pid(held_meta.pid) {
+                    LockPidState::Missing => {
+                        remove_lock_path_if_present(&path)?;
+                        tracing::warn!(
+                            store_id = %store_id,
+                            lock_path = %path.display(),
+                            stale_pid = held_meta.pid,
+                            "reclaimed stale store lock from missing pid"
+                        );
+                        match open_new_lock_file(&path) {
+                            Ok(file) => file,
+                            Err(StoreLockError::Io { source, .. })
+                                if source.kind() == io::ErrorKind::AlreadyExists =>
+                            {
+                                let (meta, meta_error) = match read_metadata(&path) {
+                                    Ok(meta) => (Some(meta), None),
+                                    Err(err) => (None, Some(err.to_string())),
+                                };
+                                return Err(StoreLockError::Held {
+                                    store_id,
+                                    path: Box::new(path),
+                                    meta: meta.map(Box::new),
+                                    meta_error,
+                                });
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    LockPidState::Alive | LockPidState::Unknown => {
+                        return Err(StoreLockError::Held {
+                            store_id,
+                            path: Box::new(path),
+                            meta: Some(Box::new(held_meta)),
+                            meta_error: held_meta_error,
+                        });
+                    }
+                }
             }
             Err(err) => return Err(err),
         };
@@ -127,6 +186,28 @@ impl StoreLock {
             self.released = true;
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockPidState {
+    Missing,
+    Alive,
+    Unknown,
+}
+
+fn pid_state_for_lock(pid: u32) -> LockPidState {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    match kill(Pid::from_raw(pid as i32), None) {
+        Ok(()) | Err(Errno::EPERM) => LockPidState::Alive,
+        Err(Errno::ESRCH) => LockPidState::Missing,
+        Err(err) => {
+            tracing::debug!(%err, pid, "store lock pid check returned unexpected error");
+            LockPidState::Unknown
+        }
     }
 }
 
@@ -417,6 +498,18 @@ fn open_existing_lock_file(path: &Path) -> Result<fs::File, StoreLockError> {
         })
 }
 
+fn remove_lock_path_if_present(path: &Path) -> Result<(), StoreLockError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StoreLockError::Io {
+            path: path.to_path_buf(),
+            operation: StoreLockOperation::Write,
+            source,
+        }),
+    }
+}
+
 fn set_dir_permissions(path: &Path, mode: u32) -> Result<(), StoreLockError> {
     #[cfg(unix)]
     {
@@ -443,4 +536,92 @@ fn set_file_permissions(path: &Path, mode: u32) -> Result<(), StoreLockError> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    fn with_test_data_dir<F>(f: F)
+    where
+        F: FnOnce(&TempDir),
+    {
+        let temp = TempDir::new().unwrap();
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+        f(&temp);
+    }
+
+    fn write_lock_meta(path: &Path, meta: &StoreLockMeta) {
+        std::fs::create_dir_all(path.parent().expect("lock parent")).unwrap();
+        let data = serde_json::to_vec(meta).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn acquire_reclaims_stale_lock_when_pid_missing() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([11u8; 16]));
+            let stale_meta = StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([12u8; 16])),
+                pid: 4242,
+                started_at_ms: 1,
+                daemon_version: "old".to_string(),
+                last_heartbeat_ms: Some(2),
+            };
+            let lock_path = paths::store_lock_path(store_id);
+            write_lock_meta(&lock_path, &stale_meta);
+
+            let lock = StoreLock::acquire_with_pid_check(
+                store_id,
+                ReplicaId::new(Uuid::from_bytes([13u8; 16])),
+                10,
+                "new",
+                |_| LockPidState::Missing,
+            )
+            .expect("acquire should reclaim stale lock");
+
+            let on_disk = read_lock_meta(store_id)
+                .expect("read lock")
+                .expect("meta exists");
+            assert_eq!(on_disk.store_id, store_id);
+            assert_eq!(on_disk.pid, std::process::id());
+            assert_ne!(on_disk.pid, stale_meta.pid);
+            lock.release().unwrap();
+        });
+    }
+
+    #[test]
+    fn acquire_keeps_live_lock_when_pid_alive() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([21u8; 16]));
+            let stale_meta = StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([22u8; 16])),
+                pid: 5151,
+                started_at_ms: 1,
+                daemon_version: "live".to_string(),
+                last_heartbeat_ms: Some(2),
+            };
+            let lock_path = paths::store_lock_path(store_id);
+            write_lock_meta(&lock_path, &stale_meta);
+
+            let err = StoreLock::acquire_with_pid_check(
+                store_id,
+                ReplicaId::new(Uuid::from_bytes([23u8; 16])),
+                10,
+                "new",
+                |_| LockPidState::Alive,
+            )
+            .expect_err("live lock must be preserved");
+            match err {
+                StoreLockError::Held { meta, .. } => {
+                    assert_eq!(meta.expect("holder meta").pid, stale_meta.pid);
+                }
+                other => panic!("unexpected error: {other}"),
+            }
+        });
+    }
 }

@@ -321,6 +321,25 @@ pub fn set_ipc_inflight(value: usize) {
     emit("ipc_inflight", MetricValue::Gauge(value as u64), Vec::new());
 }
 
+pub fn ipc_request_completed(request_type: &str, outcome: &str, duration: Duration) {
+    let labels = vec![
+        MetricLabel {
+            key: "request_type",
+            value: request_type.to_string(),
+        },
+        MetricLabel {
+            key: "outcome",
+            value: outcome.to_string(),
+        },
+    ];
+    emit("ipc_request_total", MetricValue::Counter(1), labels.clone());
+    emit(
+        "ipc_request_duration",
+        MetricValue::Histogram(duration_ms(duration)),
+        labels,
+    );
+}
+
 pub fn set_repl_queue_bytes(value: u64) {
     emit("repl_queue_bytes", MetricValue::Gauge(value), Vec::new());
 }
@@ -605,15 +624,28 @@ mod tests {
         wal_append_ok(Duration::from_millis(4));
         wal_fsync_ok(Duration::from_millis(2));
         set_ipc_inflight(3);
+        ipc_request_completed("show", "ok", Duration::from_millis(9));
 
         let snapshot = snapshot();
         assert!(snapshot.counters.iter().any(|m| m.name == "wal_append_ok"));
+        assert!(snapshot.counters.iter().any(|m| {
+            m.name == "ipc_request_total"
+                && m.labels
+                    .iter()
+                    .any(|l| l.key == "request_type" && l.value == "show")
+        }));
         assert!(
             snapshot
                 .histograms
                 .iter()
                 .any(|m| m.name == "wal_append_duration")
         );
+        assert!(snapshot.histograms.iter().any(|m| {
+            m.name == "ipc_request_duration"
+                && m.labels
+                    .iter()
+                    .any(|l| l.key == "request_type" && l.value == "show")
+        }));
         assert!(snapshot.gauges.iter().any(|m| m.name == "ipc_inflight"));
     }
 }
