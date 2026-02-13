@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use beads_daemon_core::durability::DurabilityCoordinator as CoreCoordinator;
 pub use beads_daemon_core::durability::ReplicatedPoll;
@@ -40,20 +39,6 @@ impl DurabilityCoordinator {
     ) -> Result<(), OpError> {
         self.0
             .ensure_available(namespace, requested)
-            .map_err(Into::into)
-    }
-
-    pub fn await_durability(
-        &self,
-        namespace: &NamespaceId,
-        origin: ReplicaId,
-        seq: Seq1,
-        requested: DurabilityClass,
-        receipt: DurabilityReceipt,
-        wait_timeout: Duration,
-    ) -> Result<DurabilityReceipt, OpError> {
-        self.0
-            .await_durability(namespace, origin, seq, requested, receipt, wait_timeout)
             .map_err(Into::into)
     }
 
@@ -97,6 +82,8 @@ impl DurabilityCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use crate::core::{
         Durable, HeadStatus, NamespaceId, ReplicaDurabilityRole, Seq0, StoreEpoch, StoreId,
         StoreIdentity, Watermark,
@@ -128,6 +115,21 @@ mod tests {
     }
 
     use crate::core::replica_roster::ReplicaEntry;
+
+    fn await_durability(
+        coordinator: &DurabilityCoordinator,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        requested: DurabilityClass,
+        receipt: DurabilityReceipt,
+        wait_timeout: Duration,
+    ) -> Result<DurabilityReceipt, OpError> {
+        coordinator
+            .0
+            .await_durability(namespace, origin, seq, requested, receipt, wait_timeout)
+            .map_err(Into::into)
+    }
 
     #[test]
     fn replicated_fsync_succeeds_after_k_acks() {
@@ -181,18 +183,18 @@ mod tests {
 
         let store = StoreIdentity::new(StoreId::new(Uuid::from_u128(100)), StoreEpoch::ZERO);
         let receipt = receipt_for(store);
-        let updated = coordinator
-            .await_durability(
-                &namespace,
-                local,
-                Seq1::from_u64(2).unwrap(),
-                DurabilityClass::ReplicatedFsync {
-                    k: std::num::NonZeroU32::new(2).unwrap(),
-                },
-                receipt,
-                Duration::from_millis(0),
-            )
-            .unwrap();
+        let updated = await_durability(
+            &coordinator,
+            &namespace,
+            local,
+            Seq1::from_u64(2).unwrap(),
+            DurabilityClass::ReplicatedFsync {
+                k: std::num::NonZeroU32::new(2).unwrap(),
+            },
+            receipt,
+            Duration::from_millis(0),
+        )
+        .unwrap();
 
         assert_eq!(
             updated.outcome().achieved(),
@@ -281,18 +283,18 @@ mod tests {
 
         let store = StoreIdentity::new(StoreId::new(Uuid::from_u128(200)), StoreEpoch::ZERO);
         let receipt = receipt_for(store);
-        let err = coordinator
-            .await_durability(
-                &namespace,
-                local,
-                Seq1::from_u64(1).unwrap(),
-                DurabilityClass::ReplicatedFsync {
-                    k: std::num::NonZeroU32::new(1).unwrap(),
-                },
-                receipt,
-                Duration::from_millis(0),
-            )
-            .unwrap_err();
+        let err = await_durability(
+            &coordinator,
+            &namespace,
+            local,
+            Seq1::from_u64(1).unwrap(),
+            DurabilityClass::ReplicatedFsync {
+                k: std::num::NonZeroU32::new(1).unwrap(),
+            },
+            receipt,
+            Duration::from_millis(0),
+        )
+        .unwrap_err();
 
         match err {
             OpError::DurabilityTimeout { receipt, .. } => {
