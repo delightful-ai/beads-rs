@@ -26,6 +26,7 @@ use crate::core::{
     Priority, ProtocolErrorCode, ReplicaDurabilityRole, ReplicaId, ReplicaRoster, Seq0, Seq1,
     Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermark, Watermarks,
 };
+use crate::daemon::OpResult;
 use crate::daemon::core::{Daemon, insert_store_for_tests};
 use crate::daemon::durability_coordinator::DurabilityCoordinator;
 use crate::daemon::executor::DurabilityWait;
@@ -33,7 +34,6 @@ use crate::daemon::git_worker::GitOp;
 use crate::daemon::ipc::{
     MutationMeta, OpResponse, ReadConsistency, Request, Response, ResponsePayload,
 };
-use crate::daemon::ops::OpResult;
 use crate::daemon::repl::PeerAckTable;
 
 struct TestEnv {
