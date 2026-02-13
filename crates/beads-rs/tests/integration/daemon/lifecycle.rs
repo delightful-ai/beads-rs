@@ -8,6 +8,8 @@
 //! - Concurrent access during restart
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Barrier};
@@ -139,6 +141,49 @@ impl DaemonFixture {
             std::thread::sleep(Duration::from_millis(25));
         }
         !self.socket_path().exists() && !self.meta_path().exists()
+    }
+
+    fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !Self::process_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        !Self::process_alive(pid)
+    }
+
+    fn request_shutdown(&self) {
+        let Ok(mut stream) = UnixStream::connect(self.socket_path()) else {
+            return;
+        };
+
+        let mut request = serde_json::to_string(&beads_rs::surface::ipc::Request::Shutdown)
+            .unwrap_or_else(|_| r#"{"op":"shutdown"}"#.to_string());
+        request.push('\n');
+        let _ = stream.write_all(request.as_bytes());
+        let _ = stream.flush();
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+    }
+
+    fn shutdown_gracefully(&self, pid: u32) -> bool {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+
+        // Preferred path: SIGTERM.
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        if Self::wait_for_process_exit(pid, Duration::from_secs(2)) {
+            return true;
+        }
+
+        // Some test harnesses mask non-fatal signals for child processes.
+        self.request_shutdown();
+        Self::wait_for_process_exit(pid, Duration::from_secs(3))
     }
 
     fn process_alive(pid: u32) -> bool {
@@ -414,23 +459,9 @@ fn test_graceful_shutdown_cleans_up() {
     fixture.start_daemon();
     let pid = fixture.daemon_pid().expect("daemon should be running");
 
-    // Send SIGTERM (graceful shutdown)
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-
-    // Wait for daemon to stop
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if !DaemonFixture::process_alive(pid) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
     assert!(
-        !DaemonFixture::process_alive(pid),
-        "daemon should stop after SIGTERM"
+        fixture.shutdown_gracefully(pid),
+        "daemon should stop after graceful shutdown"
     );
 
     // Socket and meta files should be cleaned up
@@ -475,23 +506,9 @@ fn test_graceful_shutdown_preserves_mutations() {
 
     let pid = fixture.daemon_pid().expect("daemon should be running");
 
-    // Send SIGTERM (graceful shutdown)
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-
-    // Wait for daemon to stop
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if !DaemonFixture::process_alive(pid) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
     assert!(
-        !DaemonFixture::process_alive(pid),
-        "daemon should stop after SIGTERM"
+        fixture.shutdown_gracefully(pid),
+        "daemon should stop after graceful shutdown"
     );
 
     // Fetch the issue after restart (auto-starts daemon)

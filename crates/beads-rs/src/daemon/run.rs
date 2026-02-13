@@ -12,9 +12,8 @@ use crate::core::ActorId;
 use crate::daemon::IpcError;
 use crate::daemon::Request;
 use crate::daemon::ipc::ensure_socket_dir;
-use crate::daemon::server::{RequestMessage, handle_client};
-use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop, run_state_loop};
-use signal_hook::iterator::Signals;
+use crate::daemon::server::{RequestMessage, handle_client, run_state_loop};
+use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop};
 
 fn wake_listener(socket: &Path) {
     if let Err(err) = UnixStream::connect(socket) {
@@ -24,7 +23,7 @@ fn wake_listener(socket: &Path) {
 
 /// Run the daemon in the current process.
 ///
-/// This never returns on success until a shutdown signal is received.
+/// This never returns on success until shutdown is requested by signal or IPC.
 pub fn run_daemon() -> Result<()> {
     // Load config first so path overrides are available for socket directory.
     let config = crate::config::load_or_init();
@@ -71,17 +70,10 @@ pub fn run_daemon() -> Result<()> {
 
     // Set up signal handling for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));
-    let (shutdown_tx, shutdown_rx) = crossbeam::channel::bounded(1);
-    let mut signals = Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT])
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))
         .map_err(IpcError::from)?;
-    let shutdown_flag = Arc::clone(&shutdown);
-    let shutdown_notify = shutdown_tx.clone();
-    std::thread::spawn(move || {
-        if signals.forever().next().is_some() {
-            shutdown_flag.store(true, Ordering::Relaxed);
-            let _ = shutdown_notify.send(());
-        }
-    });
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
+        .map_err(IpcError::from)?;
 
     // Create channels.
     let (req_tx, req_rx) = crossbeam::channel::unbounded::<RequestMessage>();
@@ -105,11 +97,13 @@ pub fn run_daemon() -> Result<()> {
     let git_worker = GitWorker::new(git_result_tx, (*limits).clone());
 
     // Spawn state thread.
+    let (state_exit_tx, state_exit_rx) = crossbeam::channel::bounded(1);
     let state_span = tracing::Span::current();
     let state_handle = std::thread::spawn(move || {
         state_span.in_scope(|| {
             run_state_loop(daemon, req_rx, git_tx, git_result_rx);
         });
+        let _ = state_exit_tx.send(());
     });
 
     // Spawn git thread.
@@ -166,18 +160,31 @@ pub fn run_daemon() -> Result<()> {
         });
     });
 
-    let _ = shutdown_rx.recv();
-    tracing::info!("shutdown signal received");
+    let shutdown_via_signal = loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break true;
+        }
+        match state_exit_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(()) => break false,
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break false,
+        }
+    };
+
+    shutdown.store(true, Ordering::Relaxed);
+    if shutdown_via_signal {
+        tracing::info!("shutdown signal received");
+    } else {
+        tracing::info!("state loop exited; shutting down daemon");
+    }
+
     wake_listener(&socket);
     let _ = accept_handle.join();
 
     // On signal shutdown, ask state thread to flush and exit cleanly.
-    if shutdown.load(Ordering::Relaxed) {
+    if shutdown_via_signal {
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
-        let _ = req_tx.send(RequestMessage {
-            request: Request::Shutdown,
-            respond: respond_tx,
-        });
+        let _ = req_tx.send(RequestMessage::new(Request::Shutdown, respond_tx));
         let _ = respond_rx.recv_timeout(std::time::Duration::from_secs(10));
     }
 

@@ -46,7 +46,7 @@ pub use ipc::{IpcClient, IpcError, Request, Response, ResponsePayload};
 pub use ops::OpError;
 pub use query::Query;
 pub use run::run_daemon;
-pub use server::{run_socket_thread, run_state_loop};
+
 pub use store::lock::{
     StoreLock, StoreLockError, StoreLockMeta, StoreLockOperation, read_lock_meta,
 };

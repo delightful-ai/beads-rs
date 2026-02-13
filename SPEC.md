@@ -229,7 +229,20 @@ If `deps.jsonl` is not present, dependency features are incomplete and the proje
 
 Readers **MUST** verify these checksums when present; mismatch indicates corruption and **MUST** fail load.
 
-#### 5.2.1 Write stamp storage in state.jsonl
+#### 5.2.1 Backup refs and lock policy
+
+Replicas **MAY** maintain backup refs under `refs/beads/backup/<oid>` to preserve previous local
+heads during divergence/force-push handling.
+
+When backup refs are used:
+
+1. Implementations **MUST** bound backup ref growth with a deterministic retention policy.
+2. Lock contention on backup ref maintenance **MUST NOT** fail read/refresh paths; maintenance is
+   best-effort.
+3. Stale backup lock cleanup **MUST** use policy checks that include both lock age and lock owner
+   PID liveness (when PID metadata is available).
+
+#### 5.2.2 Write stamp storage in state.jsonl
 
 Each bead object in `state.jsonl` **MUST** include sufficient write stamp information to perform per-field conflict resolution.
 
