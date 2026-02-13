@@ -65,6 +65,30 @@ Generated: 2026-02-12
 - Surface automatically via existing admin metrics snapshot/serialization.
 - Add integration tests to ensure request-latency histograms appear.
 
+## 6) `019c544c-bb46-7a73-b428-522a75eaa6fa`
+
+**Scope:** `bd-mtw` rare `ready` outlier root cause
+
+**Findings:**
+- `ready` requests with `require_min_seen` can enqueue read-gate waiters that only release after sync/apply work advances watermarks.
+- Waiters can sit behind sync debounce and background loop work before re-checking, yielding rare high-latency outliers.
+
+**Proposed fix:**
+- Start sync immediately when enqueueing unsatisfied read-gate waiters (if local state is dirty), rather than waiting for debounce.
+- Add dedicated read-gate wait latency metrics for direct attribution in `bd admin metrics`.
+
+## 7) `019c544f-beb1-7221-ac0c-4beab7ed42d7`
+
+**Scope:** `bd-hf5d` label add/remove write tail-latency spikes
+
+**Findings:**
+- Label mutation tails are concentrated in synchronous mutation durability paths (`wal_append`/`wal_fsync`), with occasional overlap from loop-level maintenance.
+- Current benchmark summaries emphasize means; tails are harder to diagnose without p95/p99 breakdown and request-labeled latency extracts.
+
+**Proposed fix:**
+- Keep WAL checkpoint work off the inline request/repl/git completion fast paths where possible.
+- Promote p95/p99-first benchmark outputs and labeled request-latency summaries as first-class artifacts.
+
 ---
 
 ## Prioritized Action Order (derived from reports)

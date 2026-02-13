@@ -180,6 +180,8 @@ bench-compare BASE NEW:
 # Optional env overrides:
 # - READ_THRESHOLD_PCT=25
 # - WRITE_THRESHOLD_PCT=35
+# - READ_P95_THRESHOLD_PCT=50
+# - WRITE_P95_THRESHOLD_PCT=65
 bench-guard BASE NEW:
     ./scripts/check-hotpaths-regression.sh {{BASE}} {{NEW}}
 

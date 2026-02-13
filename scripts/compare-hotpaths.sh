@@ -26,8 +26,42 @@ base_write_tmp="$(mktemp)"
 new_write_tmp="$(mktemp)"
 trap 'rm -f "$base_tmp" "$new_tmp" "$base_write_tmp" "$new_write_tmp"' EXIT
 
-jq -r '.results[] | [(.command | gsub(" >/dev/null( 2>&1)?$"; "")), ((.mean * 1000) | round)] | @tsv' "$BASE/hyperfine-read.json" | sort > "$base_tmp"
-jq -r '.results[] | [(.command | gsub(" >/dev/null( 2>&1)?$"; "")), ((.mean * 1000) | round)] | @tsv' "$NEW/hyperfine-read.json" | sort > "$new_tmp"
+jq -r '
+  def msv($v): if $v == null then 0 else (($v * 1000) | round) end;
+  def pct($arr; $p):
+    if ($arr | length) == 0 then null
+    else
+      ($arr | sort) as $s
+      | $s[((((($s | length) - 1) * $p)) | floor)]
+    end;
+  .results[] as $r
+  | ($r.times // []) as $times
+  | [
+      ($r.command | gsub(" >/dev/null( 2>&1)?$"; "")),
+      msv($r.mean),
+      msv(pct($times; 0.95)),
+      msv(pct($times; 0.99)),
+      msv($r.max)
+    ] | @tsv
+' "$BASE/hyperfine-read.json" | sort > "$base_tmp"
+jq -r '
+  def msv($v): if $v == null then 0 else (($v * 1000) | round) end;
+  def pct($arr; $p):
+    if ($arr | length) == 0 then null
+    else
+      ($arr | sort) as $s
+      | $s[((((($s | length) - 1) * $p)) | floor)]
+    end;
+  .results[] as $r
+  | ($r.times // []) as $times
+  | [
+      ($r.command | gsub(" >/dev/null( 2>&1)?$"; "")),
+      msv($r.mean),
+      msv(pct($times; 0.95)),
+      msv(pct($times; 0.99)),
+      msv($r.max)
+    ] | @tsv
+' "$NEW/hyperfine-read.json" | sort > "$new_tmp"
 
 echo "baseline=$BASE"
 echo "candidate=$NEW"
@@ -47,9 +81,71 @@ awk -F'\t' '
   }
 ' "$base_tmp" "$new_tmp" | sort
 
+echo
+echo "== Read Tail Delta (ms) =="
+awk -F'\t' '
+  NR==FNR {
+    base_p95[$1]=$3+0
+    base_p99[$1]=$4+0
+    base_max[$1]=$5+0
+    next
+  }
+  {
+    cmd=$1
+    if (!(cmd in base_p95)) next
+    p95_new=$3+0
+    p99_new=$4+0
+    max_new=$5+0
+    p95_old=base_p95[cmd]
+    p99_old=base_p99[cmd]
+    max_old=base_max[cmd]
+    printf "%s\tp95:%d->%d (%+d)\tp99:%d->%d (%+d)\tmax:%d->%d (%+d)\n",
+      cmd,
+      p95_old, p95_new, p95_new - p95_old,
+      p99_old, p99_new, p99_new - p99_old,
+      max_old, max_new, max_new - max_old
+  }
+' "$base_tmp" "$new_tmp" | sort
+
 if [[ -f "$BASE/hyperfine-write.json" && -f "$NEW/hyperfine-write.json" ]]; then
-  jq -r '.results | to_entries[] | [.key, (.value.command | gsub(" >/dev/null( 2>&1)?$"; "")), ((.value.mean * 1000) | round)] | @tsv' "$BASE/hyperfine-write.json" > "$base_write_tmp"
-  jq -r '.results | to_entries[] | [.key, (.value.command | gsub(" >/dev/null( 2>&1)?$"; "")), ((.value.mean * 1000) | round)] | @tsv' "$NEW/hyperfine-write.json" > "$new_write_tmp"
+  jq -r '
+    def msv($v): if $v == null then 0 else (($v * 1000) | round) end;
+    def pct($arr; $p):
+      if ($arr | length) == 0 then null
+      else
+        ($arr | sort) as $s
+        | $s[((((($s | length) - 1) * $p)) | floor)]
+      end;
+    .results | to_entries[] as $entry
+    | ($entry.value.times // []) as $times
+    | [
+        $entry.key,
+        ($entry.value.command | gsub(" >/dev/null( 2>&1)?$"; "")),
+        msv($entry.value.mean),
+        msv(pct($times; 0.95)),
+        msv(pct($times; 0.99)),
+        msv($entry.value.max)
+      ] | @tsv
+  ' "$BASE/hyperfine-write.json" > "$base_write_tmp"
+  jq -r '
+    def msv($v): if $v == null then 0 else (($v * 1000) | round) end;
+    def pct($arr; $p):
+      if ($arr | length) == 0 then null
+      else
+        ($arr | sort) as $s
+        | $s[((((($s | length) - 1) * $p)) | floor)]
+      end;
+    .results | to_entries[] as $entry
+    | ($entry.value.times // []) as $times
+    | [
+        $entry.key,
+        ($entry.value.command | gsub(" >/dev/null( 2>&1)?$"; "")),
+        msv($entry.value.mean),
+        msv(pct($times; 0.95)),
+        msv(pct($times; 0.99)),
+        msv($entry.value.max)
+      ] | @tsv
+  ' "$NEW/hyperfine-write.json" > "$new_write_tmp"
 
   echo
   echo "== Write Latency Delta (ms) =="
@@ -64,6 +160,33 @@ if [[ -f "$BASE/hyperfine-write.json" && -f "$NEW/hyperfine-write.json" ]]; then
       delta=now-old
       pct=(old==0)?0:(100.0*delta/old)
       printf "%s\tbase=%d\tnew=%d\tdelta=%+d\tpct=%+.1f%%\n", cmd, old, now, delta, pct
+    }
+  ' "$base_write_tmp" "$new_write_tmp"
+
+  echo
+  echo "== Write Tail Delta (ms) =="
+  awk -F'\t' '
+    NR==FNR {
+      base_p95[$1]=$4+0
+      base_p99[$1]=$5+0
+      base_max[$1]=$6+0
+      cmd[$1]=$2
+      next
+    }
+    {
+      idx=$1
+      if (!(idx in base_p95)) next
+      p95_new=$4+0
+      p99_new=$5+0
+      max_new=$6+0
+      p95_old=base_p95[idx]
+      p99_old=base_p99[idx]
+      max_old=base_max[idx]
+      printf "%s\tp95:%d->%d (%+d)\tp99:%d->%d (%+d)\tmax:%d->%d (%+d)\n",
+        $2,
+        p95_old, p95_new, p95_new - p95_old,
+        p99_old, p99_new, p99_new - p99_old,
+        max_old, max_new, max_new - max_old
     }
   ' "$base_write_tmp" "$new_write_tmp"
 fi

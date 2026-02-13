@@ -27,6 +27,16 @@
   status: completed
   summary: Found no per-request IPC latency metrics emitted today; proposed request-type histogram hooks in daemon request dispatch.
 
+- id: `019c544c-bb46-7a73-b428-522a75eaa6fa`
+  scope: `bd-mtw` rare `ready` outlier root cause
+  status: completed
+  summary: Read-gate waiters can sit behind sync debounce and loop housekeeping; recommended immediate sync start on unsatisfied read gate and prioritizing read-gate waiter service.
+
+- id: `019c544f-beb1-7221-ac0c-4beab7ed42d7`
+  scope: `bd-hf5d` label add/remove tail latency root cause
+  status: completed
+  summary: Label tails come from synchronous WAL fsync path plus occasional checkpoint overlap; recommended reducing inline checkpoint contention and improving tail-focused instrumentation.
+
 ## Reports
 
 - saved: `sub-agent-reports.md`

@@ -340,6 +340,29 @@ pub fn ipc_request_completed(request_type: &str, outcome: &str, duration: Durati
     );
 }
 
+pub fn ipc_read_gate_wait_completed(request_type: &str, outcome: &str, duration: Duration) {
+    let labels = vec![
+        MetricLabel {
+            key: "request_type",
+            value: request_type.to_string(),
+        },
+        MetricLabel {
+            key: "outcome",
+            value: outcome.to_string(),
+        },
+    ];
+    emit(
+        "ipc_read_gate_wait_total",
+        MetricValue::Counter(1),
+        labels.clone(),
+    );
+    emit(
+        "ipc_read_gate_wait_duration",
+        MetricValue::Histogram(duration_ms(duration)),
+        labels,
+    );
+}
+
 pub fn set_repl_queue_bytes(value: u64) {
     emit("repl_queue_bytes", MetricValue::Gauge(value), Vec::new());
 }
@@ -625,6 +648,7 @@ mod tests {
         wal_fsync_ok(Duration::from_millis(2));
         set_ipc_inflight(3);
         ipc_request_completed("show", "ok", Duration::from_millis(9));
+        ipc_read_gate_wait_completed("ready", "satisfied", Duration::from_millis(12));
 
         let snapshot = snapshot();
         assert!(snapshot.counters.iter().any(|m| m.name == "wal_append_ok"));
@@ -633,6 +657,12 @@ mod tests {
                 && m.labels
                     .iter()
                     .any(|l| l.key == "request_type" && l.value == "show")
+        }));
+        assert!(snapshot.counters.iter().any(|m| {
+            m.name == "ipc_read_gate_wait_total"
+                && m.labels
+                    .iter()
+                    .any(|l| l.key == "request_type" && l.value == "ready")
         }));
         assert!(
             snapshot
@@ -645,6 +675,12 @@ mod tests {
                 && m.labels
                     .iter()
                     .any(|l| l.key == "request_type" && l.value == "show")
+        }));
+        assert!(snapshot.histograms.iter().any(|m| {
+            m.name == "ipc_read_gate_wait_duration"
+                && m.labels
+                    .iter()
+                    .any(|l| l.key == "request_type" && l.value == "ready")
         }));
         assert!(snapshot.gauges.iter().any(|m| m.name == "ipc_inflight"));
     }

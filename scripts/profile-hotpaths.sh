@@ -141,6 +141,10 @@ bd_cmd dep tree "$ISSUE_ID" >/dev/null 2>&1
 bd_cmd status >/dev/null 2>&1
 bd_cmd epic status >/dev/null 2>&1
 
+# Snapshot daemon log boundary for measured-phase parsing. We parse only lines
+# written after this point to exclude startup/import noise.
+MEASURE_LOG_START_LINE=$(wc -l < "$DAEMON_STDOUT" 2>/dev/null || echo 0)
+
 # Read-heavy command latency benchmark.
 hyperfine \
   --warmup "$WARMUP" \
@@ -189,19 +193,43 @@ bd_cmd admin status --json > "$OUT_DIR/admin-status.json"
 bd_cmd admin metrics --json > "$OUT_DIR/admin-metrics.json"
 
 # Summaries: client-side latency (hyperfine).
-jq -r '.results[] | "\(.command)\tmean_ms=\((.mean*1000)|round)\tstddev_ms=\((.stddev*1000)|round)\tmin_ms=\((.min*1000)|round)\tmax_ms=\((.max*1000)|round)"' "$OUT_DIR/hyperfine-read.json" \
+jq -r '
+  def msv($v): if $v == null then 0 else (($v * 1000) | round) end;
+  def pct($arr; $p):
+    if ($arr | length) == 0 then null
+    else
+      ($arr | sort) as $s
+      | $s[((((($s | length) - 1) * $p)) | floor)]
+    end;
+  .results[] as $r
+  | ($r.times // []) as $times
+  | "\($r.command)\tmean_ms=\(msv($r.mean))\tmedian_ms=\(msv($r.median))\tp95_ms=\(msv(pct($times; 0.95)))\tp99_ms=\(msv(pct($times; 0.99)))\tstddev_ms=\(msv($r.stddev))\tmin_ms=\(msv($r.min))\tmax_ms=\(msv($r.max))"
+' "$OUT_DIR/hyperfine-read.json" \
   > "$OUT_DIR/read-latency-summary.tsv"
-jq -r '.results[] | "\(.command)\tmean_ms=\((.mean*1000)|round)\tstddev_ms=\((.stddev*1000)|round)\tmin_ms=\((.min*1000)|round)\tmax_ms=\((.max*1000)|round)"' "$OUT_DIR/hyperfine-write.json" \
+jq -r '
+  def msv($v): if $v == null then 0 else (($v * 1000) | round) end;
+  def pct($arr; $p):
+    if ($arr | length) == 0 then null
+    else
+      ($arr | sort) as $s
+      | $s[((((($s | length) - 1) * $p)) | floor)]
+    end;
+  .results[] as $r
+  | ($r.times // []) as $times
+  | "\($r.command)\tmean_ms=\(msv($r.mean))\tmedian_ms=\(msv($r.median))\tp95_ms=\(msv(pct($times; 0.95)))\tp99_ms=\(msv(pct($times; 0.99)))\tstddev_ms=\(msv($r.stddev))\tmin_ms=\(msv($r.min))\tmax_ms=\(msv($r.max))"
+' "$OUT_DIR/hyperfine-write.json" \
   > "$OUT_DIR/write-latency-summary.tsv"
 
 # Summaries: daemon request fanout.
-rg 'ipc_request request_type=' "$DAEMON_STDOUT" \
+tail -n +"$((MEASURE_LOG_START_LINE + 1))" "$DAEMON_STDOUT" \
+  | rg 'ipc_request request_type=' \
   | sed -E 's/.*request_type="([^"]+)".*/\1/' \
   | sort | uniq -c | sort -nr \
   > "$OUT_DIR/request-type-counts.txt"
 
 # Approximate store identity resolution timing by active request span.
-awk '
+tail -n +"$((MEASURE_LOG_START_LINE + 1))" "$DAEMON_STDOUT" \
+  | awk '
   /ipc_request request_type="/ {
     if (match($0, /request_type="[^"]+"/)) {
       req = substr($0, RSTART + 14, RLENGTH - 15)
@@ -214,7 +242,7 @@ awk '
       print req "\t" v
     }
   }
-' "$DAEMON_STDOUT" > "$OUT_DIR/store-identity-latency.tsv"
+' > "$OUT_DIR/store-identity-latency.tsv"
 
 awk -F '\t' '
   {
@@ -232,12 +260,31 @@ awk -F '\t' '
 ' "$OUT_DIR/store-identity-latency.tsv" | sort > "$OUT_DIR/store-identity-latency-summary.tsv"
 
 # Warning/error extraction.
-rg -n 'WARN|ERROR|checkpoint git import failed|failed to lock file|background refresh failed|store lock already held|shutdown timed out waiting for syncs' "$DAEMON_STDOUT" \
+tail -n +"$((MEASURE_LOG_START_LINE + 1))" "$DAEMON_STDOUT" \
+  | rg -n 'WARN|ERROR|checkpoint git import failed|failed to lock file|background refresh failed|store lock already held|shutdown timed out waiting for syncs' \
   > "$OUT_DIR/warnings-errors.log" || true
 
 # Metric summary available from admin metrics snapshot.
-jq -r '.data.histograms[]? | "\(.name)\tcount=\(.count)\tp50=\(.p50)\tp95=\(.p95)\tmax=\(.max)"' "$OUT_DIR/admin-metrics.json" \
+jq -r '.data.histograms[]? | ([.labels[]? | "\(.key)=\(.value)"] | sort | join(",")) as $labels | "\(.name)\tlabels=\($labels)\tcount=\(.count)\tp50=\(.p50)\tp95=\(.p95)\tmax=\(.max)"' "$OUT_DIR/admin-metrics.json" \
   | sort > "$OUT_DIR/admin-metrics-histograms.tsv"
+
+jq -r '
+  .data.histograms[]?
+  | select(.name == "ipc_request_duration")
+  | ([.labels[]? | select(.key == "request_type") | .value][0] // "") as $request_type
+  | ([.labels[]? | select(.key == "outcome") | .value][0] // "") as $outcome
+  | "\($request_type)\toutcome=\($outcome)\tcount=\(.count)\tp50=\(.p50)\tp95=\(.p95)\tmax=\(.max)"
+' "$OUT_DIR/admin-metrics.json" \
+  | sort > "$OUT_DIR/ipc-request-latency-summary.tsv"
+
+jq -r '
+  .data.histograms[]?
+  | select(.name == "ipc_read_gate_wait_duration")
+  | ([.labels[]? | select(.key == "request_type") | .value][0] // "") as $request_type
+  | ([.labels[]? | select(.key == "outcome") | .value][0] // "") as $outcome
+  | "\($request_type)\toutcome=\($outcome)\tcount=\(.count)\tp50=\(.p50)\tp95=\(.p95)\tmax=\(.max)"
+' "$OUT_DIR/admin-metrics.json" \
+  | sort > "$OUT_DIR/ipc-read-gate-wait-summary.tsv"
 
 JSON_LOG="$(ls -t "$OUT_DIR"/logs/beads.log* 2>/dev/null | head -n 1 || true)"
 if [[ -n "$JSON_LOG" ]]; then
@@ -264,6 +311,12 @@ fi
   echo ""
   echo "== Store Identity Resolution Summary =="
   cat "$OUT_DIR/store-identity-latency-summary.tsv"
+  echo ""
+  echo "== IPC Request Latency Summary (admin metrics) =="
+  cat "$OUT_DIR/ipc-request-latency-summary.tsv"
+  echo ""
+  echo "== Read Gate Wait Summary (admin metrics) =="
+  cat "$OUT_DIR/ipc-read-gate-wait-summary.tsv"
   echo ""
   echo "== Warning/Error Lines =="
   wc -l "$OUT_DIR/warnings-errors.log" | awk '{print $1 " lines"}'

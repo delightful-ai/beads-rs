@@ -230,7 +230,9 @@ pub fn run_state_loop(
                         let _guard = span.enter();
 
                         if let Some((Some(repo), read)) = read_gate {
-                            let loaded = match daemon.ensure_repo_fresh(&repo, &git_tx) {
+                            let git_sync_policy = daemon.git_sync_policy();
+                            let actor = daemon.actor().clone();
+                            let mut loaded = match daemon.ensure_repo_fresh(&repo, &git_tx) {
                                 Ok(loaded) => loaded,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
@@ -275,6 +277,11 @@ pub fn run_state_loop(
                                             );
                                             continue;
                                         }
+
+                                        // If this request is waiting on remote-applied watermarks,
+                                        // start sync immediately when local state is dirty instead of
+                                        // waiting for the debounce window.
+                                        loaded.maybe_start_sync(git_sync_policy, actor, &git_tx);
 
                                         let started_at = Instant::now();
                                         let timeout = Duration::from_millis(read.wait_timeout_ms());
@@ -394,7 +401,6 @@ pub fn run_state_loop(
 
                         daemon.fire_due_syncs(&git_tx);
                         daemon.fire_due_checkpoints(&git_tx);
-                        daemon.fire_due_wal_checkpoints();
                         daemon.fire_due_lock_heartbeats();
                         daemon.fire_due_exports();
                         flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
@@ -443,7 +449,6 @@ pub fn run_state_loop(
                     daemon.handle_repl_ingest(request);
                     daemon.fire_due_syncs(&git_tx);
                     daemon.fire_due_checkpoints(&git_tx);
-                    daemon.fire_due_wal_checkpoints();
                     daemon.fire_due_lock_heartbeats();
                     daemon.fire_due_exports();
                     flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
@@ -477,7 +482,6 @@ pub fn run_state_loop(
                 }
                 daemon.fire_due_syncs(&git_tx);
                 daemon.fire_due_checkpoints(&git_tx);
-                daemon.fire_due_wal_checkpoints();
                 daemon.fire_due_lock_heartbeats();
                 daemon.fire_due_exports();
                 flush_checkpoint_waiters(&daemon, &mut checkpoint_waiters);
@@ -664,11 +668,17 @@ fn flush_read_gate_waiters(
     let now = Instant::now();
     let mut remaining = Vec::new();
     for waiter in waiters.drain(..) {
+        let request_type = waiter.request.info().op;
         let span = waiter.span.clone();
         let _guard = span.enter();
         let loaded = match daemon.ensure_repo_fresh(&waiter.repo, git_tx) {
             Ok(loaded) => loaded,
             Err(err) => {
+                metrics::ipc_read_gate_wait_completed(
+                    request_type,
+                    "err",
+                    now.duration_since(waiter.started_at),
+                );
                 let _ = waiter
                     .respond
                     .send(ServerReply::Response(Response::err_from(err)));
@@ -680,8 +690,12 @@ fn flush_read_gate_waiters(
         drop(loaded);
         match status {
             Ok(ReadGateStatus::Satisfied) => {
-                let request_type = waiter.request.info().op;
                 let request_started_at = waiter.started_at;
+                metrics::ipc_read_gate_wait_completed(
+                    request_type,
+                    "satisfied",
+                    now.duration_since(waiter.started_at),
+                );
                 let mut request_waiters = RequestWaiters {
                     sync_waiters,
                     checkpoint_waiters,
@@ -704,6 +718,11 @@ fn flush_read_gate_waiters(
                 if now >= waiter.deadline {
                     let waited_ms = (now.duration_since(waiter.started_at).as_millis())
                         .min(u64::MAX as u128) as u64;
+                    metrics::ipc_read_gate_wait_completed(
+                        request_type,
+                        "timeout",
+                        now.duration_since(waiter.started_at),
+                    );
                     let err = OpError::RequireMinSeenTimeout {
                         waited_ms,
                         required: Box::new(required),
@@ -717,6 +736,11 @@ fn flush_read_gate_waiters(
                 remaining.push(waiter);
             }
             Err(err) => {
+                metrics::ipc_read_gate_wait_completed(
+                    request_type,
+                    "err",
+                    now.duration_since(waiter.started_at),
+                );
                 let _ = waiter
                     .respond
                     .send(ServerReply::Response(Response::err_from(err)));

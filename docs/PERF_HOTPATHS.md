@@ -36,14 +36,23 @@ Daemon observability:
 - admin metrics snapshot (`bd admin metrics --json`)
 - warning/error extraction from daemon logs
 
+Measured-phase filtering:
+- Log-derived summaries (`request-type-counts`, `store-identity-latency-summary`, `warnings-errors`) start from a captured daemon-log line boundary after warm-up, so startup/import noise is excluded.
+
 ## Key Artifacts
 
 - `SUMMARY.txt`: human-readable run digest
 - `hyperfine-read.json`, `hyperfine-write.json`: canonical benchmark data
-- `read-latency-summary.tsv`, `write-latency-summary.tsv`: compact latency tables
+- `read-latency-summary.tsv`, `write-latency-summary.tsv`: compact latency tables (`mean`, `median`, `p95`, `p99`, `min`, `max`)
 - `request-type-counts.txt`: daemon request mix
 - `store-identity-latency-summary.tsv`: per-request identity-resolution overhead
+- `ipc-request-latency-summary.tsv`: request-type latency (`p50`, `p95`, `max`) from daemon metrics
+- `ipc-read-gate-wait-summary.tsv`: read-gate wait latency (`p50`, `p95`, `max`) from daemon metrics
 - `admin-metrics.json`: full admin metrics
+
+Note:
+- `admin-metrics.json` reflects metrics accumulated across the daemon lifetime for that run (including startup/warm-up).
+- For steady-state comparisons, rely on hyperfine summaries plus measured-phase log-derived summaries.
 
 ## Comparing Two Runs
 
@@ -53,7 +62,9 @@ just bench-compare tmp/perf/hotpaths-<baseline> tmp/perf/hotpaths-<candidate>
 
 This prints:
 - read latency delta per command
+- read tail delta (`p95`, `p99`, `max`)
 - write latency delta per workflow
+- write tail delta (`p95`, `p99`, `max`)
 - store-identity mean latency deltas (when available)
 - candidate `ipc_request_duration` histogram breakdowns
 
@@ -66,10 +77,14 @@ just bench-guard tmp/perf/hotpaths-<baseline> tmp/perf/hotpaths-<candidate>
 This enforces threshold checks and exits non-zero on regression:
 - Critical read paths (`ready`, `list --status open`, `show`, `show --json`, `status`): max +25% mean latency
 - Write workflows (create/claim-close/comment/label/dep/scenario): max +35% mean latency
+- Critical read paths: max +50% `p95` latency
+- Write workflows: max +65% `p95` latency
 
 Thresholds are configurable:
 - `READ_THRESHOLD_PCT` (default `25`)
 - `WRITE_THRESHOLD_PCT` (default `35`)
+- `READ_P95_THRESHOLD_PCT` (default `50`)
+- `WRITE_P95_THRESHOLD_PCT` (default `65`)
 
 ## Environment Knobs
 
