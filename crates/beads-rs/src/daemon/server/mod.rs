@@ -5,6 +5,9 @@
 //! - State thread - owns Daemon, processes requests sequentially
 //! - Git thread - owns GitWorker, handles all git IO
 
+mod daemon_api;
+mod dispatch;
+mod engine;
 mod socket;
 mod spans;
 mod state_loop;

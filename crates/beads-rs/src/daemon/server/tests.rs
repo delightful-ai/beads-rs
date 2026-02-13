@@ -1,10 +1,11 @@
 use super::ServerReply;
 use super::socket::stream_event_response;
 use super::spans::{ReadConsistencyTag, read_consistency_tag, request_span};
-use super::state_loop::{flush_durability_waiters, flush_read_gate_waiters};
-use super::waiters::{DurabilityWaiter, ReadGateWaiter};
+use super::waiters::{
+    DurabilityWaiter, ReadGateWaiter, flush_durability_waiters, flush_read_gate_waiters,
+};
 use bytes::Bytes;
-use crossbeam::channel::Sender;
+use crossbeam::channel::{Receiver, Sender};
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -40,6 +41,7 @@ struct TestEnv {
     _override: crate::paths::DataDirOverride,
     repo_path: PathBuf,
     git_tx: Sender<GitOp>,
+    _git_rx: Receiver<GitOp>,
     daemon: Daemon,
 }
 
@@ -56,13 +58,14 @@ impl TestEnv {
         let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let remote = RemoteUrl::new("example.com/test/repo");
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
-        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let (git_tx, git_rx) = crossbeam::channel::unbounded();
 
         Self {
             _temp: temp,
             _override: override_guard,
             repo_path,
             git_tx,
+            _git_rx: git_rx,
             daemon,
         }
     }
