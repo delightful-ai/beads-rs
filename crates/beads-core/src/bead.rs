@@ -460,10 +460,7 @@ impl MutateForTest for Stamp {
     fn mutate_for_test(&mut self) {
         // Increment time
         let new_time = self.at.wall_ms + 1;
-        *self = Stamp::new(
-            WriteStamp::new(new_time, self.at.counter),
-            self.by.clone(),
-        );
+        *self = Stamp::new(WriteStamp::new(new_time, self.at.counter), self.by.clone());
     }
 }
 
