@@ -80,6 +80,21 @@ impl BeadCore {
     }
 }
 
+#[cfg(test)]
+impl BeadCore {
+    pub fn field_names() -> &'static [&'static str] {
+        &["id", "creation"]
+    }
+
+    pub fn mutate_field(&mut self, name: &str) {
+        match name {
+            "id" => self.id.mutate_for_test(),
+            "creation" => self.creation.mutate_for_test(),
+            _ => panic!("unknown core field: {}", name),
+        }
+    }
+}
+
 /// All mutable fields wrapped in Lww for per-field merge.
 macro_rules! define_bead_fields {
     (
@@ -433,6 +448,54 @@ impl MutateForTest for Claim {
 }
 
 #[cfg(test)]
+impl MutateForTest for BeadId {
+    fn mutate_for_test(&mut self) {
+        // Change suffix
+        *self = BeadId::parse(&format!("{}-modified", self.slug())).unwrap();
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for Stamp {
+    fn mutate_for_test(&mut self) {
+        // Increment time
+        let new_time = self.at.wall_ms + 1;
+        *self = Stamp::new(
+            WriteStamp::new(new_time, self.at.counter),
+            self.by.clone(),
+        );
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for BranchName {
+    fn mutate_for_test(&mut self) {
+        *self = BranchName::parse(format!("{}-mod", self.as_str())).unwrap();
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for Creation {
+    fn mutate_for_test(&mut self) {
+        // Mutate inner fields
+        self.stamp.mutate_for_test();
+        if let Some(branch) = &mut self.on_branch {
+            branch.mutate_for_test();
+        } else {
+            self.on_branch = Some(BranchName::parse("new-branch").unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for BeadCore {
+    fn mutate_for_test(&mut self) {
+        self.id.mutate_for_test();
+        self.creation.mutate_for_test();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::collections::Label;
@@ -577,6 +640,30 @@ mod tests {
             assert_ne!(
                 base_hash, new_hash,
                 "Changing field '{}' did not change content hash. Is it missing from compute_content_hash?",
+                field_name
+            );
+        }
+    }
+
+    #[test]
+    fn content_hash_depends_on_core_fields() {
+        let base_stamp = stamp(1000, 0, "alice");
+        let base_bead = bead("bd-hash-test-core", base_stamp.clone());
+        let labels = Labels::new();
+        let notes = Vec::new();
+
+        let base_hash = compute_content_hash(&base_bead, &labels, &notes);
+
+        for field_name in BeadCore::field_names() {
+            let mut bead = base_bead.clone();
+            // Mutate the field
+            bead.core.mutate_field(field_name);
+
+            // Hash should change
+            let new_hash = compute_content_hash(&bead, &labels, &notes);
+            assert_ne!(
+                base_hash, new_hash,
+                "Changing core field '{}' did not change content hash. Is it missing from compute_content_hash?",
                 field_name
             );
         }
