@@ -601,4 +601,9 @@ mod tests {
             WalIndexError::ClientRequestIdReuseMismatch { .. }
         ));
     }
+
+    #[test]
+    fn memory_index_satisfies_contract() {
+        crate::wal::contract::wal_index_laws(MemoryWalIndex::new);
+    }
 }
