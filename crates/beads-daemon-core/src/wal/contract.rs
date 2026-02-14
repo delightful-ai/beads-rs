@@ -123,7 +123,7 @@ where
     let durable = Watermark::<Durable>::new(Seq0::new(5), HeadStatus::Known([5u8; 32])).unwrap();
 
     let mut txn = index.writer().begin_txn().expect("begin txn");
-    txn.update_watermark(&ns, &origin, applied.clone(), durable.clone())
+    txn.update_watermark(&ns, &origin, applied, durable)
         .expect("update");
     txn.commit().expect("commit");
 
