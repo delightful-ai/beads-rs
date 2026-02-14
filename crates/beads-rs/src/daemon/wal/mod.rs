@@ -18,6 +18,7 @@ pub mod memory_index;
 pub mod memory_wal;
 pub mod record;
 pub mod replay;
+pub(crate) mod seams;
 pub mod segment;
 
 pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
@@ -38,6 +39,7 @@ pub use record::{
 pub use replay::{
     RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
 };
+pub(crate) use seams::{WalAppend, WalIndexTxnProvider, WalReadRange};
 pub use segment::{
     AppendOutcome, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentSyncMode,
     SegmentWriter, WAL_FORMAT_VERSION,

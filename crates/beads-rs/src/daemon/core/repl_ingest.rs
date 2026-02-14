@@ -47,8 +47,7 @@ impl Daemon {
 
         let wal_index = Arc::clone(&store.wal_index);
         let mut txn = wal_index
-            .writer()
-            .begin_txn()
+            .begin_wal_txn()
             .map_err(|err| wal_index_error_payload(&err))?;
 
         let mut canonical_shas = Vec::with_capacity(batch.len());
@@ -89,7 +88,7 @@ impl Daemon {
             })?;
 
             let append_start = Instant::now();
-            let append = match store.event_wal.append(&namespace, &record, now_ms) {
+            let append = match store.event_wal.wal_append(&namespace, &record, now_ms) {
                 Ok(append) => {
                     let elapsed = append_start.elapsed();
                     metrics::wal_append_ok(elapsed);
@@ -243,8 +242,7 @@ impl Daemon {
         self.schedule_sync(remote);
 
         let mut watermark_txn = wal_index
-            .writer()
-            .begin_txn()
+            .begin_wal_txn()
             .map_err(|err| wal_index_error_payload(&err))?;
         watermark_txn
             .update_watermark(&namespace, &origin, applied, durable)

@@ -54,7 +54,7 @@ use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster
 use super::store::{ResolvedStore, StoreCaches};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,
-    WalIndex, WalIndexError, WalReplayError, open_segment_reader,
+    WalAppend, WalIndex, WalIndexError, WalIndexTxnProvider, WalReplayError, open_segment_reader,
 };
 use beads_daemon::broadcast::BroadcastEvent;
 use beads_daemon::git_lane::{

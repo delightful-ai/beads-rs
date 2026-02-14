@@ -30,10 +30,11 @@ use crate::daemon::repl::session::{
 use crate::daemon::repl::want::{WantFramesOutcome, broadcast_to_frame, build_want_frames};
 use crate::daemon::repl::{
     FrameError, FrameLimitState, FrameReader, FrameWriter, ReplEnvelope, ReplMessage,
-    SessionAction, SessionConfig, SessionStore, SharedSessionStore, ValidatedAck, WalRangeReader,
-    WireReplMessage, decode_envelope, decode_envelope_with_version, encode_envelope,
+    SessionAction, SessionConfig, SessionStore, SharedSessionStore, ValidatedAck, WalRangeError,
+    WalRangeReader, WireReplMessage, decode_envelope, decode_envelope_with_version,
+    encode_envelope,
 };
-use crate::daemon::wal::ReplicaDurabilityRole;
+use crate::daemon::wal::{ReplicaDurabilityRole, WalReadRange};
 use beads_daemon::admission::AdmissionController;
 use beads_daemon::broadcast::{
     BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
@@ -1098,8 +1099,10 @@ fn handle_want<M>(want: &Want, ctx: &mut WantContext<'_, M>) -> Result<(), PeerE
     }
 
     let cache = ctx.broadcaster.hot_cache()?;
-    let outcome = match build_want_frames(want, cache, ctx.wal_reader, ctx.limits, ctx.allowed_set)
-    {
+    let wal_reader = ctx
+        .wal_reader
+        .map(|reader| reader as &dyn WalReadRange<Error = WalRangeError>);
+    let outcome = match build_want_frames(want, cache, wal_reader, ctx.limits, ctx.allowed_set) {
         Ok(outcome) => outcome,
         Err(err) => {
             let payload = err.as_error_payload();

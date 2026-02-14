@@ -15,6 +15,7 @@ use crate::daemon::git_worker::GitOp;
 use crate::daemon::ipc::{IntoErrorPayload, ReadConsistency, Response, ResponsePayload};
 use crate::daemon::ops::OpError;
 use crate::daemon::repl::{WalRangeError, WalRangeReader};
+use crate::daemon::wal::WalReadRange;
 use beads_daemon::broadcast::{
     BroadcastError, BroadcastEvent, EventSubscription, SubscriberLimits,
 };
@@ -117,29 +118,7 @@ struct BackfillPlan {
     last_seq: HashMap<ReplicaId, u64>,
 }
 
-trait WalRangeRead {
-    fn read_range(
-        &self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        from_seq_excl: Seq0,
-        max_bytes: usize,
-    ) -> Result<Vec<EventFrameV1>, WalRangeError>;
-}
-
-impl WalRangeRead for WalRangeReader {
-    fn read_range(
-        &self,
-        namespace: &NamespaceId,
-        origin: &ReplicaId,
-        from_seq_excl: Seq0,
-        max_bytes: usize,
-    ) -> Result<Vec<EventFrameV1>, WalRangeError> {
-        WalRangeReader::read_range(self, namespace, origin, from_seq_excl, max_bytes)
-    }
-}
-
-fn build_backfill_plan<R: WalRangeRead>(
+fn build_backfill_plan<R: WalReadRange<Error = WalRangeError>>(
     required: Option<&Watermarks<Applied>>,
     namespace: &NamespaceId,
     applied: &Watermarks<Applied>,
@@ -253,7 +232,8 @@ mod tests {
         }
     }
 
-    impl WalRangeRead for FakeWalReader {
+    impl WalReadRange for FakeWalReader {
+        type Error = WalRangeError;
         fn read_range(
             &self,
             namespace: &NamespaceId,

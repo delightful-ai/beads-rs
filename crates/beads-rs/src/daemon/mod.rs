@@ -17,6 +17,7 @@ pub(crate) mod durability_coordinator;
 pub(crate) mod executor;
 mod export_worker;
 pub(crate) mod fingerprint;
+pub(crate) mod git_backend;
 pub(crate) mod git_worker;
 pub(crate) mod io_budget;
 pub mod ipc;

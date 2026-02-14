@@ -30,8 +30,8 @@ use super::ops::OpError;
 use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
-    SegmentRow, VerifiedRecord, WalIndex, WalIndexError, WalIndexTxn, WalReplayError,
-    open_segment_reader,
+    SegmentRow, VerifiedRecord, WalAppend, WalIndex, WalIndexError, WalIndexTxn,
+    WalIndexTxnProvider, WalReplayError, open_segment_reader,
 };
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
@@ -244,7 +244,7 @@ impl Daemon {
             )
         }?;
 
-        let mut txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
+        let mut txn = wal_index.begin_wal_txn().map_err(wal_index_to_op)?;
         let LocalAppendPlan {
             origin_seq,
             prev_sha,
@@ -308,7 +308,10 @@ impl Daemon {
         let (append, segment_snapshot) = {
             let store_runtime = proof.runtime_mut();
             let append_start = Instant::now();
-            let append = match store_runtime.event_wal.append(&namespace, &record, now_ms) {
+            let append = match store_runtime
+                .event_wal
+                .wal_append(&namespace, &record, now_ms)
+            {
                 Ok(append) => {
                     let elapsed = append_start.elapsed();
                     metrics::wal_append_ok(elapsed);
@@ -464,7 +467,7 @@ impl Daemon {
             )
         };
 
-        let mut watermark_txn = wal_index.writer().begin_txn().map_err(wal_index_to_op)?;
+        let mut watermark_txn = wal_index.begin_wal_txn().map_err(wal_index_to_op)?;
         watermark_txn
             .update_watermark(&namespace, &origin_replica_id, applied, durable)
             .map_err(wal_index_to_op)?;
