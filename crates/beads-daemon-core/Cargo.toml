@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Shared daemon protocol and WAL primitives for beads-rs"
 
+[features]
+test-harness = ["uuid"]
+
 [dependencies]
 beads-core = { path = "../beads-core" }
 crc32c = "0.6"
@@ -16,6 +19,7 @@ minicbor = { version = "0.24", features = ["std"] }
 serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 uuid.workspace = true

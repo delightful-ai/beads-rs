@@ -2014,6 +2014,18 @@ mod tests {
             .unwrap();
         count > 0
     }
+
+    #[test]
+    fn sqlite_index_satisfies_contract() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let factory = || {
+            let path = temp.path().join(Uuid::new_v4().to_string());
+            std::fs::create_dir_all(&path).unwrap();
+            SqliteWalIndex::open(&path, &meta, IndexDurabilityMode::Cache).unwrap()
+        };
+        beads_daemon_core::wal::contract::wal_index_laws(factory);
+    }
 }
 
 fn head_sha_from_status(head: HeadStatus) -> Option<[u8; 32]> {

@@ -13,6 +13,9 @@ use crate::core::{
 };
 pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 
+#[cfg(any(feature = "test-harness", test))]
+pub mod contract;
+
 pub mod memory_index;
 
 pub use memory_index::{MemoryWalIndex, MemoryWalIndexSnapshot};

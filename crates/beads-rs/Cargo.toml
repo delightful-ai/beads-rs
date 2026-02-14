@@ -58,7 +58,7 @@ rusqlite = "0.31"
 default = ["cli"]
 cli = ["clap"]
 slow-tests = []
-test-harness = ["beads-core/test-harness"]
+test-harness = ["beads-core/test-harness", "beads-daemon-core/test-harness"]
 e2e-tests = ["test-harness"]
 model-testing = []
 
@@ -72,6 +72,7 @@ assert_cmd = "2"
 pathdiff = "0.2.3"
 predicates = "3"
 proptest = "1"
+beads-daemon-core = { path = "../beads-daemon-core", features = ["test-harness"] }
 
 [lints]
 workspace = true
