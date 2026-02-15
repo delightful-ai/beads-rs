@@ -2,7 +2,7 @@
 //!
 //! Provides:
 //! - `OpError` - Operation errors
-//! - `BeadPatchDaemonExt` - Daemon-only patch application helpers
+//! - `ValidatedSurfaceBeadPatch` - normalized daemon-safe patch wrapper
 
 use std::path::PathBuf;
 
@@ -12,9 +12,9 @@ use thiserror::Error;
 use crate::core::error::details as error_details;
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    ActorId, Applied, BeadFields, BeadId, CliErrorCode, ClientRequestId, DurabilityClass,
-    DurabilityReceipt, ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId, Lww, NamespaceId,
-    ProtocolErrorCode, ReplicaId, Stamp, StoreId, WallClock, Watermarks, WorkflowStatus,
+    ActorId, Applied, BeadId, CliErrorCode, ClientRequestId, DurabilityClass, DurabilityReceipt,
+    ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId, NamespaceId, ProtocolErrorCode,
+    ReplicaId, StoreId, WallClock, Watermarks,
 };
 use crate::daemon::store::runtime::StoreRuntimeError;
 use crate::daemon::wal::EventWalError;
@@ -23,7 +23,7 @@ use crate::git::SyncError;
 use beads_daemon::admission::AdmissionRejection;
 use beads_daemon_core::durability::DurabilityError;
 
-pub use beads_surface::ops::{BeadPatch, OpResult, Patch};
+use beads_surface::ops::BeadPatch;
 
 // =============================================================================
 // OpError - Operation errors
@@ -635,24 +635,9 @@ impl<T> MapLiveError<T> for Result<T, crate::core::LiveLookupError> {
     }
 }
 
-pub trait BeadPatchDaemonExt {
-    fn validate_for_daemon(&self) -> Result<(), OpError>;
-    fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError>;
-}
-
 #[derive(Clone, Debug)]
 pub struct ValidatedSurfaceBeadPatch {
     inner: BeadPatch,
-}
-
-impl ValidatedSurfaceBeadPatch {
-    pub fn as_inner(&self) -> &BeadPatch {
-        &self.inner
-    }
-
-    pub fn into_inner(self) -> BeadPatch {
-        self.inner
-    }
 }
 
 impl std::ops::Deref for ValidatedSurfaceBeadPatch {
@@ -675,59 +660,6 @@ impl TryFrom<BeadPatch> for ValidatedSurfaceBeadPatch {
     fn try_from(mut patch: BeadPatch) -> Result<Self, Self::Error> {
         normalize_required_patch(&mut patch)?;
         Ok(Self { inner: patch })
-    }
-}
-
-impl BeadPatchDaemonExt for BeadPatch {
-    fn validate_for_daemon(&self) -> Result<(), OpError> {
-        self.validate_for_update()
-            .map_err(map_surface_patch_validation_error)
-    }
-
-    fn apply_to_fields(&self, fields: &mut BeadFields, stamp: &Stamp) -> Result<(), OpError> {
-        if let Patch::Set(v) = &self.title {
-            fields.title = Lww::new(v.clone(), stamp.clone());
-        }
-        if let Patch::Set(v) = &self.description {
-            fields.description = Lww::new(v.clone(), stamp.clone());
-        }
-        match &self.design {
-            Patch::Set(v) => fields.design = Lww::new(Some(v.clone()), stamp.clone()),
-            Patch::Clear => fields.design = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        match &self.acceptance_criteria {
-            Patch::Set(v) => fields.acceptance_criteria = Lww::new(Some(v.clone()), stamp.clone()),
-            Patch::Clear => fields.acceptance_criteria = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        if let Patch::Set(v) = &self.priority {
-            fields.priority = Lww::new(*v, stamp.clone());
-        }
-        if let Patch::Set(v) = &self.bead_type {
-            fields.bead_type = Lww::new(*v, stamp.clone());
-        }
-        match &self.external_ref {
-            Patch::Set(v) => fields.external_ref = Lww::new(Some(v.clone()), stamp.clone()),
-            Patch::Clear => fields.external_ref = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        match &self.source_repo {
-            Patch::Set(v) => fields.source_repo = Lww::new(Some(v.clone()), stamp.clone()),
-            Patch::Clear => fields.source_repo = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        match &self.estimated_minutes {
-            Patch::Set(v) => fields.estimated_minutes = Lww::new(Some(*v), stamp.clone()),
-            Patch::Clear => fields.estimated_minutes = Lww::new(None, stamp.clone()),
-            Patch::Keep => {}
-        }
-        if let Patch::Set(status) = &self.status {
-            let workflow_status: WorkflowStatus = (*status).into();
-            fields.workflow = Lww::new(workflow_status.into_workflow(None, None), stamp.clone());
-        }
-
-        Ok(())
     }
 }
 
@@ -757,10 +689,10 @@ mod tests {
     #[test]
     fn bead_patch_validation() {
         let mut patch = BeadPatch::default();
-        assert!(patch.validate_for_daemon().is_ok());
+        assert!(ValidatedSurfaceBeadPatch::try_from(patch.clone()).is_ok());
 
-        patch.title = Patch::Clear;
-        assert!(patch.validate_for_daemon().is_err());
+        patch.title = beads_surface::ops::Patch::Clear;
+        assert!(ValidatedSurfaceBeadPatch::try_from(patch).is_err());
     }
 }
 

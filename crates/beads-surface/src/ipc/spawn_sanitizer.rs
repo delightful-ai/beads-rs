@@ -19,12 +19,21 @@ pub(super) fn prepare_daemon_spawn_command(cmd: &mut Command) {
 #[cfg(unix)]
 fn install_fd_sanitizer(cmd: &mut Command) {
     // Safety: `pre_exec` runs in the child process after `fork` and before
-    // `exec`. The closure performs only async-signal-safe syscalls.
+    // `exec`. The closure uses libc calls only and avoids heap allocation.
     unsafe {
         cmd.pre_exec(|| {
+            reset_inherited_signal_handlers();
             close_non_stdio_fds();
             Ok(())
         });
+    }
+}
+
+#[cfg(unix)]
+fn reset_inherited_signal_handlers() {
+    // Safety: `signal` is called with valid signal numbers and disposition constants.
+    unsafe {
+        nix::libc::signal(nix::libc::SIGTERM, nix::libc::SIG_DFL);
     }
 }
 

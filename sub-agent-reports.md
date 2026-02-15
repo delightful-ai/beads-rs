@@ -89,6 +89,39 @@ Generated: 2026-02-12
 - Keep WAL checkpoint work off the inline request/repl/git completion fast paths where possible.
 - Promote p95/p99-first benchmark outputs and labeled request-latency summaries as first-class artifacts.
 
+## 8) `019c54fa-a983-71f1-bd1f-06d8c5808d9b`
+
+**Scope:** working-copy bug review (`sync.rs`, metrics, docs)
+
+**Findings:**
+- No correctness regressions found in the backup-ref contention and cleanup-policy changes.
+- Verified lock-path parsing behavior against real `git2` locked-ref error messages and confirmed policy flow remains deterministic.
+
+**Residual risk:**
+- Cleanup is best-effort; if metadata or PID checks repeatedly fail, stale locks can persist and continue skipping backup maintenance.
+
+## 9) `019c54fa-a995-7fd1-8ff6-10b0dba1ddc7`
+
+**Scope:** working-copy coverage gap audit
+
+**Findings:**
+- Suggested additional tests to assert lock-contention metrics and prune metrics in `sync.rs`.
+- Suggested keeping policy behavior observable through metrics snapshots in sync-level tests.
+
+**Action taken:**
+- Incorporated valid coverage recommendations into follow-up test additions in current working copy.
+
+## 10) `019c54fa-a9af-7bb1-a74b-917a412620b1`
+
+**Scope:** benchmark/instrumentation methodology audit
+
+**Findings:**
+- Existing non-JSON hotpath benchmark harness is structurally sound.
+- Recommended stronger run provenance metadata so benchmark artifacts are trustworthy/comparable.
+
+**Action taken:**
+- Added run provenance capture (branch/commit/dirty state, tool versions, platform, status snapshot) to benchmark artifacts.
+
 ---
 
 ## Prioritized Action Order (derived from reports)

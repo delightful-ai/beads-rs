@@ -139,13 +139,20 @@ pub struct TelemetryGuard {
 }
 
 pub fn init(config: TelemetryConfig) -> TelemetryGuard {
-    let filter = build_env_filter(config.verbosity, config.logging.filter.as_deref());
+    // Build a fresh EnvFilter per layer — EnvFilter isn't Clone, and pushing a
+    // single filter into a Vec<Layer> is ineffective: the Vec's
+    // register_callsite short-circuits on the first layer that returns
+    // Interest::always(), so the filter never gets consulted.
+    let build_filter = || build_env_filter(config.verbosity, config.logging.filter.as_deref());
 
     let mut guards = Vec::new();
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
 
     if config.logging.stdout {
-        layers.push(build_stdout_layer(config.logging.stdout_format));
+        layers.push(build_stdout_layer(
+            config.logging.stdout_format,
+            build_filter(),
+        ));
     }
 
     let mut file_prune_report = None;
@@ -164,7 +171,7 @@ pub fn init(config: TelemetryConfig) -> TelemetryGuard {
                     }
                 }
 
-                let (layer, guard) = build_file_layer(&config.logging.file, &dir);
+                let (layer, guard) = build_file_layer(&config.logging.file, &dir, build_filter());
                 layers.push(layer);
                 guards.push(guard);
             }
@@ -176,10 +183,8 @@ pub fn init(config: TelemetryConfig) -> TelemetryGuard {
     }
 
     if let Some(layer) = TelemetryLayer::new(config.logger, config.tracer) {
-        layers.push(Box::new(layer));
+        layers.push(Box::new(layer.with_filter(build_filter())));
     }
-
-    layers.push(Box::new(filter));
 
     Registry::default().with(layers).init();
 
@@ -437,16 +442,20 @@ where
     }
 }
 
-fn build_stdout_layer(format: LogFormat) -> Box<dyn Layer<Registry> + Send + Sync> {
+fn build_stdout_layer(
+    format: LogFormat,
+    filter: EnvFilter,
+) -> Box<dyn Layer<Registry> + Send + Sync> {
     match format {
-        LogFormat::Tree => Box::new(tracing_tree::HierarchicalLayer::new(2)),
+        LogFormat::Tree => Box::new(tracing_tree::HierarchicalLayer::new(2).with_filter(filter)),
         LogFormat::Pretty => Box::new(
             tracing_subscriber::fmt::layer()
                 .pretty()
                 .with_writer(std::io::stderr)
                 .with_target(true)
                 .with_thread_names(true)
-                .with_thread_ids(true),
+                .with_thread_ids(true)
+                .with_filter(filter),
         ),
         LogFormat::Compact => Box::new(
             tracing_subscriber::fmt::layer()
@@ -454,7 +463,8 @@ fn build_stdout_layer(format: LogFormat) -> Box<dyn Layer<Registry> + Send + Syn
                 .with_writer(std::io::stderr)
                 .with_target(true)
                 .with_thread_names(true)
-                .with_thread_ids(true),
+                .with_thread_ids(true)
+                .with_filter(filter),
         ),
         LogFormat::Json => Box::new(
             tracing_subscriber::fmt::layer()
@@ -464,7 +474,8 @@ fn build_stdout_layer(format: LogFormat) -> Box<dyn Layer<Registry> + Send + Syn
                 .with_thread_names(true)
                 .with_thread_ids(true)
                 .with_current_span(true)
-                .with_span_list(true),
+                .with_span_list(true)
+                .with_filter(filter),
         ),
     }
 }
@@ -472,6 +483,7 @@ fn build_stdout_layer(format: LogFormat) -> Box<dyn Layer<Registry> + Send + Syn
 fn build_file_layer(
     config: &FileLoggingConfig,
     dir: &Path,
+    filter: EnvFilter,
 ) -> (
     Box<dyn Layer<Registry> + Send + Sync>,
     tracing_appender::non_blocking::WorkerGuard,
@@ -489,7 +501,8 @@ fn build_file_layer(
         LogFormat::Tree => Box::new(
             tracing_tree::HierarchicalLayer::new(2)
                 .with_ansi(false)
-                .with_writer(writer),
+                .with_writer(writer)
+                .with_filter(filter),
         ),
         LogFormat::Pretty => Box::new(
             tracing_subscriber::fmt::layer()
@@ -498,7 +511,8 @@ fn build_file_layer(
                 .with_ansi(false)
                 .with_target(true)
                 .with_thread_names(true)
-                .with_thread_ids(true),
+                .with_thread_ids(true)
+                .with_filter(filter),
         ),
         LogFormat::Compact => Box::new(
             tracing_subscriber::fmt::layer()
@@ -507,7 +521,8 @@ fn build_file_layer(
                 .with_ansi(false)
                 .with_target(true)
                 .with_thread_names(true)
-                .with_thread_ids(true),
+                .with_thread_ids(true)
+                .with_filter(filter),
         ),
         LogFormat::Json => Box::new(
             tracing_subscriber::fmt::layer()
@@ -517,7 +532,8 @@ fn build_file_layer(
                 .with_thread_names(true)
                 .with_thread_ids(true)
                 .with_current_span(true)
-                .with_span_list(true),
+                .with_span_list(true)
+                .with_filter(filter),
         ),
     };
     (layer, guard)

@@ -11,15 +11,18 @@ use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
 use crate::core::{ActorId, BeadSlug, CanonicalState, StoreId, WriteStamp};
+use crate::daemon::git_backend::{
+    DefaultGitBackend, FetchRemote, PublishCheckpointRef, PushRemote, ReadCheckpointRef,
+};
 use crate::daemon::io_budget::TokenBucket;
 use crate::daemon::metrics;
 use crate::git::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, CheckpointCache, CheckpointExport, CheckpointExportError,
     CheckpointExportInput, CheckpointPublishError, CheckpointPublishOutcome, CheckpointSnapshot,
-    CheckpointStoreMeta, export_checkpoint, publish_checkpoint as publish_checkpoint_git,
+    CheckpointStoreMeta, export_checkpoint,
 };
 use crate::git::error::SyncError;
-use crate::git::sync::{DivergenceInfo, SyncOutcome, SyncProcess, init_beads_ref, sync_with_retry};
+use crate::git::sync::{DivergenceInfo, SyncOutcome, init_beads_ref};
 use beads_daemon::remote::RemoteUrl;
 
 /// Result of a sync operation.
@@ -112,6 +115,7 @@ pub struct GitWorker {
     limits: crate::core::Limits,
     background_io: HashMap<StoreId, TokenBucket>,
     checkpoint_exports: HashMap<(StoreId, String), CheckpointExport>,
+    backend: DefaultGitBackend,
 }
 
 impl GitWorker {
@@ -123,6 +127,7 @@ impl GitWorker {
             limits,
             background_io: HashMap::new(),
             checkpoint_exports: HashMap::new(),
+            backend: DefaultGitBackend,
         }
     }
 
@@ -158,6 +163,7 @@ impl GitWorker {
         use crate::core::CanonicalState;
         use crate::git::sync::read_state_at_oid;
 
+        let backend = self.backend;
         let repo = self.open(path)?;
 
         // Step 1: Read local state if exists
@@ -174,13 +180,13 @@ impl GitWorker {
             };
 
         // Step 2: Fetch remote and read its state
-        let fetched = SyncProcess::new(path.to_owned()).fetch_best_effort(repo)?;
-        let remote_state = fetched.phase.remote_state;
-        let remote_slug = fetched.phase.root_slug;
-        let remote_meta_stamp = fetched.phase.parent_meta_stamp;
-        let fetch_error = fetched.phase.fetch_error.clone();
-        let divergence = fetched.phase.divergence.clone();
-        let force_push = fetched.phase.force_push.clone();
+        let fetched = backend.fetch_remote(path, repo)?;
+        let remote_state = fetched.remote_state;
+        let remote_slug = fetched.root_slug;
+        let remote_meta_stamp = fetched.parent_meta_stamp;
+        let fetch_error = fetched.fetch_error;
+        let divergence = fetched.divergence;
+        let force_push = fetched.force_push;
 
         // Step 3: CRDT merge - both local and remote are authoritative
         build_load_result(LoadResultInputs {
@@ -259,9 +265,10 @@ impl GitWorker {
 
     /// Sync local state to remote.
     pub fn sync(&mut self, path: &Path, state: &CanonicalState) -> SyncResult {
+        let backend = self.backend;
         let repo = self.open(path)?;
 
-        sync_with_retry(repo, path, state, 5)
+        backend.push_remote(repo, path, state)
     }
 
     pub fn publish_checkpoint(
@@ -271,6 +278,7 @@ impl GitWorker {
         git_ref: &str,
         checkpoint_groups: BTreeMap<String, String>,
     ) -> CheckpointResult {
+        let backend = self.backend;
         let key = (snapshot.store_id, snapshot.checkpoint_group.clone());
         let mut drop_in_memory_previous = false;
         let export = {
@@ -337,6 +345,9 @@ impl GitWorker {
         }
 
         let repo = self.open(path)?;
+        if let Ok(previous) = backend.read_checkpoint_ref(repo, git_ref) {
+            tracing::debug!(checkpoint_group = %snapshot.checkpoint_group, git_ref, ?previous, "checkpoint ref before publish");
+        }
         let store_meta = CheckpointStoreMeta::new(
             snapshot.store_id,
             snapshot.store_epoch,
@@ -344,7 +355,7 @@ impl GitWorker {
             checkpoint_groups,
         );
 
-        publish_checkpoint_git(repo, &export, git_ref, &store_meta)
+        backend.publish_checkpoint_ref(repo, &export, git_ref, &store_meta)
     }
 
     /// Initialize beads ref.

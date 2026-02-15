@@ -400,6 +400,53 @@ pub fn set_checkpoint_queue_depth(value: usize) {
     );
 }
 
+pub fn backup_ref_scan(count: usize) {
+    emit(
+        "backup_ref_scan_count",
+        MetricValue::Histogram(count as u64),
+        Vec::new(),
+    );
+}
+
+pub fn backup_ref_pruned(count: usize) {
+    if count == 0 {
+        return;
+    }
+    emit(
+        "backup_ref_pruned_total",
+        MetricValue::Counter(count as u64),
+        Vec::new(),
+    );
+}
+
+pub fn backup_ref_lock_contention(operation: &'static str) {
+    emit(
+        "backup_ref_lock_contention_total",
+        MetricValue::Counter(1),
+        vec![MetricLabel {
+            key: "operation",
+            value: operation.to_string(),
+        }],
+    );
+}
+
+pub fn backup_ref_lock_cleanup(operation: &'static str, outcome: &'static str) {
+    emit(
+        "backup_ref_lock_cleanup_total",
+        MetricValue::Counter(1),
+        vec![
+            MetricLabel {
+                key: "operation",
+                value: operation.to_string(),
+            },
+            MetricLabel {
+                key: "outcome",
+                value: outcome.to_string(),
+            },
+        ],
+    );
+}
+
 pub fn set_wal_bytes_total(namespace: &crate::core::NamespaceId, value: u64) {
     emit(
         "wal_bytes_total",
@@ -614,6 +661,10 @@ mod tests {
         set_checkpoint_queue_depth(4);
         repl_ingest_throttle(Duration::from_millis(5), 1024);
         background_io_throttle(Duration::from_millis(7), 2048);
+        backup_ref_scan(12);
+        backup_ref_pruned(3);
+        backup_ref_lock_contention("create");
+        backup_ref_lock_cleanup("create", "removed");
 
         let events = sink.events.lock().expect("metrics lock");
         assert!(events.iter().any(|e| e.name == "wal_append_ok"));
@@ -639,6 +690,18 @@ mod tests {
             events
                 .iter()
                 .any(|e| e.name == "background_io_throttle_bytes")
+        );
+        assert!(events.iter().any(|e| e.name == "backup_ref_scan_count"));
+        assert!(events.iter().any(|e| e.name == "backup_ref_pruned_total"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.name == "backup_ref_lock_contention_total")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.name == "backup_ref_lock_cleanup_total")
         );
     }
 

@@ -21,7 +21,8 @@ use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
 use crate::daemon::repl::{ContiguousBatch, IngestOutcome, SessionStore, WatermarkSnapshot};
 use crate::daemon::wal::{
     EventWalError, FrameReader, IndexedRangeItem, ReplicaDurabilityRole, ReplicaLivenessRow,
-    VerifiedRecord, WalIndex, WalIndexError, open_segment_reader,
+    VerifiedRecord, WalIndex, WalIndexError, WalIndexTxnProvider, WalReadRange,
+    open_segment_reader,
 };
 use crate::paths;
 use beads_daemon_core::repl::proto::WatermarkState;
@@ -159,7 +160,7 @@ impl SessionStore for ReplSessionStore {
         last_handshake_ms: u64,
         role: ReplicaDurabilityRole,
     ) -> Result<(), WalIndexError> {
-        let mut txn = self.wal_index.writer().begin_txn()?;
+        let mut txn = self.wal_index.begin_wal_txn()?;
         txn.upsert_replica_liveness(&ReplicaLivenessRow {
             replica_id,
             last_seen_ms,
@@ -263,6 +264,20 @@ impl WalRangeReader {
         }
 
         Ok(batch.into_vec())
+    }
+}
+
+impl WalReadRange for WalRangeReader {
+    type Error = WalRangeError;
+
+    fn read_range(
+        &self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+        from_seq_excl: Seq0,
+        max_bytes: usize,
+    ) -> Result<Vec<EventFrameV1>, Self::Error> {
+        WalRangeReader::read_range(self, namespace, origin, from_seq_excl, max_bytes)
     }
 }
 

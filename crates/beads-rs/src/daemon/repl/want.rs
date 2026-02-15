@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::core::{EventFrameV1, Limits, NamespaceId, ReplicaId, Seq0, Seq1};
-use crate::daemon::repl::runtime::{WalRangeError, WalRangeReader};
+use crate::daemon::repl::runtime::WalRangeError;
+use crate::daemon::wal::WalReadRange;
 use beads_daemon::broadcast::BroadcastEvent;
 use beads_daemon_core::repl::proto::Want;
 
@@ -38,7 +39,7 @@ pub(crate) fn broadcast_to_frame(event: BroadcastEvent) -> EventFrameV1 {
 pub(crate) fn build_want_frames(
     want: &Want,
     cache: Vec<BroadcastEvent>,
-    wal_reader: Option<&WalRangeReader>,
+    wal_reader: Option<&dyn WalReadRange<Error = WalRangeError>>,
     limits: &Limits,
     allowed_set: Option<&BTreeSet<NamespaceId>>,
 ) -> Result<WantFramesOutcome, WalRangeError> {
@@ -95,9 +96,7 @@ pub(crate) fn build_want_frames(
                 Ok(wal_frames) => {
                     state.frames = VecDeque::from(wal_frames);
                 }
-                Err(err @ WalRangeError::MissingRange { .. }) => {
-                    let _ = err;
-                }
+                Err(WalRangeError::MissingRange { .. }) => {}
                 Err(err) => return Err(err),
             }
         }

@@ -76,6 +76,7 @@ more details in `MIGRATION.md`.
 
 **where data lives:**
 - canonical state: `refs/heads/beads/store`
+- bounded backup refs: `refs/beads/backup/*` (latest 64 retained)
 - files: `state.jsonl`, `tombstones.jsonl`, `deps.jsonl`, `meta.json`
 - daemon socket: `$XDG_RUNTIME_DIR/beads/daemon.sock` or `~/.beads/daemon.sock` or `/tmp/beads-$uid/daemon.sock`
 
@@ -83,6 +84,7 @@ more details in `MIGRATION.md`.
 - cli auto-starts a local daemon on demand
 - mutations are debounced and pushed in the background
 - `bd sync` is just "wait for flush", not a workflow step
+- backup ref maintenance is best-effort under lock contention and uses age/PID-aware stale lock cleanup
 
 ## editor integration
 
@@ -123,6 +125,7 @@ override location with `BD_CONFIG_DIR`. disable auto-upgrade for a single run wi
 - `CLI_SPEC.md` - cli surface / compatibility goals
 - `SPEC.md` - storage model + invariants
 - `MIGRATION.md` - migrate from beads-go
+- `BENCHMARKING.md` - hotpath benchmark workflow and artifact interpretation
 
 ## nix flake
 

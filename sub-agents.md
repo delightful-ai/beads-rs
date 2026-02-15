@@ -37,6 +37,21 @@
   status: completed
   summary: Label tails come from synchronous WAL fsync path plus occasional checkpoint overlap; recommended reducing inline checkpoint contention and improving tail-focused instrumentation.
 
+- id: `019c54fa-a983-71f1-bd1f-06d8c5808d9b`
+  scope: working-copy bug review (sync/metrics/docs changes)
+  status: completed
+  summary: No correctness regressions found in backup-ref lock/metrics/docs changes; noted residual best-effort risk if lock metadata/PID checks repeatedly fail.
+
+- id: `019c54fa-a995-7fd1-8ff6-10b0dba1ddc7`
+  scope: working-copy test coverage audit
+  status: completed
+  summary: Flagged missing coverage around lock-contention metrics and cleanup-policy observability; recommended sync-level metric assertions/tests.
+
+- id: `019c54fa-a9af-7bb1-a74b-917a412620b1`
+  scope: benchmark/instrumentation methodology audit
+  status: completed
+  summary: Verified non-JSON hotpath harness and suggested provenance metadata capture (branch/commit/dirty/tool versions) for reproducibility.
+
 ## Reports
 
 - saved: `sub-agent-reports.md`

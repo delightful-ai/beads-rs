@@ -37,6 +37,7 @@ need_cmd "$BD_BIN"
 need_cmd jq
 need_cmd rg
 need_cmd hyperfine
+need_cmd git
 
 bd_cmd() {
   "$BD_BIN" --repo "$ROOT" "$@"
@@ -44,6 +45,27 @@ bd_cmd() {
 
 BD_BIN_Q="$(printf "%q" "$BD_BIN")"
 ROOT_Q="$(printf "%q" "$ROOT")"
+
+GIT_BRANCH="$(git -C "$ROOT" symbolic-ref --short HEAD 2>/dev/null || git -C "$ROOT" describe --dirty --always)"
+GIT_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+GIT_DIRTY="0"
+if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+  GIT_DIRTY="1"
+fi
+
+UNAME_INFO="$(uname -a)"
+RUSTC_VERSION="$(rustc --version 2>/dev/null || true)"
+CARGO_VERSION="$(cargo --version 2>/dev/null || true)"
+HYPERFINE_VERSION="$(hyperfine --version 2>/dev/null || true)"
+CPU_INFO="$(
+  {
+    sysctl -n machdep.cpu.brand_string 2>/dev/null \
+      || lscpu 2>/dev/null | awk -F: '/Model name/ {sub(/^[ \t]+/, "", $2); print $2; exit}'
+  } || true
+)"
+
+GIT_STATUS_FILE="$OUT_DIR/git-status.txt"
+git -C "$ROOT" status --short >"$GIT_STATUS_FILE"
 
 cat > "$OUT_DIR/run_meta.txt" <<META
 timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -54,6 +76,15 @@ warmup=$WARMUP
 hotpath_iters=$HOTPATH_ITERS
 bd_bin=$BD_BIN
 bd_version=$("$BD_BIN" --version)
+git_branch=$GIT_BRANCH
+git_commit=$GIT_COMMIT
+git_dirty=$GIT_DIRTY
+rustc_version=${RUSTC_VERSION:-missing}
+cargo_version=${CARGO_VERSION:-missing}
+hyperfine_version=${HYPERFINE_VERSION:-missing}
+cpu_model=${CPU_INFO:-unknown}
+os_uname="$UNAME_INFO"
+git_status_file=$GIT_STATUS_FILE
 META
 
 # Capture prime workflow guidance used for this run.
