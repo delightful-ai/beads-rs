@@ -113,8 +113,9 @@ use rustc_lint::{LateContext, Level, Lint, LintContext};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::hir::place::PlaceBase;
 use rustc_middle::lint::LevelAndSource;
+use rustc_middle::mir::visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor as MirVisitor};
 use rustc_middle::mir::{
-    AggregateKind, Operand, RETURN_PLACE, Rvalue, StatementKind, TerminatorKind,
+    AggregateKind, Local, Location, Operand, Place, RETURN_PLACE, Rvalue, StatementKind, TerminatorKind,
 };
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow, PointerCoercion};
 use rustc_middle::ty::layout::IntegerExt;
@@ -757,6 +758,56 @@ fn is_default_equivalent_from(cx: &LateContext<'_>, from_func: &Expr<'_>, arg: &
     false
 }
 
+fn is_local_partially_moved(cx: &LateContext<'_>, local_id: HirId) -> bool {
+    let def_id = cx.tcx.hir_enclosing_body_owner(local_id);
+
+    // Ensure we can access MIR
+    if !cx.tcx.is_mir_available(def_id) {
+        return true; // Conservative
+    }
+
+    let mir = cx.tcx.mir_built(def_id).borrow();
+
+    let local_span = cx.tcx.hir_span(local_id);
+
+    // Find the mir::Local
+    let Some(local) = mir.local_decls.iter_enumerated().find_map(|(local, decl)| {
+        if decl.source_info.span == local_span {
+            Some(local)
+        } else {
+            None
+        }
+    }) else {
+        return true; // Conservative
+    };
+
+    struct PartialMoveVisitor {
+        local: Local,
+        partially_moved: bool,
+    }
+
+    impl<'tcx> MirVisitor<'tcx> for PartialMoveVisitor {
+        fn visit_place(&mut self, place: &Place<'tcx>, context: PlaceContext, _location: Location) {
+            if place.local == self.local && !place.projection.is_empty() {
+                match context {
+                    PlaceContext::NonMutatingUse(NonMutatingUseContext::Move)
+                    | PlaceContext::MutatingUse(MutatingUseContext::Drop) => {
+                        self.partially_moved = true;
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+
+    let mut visitor = PartialMoveVisitor {
+        local,
+        partially_moved: false,
+    };
+    visitor.visit_body(&mir);
+    visitor.partially_moved
+}
+
 /// Checks if the top level expression can be moved into a closure as is.
 /// Currently checks for:
 /// * Break/Continue outside the given loop HIR ids.
@@ -828,8 +879,7 @@ pub fn can_move_expr_to_closure_no_visit<'tcx>(
         ) if !ignore_locals.contains(local_id)
             && can_partially_move_ty(cx, cx.typeck_results().node_type(hir_id)) =>
         {
-            // TODO: check if the local has been partially moved. Assume it has for now.
-            false
+            !is_local_partially_moved(cx, *local_id)
         }
         _ => true,
     }
