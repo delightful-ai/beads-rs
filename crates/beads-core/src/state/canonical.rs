@@ -1,86 +1,24 @@
-//! Layer 9: Canonical State
-//!
-//! The single source of truth for beads, tombstones, and deps.
-//!
-//! INVARIANT: each BeadId maps to either a live bead or a global tombstone.
-//! This is structural via BeadEntry; lineage-scoped collision tombstones are separate.
-//!
-//! Collision tombstones are lineage-scoped and may coexist with a live bead of
-//! the same ID when the live bead is a different lineage (SPEC §4.1.1).
-//!
-//! Resurrection rule: modification strictly newer than deletion can resurrect.
-
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::OnceLock;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
-use super::bead::{Bead, BeadView, SameLineageBead};
-use super::collections::{Label, Labels};
-use super::composite::Note;
-use super::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, ParentEdge};
-use super::domain::DepKind;
-use super::error::{CoreError, InvalidDependency};
-use super::event::sha256_bytes;
-use super::identity::{ActorId, BeadId, ContentHash, NoteId};
-use super::orset::{Dot, Dvv, OrSet, OrSetChange};
-use super::time::{Stamp, WallClock, WriteStamp};
-use super::tombstone::{Tombstone, TombstoneKey};
-use super::wire_bead::WireLineageStamp;
+use crate::bead::{Bead, BeadView, SameLineageBead};
+use crate::collections::{Label, Labels};
+use crate::composite::Note;
+use crate::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, ParentEdge};
+use crate::domain::DepKind;
+use crate::error::{CoreError, InvalidDependency};
+use crate::identity::{ActorId, BeadId, ContentHash, NoteId};
+use crate::orset::{Dot, Dvv, OrSetChange};
+use crate::time::{Stamp, WallClock, WriteStamp};
+use crate::tombstone::{Tombstone, TombstoneKey};
 
-/// Label membership for a single bead.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LabelState {
-    set: OrSet<Label>,
-    stamp: Option<Stamp>,
-}
-
-impl LabelState {
-    pub fn new() -> Self {
-        Self {
-            set: OrSet::new(),
-            stamp: None,
-        }
-    }
-
-    pub fn from_parts(set: OrSet<Label>, stamp: Option<Stamp>) -> Self {
-        Self { set, stamp }
-    }
-
-    pub fn stamp(&self) -> Option<&Stamp> {
-        self.stamp.as_ref()
-    }
-
-    pub fn labels(&self) -> Labels {
-        self.set.values().cloned().collect()
-    }
-
-    pub fn values(&self) -> impl Iterator<Item = &Label> {
-        self.set.values()
-    }
-
-    pub fn dots_for(&self, label: &Label) -> Option<&BTreeSet<Dot>> {
-        self.set.dots_for(label)
-    }
-
-    pub fn cc(&self) -> &Dvv {
-        self.set.cc()
-    }
-
-    pub fn join(a: &Self, b: &Self) -> Self {
-        Self {
-            set: OrSet::join(&a.set, &b.set),
-            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
-        }
-    }
-}
-
-impl Default for LabelState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+use super::deps::{DepIndexes, DepStore};
+use super::labels::{LabelState, LabelStore};
+use super::max_stamp;
+use super::notes::{NoteStore, note_collision_cmp};
 
 /// Deterministic fallback lineage for legacy data without lineage stamps.
 ///
@@ -97,446 +35,6 @@ pub fn legacy_fallback_lineage() -> Stamp {
             )
         })
         .clone()
-}
-
-/// Canonical label store keyed by bead id + lineage stamp.
-#[derive(Clone, Debug, Default)]
-pub struct LabelStore {
-    by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>>,
-}
-
-impl LabelStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn state(&self, id: &BeadId, lineage: &Stamp) -> Option<&LabelState> {
-        self.by_bead.get(id).and_then(|states| states.get(lineage))
-    }
-
-    pub fn state_mut(&mut self, id: &BeadId, lineage: &Stamp) -> &mut LabelState {
-        self.by_bead
-            .entry(id.clone())
-            .or_default()
-            .entry(lineage.clone())
-            .or_default()
-    }
-
-    pub fn insert_state(&mut self, id: BeadId, lineage: Stamp, state: LabelState) {
-        self.by_bead.entry(id).or_default().insert(lineage, state);
-    }
-
-    fn take_state(&mut self, id: &BeadId, lineage: &Stamp) -> Option<LabelState> {
-        let lineages = self.by_bead.get_mut(id)?;
-        let state = lineages.remove(lineage)?;
-        if lineages.is_empty() {
-            self.by_bead.remove(id);
-        }
-        Some(state)
-    }
-
-    pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = LabelStore::new();
-        let ids: BTreeSet<_> = a.by_bead.keys().chain(b.by_bead.keys()).cloned().collect();
-        for id in ids {
-            let mut merged_lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
-            if let Some(states) = a.by_bead.get(&id) {
-                for (lineage, state) in states {
-                    merged_lineages.insert(lineage.clone(), state.clone());
-                }
-            }
-            if let Some(states) = b.by_bead.get(&id) {
-                for (lineage, state) in states {
-                    match merged_lineages.get(lineage) {
-                        Some(existing) => {
-                            merged_lineages
-                                .insert(lineage.clone(), LabelState::join(existing, state));
-                        }
-                        None => {
-                            merged_lineages.insert(lineage.clone(), state.clone());
-                        }
-                    }
-                }
-            }
-            if !merged_lineages.is_empty() {
-                merged.by_bead.insert(id.clone(), merged_lineages);
-            }
-        }
-        merged
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct LineageLabelState {
-    lineage: WireLineageStamp,
-    state: LabelState,
-}
-
-#[derive(Serialize, Deserialize)]
-struct LabelStoreWire {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    by_bead: BTreeMap<BeadId, Vec<LineageLabelState>>,
-}
-
-impl Serialize for LabelStore {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut by_bead = BTreeMap::new();
-        for (id, lineages) in &self.by_bead {
-            let entries = lineages
-                .iter()
-                .map(|(lineage, state)| LineageLabelState {
-                    lineage: WireLineageStamp::from(lineage.clone()),
-                    state: state.clone(),
-                })
-                .collect::<Vec<_>>();
-            if !entries.is_empty() {
-                by_bead.insert(id.clone(), entries);
-            }
-        }
-        let wire = LabelStoreWire { by_bead };
-        wire.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for LabelStore {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = LabelStoreWire::deserialize(deserializer)?;
-        let mut by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>> = BTreeMap::new();
-        for (id, entries) in wire.by_bead {
-            let mut lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
-            for entry in entries {
-                let lineage = entry.lineage.stamp();
-                match lineages.get(&lineage) {
-                    Some(existing) => {
-                        lineages.insert(lineage, LabelState::join(existing, &entry.state));
-                    }
-                    None => {
-                        lineages.insert(lineage, entry.state);
-                    }
-                }
-            }
-            if !lineages.is_empty() {
-                by_bead.insert(id, lineages);
-            }
-        }
-        Ok(LabelStore { by_bead })
-    }
-}
-
-/// Canonical dependency store (OR-Set membership only).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DepStore {
-    set: OrSet<DepKey>,
-    stamp: Option<Stamp>,
-}
-
-impl DepStore {
-    pub fn new() -> Self {
-        Self {
-            set: OrSet::new(),
-            stamp: None,
-        }
-    }
-
-    pub fn from_parts(set: OrSet<DepKey>, stamp: Option<Stamp>) -> Self {
-        Self { set, stamp }
-    }
-    pub fn stamp(&self) -> Option<&Stamp> {
-        self.stamp.as_ref()
-    }
-
-    pub fn cc(&self) -> &Dvv {
-        self.set.cc()
-    }
-
-    pub fn contains(&self, key: &DepKey) -> bool {
-        self.set.contains(key)
-    }
-
-    pub fn len(&self) -> usize {
-        self.set.values().count()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.set.is_empty()
-    }
-
-    pub fn values(&self) -> impl Iterator<Item = &DepKey> {
-        self.set.values()
-    }
-
-    pub fn dots_for(&self, key: &DepKey) -> Option<&BTreeSet<Dot>> {
-        self.set.dots_for(key)
-    }
-
-    pub fn join(a: &Self, b: &Self) -> Self {
-        Self {
-            set: OrSet::join(&a.set, &b.set),
-            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
-        }
-    }
-}
-
-impl Default for DepStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Canonical note store keyed by bead id + lineage stamp.
-#[derive(Clone, Debug, Default)]
-pub struct NoteStore {
-    by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>>,
-}
-
-impl NoteStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&mut self, id: BeadId, lineage: Stamp, note: Note) -> Option<Note> {
-        let entry = self
-            .by_bead
-            .entry(id)
-            .or_default()
-            .entry(lineage)
-            .or_default();
-        if let Some(existing) = entry.get(&note.id) {
-            return Some(existing.clone());
-        }
-        entry.insert(note.id.clone(), note);
-        None
-    }
-
-    pub fn replace(&mut self, id: BeadId, lineage: Stamp, note: Note) -> Option<Note> {
-        let entry = self
-            .by_bead
-            .entry(id)
-            .or_default()
-            .entry(lineage)
-            .or_default();
-        entry.insert(note.id.clone(), note)
-    }
-
-    pub fn get(&self, id: &BeadId, lineage: &Stamp, note_id: &NoteId) -> Option<&Note> {
-        self.by_bead
-            .get(id)
-            .and_then(|notes| notes.get(lineage))
-            .and_then(|notes| notes.get(note_id))
-    }
-
-    pub fn note_id_exists(&self, id: &BeadId, note_id: &NoteId) -> bool {
-        if let Some(lineages) = self.by_bead.get(id) {
-            for notes in lineages.values() {
-                if notes.contains_key(note_id) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn notes_for(&self, id: &BeadId, lineage: &Stamp) -> Vec<&Note> {
-        let Some(notes) = self.by_bead.get(id).and_then(|notes| notes.get(lineage)) else {
-            return Vec::new();
-        };
-        let mut out: Vec<&Note> = notes.values().collect();
-        out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
-        out
-    }
-
-    pub fn iter_lineages(
-        &self,
-    ) -> impl Iterator<Item = (&BeadId, &Stamp, &BTreeMap<NoteId, Note>)> {
-        self.by_bead.iter().flat_map(|(id, lineages)| {
-            lineages
-                .iter()
-                .map(move |(lineage, notes)| (id, lineage, notes))
-        })
-    }
-
-    fn take_lineage_notes(
-        &mut self,
-        id: &BeadId,
-        lineage: &Stamp,
-    ) -> Option<BTreeMap<NoteId, Note>> {
-        let lineages = self.by_bead.get_mut(id)?;
-        let notes = lineages.remove(lineage)?;
-        if lineages.is_empty() {
-            self.by_bead.remove(id);
-        }
-        Some(notes)
-    }
-
-    pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = NoteStore::new();
-        for (id, lineages) in a.by_bead.iter().chain(b.by_bead.iter()) {
-            let entry = merged.by_bead.entry(id.clone()).or_default();
-            for (lineage, notes) in lineages {
-                let lineage_entry = entry.entry(lineage.clone()).or_default();
-                for (note_id, note) in notes {
-                    match lineage_entry.get(note_id) {
-                        None => {
-                            lineage_entry.insert(note_id.clone(), note.clone());
-                        }
-                        Some(existing) => {
-                            if note_collision_cmp(existing, note) == Ordering::Less {
-                                lineage_entry.insert(note_id.clone(), note.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        merged
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct LineageNotes {
-    lineage: WireLineageStamp,
-    notes: BTreeMap<NoteId, Note>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct NoteStoreWire {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    by_bead: BTreeMap<BeadId, Vec<LineageNotes>>,
-}
-
-impl Serialize for NoteStore {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut by_bead = BTreeMap::new();
-        for (id, lineages) in &self.by_bead {
-            let entries = lineages
-                .iter()
-                .map(|(lineage, notes)| LineageNotes {
-                    lineage: WireLineageStamp::from(lineage.clone()),
-                    notes: notes.clone(),
-                })
-                .collect::<Vec<_>>();
-            if !entries.is_empty() {
-                by_bead.insert(id.clone(), entries);
-            }
-        }
-        let wire = NoteStoreWire { by_bead };
-        wire.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for NoteStore {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = NoteStoreWire::deserialize(deserializer)?;
-        let mut by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>> =
-            BTreeMap::new();
-        for (id, entries) in wire.by_bead {
-            let mut lineages: BTreeMap<Stamp, BTreeMap<NoteId, Note>> = BTreeMap::new();
-            for entry in entries {
-                let lineage = entry.lineage.stamp();
-                match lineages.get(&lineage) {
-                    Some(existing) => {
-                        let mut merged = existing.clone();
-                        for (note_id, note) in entry.notes {
-                            match merged.get(&note_id) {
-                                None => {
-                                    merged.insert(note_id, note);
-                                }
-                                Some(existing_note) => {
-                                    if note_collision_cmp(existing_note, &note) == Ordering::Less {
-                                        merged.insert(note_id, note);
-                                    }
-                                }
-                            }
-                        }
-                        lineages.insert(lineage, merged);
-                    }
-                    None => {
-                        lineages.insert(lineage, entry.notes);
-                    }
-                }
-            }
-            if !lineages.is_empty() {
-                by_bead.insert(id, lineages);
-            }
-        }
-        Ok(NoteStore { by_bead })
-    }
-}
-
-fn max_stamp(a: Option<&Stamp>, b: Option<&Stamp>) -> Option<Stamp> {
-    match (a, b) {
-        (Some(left), Some(right)) => Some(if left >= right {
-            left.clone()
-        } else {
-            right.clone()
-        }),
-        (Some(stamp), None) | (None, Some(stamp)) => Some(stamp.clone()),
-        (None, None) => None,
-    }
-}
-
-/// Derived indexes for efficient dependency lookups.
-///
-/// These are rebuilt from `dep_store` on load and updated incrementally.
-/// Not serialized - derived state only.
-#[derive(Default, Debug, Clone)]
-pub struct DepIndexes {
-    /// from -> [(to, kind)] for active deps
-    out_edges: BTreeMap<BeadId, Vec<(BeadId, DepKind)>>,
-    /// to -> [(from, kind)] for active deps
-    in_edges: BTreeMap<BeadId, Vec<(BeadId, DepKind)>>,
-}
-
-impl DepIndexes {
-    /// Create empty indexes.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add an edge to both indexes.
-    fn add(&mut self, from: &BeadId, to: &BeadId, kind: DepKind) {
-        self.out_edges
-            .entry(from.clone())
-            .or_default()
-            .push((to.clone(), kind));
-        self.in_edges
-            .entry(to.clone())
-            .or_default()
-            .push((from.clone(), kind));
-    }
-
-    /// Remove an edge from both indexes.
-    fn remove(&mut self, from: &BeadId, to: &BeadId, kind: DepKind) {
-        if let Some(edges) = self.out_edges.get_mut(from) {
-            edges.retain(|(t, k)| !(t == to && *k == kind));
-        }
-        if let Some(edges) = self.in_edges.get_mut(to) {
-            edges.retain(|(f, k)| !(f == from && *k == kind));
-        }
-    }
-
-    /// Get outgoing edges from a bead.
-    pub fn out_edges(&self, id: &BeadId) -> &[(BeadId, DepKind)] {
-        self.out_edges.get(id).map(|v| v.as_slice()).unwrap_or(&[])
-    }
-
-    /// Get incoming edges to a bead.
-    pub fn in_edges(&self, id: &BeadId) -> &[(BeadId, DepKind)] {
-        self.in_edges.get(id).map(|v| v.as_slice()).unwrap_or(&[])
-    }
 }
 
 /// Error from requiring a live bead.
@@ -803,7 +301,7 @@ impl CanonicalState {
         self.bead_view(id).map(|view| view.updated_stamp().clone())
     }
 
-    pub fn content_hash_for(&self, id: &BeadId) -> Option<super::identity::ContentHash> {
+    pub fn content_hash_for(&self, id: &BeadId) -> Option<ContentHash> {
         self.bead_view(id).map(|view| *view.content_hash())
     }
 
@@ -993,7 +491,7 @@ impl CanonicalState {
     /// Get the maximum WriteStamp across all beads.
     ///
     /// Used for clock synchronization after sync.
-    pub fn max_write_stamp(&self) -> Option<super::time::WriteStamp> {
+    pub fn max_write_stamp(&self) -> Option<WriteStamp> {
         self.beads
             .iter()
             .filter_map(|(id, entry)| match entry {
@@ -1283,7 +781,9 @@ impl CanonicalState {
             .out_edges(id)
             .iter()
             .filter(|(to, _)| self.get_live(to).is_some())
-            .filter_map(|(to, kind)| DepKey::new(id.clone(), to.clone(), *kind).ok())
+            .filter_map(|(to, kind): &(BeadId, DepKind)| {
+                DepKey::new(id.clone(), to.clone(), *kind).ok()
+            })
             .collect()
     }
 
@@ -1299,7 +799,9 @@ impl CanonicalState {
             .in_edges(id)
             .iter()
             .filter(|(from, _)| self.get_live(from).is_some())
-            .filter_map(|(from, kind)| DepKey::new(from.clone(), id.clone(), *kind).ok())
+            .filter_map(|(from, kind): &(BeadId, DepKind)| {
+                DepKey::new(from.clone(), id.clone(), *kind).ok()
+            })
             .collect()
     }
 
@@ -1317,7 +819,9 @@ impl CanonicalState {
             .in_edges(parent)
             .iter()
             .filter(|(from, kind)| *kind == DepKind::Parent && self.get_live(from).is_some())
-            .filter_map(|(from, _)| ParentEdge::new(from.clone(), parent.clone()).ok())
+            .filter_map(|(from, _): &(BeadId, DepKind)| {
+                ParentEdge::new(from.clone(), parent.clone()).ok()
+            })
             .collect()
     }
 
@@ -1486,7 +990,7 @@ impl CanonicalState {
     }
 }
 
-fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
+pub fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
     let lineage = bead.core.created();
     let labels = state.labels_for_lineage(bead.id(), lineage);
     let notes = state
@@ -1512,17 +1016,6 @@ pub fn bead_collision_cmp(state: &CanonicalState, existing: &Bead, incoming: &Be
             bead_content_hash_for_collision(state, existing)
                 .as_bytes()
                 .cmp(bead_content_hash_for_collision(state, incoming).as_bytes())
-        })
-}
-
-pub fn note_collision_cmp(existing: &Note, incoming: &Note) -> Ordering {
-    existing
-        .at
-        .cmp(&incoming.at)
-        .then_with(|| existing.author.cmp(&incoming.author))
-        .then_with(|| {
-            sha256_bytes(existing.content.as_bytes())
-                .cmp(&sha256_bytes(incoming.content.as_bytes()))
         })
 }
 
@@ -1890,43 +1383,6 @@ mod tests {
             merged.get_tombstone(&id).is_some(),
             "tombstone should exist"
         );
-    }
-
-    #[test]
-    fn note_store_join_resolves_collisions_deterministically() {
-        let bead = bead_id("bd-note-join");
-        let note_id = NoteId::new("note-join").unwrap();
-        let lineage = make_stamp(1000, 0, "alice");
-        let note_a = Note::new(
-            note_id.clone(),
-            "alpha".to_string(),
-            actor_id("alice"),
-            WriteStamp::new(10, 0),
-        );
-        let note_b = Note::new(
-            note_id.clone(),
-            "beta".to_string(),
-            actor_id("bob"),
-            WriteStamp::new(20, 0),
-        );
-
-        let mut store_a = NoteStore::new();
-        store_a.insert(bead.clone(), lineage.clone(), note_a);
-        let mut store_b = NoteStore::new();
-        store_b.insert(bead.clone(), lineage.clone(), note_b.clone());
-
-        let joined_ab = NoteStore::join(&store_a, &store_b);
-        let joined_ba = NoteStore::join(&store_b, &store_a);
-
-        let stored_ab = joined_ab
-            .get(&bead, &lineage, &note_id)
-            .expect("note stored");
-        let stored_ba = joined_ba
-            .get(&bead, &lineage, &note_id)
-            .expect("note stored");
-
-        assert_eq!(stored_ab, stored_ba);
-        assert_eq!(stored_ab.content, "beta");
     }
 
     #[test]
