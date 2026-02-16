@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::identity::{ActorId, BranchName, NoteId};
 use super::time::{WallClock, WriteStamp}; // WriteStamp still used in Note
+use sha2::{Digest, Sha256};
+use crate::identity::ContentHashable;
+use crate::time::Stamp;
 
 /// Immutable note/comment on a bead.
 ///
@@ -145,5 +148,68 @@ impl Workflow {
     /// Check if workflow is in terminal state.
     pub fn is_closed(&self) -> bool {
         matches!(self, Self::Closed(_))
+    }
+}
+
+impl ContentHashable for Claim {
+    fn hash_content(&self, h: &mut Sha256) {
+        // assignee (from claim if present)
+        if let Some(assignee) = self.assignee() {
+            h.update(assignee.as_str().as_bytes());
+        }
+        h.update([0]);
+
+        // assignee_expires (wall clock ms if present)
+        if let Some(expires) = self.expires() {
+            h.update(expires.0.to_string().as_bytes());
+        }
+        h.update([0]);
+    }
+}
+
+impl ContentHashable for Note {
+    fn hash_content(&self, h: &mut Sha256) {
+        h.update(self.id.as_str().as_bytes());
+        h.update(b":");
+        h.update(self.content.as_bytes());
+        h.update(b":");
+        h.update(self.author.as_str().as_bytes());
+        h.update(b":");
+        h.update(self.at.wall_ms.to_string().as_bytes());
+        h.update(b",");
+        h.update(self.at.counter.to_string().as_bytes());
+        h.update(b"\n");
+    }
+}
+
+impl Workflow {
+    pub fn hash_status(&self, h: &mut Sha256) {
+        h.update(self.status().as_bytes());
+        h.update([0]);
+    }
+
+    pub fn hash_closure(&self, stamp: &Stamp, h: &mut Sha256) {
+        if let Self::Closed(closure) = self {
+            h.update(stamp.at.wall_ms.to_string().as_bytes());
+            h.update(b",");
+            h.update(stamp.at.counter.to_string().as_bytes());
+            h.update([0]);
+            h.update(stamp.by.as_str().as_bytes());
+            h.update([0]);
+            if let Some(reason) = closure.reason.as_ref() {
+                h.update(reason.as_bytes());
+            }
+            h.update([0]);
+            if let Some(branch) = closure.on_branch.as_ref() {
+                h.update(branch.as_str().as_bytes());
+            }
+            h.update([0]);
+        } else {
+            // Not closed - emit 4 null separators for compatibility
+            h.update([0]); // closed_at
+            h.update([0]); // closed_by
+            h.update([0]); // closed_reason
+            h.update([0]); // closed_on_branch
+        }
     }
 }

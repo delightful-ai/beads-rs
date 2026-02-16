@@ -12,6 +12,7 @@ use super::composite::{Claim, Note, Workflow};
 use super::crdt::Lww;
 use super::domain::{BeadType, Priority};
 use super::error::{CollisionError, CoreError};
+use crate::identity::ContentHashable;
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
 use super::time::{Stamp, WallClock, WriteStamp};
 use super::wire_bead::WorkflowStatus;
@@ -697,135 +698,70 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
     let mut h = Sha256::new();
 
     // id
-    h.update(bead.core.id.as_str().as_bytes());
-    h.update([0]);
+    bead.core.id.hash_content(&mut h);
 
     // title
-    h.update(bead.fields.title.value.as_bytes());
-    h.update([0]);
+    bead.fields.title.value.hash_content(&mut h);
 
     // description
-    h.update(bead.fields.description.value.as_bytes());
-    h.update([0]);
+    bead.fields.description.value.hash_content(&mut h);
 
     // status
-    h.update(bead.fields.workflow.value.status().as_bytes());
-    h.update([0]);
+    bead.fields.workflow.value.hash_status(&mut h);
 
-    // priority (as decimal)
-    h.update(bead.fields.priority.value.value().to_string().as_bytes());
-    h.update([0]);
+    // priority
+    bead.fields.priority.value.hash_content(&mut h);
 
     // bead_type
-    h.update(bead.fields.bead_type.value.as_str().as_bytes());
-    h.update([0]);
+    bead.fields.bead_type.value.hash_content(&mut h);
 
     // labels (sorted for determinism)
-    for label in labels.iter() {
-        h.update(label.as_str().as_bytes());
-        h.update(b",");
-    }
-    h.update([0]);
+    labels.hash_content(&mut h);
 
-    // assignee (from claim if present)
-    if let Some(assignee) = bead.fields.claim.value.assignee() {
-        h.update(assignee.as_str().as_bytes());
-    }
-    h.update([0]);
-
-    // assignee_expires (wall clock ms if present)
-    if let Some(expires) = bead.fields.claim.value.expires() {
-        h.update(expires.0.to_string().as_bytes());
-    }
-    h.update([0]);
+    // assignee (from claim if present) & assignee_expires (wall clock ms if present)
+    bead.fields.claim.value.hash_content(&mut h);
 
     // design
-    if let Some(ref design) = bead.fields.design.value {
-        h.update(design.as_bytes());
-    }
-    h.update([0]);
+    bead.fields.design.value.hash_content(&mut h);
 
     // acceptance_criteria
-    if let Some(ref ac) = bead.fields.acceptance_criteria.value {
-        h.update(ac.as_bytes());
-    }
-    h.update([0]);
+    bead.fields.acceptance_criteria.value.hash_content(&mut h);
 
     // notes (sorted by (at, id) for determinism)
     let mut notes_sorted: Vec<&Note> = notes.iter().collect();
     notes_sorted.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
     for note in notes_sorted {
-        h.update(note.id.as_str().as_bytes());
-        h.update(b":");
-        h.update(note.content.as_bytes());
-        h.update(b":");
-        h.update(note.author.as_str().as_bytes());
-        h.update(b":");
-        h.update(note.at.wall_ms.to_string().as_bytes());
-        h.update(b",");
-        h.update(note.at.counter.to_string().as_bytes());
-        h.update(b"\n");
+        note.hash_content(&mut h);
     }
     h.update([0]);
 
     // created_at (wall_ms,counter)
-    h.update(bead.core.created().at.wall_ms.to_string().as_bytes());
-    h.update(b",");
-    h.update(bead.core.created().at.counter.to_string().as_bytes());
-    h.update([0]);
+    bead.core.created().at.hash_content(&mut h);
 
     // created_by
-    h.update(bead.core.created().by.as_str().as_bytes());
-    h.update([0]);
+    bead.core.created().by.hash_content(&mut h);
 
     // created_on_branch
     if let Some(branch) = bead.core.created_on_branch() {
-        h.update(branch.as_str().as_bytes());
+        branch.hash_content(&mut h);
+    } else {
+        h.update([0]);
     }
-    h.update([0]);
 
     // closed_at/by/reason/on_branch
-    if let Workflow::Closed(closure) = &bead.fields.workflow.value {
-        let closed_stamp = &bead.fields.workflow.stamp;
-        h.update(closed_stamp.at.wall_ms.to_string().as_bytes());
-        h.update(b",");
-        h.update(closed_stamp.at.counter.to_string().as_bytes());
-        h.update([0]);
-        h.update(closed_stamp.by.as_str().as_bytes());
-        h.update([0]);
-        if let Some(reason) = closure.reason.as_ref() {
-            h.update(reason.as_bytes());
-        }
-        h.update([0]);
-        if let Some(branch) = closure.on_branch.as_ref() {
-            h.update(branch.as_str().as_bytes());
-        }
-        h.update([0]);
-    } else {
-        // Not closed - emit 4 null separators for compatibility
-        h.update([0]); // closed_at
-        h.update([0]); // closed_by
-        h.update([0]); // closed_reason
-        h.update([0]); // closed_on_branch
-    }
+    bead.fields
+        .workflow
+        .value
+        .hash_closure(&bead.fields.workflow.stamp, &mut h);
 
     // external_ref
-    if let Some(ext) = bead.fields.external_ref.value.as_ref() {
-        h.update(ext.as_bytes());
-    }
-    h.update([0]);
+    bead.fields.external_ref.value.hash_content(&mut h);
 
     // source_repo
-    if let Some(repo) = bead.fields.source_repo.value.as_ref() {
-        h.update(repo.as_bytes());
-    }
-    h.update([0]);
+    bead.fields.source_repo.value.hash_content(&mut h);
 
     // estimated_minutes
-    if let Some(est) = bead.fields.estimated_minutes.value {
-        h.update(est.to_string().as_bytes());
-    }
-    h.update([0]);
+    bead.fields.estimated_minutes.value.hash_content(&mut h);
 
     ContentHash::from_bytes(h.finalize().into())
 }

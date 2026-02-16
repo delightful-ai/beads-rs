@@ -7,6 +7,8 @@ use std::cmp::Ordering;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use crate::identity::ContentHashable;
 
 use super::identity::ActorId;
 
@@ -133,5 +135,14 @@ impl PartialOrd for Stamp {
 impl Ord for Stamp {
     fn cmp(&self, other: &Self) -> Ordering {
         self.at.cmp(&other.at).then_with(|| self.by.cmp(&other.by)) // deterministic tiebreak
+    }
+}
+
+impl ContentHashable for WriteStamp {
+    fn hash_content(&self, h: &mut Sha256) {
+        h.update(self.wall_ms.to_string().as_bytes());
+        h.update(b",");
+        h.update(self.counter.to_string().as_bytes());
+        h.update([0]);
     }
 }

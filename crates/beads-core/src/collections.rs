@@ -6,6 +6,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use sha2::{Digest, Sha256};
+use crate::identity::ContentHashable;
 use serde::{Deserialize, Serialize};
 
 use super::error::{CoreError, InvalidLabel};
@@ -172,5 +174,15 @@ mod tests {
         assert!(labels.remove("bug"));
         assert!(!labels.contains("bug"));
         assert!(!labels.remove("missing"));
+    }
+}
+
+impl ContentHashable for Labels {
+    fn hash_content(&self, h: &mut Sha256) {
+        for label in self.iter() {
+            h.update(label.as_str().as_bytes());
+            h.update(b",");
+        }
+        h.update([0]);
     }
 }
