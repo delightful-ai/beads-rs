@@ -232,6 +232,24 @@ enum HookAddOutcome {
     Skipped,
 }
 
+fn hook_contains_command(hook: &Value, command: &str) -> bool {
+    let Some(hook_map) = hook.as_object() else {
+        return false;
+    };
+    let Some(commands) = hook_map.get("hooks").and_then(|c| c.as_array()) else {
+        return false;
+    };
+
+    for cmd in commands {
+        if let Some(cmd_map) = cmd.as_object()
+            && cmd_map.get("command").and_then(|c| c.as_str()) == Some(command)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn add_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) -> HookAddOutcome {
     let event_hooks = hooks
         .entry(event.to_string())
@@ -244,16 +262,8 @@ fn add_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &str) 
 
     // Check if bd hook already registered
     for hook in event_hooks.iter() {
-        if let Some(hook_map) = hook.as_object()
-            && let Some(commands) = hook_map.get("hooks").and_then(|c| c.as_array())
-        {
-            for cmd in commands {
-                if let Some(cmd_map) = cmd.as_object()
-                    && cmd_map.get("command").and_then(|c| c.as_str()) == Some(command)
-                {
-                    return HookAddOutcome::AlreadyPresent;
-                }
-            }
+        if hook_contains_command(hook, command) {
+            return HookAddOutcome::AlreadyPresent;
         }
     }
 
@@ -277,23 +287,7 @@ fn remove_hook_command(hooks: &mut Map<String, Value>, event: &str, command: &st
 
     let original_len = event_hooks.len();
 
-    event_hooks.retain(|hook| {
-        let Some(hook_map) = hook.as_object() else {
-            return true;
-        };
-        let Some(commands) = hook_map.get("hooks").and_then(|c| c.as_array()) else {
-            return true;
-        };
-
-        for cmd in commands {
-            if let Some(cmd_map) = cmd.as_object()
-                && cmd_map.get("command").and_then(|c| c.as_str()) == Some(command)
-            {
-                return false;
-            }
-        }
-        true
-    });
+    event_hooks.retain(|hook| !hook_contains_command(hook, command));
 
     event_hooks.len() < original_len
 }
@@ -317,18 +311,8 @@ fn has_beads_hooks(settings_path: &Path) -> bool {
         };
 
         for hook in event_hooks {
-            let Some(hook_map) = hook.as_object() else {
-                continue;
-            };
-            let Some(commands) = hook_map.get("hooks").and_then(|c| c.as_array()) else {
-                continue;
-            };
-            for cmd in commands {
-                if let Some(cmd_map) = cmd.as_object()
-                    && cmd_map.get("command").and_then(|c| c.as_str()) == Some("bd prime")
-                {
-                    return true;
-                }
+            if hook_contains_command(hook, "bd prime") {
+                return true;
             }
         }
     }
@@ -762,6 +746,32 @@ mod tests {
     }
 
     #[test]
+    fn check_claude_detects_hooks() {
+        let dir = tempdir().expect("temp dir");
+        let settings_path = dir.path().join("settings.json");
+
+        let settings = json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "command": "bd prime"
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        fs::write(&settings_path, serde_json::to_string(&settings).unwrap()).unwrap();
+
+        let other_path = dir.path().join("other.json");
+        let result = check_claude_at(&settings_path, &other_path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn check_cursor_returns_error_when_not_installed() {
         let dir = tempdir().expect("temp dir");
         let rules_path = dir.path().join("beads.mdc");
@@ -775,5 +785,43 @@ mod tests {
         let config_path = dir.path().join(".aider.conf.yml");
         let err = check_aider_at(&config_path).expect_err("expected missing config");
         assert!(matches!(err, SetupError::Validation { .. }));
+    }
+
+    #[test]
+    fn test_hook_add_remove_logic() {
+        let mut hooks = Map::new();
+        let event = "SessionStart";
+        let command = "bd prime";
+
+        // Initial add
+        let outcome = add_hook_command(&mut hooks, event, command);
+        assert!(matches!(outcome, HookAddOutcome::Added));
+
+        let event_hooks = hooks.get(event).unwrap().as_array().unwrap();
+        assert_eq!(event_hooks.len(), 1);
+
+        // Verify structure roughly
+        let hook = &event_hooks[0];
+        let cmds = hook.get("hooks").unwrap().as_array().unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].get("command").unwrap().as_str().unwrap(), command);
+
+        // Duplicate add
+        let outcome = add_hook_command(&mut hooks, event, command);
+        assert!(matches!(outcome, HookAddOutcome::AlreadyPresent));
+
+        let event_hooks = hooks.get(event).unwrap().as_array().unwrap();
+        assert_eq!(event_hooks.len(), 1);
+
+        // Remove
+        let removed = remove_hook_command(&mut hooks, event, command);
+        assert!(removed);
+
+        let event_hooks = hooks.get(event).unwrap().as_array().unwrap();
+        assert_eq!(event_hooks.len(), 0);
+
+        // Remove again
+        let removed = remove_hook_command(&mut hooks, event, command);
+        assert!(!removed);
     }
 }
