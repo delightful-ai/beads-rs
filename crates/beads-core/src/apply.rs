@@ -53,11 +53,9 @@ pub enum ApplyError {
 /// ```compile_fail
 /// use beads_core::{apply_event, CanonicalState, EventBody};
 ///
-/// fn main() {
-///     let mut state = CanonicalState::new();
-///     let body: EventBody = todo!();
-///     apply_event(&mut state, &body);
-/// }
+/// let mut state = CanonicalState::new();
+/// let body: EventBody = todo!();
+/// apply_event(&mut state, &body);
 /// ```
 pub fn apply_event(
     state: &mut CanonicalState,
