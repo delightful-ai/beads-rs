@@ -489,13 +489,15 @@ impl WalIndexReader for MemoryWalIndexReader {
 
     fn max_origin_seq(&self, ns: &NamespaceId, origin: &ReplicaId) -> Result<Seq0, WalIndexError> {
         self.with_state(|state| {
-            let mut max = 0u64;
-            for (key_ns, key_origin, key_seq) in state.events.keys() {
-                if key_ns == ns && key_origin == origin {
-                    max = max.max(key_seq.get());
+            let max_seq = Seq1::from_u64(u64::MAX).expect("MAX is not zero");
+            let max_key = (ns.clone(), *origin, max_seq);
+            if let Some((key, _)) = state.events.range(..=max_key).next_back() {
+                let (k_ns, k_origin, k_seq) = key;
+                if k_ns == ns && k_origin == origin {
+                    return Ok(Seq0::new(k_seq.get()));
                 }
             }
-            Ok(Seq0::new(max))
+            Ok(Seq0::new(0))
         })
     }
 }
