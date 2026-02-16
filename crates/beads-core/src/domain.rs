@@ -7,9 +7,9 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-use sha2::{Digest, Sha256};
-use crate::identity::ContentHashable;
 use super::error::{CoreError, InvalidDepKind, RangeError};
+use crate::identity::ContentHashable;
+use sha2::{Digest, Sha256};
 
 /// Issue type classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

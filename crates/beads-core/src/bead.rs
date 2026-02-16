@@ -12,10 +12,10 @@ use super::composite::{Claim, Note, Workflow};
 use super::crdt::Lww;
 use super::domain::{BeadType, Priority};
 use super::error::{CollisionError, CoreError};
-use crate::identity::ContentHashable;
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
 use super::time::{Stamp, WallClock, WriteStamp};
 use super::wire_bead::WorkflowStatus;
+use crate::identity::ContentHashable;
 
 /// Immutable creation provenance.
 ///

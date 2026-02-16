@@ -9,10 +9,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use sha2::{Digest, Sha256};
 use crate::event::sha256_bytes;
 use crate::json_canon::{CanonJsonError, to_canon_json_bytes};
 use crate::state::CanonicalState;
+use sha2::{Digest, Sha256};
 
 use super::error::{CoreError, InvalidId};
 use super::{NamespaceId, Seq1};

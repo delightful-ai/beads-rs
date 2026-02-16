@@ -6,9 +6,9 @@
 use std::cmp::Ordering;
 use std::sync::{Arc, OnceLock, RwLock};
 
+use crate::identity::ContentHashable;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use crate::identity::ContentHashable;
 
 use super::identity::ActorId;
 

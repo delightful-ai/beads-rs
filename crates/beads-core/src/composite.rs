@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::identity::{ActorId, BranchName, NoteId};
 use super::time::{WallClock, WriteStamp}; // WriteStamp still used in Note
-use sha2::{Digest, Sha256};
 use crate::identity::ContentHashable;
 use crate::time::Stamp;
+use sha2::{Digest, Sha256};
 
 /// Immutable note/comment on a bead.
 ///

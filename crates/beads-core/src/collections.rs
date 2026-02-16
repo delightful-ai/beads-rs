@@ -6,9 +6,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use sha2::{Digest, Sha256};
 use crate::identity::ContentHashable;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::error::{CoreError, InvalidLabel};
 use super::orset::{OrSetValue, sealed::Sealed};
