@@ -665,10 +665,10 @@ fn create_issue_with_durability(
                 return (issue_id, op.receipt);
             }
             Response::Err { err }
-                if err.code == ProtocolErrorCode::DurabilityTimeout.into() && attempts < 2 =>
+                if err.code == ProtocolErrorCode::DurabilityTimeout.into() && attempts < 5 =>
             {
                 attempts += 1;
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(500));
             }
             other => panic!("unexpected create response: {other:?}"),
         }
