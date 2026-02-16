@@ -16,6 +16,8 @@ use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::adjustment::Adjust;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeckResults};
 use rustc_span::Span;
+use rustc_data_structures::fx::FxHashSet;
+use rustc_span::Symbol;
 
 mod internal {
     /// Trait for visitor functions to control whether or not to descend to child nodes. Implemented
@@ -633,6 +635,13 @@ pub fn for_each_local_use_after_expr<'tcx, B>(
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum Consumption {
+    Yes,
+    No,
+    Partial(FxHashSet<Symbol>),
+}
+
 // Calls the given function for every unconsumed temporary created by the expression. Note the
 // function is only guaranteed to be called for types which need to be dropped, but it may be called
 // for other types.
@@ -642,19 +651,23 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
     e: &'tcx Expr<'tcx>,
     mut f: impl FnMut(Ty<'tcx>) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
-    // Todo: Handle partially consumed values.
     fn helper<'tcx, B>(
-        typeck: &'tcx TypeckResults<'tcx>,
-        consume: bool,
+        cx: &LateContext<'tcx>,
+        consume: Consumption,
         e: &'tcx Expr<'tcx>,
         f: &mut impl FnMut(Ty<'tcx>) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
-        if !consume
-            || matches!(
-                typeck.expr_adjustments(e),
-                [adjust, ..] if matches!(adjust.kind, Adjust::Borrow(_) | Adjust::Deref(_))
-            )
-        {
+        let typeck = cx.typeck_results();
+        let consume = if matches!(
+            typeck.expr_adjustments(e),
+            [adjust, ..] if matches!(adjust.kind, Adjust::Borrow(_) | Adjust::Deref(_))
+        ) {
+            Consumption::No
+        } else {
+            consume
+        };
+
+        if consume == Consumption::No {
             match e.kind {
                 ExprKind::Path(QPath::Resolved(None, p))
                     if matches!(p.res, Res::Def(DefKind::Ctor(_, CtorKind::Const), _)) =>
@@ -671,64 +684,115 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
         }
         match e.kind {
             ExprKind::AddrOf(_, _, e)
-            | ExprKind::Field(e, _)
-            | ExprKind::Unary(UnOp::Deref, e)
             | ExprKind::Match(e, ..)
             | ExprKind::Let(&LetExpr { init: e, .. }) => {
-                helper(typeck, false, e, f)?;
+                helper(cx, Consumption::No, e, f)?;
             }
-            ExprKind::Block(&Block { expr: Some(e), .. }, _)
-            | ExprKind::Cast(e, _)
-            | ExprKind::Unary(_, e) => {
-                helper(typeck, true, e, f)?;
+            ExprKind::Field(base, ident) => {
+                let base_consume = if consume == Consumption::Yes {
+                    if !typeck.expr_ty(base).is_copy_modulo_regions(cx.tcx, cx.typing_env()) {
+                        Consumption::Partial(FxHashSet::from_iter([ident.name]))
+                    } else {
+                        Consumption::No
+                    }
+                } else {
+                    Consumption::No
+                };
+                helper(cx, base_consume, base, f)?;
+            }
+            ExprKind::Unary(UnOp::Deref, e) => {
+                helper(cx, Consumption::No, e, f)?;
+            }
+            ExprKind::Block(&Block { expr: Some(e), .. }, _) => {
+                let block_consume = if let Consumption::Partial(_) = consume {
+                    consume
+                } else {
+                    Consumption::Yes
+                };
+                helper(cx, block_consume, e, f)?;
+            }
+            ExprKind::Cast(e, _) | ExprKind::Unary(_, e) => {
+                helper(cx, Consumption::Yes, e, f)?;
             }
             ExprKind::Call(callee, args) => {
-                helper(typeck, true, callee, f)?;
+                helper(cx, Consumption::Yes, callee, f)?;
                 for arg in args {
-                    helper(typeck, true, arg, f)?;
+                    helper(cx, Consumption::Yes, arg, f)?;
                 }
             }
             ExprKind::MethodCall(_, receiver, args, _) => {
-                helper(typeck, true, receiver, f)?;
+                helper(cx, Consumption::Yes, receiver, f)?;
                 for arg in args {
-                    helper(typeck, true, arg, f)?;
+                    helper(cx, Consumption::Yes, arg, f)?;
                 }
             }
             ExprKind::Tup(args) | ExprKind::Array(args) => {
-                for arg in args {
-                    helper(typeck, true, arg, f)?;
+                for (i, arg) in args.iter().enumerate() {
+                    let arg_consume = if let Consumption::Partial(consumed) = &consume {
+                        if consumed.contains(&Symbol::intern(&i.to_string())) {
+                            Consumption::Yes
+                        } else {
+                            Consumption::No
+                        }
+                    } else {
+                        Consumption::Yes
+                    };
+                    helper(cx, arg_consume, arg, f)?;
                 }
             }
             ExprKind::Use(expr, _) => {
-                helper(typeck, true, expr, f)?;
+                helper(cx, Consumption::Yes, expr, f)?;
             }
             ExprKind::Index(borrowed, consumed, _)
             | ExprKind::Assign(borrowed, consumed, _)
             | ExprKind::AssignOp(_, borrowed, consumed) => {
-                helper(typeck, false, borrowed, f)?;
-                helper(typeck, true, consumed, f)?;
+                helper(cx, Consumption::No, borrowed, f)?;
+                helper(cx, Consumption::Yes, consumed, f)?;
             }
             ExprKind::Binary(_, lhs, rhs) => {
-                helper(typeck, true, lhs, f)?;
-                helper(typeck, true, rhs, f)?;
+                helper(cx, Consumption::Yes, lhs, f)?;
+                helper(cx, Consumption::Yes, rhs, f)?;
             }
             ExprKind::Struct(_, fields, default) => {
                 for field in fields {
-                    helper(typeck, true, field.expr, f)?;
+                    let field_consume = if let Consumption::Partial(consumed) = &consume {
+                        if consumed.contains(&field.ident.name) {
+                            Consumption::Yes
+                        } else {
+                            Consumption::No
+                        }
+                    } else {
+                        Consumption::Yes
+                    };
+                    helper(cx, field_consume, field.expr, f)?;
                 }
                 if let StructTailExpr::Base(default) = default {
-                    helper(typeck, false, default, f)?;
+                    let default_consume = if let Consumption::Partial(consumed) = &consume {
+                        let mut base_consumed = consumed.clone();
+                        for field in fields {
+                            base_consumed.remove(&field.ident.name);
+                        }
+                        Consumption::Partial(base_consumed)
+                    } else {
+                        Consumption::Yes
+                    };
+                    helper(cx, default_consume, default, f)?;
                 }
             }
             ExprKind::If(cond, then, else_expr) => {
-                helper(typeck, true, cond, f)?;
-                helper(typeck, true, then, f)?;
+                helper(cx, Consumption::Yes, cond, f)?;
+                let branch_consume = if let Consumption::Partial(_) = consume {
+                    consume.clone()
+                } else {
+                    Consumption::Yes
+                };
+                helper(cx, branch_consume.clone(), then, f)?;
                 if let Some(else_expr) = else_expr {
-                    helper(typeck, true, else_expr, f)?;
+                    helper(cx, branch_consume, else_expr, f)?;
                 }
             }
             ExprKind::Type(e, _) | ExprKind::UnsafeBinderCast(_, e, _) => {
-                helper(typeck, consume, e, f)?;
+                helper(cx, consume, e, f)?;
             }
 
             // Either drops temporaries, jumps out of the current expression, or has no sub expression.
@@ -751,7 +815,7 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
         }
         ControlFlow::Continue(())
     }
-    helper(cx.typeck_results(), true, e, &mut f)
+    helper(cx, Consumption::Yes, e, &mut f)
 }
 
 pub fn any_temporaries_need_ordered_drop<'tcx>(
