@@ -164,7 +164,11 @@ mod tests {
 
     #[test]
     fn normalize_optional_client_request_id_none() {
-        assert!(normalize_optional_client_request_id(None).unwrap().is_none());
+        assert!(
+            normalize_optional_client_request_id(None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
