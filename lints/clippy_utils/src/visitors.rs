@@ -14,7 +14,7 @@ use rustc_hir::{
 use rustc_lint::LateContext;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::adjustment::Adjust;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeckResults};
+use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::Span;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_span::Symbol;
@@ -690,7 +690,7 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
             }
             ExprKind::Field(base, ident) => {
                 let base_consume = if consume == Consumption::Yes {
-                    if !typeck.expr_ty(base).is_copy_modulo_regions(cx.tcx, cx.typing_env()) {
+                    if !crate::ty::is_copy(cx, typeck.expr_ty(base)) {
                         Consumption::Partial(FxHashSet::from_iter([ident.name]))
                     } else {
                         Consumption::No
