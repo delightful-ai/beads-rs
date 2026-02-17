@@ -19,6 +19,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::bead::{Bead, BeadView, SameLineageBead};
 use super::collections::{Label, Labels};
 use super::composite::Note;
+use super::crdt::Crdt;
 use super::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, ParentEdge};
 use super::domain::DepKind;
 use super::error::{CoreError, InvalidDependency};
@@ -79,6 +80,12 @@ impl LabelState {
 impl Default for LabelState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Crdt for LabelState {
+    fn join(&self, other: &Self) -> Self {
+        LabelState::join(self, other)
     }
 }
 
@@ -163,6 +170,12 @@ impl LabelStore {
             }
         }
         merged
+    }
+}
+
+impl Crdt for LabelStore {
+    fn join(&self, other: &Self) -> Self {
+        LabelStore::join(self, other)
     }
 }
 
@@ -289,6 +302,12 @@ impl Default for DepStore {
     }
 }
 
+impl Crdt for DepStore {
+    fn join(&self, other: &Self) -> Self {
+        DepStore::join(self, other)
+    }
+}
+
 /// Canonical note store keyed by bead id + lineage stamp.
 #[derive(Clone, Debug, Default)]
 pub struct NoteStore {
@@ -396,6 +415,12 @@ impl NoteStore {
         }
 
         merged
+    }
+}
+
+impl Crdt for NoteStore {
+    fn join(&self, other: &Self) -> Self {
+        NoteStore::join(self, other)
     }
 }
 
@@ -1114,10 +1139,9 @@ impl CanonicalState {
     /// Resurrection rule: if a bead's updated_stamp > tombstone.deleted,
     /// the bead wins (resurrection). Otherwise tombstone wins.
     ///
-    /// Returns errors for ID collisions (collected, doesn't abort early).
-    pub fn join(a: &Self, b: &Self) -> Result<Self, Vec<CoreError>> {
+    /// Collisions are handled internally by creating tombstones for losing lineages.
+    pub fn join(a: &Self, b: &Self) -> Self {
         let mut result = Self::default();
-        let errors = Vec::new();
 
         // Merge collision tombstones by key.
         for (key, tomb) in a
@@ -1229,11 +1253,7 @@ impl CanonicalState {
         // Rebuild derived indexes from merged dep store
         result.rebuild_dep_indexes();
 
-        if errors.is_empty() {
-            Ok(result)
-        } else {
-            Err(errors)
-        }
+        result
     }
 
     fn prune_collision_lineages(&mut self) {
@@ -1486,6 +1506,12 @@ impl CanonicalState {
     }
 }
 
+impl Crdt for CanonicalState {
+    fn join(&self, other: &Self) -> Self {
+        CanonicalState::join(self, other)
+    }
+}
+
 fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
     let lineage = bead.core.created();
     let labels = state.labels_for_lineage(bead.id(), lineage);
@@ -1626,8 +1652,7 @@ mod tests {
             let mut state_tomb = CanonicalState::new();
             state_tomb.insert_tombstone(tomb);
 
-            let merged = CanonicalState::join(&state_bead, &state_tomb)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let merged = CanonicalState::join(&state_bead, &state_tomb);
 
             let is_live = merged.get_live(&id).is_some();
             if bead_stamp > tomb_stamp {
@@ -1654,8 +1679,7 @@ mod tests {
             let mut state_tomb = CanonicalState::new();
             state_tomb.insert_tombstone(tomb);
 
-            let merged = CanonicalState::join(&state_bead, &state_tomb)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let merged = CanonicalState::join(&state_bead, &state_tomb);
 
             prop_assert!(merged.get_live(&id).is_some());
         }
@@ -1753,8 +1777,7 @@ mod tests {
         state_a.insert_note(id.clone(), stamp_a.clone(), note_a);
         state_b.insert_note(id.clone(), stamp_b.clone(), note_b);
 
-        let merged = CanonicalState::join(&state_a, &state_b)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+        let merged = CanonicalState::join(&state_a, &state_b);
 
         assert!(merged.has_lineage_tombstone(&id, &stamp_a));
 
@@ -1842,7 +1865,7 @@ mod tests {
         state_b.insert(Bead::new(core, fields)).unwrap();
 
         // Merge: bead should win (resurrection)
-        let merged = CanonicalState::join(&state_a, &state_b).unwrap();
+        let merged = CanonicalState::join(&state_a, &state_b);
         assert!(merged.get_live(&id).is_some(), "bead should be resurrected");
         assert!(
             merged.get_tombstone(&id).is_none(),
@@ -1884,7 +1907,7 @@ mod tests {
         state_b.delete(Tombstone::new(id.clone(), new_stamp.clone(), None));
 
         // Merge: tombstone should win
-        let merged = CanonicalState::join(&state_a, &state_b).unwrap();
+        let merged = CanonicalState::join(&state_a, &state_b);
         assert!(merged.get_live(&id).is_none(), "bead should be deleted");
         assert!(
             merged.get_tombstone(&id).is_some(),
@@ -2463,7 +2486,7 @@ mod tests {
         let state_b = CanonicalState::new();
 
         // Join should rebuild indexes
-        let merged = CanonicalState::join(&state_a, &state_b).unwrap();
+        let merged = CanonicalState::join(&state_a, &state_b);
 
         // Index should be populated in merged state
         assert_eq!(merged.dep_indexes().out_edges(&from).len(), 1);
