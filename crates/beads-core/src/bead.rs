@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::collections::Labels;
 use super::composite::{Claim, Note, Workflow};
-use super::crdt::Lww;
+use super::crdt::{Crdt, Lww};
 use super::domain::{BeadType, Priority};
 use super::error::{CollisionError, CoreError};
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
@@ -112,6 +112,14 @@ macro_rules! define_bead_fields {
                     $(&self.$name.stamp),*
                 ]
                 .into_iter()
+            }
+        }
+
+        impl Crdt for BeadFields {
+            fn join(&self, other: &Self) -> Self {
+                Self {
+                    $($name: self.$name.join(&other.$name)),*
+                }
             }
         }
 

@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::bead::{Bead, BeadCore, BeadFields};
 use super::composite::{Claim, Closure, Note, Workflow};
-use super::crdt::Lww;
+use super::crdt::{Crdt, Lww};
 use super::domain::{BeadType, Priority};
 use super::event::{
     ValidatedBeadPatch, ValidatedDepAdd, ValidatedDepRemove, ValidatedEventBody,
