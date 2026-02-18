@@ -5,6 +5,7 @@
 //! live in beads-rs rather than beads-core.
 
 use beads_rs::core::bead::{Bead, BeadCore, BeadFields};
+use beads_rs::core::crdt::Crdt;
 use beads_rs::core::composite::{Claim, Workflow};
 use beads_rs::core::crdt::Lww;
 use beads_rs::core::domain::{BeadType, DepKind, Priority};
@@ -164,10 +165,8 @@ proptest! {
 
     #[test]
     fn join_commutative(a in state_strategy(), b in state_strategy()) {
-        let ab = CanonicalState::join(&a, &b)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-        let ba = CanonicalState::join(&b, &a)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+        let ab = a.join(&b);
+        let ba = b.join(&a);
         prop_assert_eq!(state_fingerprint(&ab), state_fingerprint(&ba));
     }
 
@@ -183,30 +182,23 @@ proptest! {
         let mut state_b = CanonicalState::new();
         state_b.insert_live(make_bead(&id, &stamp_b));
 
-        let ab = CanonicalState::join(&state_a, &state_b)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-        let ba = CanonicalState::join(&state_b, &state_a)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+        let ab = state_a.join(&state_b);
+        let ba = state_b.join(&state_a);
         prop_assert_eq!(state_fingerprint(&ab), state_fingerprint(&ba));
     }
 
     #[test]
     fn join_idempotent(a in state_strategy()) {
-        let aa = CanonicalState::join(&a, &a)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+        let aa = a.join(&a);
         prop_assert_eq!(state_fingerprint(&aa), state_fingerprint(&a));
     }
 
     #[test]
     fn join_associative(a in state_strategy(), b in state_strategy(), c in state_strategy()) {
-        let ab = CanonicalState::join(&a, &b)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-        let left = CanonicalState::join(&ab, &c)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-        let bc = CanonicalState::join(&b, &c)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
-        let right = CanonicalState::join(&a, &bc)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+        let ab = a.join(&b);
+        let left = ab.join(&c);
+        let bc = b.join(&c);
+        let right = a.join(&bc);
         prop_assert_eq!(state_fingerprint(&left), state_fingerprint(&right));
     }
 }

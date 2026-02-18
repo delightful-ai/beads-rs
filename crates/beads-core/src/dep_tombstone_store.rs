@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::crdt::Crdt;
 use super::tombstone::{Tombstone, TombstoneKey};
 
 /// Canonical tombstone store.
@@ -29,7 +30,7 @@ impl TombstoneStore {
         let key = tombstone.key();
         self.by_key
             .entry(key)
-            .and_modify(|existing| *existing = Tombstone::join(existing, &tombstone))
+            .and_modify(|existing| *existing = existing.join(&tombstone))
             .or_insert(tombstone);
     }
 
@@ -57,10 +58,13 @@ impl TombstoneStore {
         self.by_key.iter()
     }
 
+}
+
+impl Crdt for TombstoneStore {
     /// Merge two tombstone stores.
-    pub fn join(a: &Self, b: &Self) -> Self {
-        let mut result = a.clone();
-        for t in b.by_key.values() {
+    fn join(&self, other: &Self) -> Self {
+        let mut result = self.clone();
+        for t in other.by_key.values() {
             result.upsert(t.clone());
         }
         result

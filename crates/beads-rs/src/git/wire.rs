@@ -534,6 +534,7 @@ fn wire_field_stamp(wire: &BeadSnapshotWireV1, field: &str) -> Stamp {
 mod tests {
     use super::*;
     use crate::core::state::LabelState;
+    use crate::core::Crdt;
     use crate::core::{
         ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Dvv, Label,
         LabelStore, Lww, Note, NoteId, OrSet, ParentEdge, Priority, ReplicaId, Tombstone,

@@ -23,7 +23,7 @@ use crate::core::limits::LimitViolation;
 use crate::core::state::LabelState;
 use crate::core::wire_bead::{WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1};
 use crate::core::{
-    BeadId, BeadSnapshotWireV1, CanonicalState, CheckpointContentSha256, ContentHash, DepKey,
+    BeadId, BeadSnapshotWireV1, CanonicalState, CheckpointContentSha256, ContentHash, Crdt, DepKey,
     DepStore, Dot, LabelStore, Limits, NamespaceId, NamespaceSet, OrSet, SnapshotCodec,
     SnapshotSection, Stamp, StoreState, Tombstone, TombstoneKey, WriteStamp, sha256_bytes,
 };
@@ -297,7 +297,7 @@ pub fn import_checkpoint(
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &full_path, line)?;
                     let entry = dep_stores.entry(ns.clone()).or_default();
-                    *entry = DepStore::join(entry, &dep_store);
+                    *entry = entry.join(&dep_store);
                     Ok(())
                 },
             )?,
@@ -590,7 +590,6 @@ pub fn merge_store_states(
     b: &StoreState,
 ) -> Result<StoreState, CheckpointImportError> {
     let mut merged = StoreState::new();
-    let mut errors = Vec::new();
 
     let mut namespaces: BTreeSet<NamespaceId> = BTreeSet::new();
     namespaces.extend(a.namespaces().map(|(ns, _)| ns));
@@ -600,24 +599,14 @@ pub fn merge_store_states(
         let left = a.get(&namespace);
         let right = b.get(&namespace);
         let out = match (left, right) {
-            (Some(a_state), Some(b_state)) => match CanonicalState::join(a_state, b_state) {
-                Ok(state) => state,
-                Err(errs) => {
-                    errors.extend(errs);
-                    a_state.clone()
-                }
-            },
+            (Some(a_state), Some(b_state)) => a_state.join(b_state),
             (Some(state), None) | (None, Some(state)) => state.clone(),
             (None, None) => CanonicalState::default(),
         };
         state_for_namespace(&mut merged, &namespace).clone_from(&out);
     }
 
-    if errors.is_empty() {
-        Ok(merged)
-    } else {
-        Err(CheckpointImportError::Merge(errors))
-    }
+    Ok(merged)
 }
 
 /// Lift a legacy, non-namespaced state into the core namespace.
