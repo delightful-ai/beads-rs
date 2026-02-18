@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::crdt::Crdt;
+
 use super::collections::Labels;
 use super::composite::{Claim, Note, Workflow};
 use super::crdt::Lww;
@@ -106,19 +108,20 @@ macro_rules! define_bead_fields {
         }
 
         impl BeadFields {
-            /// Per-field LWW merge.
-            pub fn join(a: &Self, b: &Self) -> Self {
-                Self {
-                    $($name: Lww::join(&a.$name, &b.$name)),*
-                }
-            }
-
             /// Collect all stamps for computing updated_stamp.
             pub fn all_stamps(&self) -> impl Iterator<Item = &Stamp> {
                 [
                     $(&self.$name.stamp),*
                 ]
                 .into_iter()
+            }
+        }
+
+        impl Crdt for BeadFields {
+            fn join(&self, other: &Self) -> Self {
+                Self {
+                    $($name: self.$name.join(&other.$name)),*
+                }
             }
         }
 
@@ -220,7 +223,7 @@ impl<'a> SameLineageBead<'a> {
         }
         Ok(Bead {
             core: a.bead.core.clone(), // immutable, should be identical
-            fields: BeadFields::join(&a.bead.fields, &b.bead.fields),
+            fields: a.bead.fields.join(&b.bead.fields),
         })
     }
 }

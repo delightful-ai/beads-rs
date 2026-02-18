@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use thiserror::Error;
 
+use crate::crdt::Crdt;
+
 use super::identity::ReplicaId;
 
 pub(crate) mod sealed {
@@ -80,12 +82,6 @@ impl Dvv {
             return;
         }
         self.dots.insert(dot);
-    }
-
-    pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = a.clone();
-        merged.merge(b);
-        merged
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -331,30 +327,11 @@ impl<V: OrSetValue> OrSet<V> {
         OrSetChange::from_diff_with_change(before, after, internal_changed)
     }
 
-    pub fn join(a: &Self, b: &Self) -> Self {
-        let mut entries = a.entries.clone();
-        for (value, dots) in &b.entries {
-            entries
-                .entry(value.clone())
-                .or_default()
-                .extend(dots.iter().copied());
-        }
-
-        let mut merged = Self {
-            entries,
-            cc: Dvv::join(&a.cc, &b.cc),
-        };
-
-        merged.prune_dominated();
-        merged.resolve_all_collisions();
-        merged
-    }
-
     pub fn merge(&mut self, other: &Self) -> OrSetChange<V> {
         let before = self.membership_set();
         let before_cc = self.cc.clone();
         let before_entries = self.entries.clone();
-        *self = Self::join(self, other);
+        *self = self.join(other);
         let after = self.membership_set();
         let internal_changed = self.cc != before_cc || self.entries != before_entries;
         OrSetChange::from_diff_with_change(before, after, internal_changed)
@@ -445,6 +422,35 @@ impl<V: OrSetValue> OrSet<V> {
                 }
             }
         }
+    }
+}
+
+impl Crdt for Dvv {
+    fn join(&self, other: &Self) -> Self {
+        let mut merged = self.clone();
+        merged.merge(other);
+        merged
+    }
+}
+
+impl<V: OrSetValue> Crdt for OrSet<V> {
+    fn join(&self, other: &Self) -> Self {
+        let mut entries = self.entries.clone();
+        for (value, dots) in &other.entries {
+            entries
+                .entry(value.clone())
+                .or_default()
+                .extend(dots.iter().copied());
+        }
+
+        let mut merged = Self {
+            entries,
+            cc: self.cc.join(&other.cc),
+        };
+
+        merged.prune_dominated();
+        merged.resolve_all_collisions();
+        merged
     }
 }
 
@@ -577,7 +583,7 @@ mod tests {
         other.observe(dot(1, 2));
         other.observe(dot(2, 1));
 
-        let merged = Dvv::join(&dvv, &other);
+        let merged = dvv.join(&other);
         assert!(merged.dominates(&dot(1, 1)));
         assert!(merged.dominates(&dot(1, 2)));
         assert!(merged.dominates(&dot(1, 3)));
@@ -589,7 +595,7 @@ mod tests {
         let mut dvv = Dvv::default();
         dvv.observe(dot(1, 2));
         let other = Dvv::default();
-        let merged = Dvv::join(&dvv, &other);
+        let merged = dvv.join(&other);
         assert!(merged.dominates(&dot(1, 2)));
     }
 
@@ -614,10 +620,10 @@ mod tests {
         let mut b = OrSet::new();
         b.apply_add(dot(2, 1), "b".to_string());
 
-        let ab = OrSet::join(&a, &b);
-        let ba = OrSet::join(&b, &a);
+        let ab = a.join(&b);
+        let ba = b.join(&a);
         assert_eq!(ab, ba);
-        assert_eq!(OrSet::join(&a, &a), a);
+        assert_eq!(a.join(&a), a);
     }
 
     #[test]
@@ -642,7 +648,7 @@ mod tests {
         let mut b = OrSet::new();
         b.cc = ctx;
 
-        let joined = OrSet::join(&a, &b);
+        let joined = a.join(&b);
         assert!(!joined.contains(&"a".to_string()));
     }
 
@@ -708,7 +714,7 @@ mod tests {
         ctx.observe(dot_b);
         b.apply_remove(&value_b, &ctx);
 
-        let joined = OrSet::join(&a, &b);
+        let joined = a.join(&b);
         assert!(joined.contains(&value_a));
         assert!(!joined.contains(&value_b));
     }
@@ -745,7 +751,7 @@ mod tests {
         ctx.observe(dot_a);
         b.apply_remove(&value, &ctx);
 
-        let joined = OrSet::join(&a, &b);
+        let joined = a.join(&b);
         assert!(joined.contains(&value));
     }
 

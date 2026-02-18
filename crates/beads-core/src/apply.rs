@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::bead::{Bead, BeadCore, BeadFields};
 use super::composite::{Claim, Closure, Note, Workflow};
-use super::crdt::Lww;
+use super::crdt::{Crdt, Lww};
 use super::domain::{BeadType, Priority};
 use super::event::{
     ValidatedBeadPatch, ValidatedDepAdd, ValidatedDepRemove, ValidatedEventBody,
@@ -661,7 +661,7 @@ fn matches_live_lineage(state: &CanonicalState, bead_id: &BeadId, lineage: &Stam
 
 fn update_lww<T: Clone + PartialEq>(field: &mut Lww<T>, value: T, stamp: &Stamp) -> bool {
     let candidate = Lww::new(value, stamp.clone());
-    let merged = Lww::join(field, &candidate);
+    let merged = field.join(&candidate);
     if *field == merged {
         false
     } else {
