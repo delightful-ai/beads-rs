@@ -594,7 +594,7 @@ mod tests {
         state: LabelState,
     ) {
         let entry = label_store.state_mut(&bead_id, &lineage);
-        *entry = LabelState::join(entry, &state);
+        *entry = entry.join(&state);
     }
 
     fn dot(replica_byte: u8, counter: u64) -> Dot {

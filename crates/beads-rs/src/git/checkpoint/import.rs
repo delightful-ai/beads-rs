@@ -591,7 +591,6 @@ pub fn merge_store_states(
     b: &StoreState,
 ) -> Result<StoreState, CheckpointImportError> {
     let mut merged = StoreState::new();
-    let mut errors = Vec::new();
 
     let mut namespaces: BTreeSet<NamespaceId> = BTreeSet::new();
     namespaces.extend(a.namespaces().map(|(ns, _)| ns));
@@ -608,11 +607,7 @@ pub fn merge_store_states(
         state_for_namespace(&mut merged, &namespace).clone_from(&out);
     }
 
-    if errors.is_empty() {
-        Ok(merged)
-    } else {
-        Err(CheckpointImportError::Merge(errors))
-    }
+    Ok(merged)
 }
 
 /// Lift a legacy, non-namespaced state into the core namespace.
