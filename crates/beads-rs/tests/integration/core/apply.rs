@@ -1,5 +1,6 @@
 //! Core apply semantics + LWW determinism.
 
+use beads_rs::core::Crdt;
 use beads_rs::core::Label;
 use beads_rs::core::NoteAppendV1;
 use beads_rs::{
@@ -143,8 +144,8 @@ fn join_bead_collision_is_deterministic_and_inserts_lineage_tombstone() {
     let event_b = validated(event_body_with_delta(51, delta_b));
     apply_event(&mut state_b, &event_b).expect("apply b");
 
-    let merged_ab = CanonicalState::join(&state_a, &state_b).expect("merge ab");
-    let merged_ba = CanonicalState::join(&state_b, &state_a).expect("merge ba");
+    let merged_ab = state_a.join(&state_b);
+    let merged_ba = state_b.join(&state_a);
 
     let winner_ab = merged_ab.get_live(&bead).expect("winner");
     let winner_ba = merged_ba.get_live(&bead).expect("winner");

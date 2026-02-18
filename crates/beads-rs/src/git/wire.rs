@@ -534,6 +534,7 @@ fn wire_field_stamp(wire: &BeadSnapshotWireV1, field: &str) -> Stamp {
 mod tests {
     use super::*;
     use crate::core::state::LabelState;
+    use crate::core::Crdt;
     use crate::core::{
         ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Dvv, Label,
         LabelStore, Lww, Note, NoteId, OrSet, ParentEdge, Priority, ReplicaId, Tombstone,
@@ -594,7 +595,7 @@ mod tests {
         state: LabelState,
     ) {
         let entry = label_store.state_mut(&bead_id, &lineage);
-        *entry = LabelState::join(entry, &state);
+        *entry = entry.join(&state);
     }
 
     fn dot(replica_byte: u8, counter: u64) -> Dot {

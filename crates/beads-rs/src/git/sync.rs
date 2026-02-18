@@ -20,7 +20,7 @@ use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 
 use super::error::SyncError;
 use super::wire;
-use crate::core::{BeadId, BeadSlug, CanonicalState, WallClock, WriteStamp};
+use crate::core::{BeadId, BeadSlug, CanonicalState, Crdt, WallClock, WriteStamp};
 use crate::daemon::metrics;
 
 const BACKUP_REF_PREFIX: &str = "refs/beads/backup/";
@@ -505,8 +505,7 @@ impl SyncProcess<Fetched> {
         }
 
         // Pairwise CRDT merge
-        let mut merged = CanonicalState::join(local_state, &remote_state)
-            .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
+        let mut merged = local_state.join(&remote_state);
 
         // Garbage collect tombstones if configured.
         if let Some(ttl_ms) = config.tombstone_ttl_ms {

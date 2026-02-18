@@ -22,7 +22,7 @@ use super::ops::OpError;
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
-    ActorId, CanonicalState, CliErrorCode, DurabilityClass, ErrorCode, NamespaceId,
+    ActorId, CliErrorCode, Crdt, DurabilityClass, ErrorCode, NamespaceId,
     ProtocolErrorCode, TraceId, WallClock,
 };
 use crate::git::{SyncError, SyncOutcome};

@@ -10,7 +10,7 @@ use std::time::Instant;
 use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
-use crate::core::{ActorId, BeadSlug, CanonicalState, StoreId, WriteStamp};
+use crate::core::{ActorId, BeadSlug, CanonicalState, Crdt, StoreId, WriteStamp};
 use crate::daemon::git_backend::{
     DefaultGitBackend, FetchRemote, PublishCheckpointRef, PushRemote, ReadCheckpointRef,
 };
@@ -492,8 +492,7 @@ fn build_load_result(inputs: LoadResultInputs) -> Result<LoadResult, SyncError> 
         divergence,
         force_push,
     } = inputs;
-    let merged = CanonicalState::join(&local_state, &remote_state)
-        .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
+    let merged = local_state.join(&remote_state);
 
     let root_slug = local_slug.or(remote_slug);
 
