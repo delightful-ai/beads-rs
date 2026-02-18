@@ -10,8 +10,6 @@ use std::time::Instant;
 use crossbeam::channel::{Receiver, Sender};
 use git2::{ErrorCode, Oid, Repository};
 
-use beads_core::Crdt;
-
 use crate::core::{ActorId, BeadSlug, CanonicalState, StoreId, WriteStamp};
 use crate::daemon::git_backend::{
     DefaultGitBackend, FetchRemote, PublishCheckpointRef, PushRemote, ReadCheckpointRef,
@@ -191,7 +189,7 @@ impl GitWorker {
         let force_push = fetched.force_push;
 
         // Step 3: CRDT merge - both local and remote are authoritative
-        Ok(build_load_result(LoadResultInputs {
+        build_load_result(LoadResultInputs {
             local_state,
             local_slug,
             local_meta_stamp,
@@ -201,7 +199,7 @@ impl GitWorker {
             fetch_error,
             divergence,
             force_push,
-        }))
+        })
     }
 
     /// Load state using only local refs (no network).
@@ -252,7 +250,7 @@ impl GitWorker {
             }
         };
 
-        Ok(build_load_result(LoadResultInputs {
+        build_load_result(LoadResultInputs {
             local_state,
             local_slug,
             local_meta_stamp,
@@ -262,7 +260,7 @@ impl GitWorker {
             fetch_error: None,
             divergence: None,
             force_push: None,
-        }))
+        })
     }
 
     /// Sync local state to remote.
@@ -482,7 +480,7 @@ struct LoadResultInputs {
     force_push: Option<crate::git::sync::ForcePushInfo>,
 }
 
-fn build_load_result(inputs: LoadResultInputs) -> LoadResult {
+fn build_load_result(inputs: LoadResultInputs) -> Result<LoadResult, SyncError> {
     let LoadResultInputs {
         local_state,
         local_slug,
@@ -494,7 +492,8 @@ fn build_load_result(inputs: LoadResultInputs) -> LoadResult {
         divergence,
         force_push,
     } = inputs;
-    let merged = local_state.join(&remote_state);
+    let merged = CanonicalState::join(&local_state, &remote_state)
+        .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
 
     let root_slug = local_slug.or(remote_slug);
 
@@ -511,7 +510,7 @@ fn build_load_result(inputs: LoadResultInputs) -> LoadResult {
     let meta_stamp = max_write_stamp(local_meta_stamp, remote_meta_stamp);
     let last_seen_stamp = max_write_stamp(merged_stamp, meta_stamp);
 
-    LoadResult {
+    Ok(LoadResult {
         state: merged,
         root_slug,
         needs_sync,
@@ -519,7 +518,7 @@ fn build_load_result(inputs: LoadResultInputs) -> LoadResult {
         fetch_error,
         divergence,
         force_push,
-    }
+    })
 }
 
 fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, SyncError> {

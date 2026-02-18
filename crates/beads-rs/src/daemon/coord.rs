@@ -22,8 +22,8 @@ use super::ops::OpError;
 use crate::api::DaemonInfo as ApiDaemonInfo;
 use crate::api::QueryResult;
 use crate::core::{
-    ActorId, CliErrorCode, DurabilityClass, ErrorCode, NamespaceId, ProtocolErrorCode, TraceId,
-    WallClock,
+    ActorId, CanonicalState, CliErrorCode, DurabilityClass, ErrorCode, NamespaceId,
+    ProtocolErrorCode, TraceId, WallClock,
 };
 use crate::git::{SyncError, SyncOutcome};
 use beads_daemon::remote::RemoteUrl;

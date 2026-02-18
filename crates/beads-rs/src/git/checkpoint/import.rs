@@ -18,7 +18,6 @@ use super::{
     CheckpointFormatVersion, CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks,
     ParsedCheckpointManifest, SupportedCheckpointMeta,
 };
-use beads_core::Crdt;
 use crate::core::error::CoreError;
 use crate::core::limits::LimitViolation;
 use crate::core::state::LabelState;
@@ -298,7 +297,7 @@ pub fn import_checkpoint(
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &full_path, line)?;
                     let entry = dep_stores.entry(ns.clone()).or_default();
-                    *entry = entry.join(&dep_store);
+                    *entry = DepStore::join(entry, &dep_store);
                     Ok(())
                 },
             )?,
@@ -470,7 +469,7 @@ fn import_checkpoint_export_parsed(
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &path, line)?;
                     let entry = dep_stores.entry(ns.clone()).or_default();
-                    *entry = entry.join(&dep_store);
+                    *entry = DepStore::join(entry, &dep_store);
                     Ok(())
                 },
             )?,
@@ -591,6 +590,7 @@ pub fn merge_store_states(
     b: &StoreState,
 ) -> Result<StoreState, CheckpointImportError> {
     let mut merged = StoreState::new();
+    let mut errors = Vec::new();
 
     let mut namespaces: BTreeSet<NamespaceId> = BTreeSet::new();
     namespaces.extend(a.namespaces().map(|(ns, _)| ns));
@@ -600,14 +600,24 @@ pub fn merge_store_states(
         let left = a.get(&namespace);
         let right = b.get(&namespace);
         let out = match (left, right) {
-            (Some(a_state), Some(b_state)) => a_state.join(b_state),
+            (Some(a_state), Some(b_state)) => match CanonicalState::join(a_state, b_state) {
+                Ok(state) => state,
+                Err(errs) => {
+                    errors.extend(errs);
+                    a_state.clone()
+                }
+            },
             (Some(state), None) | (None, Some(state)) => state.clone(),
             (None, None) => CanonicalState::default(),
         };
         state_for_namespace(&mut merged, &namespace).clone_from(&out);
     }
 
-    Ok(merged)
+    if errors.is_empty() {
+        Ok(merged)
+    } else {
+        Err(CheckpointImportError::Merge(errors))
+    }
 }
 
 /// Lift a legacy, non-namespaced state into the core namespace.

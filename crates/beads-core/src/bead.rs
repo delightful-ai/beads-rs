@@ -7,8 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::crdt::Crdt;
-
 use super::collections::Labels;
 use super::composite::{Claim, Note, Workflow};
 use super::crdt::Lww;
@@ -114,14 +112,6 @@ macro_rules! define_bead_fields {
                     $(&self.$name.stamp),*
                 ]
                 .into_iter()
-            }
-        }
-
-        impl Crdt for BeadFields {
-            fn join(&self, other: &Self) -> Self {
-                Self {
-                    $($name: self.$name.join(&other.$name)),*
-                }
             }
         }
 

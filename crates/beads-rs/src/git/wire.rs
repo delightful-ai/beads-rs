@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use beads_core::Crdt;
+
 use super::error::WireError;
 use crate::core::{
     ActorId, Bead, BeadSlug, BeadSnapshotWireV1, CanonicalState, NoteAppendV1, SnapshotCodec,

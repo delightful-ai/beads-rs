@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::bead::{BeadCore, BeadFields};
 use super::collections::Label;
 use super::composite::{Claim, Closure, Note, Workflow};
-use super::crdt::{Crdt, Lww};
+use super::crdt::Lww;
 use super::dep::{DepKey, ParentEdge};
 use super::domain::{BeadType, DepKind, Priority};
 use super::identity::{ActorId, BeadId, BranchName, NoteId, ReplicaId};
@@ -803,7 +803,7 @@ impl SnapshotCodec {
             let label_stamp = bead.label_stamp();
             let labels = Self::label_state_from_wire(bead.labels.clone(), label_stamp)?;
             let entry = label_store.state_mut(&bead_id, &lineage);
-            *entry = entry.join(&labels);
+            *entry = LabelState::join(entry, &labels);
             state.insert_live(Bead::from(bead));
         }
 

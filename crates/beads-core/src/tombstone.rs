@@ -4,8 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::crdt::Crdt;
-
 use super::identity::BeadId;
 use super::time::Stamp;
 
@@ -81,17 +79,15 @@ impl Tombstone {
             lineage: self.lineage.clone(),
         }
     }
-}
 
-impl Crdt for Tombstone {
     /// Merge: keep later deletion stamp.
-    fn join(&self, other: &Self) -> Self {
-        debug_assert_eq!(self.id, other.id, "join requires same id");
-        debug_assert_eq!(self.lineage, other.lineage, "join requires same lineage");
-        if self.deleted >= other.deleted {
-            self.clone()
+    pub fn join(a: &Self, b: &Self) -> Self {
+        debug_assert_eq!(a.id, b.id, "join requires same id");
+        debug_assert_eq!(a.lineage, b.lineage, "join requires same lineage");
+        if a.deleted >= b.deleted {
+            a.clone()
         } else {
-            other.clone()
+            b.clone()
         }
     }
 }
