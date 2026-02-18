@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use thiserror::Error;
 
+use super::crdt::Crdt;
 use super::identity::ReplicaId;
 
 pub(crate) mod sealed {
@@ -445,6 +446,12 @@ impl<V: OrSetValue> OrSet<V> {
                 }
             }
         }
+    }
+}
+
+impl<V: OrSetValue> Crdt for OrSet<V> {
+    fn join(&self, other: &Self) -> Self {
+        OrSet::join(self, other)
     }
 }
 
