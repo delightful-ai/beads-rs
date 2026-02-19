@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 use super::error::{CoreError, InvalidDepKind, RangeError};
+use crate::identity::ContentHashable;
+use sha2::{Digest, Sha256};
 
 /// Issue type classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -230,5 +232,19 @@ mod tests {
             let back: Priority = serde_json::from_str(&json).unwrap();
             assert_eq!(p, back);
         }
+    }
+}
+
+impl ContentHashable for BeadType {
+    fn hash_content(&self, h: &mut Sha256) {
+        h.update(self.as_str().as_bytes());
+        h.update([0]);
+    }
+}
+
+impl ContentHashable for Priority {
+    fn hash_content(&self, h: &mut Sha256) {
+        h.update(self.value().to_string().as_bytes());
+        h.update([0]);
     }
 }

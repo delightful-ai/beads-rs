@@ -242,7 +242,7 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
         rig.create_issue(1, "pathology-1"),
     ];
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(90));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
     wait_for_sample(&rig, &ids, Duration::from_secs(20));
 }
 

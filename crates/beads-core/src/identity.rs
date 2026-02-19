@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::event::sha256_bytes;
 use crate::json_canon::{CanonJsonError, to_canon_json_bytes};
 use crate::state::CanonicalState;
+use sha2::{Digest, Sha256};
 
 use super::error::{CoreError, InvalidId};
 use super::{NamespaceId, Seq1};
@@ -1297,5 +1298,59 @@ mod tests {
             StateCanonicalJsonSha256::from_canonical_state(&state).expect("state digest");
         let via_bytes = StateCanonicalJsonSha256::from_canonical_json_bytes(&bytes);
         assert_eq!(via_state, via_bytes);
+    }
+}
+
+/// Trait for types that can be hashed into a content hash.
+///
+/// This encapsulates the serialization logic for hashing, preventing scatter.
+/// The `hash_content` method should append the serialized bytes and the separator `[0]`.
+pub trait ContentHashable {
+    fn hash_content(&self, h: &mut Sha256);
+}
+
+impl ContentHashable for String {
+    fn hash_content(&self, h: &mut Sha256) {
+        h.update(self.as_bytes());
+        h.update([0]);
+    }
+}
+
+impl ContentHashable for Option<String> {
+    fn hash_content(&self, h: &mut Sha256) {
+        if let Some(s) = self {
+            h.update(s.as_bytes());
+        }
+        h.update([0]);
+    }
+}
+
+impl ContentHashable for Option<u32> {
+    fn hash_content(&self, h: &mut Sha256) {
+        if let Some(v) = self {
+            h.update(v.to_string().as_bytes());
+        }
+        h.update([0]);
+    }
+}
+
+impl ContentHashable for BeadId {
+    fn hash_content(&self, h: &mut Sha256) {
+        h.update(self.as_str().as_bytes());
+        h.update([0]);
+    }
+}
+
+impl ContentHashable for ActorId {
+    fn hash_content(&self, h: &mut Sha256) {
+        h.update(self.as_str().as_bytes());
+        h.update([0]);
+    }
+}
+
+impl ContentHashable for BranchName {
+    fn hash_content(&self, h: &mut Sha256) {
+        h.update(self.as_str().as_bytes());
+        h.update([0]);
     }
 }
