@@ -189,3 +189,52 @@ fn split_kind_id(raw: &str) -> Result<(Option<DepKind>, String)> {
         Ok((None, raw.trim().to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_bead_type_valid() {
+        let cases = vec![
+            ("bug", BeadType::Bug),
+            ("bugs", BeadType::Bug),
+            ("BUG", BeadType::Bug),
+            ("  bug  ", BeadType::Bug),
+            ("feature", BeadType::Feature),
+            ("feat", BeadType::Feature),
+            ("features", BeadType::Feature),
+            ("task", BeadType::Task),
+            ("todo", BeadType::Task),
+            ("tasks", BeadType::Task),
+            ("epic", BeadType::Epic),
+            ("epics", BeadType::Epic),
+            ("chore", BeadType::Chore),
+            ("chores", BeadType::Chore),
+            ("maintenance", BeadType::Chore),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_bead_type(input).unwrap(),
+                expected,
+                "Failed to parse '{}'",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_bead_type_invalid() {
+        let cases = vec!["invalid", "random", "", "123"];
+
+        for input in cases {
+            match parse_bead_type(input) {
+                Err(ParseError::UnknownBeadType { raw }) => {
+                    assert_eq!(raw, input.to_string());
+                }
+                _ => panic!("Expected UnknownBeadType error for '{}'", input),
+            }
+        }
+    }
+}
