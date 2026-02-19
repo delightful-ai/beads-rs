@@ -62,7 +62,6 @@ pub(crate) struct WalTailTruncatedRecord {
 pub struct StoreRuntime {
     pub(crate) primary_remote: RemoteUrl,
     pub(crate) meta: StoreMeta,
-    #[allow(dead_code)]
     pub(crate) policies: BTreeMap<NamespaceId, NamespacePolicy>,
     pub(crate) state: StoreState,
     pub(crate) last_wal_tail_truncated: Option<WalTailTruncatedRecord>,
@@ -74,14 +73,11 @@ pub struct StoreRuntime {
     pub(crate) broadcaster: EventBroadcaster,
     pub(crate) admission: AdmissionController,
     pub(crate) maintenance_mode: bool,
-    #[allow(dead_code)]
     pub(crate) peer_acks: Arc<Mutex<PeerAckTable>>,
     pub(crate) event_wal: EventWal,
-    #[allow(dead_code)]
     pub(crate) wal_index: Arc<dyn WalIndex>,
     pub(crate) last_wal_checkpoint: Option<Instant>,
     pub(crate) last_lock_heartbeat: Option<Instant>,
-    #[allow(dead_code)]
     lock: StoreLock,
 }
 
