@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use thiserror::Error;
 
+use super::crdt::Crdt;
 use super::identity::ReplicaId;
 
 pub(crate) mod sealed {
@@ -229,6 +230,12 @@ impl<V: Ord + Clone> OrSetChange<V> {
 pub struct OrSet<V: OrSetValue> {
     entries: BTreeMap<V, BTreeSet<Dot>>,
     cc: Dvv,
+}
+
+impl<V: OrSetValue> Crdt for OrSet<V> {
+    fn join(&self, other: &Self) -> Self {
+        Self::join(self, other)
+    }
 }
 
 impl<V: OrSetValue> OrSet<V> {
@@ -808,5 +815,19 @@ mod tests {
 
         let set = OrSet::try_from_parts(entries, cc).expect("dominated duplicates should prune");
         assert!(set.is_empty());
+    }
+
+    #[test]
+    fn orset_satisfies_laws() {
+        let mut a = OrSet::new();
+        a.apply_add(dot(1, 1), "a".to_string());
+
+        let mut b = OrSet::new();
+        b.apply_add(dot(2, 1), "b".to_string());
+
+        let mut c = OrSet::new();
+        c.apply_add(dot(3, 1), "c".to_string());
+
+        crate::crdt::tests::crdt_laws(&a, &b, &c);
     }
 }
