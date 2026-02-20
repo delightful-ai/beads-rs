@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::collections::Labels;
 use super::composite::{Claim, Note, Workflow};
-use super::crdt::Lww;
+use super::crdt::{Crdt, Lww};
 use super::domain::{BeadType, Priority};
 use super::error::{CollisionError, CoreError};
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
@@ -105,12 +105,18 @@ macro_rules! define_bead_fields {
             $(pub $name: Lww<$type>),*
         }
 
+        impl Crdt for BeadFields {
+            fn join(&self, other: &Self) -> Self {
+                Self {
+                    $($name: self.$name.join(&other.$name)),*
+                }
+            }
+        }
+
         impl BeadFields {
             /// Per-field LWW merge.
             pub fn join(a: &Self, b: &Self) -> Self {
-                Self {
-                    $($name: Lww::join(&a.$name, &b.$name)),*
-                }
+                Crdt::join(a, b)
             }
 
             /// Collect all stamps for computing updated_stamp.
@@ -211,17 +217,14 @@ pub struct SameLineageBead<'a> {
 }
 
 impl<'a> SameLineageBead<'a> {
-    pub fn join(a: Self, b: Self) -> Result<Bead, CoreError> {
+    pub fn join(a: Self, b: Self) -> Bead {
         if a.bead.core.id != b.bead.core.id || a.bead.core.created() != b.bead.core.created() {
-            return Err(CollisionError {
-                id: a.bead.core.id.as_str().to_string(),
-            }
-            .into());
+            panic!("SameLineageBead violation: join called on beads with different lineage");
         }
-        Ok(Bead {
+        Bead {
             core: a.bead.core.clone(), // immutable, should be identical
-            fields: BeadFields::join(&a.bead.fields, &b.bead.fields),
-        })
+            fields: Crdt::join(&a.bead.fields, &b.bead.fields),
+        }
     }
 }
 
@@ -542,11 +545,12 @@ mod tests {
         b.fields.title = Lww::new("right".to_string(), stamp(12, 0, "bob"));
 
         let (sa, sb) = Bead::same_lineage(&a, &b).expect("same lineage");
-        let merged = SameLineageBead::join(sa, sb).expect("join");
+        let merged = SameLineageBead::join(sa, sb);
         assert_eq!(merged.title(), "right");
     }
 
     #[test]
+    #[should_panic(expected = "SameLineageBead violation")]
     fn same_lineage_join_rejects_mixed_wrapper_pairs() {
         let left_base = stamp(10, 0, "alice");
         let right_base = stamp(20, 0, "bob");
@@ -558,7 +562,7 @@ mod tests {
         let (left, _) = Bead::same_lineage(&a1, &a2).expect("left pair");
         let (_, right) = Bead::same_lineage(&b1, &b2).expect("right pair");
 
-        assert!(SameLineageBead::join(left, right).is_err());
+        SameLineageBead::join(left, right);
     }
 
     #[test]

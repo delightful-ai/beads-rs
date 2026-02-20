@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use thiserror::Error;
 
+use super::crdt::Crdt;
 use super::identity::ReplicaId;
 
 pub(crate) mod sealed {
@@ -83,9 +84,7 @@ impl Dvv {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = a.clone();
-        merged.merge(b);
-        merged
+        Crdt::join(a, b)
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -192,6 +191,14 @@ impl<V: Ord + Clone> Default for OrSetChange<V> {
             removed: BTreeSet::new(),
             changed: false,
         }
+    }
+}
+
+impl Crdt for Dvv {
+    fn join(&self, other: &Self) -> Self {
+        let mut merged = self.clone();
+        merged.merge(other);
+        merged
     }
 }
 
@@ -332,29 +339,14 @@ impl<V: OrSetValue> OrSet<V> {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut entries = a.entries.clone();
-        for (value, dots) in &b.entries {
-            entries
-                .entry(value.clone())
-                .or_default()
-                .extend(dots.iter().copied());
-        }
-
-        let mut merged = Self {
-            entries,
-            cc: Dvv::join(&a.cc, &b.cc),
-        };
-
-        merged.prune_dominated();
-        merged.resolve_all_collisions();
-        merged
+        Crdt::join(a, b)
     }
 
     pub fn merge(&mut self, other: &Self) -> OrSetChange<V> {
         let before = self.membership_set();
         let before_cc = self.cc.clone();
         let before_entries = self.entries.clone();
-        *self = Self::join(self, other);
+        *self = Crdt::join(self, other);
         let after = self.membership_set();
         let internal_changed = self.cc != before_cc || self.entries != before_entries;
         OrSetChange::from_diff_with_change(before, after, internal_changed)
@@ -445,6 +437,27 @@ impl<V: OrSetValue> OrSet<V> {
                 }
             }
         }
+    }
+}
+
+impl<V: OrSetValue> Crdt for OrSet<V> {
+    fn join(&self, other: &Self) -> Self {
+        let mut entries = self.entries.clone();
+        for (value, dots) in &other.entries {
+            entries
+                .entry(value.clone())
+                .or_default()
+                .extend(dots.iter().copied());
+        }
+
+        let mut merged = Self {
+            entries,
+            cc: self.cc.join(&other.cc),
+        };
+
+        merged.prune_dominated();
+        merged.resolve_all_collisions();
+        merged
     }
 }
 
