@@ -131,8 +131,7 @@ impl Crdt for LabelStore {
                 for (lineage, state) in states {
                     match merged_lineages.get(lineage) {
                         Some(existing) => {
-                            merged_lineages
-                                .insert(lineage.clone(), existing.join(state));
+                            merged_lineages.insert(lineage.clone(), existing.join(state));
                         }
                         None => {
                             merged_lineages.insert(lineage.clone(), state.clone());
