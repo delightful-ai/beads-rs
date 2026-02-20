@@ -6,6 +6,17 @@ use serde::{Deserialize, Serialize};
 
 use super::time::Stamp;
 
+/// A Conflict-Free Replicated Data Type (CRDT) that supports merging.
+///
+/// Implementations must satisfy the semilattice properties:
+/// - Commutativity: join(a, b) == join(b, a)
+/// - Associativity: join(join(a, b), c) == join(a, join(b, c))
+/// - Idempotence: join(a, a) == a
+pub trait Crdt {
+    /// Merge with another state.
+    fn join(&self, other: &Self) -> Self;
+}
+
 /// Last-Writer-Wins register.
 ///
 /// This is your CRDT join for scalar/atomic fields.
@@ -22,19 +33,21 @@ impl<T> Lww<T> {
     }
 }
 
-impl<T: Clone> Lww<T> {
-    /// Deterministic merge - higher stamp wins.
-    ///
-    /// Properties:
-    /// - Commutative: join(a, b) == join(b, a)
-    /// - Associative: join(join(a, b), c) == join(a, join(b, c))
-    /// - Idempotent: join(a, a) == a
-    pub fn join(a: &Self, b: &Self) -> Self {
-        if a.stamp >= b.stamp {
-            a.clone()
+impl<T: Clone> Crdt for Lww<T> {
+    fn join(&self, other: &Self) -> Self {
+        if self.stamp >= other.stamp {
+            self.clone()
         } else {
-            b.clone()
+            other.clone()
         }
+    }
+}
+
+impl<T: Clone> Lww<T> {
+    /// Inherent join for backward compatibility or direct usage where trait is not imported.
+    /// Prefer Crdt::join.
+    pub fn join(a: &Self, b: &Self) -> Self {
+        Crdt::join(a, b)
     }
 }
 
@@ -67,8 +80,8 @@ mod tests {
         let b = make_lww("B", 20, "actor1");
 
         // b wins (newer)
-        assert_eq!(Lww::join(&a, &b), b);
-        assert_eq!(Lww::join(&b, &a), b);
+        assert_eq!(a.join(&b), b);
+        assert_eq!(b.join(&a), b);
     }
 
     #[test]
@@ -78,9 +91,9 @@ mod tests {
         let c = make_lww("C", 30, "actor3");
 
         // (a join b) join c => b join c => c
-        let left = Lww::join(&Lww::join(&a, &b), &c);
+        let left = a.join(&b).join(&c);
         // a join (b join c) => a join c => c
-        let right = Lww::join(&a, &Lww::join(&b, &c));
+        let right = a.join(&b.join(&c));
 
         assert_eq!(left, c);
         assert_eq!(right, c);
@@ -90,7 +103,7 @@ mod tests {
     #[test]
     fn test_join_idempotent() {
         let a = make_lww("A", 10, "actor1");
-        assert_eq!(Lww::join(&a, &a), a);
+        assert_eq!(a.join(&a), a);
     }
 
     #[test]
@@ -100,8 +113,8 @@ mod tests {
         let b = make_lww("B", 10, "actor2"); // "actor2" > "actor1"
 
         // b wins (higher actor)
-        assert_eq!(Lww::join(&a, &b), b);
-        assert_eq!(Lww::join(&b, &a), b);
+        assert_eq!(a.join(&b), b);
+        assert_eq!(b.join(&a), b);
     }
 
     #[test]
@@ -111,11 +124,8 @@ mod tests {
         // Manually construct b with same stamp but different value
         let b = Lww::new("Val2", a.stamp.clone());
 
-        // Lww::join returns left if stamps are equal (a.stamp >= b.stamp)
-        // This is "deterministic" in the sense that the function is deterministic,
-        // but not commutative if values differ for same stamp.
-        // In practice, same stamp means same event, so values should match.
-        assert_eq!(Lww::join(&a, &b).value, "Val1");
-        assert_eq!(Lww::join(&b, &a).value, "Val2");
+        // Crdt::join returns self if stamps are equal (self.stamp >= other.stamp)
+        assert_eq!(a.join(&b).value, "Val1");
+        assert_eq!(b.join(&a).value, "Val2");
     }
 }

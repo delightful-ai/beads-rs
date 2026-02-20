@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::composite::Note;
+use crate::crdt::Crdt;
 use crate::event::sha256_bytes;
 use crate::identity::{BeadId, NoteId};
 use crate::time::Stamp;
@@ -95,8 +96,14 @@ impl NoteStore {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
+        Crdt::join(a, b)
+    }
+}
+
+impl Crdt for NoteStore {
+    fn join(&self, other: &Self) -> Self {
         let mut merged = NoteStore::new();
-        for (id, lineages) in a.by_bead.iter().chain(b.by_bead.iter()) {
+        for (id, lineages) in self.by_bead.iter().chain(other.by_bead.iter()) {
             let entry = merged.by_bead.entry(id.clone()).or_default();
             for (lineage, notes) in lineages {
                 let lineage_entry = entry.entry(lineage.clone()).or_default();

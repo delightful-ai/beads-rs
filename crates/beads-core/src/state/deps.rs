@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::crdt::Crdt;
 use crate::dep::DepKey;
 use crate::domain::DepKind;
 use crate::identity::BeadId;
@@ -57,9 +58,15 @@ impl DepStore {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
+        Crdt::join(a, b)
+    }
+}
+
+impl Crdt for DepStore {
+    fn join(&self, other: &Self) -> Self {
         Self {
-            set: OrSet::join(&a.set, &b.set),
-            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
+            set: self.set.join(&other.set),
+            stamp: max_stamp(self.stamp.as_ref(), other.stamp.as_ref()),
         }
     }
 }
