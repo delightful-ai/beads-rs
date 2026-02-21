@@ -5,8 +5,8 @@
 //! Priority: 0-4 (0 = critical)
 
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use sha2::Digest;
+use std::cmp::Ordering;
 
 use super::error::{CoreError, InvalidDepKind, RangeError};
 use super::identity::ContentHashable;
