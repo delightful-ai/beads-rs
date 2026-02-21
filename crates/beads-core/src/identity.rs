@@ -7,6 +7,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::event::sha256_bytes;
@@ -22,6 +23,12 @@ use super::{NamespaceId, Seq1};
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ActorId(String);
+
+impl ContentHashable for ActorId {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.as_str().as_bytes());
+    }
+}
 
 impl ActorId {
     pub fn new(s: impl Into<String>) -> Result<Self, CoreError> {
@@ -459,6 +466,54 @@ const BEAD_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 /// Base58 alphabet (Bitcoin-style, no 0OIl) for internal note IDs.
 const NOTE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
+/// Trait for types that participate in content hashing.
+///
+/// Implementations must serialize their canonical content representation to the hasher.
+/// The separator `[0]` is NOT included by the implementor - it is a structural property
+/// of the containing object (e.g. Bead) unless the type is a collection that manages
+/// its own separators.
+pub trait ContentHashable {
+    fn hash_content(&self, hasher: &mut impl Digest);
+}
+
+impl<T: ContentHashable + ?Sized> ContentHashable for &T {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        (*self).hash_content(hasher);
+    }
+}
+
+impl ContentHashable for str {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.as_bytes());
+    }
+}
+
+impl ContentHashable for String {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.as_bytes());
+    }
+}
+
+impl<T: ContentHashable> ContentHashable for Option<T> {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        if let Some(inner) = self {
+            inner.hash_content(hasher);
+        }
+    }
+}
+
+impl ContentHashable for u32 {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.to_string().as_bytes());
+    }
+}
+
+impl ContentHashable for u64 {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.to_string().as_bytes());
+    }
+}
+
 /// Bead identifier - "{slug}-{suffix}" format.
 ///
 /// Slug is a per-repo prefix (beads-go used the repo name; beads-rs historically used `bd`).
@@ -467,6 +522,12 @@ const NOTE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopq
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct BeadId(String);
+
+impl ContentHashable for BeadId {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.as_str().as_bytes());
+    }
+}
 
 impl BeadId {
     const SLUG_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz-._";
@@ -760,6 +821,12 @@ impl From<NoteId> for String {
     }
 }
 
+impl ContentHashable for NoteId {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.as_str().as_bytes());
+    }
+}
+
 /// Content hash - SHA256 of bead content for CAS.
 ///
 /// Used for optimistic concurrency control.
@@ -993,6 +1060,12 @@ impl From<CheckpointContentSha256> for StateDigest {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct BranchName(String);
+
+impl ContentHashable for BranchName {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.as_str().as_bytes());
+    }
+}
 
 impl BranchName {
     /// Parse and validate a branch name.

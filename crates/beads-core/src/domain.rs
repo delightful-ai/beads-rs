@@ -6,8 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use sha2::Digest;
 
 use super::error::{CoreError, InvalidDepKind, RangeError};
+use super::identity::ContentHashable;
 
 /// Issue type classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -37,6 +39,12 @@ crate::enum_str! {
 impl BeadType {
     pub fn parse(raw: &str) -> Option<Self> {
         Self::parse_str(raw)
+    }
+}
+
+impl ContentHashable for BeadType {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.as_str().as_bytes());
     }
 }
 
@@ -133,6 +141,12 @@ impl Priority {
 
     pub fn value(&self) -> u8 {
         self.0
+    }
+}
+
+impl ContentHashable for Priority {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.value().to_string().as_bytes());
     }
 }
 
