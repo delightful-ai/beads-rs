@@ -7,8 +7,9 @@ use std::cmp::Ordering;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
-use super::identity::ActorId;
+use super::identity::{ActorId, ContentHashable};
 
 /// HLC timestamp - the ordering primitive.
 ///
@@ -23,6 +24,14 @@ pub struct WriteStamp {
 impl WriteStamp {
     pub fn new(wall_ms: u64, counter: u32) -> Self {
         Self { wall_ms, counter }
+    }
+}
+
+impl ContentHashable for WriteStamp {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.wall_ms.to_string().as_bytes());
+        hasher.update(b",");
+        hasher.update(self.counter.to_string().as_bytes());
     }
 }
 
@@ -45,6 +54,12 @@ impl Ord for WriteStamp {
 /// Copy is fine here - it's just a measurement, not causality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct WallClock(pub u64);
+
+impl ContentHashable for WallClock {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.0.to_string().as_bytes());
+    }
+}
 
 pub trait WallClockSource: Send + Sync {
     fn now_ms(&self) -> u64;
