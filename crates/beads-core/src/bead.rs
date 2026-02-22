@@ -100,7 +100,7 @@ macro_rules! define_bead_fields {
     (
         $(pub $name:ident : $type:ty),* $(,)?
     ) => {
-        #[derive(Clone, Debug, Serialize, Deserialize)]
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
         pub struct BeadFields {
             $(pub $name: Lww<$type>),*
         }
@@ -155,7 +155,7 @@ define_bead_fields! {
 }
 
 /// The Bead - core + scalar fields.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bead {
     pub core: BeadCore,
     pub fields: BeadFields,

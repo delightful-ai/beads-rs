@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256 as Sha256Hasher};
 use thiserror::Error;
 
 use super::identity::ReplicaId;
+use crate::crdt::Crdt;
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -332,22 +333,7 @@ impl<V: OrSetValue> OrSet<V> {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut entries = a.entries.clone();
-        for (value, dots) in &b.entries {
-            entries
-                .entry(value.clone())
-                .or_default()
-                .extend(dots.iter().copied());
-        }
-
-        let mut merged = Self {
-            entries,
-            cc: Dvv::join(&a.cc, &b.cc),
-        };
-
-        merged.prune_dominated();
-        merged.resolve_all_collisions();
-        merged
+        Crdt::join(a, b)
     }
 
     pub fn merge(&mut self, other: &Self) -> OrSetChange<V> {
@@ -445,6 +431,27 @@ impl<V: OrSetValue> OrSet<V> {
                 }
             }
         }
+    }
+}
+
+impl<V: OrSetValue> Crdt for OrSet<V> {
+    fn join(&self, other: &Self) -> Self {
+        let mut entries = self.entries.clone();
+        for (value, dots) in &other.entries {
+            entries
+                .entry(value.clone())
+                .or_default()
+                .extend(dots.iter().copied());
+        }
+
+        let mut merged = Self {
+            entries,
+            cc: Dvv::join(&self.cc, &other.cc),
+        };
+
+        merged.prune_dominated();
+        merged.resolve_all_collisions();
+        merged
     }
 }
 
@@ -551,6 +558,8 @@ fn dot_value_hash<V: OrSetValue>(dot: Dot, value: &V) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crdt::laws;
+    use proptest::prelude::*;
     use uuid::Uuid;
 
     fn replica(id: u8) -> ReplicaId {
@@ -808,5 +817,33 @@ mod tests {
 
         let set = OrSet::try_from_parts(entries, cc).expect("dominated duplicates should prune");
         assert!(set.is_empty());
+    }
+
+    fn orset_strategy() -> impl Strategy<Value = OrSet<String>> {
+        let val_strat = "[a-z]";
+        let replica_strat = (0u8..5).prop_map(replica);
+        let dot_strat = (replica_strat, 1u64..10).prop_map(|(r, c)| Dot {
+            replica: r,
+            counter: c,
+        });
+
+        proptest::collection::vec((dot_strat, val_strat), 0..10).prop_map(|ops| {
+            let mut set = OrSet::new();
+            for (dot, val) in ops {
+                set.apply_add(dot, val);
+            }
+            set
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn orset_satisfies_laws(
+            a in orset_strategy(),
+            b in orset_strategy(),
+            c in orset_strategy()
+        ) {
+            laws::check_crdt_laws(a, b, c);
+        }
     }
 }

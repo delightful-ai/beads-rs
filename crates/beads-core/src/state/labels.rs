@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::collections::{Label, Labels};
+use crate::crdt::Crdt;
 use crate::identity::BeadId;
 use crate::orset::{Dot, Dvv, OrSet};
 use crate::time::Stamp;
@@ -11,7 +12,7 @@ use crate::wire_bead::WireLineageStamp;
 use super::max_stamp;
 
 /// Label membership for a single bead.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabelState {
     pub(crate) set: OrSet<Label>,
     pub(crate) stamp: Option<Stamp>,
@@ -50,9 +51,15 @@ impl LabelState {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
+        Crdt::join(a, b)
+    }
+}
+
+impl Crdt for LabelState {
+    fn join(&self, other: &Self) -> Self {
         Self {
-            set: OrSet::join(&a.set, &b.set),
-            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
+            set: self.set.join(&other.set),
+            stamp: max_stamp(self.stamp.as_ref(), other.stamp.as_ref()),
         }
     }
 }
@@ -64,7 +71,7 @@ impl Default for LabelState {
 }
 
 /// Canonical label store keyed by bead id + lineage stamp.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LabelStore {
     by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>>,
 }
@@ -100,16 +107,27 @@ impl LabelStore {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
+        Crdt::join(a, b)
+    }
+}
+
+impl Crdt for LabelStore {
+    fn join(&self, other: &Self) -> Self {
         let mut merged = LabelStore::new();
-        let ids: BTreeSet<_> = a.by_bead.keys().chain(b.by_bead.keys()).cloned().collect();
+        let ids: BTreeSet<_> = self
+            .by_bead
+            .keys()
+            .chain(other.by_bead.keys())
+            .cloned()
+            .collect();
         for id in ids {
             let mut merged_lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
-            if let Some(states) = a.by_bead.get(&id) {
+            if let Some(states) = self.by_bead.get(&id) {
                 for (lineage, state) in states {
                     merged_lineages.insert(lineage.clone(), state.clone());
                 }
             }
-            if let Some(states) = b.by_bead.get(&id) {
+            if let Some(states) = other.by_bead.get(&id) {
                 for (lineage, state) in states {
                     match merged_lineages.get(lineage) {
                         Some(existing) => {

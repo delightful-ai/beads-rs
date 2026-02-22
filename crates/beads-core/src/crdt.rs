@@ -6,6 +6,16 @@ use serde::{Deserialize, Serialize};
 
 use super::time::Stamp;
 
+/// The fundamental CRDT merge capability.
+///
+/// Any type implementing this must satisfy:
+/// - Commutativity: join(a, b) == join(b, a)
+/// - Associativity: join(join(a, b), c) == join(a, join(b, c))
+/// - Idempotence: join(a, a) == a
+pub trait Crdt: Clone + Sized {
+    fn join(&self, other: &Self) -> Self;
+}
+
 /// Last-Writer-Wins register.
 ///
 /// This is your CRDT join for scalar/atomic fields.
@@ -22,6 +32,16 @@ impl<T> Lww<T> {
     }
 }
 
+impl<T: Clone> Crdt for Lww<T> {
+    fn join(&self, other: &Self) -> Self {
+        if self.stamp >= other.stamp {
+            self.clone()
+        } else {
+            other.clone()
+        }
+    }
+}
+
 impl<T: Clone> Lww<T> {
     /// Deterministic merge - higher stamp wins.
     ///
@@ -30,11 +50,7 @@ impl<T: Clone> Lww<T> {
     /// - Associative: join(join(a, b), c) == join(a, join(b, c))
     /// - Idempotent: join(a, a) == a
     pub fn join(a: &Self, b: &Self) -> Self {
-        if a.stamp >= b.stamp {
-            a.clone()
-        } else {
-            b.clone()
-        }
+        Crdt::join(a, b)
     }
 }
 
@@ -47,10 +63,29 @@ impl<T: PartialEq> PartialEq for Lww<T> {
 impl<T: Eq> Eq for Lww<T> {}
 
 #[cfg(test)]
+pub mod laws {
+    use super::*;
+
+    pub fn check_crdt_laws<T: Crdt + PartialEq + std::fmt::Debug>(a: T, b: T, c: T) {
+        // Commutativity
+        assert_eq!(a.join(&b), b.join(&a), "Commutativity failed");
+        // Associativity
+        assert_eq!(
+            a.join(&b).join(&c),
+            a.join(&b.join(&c)),
+            "Associativity failed"
+        );
+        // Idempotence
+        assert_eq!(a.join(&a), a, "Idempotence failed");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::ActorId;
     use crate::time::{Stamp, WriteStamp};
+    use proptest::prelude::*;
 
     fn make_lww<T>(value: T, wall_ms: u64, actor: &str) -> Lww<T> {
         let stamp = Stamp::new(
@@ -117,5 +152,28 @@ mod tests {
         // In practice, same stamp means same event, so values should match.
         assert_eq!(Lww::join(&a, &b).value, "Val1");
         assert_eq!(Lww::join(&b, &a).value, "Val2");
+    }
+
+    fn lww_strategy() -> impl Strategy<Value = Lww<String>> {
+        let actor = prop_oneof![Just("alice"), Just("bob"), Just("carol")];
+        let stamp_strategy = (0u64..1000, 0u32..5, actor).prop_map(|(wall_ms, counter, actor)| {
+            Stamp::new(
+                WriteStamp::new(wall_ms, counter),
+                ActorId::new(actor).unwrap(),
+            )
+        });
+
+        (any::<String>(), stamp_strategy).prop_map(|(val, stamp)| Lww::new(val, stamp))
+    }
+
+    proptest! {
+        #[test]
+        fn lww_satisfies_laws(
+            a in lww_strategy(),
+            b in lww_strategy(),
+            c in lww_strategy()
+        ) {
+            laws::check_crdt_laws(a, b, c);
+        }
     }
 }

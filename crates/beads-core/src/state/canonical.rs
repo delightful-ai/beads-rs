@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::bead::{Bead, BeadView, SameLineageBead};
 use crate::collections::{Label, Labels};
 use crate::composite::Note;
+use crate::crdt::Crdt;
 use crate::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, ParentEdge};
 use crate::domain::DepKind;
 use crate::error::{CoreError, InvalidDependency};
@@ -47,7 +48,7 @@ pub enum LiveLookupError {
 }
 
 /// Bead entry stored by ID.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BeadEntry {
     Live(Box<Bead>),
     Tombstone(Box<Tombstone>),
@@ -58,7 +59,7 @@ pub enum BeadEntry {
 /// Invariant: An ID cannot be both live and globally deleted (tombstone lineage=None).
 /// Collision tombstones (tombstone lineage=Some(created)) may coexist with a live bead
 /// of the same ID, as long as the live bead has a different creation stamp.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalState {
     beads: BTreeMap<BeadId, BeadEntry>,
     collision_tombstones: BTreeMap<TombstoneKey, Tombstone>,
@@ -612,126 +613,9 @@ impl CanonicalState {
     /// Resurrection rule: if a bead's updated_stamp > tombstone.deleted,
     /// the bead wins (resurrection). Otherwise tombstone wins.
     ///
-    /// Returns errors for ID collisions (collected, doesn't abort early).
-    pub fn join(a: &Self, b: &Self) -> Result<Self, Vec<CoreError>> {
-        let mut result = Self::default();
-        let errors = Vec::new();
-
-        // Merge collision tombstones by key.
-        for (key, tomb) in a
-            .collision_tombstones
-            .iter()
-            .chain(b.collision_tombstones.iter())
-        {
-            result
-                .collision_tombstones
-                .entry(key.clone())
-                .and_modify(|t| *t = Tombstone::join(t, tomb))
-                .or_insert_with(|| tomb.clone());
-        }
-
-        result.labels = LabelStore::join(&a.labels, &b.labels);
-        result.dep_store = DepStore::join(&a.dep_store, &b.dep_store);
-        result.notes = NoteStore::join(&a.notes, &b.notes);
-
-        // Collect all bead IDs from both sides (including collision tombstones).
-        let all_ids: BTreeSet<_> = a
-            .beads
-            .keys()
-            .chain(b.beads.keys())
-            .chain(a.collision_tombstones.keys().map(|k| &k.id))
-            .chain(b.collision_tombstones.keys().map(|k| &k.id))
-            .cloned()
-            .collect();
-
-        for id in all_ids {
-            let (a_bead, a_tomb) = match a.beads.get(&id) {
-                Some(BeadEntry::Live(bead)) => (Some(bead.as_ref()), None),
-                Some(BeadEntry::Tombstone(tomb)) => (None, Some(tomb.as_ref())),
-                None => (None, None),
-            };
-            let (b_bead, b_tomb) = match b.beads.get(&id) {
-                Some(BeadEntry::Live(bead)) => (Some(bead.as_ref()), None),
-                Some(BeadEntry::Tombstone(tomb)) => (None, Some(tomb.as_ref())),
-                None => (None, None),
-            };
-
-            // Merge beads if both exist (resolve collisions deterministically)
-            let merged_bead = match (a_bead, b_bead) {
-                (Some(ab), Some(bb)) => match Bead::same_lineage(ab, bb)
-                    .and_then(|(a, b)| SameLineageBead::join(a, b))
-                {
-                    Ok(merged) => Some(merged),
-                    Err(_) => {
-                        let ordering = bead_collision_cmp(&result, ab, bb);
-                        let (winner, loser_stamp) = if ordering == Ordering::Less {
-                            (bb.clone(), ab.core.created().clone())
-                        } else {
-                            (ab.clone(), bb.core.created().clone())
-                        };
-                        let deleted =
-                            std::cmp::max(ab.core.created().clone(), bb.core.created().clone());
-                        result.insert_tombstone(Tombstone::new_collision(
-                            id.clone(),
-                            deleted,
-                            loser_stamp,
-                            None,
-                        ));
-                        Some(winner)
-                    }
-                },
-                (Some(b), None) | (None, Some(b)) => Some(b.clone()),
-                (None, None) => None,
-            };
-
-            let merged_tomb = match (a_tomb, b_tomb) {
-                (Some(at), Some(bt)) => Some(Tombstone::join(at, bt)),
-                (Some(t), None) | (None, Some(t)) => Some(t.clone()),
-                (None, None) => None,
-            };
-
-            let mut final_bead = merged_bead;
-            let mut final_tomb = merged_tomb;
-
-            if let Some(bead) = final_bead.as_ref() {
-                // Collision tombstone: if a lineage-scoped tombstone exists for this
-                // bead's creation stamp, it always wins and permanently suppresses
-                // that lineage at this ID.
-                let collision_key = TombstoneKey::lineage(id.clone(), bead.core.created().clone());
-                if result.collision_tombstones.contains_key(&collision_key) {
-                    final_bead = None;
-                }
-            }
-
-            if let (Some(bead), Some(tomb)) = (final_bead.as_ref(), final_tomb.as_ref()) {
-                // RESURRECTION RULE: bead wins if strictly newer than deletion
-                let updated = result.updated_stamp_for_merge(&id, bead);
-                if updated > tomb.deleted {
-                    final_tomb = None;
-                } else {
-                    final_bead = None;
-                }
-            }
-
-            if let Some(bead) = final_bead {
-                result.beads.insert(id, BeadEntry::Live(Box::new(bead)));
-            } else if let Some(tomb) = final_tomb {
-                result
-                    .beads
-                    .insert(id, BeadEntry::Tombstone(Box::new(tomb)));
-            }
-        }
-
-        result.prune_collision_lineages();
-
-        // Rebuild derived indexes from merged dep store
-        result.rebuild_dep_indexes();
-
-        if errors.is_empty() {
-            Ok(result)
-        } else {
-            Err(errors)
-        }
+    /// Infallible.
+    pub fn join(a: &Self, b: &Self) -> Self {
+        Crdt::join(a, b)
     }
 
     fn prune_collision_lineages(&mut self) {
@@ -990,6 +874,124 @@ impl CanonicalState {
     }
 }
 
+impl Crdt for CanonicalState {
+    fn join(&self, other: &Self) -> Self {
+        let mut result = Self::default();
+
+        // Merge collision tombstones by key.
+        for (key, tomb) in self
+            .collision_tombstones
+            .iter()
+            .chain(other.collision_tombstones.iter())
+        {
+            result
+                .collision_tombstones
+                .entry(key.clone())
+                .and_modify(|t| *t = Tombstone::join(t, tomb))
+                .or_insert_with(|| tomb.clone());
+        }
+
+        result.labels = LabelStore::join(&self.labels, &other.labels);
+        result.dep_store = Crdt::join(&self.dep_store, &other.dep_store);
+        result.notes = Crdt::join(&self.notes, &other.notes);
+
+        // Collect all bead IDs from both sides (including collision tombstones).
+        let all_ids: BTreeSet<_> = self
+            .beads
+            .keys()
+            .chain(other.beads.keys())
+            .chain(self.collision_tombstones.keys().map(|k| &k.id))
+            .chain(other.collision_tombstones.keys().map(|k| &k.id))
+            .cloned()
+            .collect();
+
+        for id in all_ids {
+            let (a_bead, a_tomb) = match self.beads.get(&id) {
+                Some(BeadEntry::Live(bead)) => (Some(bead.as_ref()), None),
+                Some(BeadEntry::Tombstone(tomb)) => (None, Some(tomb.as_ref())),
+                None => (None, None),
+            };
+            let (b_bead, b_tomb) = match other.beads.get(&id) {
+                Some(BeadEntry::Live(bead)) => (Some(bead.as_ref()), None),
+                Some(BeadEntry::Tombstone(tomb)) => (None, Some(tomb.as_ref())),
+                None => (None, None),
+            };
+
+            // Merge beads if both exist (resolve collisions deterministically)
+            let merged_bead = match (a_bead, b_bead) {
+                (Some(ab), Some(bb)) => match Bead::same_lineage(ab, bb)
+                    .and_then(|(a, b)| SameLineageBead::join(a, b))
+                {
+                    Ok(merged) => Some(merged),
+                    Err(_) => {
+                        let ordering = bead_collision_cmp(&result, ab, bb);
+                        let (winner, loser_stamp) = if ordering == Ordering::Less {
+                            (bb.clone(), ab.core.created().clone())
+                        } else {
+                            (ab.clone(), bb.core.created().clone())
+                        };
+                        let deleted =
+                            std::cmp::max(ab.core.created().clone(), bb.core.created().clone());
+                        result.insert_tombstone(Tombstone::new_collision(
+                            id.clone(),
+                            deleted,
+                            loser_stamp,
+                            None,
+                        ));
+                        Some(winner)
+                    }
+                },
+                (Some(b), None) | (None, Some(b)) => Some(b.clone()),
+                (None, None) => None,
+            };
+
+            let merged_tomb = match (a_tomb, b_tomb) {
+                (Some(at), Some(bt)) => Some(Tombstone::join(at, bt)),
+                (Some(t), None) | (None, Some(t)) => Some(t.clone()),
+                (None, None) => None,
+            };
+
+            let mut final_bead = merged_bead;
+            let mut final_tomb = merged_tomb;
+
+            if let Some(bead) = final_bead.as_ref() {
+                // Collision tombstone: if a lineage-scoped tombstone exists for this
+                // bead's creation stamp, it always wins and permanently suppresses
+                // that lineage at this ID.
+                let collision_key = TombstoneKey::lineage(id.clone(), bead.core.created().clone());
+                if result.collision_tombstones.contains_key(&collision_key) {
+                    final_bead = None;
+                }
+            }
+
+            if let (Some(bead), Some(tomb)) = (final_bead.as_ref(), final_tomb.as_ref()) {
+                // RESURRECTION RULE: bead wins if strictly newer than deletion
+                let updated = result.updated_stamp_for_merge(&id, bead);
+                if updated > tomb.deleted {
+                    final_tomb = None;
+                } else {
+                    final_bead = None;
+                }
+            }
+
+            if let Some(bead) = final_bead {
+                result.beads.insert(id, BeadEntry::Live(Box::new(bead)));
+            } else if let Some(tomb) = final_tomb {
+                result
+                    .beads
+                    .insert(id, BeadEntry::Tombstone(Box::new(tomb)));
+            }
+        }
+
+        result.prune_collision_lineages();
+
+        // Rebuild derived indexes from merged dep store
+        result.rebuild_dep_indexes();
+
+        result
+    }
+}
+
 pub fn bead_content_hash_for_collision(state: &CanonicalState, bead: &Bead) -> ContentHash {
     let lineage = bead.core.created();
     let labels = state.labels_for_lineage(bead.id(), lineage);
@@ -1119,8 +1121,7 @@ mod tests {
             let mut state_tomb = CanonicalState::new();
             state_tomb.insert_tombstone(tomb);
 
-            let merged = CanonicalState::join(&state_bead, &state_tomb)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let merged = CanonicalState::join(&state_bead, &state_tomb);
 
             let is_live = merged.get_live(&id).is_some();
             if bead_stamp > tomb_stamp {
@@ -1147,8 +1148,7 @@ mod tests {
             let mut state_tomb = CanonicalState::new();
             state_tomb.insert_tombstone(tomb);
 
-            let merged = CanonicalState::join(&state_bead, &state_tomb)
-                .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+            let merged = CanonicalState::join(&state_bead, &state_tomb);
 
             prop_assert!(merged.get_live(&id).is_some());
         }
@@ -1246,8 +1246,7 @@ mod tests {
         state_a.insert_note(id.clone(), stamp_a.clone(), note_a);
         state_b.insert_note(id.clone(), stamp_b.clone(), note_b);
 
-        let merged = CanonicalState::join(&state_a, &state_b)
-            .unwrap_or_else(|e| panic!("join failed: {e:?}"));
+        let merged = CanonicalState::join(&state_a, &state_b);
 
         assert!(merged.has_lineage_tombstone(&id, &stamp_a));
 
@@ -1335,7 +1334,7 @@ mod tests {
         state_b.insert(Bead::new(core, fields)).unwrap();
 
         // Merge: bead should win (resurrection)
-        let merged = CanonicalState::join(&state_a, &state_b).unwrap();
+        let merged = CanonicalState::join(&state_a, &state_b);
         assert!(merged.get_live(&id).is_some(), "bead should be resurrected");
         assert!(
             merged.get_tombstone(&id).is_none(),
@@ -1377,7 +1376,7 @@ mod tests {
         state_b.delete(Tombstone::new(id.clone(), new_stamp.clone(), None));
 
         // Merge: tombstone should win
-        let merged = CanonicalState::join(&state_a, &state_b).unwrap();
+        let merged = CanonicalState::join(&state_a, &state_b);
         assert!(merged.get_live(&id).is_none(), "bead should be deleted");
         assert!(
             merged.get_tombstone(&id).is_some(),
@@ -1919,7 +1918,7 @@ mod tests {
         let state_b = CanonicalState::new();
 
         // Join should rebuild indexes
-        let merged = CanonicalState::join(&state_a, &state_b).unwrap();
+        let merged = CanonicalState::join(&state_a, &state_b);
 
         // Index should be populated in merged state
         assert_eq!(merged.dep_indexes().out_edges(&from).len(), 1);

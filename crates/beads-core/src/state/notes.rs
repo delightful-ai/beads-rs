@@ -4,13 +4,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::composite::Note;
+use crate::crdt::Crdt;
 use crate::event::sha256_bytes;
 use crate::identity::{BeadId, NoteId};
 use crate::time::Stamp;
 use crate::wire_bead::WireLineageStamp;
 
 /// Canonical note store keyed by bead id + lineage stamp.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NoteStore {
     pub(crate) by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>>,
 }
@@ -95,8 +96,14 @@ impl NoteStore {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
+        Crdt::join(a, b)
+    }
+}
+
+impl Crdt for NoteStore {
+    fn join(&self, other: &Self) -> Self {
         let mut merged = NoteStore::new();
-        for (id, lineages) in a.by_bead.iter().chain(b.by_bead.iter()) {
+        for (id, lineages) in self.by_bead.iter().chain(other.by_bead.iter()) {
             let entry = merged.by_bead.entry(id.clone()).or_default();
             for (lineage, notes) in lineages {
                 let lineage_entry = entry.entry(lineage.clone()).or_default();
@@ -210,8 +217,10 @@ impl<'de> Deserialize<'de> for NoteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crdt::laws;
     use crate::identity::{ActorId, BeadId};
     use crate::time::WriteStamp;
+    use proptest::prelude::*;
 
     fn make_stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -263,5 +272,36 @@ mod tests {
 
         assert_eq!(stored_ab, stored_ba);
         assert_eq!(stored_ab.content, "beta");
+    }
+
+    fn note_store_strategy() -> impl Strategy<Value = NoteStore> {
+        let bead_strat = (0u8..5).prop_map(|i| bead_id(&format!("bd-note-{}", i)));
+        let lineage_strat =
+            (0u64..1000, 0u32..5, "[a-z]").prop_map(|(w, c, a)| make_stamp(w, c, &a));
+        let note_id_strat = (0u8..5).prop_map(|i| NoteId::new(&format!("note-{}", i)).unwrap());
+        let note_strat = (note_id_strat, "[a-z]+", "[a-z]+", (0u64..1000, 0u32..5)).prop_map(
+            |(id, content, author, (w, c))| {
+                Note::new(id, content, actor_id(&author), WriteStamp::new(w, c))
+            },
+        );
+
+        proptest::collection::vec((bead_strat, lineage_strat, note_strat), 0..10).prop_map(|ops| {
+            let mut store = NoteStore::new();
+            for (bead, lineage, note) in ops {
+                store.insert(bead, lineage, note);
+            }
+            store
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn note_store_satisfies_laws(
+            a in note_store_strategy(),
+            b in note_store_strategy(),
+            c in note_store_strategy()
+        ) {
+            laws::check_crdt_laws(a, b, c);
+        }
     }
 }
