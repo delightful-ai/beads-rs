@@ -163,8 +163,7 @@ mod tests {
             )
         });
 
-        (any::<String>(), stamp_strategy)
-            .prop_map(|(val, stamp)| Lww::new(val, stamp))
+        (any::<String>(), stamp_strategy).prop_map(|(val, stamp)| Lww::new(val, stamp))
     }
 
     proptest! {

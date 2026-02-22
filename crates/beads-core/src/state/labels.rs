@@ -114,7 +114,12 @@ impl LabelStore {
 impl Crdt for LabelStore {
     fn join(&self, other: &Self) -> Self {
         let mut merged = LabelStore::new();
-        let ids: BTreeSet<_> = self.by_bead.keys().chain(other.by_bead.keys()).cloned().collect();
+        let ids: BTreeSet<_> = self
+            .by_bead
+            .keys()
+            .chain(other.by_bead.keys())
+            .cloned()
+            .collect();
         for id in ids {
             let mut merged_lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
             if let Some(states) = self.by_bead.get(&id) {

@@ -276,23 +276,14 @@ mod tests {
 
     fn note_store_strategy() -> impl Strategy<Value = NoteStore> {
         let bead_strat = (0u8..5).prop_map(|i| bead_id(&format!("bd-note-{}", i)));
-        let lineage_strat = (0u64..1000, 0u32..5, "[a-z]")
-            .prop_map(|(w, c, a)| make_stamp(w, c, &a));
+        let lineage_strat =
+            (0u64..1000, 0u32..5, "[a-z]").prop_map(|(w, c, a)| make_stamp(w, c, &a));
         let note_id_strat = (0u8..5).prop_map(|i| NoteId::new(&format!("note-{}", i)).unwrap());
-        let note_strat = (
-            note_id_strat,
-            "[a-z]+",
-            "[a-z]+",
-            (0u64..1000, 0u32..5),
-        )
-            .prop_map(|(id, content, author, (w, c))| {
-                Note::new(
-                    id,
-                    content,
-                    actor_id(&author),
-                    WriteStamp::new(w, c),
-                )
-            });
+        let note_strat = (note_id_strat, "[a-z]+", "[a-z]+", (0u64..1000, 0u32..5)).prop_map(
+            |(id, content, author, (w, c))| {
+                Note::new(id, content, actor_id(&author), WriteStamp::new(w, c))
+            },
+        );
 
         proptest::collection::vec((bead_strat, lineage_strat, note_strat), 0..10).prop_map(|ops| {
             let mut store = NoteStore::new();

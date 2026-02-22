@@ -165,17 +165,19 @@ mod tests {
             Just(DepKind::Related),
             Just(DepKind::Parent),
         ];
-        (bead_strat.clone(), bead_strat, kind_strat).prop_filter_map(
-            "cannot depend on self",
-            |(from, to, kind)| DepKey::new(from, to, kind).ok(),
-        )
+        (bead_strat.clone(), bead_strat, kind_strat)
+            .prop_filter_map("cannot depend on self", |(from, to, kind)| {
+                DepKey::new(from, to, kind).ok()
+            })
     }
 
     fn dep_store_strategy() -> impl Strategy<Value = DepStore> {
         let key_strat = dep_key_strat();
         let replica_strat = (0u8..5).prop_map(replica);
-        let dot_strat =
-            (replica_strat, 1u64..10).prop_map(|(r, c)| Dot { replica: r, counter: c });
+        let dot_strat = (replica_strat, 1u64..10).prop_map(|(r, c)| Dot {
+            replica: r,
+            counter: c,
+        });
         let stamp_strat =
             (0u64..1000, 0u32..5, "[a-z]").prop_map(|(w, c, a)| Some(stamp(w, c, &a)));
 

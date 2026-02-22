@@ -822,8 +822,10 @@ mod tests {
     fn orset_strategy() -> impl Strategy<Value = OrSet<String>> {
         let val_strat = "[a-z]";
         let replica_strat = (0u8..5).prop_map(replica);
-        let dot_strat =
-            (replica_strat, 1u64..10).prop_map(|(r, c)| Dot { replica: r, counter: c });
+        let dot_strat = (replica_strat, 1u64..10).prop_map(|(r, c)| Dot {
+            replica: r,
+            counter: c,
+        });
 
         proptest::collection::vec((dot_strat, val_strat), 0..10).prop_map(|ops| {
             let mut set = OrSet::new();
