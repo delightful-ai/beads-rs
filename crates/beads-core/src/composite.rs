@@ -13,7 +13,7 @@ use super::time::{WallClock, WriteStamp}; // WriteStamp still used in Note
 /// Immutable note/comment on a bead.
 ///
 /// Once created, never changes. ID is unique within the bead.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Note {
     pub id: NoteId,
     pub content: String,
@@ -39,7 +39,7 @@ impl Note {
 ///
 /// Using an enum instead of Option<ClaimData> makes states explicit
 /// and prevents accidentally having empty/invalid claim states.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[derive(Default)]
 pub enum Claim {
@@ -97,7 +97,7 @@ impl Claim {
 ///
 /// NOTE: No `at`/`by` fields - when wrapped in `Lww<Workflow::Closed(Closure)>`,
 /// the Lww.stamp IS the closure timestamp. Wire snapshots use that stamp.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Closure {
     pub reason: Option<String>,
     pub on_branch: Option<BranchName>,
@@ -114,7 +114,7 @@ impl Closure {
 /// Status is DERIVED from this, not stored separately.
 /// Impossible to have status=Closed without Closure data.
 /// This is the key invariant that prevents Go's status/closed_at desync.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 #[derive(Default)]
 pub enum Workflow {

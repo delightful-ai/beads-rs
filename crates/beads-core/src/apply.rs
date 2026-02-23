@@ -657,7 +657,7 @@ fn matches_live_lineage(state: &CanonicalState, bead_id: &BeadId, lineage: &Stam
     bead.core.created() == lineage
 }
 
-fn update_lww<T: Clone + PartialEq + std::fmt::Debug>(
+fn update_lww<T: Clone + PartialEq + std::fmt::Debug + Ord>(
     field: &mut Lww<T>,
     value: T,
     stamp: &Stamp,

@@ -18,10 +18,10 @@ use super::{
     CheckpointFormatVersion, CheckpointManifest, CheckpointMeta, IncludedHeads, IncludedWatermarks,
     ParsedCheckpointManifest, SupportedCheckpointMeta,
 };
+use crate::core::crdt::Crdt;
 use crate::core::limits::LimitViolation;
 use crate::core::state::LabelState;
 use crate::core::wire_bead::{WireDepStoreV1, WireLabelStateV1, WireStamp, WireTombstoneV1};
-use crate::core::crdt::Crdt;
 use crate::core::{
     BeadId, BeadSnapshotWireV1, CanonicalState, CheckpointContentSha256, ContentHash, DepKey,
     DepStore, Dot, LabelStore, Limits, NamespaceId, NamespaceSet, OrSet, SnapshotCodec,

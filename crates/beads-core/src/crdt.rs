@@ -35,9 +35,13 @@ impl<T> Lww<T> {
     }
 }
 
-impl<T: Clone + std::fmt::Debug> Crdt for Lww<T> {
+impl<T: Clone + std::fmt::Debug + Ord> Crdt for Lww<T> {
     fn join(&self, other: &Self) -> Self {
-        if self.stamp >= other.stamp {
+        if self.stamp > other.stamp {
+            self.clone()
+        } else if other.stamp > self.stamp {
+            other.clone()
+        } else if self.value >= other.value {
             self.clone()
         } else {
             other.clone()
@@ -56,7 +60,7 @@ impl<T: Clone> Lww<T> {
     /// Deprecated: Use Crdt::join instead.
     pub fn join(a: &Self, b: &Self) -> Self
     where
-        T: std::fmt::Debug,
+        T: std::fmt::Debug + Ord,
     {
         <Self as Crdt>::join(a, b)
     }
@@ -107,7 +111,11 @@ pub mod tests {
     }
 
     fn lww_strategy() -> impl Strategy<Value = Lww<String>> {
-        let value = prop_oneof![Just("A".to_string()), Just("B".to_string()), Just("C".to_string())];
+        let value = prop_oneof![
+            Just("A".to_string()),
+            Just("B".to_string()),
+            Just("C".to_string())
+        ];
         let wall_ms = 0u64..1000;
         let actor = prop_oneof![Just("alice"), Just("bob"), Just("carol")];
         (value, wall_ms, actor).prop_map(|(v, t, a)| make_lww(v, t, a))
@@ -130,14 +138,13 @@ pub mod tests {
     }
 
     #[test]
-    fn test_join_identical_stamps_left_wins() {
-        // Same time, same actor
+    fn test_join_identical_stamps_value_tiebreak() {
+        // Same time, same actor, different values
         let a = make_lww("Val1", 10, "actor1");
-        // Manually construct b with same stamp but different value
         let b = Lww::new("Val2", a.stamp.clone());
 
-        // Lww::join returns left if stamps are equal (a.stamp >= b.stamp)
-        assert_eq!(a.join(&b).value, "Val1");
+        // Should be deterministic based on value (Val2 > Val1)
+        assert_eq!(a.join(&b).value, "Val2");
         assert_eq!(b.join(&a).value, "Val2");
     }
 }

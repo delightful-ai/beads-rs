@@ -566,9 +566,9 @@ fn dot_value_hash<V: OrSetValue>(dot: Dot, value: &V) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
-    use proptest::prelude::*;
     use crate::crdt::tests::assert_crdt_laws;
+    use proptest::prelude::*;
+    use uuid::Uuid;
 
     fn replica(id: u8) -> ReplicaId {
         ReplicaId::new(Uuid::from_bytes([id; 16]))
