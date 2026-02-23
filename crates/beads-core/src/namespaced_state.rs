@@ -1,12 +1,35 @@
 //! Namespaced store state wrapper.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::crdt::Crdt;
 
 use super::{CanonicalState, NamespaceId, WriteStamp};
 
 #[derive(Clone, Debug)]
 pub struct StoreState {
     by_namespace: BTreeMap<NamespaceId, CanonicalState>,
+}
+
+impl Crdt for StoreState {
+    fn join(&self, other: &Self) -> Self {
+        let mut merged = StoreState::new();
+        let mut namespaces: BTreeSet<NamespaceId> = BTreeSet::new();
+        namespaces.extend(self.namespaces().map(|(ns, _)| ns.clone()));
+        namespaces.extend(other.namespaces().map(|(ns, _)| ns.clone()));
+
+        for namespace in namespaces {
+            let left = self.get(&namespace);
+            let right = other.get(&namespace);
+            let out = match (left, right) {
+                (Some(a_state), Some(b_state)) => a_state.join(b_state),
+                (Some(state), None) | (None, Some(state)) => state.clone(),
+                (None, None) => CanonicalState::default(),
+            };
+            merged.set_namespace_state(namespace, out);
+        }
+        merged
+    }
 }
 
 impl StoreState {
@@ -55,10 +78,10 @@ impl StoreState {
         self.by_namespace.insert(namespace, state);
     }
 
-    pub fn namespaces(&self) -> impl Iterator<Item = (NamespaceId, &CanonicalState)> {
+    pub fn namespaces(&self) -> impl Iterator<Item = (&NamespaceId, &CanonicalState)> {
         self.by_namespace
             .iter()
-            .map(|(namespace, state)| (namespace.clone(), state))
+            .map(|(namespace, state)| (namespace, state))
     }
 
     pub fn max_write_stamp(&self) -> Option<WriteStamp> {
@@ -66,6 +89,11 @@ impl StoreState {
             .values()
             .filter_map(|state| state.max_write_stamp())
             .max()
+    }
+
+    /// Deprecated: Use Crdt::join instead.
+    pub fn join(a: &Self, b: &Self) -> Self {
+        <Self as Crdt>::join(a, b)
     }
 }
 

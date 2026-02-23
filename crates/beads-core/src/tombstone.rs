@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::crdt::Crdt;
+
 use super::identity::BeadId;
 use super::time::Stamp;
 
@@ -49,6 +51,21 @@ pub struct Tombstone {
     pub lineage: Option<Stamp>,
 }
 
+impl Crdt for Tombstone {
+    /// Merge: keep later deletion stamp.
+    ///
+    /// Panics if IDs or lineages mismatch (developer error).
+    fn join(&self, other: &Self) -> Self {
+        debug_assert_eq!(self.id, other.id, "join requires same id");
+        debug_assert_eq!(self.lineage, other.lineage, "join requires same lineage");
+        if self.deleted >= other.deleted {
+            self.clone()
+        } else {
+            other.clone()
+        }
+    }
+}
+
 impl Tombstone {
     pub fn new(id: BeadId, deleted: Stamp, reason: Option<String>) -> Self {
         Self {
@@ -80,15 +97,9 @@ impl Tombstone {
         }
     }
 
-    /// Merge: keep later deletion stamp.
+    /// Deprecated: Use Crdt::join instead.
     pub fn join(a: &Self, b: &Self) -> Self {
-        debug_assert_eq!(a.id, b.id, "join requires same id");
-        debug_assert_eq!(a.lineage, b.lineage, "join requires same lineage");
-        if a.deleted >= b.deleted {
-            a.clone()
-        } else {
-            b.clone()
-        }
+        <Self as Crdt>::join(a, b)
     }
 }
 

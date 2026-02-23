@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use thiserror::Error;
 
+use super::crdt::Crdt;
 use super::identity::ReplicaId;
 
 pub(crate) mod sealed {
@@ -34,7 +35,7 @@ pub(crate) mod sealed {
 /// This trait is sealed so only vetted, deterministic encodings can be used.
 /// To add a new value type, implement `sealed::Sealed` and `OrSetValue` inside
 /// this crate, ensuring `collision_bytes` is stable across runs and platforms.
-pub trait OrSetValue: sealed::Sealed + Ord + Clone {
+pub trait OrSetValue: sealed::Sealed + Ord + Clone + std::fmt::Debug {
     fn collision_bytes(&self) -> Vec<u8>;
 }
 
@@ -61,6 +62,14 @@ pub struct Dvv {
     pub dots: BTreeSet<Dot>,
 }
 
+impl Crdt for Dvv {
+    fn join(&self, other: &Self) -> Self {
+        let mut merged = self.clone();
+        merged.merge(other);
+        merged
+    }
+}
+
 impl Dvv {
     pub fn dominates(&self, dot: &Dot) -> bool {
         self.max
@@ -82,10 +91,9 @@ impl Dvv {
         self.dots.insert(dot);
     }
 
+    /// Deprecated: Use Crdt::join instead.
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = a.clone();
-        merged.merge(b);
-        merged
+        <Self as Crdt>::join(a, b)
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -231,6 +239,27 @@ pub struct OrSet<V: OrSetValue> {
     cc: Dvv,
 }
 
+impl<V: OrSetValue> Crdt for OrSet<V> {
+    fn join(&self, other: &Self) -> Self {
+        let mut entries = self.entries.clone();
+        for (value, dots) in &other.entries {
+            entries
+                .entry(value.clone())
+                .or_default()
+                .extend(dots.iter().copied());
+        }
+
+        let mut merged = Self {
+            entries,
+            cc: Crdt::join(&self.cc, &other.cc),
+        };
+
+        merged.prune_dominated();
+        merged.resolve_all_collisions();
+        merged
+    }
+}
+
 impl<V: OrSetValue> OrSet<V> {
     pub fn new() -> Self {
         Self {
@@ -331,23 +360,9 @@ impl<V: OrSetValue> OrSet<V> {
         OrSetChange::from_diff_with_change(before, after, internal_changed)
     }
 
+    /// Deprecated: Use Crdt::join instead.
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut entries = a.entries.clone();
-        for (value, dots) in &b.entries {
-            entries
-                .entry(value.clone())
-                .or_default()
-                .extend(dots.iter().copied());
-        }
-
-        let mut merged = Self {
-            entries,
-            cc: Dvv::join(&a.cc, &b.cc),
-        };
-
-        merged.prune_dominated();
-        merged.resolve_all_collisions();
-        merged
+        <Self as Crdt>::join(a, b)
     }
 
     pub fn merge(&mut self, other: &Self) -> OrSetChange<V> {
@@ -552,6 +567,8 @@ fn dot_value_hash<V: OrSetValue>(dot: Dot, value: &V) -> [u8; 32] {
 mod tests {
     use super::*;
     use uuid::Uuid;
+    use proptest::prelude::*;
+    use crate::crdt::tests::assert_crdt_laws;
 
     fn replica(id: u8) -> ReplicaId {
         ReplicaId::new(Uuid::from_bytes([id; 16]))
@@ -564,6 +581,36 @@ mod tests {
         }
     }
 
+    // Property tests using Crdt trait harness
+    fn dvv_strategy() -> impl Strategy<Value = Dvv> {
+        let dot_gen = (0u8..3, 1u64..5).prop_map(|(r, c)| dot(r, c));
+        prop::collection::vec(dot_gen, 0..10).prop_map(Dvv::from_dots)
+    }
+
+    #[test]
+    fn dvv_satisfies_laws() {
+        assert_crdt_laws(dvv_strategy());
+    }
+
+    fn orset_strategy() -> impl Strategy<Value = OrSet<String>> {
+        let val_gen = prop_oneof![Just("A".to_string()), Just("B".to_string())];
+        let dot_gen = (0u8..3, 1u64..5).prop_map(|(r, c)| dot(r, c));
+        let op_gen = (val_gen, dot_gen);
+        prop::collection::vec(op_gen, 0..10).prop_map(|ops| {
+            let mut set = OrSet::new();
+            for (val, dot) in ops {
+                set.apply_add(dot, val);
+            }
+            set
+        })
+    }
+
+    #[test]
+    fn orset_satisfies_laws() {
+        assert_crdt_laws(orset_strategy());
+    }
+
+    // Existing tests...
     #[test]
     fn dvv_dominates_and_join() {
         let mut dvv = Dvv::default();
@@ -577,7 +624,7 @@ mod tests {
         other.observe(dot(1, 2));
         other.observe(dot(2, 1));
 
-        let merged = Dvv::join(&dvv, &other);
+        let merged = Crdt::join(&dvv, &other);
         assert!(merged.dominates(&dot(1, 1)));
         assert!(merged.dominates(&dot(1, 2)));
         assert!(merged.dominates(&dot(1, 3)));
@@ -589,7 +636,7 @@ mod tests {
         let mut dvv = Dvv::default();
         dvv.observe(dot(1, 2));
         let other = Dvv::default();
-        let merged = Dvv::join(&dvv, &other);
+        let merged = Crdt::join(&dvv, &other);
         assert!(merged.dominates(&dot(1, 2)));
     }
 
@@ -614,10 +661,10 @@ mod tests {
         let mut b = OrSet::new();
         b.apply_add(dot(2, 1), "b".to_string());
 
-        let ab = OrSet::join(&a, &b);
-        let ba = OrSet::join(&b, &a);
+        let ab = Crdt::join(&a, &b);
+        let ba = Crdt::join(&b, &a);
         assert_eq!(ab, ba);
-        assert_eq!(OrSet::join(&a, &a), a);
+        assert_eq!(Crdt::join(&a, &a), a);
     }
 
     #[test]
@@ -642,7 +689,7 @@ mod tests {
         let mut b = OrSet::new();
         b.cc = ctx;
 
-        let joined = OrSet::join(&a, &b);
+        let joined = Crdt::join(&a, &b);
         assert!(!joined.contains(&"a".to_string()));
     }
 
@@ -708,7 +755,7 @@ mod tests {
         ctx.observe(dot_b);
         b.apply_remove(&value_b, &ctx);
 
-        let joined = OrSet::join(&a, &b);
+        let joined = Crdt::join(&a, &b);
         assert!(joined.contains(&value_a));
         assert!(!joined.contains(&value_b));
     }
@@ -745,7 +792,7 @@ mod tests {
         ctx.observe(dot_a);
         b.apply_remove(&value, &ctx);
 
-        let joined = OrSet::join(&a, &b);
+        let joined = Crdt::join(&a, &b);
         assert!(joined.contains(&value));
     }
 

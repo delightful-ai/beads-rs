@@ -6,8 +6,7 @@ use thiserror::Error;
 
 use crate::core::error::details as error_details;
 use crate::core::{
-    CliErrorCode, CoreError, ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode,
-    StateJsonlSha256,
+    CliErrorCode, ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, StateJsonlSha256,
 };
 use crate::error::{Effect, Transience};
 
@@ -60,9 +59,6 @@ pub enum SyncError {
     #[error(transparent)]
     Wire(#[from] WireError),
 
-    #[error("merge conflict: {errors:?}")]
-    MergeConflict { errors: Vec<CoreError> },
-
     #[error(transparent)]
     PushRejected(#[from] PushRejected),
 
@@ -104,7 +100,6 @@ impl SyncError {
             | SyncError::Commit(_)
             | SyncError::NoCommonAncestor
             | SyncError::Wire(_)
-            | SyncError::MergeConflict { .. }
             | SyncError::Git(_) => Transience::Permanent,
         }
     }
