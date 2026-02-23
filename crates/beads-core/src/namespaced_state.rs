@@ -79,9 +79,7 @@ impl StoreState {
     }
 
     pub fn namespaces(&self) -> impl Iterator<Item = (&NamespaceId, &CanonicalState)> {
-        self.by_namespace
-            .iter()
-            .map(|(namespace, state)| (namespace, state))
+        self.by_namespace.iter()
     }
 
     pub fn max_write_stamp(&self) -> Option<WriteStamp> {
