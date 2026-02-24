@@ -196,14 +196,6 @@ impl Daemon {
         for import in &checkpoint_imports {
             match merge_store_states(&state, &import.state) {
                 Ok(merged) => state = merged,
-                Err(CheckpointImportError::Merge(errors)) => {
-                    tracing::warn!(
-                        store_id = %store_id,
-                        errors = ?errors,
-                        "checkpoint merge failed"
-                    );
-                    return Err(OpError::Internal("checkpoint merge failed"));
-                }
                 Err(err) => {
                     tracing::warn!(store_id = %store_id, error = ?err, "checkpoint merge failed");
                     return Err(OpError::Internal("checkpoint merge failed"));

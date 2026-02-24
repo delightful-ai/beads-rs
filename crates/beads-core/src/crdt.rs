@@ -1,10 +1,23 @@
-//! Layer 3: LWW (Last-Writer-Wins) CRDT
+//! Layer 3: CRDT Primitives
 //!
-//! The fundamental merge primitive for scalar/atomic fields.
+//! The fundamental merge primitive for conflict-free replicated data types.
 
 use serde::{Deserialize, Serialize};
 
 use super::time::Stamp;
+
+/// A Conflict-Free Replicated Data Type.
+///
+/// Implementations must satisfy the semi-lattice properties:
+/// - Commutative: join(a, b) == join(b, a)
+/// - Associative: join(join(a, b), c) == join(a, join(b, c))
+/// - Idempotent: join(a, a) == a
+pub trait Crdt: Clone + std::fmt::Debug {
+    /// Deterministic merge of two states.
+    ///
+    /// This operation must be infallible and total.
+    fn join(&self, other: &Self) -> Self;
+}
 
 /// Last-Writer-Wins register.
 ///
@@ -22,6 +35,20 @@ impl<T> Lww<T> {
     }
 }
 
+impl<T: Clone + std::fmt::Debug + Ord> Crdt for Lww<T> {
+    fn join(&self, other: &Self) -> Self {
+        if self.stamp > other.stamp {
+            self.clone()
+        } else if other.stamp > self.stamp {
+            other.clone()
+        } else if self.value >= other.value {
+            self.clone()
+        } else {
+            other.clone()
+        }
+    }
+}
+
 impl<T: Clone> Lww<T> {
     /// Deterministic merge - higher stamp wins.
     ///
@@ -29,12 +56,13 @@ impl<T: Clone> Lww<T> {
     /// - Commutative: join(a, b) == join(b, a)
     /// - Associative: join(join(a, b), c) == join(a, join(b, c))
     /// - Idempotent: join(a, a) == a
-    pub fn join(a: &Self, b: &Self) -> Self {
-        if a.stamp >= b.stamp {
-            a.clone()
-        } else {
-            b.clone()
-        }
+    ///
+    /// Deprecated: Use Crdt::join instead.
+    pub fn join(a: &Self, b: &Self) -> Self
+    where
+        T: std::fmt::Debug + Ord,
+    {
+        <Self as Crdt>::join(a, b)
     }
 }
 
@@ -47,10 +75,32 @@ impl<T: PartialEq> PartialEq for Lww<T> {
 impl<T: Eq> Eq for Lww<T> {}
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::identity::ActorId;
     use crate::time::{Stamp, WriteStamp};
+    use proptest::prelude::*;
+
+    /// Contract tests for CRDT implementations.
+    ///
+    /// Verifies the three laws: commutativity, associativity, and idempotence.
+    pub fn assert_crdt_laws<T, S>(strategy: S)
+    where
+        T: Crdt + PartialEq + Eq + 'static,
+        S: Strategy<Value = T> + 'static,
+    {
+        let strategy = strategy.boxed();
+        proptest!(|(a in strategy.clone(), b in strategy.clone(), c in strategy)| {
+            // Commutative
+            prop_assert_eq!(a.join(&b), b.join(&a));
+
+            // Associative
+            prop_assert_eq!(a.join(&b).join(&c), a.join(&b.join(&c)));
+
+            // Idempotent
+            prop_assert_eq!(a.join(&a), a.clone());
+        });
+    }
 
     fn make_lww<T>(value: T, wall_ms: u64, actor: &str) -> Lww<T> {
         let stamp = Stamp::new(
@@ -60,37 +110,46 @@ mod tests {
         Lww::new(value, stamp)
     }
 
-    #[test]
-    fn test_join_commutative() {
-        // Case 1: distinct timestamps
-        let a = make_lww("A", 10, "actor1");
-        let b = make_lww("B", 20, "actor1");
+    fn lww_strategy() -> impl Strategy<Value = Lww<String>> {
+        let wall_ms = 0u64..1000;
+        let actor = prop_oneof![Just("alice"), Just("bob"), Just("carol")];
+        // Keep value derivable from stamp identity so equal stamps don't generate
+        // inconsistent payload pairs in law tests.
+        (wall_ms, actor).prop_map(|(t, a)| make_lww(format!("{t}:{a}"), t, a))
+    }
 
-        // b wins (newer)
-        assert_eq!(Lww::join(&a, &b), b);
-        assert_eq!(Lww::join(&b, &a), b);
+    fn lww_value_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("A".to_string()),
+            Just("B".to_string()),
+            Just("C".to_string())
+        ]
     }
 
     #[test]
-    fn test_join_associative() {
-        let a = make_lww("A", 10, "actor1");
-        let b = make_lww("B", 20, "actor2");
-        let c = make_lww("C", 30, "actor3");
-
-        // (a join b) join c => b join c => c
-        let left = Lww::join(&Lww::join(&a, &b), &c);
-        // a join (b join c) => a join c => c
-        let right = Lww::join(&a, &Lww::join(&b, &c));
-
-        assert_eq!(left, c);
-        assert_eq!(right, c);
-        assert_eq!(left, right);
+    fn lww_satisfies_laws() {
+        assert_crdt_laws(lww_strategy());
     }
 
-    #[test]
-    fn test_join_idempotent() {
-        let a = make_lww("A", 10, "actor1");
-        assert_eq!(Lww::join(&a, &a), a);
+    proptest! {
+        #[test]
+        fn lww_same_stamp_value_tiebreak_satisfies_laws(
+            a_val in lww_value_strategy(),
+            b_val in lww_value_strategy(),
+            c_val in lww_value_strategy()
+        ) {
+            let stamp = Stamp::new(
+                WriteStamp::new(42, 0),
+                ActorId::new("actor1").expect("valid actor id"),
+            );
+            let a = Lww::new(a_val, stamp.clone());
+            let b = Lww::new(b_val, stamp.clone());
+            let c = Lww::new(c_val, stamp);
+
+            prop_assert_eq!(a.join(&b), b.join(&a));
+            prop_assert_eq!(a.join(&b).join(&c), a.join(&b.join(&c)));
+            prop_assert_eq!(a.join(&a), a.clone());
+        }
     }
 
     #[test]
@@ -100,22 +159,18 @@ mod tests {
         let b = make_lww("B", 10, "actor2"); // "actor2" > "actor1"
 
         // b wins (higher actor)
-        assert_eq!(Lww::join(&a, &b), b);
-        assert_eq!(Lww::join(&b, &a), b);
+        assert_eq!(a.join(&b), b);
+        assert_eq!(b.join(&a), b);
     }
 
     #[test]
-    fn test_join_identical_stamps_left_wins() {
-        // Same time, same actor
+    fn test_join_identical_stamps_value_tiebreak() {
+        // Same time, same actor, different values
         let a = make_lww("Val1", 10, "actor1");
-        // Manually construct b with same stamp but different value
         let b = Lww::new("Val2", a.stamp.clone());
 
-        // Lww::join returns left if stamps are equal (a.stamp >= b.stamp)
-        // This is "deterministic" in the sense that the function is deterministic,
-        // but not commutative if values differ for same stamp.
-        // In practice, same stamp means same event, so values should match.
-        assert_eq!(Lww::join(&a, &b).value, "Val1");
-        assert_eq!(Lww::join(&b, &a).value, "Val2");
+        // Should be deterministic based on value (Val2 > Val1)
+        assert_eq!(a.join(&b).value, "Val2");
+        assert_eq!(b.join(&a).value, "Val2");
     }
 }

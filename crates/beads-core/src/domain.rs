@@ -12,7 +12,7 @@ use super::error::{CoreError, InvalidDepKind, RangeError};
 use super::identity::ContentHashable;
 
 /// Issue type classification.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BeadType {
     Bug,
