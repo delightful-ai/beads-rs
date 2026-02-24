@@ -7,8 +7,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use super::error::{CoreError, InvalidLabel};
+use super::identity::ContentHashable;
 use super::orset::{OrSetValue, sealed::Sealed};
 
 /// Validated label - non-empty, no newlines.
@@ -114,6 +116,15 @@ impl Labels {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+impl ContentHashable for Labels {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        for label in self.iter() {
+            hasher.update(label.as_str().as_bytes());
+            hasher.update(b",");
+        }
     }
 }
 
