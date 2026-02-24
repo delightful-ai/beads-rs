@@ -52,13 +52,18 @@ pub struct Tombstone {
 }
 
 impl Crdt for Tombstone {
-    /// Merge: keep later deletion stamp.
+    /// Merge: keep later deletion stamp; on equal stamps, keep lexicographically
+    /// greater reason to preserve commutativity.
     ///
     /// Panics if IDs or lineages mismatch (developer error).
     fn join(&self, other: &Self) -> Self {
         debug_assert_eq!(self.id, other.id, "join requires same id");
         debug_assert_eq!(self.lineage, other.lineage, "join requires same lineage");
-        if self.deleted >= other.deleted {
+        if self.deleted > other.deleted {
+            self.clone()
+        } else if other.deleted > self.deleted {
+            other.clone()
+        } else if self.reason >= other.reason {
             self.clone()
         } else {
             other.clone()
@@ -139,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn test_join_same_stamp_left_wins() {
+    fn test_join_same_stamp_uses_reason_tiebreak() {
         let id = bead_id("bd-test");
         let stamp = make_stamp(1000, 0, "alice");
 
@@ -147,7 +152,7 @@ mod tests {
         let t2 = Tombstone::new(id.clone(), stamp.clone(), Some("reason B".to_string()));
 
         let merged = Tombstone::join(&t1, &t2);
-        assert_eq!(merged.reason.as_deref(), Some("reason A"));
+        assert_eq!(merged.reason.as_deref(), Some("reason B"));
 
         let merged_rev = Tombstone::join(&t2, &t1);
         assert_eq!(merged_rev.reason.as_deref(), Some("reason B"));
@@ -206,19 +211,13 @@ mod tests {
 
     proptest! {
         #[test]
-        fn prop_join_commutative_with_distinct_stamps(
+        fn prop_join_commutative(
             t1 in tombstone_strategy(),
             mut t2 in tombstone_strategy()
         ) {
             // Ensure same ID and lineage for valid join
             t2.id = t1.id.clone();
             t2.lineage = t1.lineage.clone();
-
-            // Ensure distinct deleted stamps to guarantee commutativity
-            if t1.deleted == t2.deleted {
-                // If stamps equal, modify one to be different
-                t2.deleted.at.counter += 1;
-            }
 
             let m1 = Tombstone::join(&t1, &t2);
             let m2 = Tombstone::join(&t2, &t1);

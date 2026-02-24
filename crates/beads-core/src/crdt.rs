@@ -111,19 +111,45 @@ pub mod tests {
     }
 
     fn lww_strategy() -> impl Strategy<Value = Lww<String>> {
-        let value = prop_oneof![
+        let wall_ms = 0u64..1000;
+        let actor = prop_oneof![Just("alice"), Just("bob"), Just("carol")];
+        // Keep value derivable from stamp identity so equal stamps don't generate
+        // inconsistent payload pairs in law tests.
+        (wall_ms, actor).prop_map(|(t, a)| make_lww(format!("{t}:{a}"), t, a))
+    }
+
+    fn lww_value_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
             Just("A".to_string()),
             Just("B".to_string()),
             Just("C".to_string())
-        ];
-        let wall_ms = 0u64..1000;
-        let actor = prop_oneof![Just("alice"), Just("bob"), Just("carol")];
-        (value, wall_ms, actor).prop_map(|(v, t, a)| make_lww(v, t, a))
+        ]
     }
 
     #[test]
     fn lww_satisfies_laws() {
         assert_crdt_laws(lww_strategy());
+    }
+
+    proptest! {
+        #[test]
+        fn lww_same_stamp_value_tiebreak_satisfies_laws(
+            a_val in lww_value_strategy(),
+            b_val in lww_value_strategy(),
+            c_val in lww_value_strategy()
+        ) {
+            let stamp = Stamp::new(
+                WriteStamp::new(42, 0),
+                ActorId::new("actor1").expect("valid actor id"),
+            );
+            let a = Lww::new(a_val, stamp.clone());
+            let b = Lww::new(b_val, stamp.clone());
+            let c = Lww::new(c_val, stamp);
+
+            prop_assert_eq!(a.join(&b), b.join(&a));
+            prop_assert_eq!(a.join(&b).join(&c), a.join(&b.join(&c)));
+            prop_assert_eq!(a.join(&a), a.clone());
+        }
     }
 
     #[test]
