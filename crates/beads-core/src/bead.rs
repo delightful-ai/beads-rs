@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::crdt::Crdt;
 use super::collections::Labels;
 use super::composite::{Claim, Note, Workflow};
 use super::crdt::Lww;
@@ -16,6 +15,7 @@ use super::error::{CollisionError, CoreError};
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
 use super::time::{Stamp, WallClock, WriteStamp};
 use super::wire_bead::WorkflowStatus;
+use crate::crdt::Crdt;
 
 /// Immutable creation provenance.
 ///

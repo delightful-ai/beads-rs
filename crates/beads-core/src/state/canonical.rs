@@ -4,10 +4,10 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crdt::Crdt;
 use crate::bead::{Bead, BeadView, SameLineageBead};
 use crate::collections::{Label, Labels};
 use crate::composite::Note;
+use crate::crdt::Crdt;
 use crate::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, ParentEdge};
 use crate::domain::DepKind;
 use crate::error::{CoreError, InvalidDependency};

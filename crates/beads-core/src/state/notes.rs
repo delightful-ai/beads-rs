@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::crdt::Crdt;
 use crate::composite::Note;
+use crate::crdt::Crdt;
 use crate::event::sha256_bytes;
 use crate::identity::{BeadId, NoteId};
 use crate::time::Stamp;

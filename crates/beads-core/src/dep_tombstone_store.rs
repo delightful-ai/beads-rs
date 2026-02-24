@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crdt::Crdt;
 use super::tombstone::{Tombstone, TombstoneKey};
+use crate::crdt::Crdt;
 
 /// Canonical tombstone store.
 ///
